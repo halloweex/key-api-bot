@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 
 from core import permissions as perm
 
@@ -339,28 +340,30 @@ class TestTogglingATab:
 class TestTheSharedSqlRuns:
     """`core/dashboard_access.py` holds one SQL text for two containers.
 
-    The bot runs it against Postgres, which no test here can reach; DuckDB is
-    the engine available, and it is the same statement with the same two holes
-    filled in. What this catches is the half that is not about permissions at
-    all — `ON CONFLICT DO UPDATE` referring to the existing row, `RETURNING`,
-    the parameter order — which is exactly the class of mistake that would
-    otherwise surface as an admin tapping Approve and getting nothing.
+    The bot runs it against Postgres through its own pool, and the web
+    container through `_users_run` — Postgres alone since step 14's S14-08
+    (these ran on DuckDB until then, the same statement with the same two
+    holes filled in). What this catches is the half that is not about
+    permissions at all — `ON CONFLICT DO UPDATE` referring to the existing
+    row, `RETURNING`, the parameter order — which is exactly the class of
+    mistake that would otherwise surface as an admin tapping Approve and
+    getting nothing. Skipped without `KS_PG_DSN`.
     """
 
-    @pytest.fixture(autouse=True)
-    def _users_on_duckdb(self, monkeypatch):
-        """DuckDB is the engine here, as before step 14's S14-00 made the
-        user list's store a constant (`tests.conftest.user_store_on_duckdb`)."""
-        from tests.conftest import user_store_on_duckdb
+    @pytest_asyncio.fixture(autouse=True)
+    async def _postgres(self, monkeypatch):
+        from tests.integration import pg_sms_seed
 
-        user_store_on_duckdb(monkeypatch)
+        if not pg_sms_seed.DSN:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+        async with pg_sms_seed.on_postgres(
+                monkeypatch, pg_sms_seed.ACCESS_TABLES, what="the access path"):
+            yield
 
     async def _store(self, tmp_path):
-        from core.duckdb_store import DuckDBStore
+        from tests.integration import pg_sms_seed
 
-        store = DuckDBStore(db_path=tmp_path / "users.duckdb")
-        await store.connect()
-        return store
+        return pg_sms_seed.store(tmp_path, "users.duckdb")
 
     async def test_a_grant_creates_an_approved_row_with_its_tabs(self, tmp_path):
         from core.dashboard_access import GRANT_ACCESS, SELECT_ACCESS, access_row
@@ -831,11 +834,58 @@ class TestAuthorizationRefusalsAreLogged:
 class TestTheBotSaysWhenItCannotEnforce:
     """`may_use` is permissive where it cannot know — right for a missing row
     or an unreachable store, and a silent no-op when the reason is
-    configuration. `KS_BOT_STORE` and `KS_USER_STORE` are separate variables,
-    and with the second not `postgres` every narrowed account quietly gets
-    every report again.
+    configuration. Under a `KS_BOT_STORE` other than `postgres` the bot cannot
+    reach the dashboard's list at all, and every narrowed account quietly
+    gets every report again. `KS_USER_STORE` used to be the second half of
+    that question; the dashboard's list is Postgres whatever it says since
+    step 14 (S14-00), and the bot stopped asking in S14-08.
     """
 
+    def test_a_bot_off_postgres_says_so(self, monkeypatch, caplog):
+        import logging
+
+        import bot.main as main
+
+        monkeypatch.setenv("KS_BOT_STORE", "sqlite")
+        with caplog.at_level(logging.INFO):
+            main._warn_if_tab_access_is_off()
+        assert "tab enforcement in the bot is off" in caplog.text
+
+    @pytest.mark.parametrize("user_store", ["postgres", "duckdb", "", "junk"])
+    def test_the_user_store_variable_is_not_asked(self, monkeypatch, caplog,
+                                                  user_store):
+        """Whatever `KS_USER_STORE` holds — production keeps `postgres` for the
+        images before step 14 — a bot on Postgres enforces the tab set and has
+        nothing to say about it."""
+        import logging
+
+        import bot.main as main
+
+        monkeypatch.setenv("KS_BOT_STORE", "postgres")
+        monkeypatch.setenv("KS_USER_STORE", user_store)
+        with caplog.at_level(logging.INFO):
+            main._warn_if_tab_access_is_off()
+        assert not caplog.records, caplog.text
+
+    @pytest.mark.parametrize("user_store", ["postgres", "duckdb", "", "junk"])
+    def test_the_postgres_adapter_always_reaches_the_dashboards_list(
+            self, monkeypatch, user_store):
+        """`DashboardTabs.available()` answers what `KS_BOT_STORE` answered by
+        choosing the adapter: the Postgres one reaches `app.dashboard_users`,
+        and `KS_USER_STORE` — any value, junk included — is not asked."""
+        import ast
+        import inspect
+        import textwrap
+
+        from bot.store_postgres import PostgresDashboardTabs
+
+        monkeypatch.setenv("KS_USER_STORE", user_store)
+        assert PostgresDashboardTabs(None, None).available() is True
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(PostgresDashboardTabs.available)))
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert "user_store_is_postgres" not in names
 
     def test_agreement_is_silent(self, monkeypatch, caplog):
         import logging

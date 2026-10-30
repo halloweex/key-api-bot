@@ -1,4 +1,4 @@
-"""The dashboard's user list means the same thing in DuckDB and Postgres.
+"""The dashboard's user list answers in Postgres what it answered in DuckDB.
 
 `tests/unit/test_dashboard_users_store.py` proves the ten statements are one
 text and that nothing goes round the router. Necessary and not sufficient:
@@ -6,41 +6,39 @@ identical SQL still means different things where the engines differ — what
 `RETURNING` gives back on a no-op update, how an `ON CONFLICT` treats a NULL,
 where a tie lands under `LIMIT`, and what a timestamp looks like on the way out.
 
-So this runs the real thing. The same twelve people go into a DuckDB store and
-a live PostgreSQL, every method is called twice — once with `KS_USER_STORE`
-unset and once set to `postgres` — and the **whole result** is compared.
+So this ran the real thing on both: the same people in a DuckDB store and a
+live PostgreSQL, every method called on each, the **whole result** compared.
+
+ONE ENGINE SINCE STEP 14 (S14-08)
+
+The list is Postgres's alone. Every call is compared with a literal
+(`tests/integration/golden/dashboard_users.json`): DuckDB's answer on this
+fixture, recorded while this file still asserted Postgres answered the same
+(rule 9 of the step-14 plan). The copy of the list out of DuckDB and its
+daily comparison stand down under the constant (S14-00), so their tests went
+with DuckDB's side.
 
 WHY THE WRITES MATTER MORE THAN THE READS HERE
 
 A read that disagrees shows a wrong name on an admin page. A write that
 disagrees changes who can open the dashboard, and the two directions are not
 equally visible: locking somebody out is loud, and leaving a revoked account
-approved is not. So each write is run on both engines and the *resulting row*
-is compared, not just its return value.
+approved is not. So each write is held to the *resulting row*, not just its
+return value.
 
 Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
 
-from core.duckdb_store import DuckDBStore
 from core.pg_dashboard_users import USER_COLUMNS
-
-
-@pytest.fixture(autouse=True)
-def _user_store_follows_env(monkeypatch):
-    """Since step 14's S14-00 the store switch decides nothing; this module's
-    two engines are chosen as before it (`tests.conftest.user_store_follows_env`)."""
-    from tests.conftest import user_store_follows_env
-
-    user_store_follows_env(monkeypatch)
-
+from tests.integration import pg_sms_seed
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -48,6 +46,8 @@ DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
+
+GOLDEN = pg_sms_seed.golden("dashboard_users")
 
 NOW = datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc)
 
@@ -77,60 +77,28 @@ USERS = [
 ]
 
 
-async def _seed_duckdb(store):
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM users")
-        for row in USERS:
-            conn.execute(
-                f"INSERT INTO users ({', '.join(USER_COLUMNS)}) "
-                f"VALUES ({', '.join(['?'] * len(USER_COLUMNS))})",
-                list(row),
-            )
-
-
-async def _seed_postgres(conn):
-    await conn.execute("DELETE FROM app.dashboard_users")
-    await conn.executemany(
-        f"INSERT INTO app.dashboard_users ({', '.join(USER_COLUMNS)}) "
-        f"VALUES ({', '.join(f'${i}' for i in range(1, len(USER_COLUMNS) + 1))})",
-        USERS,
-    )
-
-
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
-    """One store each, holding the identical list.
-
-    The pool is built here and `core.pg.get_pool` patched to hand it over —
-    the module-level one is bound to whichever loop first asked for it, and
-    closing it after pytest-asyncio has retired that loop raises. Same route
-    as the inventory and SMS two-engine tests.
-    """
-    monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore(db_path=tmp_path / "users.duckdb")
-    await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
-    try:
-        async with pool.acquire() as conn:
-            await _seed_postgres(conn)
-        await _seed_duckdb(store)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            yield store
-    finally:
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM app.dashboard_users")
-        await pool.close()
-        await store.close()
+async def store(tmp_path, monkeypatch):
+    """The repository on Postgres, holding the list; its DuckDB connection
+    is a trap."""
+    async with pg_sms_seed.on_postgres(monkeypatch, pg_sms_seed.ACCESS_TABLES,
+                                       what="the access path"):
+        async with pg_sms_seed.pg_conn() as conn:
+            await conn.executemany(
+                f"INSERT INTO app.dashboard_users ({', '.join(USER_COLUMNS)}) "
+                f"VALUES ({', '.join(f'${i}' for i in range(1, len(USER_COLUMNS) + 1))})",
+                USERS,
+            )
+        yield pg_sms_seed.store(tmp_path, "users.duckdb")
 
 
-async def _both(store, monkeypatch, name, kwargs):
-    """The same call on each engine, DuckDB first."""
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    duck = await getattr(store, name)(**kwargs)
-    monkeypatch.setenv("KS_USER_STORE", "postgres")
-    postgres = await getattr(store, name)(**kwargs)
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    return duck, postgres
+def _plain(value):
+    """JSON's shape, which the literals were recorded in: tuples as lists."""
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
 
 
 READS = (
@@ -157,61 +125,44 @@ READS = (
     "name,kwargs", READS,
     ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in READS],
 )
-async def test_the_reads_agree(both_engines, monkeypatch, name, kwargs):
-    duck, postgres = await _both(both_engines, monkeypatch, name, kwargs)
-    assert postgres == duck
+async def test_the_reads_agree(store, name, kwargs):
+    answer = await getattr(store, name)(**kwargs)
+    assert _plain(answer) == GOLDEN[f"read:{name}{json.dumps(kwargs, sort_keys=True)}"]
 
 
 @pytest.mark.asyncio
-async def test_the_fixture_reaches_the_awkward_rows(both_engines, monkeypatch):
+async def test_the_fixture_reaches_the_awkward_rows(store):
     """A comparison of two empty answers agrees about nothing."""
-    approved, _ = await _both(
-        both_engines, monkeypatch, "get_user_by_status", {"status": "approved"})
+    approved = await store.get_user_by_status("approved")
     assert len(approved) == 3
     assert any(u["username"] is None for u in approved), "the NULL username is not reached"
     assert {u["role"] for u in approved} == {"admin", "viewer", "marketer"}
 
-    page_one, _ = await _both(both_engines, monkeypatch, "list_users",
-                              {"limit": 2, "offset": 0})
-    page_two, _ = await _both(both_engines, monkeypatch, "list_users",
-                              {"limit": 2, "offset": 2})
+    page_one = await store.list_users(limit=2, offset=0)
+    page_two = await store.list_users(limit=2, offset=2)
     assert len({u["user_id"] for u in page_one} & {u["user_id"] for u in page_two}) == 0, (
         "the pages overlap, so the ORDER BY is not deciding the same thing twice"
     )
 
 
 @pytest.mark.asyncio
-async def test_the_timestamp_leaves_as_the_same_string(both_engines, monkeypatch):
-    """DuckDB renders a TIMESTAMPTZ in the session timezone and asyncpg in
+async def test_the_timestamp_leaves_as_the_same_string(store):
+    """DuckDB rendered a TIMESTAMPTZ in the session timezone and asyncpg in
     UTC. Same instant, two strings — the defect the `/inventory` port hit with
     `lastSync`, and it would land here on every date the admin page shows."""
-    duck, postgres = await _both(both_engines, monkeypatch, "get_user", {"user_id": 11})
-    assert duck["requested_at"] == postgres["requested_at"]
-    assert duck["requested_at"].endswith("+00:00"), duck["requested_at"]
+    postgres = await store.get_user(11)
+    recorded = GOLDEN['read:get_user{"user_id": 11}']["requested_at"]
+    assert postgres["requested_at"] == recorded
+    assert postgres["requested_at"].endswith("+00:00"), postgres["requested_at"]
 
 
-# ─── the writes, compared by what they leave behind ──────────────────────────
+# ─── the writes, held to what they leave behind ─────────────────────────────
 
 
-async def _row(store, monkeypatch, user_id):
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    return await store.get_user(user_id)
-
-
-async def _row_pg(store, monkeypatch, user_id):
-    monkeypatch.setenv("KS_USER_STORE", "postgres")
-    row = await store.get_user(user_id)
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    return row
-
-
-# The clocks a write sets itself. Each engine stamps its own `now()` at the
-# moment its copy of the call runs — measured 13 ms apart on the gate — so
-# comparing the values would be comparing two clocks, not two behaviours. That
-# they are *set at all* is asserted by
-# `test_a_created_user_gets_its_dates_on_both`, which is where the real defect
-# showed up: Postgres left them NULL until the migration learned DuckDB's
-# defaults.
+# The clocks a write sets itself. Each engine stamped its own `now()` at the
+# moment its copy of the call ran, so the values were never compared — only
+# that they are *set at all*, which is where the real defect showed up:
+# Postgres left them NULL until the migration learned DuckDB's defaults.
 SELF_SET_CLOCKS = ("reviewed_at", "last_activity", "created_at", "requested_at")
 
 
@@ -236,35 +187,28 @@ def _comparable(row):
     ("create_user", {"username": "new", "first_name": "New"}, 77),
     ("create_user", {"username": None, "first_name": None}, 11),   # COALESCE keeps
 ))
-async def test_the_writes_leave_the_same_row(
-    both_engines, monkeypatch, method, kwargs, user_id,
-):
-    store = both_engines
+async def test_the_writes_leave_the_same_row(store, method, kwargs, user_id):
     call = dict(kwargs, user_id=user_id)
+    recorded = GOLDEN[f"write:{method}{json.dumps(call, sort_keys=True)}"]
 
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    duck_returned = await getattr(store, method)(**call)
-    duck_row = await _row(store, monkeypatch, user_id)
+    returned = await getattr(store, method)(**call)
+    row = await store.get_user(user_id)
 
-    monkeypatch.setenv("KS_USER_STORE", "postgres")
-    pg_returned = await getattr(store, method)(**call)
-    pg_row = await _row_pg(store, monkeypatch, user_id)
+    assert _plain(_comparable(returned)) == recorded["returned"]
+    assert _plain(_comparable(row)) == recorded["row"]
 
-    assert _comparable(pg_returned) == _comparable(duck_returned)
-    assert _comparable(pg_row) == _comparable(duck_row)
-
-    # Whatever the write touched, it must not have left a clock empty on one
-    # engine and filled on the other — that asymmetry is the shape of the
-    # defect this file found.
-    if duck_row is not None:
-        for column in SELF_SET_CLOCKS:
-            assert (duck_row.get(column) is None) == (pg_row.get(column) is None), (
-                f"{column} is set on one engine and not the other"
-            )
+    # Whatever the write touched, it must not have left a clock empty where
+    # DuckDB filled it, or the other way round — that asymmetry is the shape
+    # of the defect this file found.
+    if recorded["clocks_set"] is None:
+        assert row is None
+    else:
+        assert {c: row.get(c) is not None for c in SELF_SET_CLOCKS} == \
+            recorded["clocks_set"]
 
 
 @pytest.mark.asyncio
-async def test_a_created_user_gets_its_dates_on_both(both_engines, monkeypatch):
+async def test_a_created_user_gets_its_dates(store):
     """The defect this file was written to catch.
 
     DuckDB defaults `requested_at` and `created_at`; the new Postgres table did
@@ -273,108 +217,30 @@ async def test_a_created_user_gets_its_dates_on_both(both_engines, monkeypatch):
     page, and a NULL in `COALESCE(reviewed_at, created_at)`, which is the clock
     the daily comparison forgives a row in flight by.
 
-    The values themselves are two different `now()`s and are not compared;
-    what must match is that both are there.
+    The value itself is `now()` and is not compared; what must hold is that
+    it is there.
     """
-    store = both_engines
-    for user_id, engine in ((81, "duckdb"), (82, "postgres")):
-        if engine == "postgres":
-            monkeypatch.setenv("KS_USER_STORE", "postgres")
-        else:
-            monkeypatch.delenv("KS_USER_STORE", raising=False)
-        row = await store.create_user(user_id=user_id, username=f"u{user_id}")
-        assert row["requested_at"], f"{engine} left requested_at empty"
-        assert row["created_at"], f"{engine} left created_at empty"
-        assert row["status"] == "pending" and row["role"] == "viewer"
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
+    row = await store.create_user(user_id=82, username="u82")
+    assert row["requested_at"], "postgres left requested_at empty"
+    assert row["created_at"], "postgres left created_at empty"
+    assert row["status"] == "pending" and row["role"] == "viewer"
 
 
 @pytest.mark.asyncio
-async def test_the_fifth_refusal_freezes_on_both(both_engines, monkeypatch):
+async def test_the_fifth_refusal_freezes(store):
     """User 15 arrives on four refusals. The fifth is the freeze, and the
-    count now comes back from the database rather than being computed here —
+    count comes back from the database rather than being computed here —
     which is what stops two admins refusing at once from losing one."""
-    store = both_engines
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
     ok, frozen = await store.deny_user(15, admin_id=11)
     assert (ok, frozen) == (True, True)
     assert (await store.get_user(15))["status"] == "frozen"
-
-    monkeypatch.setenv("KS_USER_STORE", "postgres")
-    ok, frozen = await store.deny_user(15, admin_id=11)
-    assert (ok, frozen) == (True, True)
-    assert (await store.get_user(15))["status"] == "frozen"
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
 
 
 @pytest.mark.asyncio
-async def test_approving_clears_the_denial_count_on_both(both_engines, monkeypatch):
+async def test_approving_clears_the_denial_count(store):
     """Otherwise a re-approved person stands one refusal from a thirty-day
     freeze, which is a trap nobody would connect to their own approval."""
-    store = both_engines
-    for expected_store in ("duckdb", "postgres"):
-        if expected_store == "postgres":
-            monkeypatch.setenv("KS_USER_STORE", "postgres")
-        else:
-            monkeypatch.delenv("KS_USER_STORE", raising=False)
-        await store.update_user_status(16, "approved", reviewed_by=11)
-        row = await store.get_user(16)
-        assert row["status"] == "approved"
-        assert row["denial_count"] == 0, expected_store
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-
-
-@pytest.mark.asyncio
-async def test_the_replication_carries_the_list_faithfully(both_engines, monkeypatch):
-    """The copy that has to run before the switch can be flipped."""
-    from core.pg_dashboard_users import replicate_dashboard_users
-
-    store = both_engines
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    async with store.connection() as conn:
-        conn.execute("UPDATE users SET role = 'editor' WHERE user_id = 12")
-
-    with patch("core.mirror_reconciliation.configured", return_value=True):
-        out = await replicate_dashboard_users(store)
-    assert out.get("rows") == len(USERS), out
-
-    duck = await store.get_user(12)
-    monkeypatch.setenv("KS_USER_STORE", "postgres")
-    postgres = await store.get_user(12)
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    assert postgres == duck
-
-
-@pytest.mark.asyncio
-async def test_the_comparison_is_clean_on_a_faithful_copy(both_engines, monkeypatch):
-    from core.mirror_reconciliation import reconcile_dashboard_users
-    from core.pg_dashboard_users import replicate_dashboard_users
-
-    store = both_engines
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    with patch("core.mirror_reconciliation.configured", return_value=True):
-        await replicate_dashboard_users(store)
-    with patch("core.pg_landing.enabled", return_value=True):
-        assert await reconcile_dashboard_users(store) == []
-
-
-@pytest.mark.asyncio
-async def test_a_lost_approval_is_reported(both_engines, monkeypatch):
-    """The finding that matters: somebody who can open the dashboard on one
-    store and not on the other."""
-    from core.mirror_reconciliation import reconcile_dashboard_users
-    from core.pg_dashboard_users import replicate_dashboard_users
-
-    store = both_engines
-    monkeypatch.delenv("KS_USER_STORE", raising=False)
-    with patch("core.mirror_reconciliation.configured", return_value=True):
-        await replicate_dashboard_users(store)
-
-    pool = await __import__("core.pg", fromlist=["pg"]).get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM app.dashboard_users WHERE user_id = 11")
-
-    with patch("core.pg_landing.enabled", return_value=True):
-        issues = await reconcile_dashboard_users(store)
-    assert issues, "an approved admin vanished from one store and nothing said so"
-    assert any("11" in str(i.sample_ids) for i in issues), issues
+    await store.update_user_status(16, "approved", reviewed_by=11)
+    row = await store.get_user(16)
+    assert row["status"] == "approved"
+    assert row["denial_count"] == 0

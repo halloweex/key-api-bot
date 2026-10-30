@@ -1,4 +1,5 @@
-"""Audience groups on both engines, and against the query before groups.
+"""Audience groups on Postgres, against the query before groups and against
+what DuckDB answered.
 
 Two things are proved here by running SQL, which is what a rendered-text test
 cannot do:
@@ -6,20 +7,24 @@ cannot do:
 1. **One group selects what the audience selected before groups existed.**
    The query as it stood on main before this change is frozen in
    `tests/sms_segments_legacy.py`. Each case below runs it and the current
-   query side by side, on DuckDB and on PostgreSQL, over the same rows: the
-   rows must be identical, funnel included. The current query is rendered by
-   `sms_segments_fragments` — the function `get_sms_segments` executes — so
-   the comparison is with what the store runs, not with a copy of it. That is
-   the promise that keeps every past campaign, built-in preset and saved
-   preset reproducible.
+   query side by side over the same rows: the rows must be identical, funnel
+   included. The current query is rendered by `sms_segments_fragments` — the
+   function `get_sms_segments` executes — so the comparison is with what the
+   store runs, not with a copy of it. That is the promise that keeps every
+   past campaign, built-in preset and saved preset reproducible. It ran on
+   DuckDB too until step 14's S14-08.
 
-2. **Groups mean the same thing in both engines.** The owner's campaign and
-   its edges — a shared phone across groups, a group narrower than another,
-   the period counting only what the audience counts — answer what
+2. **Groups mean what they meant.** The owner's campaign and its edges — a
+   shared phone across groups, a group narrower than another, the period
+   counting only what the audience counts — answer what
    `tests/sms_audience_fixture.py` says by hand, through the real
-   `get_sms_segments`, on PostgreSQL as on DuckDB. So do the period's shapes
-   and bounds — a closed range, up to a date, exactly N, none in the period —
-   and the all-time window, against the fixture's oracle.
+   `get_sms_segments`. So do the period's shapes and bounds — a closed range,
+   up to a date, exactly N, none in the period — and the all-time window,
+   against the fixture's oracle. The whole result of each was compared with
+   DuckDB's while there were two engines; it is compared now with DuckDB's
+   answer recorded on this fixture before that side went
+   (`tests/integration/golden/sms_audience_groups.json`, rule 9 of the step-14
+   plan), its dates written back from today as the fixture's are.
 
 Skipped without `KS_PG_DSN`, which CI always sets and fails on skipping.
 """
@@ -27,28 +32,18 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
 from core.repositories.customers import (
     SMS_TIER_DEFAULTS, SmsAudienceFilters, SmsAudienceGroup, sms_segments_fragments,
 )
-from core.sql_dialect import DUCKDB, POSTGRES, numbered, sms_segments_select
+from core.sql_dialect import POSTGRES, numbered, sms_segments_select
 from tests import sms_audience_fixture as fx
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import golden, kyiv_today, relative, shifted
 from tests.sms_segments_legacy import legacy_render
-
-
-@pytest.fixture(autouse=True)
-def _sms_store_follows_env(monkeypatch):
-    """Since step 14's S14-00 the store switch decides nothing; this module's
-    two engines are chosen as before it (`tests.conftest.sms_store_follows_env`)."""
-    from tests.conftest import sms_store_follows_env
-
-    sms_store_follows_env(monkeypatch)
-
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -56,6 +51,13 @@ DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
+
+GOLDEN = golden("sms_audience_groups")
+# The Kyiv day the literals were recorded on: the one date below written out
+# rather than counted back from today moves with the calendar from it.
+RECORDED_ON = date(2026, 10, 28)
+# What each whole-result comparison held to DuckDB's.
+_KEYS = ("funnel", "groups", "segments", "totals", "customers", "criteria")
 
 
 def group_a(window: int = 365) -> SmsAudienceGroup:
@@ -112,59 +114,25 @@ LEGACY_CASES = [
 ]
 
 
-class _PoolOf:
-    def __init__(self, conn):
-        self._conn = conn
-
-    def acquire(self):
-        conn = self._conn
-
-        class _Ctx:
-            async def __aenter__(self):
-                return conn
-
-            async def __aexit__(self, *exc):
-                return False
-
-        return _Ctx()
-
-
 @pytest_asyncio.fixture
-async def engines(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "groups.duckdb")
-    await store.connect()
-    conn = await asyncpg.connect(DSN)
-    try:
-        async with store.connection() as duck:
-            fx.seed_duckdb_conn(duck)
-        await fx.seed_postgres(conn)
-        yield store, conn
-    finally:
-        await conn.close()
-        await store.close()
+async def engine(tmp_path, monkeypatch):
+    """The repository on Postgres, the fixture seeded, its DuckDB connection
+    a trap; and the pool, for the statements the tests run themselves."""
+    async with pg_sms_seed.on_postgres(monkeypatch) as pool:
+        async with pool.acquire() as conn:
+            await fx.seed_postgres(conn)
+        yield pg_sms_seed.store(tmp_path, "groups.duckdb"), pool
 
 
-async def _run(store, conn, dialect, sql, params):
-    if dialect is DUCKDB:
-        async with store.connection() as duck:
-            return duck.execute(sql, params).fetchall()
-    return [tuple(r) for r in await conn.fetch(numbered(sql), *params)]
+async def _run(pool, sql, params):
+    async with pool.acquire() as conn:
+        return [tuple(r) for r in await conn.fetch(numbered(sql), *params)]
 
 
 def _plain(rows):
-    """Money as float at two decimals: DuckDB DECIMAL, asyncpg Decimal."""
+    """Money as float at two decimals: asyncpg hands back Decimal."""
     return [tuple(round(float(v), 2) if hasattr(v, "as_tuple") else v for v in r)
             for r in rows]
-
-
-async def _on_postgres(store, conn, monkeypatch, **kwargs):
-    monkeypatch.setenv("KS_SMS_STORE", "postgres")
-    try:
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
-             patch("core.pg.require_revision", new=AsyncMock()):
-            return await store.get_sms_segments(**kwargs)
-    finally:
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
 
 
 def _filters(case) -> SmsAudienceFilters:
@@ -172,20 +140,18 @@ def _filters(case) -> SmsAudienceFilters:
     return build() if build else SmsAudienceFilters()
 
 
-async def _on_duckdb(store, monkeypatch, **kwargs):
-    monkeypatch.delenv("KS_SMS_STORE", raising=False)
-    return await store.get_sms_segments(**kwargs)
+def _as_recorded(result) -> dict:
+    """The keys the engines were compared on, dates written back from today."""
+    return relative({k: result[k] for k in _KEYS}, kyiv_today())
 
 
 class TestOneGroupIsTheAudienceBeforeGroups:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("label,case", LEGACY_CASES,
                              ids=[c[0] for c in LEGACY_CASES])
-    @pytest.mark.parametrize("dialect", (DUCKDB, POSTGRES), ids=("duckdb", "postgres"))
-    async def test_the_rows_are_the_old_querys_rows(
-        self, engines, dialect, label, case,
-    ):
-        store, conn = engines
+    async def test_the_rows_are_the_old_querys_rows(self, engine, label, case):
+        _store, pool = engine
+        dialect = POSTGRES
         basis = case.get("ltv_basis", "revenue")
         window = case.get("window", 270)
         filters = _filters(case)
@@ -209,8 +175,8 @@ class TestOneGroupIsTheAudienceBeforeGroups:
         )
         new_sql = sms_segments_select(dialect, **fragments)
 
-        old_rows = await _run(store, conn, dialect, old_sql, old_params)
-        new_rows = await _run(store, conn, dialect, new_sql, new_params)
+        old_rows = await _run(pool, old_sql, old_params)
+        new_rows = await _run(pool, new_sql, new_params)
 
         assert old_rows, "the comparison ran over nothing"
         # The old projection is the first 26 columns; after it come the group
@@ -221,16 +187,16 @@ class TestOneGroupIsTheAudienceBeforeGroups:
         )
 
     @pytest.mark.asyncio
-    async def test_the_cases_are_not_all_the_same_audience(self, engines):
+    async def test_the_cases_are_not_all_the_same_audience(self, engine):
         """A pin that compared one roster eighteen times would prove one
         thing. The cases must actually select different people."""
-        store, conn = engines
+        _store, pool = engine
         rosters = set()
         for _label, case in LEGACY_CASES:
             basis = case.get("ltv_basis", "revenue")
             window = case.get("window", 270)
             sql, params = legacy_render(
-                DUCKDB, _filters(case),
+                POSTGRES, _filters(case),
                 ltv_basis=basis, sales_type=case.get("sales_type", "retail"),
                 tiers=case.get("tiers", ()), grouping=case.get("grouping", "single"),
                 max_recency_days=window,
@@ -238,17 +204,17 @@ class TestOneGroupIsTheAudienceBeforeGroups:
                 core_ltv=SMS_TIER_DEFAULTS[basis]["core"],
                 reactivation_max_recency=min(120, window),
             )
-            rows = await _run(store, conn, DUCKDB, sql, params)
+            rows = await _run(pool, sql, params)
             rosters.add(frozenset(r[0] for r in rows if r[0] is not None))
         assert len(rosters) >= 10
 
 
 class TestGroupsOnPostgres:
     @pytest.mark.asyncio
-    async def test_the_owners_campaign(self, engines, monkeypatch):
-        store, conn = engines
-        result = await _on_postgres(
-            store, conn, monkeypatch, groups=[group_a(), GROUP_B],
+    async def test_the_owners_campaign(self, engine):
+        store, _pool = engine
+        result = await store.get_sms_segments(
+            groups=[group_a(), GROUP_B],
             grouping="single", holdout_pct=0, include_customers=True,
         )
         assert {c["buyerId"] for c in result["customers"]} == fx.UNION
@@ -259,58 +225,54 @@ class TestGroupsOnPostgres:
             len(fx.B_MATCHED), fx.B_RECIPIENTS, fx.B_ONLY)
 
     @pytest.mark.asyncio
-    async def test_each_group_alone(self, engines, monkeypatch):
-        store, conn = engines
+    async def test_each_group_alone(self, engine):
+        store, _pool = engine
         for group, expected in ((group_a(), fx.A_ALONE), (GROUP_B, fx.B_ALONE)):
-            result = await _on_postgres(
-                store, conn, monkeypatch, groups=[group], grouping="single",
-                include_customers=True,
+            result = await store.get_sms_segments(
+                groups=[group], grouping="single", include_customers=True,
             )
             assert {c["buyerId"] for c in result["customers"]} == expected
 
     @pytest.mark.asyncio
-    async def test_within_n_days_is_the_window_on_postgres_too(
-        self, engines, monkeypatch,
-    ):
-        store, conn = engines
+    async def test_within_n_days_is_the_window_on_postgres_too(self, engine):
+        store, _pool = engine
         as_period = SmsAudienceGroup(270, SmsAudienceFilters(period_days=92))
-        a = await _on_postgres(store, conn, monkeypatch, groups=[as_period],
-                               grouping="single", include_customers=True)
-        b = await _on_postgres(store, conn, monkeypatch, groups=[GROUP_B],
-                               grouping="single", include_customers=True)
+        a = await store.get_sms_segments(groups=[as_period],
+                                         grouping="single", include_customers=True)
+        b = await store.get_sms_segments(groups=[GROUP_B],
+                                         grouping="single", include_customers=True)
         assert a["customers"] == b["customers"]
 
 
-class TestThePeriodsShapesOnBothEngines:
+class TestThePeriodsShapes:
     """From-and-to, up-to, exactly N, none in the period and the all-time
-    window: each engine selects the oracle's answer
+    window: the store selects the oracle's answer
     (`tests/sms_audience_fixture.py`, which also writes it by hand), and the
-    two engines return one result, funnel and frozen criteria included."""
+    whole result — funnel and frozen criteria included — is the one DuckDB
+    returned."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("label,window,fields,terms,answer", fx.PERIOD_CASES,
                              ids=[c[0] for c in fx.PERIOD_CASES])
-    async def test_both_engines_select_the_oracles_answer(
-        self, engines, monkeypatch, label, window, fields, terms, answer,
+    async def test_the_store_selects_the_oracles_answer(
+        self, engine, label, window, fields, terms, answer,
     ):
-        store, conn = engines
+        store, _pool = engine
         mine = fx.matched(window, **terms)
         assert fx.recipients(mine) == answer, f"{label}: the oracle disagrees with the hand"
-        kwargs = dict(groups=[SmsAudienceGroup(window, SmsAudienceFilters(**fields()))],
-                      grouping="single", holdout_pct=20, campaign="period-shapes",
-                      include_customers=True)
-        duck = await _on_duckdb(store, monkeypatch, **kwargs)
-        postgres = await _on_postgres(store, conn, monkeypatch, **kwargs)
-        for name, result in (("duckdb", duck), ("postgres", postgres)):
-            assert {c["buyerId"] for c in result["customers"]} == answer, (
-                f"{name}: {label}")
-            assert result["groups"][0]["matched"] == len(mine), f"{name}: {label}"
-        for key in ("funnel", "groups", "segments", "totals", "customers",
-                    "criteria"):
-            assert duck[key] == postgres[key], f"{label}: {key} differs"
+        result = await store.get_sms_segments(
+            groups=[SmsAudienceGroup(window, SmsAudienceFilters(**fields()))],
+            grouping="single", holdout_pct=20, campaign="period-shapes",
+            include_customers=True)
+        assert {c["buyerId"] for c in result["customers"]} == answer, label
+        assert result["groups"][0]["matched"] == len(mine), label
+        assert _as_recorded(result) == GOLDEN[f"periods:{label}"], (
+            f"{label}: Postgres's result is not the one DuckDB returned")
 
 
 class TestTheEnginesAgree:
+    """Each answer is the one DuckDB gave on the same fixture."""
+
     # Each case's arguments are a function, called when the test runs: they
     # carry dates, and pytest builds this table at collection.
     CASES = [
@@ -324,7 +286,12 @@ class TestTheEnginesAgree:
                                                      cities=("Львів",))),
             SmsAudienceGroup(400, SmsAudienceFilters(brands=("Anua",),
                                                      period_orders_min=1,
-                                                     period_from=date(2000, 1, 1))),
+                                                     # Written out, so moved with
+                                                     # the calendar: its echo in
+                                                     # the criteria is a literal.
+                                                     period_from=shifted(
+                                                         date(2000, 1, 1),
+                                                         RECORDED_ON))),
         ])),
         ("split by level", lambda: dict(groups=[group_a(), GROUP_B],
                                         grouping="rfm", ltv_basis="margin")),
@@ -350,15 +317,13 @@ class TestTheEnginesAgree:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("label,kwargs", CASES, ids=[c[0] for c in CASES])
-    async def test_the_whole_result_is_the_same(self, engines, monkeypatch,
-                                                label, kwargs):
-        store, conn = engines
+    async def test_the_whole_result_is_the_one_duckdb_returned(self, engine,
+                                                               label, kwargs):
+        store, _pool = engine
         common = dict(include_customers=True, campaign="groups-compare",
                       holdout_pct=20, grouping="single")
         common.update(kwargs())
-        duck = await _on_duckdb(store, monkeypatch, **common)
-        postgres = await _on_postgres(store, conn, monkeypatch, **common)
-        assert duck["totals"]["customers"] > 0, f"{label}: compared nobody"
-        for key in ("funnel", "groups", "segments", "totals", "customers",
-                    "criteria"):
-            assert duck[key] == postgres[key], f"{label}: {key} differs"
+        postgres = await store.get_sms_segments(**common)
+        assert postgres["totals"]["customers"] > 0, f"{label}: compared nobody"
+        assert _as_recorded(postgres) == GOLDEN[f"agree:{label}"], (
+            f"{label}: Postgres's result is not the one DuckDB returned")

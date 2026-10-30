@@ -258,8 +258,8 @@ async def _resolve_session(session: str | None) -> dict | None:
             session_data['role'] = 'admin'
             return session_data
 
-        # Verify the caller is still authorized, on whichever store owns the
-        # dashboard's user list.
+        # Verify the caller is still authorized, against the dashboard's user
+        # list in Postgres (its only store since step 14's S14-08).
         #
         # **An error is not an absence, and they must not share an exit.** Both
         # used to fall through to the block below, which grants a `viewer` with
@@ -269,9 +269,9 @@ async def _resolve_session(session: str | None) -> dict | None:
         # here can see it, and handing back the full set would silently undo an
         # admin's decision at exactly the moment nothing can be verified.
         #
-        # The realistic error is not a network blip — under
-        # `KS_USER_STORE=postgres` a blip takes the fallback's own read down
-        # with it and the answer is 401 either way. It is `SchemaVersionError`:
+        # The realistic error is not a network blip — with the list in
+        # Postgres a blip takes the fallback's own read down with it and the
+        # answer is 401 either way. It is `SchemaVersionError`:
         # `web` deployed ahead of `migrate`, where `require_revision` raises on
         # this read while the bot's store, which checks the revision only in
         # `initialise()`, keeps answering. Every narrowed account would have

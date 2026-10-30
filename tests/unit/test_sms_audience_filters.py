@@ -7,77 +7,68 @@ buyer outside the reactivation window belongs to no tier and is dropped.
 
 So these tests pin two things together — that a filter selects what it says,
 and that `grouping="single"` stops the tier rules from filtering underneath it.
+
+The audience reads Postgres alone since step 14's S14-08, so the rows go
+into the tables its production read names (`tests/integration/pg_sms_seed.py`);
+they went into DuckDB until then, and the assertions are unchanged. The async
+tests are skipped without `KS_PG_DSN`.
 """
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
 from core.repositories.customers import (
     BUILTIN_AUDIENCE_PRESETS, SINGLE_GROUP_NAME, SmsAudienceFilters,
 )
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import insert, order_row, pg_conn
 
 
-@pytest.fixture(autouse=True)
-def _sms_on_duckdb(monkeypatch):
-    """This module's engine is DuckDB, as it was before step 14's S14-00 made
-    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(request, monkeypatch):
+    async with pg_sms_seed.for_async_tests(request, monkeypatch):
+        yield
 
 
 async def _store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "filters.duckdb")
-    await store.connect()
-    return store
+    return pg_sms_seed.store(tmp_path, "filters.duckdb")
 
 
-def _catalogue(conn) -> None:
-    conn.execute(
-        "INSERT INTO categories (id, name, parent_id) VALUES "
-        "(10, 'Face care', NULL), (11, 'Masks', 10), (20, 'Hair', NULL)"
-    )
-    for pid, sku, brand, category in (
-        (101, "SKU-A", "Medi-Peel", 11),
-        (102, "SKU-B", "Anua", 20),
-    ):
-        conn.execute(
-            "INSERT INTO products (id, name, sku, brand, category_id, price)"
-            " VALUES (?, ?, ?, ?, ?, 1000)",
-            [pid, f"Product {pid}", sku, brand, category],
+async def _catalogue(conn) -> None:
+    await insert(conn, "bronze.categories", [
+        dict(id=10, name="Face care", parent_id=None),
+        dict(id=11, name="Masks", parent_id=10),
+        dict(id=20, name="Hair", parent_id=None),
+    ])
+    await insert(conn, "bronze.products", [
+        dict(id=pid, name=f"Product {pid}", sku=sku, brand=brand,
+             category_id=category, price=1000)
+        for pid, sku, brand, category in (
+            (101, "SKU-A", "Medi-Peel", 11),
+            (102, "SKU-B", "Anua", 20),
         )
+    ])
 
 
-def _buyer(conn, buyer_id: int, phone: str, city: str = "Kyiv") -> None:
-    conn.execute(
-        "INSERT INTO buyers (id, full_name, phone, city) VALUES (?, ?, ?, ?)",
-        [buyer_id, f"Buyer {buyer_id}", phone, city],
-    )
+async def _buyer(conn, buyer_id: int, phone: str, city: str = "Kyiv") -> None:
+    await insert(conn, "bronze.buyers", [dict(
+        id=buyer_id, full_name=f"Buyer {buyer_id}", phone=phone, city=city)])
 
 
-def _order(
+async def _order(
     conn, *, oid: int, buyer_id: int, days_ago: int, total: str = "1000.00",
     product_id: int = 101, source_id: int = 4, promocode: str | None = None,
 ) -> None:
     when = date.today() - timedelta(days=days_ago)
-    conn.execute(
-        """
-        INSERT INTO silver_orders (
-            id, source_id, status_id, grand_total, ordered_at, buyer_id,
-            manager_id, order_date, is_return, sales_type, is_active_source,
-            source_name, is_new_customer, promocode
-        ) VALUES (?, ?, 1, ?, ?, ?, NULL, ?, FALSE, 'retail', TRUE,
-                  'Shopify', FALSE, ?)
-        """,
-        [oid, source_id, total, when, buyer_id, when, promocode],
-    )
-    conn.execute(
-        "INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold)"
-        " VALUES (?, ?, ?, ?, 1, ?)",
-        [oid, oid, product_id, f"Product {product_id}", total],
-    )
+    await insert(conn, "silver.orders", [order_row(
+        oid=oid, buyer_id=buyer_id, day=when, total=total, source_id=source_id,
+        promocode=promocode)])
+    await insert(conn, "bronze.order_products", [dict(
+        id=oid, order_id=oid, product_id=product_id, name=f"Product {product_id}",
+        quantity=1, price_sold=total)])
 
 
 async def _seed(store: DuckDBStore) -> None:
@@ -86,21 +77,21 @@ async def _seed(store: DuckDBStore) -> None:
     Values are chosen so nobody qualifies for VIP or CORE: everyone here is a
     one-order buyer, which is exactly the population the tier rules discard.
     """
-    async with store.connection() as conn:
-        _catalogue(conn)
+    async with pg_conn() as conn:
+        await _catalogue(conn)
         # 1 — Medi-Peel (a Masks product), Kyiv, recent, promocode
-        _buyer(conn, 1, "380961111111", city="Kyiv")
-        _order(conn, oid=1, buyer_id=1, days_ago=20, product_id=101,
+        await _buyer(conn, 1, "380961111111", city="Kyiv")
+        await _order(conn, oid=1, buyer_id=1, days_ago=20, product_id=101,
                promocode="KS-AUG")
         # 2 — Anua (Hair), Lviv, recent
-        _buyer(conn, 2, "380962222222", city="Lviv")
-        _order(conn, oid=2, buyer_id=2, days_ago=30, product_id=102)
+        await _buyer(conn, 2, "380962222222", city="Lviv")
+        await _order(conn, oid=2, buyer_id=2, days_ago=30, product_id=102)
         # 3 — Medi-Peel, but long ago: outside every "recently" window
-        _buyer(conn, 3, "380963333333", city="Kyiv")
-        _order(conn, oid=3, buyer_id=3, days_ago=200, product_id=101)
+        await _buyer(conn, 3, "380963333333", city="Kyiv")
+        await _order(conn, oid=3, buyer_id=3, days_ago=200, product_id=101)
         # 4 — big single order, Instagram, no promocode
-        _buyer(conn, 4, "380964444444", city="Kyiv")
-        _order(conn, oid=4, buyer_id=4, days_ago=15, total="8000.00",
+        await _buyer(conn, 4, "380964444444", city="Kyiv")
+        await _order(conn, oid=4, buyer_id=4, days_ago=15, total="8000.00",
                product_id=102, source_id=1)
 
 
@@ -377,14 +368,14 @@ async def test_level_filters_under_one_arm(tmp_path):
     """
     store = await _store(tmp_path)
     try:
-        async with store.connection() as conn:
-            _catalogue(conn)
+        async with pg_conn() as conn:
+            await _catalogue(conn)
             # One valuable repeat buyer, one modest single-order buyer.
-            _buyer(conn, 1, "380961111111")
+            await _buyer(conn, 1, "380961111111")
             for oid in (11, 12):
-                _order(conn, oid=oid, buyer_id=1, days_ago=20, total="9000.00")
-            _buyer(conn, 2, "380962222222")
-            _order(conn, oid=21, buyer_id=2, days_ago=20, total="500.00")
+                await _order(conn, oid=oid, buyer_id=1, days_ago=20, total="9000.00")
+            await _buyer(conn, 2, "380962222222")
+            await _order(conn, oid=21, buyer_id=2, days_ago=20, total="500.00")
 
         both = await store.get_sms_segments(
             grouping="single", ltv_basis="revenue", include_customers=True,

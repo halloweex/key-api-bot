@@ -24,6 +24,9 @@ campaign under time pressure. These tests pin which replay shapes survive it:
 
 `record_sms_delivery` is exercised against a real store rather than a mock: the
 binding lives in SQL, and a mock would agree with whatever the test expected.
+The store is Postgres, `/sms`'s only one since step 14's S14-08 (it was
+DuckDB until then; `tests/integration/pg_sms_seed.py`). Skipped without
+`KS_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -31,39 +34,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
 from core.repositories.customers import DlrEventRebound
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import as_tuple, insert, needs_postgres, pg_conn
+
+pytestmark = needs_postgres
 
 
-@pytest.fixture(autouse=True)
-def _sms_on_duckdb(monkeypatch):
-    """This module's engine is DuckDB, as it was before step 14's S14-00 made
-    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(monkeypatch):
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        yield
 
 UTC = timezone.utc
 
 
 async def _store_with_roster(tmp_path: Path) -> DuckDBStore:
     """Two recipients of one campaign, each with the gateway's message id."""
-    store = DuckDBStore(db_path=tmp_path / "dlr.duckdb")
-    await store.connect()
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO sms_campaigns (campaign, ltv_basis, sales_type, "
-            " holdout_pct, criteria) VALUES ('aug', 'revenue', 'retail', 10, '{}')"
-        )
-        for buyer, msg in ((1, "msg-aaa"), (2, "msg-bbb")):
-            conn.execute(
-                "INSERT INTO sms_campaign_members (campaign, buyer_id, phone, "
-                " tier, assignment, orders_at_export, message_id, "
-                " delivery_status) VALUES "
-                f"('aug', {buyer}, '38050000000{buyer}', 'VIP', 'target', 3, "
-                f"'{msg}', 'Accepted')"
-            )
+    store = pg_sms_seed.store(tmp_path, "dlr.duckdb")
+    async with pg_conn() as conn:
+        await insert(conn, "app.sms_campaigns", [dict(
+            campaign="aug", ltv_basis="revenue", sales_type="retail",
+            holdout_pct=10, criteria="{}")])
+        await insert(conn, "app.sms_campaign_members", [
+            dict(campaign="aug", buyer_id=buyer, phone=f"38050000000{buyer}",
+                 tier="VIP", assignment="target", orders_at_export=3,
+                 message_id=msg, delivery_status="Accepted")
+            for buyer, msg in ((1, "msg-aaa"), (2, "msg-bbb"))
+        ])
     return store
 
 
@@ -78,11 +79,11 @@ async def _replay(store, event_id: str, message_id: str, status: str = "DELIVRD"
 
 
 async def _delivered(store, message_id: str):
-    async with store.connection() as conn:
-        return conn.execute(
-            "SELECT delivered, delivery_status FROM sms_campaign_members "
-            "WHERE message_id = ?", [message_id],
-        ).fetchone()
+    async with pg_conn() as conn:
+        return as_tuple(await conn.fetchrow(
+            "SELECT delivered, delivery_status FROM app.sms_campaign_members "
+            "WHERE message_id = $1", message_id,
+        ))
 
 
 class TestTheSupportedReplayShape:

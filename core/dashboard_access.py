@@ -9,9 +9,9 @@ WHY THE SQL IS HERE AND NOT IN THE REPOSITORY THAT USES IT
 
 Two callers write this column and they are in different containers:
 
-* the **web** container, through the admin page, on whichever store
-  `KS_USER_STORE` names — `core/repositories/users.py` runs these against
-  DuckDB or Postgres with the `{users}` / `{self}` holes filled in;
+* the **web** container, through the admin page —
+  `core/repositories/users.py` runs these against Postgres, the list's only
+  store since step 14's S14-08, with the `{users}` / `{self}` holes filled in;
 * the **bot**, at the moment an admin approves an access request, through
   `bot/store_postgres.py` and only ever against Postgres.
 
@@ -19,15 +19,17 @@ A grant written two ways would drift the first time one of them learned
 something the other did not — that an approval must not demote an existing
 admin, say. So the statements have one home and two runners.
 
-WHY THE BOT CANNOT WRITE THIS ON EVERY ENGINE
+WHY THE BOT CANNOT ALWAYS WRITE THIS
 
-DuckDB takes a single writer and the web container holds it, so a bot process
-cannot open the analytics file at all — the same reason `core/bot_prefs.py`
-exists. Under `KS_USER_STORE=duckdb` the bot therefore has no way to reach the
-dashboard's user list, and `PostgresDashboardAccess.available()` says so rather
-than pretending: the approval still grants bot access, and the tabs are set
-from the admin page instead. That is a degradation the admin is told about, not
-one they discover.
+The bot reaches the list only through a Postgres store of its own. Under
+`KS_BOT_STORE=postgres` it has one, and `PostgresDashboardTabs.available()`
+says True. Under any other value its state is SQLite, it has no way to the
+list, and `NoDashboardTabs.available()` says so rather than pretending: the
+approval still grants bot access, and the tabs are set from the admin page
+instead. That is a degradation the admin is told about, not one they discover.
+Until step 14's S14-08 the list could also be in DuckDB
+(`KS_USER_STORE=duckdb`), whose single writer the web container holds, so no
+bot process could reach it on any engine.
 """
 from __future__ import annotations
 

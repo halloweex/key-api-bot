@@ -10,7 +10,10 @@ The send used to have one guard of its own (the claim) and one in the browser
 
 The gateway is the real `TurboSmsClient` over an injected `httpx.MockTransport`,
 so the balance is parsed the way production parses it and nothing here can
-reach the live gateway. The follow-up routes run over a real DuckDB store.
+reach the live gateway. The follow-up routes, the named refusals and the
+guards end to end run over a real store on Postgres — `/sms`'s only one since
+step 14's S14-08 (they ran over DuckDB until then;
+`tests/integration/pg_sms_seed.py`) — and are skipped without `KS_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -23,20 +26,11 @@ import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 
-from core.duckdb_store import DuckDBStore
 from core.permissions import ADMIN_USER_IDS
 from core.turbosms import TurboSmsClient, TurboSmsConfig
+from tests.integration import pg_sms_seed
 from web.main import app
 from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
-
-
-@pytest.fixture(autouse=True)
-def _sms_store_follows_env(monkeypatch):
-    """Since step 14's S14-00 the store switch decides nothing; this module's
-    two engines are chosen as before it (`tests.conftest.sms_store_follows_env`)."""
-    from tests.conftest import sms_store_follows_env
-
-    sms_store_follows_env(monkeypatch)
 
 
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
@@ -368,16 +362,28 @@ class TestTheChannelsBalance:
 
 @pytest_asyncio.fixture
 async def real_store(tmp_path, monkeypatch):
-    monkeypatch.delenv("KS_SMS_STORE", raising=False)
-    store = DuckDBStore(db_path=tmp_path / "follow-up.duckdb")
-    await store.connect()
+    """The repository on Postgres, its DuckDB connection a trap, handed to the
+    routes as `get_store()` answers it."""
+    if not pg_sms_seed.DSN:
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        store = pg_sms_seed.store(tmp_path, "follow-up.duckdb")
 
-    async def _get_store():
-        return store
+        async def _get_store():
+            return store
 
-    monkeypatch.setattr("web.routes.api.customers.get_store", _get_store)
-    yield store
-    await store.close()
+        monkeypatch.setattr("web.routes.api.customers.get_store", _get_store)
+        yield store
+
+
+@pytest_asyncio.fixture
+async def aclient():
+    """The app in this test's own event loop, so the pool the store holds is
+    used from the loop that made it. `TestClient` runs the app on a loop of
+    its own, which asyncpg refuses."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as ac:
+        yield ac
 
 
 def _member(buyer_id: int, assignment: str = "target") -> dict:
@@ -410,14 +416,14 @@ async def _sent_root(store, refused=(5,)):
 class TestFollowUpRoutes:
 
     @pytest.mark.asyncio
-    async def test_preview_and_freeze_are_the_same_roster(self, client, real_store):
+    async def test_preview_and_freeze_are_the_same_roster(self, aclient, real_store):
         await _sent_root(real_store)
 
-        preview = client.get(
+        preview = await aclient.get(
             SEGMENTS, params={"follow_up_of": "root", "include_customers": "true"},
             headers=_headers(),
         )
-        created = client.post(
+        created = await aclient.post(
             CREATE, params={"campaign": "root-last-day", "follow_up_of": "root"},
             headers=_headers(),
         )
@@ -444,11 +450,11 @@ class TestFollowUpRoutes:
     ])
     @pytest.mark.asyncio
     async def test_audience_parameters_beside_it_are_refused(
-        self, client, real_store, extra,
+        self, aclient, real_store, extra,
     ):
         await _sent_root(real_store)
 
-        r = client.post(
+        r = await aclient.post(
             CREATE, params={"campaign": "root-last-day", "follow_up_of": "root", **extra},
             headers=_headers(),
         )
@@ -462,10 +468,10 @@ class TestFollowUpRoutes:
             c["campaign"] for c in await real_store.list_sms_campaigns()}
 
     @pytest.mark.asyncio
-    async def test_a_holdout_of_its_own_is_refused(self, client, real_store):
+    async def test_a_holdout_of_its_own_is_refused(self, aclient, real_store):
         await _sent_root(real_store)
 
-        r = client.post(
+        r = await aclient.post(
             CREATE, params={"campaign": "f", "follow_up_of": "root", "holdout_pct": 10},
             headers=_headers(),
         )
@@ -475,10 +481,10 @@ class TestFollowUpRoutes:
         assert r.json()["reason"] == "follow_up_holdout"
 
     @pytest.mark.asyncio
-    async def test_a_holdout_of_zero_is_what_it_is_anyway(self, client, real_store):
+    async def test_a_holdout_of_zero_is_what_it_is_anyway(self, aclient, real_store):
         await _sent_root(real_store)
 
-        r = client.post(
+        r = await aclient.post(
             CREATE, params={"campaign": "f", "follow_up_of": "root", "holdout_pct": 0},
             headers=_headers(),
         )
@@ -486,13 +492,13 @@ class TestFollowUpRoutes:
         assert r.status_code == 200, r.text
 
     @pytest.mark.asyncio
-    async def test_an_unsent_root_is_refused(self, client, real_store):
+    async def test_an_unsent_root_is_refused(self, aclient, real_store):
         await real_store.freeze_sms_campaign(
             campaign="root", customers=[_member(1)], criteria={},
             ltv_basis="margin", sales_type="retail", holdout_pct=10,
         )
 
-        r = client.post(CREATE, params={"campaign": "f", "follow_up_of": "root"},
+        r = await aclient.post(CREATE, params={"campaign": "f", "follow_up_of": "root"},
                         headers=_headers())
 
         assert r.status_code == 409
@@ -501,18 +507,18 @@ class TestFollowUpRoutes:
         assert r.json()["root"] == "root"
 
     @pytest.mark.asyncio
-    async def test_a_follow_up_of_a_follow_up_is_refused(self, client, real_store):
+    async def test_a_follow_up_of_a_follow_up_is_refused(self, aclient, real_store):
         await _sent_root(real_store)
-        assert client.post(
+        assert (await aclient.post(
             CREATE, params={"campaign": "noon", "follow_up_of": "root"},
             headers=_headers(),
-        ).status_code == 200
+        )).status_code == 200
         targets = await real_store.get_sms_campaign_targets("noon")
         await real_store.record_sms_send(
             "noon", {t["buyerId"]: f"n-{t['buyerId']}" for t in targets}, [], {},
         )
 
-        r = client.post(CREATE, params={"campaign": "evening", "follow_up_of": "noon"},
+        r = await aclient.post(CREATE, params={"campaign": "evening", "follow_up_of": "noon"},
                         headers=_headers())
 
         assert r.status_code == 409
@@ -521,15 +527,15 @@ class TestFollowUpRoutes:
         assert (r.json()["root"], r.json()["parent"]) == ("noon", "root")
 
     @pytest.mark.asyncio
-    async def test_an_unknown_root_is_404(self, client, real_store):
-        r = client.get(SEGMENTS, params={"follow_up_of": "nobody"}, headers=_headers())
+    async def test_an_unknown_root_is_404(self, aclient, real_store):
+        r = await aclient.get(SEGMENTS, params={"follow_up_of": "nobody"}, headers=_headers())
 
         assert r.status_code == 404
         assert r.json()["reason"] == "not_frozen"
         assert r.json()["campaign"] == "nobody"
 
     @pytest.mark.asyncio
-    async def test_another_sales_type_must_be_named(self, client, real_store):
+    async def test_another_sales_type_must_be_named(self, aclient, real_store):
         await real_store.freeze_sms_campaign(
             campaign="root", customers=[_member(1)], criteria={},
             ltv_basis="margin", sales_type="all", holdout_pct=10,
@@ -538,9 +544,9 @@ class TestFollowUpRoutes:
         await real_store.record_sms_send(
             "root", {t["buyerId"]: "m" for t in targets}, [], {})
 
-        refused = client.get(SEGMENTS, params={"follow_up_of": "root"},
+        refused = await aclient.get(SEGMENTS, params={"follow_up_of": "root"},
                              headers=_headers())
-        named = client.get(SEGMENTS, params={"follow_up_of": "root", "sales_type": "all"},
+        named = await aclient.get(SEGMENTS, params={"follow_up_of": "root", "sales_type": "all"},
                            headers=_headers())
 
         assert refused.status_code == 409
@@ -550,17 +556,17 @@ class TestFollowUpRoutes:
         assert named.status_code == 200, named.text
 
     @pytest.mark.asyncio
-    async def test_it_is_not_exported(self, client, real_store):
+    async def test_it_is_not_exported(self, aclient, real_store):
         await _sent_root(real_store)
 
-        r = client.get(CSV, params={"follow_up_of": "root", "campaign": "f"},
+        r = await aclient.get(CSV, params={"follow_up_of": "root", "campaign": "f"},
                        headers=_headers())
 
         assert r.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_a_campaign_cannot_follow_itself(self, client, real_store):
-        r = client.post(CREATE, params={"campaign": "root", "follow_up_of": "root"},
+    async def test_a_campaign_cannot_follow_itself(self, aclient, real_store):
+        r = await aclient.post(CREATE, params={"campaign": "root", "follow_up_of": "root"},
                         headers=_headers())
 
         assert r.status_code == 400
@@ -577,10 +583,10 @@ class TestFollowUpRoutes:
 class TestRefusalsAreNamed:
 
     @pytest.mark.asyncio
-    async def test_a_second_send_is_already_sent(self, client, real_store, gateway):
+    async def test_a_second_send_is_already_sent(self, aclient, real_store, gateway):
         await _sent_root(real_store)
 
-        r = client.post("/api/customers/sms-campaigns/root/send",
+        r = await aclient.post("/api/customers/sms-campaigns/root/send",
                         params={"text": "hi", "confirm_campaign": "root"},
                         headers=_headers())
 
@@ -592,8 +598,8 @@ class TestRefusalsAreNamed:
         assert gateway.sends == 0
 
     @pytest.mark.asyncio
-    async def test_an_unknown_campaign_is_not_frozen(self, client, real_store, gateway):
-        r = client.post("/api/customers/sms-campaigns/nobody/send",
+    async def test_an_unknown_campaign_is_not_frozen(self, aclient, real_store, gateway):
+        r = await aclient.post("/api/customers/sms-campaigns/nobody/send",
                         params={"text": "hi", "confirm_campaign": "nobody"},
                         headers=_headers())
 
@@ -602,8 +608,8 @@ class TestRefusalsAreNamed:
         assert r.json()["campaign"] == "nobody"
 
     @pytest.mark.asyncio
-    async def test_the_placeholder_name_is_refused(self, client, real_store):
-        r = client.post(CREATE, params={"campaign": "default", "grouping": "single"},
+    async def test_the_placeholder_name_is_refused(self, aclient, real_store):
+        r = await aclient.post(CREATE, params={"campaign": "default", "grouping": "single"},
                         headers=_headers())
 
         assert r.status_code == 400
@@ -611,14 +617,14 @@ class TestRefusalsAreNamed:
         assert "default" in r.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_a_taken_name_is_already_frozen(self, client, real_store):
+    async def test_a_taken_name_is_already_frozen(self, aclient, real_store):
         await _sent_root(real_store)
         await real_store.freeze_sms_campaign(
             campaign="taken", customers=[_member(1)], criteria={},
             ltv_basis="margin", sales_type="retail", holdout_pct=10,
         )
 
-        r = client.post(CREATE, params={"campaign": "taken", "follow_up_of": "root"},
+        r = await aclient.post(CREATE, params={"campaign": "taken", "follow_up_of": "root"},
                         headers=_headers())
 
         assert r.status_code == 409
@@ -626,8 +632,8 @@ class TestRefusalsAreNamed:
         assert r.json()["campaign"] == "taken"
 
     @pytest.mark.asyncio
-    async def test_an_empty_audience_is_refused(self, client, real_store):
-        r = client.post(CREATE, params={"campaign": "nobody-here", "grouping": "single"},
+    async def test_an_empty_audience_is_refused(self, aclient, real_store):
+        r = await aclient.post(CREATE, params={"campaign": "nobody-here", "grouping": "single"},
                         headers=_headers())
 
         assert r.status_code == 400
@@ -659,3 +665,161 @@ class TestRefusalsAreNamed:
         assert r.json()["reason"] == "gateway_refused"
         assert "sender name is not approved" in r.json()["error"]
         assert store.releases == 1
+
+
+# ─── F. Every guard, end to end, over the store production runs ─────────────
+#
+# The guards above are proved at the route against a store that claims the
+# way the real one does. These prove each of them again with nothing stood
+# in for: the route, the real repository and its claim — the conditional
+# UPDATE on `app.sms_campaigns` — on Postgres, `/sms`'s only store since
+# step 14's S14-08. What a refusal must leave behind is read back out of
+# Postgres: a campaign nothing was sent for, still sendable. The gateway is
+# the mock transport throughout; nothing here can reach TurboSMS.
+
+async def _claim_state(campaign: str):
+    """`sent_at` of the campaign as Postgres holds it: NULL is unclaimed."""
+    async with pg_sms_seed.pg_conn() as conn:
+        return await conn.fetchval(
+            "SELECT sent_at FROM app.sms_campaigns WHERE campaign = $1", campaign)
+
+
+async def _frozen(store, campaign: str, members: list) -> None:
+    await store.freeze_sms_campaign(
+        campaign=campaign, customers=members, criteria={"grouping": "single"},
+        ltv_basis="margin", sales_type="retail", holdout_pct=0,
+    )
+
+
+def _send_to(aclient, campaign: str, confirm: "str | None" = None, text="Знижка 20%"):
+    params = {"text": text}
+    if confirm is not None:
+        params["confirm_campaign"] = confirm
+    return aclient.post(f"/api/customers/sms-campaigns/{campaign}/send",
+                        params=params, headers=_headers())
+
+
+class TestTheGuardsOverAPostgresStore:
+
+    @pytest.mark.asyncio
+    async def test_a_confirmed_send_goes_once_and_is_recorded(
+        self, aclient, real_store, gateway,
+    ):
+        await _frozen(real_store, "oct", [_member(1), _member(2)])
+
+        r = await _send_to(aclient, "oct", confirm="oct")
+
+        assert r.status_code == 200, r.text
+        assert gateway.sends == 1
+        assert await _claim_state("oct") is not None, "the send stamps the claim"
+        listed = {c["campaign"]: c for c in await real_store.list_sms_campaigns()}
+        assert listed["oct"]["recipientsSent"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_typed_name_refuses_before_the_claim(
+        self, aclient, real_store, gateway,
+    ):
+        await _frozen(real_store, "oct", [_member(1)])
+
+        missing = await _send_to(aclient, "oct")
+        wrong = await _send_to(aclient, "oct", confirm="ocT")
+
+        assert (missing.status_code, missing.json()["reason"]) == (409, "confirm_mismatch")
+        assert (wrong.status_code, wrong.json()["reason"]) == (409, "confirm_mismatch")
+        assert gateway.calls == []
+        assert await _claim_state("oct") is None, "nothing may be claimed"
+
+    @pytest.mark.asyncio
+    async def test_the_claim_lets_one_of_two_sends_through(
+        self, aclient, real_store, gateway,
+    ):
+        """The 5 550 sent twice: a second press while the first was running.
+        Two at once over the pool, and the conditional UPDATE lets one by."""
+        import asyncio
+
+        await _frozen(real_store, "oct", [_member(1), _member(2)])
+
+        first, second = await asyncio.gather(
+            _send_to(aclient, "oct", confirm="oct"),
+            _send_to(aclient, "oct", confirm="oct"),
+        )
+
+        assert sorted([first.status_code, second.status_code]) == [200, 409]
+        loser = first if first.status_code == 409 else second
+        assert loser.json()["reason"] == "already_sent"
+        assert gateway.sends == 1, "the roster went to the gateway once"
+
+    @pytest.mark.asyncio
+    async def test_a_recent_overlap_refuses_and_hands_the_claim_back(
+        self, aclient, real_store, gateway,
+    ):
+        await _frozen(real_store, "first", [_member(1), _member(2)])
+        targets = await real_store.get_sms_campaign_targets("first")
+        await real_store.record_sms_send(
+            "first", {t["buyerId"]: f"m-{t['buyerId']}" for t in targets}, [], {},
+            sent_at=datetime.now() - timedelta(hours=1),
+        )
+        await _frozen(real_store, "second", [_member(2), _member(9)])
+
+        r = await _send_to(aclient, "second", confirm="second")
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "recent_campaign"
+        assert [(c["campaign"], c["arm"], c["people"]) for c in r.json()["conflicts"]] \
+            == [("first", "target", 1)]
+        assert gateway.calls == [], "not even the balance is asked"
+        assert await _claim_state("second") is None, "handed back, still sendable"
+
+    @pytest.mark.asyncio
+    async def test_a_short_balance_refuses_and_hands_the_claim_back(
+        self, aclient, real_store, gateway,
+    ):
+        await _frozen(real_store, "oct", [_member(i) for i in range(1, 11)])
+        gateway.balance = 5.0      # ten recipients × 1.28 ₴ × 1.02 is 13.06 ₴
+
+        r = await _send_to(aclient, "oct", confirm="oct")
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "balance_short"
+        assert gateway.sends == 0
+        assert await _claim_state("oct") is None
+
+        gateway.balance = 1_000_000.0
+        again = await _send_to(aclient, "oct", confirm="oct")
+        assert again.status_code == 200, again.text
+        assert gateway.sends == 1
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_balance_refuses_and_hands_the_claim_back(
+        self, aclient, real_store, gateway,
+    ):
+        await _frozen(real_store, "oct", [_member(1)])
+        gateway.balance_status = 503
+
+        r = await _send_to(aclient, "oct", confirm="oct")
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "balance_unreadable"
+        assert gateway.sends == 0
+        assert await _claim_state("oct") is None
+
+    @pytest.mark.asyncio
+    async def test_a_guard_that_raises_hands_the_claim_back(
+        self, real_store, gateway, monkeypatch,
+    ):
+        await _frozen(real_store, "oct", [_member(1)])
+
+        async def broken(campaign):
+            raise RuntimeError("database went away")
+
+        monkeypatch.setattr(real_store, "find_sms_send_conflicts", broken)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://testserver",
+        ) as ac:
+            r = await _send_to(ac, "oct", confirm="oct")
+
+        assert r.status_code == 500
+        assert gateway.calls == []
+        assert await _claim_state("oct") is None, \
+            "a campaign nothing was sent for must stay sendable"

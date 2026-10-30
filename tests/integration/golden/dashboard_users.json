@@ -1,0 +1,605 @@
+{
+ "answers": {
+  "read:get_approved_users{}": [
+   {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "first_name": "Bob",
+    "last_activity": "2026-09-05T09:00:00+00:00",
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-19T09:00:00+00:00",
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   },
+   {
+    "allowed_features": [],
+    "first_name": "Carol",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-20T09:00:00+00:00",
+    "role": "marketer",
+    "status": "approved",
+    "user_id": 13,
+    "username": null
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Alice",
+    "last_activity": "2026-09-06T09:00:00+00:00",
+    "last_name": "A",
+    "photo_url": "http://p/1",
+    "requested_at": "2026-08-08T09:00:00+00:00",
+    "reviewed_at": "2026-08-09T09:00:00+00:00",
+    "role": "admin",
+    "status": "approved",
+    "user_id": 11,
+    "username": "alice"
+   }
+  ],
+  "read:get_pending_users{}": [
+   {
+    "allowed_features": null,
+    "first_name": "Dan",
+    "last_activity": null,
+    "last_name": "D",
+    "photo_url": null,
+    "requested_at": "2026-09-02T09:00:00+00:00",
+    "reviewed_at": null,
+    "role": "viewer",
+    "status": "pending",
+    "user_id": 14,
+    "username": "dan"
+   }
+  ],
+  "read:get_user_by_status{\"status\": \"approved\"}": [
+   {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "first_name": "Bob",
+    "last_activity": "2026-09-05T09:00:00+00:00",
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-19T09:00:00+00:00",
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   },
+   {
+    "allowed_features": [],
+    "first_name": "Carol",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-20T09:00:00+00:00",
+    "role": "marketer",
+    "status": "approved",
+    "user_id": 13,
+    "username": null
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Alice",
+    "last_activity": "2026-09-06T09:00:00+00:00",
+    "last_name": "A",
+    "photo_url": "http://p/1",
+    "requested_at": "2026-08-08T09:00:00+00:00",
+    "reviewed_at": "2026-08-09T09:00:00+00:00",
+    "role": "admin",
+    "status": "approved",
+    "user_id": 11,
+    "username": "alice"
+   }
+  ],
+  "read:get_user_by_status{\"status\": \"frozen\"}": [
+   {
+    "allowed_features": null,
+    "first_name": "Frank",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-07-29T09:00:00+00:00",
+    "reviewed_at": "2026-08-03T09:00:00+00:00",
+    "role": "editor",
+    "status": "frozen",
+    "user_id": 16,
+    "username": "frank"
+   }
+  ],
+  "read:get_user{\"user_id\": 11}": {
+   "allowed_features": null,
+   "created_at": "2026-08-08T09:00:00+00:00",
+   "denial_count": 0,
+   "first_name": "Alice",
+   "last_activity": "2026-09-06T09:00:00+00:00",
+   "last_name": "A",
+   "photo_url": "http://p/1",
+   "requested_at": "2026-08-08T09:00:00+00:00",
+   "reviewed_at": "2026-08-09T09:00:00+00:00",
+   "reviewed_by": 1,
+   "role": "admin",
+   "status": "approved",
+   "user_id": 11,
+   "username": "alice"
+  },
+  "read:get_user{\"user_id\": 13}": {
+   "allowed_features": [],
+   "created_at": "2026-08-18T09:00:00+00:00",
+   "denial_count": 0,
+   "first_name": "Carol",
+   "last_activity": null,
+   "last_name": null,
+   "photo_url": null,
+   "requested_at": "2026-08-18T09:00:00+00:00",
+   "reviewed_at": "2026-08-20T09:00:00+00:00",
+   "reviewed_by": 1,
+   "role": "marketer",
+   "status": "approved",
+   "user_id": 13,
+   "username": null
+  },
+  "read:get_user{\"user_id\": 999}": null,
+  "read:is_user_authorized{\"user_id\": 12}": true,
+  "read:is_user_authorized{\"user_id\": 15}": false,
+  "read:is_user_authorized{\"user_id\": 999}": false,
+  "read:list_users{\"limit\": 2, \"offset\": 0}": [
+   {
+    "allowed_features": null,
+    "first_name": "Dan",
+    "last_activity": null,
+    "last_name": "D",
+    "photo_url": null,
+    "requested_at": "2026-09-02T09:00:00+00:00",
+    "reviewed_at": null,
+    "role": "viewer",
+    "status": "pending",
+    "user_id": 14,
+    "username": "dan"
+   },
+   {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "first_name": "Bob",
+    "last_activity": "2026-09-05T09:00:00+00:00",
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-19T09:00:00+00:00",
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   }
+  ],
+  "read:list_users{\"limit\": 2, \"offset\": 2}": [
+   {
+    "allowed_features": [],
+    "first_name": "Carol",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-20T09:00:00+00:00",
+    "role": "marketer",
+    "status": "approved",
+    "user_id": 13,
+    "username": null
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Alice",
+    "last_activity": "2026-09-06T09:00:00+00:00",
+    "last_name": "A",
+    "photo_url": "http://p/1",
+    "requested_at": "2026-08-08T09:00:00+00:00",
+    "reviewed_at": "2026-08-09T09:00:00+00:00",
+    "role": "admin",
+    "status": "approved",
+    "user_id": 11,
+    "username": "alice"
+   }
+  ],
+  "read:list_users{\"role\": \"viewer\"}": [
+   {
+    "allowed_features": null,
+    "first_name": "Dan",
+    "last_activity": null,
+    "last_name": "D",
+    "photo_url": null,
+    "requested_at": "2026-09-02T09:00:00+00:00",
+    "reviewed_at": null,
+    "role": "viewer",
+    "status": "pending",
+    "user_id": 14,
+    "username": "dan"
+   },
+   {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "first_name": "Bob",
+    "last_activity": "2026-09-05T09:00:00+00:00",
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-19T09:00:00+00:00",
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Erin",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-29T09:00:00+00:00",
+    "reviewed_at": "2026-08-30T09:00:00+00:00",
+    "role": "viewer",
+    "status": "denied",
+    "user_id": 15,
+    "username": "erin"
+   }
+  ],
+  "read:list_users{\"status\": \"approved\"}": [
+   {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "first_name": "Bob",
+    "last_activity": "2026-09-05T09:00:00+00:00",
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-19T09:00:00+00:00",
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   },
+   {
+    "allowed_features": [],
+    "first_name": "Carol",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-20T09:00:00+00:00",
+    "role": "marketer",
+    "status": "approved",
+    "user_id": 13,
+    "username": null
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Alice",
+    "last_activity": "2026-09-06T09:00:00+00:00",
+    "last_name": "A",
+    "photo_url": "http://p/1",
+    "requested_at": "2026-08-08T09:00:00+00:00",
+    "reviewed_at": "2026-08-09T09:00:00+00:00",
+    "role": "admin",
+    "status": "approved",
+    "user_id": 11,
+    "username": "alice"
+   }
+  ],
+  "read:list_users{}": [
+   {
+    "allowed_features": null,
+    "first_name": "Dan",
+    "last_activity": null,
+    "last_name": "D",
+    "photo_url": null,
+    "requested_at": "2026-09-02T09:00:00+00:00",
+    "reviewed_at": null,
+    "role": "viewer",
+    "status": "pending",
+    "user_id": 14,
+    "username": "dan"
+   },
+   {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "first_name": "Bob",
+    "last_activity": "2026-09-05T09:00:00+00:00",
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-19T09:00:00+00:00",
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   },
+   {
+    "allowed_features": [],
+    "first_name": "Carol",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-18T09:00:00+00:00",
+    "reviewed_at": "2026-08-20T09:00:00+00:00",
+    "role": "marketer",
+    "status": "approved",
+    "user_id": 13,
+    "username": null
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Alice",
+    "last_activity": "2026-09-06T09:00:00+00:00",
+    "last_name": "A",
+    "photo_url": "http://p/1",
+    "requested_at": "2026-08-08T09:00:00+00:00",
+    "reviewed_at": "2026-08-09T09:00:00+00:00",
+    "role": "admin",
+    "status": "approved",
+    "user_id": 11,
+    "username": "alice"
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Erin",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-08-29T09:00:00+00:00",
+    "reviewed_at": "2026-08-30T09:00:00+00:00",
+    "role": "viewer",
+    "status": "denied",
+    "user_id": 15,
+    "username": "erin"
+   },
+   {
+    "allowed_features": null,
+    "first_name": "Frank",
+    "last_activity": null,
+    "last_name": null,
+    "photo_url": null,
+    "requested_at": "2026-07-29T09:00:00+00:00",
+    "reviewed_at": "2026-08-03T09:00:00+00:00",
+    "role": "editor",
+    "status": "frozen",
+    "user_id": 16,
+    "username": "frank"
+   }
+  ],
+  "write:create_user{\"first_name\": \"New\", \"user_id\": 77, \"username\": \"new\"}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": false,
+    "requested_at": true,
+    "reviewed_at": false
+   },
+   "returned": {
+    "allowed_features": null,
+    "denial_count": 0,
+    "first_name": "New",
+    "last_name": null,
+    "photo_url": null,
+    "reviewed_by": null,
+    "role": "viewer",
+    "status": "pending",
+    "user_id": 77,
+    "username": "new"
+   },
+   "row": {
+    "allowed_features": null,
+    "denial_count": 0,
+    "first_name": "New",
+    "last_name": null,
+    "photo_url": null,
+    "reviewed_by": null,
+    "role": "viewer",
+    "status": "pending",
+    "user_id": 77,
+    "username": "new"
+   }
+  },
+  "write:create_user{\"first_name\": null, \"user_id\": 11, \"username\": null}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": true,
+    "requested_at": true,
+    "reviewed_at": true
+   },
+   "returned": {
+    "allowed_features": null,
+    "denial_count": 0,
+    "first_name": "Alice",
+    "last_name": "A",
+    "photo_url": "http://p/1",
+    "reviewed_by": 1,
+    "role": "admin",
+    "status": "approved",
+    "user_id": 11,
+    "username": "alice"
+   },
+   "row": {
+    "allowed_features": null,
+    "denial_count": 0,
+    "first_name": "Alice",
+    "last_name": "A",
+    "photo_url": "http://p/1",
+    "reviewed_by": 1,
+    "role": "admin",
+    "status": "approved",
+    "user_id": 11,
+    "username": "alice"
+   }
+  },
+  "write:deny_user{\"admin_id\": 11, \"user_id\": 12}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": true,
+    "requested_at": true,
+    "reviewed_at": true
+   },
+   "returned": [
+    true,
+    false
+   ],
+   "row": {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "denial_count": 1,
+    "first_name": "Bob",
+    "last_name": null,
+    "photo_url": null,
+    "reviewed_by": 11,
+    "role": "viewer",
+    "status": "denied",
+    "user_id": 12,
+    "username": "bob"
+   }
+  },
+  "write:deny_user{\"admin_id\": 11, \"user_id\": 15}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": false,
+    "requested_at": true,
+    "reviewed_at": true
+   },
+   "returned": [
+    true,
+    true
+   ],
+   "row": {
+    "allowed_features": null,
+    "denial_count": 5,
+    "first_name": "Erin",
+    "last_name": null,
+    "photo_url": null,
+    "reviewed_by": 11,
+    "role": "viewer",
+    "status": "frozen",
+    "user_id": 15,
+    "username": "erin"
+   }
+  },
+  "write:deny_user{\"admin_id\": 11, \"user_id\": 999}": {
+   "clocks_set": null,
+   "returned": [
+    false,
+    false
+   ],
+   "row": null
+  },
+  "write:update_user_activity{\"user_id\": 12}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": true,
+    "requested_at": true,
+    "reviewed_at": true
+   },
+   "returned": true,
+   "row": {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "denial_count": 0,
+    "first_name": "Bob",
+    "last_name": null,
+    "photo_url": null,
+    "reviewed_by": 1,
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   }
+  },
+  "write:update_user_role{\"changed_by\": 11, \"role\": \"editor\", \"user_id\": 12}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": true,
+    "requested_at": true,
+    "reviewed_at": true
+   },
+   "returned": true,
+   "row": {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "denial_count": 0,
+    "first_name": "Bob",
+    "last_name": null,
+    "photo_url": null,
+    "reviewed_by": 11,
+    "role": "editor",
+    "status": "approved",
+    "user_id": 12,
+    "username": "bob"
+   }
+  },
+  "write:update_user_status{\"reviewed_by\": 11, \"status\": \"approved\", \"user_id\": 14}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": false,
+    "requested_at": true,
+    "reviewed_at": true
+   },
+   "returned": true,
+   "row": {
+    "allowed_features": null,
+    "denial_count": 0,
+    "first_name": "Dan",
+    "last_name": "D",
+    "photo_url": null,
+    "reviewed_by": 11,
+    "role": "viewer",
+    "status": "approved",
+    "user_id": 14,
+    "username": "dan"
+   }
+  },
+  "write:update_user_status{\"reviewed_by\": 11, \"status\": \"denied\", \"user_id\": 12}": {
+   "clocks_set": {
+    "created_at": true,
+    "last_activity": true,
+    "requested_at": true,
+    "reviewed_at": true
+   },
+   "returned": true,
+   "row": {
+    "allowed_features": [
+     "dashboard",
+     "products"
+    ],
+    "denial_count": 0,
+    "first_name": "Bob",
+    "last_name": null,
+    "photo_url": null,
+    "reviewed_by": 11,
+    "role": "viewer",
+    "status": "denied",
+    "user_id": 12,
+    "username": "bob"
+   }
+  }
+ },
+ "source": "DuckDB's answer to every call of tests/integration/test_dashboard_users_two_engines.py's read and write comparisons, on that file's fixture (pinned to 2026-09-07), recorded at step 14's S14-08 on the code before it (7f42a87a) by a run that asserted Postgres answered each one equally. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it."
+}

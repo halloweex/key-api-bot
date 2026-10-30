@@ -146,17 +146,32 @@ _DESTINATION = {
         "`_write_duckdb`'s DuckDB statements as its own", None),
 }
 
-# The store helpers that route every statement handed to them by a switch of
-# their own, and so are where the Postgres half of a moved store is written —
-# the destination side, like the replicators above. A writer whose only
-# Postgres calls are to one of these is exempt through it: `{helper: switch}`,
-# and the test checks the helper evaluates the switch and still routes a
-# writer. This is what the walk saw once `_users_run` stopped being invisible.
-_ROUTED_BY_SWITCH = {
-    ("core/repositories/customers.py", "_sms_run"): "sms_store_is_postgres",
-    ("core/repositories/users.py", "_users_run"): "user_store_is_postgres",
-    ("core/repositories/users.py", "_perms_run"): "user_store_is_postgres",
+# The store helpers through which `/sms` and the access lists write — the
+# destination side, like the replicators above: Postgres is where those
+# tables' writer lives, and there is no copy to ship. They routed by a switch
+# of their own (`sms_store_is_postgres`, `user_store_is_postgres`) until step
+# 14's S14-08 took their DuckDB tails away; they run on Postgres alone now.
+# A writer whose only Postgres calls, in its own module, are to these is
+# exempt through them, and the test checks each still executes what it is
+# handed, still carries a writer, and asks no switch.
+#
+# `none`, `many`, `one` and `all` are `_PgTx`'s, the transaction `_sms_tx`
+# yields: the walk reads methods by name, and until S14-08 the first
+# definition of each name in the module was `_DuckTx`'s, which executed
+# nothing asyncpg could see — so the three writers that run inside the
+# transaction (the freeze, the send's record, a delivery report) were exempt
+# by that accident rather than by a rule.
+_POSTGRES_STORE_HELPERS = {
+    ("core/repositories/customers.py", "_sms_run"): "one /sms statement",
+    ("core/repositories/customers.py", "none"): "a statement in _sms_tx's transaction",
+    ("core/repositories/customers.py", "many"): "a statement in _sms_tx's transaction",
+    ("core/repositories/customers.py", "one"): "a statement in _sms_tx's transaction",
+    ("core/repositories/customers.py", "all"): "a statement in _sms_tx's transaction",
+    ("core/repositories/users.py", "_users_run"): "one statement on the user list",
+    ("core/repositories/users.py", "_perms_run"): "one statement on the role matrix",
 }
+# The switches those helpers asked until S14-08. None may come back into one.
+_RETIRED_STORE_SWITCHES = ("sms_store_is_postgres", "user_store_is_postgres")
 
 
 class _Module:
@@ -577,9 +592,9 @@ class _Walk:
         return found
 
     def routed(self, key) -> bool:
-        """Its only Postgres calls are to a store helper that routes by a
-        switch of its own (`_ROUTED_BY_SWITCH`)."""
-        helpers = {name for _rel, name in _ROUTED_BY_SWITCH}
+        """Its only Postgres calls are to its own module's store helpers that
+        write Postgres alone (`_POSTGRES_STORE_HELPERS`)."""
+        helpers = {name for rel, name in _POSTGRES_STORE_HELPERS if rel == key[0]}
         _module, fn = self.fns[key]
         reached = _awaited_names(fn) & (_PG_EXECUTE | self.executors)
         return bool(reached) and reached <= helpers
@@ -678,17 +693,19 @@ class TestEveryPostgresWriterAsksTheRegistry:
             assert switch in names, f"{key} names {switch} as its reason and never reads it"
 
     def test_the_routed_helpers_are_exactly_what_the_walk_finds(self, walk):
-        """Each routes by the switch it is listed under, is an executor the
-        walk finds, and still carries a writer — so neither a helper that
-        stopped reading its switch nor a stale entry keeps an exemption."""
+        """Each is an executor the walk finds, still carries a writer, and
+        asks no store switch — so neither a helper that grew an engine choice
+        back nor a stale entry keeps an exemption."""
         writers = walk.writers()
-        for key, switch in _ROUTED_BY_SWITCH.items():
+        for key in _POSTGRES_STORE_HELPERS:
             _module, fn = walk.fns[key]
             names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | \
                 _called_names(fn)
-            assert switch in names, f"{key} is listed under {switch} and never reads it"
+            for switch in _RETIRED_STORE_SWITCHES:
+                assert switch not in names, f"{key} asks {switch} again"
             assert key[1] in walk.executors, f"{key} no longer executes what it is handed"
-            assert any(key[1] in _awaited_names(walk.fns[w][1]) and walk.routed(w)
+            assert any(key[0] == w[0] and key[1] in _awaited_names(walk.fns[w][1])
+                       and walk.routed(w)
                        for w in writers), f"nothing writes through {key}"
         # And nothing else is excused by them: a writer that also calls
         # asyncpg itself, or any other executor, is not routed.
@@ -796,7 +813,7 @@ class TestTheWalkSeesWhatTheReviewFound:
         """`_users_run`'s shape: rendered into a local, handed to a helper that
         hands it to asyncpg. The target is a hole the helper fills, so it
         counts as unknown — which is what makes the store's writers visible
-        and `_ROUTED_BY_SWITCH` necessary. The inner helper is not called
+        and `_POSTGRES_STORE_HELPERS` necessary. The inner helper is not called
         `execute` here, so only the fixed point can reach it."""
         assert _targets_of("""
             async def _send(sql, params):

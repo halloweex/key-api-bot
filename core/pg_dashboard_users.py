@@ -49,10 +49,6 @@ USER_COLUMNS: Tuple[str, ...] = (
     "last_activity", "denial_count", "created_at", "allowed_features",
 )
 
-_ENV = "KS_USER_STORE"
-_VALID = ("duckdb", "postgres")
-
-
 def user_store_is_postgres() -> bool:
     """Which store owns the dashboard's user list: Postgres, a constant since
     step 14's S14-00 — production since 2026-09-07, with no way back (the
@@ -60,11 +56,14 @@ def user_store_is_postgres() -> bool:
 
     `KS_USER_STORE` is read for nothing, so no value of it can stop the
     container. Production keeps `postgres` in `.env` for the images before
-    step 14, which read an absent value as `duckdb` — a 401 for everybody. Last consumers:
-    `bot/store_postgres.py`, `core/repositories/users.py`,
-    `core/mirror_reconciliation.py`, `core/duckdb_table_fates.py`; the
-    DuckDB branches go in S14-08. Until S14-00 an unknown value raised —
-    `KS_BOT_STORE`'s rule.
+    step 14, which read an absent value as `duckdb` — a 401 for everybody.
+    Since S14-08 nothing routes on this: `core/repositories/users.py` and
+    `bot/store_postgres.py` stopped asking, and the DuckDB tails of
+    `_users_run`/`_perms_run` are gone. Last consumers, by rule 16 of the
+    step-14 plan: `replicate_dashboard_users` below and
+    `core/mirror_reconciliation.reconcile_dashboard_users` (both go in
+    S14-12/S14-13), and `core/duckdb_table_fates.py` (S14-18). Until S14-00
+    an unknown value raised — `KS_BOT_STORE`'s rule.
     """
     return True
 
@@ -126,7 +125,7 @@ async def replicate_dashboard_users(store) -> Dict[str, Any]:
     if not configured():
         return {"skipped": "KS_PG_DSN is not set"}
     if user_store_is_postgres():
-        return {"skipped": f"{_ENV}=postgres — DuckDB is no longer the writer"}
+        return {"skipped": "KS_USER_STORE=postgres — DuckDB is no longer the writer"}
 
     started = time.monotonic()
     try:

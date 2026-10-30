@@ -1,0 +1,3259 @@
+{
+ "answers": {
+  "agree:a narrower A": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_min": 2
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_min": 2
+      },
+      "maxRecencyDays": 180
+     },
+     {
+      "filters": {},
+      "maxRecencyDays": 92
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 180,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 3000.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 3000.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 3,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Both",
+     "lastOrderDate": "D-10",
+     "lastOrderId": 302,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 302",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000003",
+     "recencyDays": 10,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 12,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 8,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 8,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 7,
+     "stage": "phone"
+    },
+    {
+     "remaining": 6,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 6,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 5,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 4,
+     "onlyHere": 1,
+     "recipients": 3
+    },
+    {
+     "group": 2,
+     "matched": 6,
+     "onlyHere": 2,
+     "recipients": 4
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 2000.0,
+     "avgOrders": 1.6,
+     "avgRecencyDays": 54,
+     "holdout": 1,
+     "marginPct": 50.0,
+     "target": 4,
+     "tier": "ALL",
+     "total": 5,
+     "totalLtv": 10000.0,
+     "totalMargin": 5000.0,
+     "totalRevenue": 10000.0
+    }
+   ],
+   "totals": {
+    "customers": 5,
+    "holdout": 1,
+    "target": 4
+   }
+  },
+  "agree:all sales types": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_min": 2
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_min": 2
+      },
+      "maxRecencyDays": 365
+     },
+     {
+      "filters": {},
+      "maxRecencyDays": 92
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 365,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 3000.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 3000.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 3,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Both",
+     "lastOrderDate": "D-10",
+     "lastOrderId": 302,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 302",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000003",
+     "recencyDays": 10,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 7,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "B2B does not count in retail",
+     "lastOrderDate": "D-130",
+     "lastOrderId": 702,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 702",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000007",
+     "recencyDays": 130,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 10,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 10,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 9,
+     "stage": "phone"
+    },
+    {
+     "remaining": 8,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 8,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 7,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 6,
+     "onlyHere": 3,
+     "recipients": 5
+    },
+    {
+     "group": 2,
+     "matched": 6,
+     "onlyHere": 2,
+     "recipients": 4
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 2000.0,
+     "avgOrders": 1.71,
+     "avgRecencyDays": 84,
+     "holdout": 2,
+     "marginPct": 44.3,
+     "target": 5,
+     "tier": "ALL",
+     "total": 7,
+     "totalLtv": 14000.0,
+     "totalMargin": 6200.0,
+     "totalRevenue": 14000.0
+    }
+   ],
+   "totals": {
+    "customers": 7,
+    "holdout": 2,
+    "target": 5
+   }
+  },
+  "agree:one level of the union": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_min": 2
+    },
+    "grouping": "rfm",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_min": 2
+      },
+      "maxRecencyDays": 365
+     },
+     {
+      "filters": {},
+      "maxRecencyDays": 92
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 365,
+    "reactivationMaxRecency": 120,
+    "tiers": [
+     "REACTIVATION"
+    ],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 3000.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 3000.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "REACTIVATION"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "REACTIVATION"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 9,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 9,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 8,
+     "stage": "phone"
+    },
+    {
+     "remaining": 7,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 7,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 6,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 5,
+     "onlyHere": 0,
+     "recipients": 1
+    },
+    {
+     "group": 2,
+     "matched": 6,
+     "onlyHere": 1,
+     "recipients": 2
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 2000.0,
+     "avgOrders": 1.0,
+     "avgRecencyDays": 56,
+     "holdout": 0,
+     "marginPct": 80.0,
+     "target": 2,
+     "tier": "REACTIVATION",
+     "total": 2,
+     "totalLtv": 4000.0,
+     "totalMargin": 3200.0,
+     "totalRevenue": 4000.0
+    }
+   ],
+   "totals": {
+    "customers": 2,
+    "holdout": 0,
+    "target": 2
+   }
+  },
+  "agree:ranges and bounds, ORed": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_max": 2,
+     "period_orders_min": 2,
+     "period_to": "D-100"
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_max": 2,
+       "period_orders_min": 2,
+       "period_to": "D-100"
+      },
+      "maxRecencyDays": 365
+     },
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_max": 0
+      },
+      "maxRecencyDays": 3650
+     },
+     {
+      "filters": {},
+      "maxRecencyDays": 92
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 3650,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 3000.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 3000.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 3,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Both",
+     "lastOrderDate": "D-10",
+     "lastOrderId": 302,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 302",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000003",
+     "recencyDays": 10,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 15,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-1000",
+     "fullName": "Lapsed, one order 1000 days ago",
+     "lastOrderDate": "D-1000",
+     "lastOrderId": 1501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000015",
+     "recencyDays": 1000,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 15,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 11,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 11,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 10,
+     "stage": "phone"
+    },
+    {
+     "remaining": 9,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 9,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 8,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 3,
+     "onlyHere": 2,
+     "recipients": 3
+    },
+    {
+     "group": 2,
+     "matched": 2,
+     "onlyHere": 2,
+     "recipients": 2
+    },
+    {
+     "group": 3,
+     "matched": 6,
+     "onlyHere": 3,
+     "recipients": 4
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1875.0,
+     "avgOrders": 1.62,
+     "avgRecencyDays": 213,
+     "holdout": 1,
+     "marginPct": 45.3,
+     "target": 7,
+     "tier": "ALL",
+     "total": 8,
+     "totalLtv": 15000.0,
+     "totalMargin": 6800.0,
+     "totalRevenue": 15000.0
+    }
+   ],
+   "totals": {
+    "customers": 8,
+    "holdout": 1,
+    "target": 7
+   }
+  },
+  "agree:split by level": {
+   "criteria": {
+    "coreLtv": 2750.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_min": 2
+    },
+    "grouping": "rfm",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_min": 2
+      },
+      "maxRecencyDays": 365
+     },
+     {
+      "filters": {},
+      "maxRecencyDays": 92
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "margin",
+    "maxRecencyDays": 365,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 5500.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 300.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "CORE"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 300.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "CORE"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 300.0,
+     "buyerId": 3,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Both",
+     "lastOrderDate": "D-10",
+     "lastOrderId": 302,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 302",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000003",
+     "recencyDays": 10,
+     "revenueLtv": 2000.0,
+     "tier": "CORE"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 300.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "CORE"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 2600.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 2600.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "REACTIVATION"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 600.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "REACTIVATION"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 9,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 9,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 8,
+     "stage": "phone"
+    },
+    {
+     "remaining": 7,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 7,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 6,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 5,
+     "onlyHere": 2,
+     "recipients": 4
+    },
+    {
+     "group": 2,
+     "matched": 6,
+     "onlyHere": 2,
+     "recipients": 4
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 600.0,
+     "avgOrders": 2.0,
+     "avgRecencyDays": 86,
+     "holdout": 1,
+     "marginPct": 30.0,
+     "target": 3,
+     "tier": "CORE",
+     "total": 4,
+     "totalLtv": 2400.0,
+     "totalMargin": 2400.0,
+     "totalRevenue": 8000.0
+    },
+    {
+     "avgLtv": 1600.0,
+     "avgOrders": 1.0,
+     "avgRecencyDays": 56,
+     "holdout": 0,
+     "marginPct": 80.0,
+     "target": 2,
+     "tier": "REACTIVATION",
+     "total": 2,
+     "totalLtv": 3200.0,
+     "totalMargin": 3200.0,
+     "totalRevenue": 4000.0
+    }
+   ],
+   "totals": {
+    "customers": 6,
+    "holdout": 1,
+    "target": 5
+   }
+  },
+  "agree:the owner's campaign": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_min": 2
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_min": 2
+      },
+      "maxRecencyDays": 365
+     },
+     {
+      "filters": {},
+      "maxRecencyDays": 92
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 365,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 3000.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 3000.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 3,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Both",
+     "lastOrderDate": "D-10",
+     "lastOrderId": 302,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 302",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000003",
+     "recencyDays": 10,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 9,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 9,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 8,
+     "stage": "phone"
+    },
+    {
+     "remaining": 7,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 7,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 6,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 5,
+     "onlyHere": 2,
+     "recipients": 4
+    },
+    {
+     "group": 2,
+     "matched": 6,
+     "onlyHere": 2,
+     "recipients": 4
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 2000.0,
+     "avgOrders": 1.67,
+     "avgRecencyDays": 76,
+     "holdout": 1,
+     "marginPct": 46.7,
+     "target": 5,
+     "tier": "ALL",
+     "total": 6,
+     "totalLtv": 12000.0,
+     "totalMargin": 5600.0,
+     "totalRevenue": 12000.0
+    }
+   ],
+   "totals": {
+    "customers": 6,
+    "holdout": 1,
+    "target": 5
+   }
+  },
+  "agree:three groups, mixed": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_min": 2
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_min": 2
+      },
+      "maxRecencyDays": 365
+     },
+     {
+      "filters": {
+       "cities": [
+        "Львів"
+       ],
+       "period_days": 60
+      },
+      "maxRecencyDays": 120
+     },
+     {
+      "filters": {
+       "brands": [
+        "Anua"
+       ],
+       "period_from": "D-9797",
+       "period_orders_min": 1
+      },
+      "maxRecencyDays": 400
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 400,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 3,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Both",
+     "lastOrderDate": "D-10",
+     "lastOrderId": 302,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 302",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000003",
+     "recencyDays": 10,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 500.0,
+     "buyerId": 8,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-160",
+     "fullName": "A only, loses its phone",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 802,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 802",
+     "lastOrderTotal": 500.0,
+     "ltv": 1000.0,
+     "marginLtv": 100.0,
+     "marginPct": 10.0,
+     "orders": 2,
+     "phone": "380500000089",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 7,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 7,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 7,
+     "stage": "phone"
+    },
+    {
+     "remaining": 6,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 6,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 6,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 5,
+     "onlyHere": 0,
+     "recipients": 4
+    },
+    {
+     "group": 2,
+     "matched": 1,
+     "onlyHere": 0,
+     "recipients": 1
+    },
+    {
+     "group": 3,
+     "matched": 7,
+     "onlyHere": 1,
+     "recipients": 6
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1833.33,
+     "avgOrders": 2.0,
+     "avgRecencyDays": 124,
+     "holdout": 1,
+     "marginPct": 28.2,
+     "target": 5,
+     "tier": "ALL",
+     "total": 6,
+     "totalLtv": 11000.0,
+     "totalMargin": 3100.0,
+     "totalRevenue": 11000.0
+    }
+   ],
+   "totals": {
+    "customers": 6,
+    "holdout": 1,
+    "target": 5
+   }
+  },
+  "agree:up to a date, margin levels": {
+   "criteria": {
+    "coreLtv": 2750.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_to": "D-200"
+    },
+    "grouping": "rfm",
+    "groups": [
+     {
+      "filters": {
+       "period_to": "D-200"
+      },
+      "maxRecencyDays": 3650
+     },
+     {
+      "filters": {
+       "period_days": 30,
+       "period_orders_max": 0
+      },
+      "maxRecencyDays": 92
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "margin",
+    "maxRecencyDays": 3650,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 5500.0
+   },
+   "customers": [
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 300.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "CORE"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 300.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "CORE"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 600.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 600.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "REACTIVATION"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 15,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 4,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 3,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 3,
+     "stage": "phone"
+    },
+    {
+     "remaining": 3,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 3,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 3,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 3,
+     "onlyHere": 2,
+     "recipients": 2
+    },
+    {
+     "group": 2,
+     "matched": 1,
+     "onlyHere": 1,
+     "recipients": 1
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 600.0,
+     "avgOrders": 2.0,
+     "avgRecencyDays": 140,
+     "holdout": 1,
+     "marginPct": 30.0,
+     "target": 1,
+     "tier": "CORE",
+     "total": 2,
+     "totalLtv": 1200.0,
+     "totalMargin": 1200.0,
+     "totalRevenue": 4000.0
+    },
+    {
+     "avgLtv": 600.0,
+     "avgOrders": 1.0,
+     "avgRecencyDays": 92,
+     "holdout": 0,
+     "marginPct": 60.0,
+     "target": 1,
+     "tier": "REACTIVATION",
+     "total": 1,
+     "totalLtv": 600.0,
+     "totalMargin": 600.0,
+     "totalRevenue": 1000.0
+    }
+   ],
+   "totals": {
+    "customers": 3,
+    "holdout": 1,
+    "target": 2
+   }
+  },
+  "periods:all time": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {},
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {},
+      "maxRecencyDays": 3650
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 3650,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 3000.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 3000.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 3,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Both",
+     "lastOrderDate": "D-10",
+     "lastOrderId": 302,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 302",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000003",
+     "recencyDays": 10,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 5,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Return does not count",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000005",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 6,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Retired source does not count",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 601,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 601",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000006",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 7,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "B2B does not count in retail",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 701,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 701",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000007",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 13,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-93",
+     "fullName": "Not B, 93 days",
+     "lastOrderDate": "D-93",
+     "lastOrderId": 1301,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1301",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000013",
+     "recencyDays": 93,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 15,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-1000",
+     "fullName": "Lapsed, one order 1000 days ago",
+     "lastOrderDate": "D-1000",
+     "lastOrderId": 1501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000015",
+     "recencyDays": 1000,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 15,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 15,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 15,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 14,
+     "stage": "phone"
+    },
+    {
+     "remaining": 13,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 13,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 12,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 15,
+     "onlyHere": 12,
+     "recipients": 12
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1583.33,
+     "avgOrders": 1.42,
+     "avgRecencyDays": 188,
+     "holdout": 3,
+     "marginPct": 48.4,
+     "target": 9,
+     "tier": "ALL",
+     "total": 12,
+     "totalLtv": 19000.0,
+     "totalMargin": 9200.0,
+     "totalRevenue": 19000.0
+    }
+   ],
+   "totals": {
+    "customers": 12,
+    "holdout": 3,
+    "target": 9
+   }
+  },
+  "periods:exactly one in 200 days": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_days": 200,
+     "period_orders_max": 1,
+     "period_orders_min": 1
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_days": 200,
+       "period_orders_max": 1,
+       "period_orders_min": 1
+      },
+      "maxRecencyDays": 365
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 365,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 3000.0,
+     "buyerId": 9,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-20",
+     "fullName": "B only, wins the shared phone",
+     "lastOrderDate": "D-20",
+     "lastOrderId": 901,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 901",
+     "lastOrderTotal": 3000.0,
+     "ltv": 3000.0,
+     "marginLtv": 2600.0,
+     "marginPct": 86.7,
+     "orders": 1,
+     "phone": "380500000089",
+     "recencyDays": 20,
+     "revenueLtv": 3000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 5,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Return does not count",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000005",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 6,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Retired source does not count",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 601,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 601",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000006",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 7,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "B2B does not count in retail",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 701,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 701",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000007",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 12,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-92",
+     "fullName": "B, exactly 92 days",
+     "lastOrderDate": "D-92",
+     "lastOrderId": 1201,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1201",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000012",
+     "recencyDays": 92,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 13,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-93",
+     "fullName": "Not B, 93 days",
+     "lastOrderDate": "D-93",
+     "lastOrderId": 1301,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1301",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000013",
+     "recencyDays": 93,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 8,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 8,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 7,
+     "stage": "phone"
+    },
+    {
+     "remaining": 7,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 7,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 7,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 8,
+     "onlyHere": 7,
+     "recipients": 7
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1428.57,
+     "avgOrders": 1.14,
+     "avgRecencyDays": 98,
+     "holdout": 1,
+     "marginPct": 62.0,
+     "target": 6,
+     "tier": "ALL",
+     "total": 7,
+     "totalLtv": 10000.0,
+     "totalMargin": 6200.0,
+     "totalRevenue": 10000.0
+    }
+   ],
+   "totals": {
+    "customers": 7,
+    "holdout": 1,
+    "target": 6
+   }
+  },
+  "periods:from and to, at least two": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_min": 2,
+     "period_to": "D-100"
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_min": 2,
+       "period_to": "D-100"
+      },
+      "maxRecencyDays": 365
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 365,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 500.0,
+     "buyerId": 8,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-160",
+     "fullName": "A only, loses its phone",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 802,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 802",
+     "lastOrderTotal": 500.0,
+     "ltv": 1000.0,
+     "marginLtv": 100.0,
+     "marginPct": 10.0,
+     "orders": 2,
+     "phone": "380500000089",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 3,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 3,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 3,
+     "stage": "phone"
+    },
+    {
+     "remaining": 3,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 3,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 3,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 3,
+     "onlyHere": 3,
+     "recipients": 3
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1666.67,
+     "avgOrders": 2.0,
+     "avgRecencyDays": 152,
+     "holdout": 2,
+     "marginPct": 26.0,
+     "target": 1,
+     "tier": "ALL",
+     "total": 3,
+     "totalLtv": 5000.0,
+     "totalMargin": 1300.0,
+     "totalRevenue": 5000.0
+    }
+   ],
+   "totals": {
+    "customers": 3,
+    "holdout": 2,
+    "target": 1
+   }
+  },
+  "periods:none in 92 days": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_days": 92,
+     "period_orders_max": 0
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_days": 92,
+       "period_orders_max": 0
+      },
+      "maxRecencyDays": 3650
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 3650,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 1,
+     "city": "Київ",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-150",
+     "fullName": "A only",
+     "lastOrderDate": "D-120",
+     "lastOrderId": 102,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 102",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000001",
+     "recencyDays": 120,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 14,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-190",
+     "fullName": "A, last order 185 days ago",
+     "lastOrderDate": "D-185",
+     "lastOrderId": 1402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000014",
+     "recencyDays": 185,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 5,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Return does not count",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000005",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 6,
+     "city": "Львів",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "Retired source does not count",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 601,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 601",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000006",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 7,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-150",
+     "fullName": "B2B does not count in retail",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 701,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 701",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000007",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 500.0,
+     "buyerId": 8,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-160",
+     "fullName": "A only, loses its phone",
+     "lastOrderDate": "D-150",
+     "lastOrderId": 802,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 802",
+     "lastOrderTotal": 500.0,
+     "ltv": 1000.0,
+     "marginLtv": 100.0,
+     "marginPct": 10.0,
+     "orders": 2,
+     "phone": "380500000089",
+     "recencyDays": 150,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 13,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-93",
+     "fullName": "Not B, 93 days",
+     "lastOrderDate": "D-93",
+     "lastOrderId": 1301,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1301",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000013",
+     "recencyDays": 93,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 15,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-1000",
+     "fullName": "Lapsed, one order 1000 days ago",
+     "lastOrderDate": "D-1000",
+     "lastOrderId": 1501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000015",
+     "recencyDays": 1000,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 15,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 9,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 9,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 9,
+     "stage": "phone"
+    },
+    {
+     "remaining": 9,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 9,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 9,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 9,
+     "onlyHere": 9,
+     "recipients": 9
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1333.33,
+     "avgOrders": 1.44,
+     "avgRecencyDays": 250,
+     "holdout": 4,
+     "marginPct": 40.8,
+     "target": 5,
+     "tier": "ALL",
+     "total": 9,
+     "totalLtv": 12000.0,
+     "totalMargin": 4900.0,
+     "totalRevenue": 12000.0
+    }
+   ],
+   "totals": {
+    "customers": 9,
+    "holdout": 4,
+    "target": 5
+   }
+  },
+  "periods:none since a date, all time": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_max": 0
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_max": 0
+      },
+      "maxRecencyDays": 3650
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 3650,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 15,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-1000",
+     "fullName": "Lapsed, one order 1000 days ago",
+     "lastOrderDate": "D-1000",
+     "lastOrderId": 1501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000015",
+     "recencyDays": 1000,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 15,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 2,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 2,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 2,
+     "stage": "phone"
+    },
+    {
+     "remaining": 2,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 2,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 2,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 2,
+     "onlyHere": 2,
+     "recipients": 2
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1500.0,
+     "avgOrders": 1.5,
+     "avgRecencyDays": 625,
+     "holdout": 1,
+     "marginPct": 40.0,
+     "target": 1,
+     "tier": "ALL",
+     "total": 2,
+     "totalLtv": 3000.0,
+     "totalMargin": 1200.0,
+     "totalRevenue": 3000.0
+    }
+   ],
+   "totals": {
+    "customers": 2,
+    "holdout": 1,
+    "target": 1
+   }
+  },
+  "periods:none since a date, two years": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_from": "D-200",
+     "period_orders_max": 0
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_from": "D-200",
+       "period_orders_max": 0
+      },
+      "maxRecencyDays": 730
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 730,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 14,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 1,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 1,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 1,
+     "stage": "phone"
+    },
+    {
+     "remaining": 1,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 1,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 1,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 1,
+     "onlyHere": 1,
+     "recipients": 1
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 2000.0,
+     "avgOrders": 2.0,
+     "avgRecencyDays": 250,
+     "holdout": 1,
+     "marginPct": 30.0,
+     "target": 0,
+     "tier": "ALL",
+     "total": 1,
+     "totalLtv": 2000.0,
+     "totalMargin": 600.0,
+     "totalRevenue": 2000.0
+    }
+   ],
+   "totals": {
+    "customers": 1,
+    "holdout": 1,
+    "target": 0
+   }
+  },
+  "periods:up to a date": {
+   "criteria": {
+    "coreLtv": 5000.0,
+    "coreMinOrders": 2,
+    "filters": {
+     "period_to": "D-200"
+    },
+    "grouping": "single",
+    "groups": [
+     {
+      "filters": {
+       "period_to": "D-200"
+      },
+      "maxRecencyDays": 3650
+     }
+    ],
+    "holdoutPct": 20,
+    "ltvBasis": "revenue",
+    "maxRecencyDays": 3650,
+    "reactivationMaxRecency": 120,
+    "tiers": [],
+    "vipLtv": 10000.0
+   },
+   "customers": [
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 2,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-400",
+     "fullName": "B only",
+     "lastOrderDate": "D-30",
+     "lastOrderId": 202,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 202",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000002",
+     "recencyDays": 30,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "holdout",
+     "avgOrderValue": 1000.0,
+     "buyerId": 4,
+     "city": "Львів",
+     "costCoverage": 50.0,
+     "firstOrderDate": "D-300",
+     "fullName": "Neither",
+     "lastOrderDate": "D-250",
+     "lastOrderId": 402,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 402",
+     "lastOrderTotal": 1000.0,
+     "ltv": 2000.0,
+     "marginLtv": 600.0,
+     "marginPct": 30.0,
+     "orders": 2,
+     "phone": "380500000004",
+     "recencyDays": 250,
+     "revenueLtv": 2000.0,
+     "tier": "ALL"
+    },
+    {
+     "assignment": "target",
+     "avgOrderValue": 1000.0,
+     "buyerId": 15,
+     "city": "Київ",
+     "costCoverage": 100.0,
+     "firstOrderDate": "D-1000",
+     "fullName": "Lapsed, one order 1000 days ago",
+     "lastOrderDate": "D-1000",
+     "lastOrderId": 1501,
+     "lastOrderItemCount": 1,
+     "lastOrderItems": "Product 1501",
+     "lastOrderTotal": 1000.0,
+     "ltv": 1000.0,
+     "marginLtv": 600.0,
+     "marginPct": 60.0,
+     "orders": 1,
+     "phone": "380500000015",
+     "recencyDays": 1000,
+     "revenueLtv": 1000.0,
+     "tier": "ALL"
+    }
+   ],
+   "funnel": [
+    {
+     "remaining": 15,
+     "stage": "customers"
+    },
+    {
+     "remaining": 15,
+     "stage": "inWindow"
+    },
+    {
+     "remaining": 3,
+     "stage": "filtered"
+    },
+    {
+     "remaining": 3,
+     "stage": "tiered"
+    },
+    {
+     "remaining": 3,
+     "stage": "phone"
+    },
+    {
+     "remaining": 3,
+     "stage": "subscribed"
+    },
+    {
+     "remaining": 3,
+     "stage": "reachable"
+    },
+    {
+     "remaining": 3,
+     "stage": "uniquePhone"
+    }
+   ],
+   "groups": [
+    {
+     "group": 1,
+     "matched": 3,
+     "onlyHere": 3,
+     "recipients": 3
+    }
+   ],
+   "segments": [
+    {
+     "avgLtv": 1666.67,
+     "avgOrders": 1.67,
+     "avgRecencyDays": 427,
+     "holdout": 1,
+     "marginPct": 36.0,
+     "target": 2,
+     "tier": "ALL",
+     "total": 3,
+     "totalLtv": 5000.0,
+     "totalMargin": 1800.0,
+     "totalRevenue": 5000.0
+    }
+   ],
+   "totals": {
+    "customers": 3,
+    "holdout": 1,
+    "target": 2
+   }
+  }
+ },
+ "recorded_on": "2026-10-28",
+ "source": "DuckDB's answer — funnel, groups, segments, totals, customers and frozen criteria — to every engine comparison of tests/integration/test_sms_audience_groups_two_engines.py, on tests/sms_audience_fixture.py, recorded at step 14's S14-08 on the code before it (7f42a87a) by a run that asserted Postgres answered each one equally. The fixture counts its days back from Kyiv's today, and the dates here are written the same way (tests/integration/pg_sms_seed.relative), so they hold on every later day. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it."
+}

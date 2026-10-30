@@ -190,10 +190,13 @@ class DashboardTabs(Protocol):
     bot is what `tests/unit/test_pg_bot_state.py` watches for, and it would be
     right to.
 
-    `available()` is the honest half. DuckDB takes a single writer and the web
-    container holds it, so under `KS_USER_STORE=duckdb` no bot process can
-    reach the dashboard's user list at all; the adapter says so and the
-    approval still happens, with the tabs set from the admin page instead.
+    `available()` is the honest half. The dashboard's user list lives in
+    Postgres alone (since step 14's S14-08), so the Postgres adapter reaches
+    it and answers True; the SQLite one, chosen by a `KS_BOT_STORE` other than
+    `postgres`, has no way to it and answers False, and the approval still
+    happens, with the tabs set from the admin page instead. Until S14-08 the
+    list could also be in DuckDB (`KS_USER_STORE=duckdb`), whose single writer
+    the web container holds, out of every bot process's reach.
     """
 
     def available(self) -> bool:
