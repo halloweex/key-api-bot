@@ -205,6 +205,18 @@ comparison, expenses summary and profit, customer insights — and
 the date picker stops; eight years ahead had held the single ML thread for
 70 s.
 
+An integer parameter past the width of the column it meets, or a NUL in an
+`/api/` path or query string, is a 400 naming the field. Both used to reach
+asyncpg and fail there, and the engine routers read that as the store failing:
+a 503 naming the page and a `read_refused` page, for a request no page sends
+(found by the Rust ports, #330–#332). Integers are held to their column where
+the route reads them (`core.validators.validate_db_int`, and
+`validate_category_id`'s int32 ceiling); a NUL is refused before routing by
+`web.middleware.RejectNulMiddleware`. `tests/unit/test_input_bounds.py` walks
+every `/api/` route: each integer parameter is bounded on both sides by
+FastAPI (`ge`/`le`) or passed to a bounded validator, or is exempt there with
+the reason it never reaches SQL.
+
 ## DuckDB Schema
 
 ```
@@ -361,6 +373,35 @@ docker-compose ps
 docker-compose logs --tail=50 bot
 docker-compose logs --tail=50 web
 docker-compose logs --tail=50 nginx
+```
+
+### The /api request log
+
+`docker logs` goes with the container, and on 2026-10-29 the dead-route audit
+found four hours of it: too little to call a lever run by hand once a month
+dead. So nginx also writes one JSON line per HTTPS request under `/api/` to
+`/var/log/ks-api/api.log` on the host (`nginx/nginx.conf`, `ks_api`): time,
+method, path, status, bytes, both timings, the upstream by name and by
+address. **No client address, no user agent, no query string**: the query of
+a search is what somebody typed. The path is cut out of the request line as
+it arrived, so a request answered with the 502 page keeps its own path.
+
+The bound is the `api-log` service, declared beside the mount that creates
+the log (`nginx/api-log/rotate.sh`, every five minutes): the file is cut at
+the first pass after midnight UTC, or past 32 MiB, compressed, and the newest
+62 cuts are kept. That is two months on an ordinary day, and in a flood never
+much more than 62 × 32 MiB of text. Copy, then truncate, because nothing
+there can signal nginx: a line written inside the copy can be lost.
+`tests/unit/test_api_request_log.py` holds the path, the format and the bound
+to each other and runs the script.
+
+Which routes were asked, on the host:
+
+```bash
+zcat -f /var/log/ks-api/api.log /var/log/ks-api/api-*.log.gz | python3 -c '
+import collections, json, sys
+c = collections.Counter((r["m"], r["p"]) for r in map(json.loads, sys.stdin))
+for (m, p), n in c.most_common(): print(n, m, p)'
 ```
 
 ## Testing
@@ -2478,7 +2519,9 @@ chain was on DuckDB and chain 3 still owned the orders; DuckDB's
 (`duckdb_orders_frozen`) rather than count frozen orders and ship
 `last_order_date` and `order_count` backwards. A value Postgres would refuse —
 a note with NUL, a `set_by` past INTEGER — is `ClassificationRefused`, which
-the route answers **422**, not "Postgres did not answer". Every precondition's
+the route answers **422**, not "Postgres did not answer". A NUL sent in the
+query string no longer reaches it: `RejectNulMiddleware` answers it 400 at the
+edge, before routing. Every precondition's
 reason starts with its key, an unreadable one too (`read_fallback_off`, not
 `read_fallback`). With the flag off nothing is asked on the chain's behalf:
 the preflight asks Postgres only once every local precondition holds — never
@@ -3493,6 +3536,23 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 по-разному. Имена каналов на фронте — интерполированные ключи
 `traffic.organicChannel.*`/`…Desc.*`, и `test_frontend_locales.py` требует их
 во всех трёх языках.
+
+**«Тільки піксель» разложен по покупателю** (`GET /api/traffic/pixel-only`, блок
+«Тільки піксель: хто ці покупці»). `pixel_only` — заказ сайта, до которого не
+дошли UTM-метки, только кука пикселя Meta/TikTok; пиксель срабатывает и на 74%
+органических заказов с метками, так что корзина значит «метка не дошла», а не
+«привёл пиксель». Замер на проде 28.10.2026: в августе, когда шаблон
+комментария потерял UTM, она выросла с ~30% заказов сайта до 70%, а органика
+упала с 35% до 10%. Блок делит её на новых и повторных и для каждого покупателя
+называет канал его **самого первого** заказа (`first_order_channel`: органика —
+каналом органики, реклама — платформой вкладки, иначе `pixel_only`, `manager`,
+`opencart`, `exhibition`, `unknown`). «Первый» — правило Silver для нового
+клиента: любой источник и тип продаж, без отменённых, ничья — по id, поэтому
+«новый» здесь совпадает с `is_new_customer`. Люди не складываются: покупатель с
+пиксельным заказом в первый день и ещё одним позже есть и в новых, и в повторных.
+За 30.04–27.10 розницы: 2 125 заказов, ₴4.94M; 689 новых (₴1.26M) и 1 006
+повторных (₴3.68M), из них первыми пришли через Instagram Direct 193, ссылку в
+профиле 99, рекламу Facebook 82.
 
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
 
