@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.304
+
+- Keep a bounded log of /api requests on the host
+
+
+## 3.0.303
+
+- A NUL in retail-status's note is the edge's 400 now; its two tests say so
+- Bad input is a 400 naming the field, not a 503 and a page
+
+
 ## 3.0.302
 
 - Step 14 S14-01: the shared warehouse SQL and constants live in neutral modules
