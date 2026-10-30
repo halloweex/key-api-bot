@@ -273,9 +273,12 @@ class TestItsWatermarkIsNotJudgedAtNinetyMinutes:
 
 class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
     """The key moves on the Sunday full sync, so after a mid-week flip
-    `meta.chain_watermarks` has none for up to a week. It used to read as
-    "entity never synced" on every integrity run until Sunday (review of
-    DN-26); DuckDB's frozen stamp now stands in, at the same 192 h."""
+    `meta.chain_watermarks` had none for up to a week, and it read as "entity
+    never synced" on every integrity run until Sunday (review of DN-26);
+    DuckDB's frozen stamp stood in, at the same 192 h, until step 14's S14-09
+    took the stand-in off: the flip is long past and production holds the
+    key. An absent key is "never synced" again, which is then true
+    (`tests/unit/test_absent_chain_keys.py`)."""
 
     NOW = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)   # a Thursday
 
@@ -313,28 +316,23 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
                 for i in _freshness_check(conn, self.NOW,
                                           chain_watermarks={**others, **marks})]
 
-    def test_the_chain_declares_it_and_chain_1_does_not(self):
+    def test_neither_this_chain_nor_chain_1_declares_it(self):
         from core import pg_inventory_write
 
-        assert chain.CHAIN_WATERMARK_INHERITS_DUCKDB is True
+        assert not hasattr(chain, "CHAIN_WATERMARK_INHERITS_DUCKDB")
         assert not getattr(pg_inventory_write, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
 
-    def test_a_mid_week_flip_is_quiet_about_a_dictionary_synced_on_sunday(self, flags):
-        # 103 h: Sunday 02:00 Kyiv to Thursday 09:00 UTC. `{}` is what
-        # `read_values` returns for a key Postgres does not hold yet.
-        assert self._judge(flags, self._duckdb(103), {}) == []
-
-    def test_the_frozen_stamp_still_pages_at_the_same_threshold(self, flags):
-        """A first sync under the flag that failed must page when a failed
-        DuckDB one would have — the stand-in is not a pass."""
-        (issue,) = self._judge(flags, self._duckdb(200), {})
-        name, severity, count, description = issue
-        assert (name, severity, count) == ("freshness_expense_types", "WARN", 200)
-        assert "threshold 192" in description and "before the switch" in description
+    def test_an_absent_key_is_never_synced_whatever_duckdb_holds(self, flags):
+        """Kills: the stand-in put back — a DuckDB stamp 103 h old would then
+        answer for a key Postgres does not hold, and the run would be quiet."""
+        (issue,) = self._judge(flags, self._duckdb(103), {})
+        name, severity, _count, description = issue
+        assert (name, severity) == ("freshness_expense_types", "WARN")
+        assert "never synced" in description
 
     def test_once_postgres_holds_the_key_it_wins(self, flags):
-        """The stand-in is only for an absent key: a stale Postgres stamp
-        beside a fresh DuckDB one is a stall."""
+        """Postgres's stamp is the one judged: a stale Postgres stamp beside a
+        fresh DuckDB one is a stall."""
         from datetime import timedelta
 
         stale = (self.NOW - timedelta(hours=200)).isoformat()

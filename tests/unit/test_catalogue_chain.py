@@ -52,7 +52,6 @@ def flags(monkeypatch):
     for name in warehouse_cutover.WAREHOUSE_READERS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(read_fallback, "_mode", "duckdb")
-    chain._unmet_warned.clear()
     return monkeypatch
 
 
@@ -75,11 +74,10 @@ def flagged(met):
 
 @pytest.fixture
 def flagged_alone(flags):
-    """The flag on and its precondition taken as met, with every other chain
-    and reader as it is today — so the tick's other steps keep their own
-    paths and only the catalogue's moves."""
+    """The flag on, with every other chain and reader as it is today — so
+    the tick's other steps keep their own paths. Since step 14's S14-09 the
+    catalogue's step has no other path, and the flag routes nothing."""
     flags.setenv(chain.WRITE_ENV, "postgres")
-    flags.setattr(chain, "unmet_precondition", lambda: None)
     # Since step 14's S14-00 every chain writes Postgres, a constant; the
     # tick's other steps are faked here, and keep the DuckDB paths the store
     # under the test answers.
@@ -162,18 +160,21 @@ class TestTheRepositoryRoutes:
 
 
 class TestTheFlag:
+    """Since step 14's S14-00 the flag routes nothing, and S14-09 deleted the
+    answers that stood in for it: `mode()`, the precondition and its warning,
+    the lock-out and the stand-in for an absent key."""
 
-
-    def test_the_latch_outranks_it(self, flags):
+    @pytest.mark.parametrize("value", ["duckdb", "yes", ""])
+    def test_whatever_it_says_the_chain_writes_postgres(self, flags, value):
         chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, "duckdb")
+        flags.setenv(chain.WRITE_ENV, value)
         assert chain.writes_postgres() is True
-        assert chain.mode() == "postgres"
 
-    def test_the_latch_outranks_a_value_nobody_can_read(self, flags):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, "yes")
-        assert chain.writes_postgres() is True
+    @pytest.mark.parametrize("name", [
+        "mode", "unmet_precondition", "_warn_unmet", "UNMET_WARN_EVERY_S",
+        "_unmet_warned", "LOCKOUT_REVISION", "CHAIN_WATERMARK_INHERITS_DUCKDB"])
+    def test_the_answers_that_routed_it_are_gone(self, name):
+        assert not hasattr(chain, name)
 
 
 # ─── the precondition (T-3) ──────────────────────────────────────────────────
@@ -369,8 +370,9 @@ class TestTheFullCatalogueContract:
             ("core/duckdb_store.py", attr)}
 
     @pytest.mark.parametrize("attr,sites", [
+        # `incremental_sync` wrote the products itself on DuckDB's path, until
+        # step 14's S14-09 deleted it; the hourly step is chain 6's alone.
         ("upsert_products", {("core/sync_service.py", "full_sync"),
-                             ("core/sync_service.py", "incremental_sync"),
                              ("core/sync_service.py", "_catalogue_step_postgres")}),
         ("upsert_categories", {("core/sync_service.py", "full_sync")}),
     ])
@@ -809,8 +811,9 @@ class TestTheStandingWatch:
         assert all(c.startswith(inv.PREFIX) for c in mine)
 
     def test_its_watermarks_are_left_to_the_freshness_check(self):
+        """With no stand-in since S14-09 (`tests/unit/test_absent_chain_keys.py`)."""
         assert inv.watermark_limit_min(chain) is None
-        assert chain.CHAIN_WATERMARK_INHERITS_DUCKDB is True
+        assert not hasattr(chain, "CHAIN_WATERMARK_INHERITS_DUCKDB")
 
 
 # ─── /api/health publishes the step (§3.11) ──────────────────────────────────

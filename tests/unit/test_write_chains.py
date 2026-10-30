@@ -666,7 +666,6 @@ class TestEveryPostgresWriterAsksTheRegistry:
             ("core/pg_replication.py", "replicate_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
             ("core/pg_expense_backfill.py", "hourly_expenses_ids_diff"),
-            ("core/duckdb_store.py", "upsert_orders"),
             ("web/routes/api/admin.py", "backfill_mirror_expenses"),
         } <= walk.consulting
 
@@ -859,12 +858,12 @@ _OWNER_READS = {"order_tables_stood_down_or_owned", "tables_stood_down_or_owned"
 # The sync's per-tick mirrors, which keep the local answer alone: the write
 # path, once a minute, where a Postgres read is the one `writes_postgres()`
 # exists to avoid (DN-22a). The daily comparisons page the state they cannot
-# see — `order_owner_row_without_marker`, `owner_row_without_marker`.
+# see — `order_owner_row_without_marker`, `owner_row_without_marker`. The
+# orders mirror in `DuckDBStore.upsert_orders` was the second, until step 14's
+# S14-09 deleted that writer.
 _PER_TICK_MIRRORS = {
     ("core/pg_landing.py", "_mirror"):
         "the catalogue and expense mirror, every sync tick",
-    ("core/duckdb_store.py", "upsert_orders"):
-        "the orders mirror, every sync tick",
 }
 
 
@@ -1191,17 +1190,13 @@ def _rolled_back(flags) -> None:
         if not {ORDERS, LINES} & set(c.CHAIN_TABLES)))
 
 
-async def _store(tmp_path, ids=()):
-    """A DuckDB holding `ids`, written with the mirror patched out."""
-    from unittest.mock import AsyncMock, patch
-
+async def _store(tmp_path):
+    """An empty DuckDB. It held seeded orders through `upsert_orders`, until
+    step 14's S14-09 deleted that writer; nothing here asked it to any more."""
     from core.duckdb_store import DuckDBStore
 
     store = DuckDBStore(db_path=tmp_path / "dn22a.duckdb")
     await store.connect()
-    if ids:
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders([_order(i) for i in ids])
     return store
 
 
@@ -1648,13 +1643,16 @@ class TestEveryOrderShipperAsksFirst:
 
     def test_the_walk_is_not_vacuous(self):
         found = {name for _rel, name, _called in self._sites()}
-        assert {"upsert_orders", "backfill_orders", "ship_orders_by_id"} <= found
+        # `upsert_orders`, the sync's per-tick mirror, was the third until
+        # step 14's S14-09 deleted DuckDB's order writer.
+        assert {"backfill_orders", "ship_orders_by_id"} <= found
+        assert "upsert_orders" not in found
 
     def test_one_that_takes_the_pool_asks_the_owner_rows_too(self):
         """DN-06: anything already holding a Postgres connection stands down on
-        either copy of the latch. The sync's mirror in `upsert_orders` takes
+        either copy of the latch. The sync's mirror in `upsert_orders` took
         no pool — the write path, where that read is the one to avoid — and so
-        is not held to it."""
+        was not held to it, until step 14's S14-09 deleted it."""
         holding = [(rel, name, called) for rel, name, called in self._sites()
                    if "get_pool" in called]
         assert {"backfill_orders", "ship_orders_by_id"} <= {n for _r, n, _c in holding}

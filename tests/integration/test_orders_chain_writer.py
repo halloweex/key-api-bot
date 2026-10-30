@@ -72,17 +72,15 @@ async def _clean(pool):
 
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
-    """A real DuckDB, a live Postgres, and the flag on. The preconditions —
-    chain 7b, step 13, chain 1, the backup evidence — are local reads with
-    tests of their own (`tests/unit/test_pg_orders_write.py`); none is what
-    this module is about."""
+    """A real DuckDB, a live Postgres, and the flag on — production's value;
+    since step 14's S14-09 nothing reads it to route, and the preconditions
+    it once waited on are gone."""
     from core.duckdb_store import DuckDBStore
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-    monkeypatch.setattr(chain, "unmet_precondition", lambda: None)
     store = DuckDBStore(db_path=tmp_path / "orders-chain.duckdb")
     await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)

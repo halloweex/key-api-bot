@@ -389,10 +389,10 @@ def _writer_name(key: str) -> str:
 async def stores(tmp_path, monkeypatch):
     """A real DuckDB, a live Postgres, and no chain's flag set.
 
-    `KS_READ_EXPENSES=postgres` because chain 6a moves nothing without it
-    (`pg_expense_types_write.unmet_precondition`); it routes reads only, and
-    no test here reads expenses. The three buyer readers for chain 4's, for
-    the same reason: none of them is read here.
+    `KS_READ_EXPENSES=postgres` because chain 6a once moved nothing without
+    it, and the three buyer readers for chain 4's; since step 14 none of
+    them routes anything, and none is read here. Chains 3, 6 and 6a have no
+    precondition left to stand in for since S14-09.
     """
     from core.duckdb_store import DuckDBStore
 
@@ -402,18 +402,10 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
-    # Chain 3 moves nothing until chain 7b, step 13, chain 1 and the backup
-    # evidence hold (`pg_orders_write.unmet_precondition`); none of them is
-    # what this module is about, and every one is a local read.
-    monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
     # Chain 5 is held on DuckDB by facts no environment variable sets (step
     # 13, chain 3); this harness proves where its latch is taken, not whether
     # it may move.
     monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
-    # Chain 6's precondition taken as met: setting KS_WRITE_INVENTORY=postgres
-    # here would move chain 1's own calls; the precondition itself is proved
-    # in tests/unit/test_catalogue_chain.py.
-    monkeypatch.setattr(pg_catalogue_write, "unmet_precondition", lambda: None)
     # Chain 7b-3's four preconditions: its inputs on Postgres, and the
     # fallback off as configured. The goal history then reads an empty
     # `silver.orders`, which still writes a placeholder growth row.

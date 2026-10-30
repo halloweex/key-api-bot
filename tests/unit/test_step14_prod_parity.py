@@ -131,13 +131,37 @@ JUNK = "junk-s14"
 # `KS_GOALS_HISTORY` refusal with its health block and canary check.
 RETIRED = {"goals_history": "S14-07"}
 
+# The same for single fields, by their path in a capture. S14-09 deleted chain
+# 3's, 6's and 6a's routing answers the capture asks of the modules themselves
+# (`mode`, `unmet_precondition`, chain 3's hold) and chain 3's preflight from
+# `/api/health`. The registry's own `mode` and `unmet_precondition` for those
+# chains (`chain_modes`) stay until S14-11, and are still compared.
+RETIRED_FIELDS = {
+    ("chains", "pg_orders_write", "mode"): "S14-09",
+    ("chains", "pg_orders_write", "unmet_precondition"): "S14-09",
+    ("chains", "pg_orders_write", "unmet_reasons"): "S14-09",
+    ("chains", "pg_orders_write", "settle_hold"): "S14-09",
+    ("chains", "pg_orders_write", "held"): "S14-09",
+    ("chains", "pg_catalogue_write", "mode"): "S14-09",
+    ("chains", "pg_catalogue_write", "unmet_precondition"): "S14-09",
+    ("chains", "pg_expense_types_write", "unmet_precondition"): "S14-09",
+    ("health", "write_chains", "pg_orders_write", "preflight"): "S14-09",
+}
+
 
 def _without_retired(result: dict) -> dict:
-    """`result`, a capture or a literal, without the blocks `RETIRED` names."""
+    """`result`, a capture or a literal, without the blocks `RETIRED` names
+    and the fields `RETIRED_FIELDS` names."""
     result = json.loads(json.dumps(result))
     for key in RETIRED:
         result.pop(key, None)
         result.get("health", {}).pop(key, None)
+    for path in RETIRED_FIELDS:
+        node = result
+        for step in path[:-1]:
+            node = node.get(step, {}) if isinstance(node, dict) else {}
+        if isinstance(node, dict):
+            node.pop(path[-1], None)
     return result
 
 # Captured on 57fd7c22 — see the module's docstring. Not to be edited by hand:
@@ -984,10 +1008,14 @@ def capture() -> dict:
     chains["pg_forecast_write"]["_routes_postgres"] = pg_forecast_write._routes_postgres(log=False)
     chains["pg_orders_write"].update(
         stood_down_layers=sorted(pg_orders_write.stood_down_layers()),
-        landing_checks_stood_down=sorted(pg_orders_write.landing_checks_stood_down()),
-        unmet_reasons=pg_orders_write.unmet_reasons(),
-        settle_hold=pg_orders_write.settle_hold(),
-        held=pg_orders_write._held)
+        landing_checks_stood_down=sorted(pg_orders_write.landing_checks_stood_down()))
+    # Deleted in S14-09 (`RETIRED_FIELDS`); asked where they still exist, so
+    # the capture still runs against the trees before it.
+    for name, field in (("unmet_reasons", "unmet_reasons"), ("settle_hold", "settle_hold"),
+                        ("_held", "held")):
+        if hasattr(pg_orders_write, name):
+            value = getattr(pg_orders_write, name)
+            chains["pg_orders_write"][field] = value() if callable(value) else value
     chains["pg_managers_write"]["unmet_reasons"] = pg_managers_write.unmet_reasons()
     out["chains"] = chains
     out["chain_modes"] = {
@@ -1147,6 +1175,10 @@ def test_the_literal_is_what_production_published(production):
         assert health[block] == H0[block], block
     for block in RETIRED:
         assert health[block] is None, f"{block} went with {RETIRED[block]}"
+    for path, pr in RETIRED_FIELDS.items():
+        if path[0] == "health":
+            entry = health[path[1]][path[2]]
+            assert entry.get(path[3]) is None, f"{'.'.join(path)} went with {pr}"
     for name, entry in H0["write_chains"].items():
         published = health["write_chains"][name]
         assert {k: published[k] for k in entry} == entry, name

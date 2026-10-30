@@ -50,6 +50,20 @@ REGISTERED_BEFORE_THE_RULE = frozenset({
     "pg_expense_types_write", "pg_buyers_write",
 })
 
+# Chains whose `LOCKOUT_REVISION` constant step 14's S14-09 deleted with the
+# rest of their routing: nothing read it since S14-00. Their lock-out is the
+# same revision, frozen here, so the test that the revision knows the chain
+# still holds them — a table added to chain 3 or 6 still needs a new revision.
+LOCKOUT_RETIRED = {
+    "pg_orders_write": "0035_batch_e_chains",
+    "pg_catalogue_write": "0035_batch_e_chains",
+}
+
+
+def _lockout(name: str) -> str:
+    return LOCKOUT_RETIRED.get(name) or getattr(_chains()[name], "LOCKOUT_REVISION")
+
+
 NEW_REVISION = (
     "Never edit an applied revision to make this pass: alembic does not re-run "
     "it, so production keeps the old comment while CI's freshly migrated "
@@ -98,9 +112,12 @@ class TestEveryChainNamesItsLockout:
         it in the build that registered it, with every older image admitted
         (#280). Name the revision that will refuse them; until a build
         requires it, the flag moves nothing."""
-        missing = [name for name in _ruled()
-                   if not isinstance(getattr(_chains()[name], "LOCKOUT_REVISION", None), str)]
+        missing = [name for name in _ruled() if name not in LOCKOUT_RETIRED
+                   and not isinstance(getattr(_chains()[name], "LOCKOUT_REVISION", None), str)]
         assert not missing, (f"registered without a LOCKOUT_REVISION: {missing}")
+        for name in LOCKOUT_RETIRED:
+            assert not hasattr(_chains()[name], "LOCKOUT_REVISION"), (
+                f"{name}'s lock-out is the literal here since S14-09")
 
     @pytest.mark.parametrize("name", _ruled())
     def test_a_lockout_in_force_is_a_revision_that_knows_the_chain(self, name):
@@ -110,7 +127,7 @@ class TestEveryChainNamesItsLockout:
         chain, and a table the chain gained after its lock-out shipped — an
         image between the two does not know the chain owns it."""
         chain = _chains()[name]
-        lockout = chain.LOCKOUT_REVISION
+        lockout = _lockout(name)
         if chain_latch.lockout_unmet(lockout) is not None:
             pytest.skip(f"{lockout} is not in this build yet; the flag waits for it")
         assert lockout in _lineage_ids(pg.REQUIRED_REVISION), lockout
