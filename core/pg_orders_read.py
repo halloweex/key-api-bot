@@ -11,10 +11,11 @@ orders every two hours, and the backfill-miss ledger — the one table that
 stops a repair asking KeyCRM for what it cannot supply — would be read where
 the chain no longer writes it.
 
-So each DuckDB method routes to the function here at its first statement
-(`duckdb_store._orders_in_postgres()`, which is `pg_orders_write.writes_postgres()`),
+So each DuckDB method routed to the function here at its first statement
+(`duckdb_store._orders_in_postgres()`, which was `pg_orders_write.writes_postgres()`),
 the transliteration of its own SQL: same tables, same window, same order, same
-limit.
+limit. Since step 14's S14-09 the store's methods are these alone: the answer
+was a constant since S14-00, and the DuckDB bodies went.
 
 These raise. A selection that could not be made is not an empty one: the
 callers are repair jobs, each with its own failure handling, and "nothing to

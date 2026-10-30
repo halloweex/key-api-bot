@@ -22,9 +22,10 @@ temporary file and a rename (`deploy/`):
         2026-09-28T08:21:05Z
 
 Read from `./data`, which both containers mount, without opening a database:
-the flip's precondition (`core.pg_orders_write.unmet_precondition`) is asked
-through the write-chain registry by `/api/health`, which must answer with
-Postgres down. The time is the line's own; a file whose text cannot be read
+`/api/health` publishes the ages, which must answer with Postgres down, and
+the canary judges them (`backup_evidence_stale`, step 14's S14-00). Until
+then they were chain 3's flip precondition, asked through the write-chain
+registry (`core.pg_orders_write.unmet_precondition`, deleted in S14-09). The time is the line's own; a file whose text cannot be read
 falls back to its mtime, `chain_latch._stamp_of`'s rule, since the file exists
 only because the script got that far.
 

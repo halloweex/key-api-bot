@@ -5,7 +5,8 @@ yet, because a value that stopped moving at a chain's flip is still the right
 stand-in for one that has not been written since (stage 5's design, 2.5):
 
 1. `DuckDBStore.get_last_sync_time` — the sync window of a chain declaring
-   `CHAIN_WATERMARK_INHERITS_DUCKDB` (3, 6, 6a);
+   `CHAIN_WATERMARK_INHERITS_DUCKDB` (chain 3; chains 6 and 6a too, until
+   step 14's S14-09);
 2. `core.data_quality._freshness_check` — the same stand-in, judged, and the
    bootstrap gate ("no sync history at all");
 3. `core.dq_journal.digest_inputs` — the digest's beat;

@@ -489,11 +489,11 @@ def readers_not_on_postgres(env: Mapping[str, str]) -> Tuple[str, ...]:
     """The `WAREHOUSE_READERS` switches `env` does not set to postgres, in
     their order. Pure.
 
-    The one reading of that list, shared: `evaluate_preconditions` files one
-    `reader:<name>` per name here, and chain 6 holds its catalogue writes on
-    DuckDB while any is left (`core.pg_catalogue_write.unmet_precondition`) —
-    so the switch and the chain cannot come to disagree about which readers
-    still read DuckDB. Unset is duckdb; anything that is not exactly postgres,
+    The one reading of that list: `evaluate_preconditions` files one
+    `reader:<name>` per name here. Chain 6 held its catalogue writes on DuckDB
+    while any was left, through the same helper, until step 14's S14-00 made
+    that hold a constant (and S14-09 deleted it), so the switch and the chain
+    could not come to disagree about which readers still read DuckDB. Unset is duckdb; anything that is not exactly postgres,
     a typo included, is not on postgres."""
     return tuple(name for name in WAREHOUSE_READERS
                  if (_read(env, name, "duckdb") or "duckdb") != "postgres")

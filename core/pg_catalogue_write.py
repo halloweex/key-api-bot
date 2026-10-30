@@ -123,39 +123,26 @@ its transaction. From the first catalogue written here only
 (deleted in step 14's S14-04; the way back since is an image from before
 step 14, `core.rollback_lever`).
 
-A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
+A PRECONDITION THE FLAG ENFORCED — UNTIL STEP 14
 
-Since step 14's S14-00 the chain writes Postgres whatever its flag says and
-asks no precondition (`writes_postgres`, `unmet_precondition`, `mode` are
-constants). What follows is the history.
-
-Nearly every reader on the dashboard joins the catalogue — directly, or
-through `silver_order_lines` — and each can still read DuckDB, whose catalogue
-stops changing the moment this chain writes Postgres. So `unmet_precondition()`
-holds an unlatched chain on DuckDB until:
-
-- this build requires `LOCKOUT_REVISION` (0035), which refuses every image
-  built before the chain (`chain_latch.lockout_unmet`);
-- chain 1 writes Postgres: DuckDB's `refresh_sku_inventory_status` joins
-  DuckDB's products, and its result is what the hourly copy ships;
-- `KS_READ_FALLBACK=off`: under `duckdb` a failed Postgres read is answered
-  from DuckDB, here from a frozen catalogue;
-- every read switch of the warehouse (`warehouse_cutover.WAREHOUSE_READERS`)
-  is postgres — the list step 13 checks, kept complete by a walk of every
-  `KS_READ_*` name in the tree, read through the one helper the switch reads
-  (`readers_not_on_postgres`), so the two cannot disagree. Over-inclusive on
-  purpose: a hand-picked subset of "catalogue readers" would be a second list
-  with no walker.
-
-The warning that says so is rate-limited (chain 4's reason): the incremental
-tick asks for the products watermark every minute.
+Until step 14's S14-00 an unlatched chain was held on DuckDB until the
+lock-out revision was required, chain 1 wrote Postgres, `KS_READ_FALLBACK` was
+`off` and every warehouse read switch was postgres — nearly every reader on
+the dashboard joins the catalogue, and each could still read DuckDB, whose
+catalogue stops changing the moment this chain writes Postgres. S14-00 made
+the answers constants; S14-09 deleted them, with the routing they fed: the
+hourly products step, `full_sync` and the store's two writers ask nothing.
+Kept: `WRITE_ENV` as a name (revision 0035's comments name it; the registry
+still publishes the variable until S14-11, through `env_writes_postgres`),
+the latch and its owner rows (decision 3: an image from before step 14 routes
+by them), and `writes_postgres()`, a constant the registry's sync-key routing
+asks until S14-11.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
@@ -183,10 +170,6 @@ CATEGORIES = "bronze.categories"
 # one table, one transaction.
 CHAIN_TABLES: Tuple[str, ...] = (PRODUCTS, CATEGORIES)
 
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
-
 # What the two full-catalogue sync sites stamp after the rows land. The store's
 # getter and setter route them through `core.write_chains.chain_for_sync_key`
 # to `meta.chain_watermarks`.
@@ -207,12 +190,14 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_products", "last_sync_categories"
 # one stall twice under two names (chain 6a's reasoning).
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 
-# Until the first write under the flag stamps a key in
-# `meta.chain_watermarks`, `_freshness_check` judges DuckDB's frozen stamp
-# instead of calling the entity never synced — the categories move on Sunday
-# only, so a mid-week flip would file "never synced" on every integrity run
-# until then. Chain 6a's arrangement.
-CHAIN_WATERMARK_INHERITS_DUCKDB = True
+# `CHAIN_WATERMARK_INHERITS_DUCKDB` stood here until step 14's S14-09: until
+# the first write under the flag stamped a key in `meta.chain_watermarks`,
+# `_freshness_check` judged DuckDB's frozen stamp instead of calling the entity
+# never synced. Production holds both keys (H6, 2026-10-29), and an absent one
+# costs nothing the stand-in would save: the hourly products step syncs at once
+# when `last_sync_products` is absent, nothing reads `last_sync_categories`
+# back, and the freshness check then says "never synced", which is true
+# (`tests/unit/test_absent_chain_keys.py`).
 
 # A share of the previous full write's rows that the LAST write left out,
 # above which it is not KeyCRM retiring goods: it is a catalogue that arrived
@@ -288,10 +273,6 @@ _RECORD_WRITE_SQL = (
     "WHERE mirrored_at = now() OR " + STAMP_SQL + " = ANY($2::bigint[])) kept), "
     "'previous', (extract(epoch FROM $3::timestamptz) * 1000000)::bigint"
     ")::text WHERE key = $1")
-
-# How often the unmet-precondition warning may repeat for one reason.
-UNMET_WARN_EVERY_S = 3600.0
-_unmet_warned: Dict[str, float] = {}
 
 _INT32 = (-2 ** 31, 2 ** 31 - 1)
 # `price NUMERIC(12,2)` (revision 0002), DuckDB's `DECIMAL(12,2)` beside it.
@@ -375,11 +356,14 @@ async def read_mirror_stamps(conn) -> Dict[str, chain_latch.MirrorStamp]:
 
 
 def env_writes_postgres() -> bool:
-    """What `KS_WRITE_CATALOGUE` alone says.
+    """What `KS_WRITE_CATALOGUE` alone says. Routes nothing: since step 14's
+    S14-00 the chain writes Postgres whatever its flag says, and since S14-09
+    neither the products step nor `full_sync` reads the flag either.
 
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands it down, the hourly
-    products step records it, and `full_sync` contains it.
+    An unrecognised value raises — `KS_BOT_STORE`'s rule — and the registry
+    publishes the raise as the chain's `error`, which a rollback to an image
+    from before step 14 would route by (`core.write_chains._chain_state`).
+    Last consumer: that registry entry — S14-11.
     """
     value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
     if value not in {"duckdb", "postgres"}:
@@ -390,39 +374,15 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and nothing it waited on is asked any more —
-    production met every clause, and the readers it named read Postgres.
-    Kept for the registry's `unmet_precondition` field, which keeps its shape
-    until S14-11."""
-    return None
-
-
-def _warn_unmet(reason: str) -> None:
-    now = time.monotonic()
-    last = _unmet_warned.get(reason)
-    if last is not None and now - last < UNMET_WARN_EVERY_S:
-        return
-    _unmet_warned[reason] = now
-    logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, reason)
-
-
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
-    nor a precondition routes any more; the first write in a process still
-    takes the latch (decision 3), which the images before step 14 route by.
-    Last consumers:
-    the products step, `full_sync` and the registry — S14-09.
-    """
+    """Whether this chain writes Postgres: True, a constant since step 14's
+    S14-00 — neither the flag, nor the latch, nor a precondition routes. The
+    first write in a process still takes the latch (decision 3), which the
+    images before step 14 route by. Last consumer: the store's sync-key
+    getter and setter, which ask it of the chain that declares the key
+    through the registry (`DuckDBStore.get_last_sync_time`) — S14-11.
+    Nothing in this build asks it of this chain by name since S14-09."""
     return True
-
-
-def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", a constant since step 14's
-    S14-00 — never None, since no flag is read for it."""
-    return "postgres"
 
 
 def _latch() -> str:
