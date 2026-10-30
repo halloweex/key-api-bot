@@ -44,9 +44,9 @@ THE DIGEST'S BEAT
 replace of `app.sync_metadata` would wipe it. `core.dq_journal` reads it there
 first and, while the key is absent, inherits it from `app.sync_metadata`
 (DuckDB's value as the hourly copy last shipped it), so a first digest after
-a flip does not restate everything. Production has held the key in
-`meta.chain_watermarks` since the chain's first delivered digest (H6,
-2026-10-29).
+a flip does not restate everything. Production holds the key in
+`meta.chain_watermarks` (H6, 2026-10-29), so there the inheritance answers
+nothing.
 
 READS FOLLOW THE WRITER
 

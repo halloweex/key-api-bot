@@ -214,9 +214,8 @@ async def digest_inputs(
     `sync_metadata` as Postgres last copied it (`core.pg_frozen_metadata`),
     read on the same connection: the beat as of the flip. Without the inherit
     the first digest after a flip would restate every standing finding as
-    new. Production has held the key in `meta.chain_watermarks` since chain
-    9's first delivered digest (H6, 2026-10-29), so the copy is asked only
-    for a key that went missing. Until step 14's S14-10 a process running
+    new. Production holds the key in `meta.chain_watermarks` (H6,
+    2026-10-29), so the copy is asked only for a key that went missing. Until step 14's S14-10 a process running
     `KS_DUCKDB=on` read DuckDB's own table here instead; web has run `off`
     since S14-00, so production's answer does not move.
     """
