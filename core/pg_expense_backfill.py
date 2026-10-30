@@ -37,8 +37,9 @@ from typing import Any, Dict, Sequence
 logger = logging.getLogger(__name__)
 
 EXPENSES_TABLE = "bronze.expenses"
-# Shipped alone — by `pg_landing.mirror_expenses` and by this backfill — so it
-# changes hands alone (`pg_landing.tables_stood_down`).
+# Shipped alone — by this backfill, and by `pg_landing.mirror_expenses` until
+# step 14's S14-09 took its last caller — so it changes hands alone
+# (`pg_landing.tables_stood_down`).
 EXPENSES_UNIT = (EXPENSES_TABLE,)
 
 # Smaller than the orders backfill's 2 000 because the whole table is 15 020

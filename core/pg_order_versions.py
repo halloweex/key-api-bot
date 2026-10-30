@@ -22,14 +22,15 @@ WHY THIS RUNS INSIDE THE MIRROR'S TRANSACTION
 
 Two reasons, and the second one only shows up on real data.
 
-1. `mirror_orders` never raises: a Postgres outage must not break the sync,
-   because whatever the mirror missed the backfill can ship later. **The
-   archive has no backfill and cannot have one** — KeyCRM serves current state,
-   so a transition that was not written when it happened is not recoverable
-   from anywhere. It therefore cannot inherit the mirror's "lose it quietly"
-   contract. Writing it inside `write_orders`, in the same transaction as the
-   header it describes, means the version and the row it is a version of land
-   together or neither does.
+1. `mirror_orders` never raises: a Postgres outage must not break the sync
+   that ran through it until step 14's S14-09, because whatever the mirror
+   missed the backfill can ship later. **The archive has no backfill and
+   cannot have one** — KeyCRM serves current state, so a transition that was
+   not written when it happened is not recoverable from anywhere. It
+   therefore cannot inherit the mirror's "lose it quietly" contract. Writing
+   it inside `write_orders`, in the same transaction as the header it
+   describes, means the version and the row it is a version of land together
+   or neither does.
 
 2. It must record the row **as written**, not as it arrived. The header upsert
    sets `manager_comment = COALESCE(EXCLUDED.manager_comment, stored)` because
@@ -56,11 +57,13 @@ Revision 0010 has the measurements.
 
 IF THE TABLE IS NOT THERE YET
 
-The INSERT raises, `write_orders` raises, and on the sync path `mirror_orders`
-catches it and records a mirror failure against `bronze.orders` — visible in
-`meta.mirror_state.failures_since_ok`, in the morning digest, and in the layer
-age. That is the same way deploying `web` before `migrate` already fails for
-revision 0007, and it fails closed rather than quietly.
+The INSERT raises, the order write raises, and on the sync path the failure
+is recorded against `bronze.orders` — by chain 3's order step
+(`SyncService._record_orders_failure`) since step 14's S14-09, by
+`mirror_orders` until then — visible in `meta.mirror_state.failures_since_ok`,
+in the morning digest, and in the layer age. That is the same way deploying
+`web` before `migrate` already fails for revision 0007, and it fails closed
+rather than quietly.
 """
 from __future__ import annotations
 

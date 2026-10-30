@@ -6,8 +6,9 @@ mirror (`core.pg_landing.mirror_orders`) shipped exactly those rows to Postgres;
 `upsert_expenses_batch` and `mirror_expenses` did the same for the order-level
 costs; `record_backfill_misses` remembered in DuckDB the ids KeyCRM could not
 supply, and the hourly `replicate_operational` copied that ledger across.
-Under `KS_WRITE_ORDERS=postgres` all four tables are written here and DuckDB's
-copies freeze.
+Under `KS_WRITE_ORDERS=postgres` all four tables were written here and DuckDB's
+copies froze; since step 14 they are written here alone, whatever the flag
+says (PRECONDITIONS AND ROUTING, below).
 
 OWNER DECISION OD-13 (a), 2026-10-01: A RAISING WRITER
 
@@ -44,13 +45,14 @@ archive goes on across a flip and across a rollback with nothing to copy.
 
 THE ONE WRITER OF THE ORDER TABLES STAYS ONE WRITER
 
-The rows come from `core.landing_rows`, the parse DuckDB is handed too, and
-are written by `pg_landing._write_order_rows` and `pg_landing._write_rows` —
-the statements every DuckDB-to-Postgres shipment runs. So the version is
-captured in the row's own transaction, the `bronze.orders` watermark the
-canary's `mirror_stale` reads keeps moving, and `order_versions_stalled` keeps
-meaning what it says (DN-22b; `tests/unit/test_write_chains.py` walks for a
-second writer). What only the chain does lives here: the decision, the latch
+The rows come from `core.landing_rows`, the parse DuckDB was handed too until
+step 14's S14-09 deleted its order writer, and are written by
+`pg_landing._write_order_rows` and `pg_landing._write_rows` — the statements
+every DuckDB-to-Postgres shipment runs. So the version is captured in the
+row's own transaction, the `bronze.orders` watermark the canary's
+`mirror_stale` reads keeps moving, and `order_versions_stalled` keeps meaning
+what it says (DN-22b; `tests/unit/test_write_chains.py` walks for a second
+writer). What only the chain does lives here: the decision, the latch
 and its owner rows, and what to do with an order Postgres would refuse.
 
 THE DECIDER READ IS THE WRITE DECISION
@@ -154,9 +156,10 @@ WRITE_ENV = "KS_WRITE_ORDERS"
 CHAIN = "pg_orders_write"
 
 # The tables this chain writes (module docstring). `core.write_chains` reads
-# this, and through it the sync's mirrors, the hourly shipper (the misses),
-# the backfills and the daily comparisons (and the copy-back, until step 14's
-# S14-04 deleted it). The two order tables are `pg_landing.ORDER_UNIT` and
+# this, and through it the hourly shipper (the misses), the backfills and the
+# daily comparisons — and, until step 14 took them, the sync's orders and
+# expenses mirrors (their last callers went in S14-09) and the copy-back
+# (deleted in S14-04). The two order tables are `pg_landing.ORDER_UNIT` and
 # pass as one.
 CHAIN_TABLES: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses",
@@ -705,12 +708,13 @@ async def record_backfill_misses(misses: Mapping[int, str]) -> int:
 async def restore_manager_comments(comments: Mapping[int, str]) -> List[int]:
     """Fill in `manager_comment` where Postgres holds NULL, from KeyCRM.
 
-    The two comment backfills (`POST /api/traffic/backfill-utm`,
-    `scripts/backfill_utm.py`) under the chain. The rows are read `FOR UPDATE`
-    and written back through `pg_landing._write_order_rows` with the comment
-    filled in, headers only, as `kind='backfill'` (OD-20 (b)) — exactly what
-    `ship_orders_by_id` sends on the DuckDB path, so the chain module spells
-    no UPDATE of its own against the order tables. Returns the ids restored:
+    The two comment backfills' one write (`POST /api/traffic/backfill-utm`,
+    `scripts/backfill_utm.py`) since step 14's S14-09 deleted their DuckDB
+    walk. The rows are read `FOR UPDATE` and written back through
+    `pg_landing._write_order_rows` with the comment filled in, headers only,
+    as `kind='backfill'` (OD-20 (b)) — exactly what `ship_orders_by_id` sent
+    on the DuckDB path until then, so the chain module spells no UPDATE of
+    its own against the order tables. Returns the ids restored:
     an order whose comment is no longer NULL is left alone."""
     from core import pg_landing
     from core.landing_rows import ORDER_COLUMNS

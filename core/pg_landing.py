@@ -252,9 +252,10 @@ def tables_stood_down(unit: Sequence[str]) -> FrozenSet[str]:
     """Which of `unit` a write chain has taken — the local answer. Never raises.
 
     The marker and the flag, asked of only the chains that declare one of these
-    tables (`write_chains.stood_down_among`): with none declaring them — every
-    table here today — nothing is evaluated at all, so the per-tick mirrors
-    that ask this read no variable and open no file.
+    tables (`write_chains.stood_down_among`): with none declaring them nothing
+    is evaluated at all, so a mirror that asks reads no variable and opens no
+    file. That was every table here once; since #280 registered chains 3, 5
+    and 6 a chain declares each of them.
 
     This is the only answer the **sync's mirrors** take — `_mirror` and,
     until step 14's S14-09, the orders mirror in DuckDB's `upsert_orders` —
@@ -280,8 +281,9 @@ def sync_reads_the_owner_rows(unit: Sequence[str]) -> bool:
     answer since the DN-22b review: the classification copy is a full replace
     run a few times a day, and on the local answer alone a lost marker let it
     delete a human's interval in Postgres the first time it ran. False for
-    everything `_mirror` ships and for the order tables, whose per-tick
-    mirrors keep the local answer alone.
+    everything `_mirror` ships, which keeps the local answer alone, and for
+    the order tables, whose per-tick mirror kept it alone until step 14's
+    S14-09 deleted that mirror's caller.
 
     The comparisons read this to say which of the two is true when only the
     owner rows name a unit — a shipper that has stopped (INFO; the latch
@@ -368,7 +370,8 @@ async def _mirror(table: str, columns: Sequence[str], rows: List[tuple]) -> Mirr
     # rows in Postgres DuckDB never sees, and this upsert would write DuckDB's
     # copy over them. Skipped rather than failed — nothing is recorded against
     # the watermark, because nothing went wrong — and asked on the local answer
-    # alone, since this runs on the sync's own tick.
+    # alone, since this ran on the sync's own tick (since step 14's S14-09 it is
+    # reached from the weekly full sync alone).
     moved = tables_stood_down((table,))
     if moved:
         out.skipped = stood_down_reason(moved)
@@ -639,9 +642,11 @@ def order_tables_stood_down() -> FrozenSet[str]:
     items with it, so a chain declaring either table declares both — a
     registry invariant `tests/unit/test_write_chains.py` walks `WRITE_CHAINS`
     for. Standing both down on either is that invariant held defensively, and
-    not a property of the shipping: the two tables do ship apart, since
-    `write_orders(replace_products=False)` ships headers alone every day, from
-    the 05:15 status refresh and from `ship_orders_by_id`.
+    not a property of the shipping: the two tables are written apart, since
+    `write_orders`' core with `replace_products=False` writes headers alone
+    every day — from the 05:15 status refresh, through chain 3's writer, and
+    from the comment backfills' `pg_orders_write.restore_manager_comments`
+    (through `ship_orders_by_id` until step 14's S14-09).
 
     Asked BEFORE `write_orders` and never inside it. The capture's contract is
     that the version and the row it describes land together or neither does
@@ -656,8 +661,9 @@ async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
     """`order_tables_stood_down()`, and what the owner rows in Postgres say.
 
     For the order paths that already hold a pool: the ids-diff and its
-    header-only repair, the hourly diff, the comment ship and the bucket
-    comparison. The local answer reads the markers, and the markers live on a
+    header-only repair, the hourly diff, the comment ship (`ship_orders_by_id`,
+    with no caller since step 14's S14-09) and the bucket comparison. The
+    local answer reads the markers, and the markers live on a
     bind mount — an older `./data` snapshot or a rebuilt data directory loses
     them while Postgres keeps the owner rows and the rows they were taken for.
     The flag then routes to DuckDB again, the local answer says nothing has
@@ -770,8 +776,9 @@ async def write_orders(
     """Headers, line items and both watermarks, in one transaction.
 
     Public and **raises** — the opposite contract to `mirror_orders`, which
-    wraps this and never does. The sync path must not be broken by Postgres;
-    the backfill has nothing to protect and every reason to stop loudly.
+    wraps this and never does: the sync path, which ran through it until step
+    14's S14-09, must not be broken by Postgres; the backfill has nothing to
+    protect and every reason to stop loudly.
 
     One transaction across both tables because a half-applied order — header
     updated, line items still the old ones — is the exact state the
@@ -779,8 +786,10 @@ async def write_orders(
 
     `version_kind` labels what the archive calls a header that moved. It
     defaults to the sync's `'change'`, so every caller that existed before
-    OD-20 writes exactly what it wrote before; `core/pg_backfill.py` passes
-    `'backfill'` for the two `manager_comment` repairs.
+    OD-20 writes exactly what it wrote before; `core/pg_backfill.py` passed
+    `'backfill'` for the two `manager_comment` repairs until step 14's S14-09,
+    and `pg_orders_write.restore_manager_comments` passes it to the core
+    since.
 
     The statements themselves are `_write_order_rows`, which runs on the
     caller's transaction; this is the acquire and the transaction around them
@@ -791,8 +800,9 @@ async def write_orders(
     # Validated here, before the pool is acquired, rather than inside the
     # capture. A typo could only come from code, but a raise from inside the
     # transaction would roll back the header upsert as well — and on the sync
-    # path `mirror_orders` would swallow it, so the order would be lost to
-    # Postgres over a misspelt constant. Refusing early costs nothing.
+    # path, until step 14's S14-09, `mirror_orders` would have swallowed it, so
+    # the order would be lost to Postgres over a misspelt constant. Refusing
+    # early costs nothing.
     check_version_kind(version_kind)
 
     pool = await get_pool()

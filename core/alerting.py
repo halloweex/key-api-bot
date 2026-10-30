@@ -313,13 +313,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "its flag move them: it stands while the chain owns them"),
     # The same stand-down seen on the owner rows alone — a lost marker, or an
     # image older than the orders chain — and that is a fault, not a decision:
-    # the sync's mirror asks only the local answer, so it is still writing
-    # DuckDB's copy over the chain's rows every tick. Never clears by itself.
+    # in an image from before step 14 the sync's mirror asked only the local
+    # answer, so it wrote DuckDB's copy over the chain's rows every tick. A
+    # step-14 image has no such mirror (S14-09); the fault is the lost marker a
+    # rollback to such an image would route by. Never clears by itself.
     "order_owner_row_without_marker": _c(
         "the marker is back — a human, not a job. " + ROLLBACK_LEVER),
     # The same fault on the catalogue and the order-level expenses (DN-22b):
-    # their per-tick mirror asks the local answer alone and so still ships
-    # over the chain's rows. The buyers mirror and the classification copy
+    # in an image from before step 14 their per-tick mirror asked the local
+    # answer alone and so shipped over the chain's rows. Since S14-09
+    # `mirror_expenses` has had no caller, and `_mirror` is reached from the
+    # weekly full sync alone. The buyers mirror and the classification copy
     # read the owner rows too since the DN-22b review, so they file
     # mirror_stood_down instead. Never clears by itself.
     "owner_row_without_marker": _c(

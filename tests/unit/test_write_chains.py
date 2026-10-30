@@ -1232,8 +1232,9 @@ def _chains_splitting_the_order_tables(chains) -> list:
 
 class TestOwnershipOfTheOrderTablesPassesAsAUnit:
     """Why either order table stands both down. Not that they ship together —
-    `write_orders(replace_products=False)` ships headers alone every day, from
-    the 05:15 status refresh and the comment ship — but that whoever takes the
+    `write_orders`' core with `replace_products=False` writes headers alone
+    every day, from the 05:15 status refresh and the comment backfills (the
+    comment ship until step 14's S14-09) — but that whoever takes the
     headers takes their line items: a chain declares both or neither. Walked
     over the real registry, which `TestEveryWriteChainIsRegistered` holds equal
     to every module that declares a chain."""

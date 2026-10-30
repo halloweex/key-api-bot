@@ -1301,8 +1301,10 @@ async def reconcile_mirror(
 #
 # `last_ok_at` cannot license a tolerance of zero here the way it does for the
 # catalogue. That rule works because a catalogue mirror ships the whole table,
-# so a successful write proves what Postgres held. The orders mirror ships
-# `updated_ids`, which proves only that the last delta landed. Until the
+# so a successful write proves what Postgres held. The orders mirror shipped
+# `updated_ids`, and chain 3's writer — the sync's only order writer since
+# step 14's S14-09 — writes the same delta, which proves only that the last
+# delta landed. Until the
 # backfill has carried history across, "missing from Postgres" means "not
 # carried yet" — so the comparison is gated on
 # `meta.mirror_state.backfilled_at`, and once that is set, any difference is a
@@ -1961,10 +1963,12 @@ async def reconcile_orders(
     # Here it is normally the owner rows alone that stand a table down — had
     # the local answer named one, the first call would already have taken both
     # order tables out of `specs` — and then it is not a stand-down at all but
-    # `order_owner_row_without_marker`, CRITICAL: the sync's mirror asks the
-    # local answer alone, so it is still shipping over the chain's rows. Asked
-    # again rather than assumed, so a chain that latched between the two
-    # questions is not paged as a lost marker.
+    # `order_owner_row_without_marker`, CRITICAL: in an image from before step
+    # 14 the sync's mirror asked the local answer alone, so it shipped over the
+    # chain's rows. A step-14 image has no such mirror (S14-09); here the
+    # finding is the lost marker such a rollback would route by
+    # (`_orders_stood_down`). Asked again rather than assumed, so a chain that
+    # latched between the two questions is not paged as a lost marker.
     moved = await pg_landing.order_tables_stood_down_or_owned(pool)
     found, specs = _orders_stood_down(
         specs, moved, owner_rows_only=not pg_landing.order_tables_stood_down())
@@ -4752,8 +4756,9 @@ async def reconcile_order_versions(
     the only record of.
 
     **It does not stand down when a write chain owns the order tables**
-    (DN-22b). The stand-down stops the sync's mirror, not the capture: the
-    chain's writer ships through `write_orders`, which captures in the same
+    (DN-22b). The stand-down stopped the sync's mirror (which step 14's S14-09
+    deleted with DuckDB's order writer), never the capture: the chain's writer
+    ships through `write_orders`' core, which captures in the same
     transaction, so a day with no version is still a broken writer — and this
     is the one liveness check on the one table nothing can rebuild, at the
     moment its writer changes hands.

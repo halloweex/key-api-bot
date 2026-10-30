@@ -29,11 +29,13 @@ say which rows disagree. Running this after such a divergence will report
 nothing missing and be right.
 
 `ship_orders_by_id` is the other half of that sentence, and not an exception to
-it. It repairs nothing it discovered: a caller that has *just changed* rows in
-DuckDB hands it exactly those ids. The `manager_comment` backfills are the two
-callers, and an ids-diff could never serve them — the orders they touch exist
-on both sides and merely differ, which is the one shape this file's set
-difference is blind to by construction.
+it. It repairs nothing it discovered: a caller that had *just changed* rows in
+DuckDB handed it exactly those ids. The `manager_comment` backfills were the
+two callers until step 14's S14-09, and an ids-diff could never serve them —
+the orders they touch exist on both sides and merely differ, which is the one
+shape this file's set difference is blind to by construction. Since S14-09
+they write Postgres alone (`pg_orders_write.restore_manager_comments`) and
+nothing calls it; it goes with the rest of this module in S14-13.
 
 WHY IT CHUNKS, AND WHAT THE CHUNK BOUNDARY MEANS
 
@@ -168,9 +170,14 @@ async def ship_orders_by_id(
 ) -> Dict[str, Any]:
     """Ship these exact orders, as DuckDB now holds them, headers only.
 
+    **No caller since step 14's S14-09**: both `manager_comment` backfills
+    write Postgres alone now (`pg_orders_write.restore_manager_comments`), and
+    this goes with the rest of the module in S14-13. What follows is why it
+    was built and what it did for them.
+
     The ids-diff above ships what Postgres is *missing*. This ships what a
     caller has just *changed*, which the ids-diff can never reach: both
-    `manager_comment` backfills UPDATE rows that exist on both sides, and the
+    `manager_comment` backfills UPDATEd rows that exist on both sides, and the
     hourly diff is a set difference over ids. Until DN-17 they wrote DuckDB
     and stopped there, so a restored comment never reached `bronze.orders` or
     the version archive at all.

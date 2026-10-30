@@ -303,12 +303,13 @@ def stood_down_among(tables: Iterable[str]) -> FrozenSet[str]:
     Always `stood_down_tables() & tables` — the same `_chain_state` verdict,
     so a flag error or a latch stands a table down here exactly as it does
     for the shipper. What differs is who is asked, and that is DN-01's rule
-    carried from sync keys to tables: the order sync asks this on every
-    write, and evaluating every chain there would log an unrelated
+    carried from sync keys to tables: the order sync asked this on every
+    write until step 14's S14-09 deleted DuckDB's order writer, and
+    evaluating every chain there would have logged an unrelated
     `KS_WRITE_*` typo once a minute from the one path that must stay quiet
-    about other chains' business. With no chain declaring a table — every
-    order table today — nothing is evaluated at all: no variable read, no
-    marker file opened.
+    about other chains' business. With no chain declaring a table nothing is
+    evaluated at all: no variable read, no marker file opened (no order
+    table has been in that case since #280 registered chain 3).
     """
     wanted = frozenset(tables)
     moved: set = set()

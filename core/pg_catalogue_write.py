@@ -75,9 +75,11 @@ morning from 2026-10-10. It sees a stamp that is not the chain's only until
 the next write moves the watermark again — within the hour for the products,
 the week for the categories — and it is not the only thing that would: the
 sync's mirror (`pg_landing._mirror`), the one other writer that stamps this
-watermark, ships only while the chain is routed to DuckDB, and with owner rows
-in Postgres that is the marker lost, which `chain_latch_disagrees` and
-`owner_row_without_marker` say for as long as it lasts.
+watermark, ships only while the chain is routed to DuckDB. A step-14 image
+routes no chain there (S14-00), so its mirror never ships these tables; in an
+image from before step 14, with owner rows in Postgres, that is the marker
+lost, which `chain_latch_disagrees` and `owner_row_without_marker` say for as
+long as it lasts.
 
 What it cannot see, named rather than claimed: a write that leaves
 `mirrored_at` alone, or copies an instant the chain did write. On a row KeyCRM
