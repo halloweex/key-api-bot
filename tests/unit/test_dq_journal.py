@@ -1,9 +1,15 @@
-"""Chain 9: the quality journal behind `KS_WRITE_DQ_JOURNAL`, shadowed in DuckDB.
+"""Chain 9: the quality journal, written to and read from Postgres alone.
 
 The parts that need no database. What needs a real Postgres — the allocator
-under two concurrent runs, every column equal across the two stores, the
-Postgres readers rendering exactly as DuckDB's — is in
-`tests/integration/test_dq_journal_pg.py`.
+under two concurrent runs, every column as written, the Postgres readers
+rendering what DuckDB's rendered (literals taken from DuckDB's answer on the
+base, step 14's rule 9) — is in `tests/integration/test_dq_journal_pg.py`.
+
+Until step 14's S14-10 the journal had a DuckDB shadow and a `duckdb` branch
+behind `KS_WRITE_DQ_JOURNAL`; their tests went with them. What is held here
+is what stays: one door, Postgres first and only, no fallback, the beat's
+inheritance from the copy, one rendering zone, the allocator's lock, the
+standing watch and the fold at the door.
 
 Every guard names, in its docstring, the mutation it exists to catch.
 """
@@ -17,14 +23,12 @@ from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
-import pytest_asyncio
 
-from core import dq_journal, pg_dq_journal_write as chain, shadow_writes
+from core import dq_journal, pg_dq_journal_write as chain
 from core.data_quality import (
-    Discrepancy, DiscrepancyClass, IntegrityIssue, Severity, fetch_latest_run,
-    journal_rows, run_values,
+    Discrepancy, DiscrepancyClass, IntegrityIssue, Severity, journal_rows,
+    run_values,
 )
-from core.duckdb_store import DuckDBStore
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 1, 7, 30, tzinfo=timezone.utc)
@@ -33,12 +37,12 @@ DAY = date(2026, 10, 1)
 
 @pytest.fixture
 def flag(monkeypatch):
-    """No chain's flag, and nothing latched — the marker dir is the test's."""
+    """No chain's flag, and nothing latched — the marker dir is the test's.
+    The flag routes nothing since S14-00; it is set only to show that."""
     from core import write_chains
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
-    shadow_writes.reset()
 
     def set_(value):
         if value is None:
@@ -46,15 +50,22 @@ def flag(monkeypatch):
         else:
             monkeypatch.setenv(chain.WRITE_ENV, value)
     yield set_
-    shadow_writes.reset()
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "journal.duckdb")
-    await s.connect()
-    yield s
-    await s.close()
+@pytest.fixture
+def no_duckdb(monkeypatch):
+    """Any reach for DuckDB's store fails the test: the journal's doors take
+    no store and open no connection since S14-10."""
+    from core import duckdb_store
+
+    boom = AsyncMock(side_effect=AssertionError("the journal reached for DuckDB"))
+    monkeypatch.setattr(duckdb_store, "get_store", boom)
+
+    def connection(self):
+        raise AssertionError("the journal opened a DuckDB connection")
+
+    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
+    return boom
 
 
 def _issue(name="pk_uniqueness_orders", severity=Severity.WARN, count=3):
@@ -77,56 +88,36 @@ def _kwargs(**over):
     return kw
 
 
-def _no_postgres(monkeypatch):
-    """Any reach for a pool fails the test — the duckdb branch asks Postgres
-    nothing, not even for a pool."""
-    boom = AsyncMock(side_effect=AssertionError("the duckdb branch asked for a pool"))
-    monkeypatch.setattr("core.pg.get_pool", boom)
-    monkeypatch.setattr("core.pg.require_revision", boom)
-    return boom
-
-
-def _count_connections(store):
-    calls = []
-    real = store.connection
-
-    def connection():
-        calls.append(1)
-        return real()
-
-    store.connection = connection
-    return calls
-
-
 # ─── The one door ─────────────────────────────────────────────────────────────
 
-# The DuckDB journal's writer and readers. A call to any of these outside the
-# modules allowed below goes round the router — and with the chain on
-# Postgres, writes or reads the store that is no longer the writer.
-_DOOR_FUNCS = {
+# The journal's writer and readers. DuckDB's — `persist_run(conn, ...)` and
+# the `fetch_*` family in `core/data_quality.py` — went with step 14's S14-10;
+# their names stay here so one coming back is caught. Chain 9's Postgres
+# functions are the other half: a call to one of them outside the door skips
+# what the door does (the fold of repeated keys, the beat's inheritance).
+_DUCKDB_GONE = {
     "persist_run", "insert_journal_rows", "fetch_latest_run", "fetch_run_issues",
     "fetch_run_diffs", "fetch_baseline_run", "fetch_previous_run",
     "fetch_latest_run_by_id", "fetch_last_success_ages",
 }
-_ROUTER = {"core/data_quality.py", "core/dq_journal.py", "core/pg_dq_journal_write.py"}
-# Each exemption, with what makes it one:
-# - `fetch_last_success_ages` inside a connection two callers already hold:
-#   `get_stats` (whose answer `/api/health` replaces through
-#   `dq_journal.reads_postgres`) and the catch-up (which replaces it after
-#   the block). A test below holds each replacement to being there.
-_EXEMPT_CALLS = {
-    ("core/duckdb_store.py", "fetch_last_success_ages"),
-    ("core/scheduler.py", "fetch_last_success_ages"),
+_CHAIN_FUNCS = {
+    "set_digest_marker", "latest_run", "run_by_id", "previous_run", "baseline_run",
+    "run_issues", "run_diffs", "last_success_ages", "digest_marker",
 }
+_DOOR_FUNCS = _DUCKDB_GONE | _CHAIN_FUNCS
+_ROUTER = {"core/data_quality.py", "core/dq_journal.py", "core/pg_dq_journal_write.py"}
+# Calls allowed outside the door, each with what makes it one. None since
+# S14-10: the two that read DuckDB's ages in place (`get_stats` and the
+# catch-up) stopped reading them.
+_EXEMPT_CALLS: set = set()
 # SQL naming the journal: the router, the stores' own machinery (DDL,
 # migrations, the hourly copy and its comparison, the snapshot validation;
 # the copy-back went with step 14's S14-04), the Postgres-side readers that
 # already read the writer (chain 1's preflight, the standing invariants). The
 # one that gates on the hourly copy's age drops that gate under
 # `pg_dq_journal_write.reads_postgres()` — the copy stands down with the
-# chain — which `TestChainOnesPreflight` here holds it to. Chain 7b's goals
-# dry run was the second, and was retired with the bridge it measured (chain
-# 7b-4).
+# chain. Chain 7b's goals dry run was the second, and was retired with the
+# bridge it measured (chain 7b-4).
 _SQL_ALLOWED = _ROUTER | {
     "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
     "core/snapshot_validation.py",
@@ -194,33 +185,46 @@ def _walk_offenders():
 
 class TestTheOneDoor:
     def test_nothing_goes_round_the_router(self):
-        """Mutation: `persist_run(conn, ...)` back in `_run_dq_integrity`, or
-        `SELECT ... FROM data_quality_runs` added to `web/routes/api/health.py`
-        — under `postgres` either writes or reads the store that stopped being
-        the journal's writer, and nothing else would notice."""
+        """Mutation: `persist_run(conn, ...)` back in `_run_dq_integrity`,
+        `pg_dq_journal_write.persist_run(...)` called there directly (the fold
+        of repeated keys skipped), or `SELECT ... FROM data_quality_runs`
+        added to `web/routes/api/health.py`."""
         assert _walk_offenders() == []
 
     def test_the_walk_sees_a_call_and_a_statement(self):
         tree = ast.parse(
             "def f(conn):\n"
             "    persist_run(conn, layer='x')\n"
+            "    chain.latest_run(conn, 'integrity')\n"
             "    conn.execute('SELECT run_id FROM data_quality_runs')\n"
             "    k = 'dq_digest_last_sent'\n")
-        assert [n for n, _ in _door_calls(tree)] == ["persist_run"]
+        assert [n for n, _ in _door_calls(tree)] == ["persist_run", "latest_run"]
         assert {k for k, _ in _journal_strings(tree)} == {"sql", "marker"}
 
-    def test_each_exemption_replaces_duckdbs_answer_under_postgres(self):
-        """The two callers allowed to read DuckDB's ages in place must swap in
-        Postgres's while the chain writes there. Mutation: drop either swap."""
+    def test_duckdbs_writer_and_readers_of_the_journal_are_gone(self):
+        """S14-10 deleted them. Mutation: put `fetch_last_success_ages` (or
+        any of them) back in `core/data_quality.py`."""
+        from core import data_quality
+
+        assert not {n for n in _DUCKDB_GONE if hasattr(data_quality, n)}
+        assert not hasattr(dq_journal, "_DuckReader")
+        assert not hasattr(dq_journal, "writes_postgres")
+        assert not hasattr(dq_journal, "reads_postgres")
+
+    def test_the_two_callers_of_the_ages_ask_postgres_alone(self):
+        """The catch-up and `/api/health` used to read DuckDB's ages in place
+        and swap Postgres's in. Mutation: hand `_journal_ages` a block again,
+        or read the ages out of a DuckDB connection in the catch-up."""
         import inspect
 
         from core import scheduler
         from web.routes.api import health
 
         catchup = inspect.getsource(scheduler.BackgroundScheduler._schedule_catchup_runs)
-        assert "dq_journal.reads_postgres()" in catchup
-        assert "dq_journal.last_success_ages_pg()" in catchup
-        assert "_journal_ages(data_quality)" in inspect.getsource(health.health_check)
+        assert catchup.count("dq_journal.last_success_ages_pg()") == 2
+        assert "fetch_last_success_ages" not in catchup
+        assert "_journal_ages()" in inspect.getsource(health.health_check)
+        assert list(inspect.signature(health._journal_ages).parameters) == []
 
     def test_one_spelling_of_the_marker_key(self):
         from core import scheduler
@@ -229,20 +233,12 @@ class TestTheOneDoor:
                 == chain.DIGEST_MARKER_KEY == chain.CHAIN_MARKER_KEYS[0])
 
 
-# ─── duckdb: the default, byte for byte ──────────────────────────────────────
+# ─── The writer: Postgres, and nothing after it ──────────────────────────────
 
 
-# ─── postgres: the writer, then the shadow ───────────────────────────────────
-
-
-class _Recorder:
-    def __init__(self):
-        self.events = []
-
-
-def _fake_chain_writer(monkeypatch, rec, *, fail=None, run_id=41):
+def _fake_chain_writer(monkeypatch, events, *, fail=None, run_id=41):
     async def persist_run(values, issues, discrepancies):
-        rec.events.append("postgres")
+        events.append("postgres")
         if fail:
             raise fail
         return journal_rows(run_id, values, issues, discrepancies)
@@ -250,68 +246,35 @@ def _fake_chain_writer(monkeypatch, rec, *, fail=None, run_id=41):
     monkeypatch.setattr(chain, "persist_run", persist_run)
 
 
-def _record_duckdb(store, rec):
-    real = store.connection
-
-    def connection():
-        rec.events.append("duckdb")
-        return real()
-
-    store.connection = connection
-
-
-class TestUnderPostgres:
+class TestTheWriter:
     @pytest.mark.asyncio
-    async def test_postgres_commits_first_then_duckdb_is_handed_the_same_rows(
-            self, flag, store, monkeypatch):
-        """Mutation: write DuckDB first — a Postgres failure would then leave a
-        run only DuckDB holds, the one state `compare_shadow` calls a defect."""
-        flag("postgres")
-        rec = _Recorder()
-        _fake_chain_writer(monkeypatch, rec, run_id=41)
-        _record_duckdb(store, rec)
-        assert await dq_journal.journal_run(store, **_kwargs()) == 41
-        assert rec.events == ["postgres", "duckdb"]
-        async with store.connection() as conn:
-            assert fetch_latest_run(conn)["run_id"] == 41
+    @pytest.mark.parametrize("value", [None, "duckdb", "postgres", "pgsql-typo"])
+    async def test_the_run_goes_to_postgres_alone_and_its_id_comes_back(
+            self, flag, no_duckdb, monkeypatch, value):
+        """Whatever the flag says, no DuckDB half after it. Mutation: put a
+        shadow write back after the Postgres commit, or route by the flag."""
+        flag(value)
+        events = []
+        _fake_chain_writer(monkeypatch, events, run_id=41)
+        assert await dq_journal.journal_run(**_kwargs()) == 41
+        assert events == ["postgres"]
+        assert not no_duckdb.await_count
 
     @pytest.mark.asyncio
-    async def test_a_postgres_failure_raises_and_writes_nothing_to_duckdb(
-            self, flag, store, monkeypatch):
-        """Mutation: fall back to DuckDB on a Postgres error."""
-        flag("postgres")
-        rec = _Recorder()
-        _fake_chain_writer(monkeypatch, rec, fail=ConnectionRefusedError("down"))
-        _record_duckdb(store, rec)
+    async def test_a_postgres_failure_raises(self, flag, no_duckdb, monkeypatch):
+        """Mutation: swallow it, or fall back to DuckDB on a Postgres error."""
+        events = []
+        _fake_chain_writer(monkeypatch, events, fail=ConnectionRefusedError("down"))
         with pytest.raises(ConnectionRefusedError):
-            await dq_journal.journal_run(store, **_kwargs())
-        assert rec.events == ["postgres"]
-
-    @pytest.mark.asyncio
-    async def test_a_duckdb_failure_is_counted_and_the_id_still_returned(
-            self, flag, store, monkeypatch):
-        """Mutation: re-raise the shadow's failure — the run is in Postgres,
-        and the job would log "persist failed" and page without its run id."""
-        flag("postgres")
-        rec = _Recorder()
-        _fake_chain_writer(monkeypatch, rec, run_id=5)
-        # A run DuckDB already holds under id 5: the shadow's INSERT collides.
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO data_quality_runs (run_id, started_at, as_of, "
-                         "window_start, window_end, layer, status) VALUES "
-                         "(5, ?, ?, ?, ?, 'x', 'PASS')", [NOW, NOW, DAY, DAY])
-        assert await dq_journal.journal_run(store, **_kwargs()) == 5
-        failures = shadow_writes.failures_of(chain.CHAIN)
-        assert failures["count"] == 1 and failures["last_error_class"]
+            await dq_journal.journal_run(**_kwargs())
+        assert events == ["postgres"]
 
     @pytest.mark.asyncio
     async def test_a_naive_timestamp_is_refused_before_the_latch_and_the_pool(
             self, flag, monkeypatch):
-        """DuckDB reads a naive stamp as Kyiv local time and asyncpg as UTC, so
-        one value would land three hours apart in the two stores. Mutation:
-        accept it — or refuse it only after `_latch()`, which spends a
-        rollback on a write that never happens."""
-        flag("postgres")
+        """asyncpg reads a naive stamp as UTC, so a Kyiv wall clock would land
+        three hours off. Mutation: accept it — or refuse it only after
+        `_latch()`, which spends a rollback on a write that never happens."""
         pool = AsyncMock(side_effect=AssertionError("asked for a pool"))
         monkeypatch.setattr("core.pg.get_pool", pool)
         naive = datetime(2026, 10, 1, 7, 0)
@@ -322,10 +285,9 @@ class TestUnderPostgres:
         assert not pool.await_count
         assert not chain.chain_latch.marker_path(chain.CHAIN).exists()
 
-    def test_both_stores_are_handed_floats_and_ints(self):
-        """asyncpg's float8 and DuckDB's DOUBLE read the same float; a Decimal
-        from a rollup would reach one of them as a Decimal. Mutation: hand the
-        raw value on."""
+    def test_postgres_is_handed_floats_and_ints(self):
+        """asyncpg's float8 reads a float; a Decimal from a rollup would reach
+        it as a Decimal. Mutation: hand the raw value on."""
         from decimal import Decimal
 
         d = Discrepancy(month="2026-09", source_id=4,
@@ -340,21 +302,17 @@ class TestUnderPostgres:
         assert rows.run[0] == 9 and rows.run_id == 9
 
     @pytest.mark.asyncio
-    async def test_the_beat_goes_to_postgres_then_duckdb(self, flag, store, monkeypatch):
-        flag("postgres")
-        rec = _Recorder()
+    async def test_the_beat_goes_to_postgres_alone(self, flag, no_duckdb, monkeypatch):
+        """Mutation: write DuckDB's `sync_metadata` after it again."""
+        events = []
 
         async def set_digest_marker(value):
-            rec.events.append(("postgres", value))
+            events.append(("postgres", value))
 
         monkeypatch.setattr(chain, "set_digest_marker", set_digest_marker)
-        _record_duckdb(store, rec)
-        await dq_journal.mark_digest_sent(store, "2026-10-01T06:00:00+00:00")
-        assert rec.events == [("postgres", "2026-10-01T06:00:00+00:00"), "duckdb"]
-        async with store.connection() as conn:
-            assert conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
-                                [dq_journal.DIGEST_MARKER_KEY]).fetchone()[0] == \
-                "2026-10-01T06:00:00+00:00"
+        await dq_journal.mark_digest_sent("2026-10-01T06:00:00+00:00")
+        assert events == [("postgres", "2026-10-01T06:00:00+00:00")]
+        assert not no_duckdb.await_count
 
 
 # ─── Readers follow the writer ───────────────────────────────────────────────
@@ -372,9 +330,10 @@ PG_ISSUES = [{"check_name": "from_postgres", "table_name": "t", "severity": "WAR
 
 @pytest.fixture
 def pg_journal(monkeypatch):
-    """The chain's Postgres readers, answering from a fixed journal that
-    DuckDB does not hold — so a reader that read DuckDB is visible."""
-    state = {"marker": "2026-09-30T06:00:00+00:00", "raise": None, "reads": 0}
+    """The chain's Postgres readers, answering from a fixed journal, and the
+    copy of DuckDB's `sync_metadata` the beat is inherited from."""
+    state = {"marker": "2026-09-30T06:00:00+00:00", "raise": None, "reads": 0,
+             "copy": {}, "copy_asked": []}
 
     @asynccontextmanager
     async def reading():
@@ -402,139 +361,158 @@ def pg_journal(monkeypatch):
     async def digest_marker(conn):
         return state["marker"]
 
+    async def values_on(conn, keys):
+        state["copy_asked"].append(sorted(keys))
+        return {k: v for k, v in state["copy"].items() if k in keys}
+
     for name, fn in dict(reading=reading, latest_run=latest_run,
                          baseline_run=baseline_run, run_issues=run_issues,
                          run_diffs=run_diffs, last_success_ages=last_success_ages,
                          digest_marker=digest_marker).items():
         monkeypatch.setattr(chain, name, fn)
+    monkeypatch.setattr("core.pg_frozen_metadata.values_on", values_on)
     return state
 
 
-class TestReadersFollowTheWriter:
+class TestReadersReadPostgres:
     @pytest.mark.asyncio
-    async def test_the_digest_reads_postgres(self, flag, store, pg_journal):
-        """Mutation: leave the digest on DuckDB — the morning message would
-        report the journal of a store that stopped being written."""
-        flag("postgres")
-        last, sections = await dq_journal.digest_inputs(store, ("integrity",), NOW)
+    async def test_the_digest_reads_postgres(self, flag, no_duckdb, pg_journal):
+        """Mutation: read the digest's journal anywhere else."""
+        last, sections = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime.fromisoformat(pg_journal["marker"])
         assert sections[0].run["run_id"] == 900
         assert [i["check_name"] for i in sections[0].issues] == ["from_postgres"]
         assert pg_journal["sent_at"] == last
+        assert pg_journal["copy_asked"] == []       # the beat was there
 
     @pytest.mark.asyncio
-    async def test_the_data_quality_endpoint_reads_postgres(self, flag, store, pg_journal):
-        flag("postgres")
-        body = await dq_journal.health_runs(store)
+    async def test_the_data_quality_endpoint_reads_postgres(self, flag, no_duckdb,
+                                                            pg_journal):
+        body = await dq_journal.health_runs()
         assert body["integrity"]["last_run"]["run_id"] == 900
         assert body["integrity"]["issues"] == PG_ISSUES
 
     @pytest.mark.asyncio
     async def test_the_canarys_ages_come_from_postgres(self, flag, pg_journal):
-        """Mutation: keep `get_stats`' DuckDB ages under postgres — the canary
-        would judge a journal nobody writes first."""
+        """Mutation: publish anything but Postgres's ages."""
         from web.routes.api import health
 
-        flag("postgres")
         health._journal_ages_cache.update(data=None, expires_at=0)
-        ages = await health._journal_ages({"integrity": {"age_seconds": 999}})
+        ages = await health._journal_ages()
         assert ages["integrity"] == {"last_success_at": "pg", "age_seconds": 7}
 
     @pytest.mark.asyncio
-    async def test_a_latched_chain_reads_postgres_whatever_the_flag(
-            self, flag, store, pg_journal):
-        flag("duckdb")
-        chain.chain_latch.latch(chain.CHAIN)
-        try:
-            assert (await dq_journal.health_runs(store))["integrity"]["last_run"]["run_id"] == 900
-        finally:
-            chain.chain_latch.release(chain.CHAIN)
+    @pytest.mark.parametrize("value", [None, "duckdb", "pgsql-typo"])
+    async def test_no_flag_routes_the_reads(self, flag, no_duckdb, pg_journal, value):
+        """Unlatched, at a flag that once kept the readers on DuckDB, or one
+        nobody can read: Postgres answers. Mutation: route by the flag."""
+        flag(value)
+        assert (await dq_journal.health_runs())["integrity"]["last_run"]["run_id"] == 900
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
+        assert last == datetime.fromisoformat(pg_journal["marker"])
 
 
 class TestNoFallback:
     @pytest.mark.asyncio
-    async def test_an_unreachable_postgres_fails_the_digest(self, flag, store, pg_journal):
+    async def test_an_unreachable_postgres_fails_the_digest(self, flag, no_duckdb,
+                                                           pg_journal):
         """Mutation: wrap the Postgres read in a DuckDB fallback — the journal's
         writer failing would then read as "journal fine"."""
-        flag("postgres")
         pg_journal["raise"] = ConnectionRefusedError("down")
         with pytest.raises(ConnectionRefusedError):
-            await dq_journal.digest_inputs(store, ("integrity",), NOW)
+            await dq_journal.digest_inputs(("integrity",), NOW)
         with pytest.raises(ConnectionRefusedError):
-            await dq_journal.health_runs(store)
+            await dq_journal.health_runs()
 
     @pytest.mark.asyncio
     async def test_a_journal_lost_after_the_beat_still_fails_the_digest(
-            self, flag, store, pg_journal, monkeypatch):
+            self, flag, no_duckdb, pg_journal, monkeypatch):
         """The beat answered and the runs did not — a connection lost between
-        the two reads. Mutation: fall back to DuckDB for the sections alone —
-        the test above would still pass, since its first read already raises,
-        and the digest would print DuckDB's journal under Postgres's beat."""
-        flag("postgres")
-
+        the two reads. Mutation: answer the sections from anything else — the
+        test above would still pass, since its first read already raises."""
         async def lost(conn, layer=None):
             raise ConnectionResetError("lost mid-digest")
 
         monkeypatch.setattr(chain, "latest_run", lost)
         with pytest.raises(ConnectionResetError):
-            await dq_journal.digest_inputs(store, ("integrity",), NOW)
+            await dq_journal.digest_inputs(("integrity",), NOW)
 
     @pytest.mark.asyncio
-    async def test_the_canary_gets_no_block_rather_than_duckdbs(self, flag, pg_journal):
+    async def test_the_canary_gets_no_block_rather_than_another(self, flag, pg_journal):
         from web.routes.api import health
 
-        flag("postgres")
         health._journal_ages_cache.update(data=None, expires_at=0)
         pg_journal["raise"] = ConnectionRefusedError("down")
-        assert await health._journal_ages({"integrity": {"age_seconds": 1}}) is None
+        assert await health._journal_ages() is None
 
     @pytest.mark.asyncio
     async def test_a_failure_is_not_cached(self, flag, pg_journal):
         from web.routes.api import health
 
-        flag("postgres")
         health._journal_ages_cache.update(data=None, expires_at=0)
         pg_journal["raise"] = ConnectionRefusedError("down")
-        assert await health._journal_ages({}) is None
+        assert await health._journal_ages() is None
         pg_journal["raise"] = None
-        assert (await health._journal_ages({}))["integrity"]["age_seconds"] == 7
+        assert (await health._journal_ages())["integrity"]["age_seconds"] == 7
 
 
 class TestTheBeatIsInherited:
+    """H6 (2026-10-29): production holds `dq_digest_last_sent` in
+    `meta.chain_watermarks`. The inheritance stays for a key that went
+    missing, and since S14-10 it reads the copy whatever `KS_DUCKDB` says."""
+
     @pytest.mark.asyncio
-    async def test_absent_in_postgres_it_is_duckdbs(self, flag, store, pg_journal):
+    @pytest.mark.parametrize("duckdb", ["on", "off"])
+    async def test_absent_in_postgres_it_is_the_copys(self, flag, no_duckdb, pg_journal,
+                                                      monkeypatch, duckdb):
         """The first digest after a flip would otherwise restate every
-        standing finding as new. Mutation: no inherit."""
-        flag("postgres")
+        standing finding as new. Mutation: no inherit — or inherit only under
+        `KS_DUCKDB=off`, as before S14-10, or from DuckDB's own table."""
+        from core import duckdb_switch
+
+        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
+        duckdb_switch.configure_mode()
         pg_journal["marker"] = None
-        async with store.connection() as conn:
-            conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                         "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                         [dq_journal.DIGEST_MARKER_KEY, "2026-09-29T06:00:00+00:00"])
-        last, _ = await dq_journal.digest_inputs(store, ("integrity",), NOW)
+        pg_journal["copy"] = {dq_journal.DIGEST_MARKER_KEY: "2026-09-29T06:00:00+00:00"}
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime(2026, 9, 29, 6, tzinfo=timezone.utc)
+        assert pg_journal["copy_asked"] == [[dq_journal.DIGEST_MARKER_KEY]]
 
     @pytest.mark.asyncio
-    async def test_present_in_postgres_it_wins(self, flag, store, pg_journal):
-        flag("postgres")
-        async with store.connection() as conn:
-            conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                         "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                         [dq_journal.DIGEST_MARKER_KEY, "2026-09-01T06:00:00+00:00"])
-        last, _ = await dq_journal.digest_inputs(store, ("integrity",), NOW)
+    async def test_absent_in_both_it_is_no_beat(self, flag, no_duckdb, pg_journal):
+        pg_journal["marker"] = None
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
+        assert last is None
+
+    @pytest.mark.asyncio
+    async def test_present_in_postgres_it_wins(self, flag, no_duckdb, pg_journal):
+        pg_journal["copy"] = {dq_journal.DIGEST_MARKER_KEY: "2026-09-01T06:00:00+00:00"}
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime.fromisoformat(pg_journal["marker"])
+        assert pg_journal["copy_asked"] == []
 
 
-# ─── Rendering: the Postgres branch prints what DuckDB printed ───────────────
+# ─── Rendering: the Postgres rows print what DuckDB printed ──────────────────
+
+# DuckDB's answer, on the base `e3112a7d` (rule 9): `fetch_latest_run` on a
+# DuckDB connection set to Europe/Kyiv, after `insert_journal_rows` of
+# `journal_rows(3, run_values(**_kwargs()), [], [])`. Postgres's row, as asyncpg
+# hands it back in UTC, must still render as this.
+DUCKDB_RENDERED_RUN = {
+    "api_calls_used": 0, "as_of": "2026-10-01T10:30:00+03:00", "critical_count": 1,
+    "discrepancies_count": 1, "duration_ms": 3000,
+    "ended_at": "2026-10-01T10:30:00+03:00", "error_message": None,
+    "integrity_issues_count": 1, "layer": "integrity", "run_id": 3,
+    "started_at": "2026-10-01T10:29:57+03:00", "status": "CRITICAL", "warn_count": 1,
+    "window_end": "2026-10-01", "window_start": "2026-10-01",
+}
 
 
 class TestOneRendering:
-    @pytest.mark.asyncio
-    async def test_a_postgres_row_shapes_exactly_as_duckdbs(self, store, monkeypatch):
-        """asyncpg hands back UTC and DuckDB its session's zone; the digest
-        prints `started_at[:16]`, so an unconverted Postgres branch would date
-        every run three hours early in Kyiv. Mutation: drop the conversion in
-        `_local`."""
+    def test_a_postgres_row_shapes_exactly_as_duckdbs_did(self, monkeypatch):
+        """asyncpg hands back UTC; the digest prints `started_at[:16]`, so an
+        unconverted row would date every run three hours early in Kyiv.
+        Mutation: drop the conversion in `_local`."""
         from zoneinfo import ZoneInfo
 
         from core.data_quality import run_dict
@@ -542,51 +520,35 @@ class TestOneRendering:
         monkeypatch.setattr(chain, "_ZONE", ZoneInfo("Europe/Kyiv"))
         values = run_values(**_kwargs())
         rows = journal_rows(3, values, [], [])
-        async with store.connection() as conn:
-            conn.execute("SET TimeZone = 'Europe/Kyiv'")
-            from core.data_quality import insert_journal_rows
-
-            insert_journal_rows(conn, rows)
-            duck = fetch_latest_run(conn)
-        # What asyncpg would hand back: the same instants, in UTC.
         pg_row = tuple(v.astimezone(timezone.utc) if isinstance(v, datetime) else v
                        for v in rows.run)
-        assert run_dict(chain._local(pg_row)) == duck
-        assert duck["started_at"].endswith("+03:00")
+        assert run_dict(chain._local(pg_row)) == DUCKDB_RENDERED_RUN
 
-    def test_the_zone_is_duckdbs_own_through_the_one_opener(self, monkeypatch):
-        """The probe goes through `duckdb_switch.open_file`, the one reach for
-        the driver the week of silence allows (test_duckdb_switch walks for
-        any other), and still reads DuckDB's session zone."""
-        import duckdb
+    @pytest.mark.parametrize("duckdb", ["on", "off"])
+    def test_the_zone_is_the_hosts_and_never_asks_duckdb(self, monkeypatch, duckdb):
+        """Whatever `KS_DUCKDB` says: under `on` the zone used to be asked of an
+        in-memory DuckDB through the one opener. Mutation: put the probe back."""
         from zoneinfo import ZoneInfo
 
         from core import duckdb_switch
 
         monkeypatch.setattr(chain, "_ZONE", None)
-        con = duckdb.connect(":memory:")
-        try:
-            expected = con.execute("SELECT current_setting('TimeZone')").fetchone()[0]
-        finally:
-            con.close()
-        assert chain._duckdb_zone() == ZoneInfo(expected)
-        assert duckdb_switch.opened() == {}
-
-    def test_under_off_the_zone_is_read_without_duckdb(self, monkeypatch):
-        """Under KS_DUCKDB=off the journal is read from Postgres and every row
-        converted through this zone; asking DuckDB for it would be refused and
-        counted as the file opened while off — CRITICAL, on every read of
-        the journal. Mutation: drop the `is_off()` branch in `_duckdb_zone`."""
-        from zoneinfo import ZoneInfo
-
-        from core import duckdb_switch
-
-        monkeypatch.setattr(chain, "_ZONE", None)
-        monkeypatch.setenv(duckdb_switch.ENV, "off")
+        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
         duckdb_switch.configure_mode()
         monkeypatch.setenv("TZ", "Europe/Kyiv")
-        assert chain._duckdb_zone() == ZoneInfo("Europe/Kyiv")
+        assert chain._zone() == ZoneInfo("Europe/Kyiv")
         assert duckdb_switch.opened() == {}
+        assert not hasattr(chain, "_duckdb_zone")
+
+    def test_the_zone_is_read_once(self, monkeypatch):
+        """Every row of every read goes through it; the host's file is read
+        once per process. Mutation: drop the cache."""
+        calls = []
+        monkeypatch.setattr(chain, "_ZONE", None)
+        monkeypatch.setattr(chain, "_host_zone", lambda: calls.append(1) or timezone.utc)
+        chain._zone()
+        chain._zone()
+        assert calls == [1]
 
     @pytest.mark.parametrize("tz", [None, "", "not/a zone"])
     def test_the_host_zone_falls_back_to_the_host(self, monkeypatch, tz):
@@ -703,20 +665,17 @@ class TestOneFindingPerKey:
         assert first.description == "journal blind\nwatchdogs blind"
 
     @pytest.mark.asyncio
-    async def test_postgres_is_handed_one_row_per_key(self, flag, store, monkeypatch):
-        """Under `postgres` the chain's writer is handed the folded list, and
-        DuckDB the same rows. Mutation: fold only on the duckdb branch."""
-        flag("postgres")
-        rec = _Recorder()
+    async def test_postgres_is_handed_one_row_per_key(self, flag, no_duckdb, monkeypatch):
+        """The chain's writer is handed the folded list, and the run's counts
+        are the folded ones. Mutation: fold after `run_values`, or not at all."""
         seen = []
 
         async def persist_run(values, issues, discrepancies):
-            seen.append([(i.check_name, i.table_name) for i in issues])
+            seen.append(([(i.check_name, i.table_name) for i in issues],
+                         values.integrity_issues_count))
             return journal_rows(7, values, issues, discrepancies)
 
         monkeypatch.setattr(chain, "persist_run", persist_run)
-        _record_duckdb(store, rec)
-        await dq_journal.journal_run(
-            store, **_kwargs(issues=[_twin(), _issue(), _twin()]))
-        assert seen == [[("chain_invariants_unwatched", "(write chains)"),
-                         ("pk_uniqueness_orders", "orders")]]
+        await dq_journal.journal_run(**_kwargs(issues=[_twin(), _issue(), _twin()]))
+        assert seen == [([("chain_invariants_unwatched", "(write chains)"),
+                          ("pk_uniqueness_orders", "orders")], 2)]

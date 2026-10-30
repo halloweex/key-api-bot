@@ -1,4 +1,10 @@
-"""Tests for evaluate_memory, the cgroup reader, and memory_samples.
+"""Tests for evaluate_memory, the cgroup reader, and the job that pages on them.
+
+`memory_samples`' own statements — the last sample across a recreate, the
+peak over a window, the prune — were proved here on DuckDB until step 14's
+S14-10 deleted DuckDB's writer and readers of them; the same cases run on
+Postgres in `tests/integration/test_watchdog_samples_pg.py`
+(`TestTheMemoryStatements`).
 
 Fixtures are production readings with the date they were taken, for the reason
 spelled out in test_disk_monitor.py: this suite exists because a previous one
@@ -12,22 +18,16 @@ from __future__ import annotations
 
 import math
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from core.data_quality import Severity
-from core.duckdb_store import DuckDBStore
 from core.memory_monitor import (
     CRITICAL_PCT,
     WARN_PCT,
     evaluate_memory,
-    fetch_last_sample,
-    fetch_peak_working_set_mb,
-    insert_sample,
-    prune_old_samples,
     read_cgroup_memory,
 )
 
@@ -255,12 +255,6 @@ class TestCgroupReader:
         assert read_cgroup_memory(str(tmp_path))["oom_kills"] == 2
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await s.connect()
-    return s
-
-
 def _sample(working_mb: float, cache_mb: float = 100, oom: int = 0) -> dict:
     return {
         "working_set": int(working_mb * MB),
@@ -268,90 +262,6 @@ def _sample(working_mb: float, cache_mb: float = 100, oom: int = 0) -> dict:
         "limit": LIVE_LIMIT,
         "oom_kills": oom,
     }
-
-
-class TestPersistence:
-    """The kernel forgets on recreate. This table is what remembers — and it is
-    what makes a kill detectable after the restart that erased the counter."""
-
-    @pytest.mark.asyncio
-    async def test_insert_then_fetch_last(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                insert_sample(conn, _sample(650))
-                last = fetch_last_sample(conn)
-            assert last["working_set_mb"] == pytest.approx(650, abs=1)
-            assert last["oom_kills"] == 0
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_empty_table_has_no_last_sample(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                assert fetch_last_sample(conn) is None
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_oom_survives_the_restart_that_reset_the_counter(self, tmp_path):
-        """The scenario this table exists for: a kill is recorded, the
-        container is recreated and the kernel counter goes back to zero. The
-        stored value is what the next sample compares against."""
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                insert_sample(conn, _sample(500, oom=0))
-                previous = fetch_last_sample(conn)["oom_kills"]
-            alert = evaluate_memory(
-                working_set_bytes=500 * MB, page_cache_bytes=0,
-                limit_bytes=LIVE_LIMIT, oom_kills=1, previous_oom_kills=previous,
-            )
-            assert alert is not None and alert.oom_kills_delta == 1
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_peak_is_the_max_over_the_window(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_sample(conn, _sample(500), sampled_at=now - timedelta(hours=20))
-                insert_sample(conn, _sample(5_300), sampled_at=now - timedelta(hours=10))
-                insert_sample(conn, _sample(650), sampled_at=now)
-                assert fetch_peak_working_set_mb(conn, hours=24) == pytest.approx(5_300, abs=1)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_peak_ignores_samples_outside_the_window(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_sample(conn, _sample(6_000), sampled_at=now - timedelta(days=3))
-                insert_sample(conn, _sample(650), sampled_at=now)
-                assert fetch_peak_working_set_mb(conn, hours=24) == pytest.approx(650, abs=1)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_prune_keeps_the_table_small(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_sample(conn, _sample(500), sampled_at=now - timedelta(days=20))
-                insert_sample(conn, _sample(650), sampled_at=now - timedelta(days=5))
-                deleted = prune_old_samples(conn, retention_days=14)
-                remaining = conn.execute("SELECT COUNT(*) FROM memory_samples").fetchone()[0]
-            assert deleted == 1
-            assert remaining == 1
-        finally:
-            await store.close()
 
 
 class TestTheWebWatchdogSendsWhatItJudges:
@@ -371,12 +281,11 @@ class TestTheWebWatchdogSendsWhatItJudges:
     def watch(self, monkeypatch):
         from unittest.mock import AsyncMock
 
-        from core import alerting, duckdb_store, memory_monitor, watchdog_samples
+        from core import alerting, memory_monitor, watchdog_samples
         from core.scheduler import BackgroundScheduler
 
         reading = {"mem": _sample(650)}
         monkeypatch.setattr(memory_monitor, "read_cgroup_memory", lambda: reading["mem"])
-        monkeypatch.setattr(duckdb_store, "get_store", AsyncMock(return_value=object()))
         # The previous stored sample: no kill recorded yet.
         monkeypatch.setattr(watchdog_samples, "memory_tick", AsyncMock(
             return_value={"last": {"oom_kills": 0}, "peak_24h": None}))
