@@ -38,7 +38,8 @@ needs_postgres = pytest.mark.skipif(
 # Derived first, so a DELETE never meets a row still referring to another.
 DERIVED = ("gold.daily_revenue", "silver.order_utm", "silver.orders")
 LANDED = ("bronze.order_products", "bronze.orders", "bronze.products",
-          "bronze.categories", "bronze.offer_stocks")
+          "bronze.categories", "bronze.offer_stocks", "bronze.buyers",
+          "bronze.managers")
 APP = ("app.manual_expenses", "app.revenue_goals")
 TABLES = DERIVED + LANDED + APP
 WATERMARKS = ("silver.orders", "gold.daily_revenue")
@@ -92,13 +93,17 @@ async def seed(
     orders: Iterable[Sequence] = (),
     lines: Iterable[Sequence] = (),
     stocks: Iterable[Sequence] = (),
+    buyers: Iterable[Sequence] = (),
+    managers: Iterable[Sequence] = (),
 ) -> None:
     """Bronze, as the landing writes it.
 
     `orders` are `(id, source_id, status_id, grand_total, ordered_at,
     buyer_id, manager_id, promocode)`, `lines` `(id, order_id, product_id,
-    name, quantity, price_sold)` and `stocks` `(id, sku, price,
-    purchased_price)`; categories and products in their table's order."""
+    name, quantity, price_sold)`, `stocks` `(id, sku, price,
+    purchased_price)`, `buyers` `(id, full_name, phone)` and `managers`
+    `(id, name)` — the two the dashboard's returns list joins (step 14,
+    S14-06); categories and products in their table's order."""
     await conn.executemany(
         "INSERT INTO bronze.categories (id, name, parent_id) VALUES ($1,$2,$3)",
         list(categories))
@@ -115,6 +120,11 @@ async def seed(
     await conn.executemany(
         "INSERT INTO bronze.offer_stocks (id, sku, price, purchased_price,"
         " quantity, reserve) VALUES ($1,$2,$3,$4,0,0)", list(stocks))
+    await conn.executemany(
+        "INSERT INTO bronze.buyers (id, full_name, phone) VALUES ($1,$2,$3)",
+        list(buyers))
+    await conn.executemany(
+        "INSERT INTO bronze.managers (id, name) VALUES ($1,$2)", list(managers))
 
 
 async def derive(pool) -> None:

@@ -1,38 +1,49 @@
-"""The rest of `/dashboard` means the same thing in DuckDB and Postgres.
+"""The rest of `/dashboard` answers in Postgres what DuckDB answered.
 
-`tests/unit/test_pg_dashboard_read.py` proves the bodies are one text and that
-nothing goes round the router. Necessary and not sufficient: identical SQL
-still means different things where the engines differ, and this tab has the
-one place where they differ in *shape* rather than in spelling.
+ONE ENGINE SINCE STEP 14 (S14-06)
+
+The dashboard reads Postgres and nothing else — its Gold primitives, its
+Silver escapes and everything `_dashboard_run` carries. Every call below is
+compared with a literal (`tests/integration/golden/dashboard.json`): DuckDB's
+answer on this file's fixture, pinned to 2026-09-15, recorded while the same
+run asserted Postgres — Silver and Gold derived from the same Bronze, the
+production path — answered each one equally (rule 9 of the step-14 plan; all
+92 agreed). The store's DuckDB connection is a trap, so an answer can only be
+Postgres's. `tests/unit/test_pg_dashboard_read.py` proves the bodies and that
+nothing goes round the router; `tests/unit/test_dashboard_routers_postgres_only.py`
+the refusal and the response's shape.
 
 THE DOUGHNUT READS TWO DIFFERENT THINGS
 
-Unfiltered it reads Gold, where DuckDB spells a channel as a column
-(`instagram_revenue`) and Postgres as a dimension (`source_id = 1`) over a
-table that also holds roll-up rows. Filtered it reads the order-lines level
-instead, because a category or brand is a fact about a line. Both branches are
-exercised, and with the same filters, so the comparison covers the switch as
-well as each side of it.
-
-THE POSTGRES GOLD IS DERIVED, NOT COPIED
-
-`core.pg_gold.rebuild_gold` — the production path — for
-`test_marketing_two_engines`' reason: copying DuckDB's Gold into Postgres'
-shape would be re-implementing the shape mapping inside the test, and the test
-would then agree with itself.
+Unfiltered it reads Gold, where DuckDB spelled a channel as a column
+(`instagram_revenue`) and Postgres spells it as a dimension (`source_id = 1`)
+over a table that also holds roll-up rows. Filtered it reads the order-lines
+level instead, because a category or brand is a fact about a line. Both
+branches are asked, and with the same filters.
 
 THE FIXTURE IS DELIBERATELY AWKWARD
 
 An order with **no line items** and real revenue (323 of those exist in
 production): the Gold branch counts it, the line-level branch cannot, and the
-two branches are supposed to disagree about it — so both engines must
-reproduce the same disagreement. A return, an order from a retired source that
-must reach no total, two categories tied on revenue so the ordering has a tie
-to break, an order whose buyer is in neither store and one with a NULL
-manager so both LEFT JOINs have a miss to survive,
-and a category two deep so the filter has descendants to walk.
+two branches are supposed to disagree about it. A return, an order from a
+retired source that must reach no total, an exhibition sale (source 5) that
+the summary answers with zeros and the trend with its money (the owner's
+decision 5 for step 14), a staff order (`internal`), an order in the previous
+period and one a year back so both comparisons have something to compare, a
+promocode, two categories tied on revenue so the ordering has a tie to break,
+an order whose buyer is in neither store and one with a NULL manager so both
+LEFT JOINs have a miss to survive, and a category two deep so the filter has
+descendants to walk.
 
-Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
+THE SEARCH INDEX, BELOW, STILL COMPARES TWO ENGINES
+
+`sync_to_meilisearch` reads under `KS_READ_SEARCH_INDEX`, which step 14 takes
+in S14-07; until then its tests keep the two-engine fixture (`both_engines`),
+which seeds this file's original dashboard fixture into both stores — and so
+does `tests/integration/test_chat_tools_two_engines.py`, which imports it with
+`_comparable`, `WINDOW` and `DSN`.
+
+Skipped without `KS_PG_DSN`; CI and `deploy/gate_with_stores.sh` supply one.
 """
 from __future__ import annotations
 
@@ -45,6 +56,10 @@ from unittest.mock import AsyncMock, patch
 
 from core.duckdb_constants import B2B_MANAGER_ID
 from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    call_key, comparable, derive, golden, seed, store_that_never_reaches_duckdb,
+    tab_in_postgres,
+)
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -202,42 +217,14 @@ async def both_engines(tmp_path, monkeypatch):
         await store.close()
 
 
-async def _both(store, monkeypatch, name, kwargs):
-    """Each engine once — and the Postgres leg with DuckDB made fatal.
-
-    These reads fall back to DuckDB when Postgres raises, so a comparison that
-    merely calls the method twice can pass while Postgres never answers: the
-    second call falls back and the two "engines" agree because they were the
-    same engine. `get_margin_trend` shipped that way and the gate was green.
-
-    **The DuckDB leg is not all DuckDB since step 14's S14-05**: a
-    `category_id` case resolves its category tree through the filter bar's
-    router, which reads Postgres alone (`_category_ids`), in both legs. The
-    fixture seeds the same categories into both stores, so the trees are
-    equal, but a literal S14-06 records from this leg for such a case holds
-    DuckDB's measures over Postgres's tree.
-    """
-    monkeypatch.delenv("KS_READ_DASHBOARD", raising=False)
-    duck = await getattr(store, name)(*WINDOW, **kwargs)
-
-    monkeypatch.setenv("KS_READ_DASHBOARD", "postgres")
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            f"{name} fell back to DuckDB — Postgres did not answer, so the "
-            f"comparison would have compared DuckDB with itself"
-        )
-
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres = await getattr(store, name)(*WINDOW, **kwargs)
-    monkeypatch.delenv("KS_READ_DASHBOARD", raising=False)
-    return duck, postgres
-
-
 def _comparable(value):
     """Money to six places. DuckDB divides a DECIMAL into a DOUBLE and
     Postgres into a NUMERIC, so the two legitimately differ in the last bits —
-    far below anything this tab renders, far above the noise."""
+    far below anything this tab renders, far above the noise.
+
+    No test here compares two engines any more; kept, with `both_engines`,
+    for `tests/integration/test_chat_tools_two_engines.py`, which imports
+    both (step 14's S14-07 takes the assistant's tools off DuckDB)."""
     if isinstance(value, bool):
         return value
     if isinstance(value, dict):
@@ -249,17 +236,81 @@ def _comparable(value):
     return value
 
 
+# ─── The dashboard, on Postgres alone (step 14, S14-06) ──────────────────────
+
+# Pinned: the answers are literals taken from DuckDB on this fixture, so the
+# calendar under them cannot move with the run.
+PINNED_TODAY = date(2026, 9, 15)
+NOW = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)   # midday Kyiv
+PINNED_WINDOW = (PINNED_TODAY - timedelta(days=30), PINNED_TODAY)
+STAFF_MANAGER = 34      # in neither the managers nor the classifications: `internal`
+
+# (order_id, source_id, grand_total, days_ago, is_return, manager_id, buyer_id,
+#  promocode) — the original seven, then the four the S14-06 recording added.
+DASHBOARD_ORDERS = [
+    (1, 1, 1200.0, 2, False, None, 7, None),
+    (2, 2, 600.0, 3, False, None, 7, "SAVE10"),
+    (3, 1, 400.0, 4, True, None, 999, None),     # a return whose buyer is in neither store
+    (4, 3, 900.0, 5, False, None, 7, None),      # source 3 retired — reaches nothing
+    (5, 4, 750.0, 6, False, None, 8, None),      # NO LINE ITEMS, and revenue
+    (6, 1, 300.0, 7, False, B2B_MANAGER_ID, 7, None),   # b2b, and a named manager
+    (7, 2, 500.0, 8, True, B2B_MANAGER_ID, 7, None),    # a b2b return
+    (8, 5, 450.0, 9, False, None, 8, None),      # the exhibition: decision 5
+    (9, 4, 350.0, 40, False, None, 8, None),     # the previous period
+    (10, 1, 220.0, 370, False, None, 7, None),   # a year back
+    (11, 1, 280.0, 10, False, STAFF_MANAGER, 7, None),  # internal
+]
+# (line_id, order_id, product_id, quantity, price_sold, sold_name), `LINES`'
+# shape: product 100 is sold under two names, and order 1 carries two BrandA
+# lines (100 and 400) — `COUNT(DISTINCT order_id)` counts it once.
+DASHBOARD_LINES = LINES + [
+    (9, 8, 300, 1, 450.0, "Lipstick"),
+    (10, 9, 400, 1, 350.0, "Toner"),
+    (11, 10, 100, 1, 220.0, "Serum"),
+    (12, 11, 200, 2, 140.0, "Ampoule"),
+]
+
+
+async def _populate(conn, pool):
+    await seed(
+        conn, categories=CATEGORIES, products=PRODUCTS, buyers=BUYERS,
+        managers=MANAGERS,
+        orders=[(oid, src, 19 if is_ret else 1, total, NOW - timedelta(days=days),
+                 buyer, manager, promo)
+                for oid, src, total, days, is_ret, manager, buyer, promo
+                in DASHBOARD_ORDERS],
+        lines=[(lid, oid, pid, sold, qty, price)
+               for lid, oid, pid, qty, price, sold in DASHBOARD_LINES])
+    await derive(pool)
+
+
+@pytest_asyncio.fixture
+async def in_postgres(tmp_path, monkeypatch):
+    """The dashboard's store, never connected: its DuckDB connection is a
+    trap, so an answer below can only be Postgres's."""
+    async with tab_in_postgres(DSN, monkeypatch, _populate):
+        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the dashboard")
+
+
+async def _answer(store, name, kwargs):
+    return await getattr(store, name)(*PINNED_WINDOW, **kwargs)
+
+
+GOLDEN = golden("dashboard")
+
 CALLS = (
     # The doughnut, Gold branch — no filters at all.
     ("get_sales_by_source", {}),
     ("get_sales_by_source", {"sales_type": "all"}),
     ("get_sales_by_source", {"sales_type": "b2b"}),
+    ("get_sales_by_source", {"sales_type": "internal"}),
     # …and the line-level branch, one filter each and then together.
     ("get_sales_by_source", {"category_id": 1}),        # a parent, two deep
     ("get_sales_by_source", {"category_id": 99999}),    # absent — was a 500
     ("get_sales_by_source", {"brand": "BrandA"}),
     ("get_sales_by_source", {"brand": "Unknown"}),      # the NULL-brand bucket
     ("get_sales_by_source", {"category_id": 1, "brand": "BrandA"}),
+    ("get_sales_by_source", {"promocode": "SAVE10"}),
     # The returns list.
     ("get_return_orders", {}),
     ("get_return_orders", {"sales_type": "all"}),
@@ -271,39 +322,101 @@ CALLS = (
     ("get_subcategory_breakdown", {"parent_category_name": "Nope"}),     # nothing
     ("get_subcategory_breakdown", {"parent_category_name": "Care", "brand": "BrandA"}),
     ("get_subcategory_breakdown", {"parent_category_name": "Care", "source_id": 1}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Care", "promocode": "SAVE10"}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Care", "sales_type": "all"}),
     # The three that came off `gold_daily_products`.
     ("get_top_products", {}),
     ("get_top_products", {"category_id": 1}),
     ("get_top_products", {"brand": "BrandA"}),
     ("get_top_products", {"limit": 2}),
     ("get_top_products", {"promocode": "NOPE"}),        # the old Silver branch
+    ("get_top_products", {"promocode": "SAVE10"}),
+    ("get_top_products", {"source_id": 1}),
+    ("get_top_products", {"sales_type": "all"}),
     ("get_product_performance", {}),
     ("get_product_performance", {"brand": "BrandA"}),
     ("get_product_performance", {"source_id": 1}),
     ("get_product_performance", {"sales_type": "all"}),
+    ("get_product_performance", {"promocode": "SAVE10"}),
     ("get_brand_analytics", {}),
     ("get_brand_analytics", {"sales_type": "all"}),
+    ("get_brand_analytics", {"sales_type": "b2b"}),
     ("get_brand_analytics", {"source_id": 1}),
     # The customer block: five statements, two of them over Gold where the
     # roll-up predicate decides whether every day is counted once or twice.
     ("get_customer_insights", {}),
     ("get_customer_insights", {"sales_type": "all"}),
     ("get_customer_insights", {"sales_type": "b2b"}),
+    ("get_customer_insights", {"sales_type": "internal"}),
     ("get_customer_insights", {"promocode": "NOPE"}),
+    ("get_customer_insights", {"promocode": "SAVE10"}),
+    ("get_customer_insights", {"source_id": 1, "brand": "BrandA"}),
+    # `/api/summary`: Gold, Gold by source, the zeros of decision 5, and the
+    # Silver escapes — a category or brand, a promocode.
+    ("get_summary_stats", {}),
+    ("get_summary_stats", {"sales_type": "all"}),
+    ("get_summary_stats", {"sales_type": "b2b"}),
+    ("get_summary_stats", {"sales_type": "internal"}),
+    ("get_summary_stats", {"source_id": 1}),
+    ("get_summary_stats", {"source_id": 2}),
+    ("get_summary_stats", {"source_id": 4}),
+    ("get_summary_stats", {"source_id": 1, "sales_type": "all"}),
+    ("get_summary_stats", {"source_id": 2, "sales_type": "b2b"}),
+    ("get_summary_stats", {"source_id": 3}),
+    ("get_summary_stats", {"source_id": 5}),
+    ("get_summary_stats", {"source_id": 5, "sales_type": "all"}),
+    ("get_summary_stats", {"source_id": 3, "brand": "Unknown"}),
+    ("get_summary_stats", {"category_id": 1}),               # a parent: the tree walk
+    ("get_summary_stats", {"category_id": 4}),               # a leaf root
+    ("get_summary_stats", {"category_id": 99999}),           # absent
+    ("get_summary_stats", {"brand": "BrandA"}),              # two lines in one order
+    ("get_summary_stats", {"brand": "Unknown"}),             # the NULL-brand bucket
+    ("get_summary_stats", {"promocode": "NOPE"}),            # no Gold column at all
+    ("get_summary_stats", {"promocode": "SAVE10"}),
+    ("get_summary_stats", {"brand": "BrandA", "source_id": 1}),
+    ("get_summary_stats", {"category_id": 1, "sales_type": "all"}),
+    ("get_summary_stats", {"brand": "BrandA", "sales_type": "b2b"}),
+    ("get_summary_stats", {"promocode": "SAVE10", "source_id": 5, "sales_type": "all"}),
+    # `/api/revenue/trend`: Gold, the order grain (a promocode, a source the
+    # dashboard does not ask Gold about), the lines, and both comparisons.
+    ("get_revenue_trend", {}),
+    ("get_revenue_trend", {"sales_type": "all"}),
+    ("get_revenue_trend", {"sales_type": "b2b"}),
+    ("get_revenue_trend", {"sales_type": "internal"}),
+    ("get_revenue_trend", {"source_id": 1}),
+    ("get_revenue_trend", {"source_id": 4, "sales_type": "all"}),
+    ("get_revenue_trend", {"source_id": 3}),
+    ("get_revenue_trend", {"source_id": 5}),
+    ("get_revenue_trend", {"source_id": 5, "sales_type": "all"}),   # Виставка: the order grain
+    ("get_revenue_trend", {"compare_type": "month_ago"}),
+    ("get_revenue_trend", {"compare_type": "year_ago"}),
+    ("get_revenue_trend", {"include_comparison": False}),
+    ("get_revenue_trend", {"category_id": 1}),
+    ("get_revenue_trend", {"brand": "BrandA"}),
+    ("get_revenue_trend", {"brand": "Unknown"}),
+    ("get_revenue_trend", {"promocode": "NOPE"}),            # the order-grain escape
+    ("get_revenue_trend", {"promocode": "SAVE10"}),
+    ("get_revenue_trend", {"brand": "BrandA", "promocode": "SAVE10"}),
+    ("get_revenue_trend", {"brand": "BrandA", "source_id": 1}),
+    ("get_revenue_trend", {"category_id": 1, "sales_type": "all"}),
+    ("get_revenue_trend", {"brand": "BrandA", "compare_type": "year_ago"}),
+    ("get_revenue_trend", {"brand": "BrandA", "include_comparison": False}),
+    ("get_revenue_trend", {"promocode": "SAVE10", "compare_type": "month_ago"}),
 )
 
 
-class TestTheTwoEnginesAgree:
+class TestPostgresAnswersWhatDuckDBAnswered:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "name,kwargs", CALLS,
-        ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
+        ids=[f"{n}{tuple(k.items()) if k else ''}" for n, k in CALLS],
     )
-    async def test_the_whole_result_is_identical(
-        self, both_engines, monkeypatch, name, kwargs,
-    ):
-        duck, postgres = await _both(both_engines, monkeypatch, name, kwargs)
-        assert _comparable(duck) == _comparable(postgres)
+    async def test_the_whole_result_is_the_literal(self, in_postgres, name, kwargs):
+        assert comparable(await _answer(in_postgres, name, kwargs)) == \
+            GOLDEN[call_key(name, kwargs)]
+
+    def test_every_literal_is_a_call_and_every_call_has_one(self):
+        assert set(GOLDEN) == {call_key(n, k) for n, k in CALLS}
 
 
 class TestTheTwoBranchesOfTheDoughnut:
@@ -312,11 +425,10 @@ class TestTheTwoBranchesOfTheDoughnut:
 
     @pytest.mark.asyncio
     async def test_gold_counts_the_order_with_no_lines_and_the_lines_do_not(
-        self, both_engines, monkeypatch,
+        self, in_postgres,
     ):
-        unfiltered, _ = await _both(both_engines, monkeypatch, "get_sales_by_source", {})
-        filtered, _ = await _both(
-            both_engines, monkeypatch, "get_sales_by_source", {"brand": "BrandA"})
+        unfiltered = await _answer(in_postgres, "get_sales_by_source", {})
+        filtered = await _answer(in_postgres, "get_sales_by_source", {"brand": "BrandA"})
 
         shopify_gold = dict(zip(unfiltered["labels"], unfiltered["revenue"]))
         shopify_lines = dict(zip(filtered["labels"], filtered["revenue"]))
@@ -325,34 +437,22 @@ class TestTheTwoBranchesOfTheDoughnut:
         )
         assert "Shopify" not in shopify_lines, (
             "the line-level branch cannot see an order with no lines, and that "
-            "is the difference both engines have to reproduce"
+            "is the difference the two branches have to keep"
         )
-
-    @pytest.mark.asyncio
-    async def test_both_engines_reproduce_that_difference(
-        self, both_engines, monkeypatch,
-    ):
-        for kwargs in ({}, {"brand": "BrandA"}):
-            duck, postgres = await _both(
-                both_engines, monkeypatch, "get_sales_by_source", kwargs)
-            assert _comparable(duck) == _comparable(postgres), kwargs
 
 
 class TestTheReturnsListJoinsThatCanMiss:
     @pytest.mark.asyncio
     async def test_a_missing_buyer_and_a_null_manager_survive_both_joins(
-        self, both_engines, monkeypatch,
+        self, in_postgres,
     ):
-        """Both engines LEFT JOIN here, and a port that turned one into an
-        inner join would silently drop the order — with no total moving to say
-        so. Production has no orphan buyers today, which is exactly why this
-        has to be asserted on the code rather than noticed in the data."""
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "get_return_orders", {"sales_type": "all"})
-        assert duck == postgres
-        ids = {r["id"] for r in postgres}
-        assert 3 in ids, "the return whose buyer is missing was dropped"
-        by_id = {r["id"]: r for r in postgres}
+        """Both joins are LEFT, and a port that turned one into an inner join
+        would silently drop the order — with no total moving to say so.
+        Production has no orphan buyers today, which is exactly why this has
+        to be asserted on the code rather than noticed in the data."""
+        returns = await _answer(in_postgres, "get_return_orders", {"sales_type": "all"})
+        by_id = {r["id"]: r for r in returns}
+        assert 3 in by_id, "the return whose buyer is missing was dropped"
         assert by_id[3]["buyerName"] is None
         assert by_id[3]["managerName"] is None
         assert by_id[7]["managerName"] == "Wholesale"
@@ -367,50 +467,39 @@ class TestTheTwoCorrectionsTheGoldPathCarried:
     """
 
     @pytest.mark.asyncio
-    async def test_a_product_sold_under_two_names_is_one_row(
-        self, both_engines, monkeypatch,
-    ):
+    async def test_a_product_sold_under_two_names_is_one_row(self, in_postgres):
         """Product 100 ships as "Serum" and once as "Serum — renamed".
         Grouped by the sold name it is two products; grouped by id it is one,
         and its revenue is the sum."""
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "get_product_performance", {})
-        assert _comparable(duck) == _comparable(postgres)
-
-        labels = postgres["topByRevenue"]["labels"]
+        performance = await _answer(in_postgres, "get_product_performance", {})
+        labels = performance["topByRevenue"]["labels"]
         assert labels.count("Serum") == 1, labels
         assert "Serum — renamed" not in labels, (
             "the sold name reached the chart — the grouping is by name again"
         )
-        revenue = dict(zip(labels, postgres["topByRevenue"]["data"]))
-        # lines 1, 4 and 8: 2×500 + 1×500 + 1×500, the last on a return
+        revenue = dict(zip(labels, performance["topByRevenue"]["data"]))
+        # lines 1 and 4: 2×500 + 1×500 (line 8 is on a return, line 11 a
+        # year back)
         assert revenue["Serum"] == 1500.0, revenue
 
     @pytest.mark.asyncio
-    async def test_the_catalogue_name_is_what_is_shown(
-        self, both_engines, monkeypatch,
-    ):
+    async def test_the_catalogue_name_is_what_is_shown(self, in_postgres):
         """`MIN` over the sold names would have picked "Serum — renamed" for
         product 100 in DuckDB's collation. The catalogue name is the one a
-        reader recognises, and it is the same in both engines."""
-        _, postgres = await _both(
-            both_engines, monkeypatch, "get_product_performance", {})
-        assert "Serum" in postgres["topByRevenue"]["labels"]
+        reader recognises."""
+        performance = await _answer(in_postgres, "get_product_performance", {})
+        assert "Serum" in performance["topByRevenue"]["labels"]
 
     @pytest.mark.asyncio
-    async def test_one_order_with_two_lines_of_a_brand_counts_once(
-        self, both_engines, monkeypatch,
-    ):
+    async def test_one_order_with_two_lines_of_a_brand_counts_once(self, in_postgres):
         """Order 1 carries products 100 and 400, both BrandA. Summing Gold's
         per-product cells makes that two orders; it is one."""
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "get_brand_analytics", {})
-        assert _comparable(duck) == _comparable(postgres)
-
-        by_brand = dict(zip(postgres["topByRevenue"]["labels"],
-                            postgres["topByRevenue"]["orders"]))
+        brands = await _answer(in_postgres, "get_brand_analytics", {})
+        by_brand = dict(zip(brands["topByRevenue"]["labels"],
+                            brands["topByRevenue"]["orders"]))
         # BrandA appears on orders 1 and 2 — order 7 is a return, order 4 is a
-        # retired source. Two, not the three lines that carry it.
+        # retired source, order 9 the previous period. Two, not the three
+        # lines that carry it.
         assert by_brand["BrandA"] == 2, by_brand
 
 
@@ -425,19 +514,14 @@ class TestTheBlendedAov:
     """
 
     @pytest.mark.asyncio
-    async def test_a_day_with_three_sales_types_reports_the_blend(
-        self, both_engines, monkeypatch,
-    ):
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "get_customer_insights", {"sales_type": "all"})
-        assert _comparable(duck) == _comparable(postgres)
-
-        series = postgres["aovTrend"]["datasets"][0]["data"]
-        labels = postgres["aovTrend"]["labels"]
-        # The fixture puts a retail order and a b2b order on different days,
-        # so the blend is exercised by the totals rather than by one cell:
-        # every non-zero point must lie between the smallest and largest
-        # per-order value the fixture contains.
+    async def test_a_day_with_three_sales_types_reports_the_blend(self, in_postgres):
+        insights = await _answer(in_postgres, "get_customer_insights", {"sales_type": "all"})
+        series = insights["aovTrend"]["datasets"][0]["data"]
+        labels = insights["aovTrend"]["labels"]
+        # The fixture puts each sales type's orders on different days, so the
+        # blend is exercised by the totals rather than by one cell: every
+        # non-zero point must lie between the smallest and largest per-order
+        # value the fixture contains.
         nonzero = [v for v in series if v]
         assert nonzero, "the window missed the fixture entirely"
         assert min(nonzero) >= 100.0 and max(nonzero) <= 1200.0, (
@@ -445,115 +529,21 @@ class TestTheBlendedAov:
             f"one sales type rather than the blend: {dict(zip(labels, series))}"
         )
 
-    @pytest.mark.asyncio
-    async def test_the_retail_case_is_unchanged(self, both_engines, monkeypatch):
-        """One row per date there, so the old and new queries agree — which is
-        why this went unnoticed: `retail` is the default."""
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "get_customer_insights", {})
-        assert _comparable(duck) == _comparable(postgres)
 
-
-# ─── The Silver-grain escapes of /summary and /trend (KS_READ_SILVER) ────────
-#
-# `KS_READ_GOLD` covers exactly the two Gold primitives. Every request Gold
-# cannot answer — a category or brand, a promocode, a source with no Gold
-# column — fell through to DuckDB Silver, so with a filter set the headline
-# number came from a different engine than without one. Stage 1's "16 of 16"
-# could not see it: it counted methods, and these are branches inside two
-# methods it had already counted.
-
-REVENUE_CALLS = (
-    ("get_summary_stats", {}),                               # the Gold path, still
-    ("get_summary_stats", {"category_id": 1}),               # a parent: the tree walk
-    ("get_summary_stats", {"category_id": 4}),               # a leaf root
-    ("get_summary_stats", {"category_id": 99999}),           # absent
-    ("get_summary_stats", {"brand": "BrandA"}),              # two lines in one order
-    ("get_summary_stats", {"brand": "Unknown"}),             # the NULL-brand bucket
-    ("get_summary_stats", {"promocode": "NOPE"}),            # no Gold column at all
-    ("get_summary_stats", {"brand": "BrandA", "source_id": 1}),
-    ("get_summary_stats", {"category_id": 1, "sales_type": "all"}),
-    ("get_summary_stats", {"brand": "BrandA", "sales_type": "b2b"}),
-    ("get_revenue_trend", {}),
-    ("get_revenue_trend", {"category_id": 1}),
-    ("get_revenue_trend", {"brand": "BrandA"}),
-    ("get_revenue_trend", {"brand": "Unknown"}),
-    ("get_revenue_trend", {"promocode": "NOPE"}),            # the order-grain escape
-    ("get_revenue_trend", {"source_id": 5}),                 # Виставка: no Gold column
-    ("get_revenue_trend", {"brand": "BrandA", "source_id": 1}),
-    ("get_revenue_trend", {"category_id": 1, "sales_type": "all"}),
-    ("get_revenue_trend", {"brand": "BrandA", "compare_type": "year_ago"}),
-    ("get_revenue_trend", {"brand": "BrandA", "include_comparison": False}),
-)
-
-# `KS_READ_LOOKUPS` was the third until step 14's S14-05: the category tree
-# reads Postgres in both legs now (see `_both`).
-_REVENUE_FLAGS = ("KS_READ_GOLD", "KS_READ_SILVER")
-
-
-async def _both_revenue(store, monkeypatch, name, kwargs):
-    """`_both`, for the two flags these two methods read.
-
-    Postgres leg with DuckDB made fatal, and for the same reason: `_pg_silver`
-    returns None on any failure, so a broken Postgres body falls back and a
-    plain double call compares DuckDB with itself — green, and proving nothing.
-    """
-    for flag in _REVENUE_FLAGS:
-        monkeypatch.delenv(flag, raising=False)
-    duck = await getattr(store, name)(*WINDOW, **kwargs)
-
-    for flag in _REVENUE_FLAGS:
-        monkeypatch.setenv(flag, "postgres")
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            f"{name}{kwargs} fell back to DuckDB — Postgres did not answer, so "
-            f"the comparison would have compared DuckDB with itself"
-        )
-
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres = await getattr(store, name)(*WINDOW, **kwargs)
-    for flag in _REVENUE_FLAGS:
-        monkeypatch.delenv(flag, raising=False)
-    return duck, postgres
-
-
-class TestTheSilverEscapesAgree:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "name,kwargs", REVENUE_CALLS,
-        ids=[f"{n}{tuple(k.items()) if k else ''}" for n, k in REVENUE_CALLS],
-    )
-    async def test_the_whole_result_is_identical(
-        self, both_engines, monkeypatch, name, kwargs,
-    ):
-        duck, postgres = await _both_revenue(both_engines, monkeypatch, name, kwargs)
-        assert _comparable(duck) == _comparable(postgres)
-
-
-class TestTheSilverFlagIsTheSwitch:
-    """`KS_READ_SILVER` ships off, and turning `KS_READ_GOLD` on must not be
-    enough to move a filtered request. If it were, the flag would be decoration
-    and "ships off" would be false the day this deploys."""
+class TestDecisionFive:
+    """The owner's decision 5 for step 14: `/api/summary` for source 5
+    (Виставка) answers zeros — DuckDB's Gold had no column for it — while the
+    trend for the same source shows its money from the order grain. A
+    correction is its own change; this holds that S14-06 is not it."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", ["get_summary_stats", "get_revenue_trend"])
-    async def test_gold_alone_leaves_a_filtered_request_on_duckdb(
-        self, both_engines, monkeypatch, name,
-    ):
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        monkeypatch.delenv("KS_READ_SILVER", raising=False)
-
-        calls = []
-        real = type(both_engines).connection
-
-        def _spy(self_, *a, **k):
-            calls.append(1)
-            return real(self_, *a, **k)
-
-        with patch.object(type(both_engines), "connection", _spy):
-            await getattr(both_engines, name)(*WINDOW, brand="BrandA")
-        assert calls, f"{name} with a brand never reached DuckDB with KS_READ_SILVER unset"
+    async def test_the_summary_is_zeros_while_the_trend_has_the_money(self, in_postgres):
+        summary = await _answer(in_postgres, "get_summary_stats",
+                                {"source_id": 5, "sales_type": "all"})
+        trend = await _answer(in_postgres, "get_revenue_trend",
+                              {"source_id": 5, "sales_type": "all"})
+        assert (summary["totalOrders"], summary["totalRevenue"]) == (0, 0)
+        assert round(sum(trend["revenue"]), 2) == 450.0
 
 
 # ─── The Meilisearch index (KS_READ_SEARCH_INDEX) ────────────────────────────

@@ -995,13 +995,17 @@ class TestTheManagersStep:
 
 
 def _read_walk():
-    """`(routers that ask, [(file, line, call) a hole statement is handed to],
-    [stray (file, line)])` over `core/` and `web/`.
+    """`(routers that read where the chain writes, [(file, line, call) a hole
+    statement is handed to], [stray (file, line)])` over `core/` and `web/`.
 
     A statement is a string constant carrying one of the chain's holes, not in
     an f-string (the Silver CASE renders its names, it is not routed) and not a
     write: the stats UPDATE is the writer's own body. Chain 7a's walk
-    (`test_goals_reads_follow_chain.py`) in miniature.
+    (`test_goals_reads_follow_chain.py`) in miniature. A router qualifies by
+    asking `reads_the_chain`, or — since step 14's S14-06, when
+    `_dashboard_run` lost its DuckDB tail and the branch on the chain with it
+    — by reading Postgres alone: it refuses a failure and reaches DuckDB
+    through nothing.
     """
     import pathlib
 
@@ -1026,9 +1030,23 @@ def _read_walk():
             stack.extend(ast.iter_child_nodes(node))
         return out
 
+    def dotted_calls(fn):
+        out = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and isinstance(node.func.value, ast.Name):
+                out.add(f"{node.func.value.id}.{node.func.attr}")
+        return out
+
+    def postgres_only(fn):
+        calls = dotted_calls(fn)
+        return ("read_fallback.refuse" in calls
+                and not calls & {"self.connection", "self._fetch_one",
+                                 "self._fetch_all"})
+
     routers = {fn.name for _r, tree in trees for fn in ast.walk(tree)
                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and "reads_the_chain" in own_calls(fn)}
+               and ("reads_the_chain" in own_calls(fn) or postgres_only(fn))}
 
     def is_statement(node):
         return (isinstance(node, ast.Constant) and isinstance(node.value, str)
@@ -1075,15 +1093,17 @@ def _read_walk():
 
 class TestEveryReadOfTheTablesFollowsTheChain:
     def test_the_walk_finds_the_reads_there_are(self):
-        """Non-vacuity: the dashboard's returns list joins `{managers}`."""
+        """Non-vacuity: the dashboard's returns list joins `{managers}`, and
+        its router reads Postgres alone since step 14's S14-06."""
         routers, sites, _stray = _read_walk()
         assert "_dashboard_run" in routers
         assert ("core/repositories/revenue.py", "_dashboard_run") in {
             (rel, name) for rel, _line, name in sites}
 
-    def test_each_is_handed_to_a_router_that_asks(self):
-        """Mutation: drop `reads_the_chain` from `_dashboard_run` — after the
-        flip that join would name managers out of a DuckDB nothing writes."""
+    def test_each_is_handed_to_a_router_that_reads_where_the_chain_writes(self):
+        """Mutation: give `_dashboard_run` back a DuckDB tail — it is no
+        longer Postgres-only, and the join would name managers out of a
+        DuckDB nothing writes."""
         routers, sites, _stray = _read_walk()
         wrong = [s for s in sites if s[2] not in routers]
         assert not wrong, wrong
@@ -1093,28 +1113,42 @@ class TestEveryReadOfTheTablesFollowsTheChain:
         assert not stray, stray
 
     @pytest.mark.asyncio
-    async def test_the_dashboard_join_reads_postgres_under_the_chain_without_a_fallback(
-            self, flags):
-        """`_RETURN_ORDERS_SQL` under the chain, with `KS_READ_DASHBOARD` at
-        duckdb: Postgres, and a Postgres failure raises."""
+    @pytest.mark.parametrize("switch", [None, "duckdb", "junk-s14-06"],
+                             ids=["unset", "duckdb", "junk"])
+    async def test_the_dashboard_join_reads_postgres_and_a_failure_is_refused(
+            self, flags, switch):
+        """`_RETURN_ORDERS_SQL`, whatever `KS_READ_DASHBOARD` says: Postgres,
+        and a Postgres failure is refused naming `dashboard` — counted, the
+        page's 503 — where until step 14's S14-06 the chain's branch let it
+        escape uncounted."""
         from unittest.mock import AsyncMock, patch
 
-        from core import chain_latch, pg_managers_write
+        from core import read_fallback
         from core.duckdb_store import DuckDBStore
         from core.repositories.revenue import _RETURN_ORDERS_SQL
 
-        flags.setenv("KS_READ_DASHBOARD", "duckdb")
-        chain_latch.latch(pg_managers_write.CHAIN)
+        if switch is None:
+            flags.delenv("KS_READ_DASHBOARD", raising=False)
+        else:
+            flags.setenv("KS_READ_DASHBOARD", switch)
         store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
         with patch("core.pg_dashboard_read.fetch",
                    new=AsyncMock(return_value=[(1,)])) as fetch:
             assert await store._dashboard_run(_RETURN_ORDERS_SQL.replace(
                 "{where}", "TRUE"), [5]) == [(1,)]
         assert "bronze.managers" in fetch.await_args.args[0]
-        with patch("core.pg_dashboard_read.fetch",
-                   new=AsyncMock(side_effect=OSError("down"))):
-            with pytest.raises(OSError):
-                await store._dashboard_run("SELECT name FROM {managers}", [])
+        down = OSError("down")
+        read_fallback.reset_counts()
+        try:
+            with patch("core.pg_dashboard_read.fetch",
+                       new=AsyncMock(side_effect=down)):
+                with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                    await store._dashboard_run("SELECT name FROM {managers}", [])
+            assert raised.value.surface == "dashboard"
+            assert raised.value.__cause__ is down
+            assert read_fallback.refusals()["dashboard"]["count"] == 1
+        finally:
+            read_fallback.reset_counts()
 
 
 # ─── The route ──────────────────────────────────────────────────────────────

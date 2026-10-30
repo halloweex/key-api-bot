@@ -1,0 +1,646 @@
+"""Step 14's S14-06: the dashboard asks Postgres and nothing else.
+
+`_dashboard_run` (the doughnut, the returns list, the subcategories, the
+three that left `gold_daily_products`, the customer block), the two Gold
+primitives (`_pg_gold_summary`, `_pg_gold_series`), the Silver escapes of
+`/api/summary` and `/api/revenue/trend` (`_pg_silver`) and the managers
+screen's year (`get_manager_sales_365d`) each used to choose an engine by a
+`KS_READ_*` switch (`KS_READ_DASHBOARD`, `KS_READ_GOLD`, `KS_READ_SILVER`),
+ask `read_fallback.no_address` about it, try Postgres, and on a failure call
+`read_fallback.fall_back` — which under `KS_READ_FALLBACK=off`, production's
+mode since 2026-10-09 and since S14-00 the only one, refused the read: a 503
+naming the surface, counted under `read_fallback_mode.refused`. The DuckDB
+tails below that call were reachable by nothing in production.
+
+So each keeps exactly the path production took: the Postgres read, and on any
+exception `raise read_fallback.refuse(surface, exc)`. What is held here,
+without a database:
+
+- the switch is not read — unset, `duckdb`, a typo or junk, the read goes to
+  Postgres and nothing reaches for the DuckDB store (step 13's readiness on
+  `/api/warehouse/status` still reads the three variables, as `reader:*`
+  keys, until S14-15 — `tests/unit/test_warehouse_cutover.py`);
+- a failure is the refusal `fall_back` made under `off`: the surface, the
+  count, the log line, the cause, and no fallback counted;
+- without `KS_PG_DSN` the pool's own refusal to guess a database is that
+  failure, so the answer is the same 503 — `no_address` named the switch in
+  the log, the cause names the DSN now;
+- junk in any of the three variables starts web and imports every module
+  (rule 3 of the plan);
+- the shape of what the card row and the chart receive: the summary's seven
+  keys, and the trend's labels, series, datasets, comparison and measure.
+
+The numbers are `tests/integration/test_dashboard_two_engines.py`'s, against a
+real Postgres and literals DuckDB answered before its side went; every route
+through the real app is `tests/unit/test_read_fallback_http.py`'s; that no
+engine call sits outside its `try` is `tests/unit/test_read_fallback_sites.py`'s
+rule 5.
+"""
+from __future__ import annotations
+
+import ast
+import importlib
+import logging
+import os
+import subprocess
+import sys
+from datetime import date
+from pathlib import Path
+from typing import List, Optional, Set
+from unittest.mock import AsyncMock
+
+import pytest
+
+from core import read_fallback
+
+ROOT = Path(__file__).resolve().parents[2]
+D1, D2 = date(2026, 8, 1), date(2026, 8, 3)
+
+MODULES = ("pg_dashboard_read", "pg_gold_read", "pg_silver_read")
+SWITCHES = ("KS_READ_DASHBOARD", "KS_READ_GOLD", "KS_READ_SILVER")
+SWITCH_VALUES = [None, "", "duckdb", "postgres", "postgress", "junk-s14-06"]
+
+
+def _dashboard(store):
+    return store._dashboard_run(
+        "SELECT 1 FROM {silver_orders} s LEFT JOIN {managers} m ON s.manager_id = m.id"
+        " WHERE s.id = ?", [7])
+
+
+def _silver(store):
+    return store._pg_silver("SELECT 1 FROM {order_lines} l WHERE l.order_id = ?", [7])
+
+
+def _gold_summary(store):
+    return store._pg_gold_summary(D1, D2, "retail", None)
+
+
+def _gold_series(store):
+    return store._pg_gold_series(D1, D2, "b2b", 4)
+
+
+def _managers(store):
+    return store.get_manager_sales_365d()
+
+
+# (reader, surface, module, function the reader calls, the switch it no longer
+# reads, how to call it, what the call must hand the engine: a table the
+# rendered statement names, or the arguments)
+READERS = [
+    ("_dashboard_run", "dashboard", "pg_dashboard_read", "fetch", "KS_READ_DASHBOARD",
+     _dashboard, "bronze.managers"),
+    ("_pg_silver", "dashboard", "pg_silver_read", "fetch", "KS_READ_SILVER",
+     _silver, "silver.order_lines"),
+    ("_pg_gold_summary", "dashboard", "pg_gold_read", "fetch_summary", "KS_READ_GOLD",
+     _gold_summary, (D1, D2, "retail", None)),
+    ("_pg_gold_series", "dashboard", "pg_gold_read", "fetch_series", "KS_READ_GOLD",
+     _gold_series, (D1, D2, "b2b", 4)),
+    ("get_manager_sales_365d", "managers", "pg_silver_read", "fetch", "KS_READ_SILVER",
+     _managers, "silver.orders"),
+]
+IDS = [r[0] for r in READERS]
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    """A store that is never connected, whose connection is a trap: nothing
+    here may reach for DuckDB, under any value of any switch."""
+    from core.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+
+    def trap(*_a, **_k):
+        raise AssertionError("a Postgres-only dashboard read reached for DuckDB")
+
+    for name in ("connection", "_fetch_one", "_fetch_all"):
+        monkeypatch.setattr(type(store), name, trap)
+    read_fallback.reset_counts()
+    yield store
+    read_fallback.reset_counts()
+    assert not (tmp_path / "never.duckdb").exists()
+
+
+# The trees web, the bot and the host tools run from.
+PRODUCTION_TREES = ("core", "web", "bot", "scripts", "deploy")
+CHAIN_5 = "core.pg_managers_write"
+QUESTION = "reads_the_chain"
+SHORT = CHAIN_5.rsplit(".", 1)[-1]
+
+
+def _absolute(node: ast.ImportFrom, relpath: str) -> str:
+    """The module an `ImportFrom` names, relative ones resolved against the
+    file's own package (`from .. import x` in `core/repositories/`)."""
+    if not node.level:
+        return node.module or ""
+    package = relpath[:-len(".py")].split("/")[:-1]
+    if node.level > 1:
+        package = package[:-(node.level - 1)]
+    return ".".join(package + ([node.module] if node.module else []))
+
+
+def asks_the_managers_chain(source: str, relpath: str) -> List[int]:
+    """The lines of `source` that refer to `core.pg_managers_write.reads_the_chain`,
+    called or not.
+
+    The module is: the name `pg_managers_write` however it was bound — an
+    import, `sys.modules`, a parameter, a `for` target — and any attribute of
+    that name (`core.pg_managers_write`, `self.pg_managers_write`); any name an
+    import binds to it (`from core import … as`, `import … as`, a relative
+    import); a call or a subscript with the module's name written out
+    (`importlib.import_module`, `__import__`, `sys.modules[…]`,
+    `sys.modules.get`); and any name assigned one of these (`=`, an annotated
+    assignment, `:=`), to a fixed point. The question is its attribute on the
+    module, a name from any import of it (aliased, relative or `*`), the
+    import itself, and `getattr` with the name written out.
+
+    File-wide, so an import inside a function counts everywhere, and a local
+    that shadows an alias reads as asking: too strict, never too lenient. Not
+    seen: the module under another name no assignment gives it (a parameter
+    or a `for` target named otherwise, a container, `vars()` or `__dict__`),
+    and a name computed at run time."""
+    tree = ast.parse(source)
+    own = relpath == CHAIN_5.replace(".", "/") + ".py"
+    modules: Set[str] = {SHORT}
+    names: Set[str] = {QUESTION} if own else set()
+    lines: List[int] = []
+
+    def names_it(node: Optional[ast.AST]) -> bool:
+        return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and node.value.split(".")[-1] == SHORT)
+
+    def is_chain_5(node: Optional[ast.AST]) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in modules
+        if isinstance(node, ast.Attribute):
+            return node.attr == SHORT
+        if isinstance(node, ast.Call):
+            return any(names_it(a) for a in node.args) or any(
+                names_it(k.value) for k in node.keywords)
+        if isinstance(node, ast.Subscript):
+            return names_it(node.slice)
+        return False
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            module = _absolute(n, relpath)
+            for a in n.names:
+                if f"{module}.{a.name}" == CHAIN_5:
+                    modules.add(a.asname or a.name)
+                elif module == CHAIN_5 and a.name in (QUESTION, "*"):
+                    names.add(a.asname or QUESTION)
+                    lines.append(n.lineno)
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name == CHAIN_5 and a.asname:
+                    modules.add(a.asname)
+
+    while True:
+        bound = set(modules)
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign) and is_chain_5(n.value):
+                bound |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+            elif (isinstance(n, (ast.AnnAssign, ast.NamedExpr))
+                  and isinstance(n.target, ast.Name) and is_chain_5(n.value)):
+                bound.add(n.target.id)
+        if bound == modules:
+            break
+        modules = bound
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in names:
+            lines.append(n.lineno)
+        elif isinstance(n, ast.Attribute) and n.attr == QUESTION and is_chain_5(n.value):
+            lines.append(n.lineno)
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+              and n.func.id == "getattr" and len(n.args) >= 2
+              and is_chain_5(n.args[0]) and isinstance(n.args[1], ast.Constant)
+              and n.args[1].value == QUESTION):
+            lines.append(n.lineno)
+    return sorted(set(lines))
+
+
+def _set(monkeypatch, switch, value):
+    if value is None:
+        monkeypatch.delenv(switch, raising=False)
+    else:
+        monkeypatch.setenv(switch, value)
+
+
+class TestTheSwitchIsNotRead:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", SWITCH_VALUES,
+                             ids=[repr(v) for v in SWITCH_VALUES])
+    @pytest.mark.parametrize(
+        "reader,surface,module,function,switch,call,handed", READERS, ids=IDS)
+    async def test_postgres_answers_whatever_it_says(
+        self, store, monkeypatch, reader, surface, module, function, switch,
+        call, handed, value,
+    ):
+        _set(monkeypatch, switch, value)
+        answer = [(1, "x", 2.0)]
+        engine = AsyncMock(return_value=answer)
+        monkeypatch.setattr(f"core.{module}.{function}", engine)
+
+        assert await call(store) == answer
+
+        args = engine.await_args.args
+        if isinstance(handed, tuple):
+            assert args == handed
+        else:
+            rendered, params = args
+            assert handed in rendered and "{" not in rendered
+            assert list(params) in ([7], [])
+        assert read_fallback.refusals() == {} and read_fallback.counts() == {}
+
+    @pytest.mark.parametrize("module", MODULES)
+    def test_the_module_carries_no_switch(self, module):
+        """Mutation: put `ENV`/`enabled`/`available` back — the sites walk
+        would then take the module for a switch, and a reader could start
+        asking it again."""
+        m = importlib.import_module(f"core.{module}")
+        assert not any(hasattr(m, name) for name in ("ENV", "enabled", "available"))
+
+    def test_the_walk_finds_none_of_them_a_switch(self):
+        from tests.unit.test_read_fallback_sites import read_switch_modules
+
+        assert not read_switch_modules() & set(MODULES)
+
+    def test_no_dashboard_reader_asks_the_managers_chain(self):
+        """`_dashboard_run` asked `pg_managers_write.reads_the_chain` for the
+        returns list's `{managers}` join until S14-06; with one path, the
+        question decides nothing, and nothing web, the bot or a host tool
+        runs refers to it — by attribute, by name, under an alias, through
+        `getattr`, `sys.modules` or `import_module` (`asks_the_managers_chain`,
+        whose docstring lists what it cannot see). The tests are not walked:
+        the parity pin asks every chain's `reads_the_chain` on purpose."""
+        found = []
+        for top in PRODUCTION_TREES:
+            for path in sorted((ROOT / top).rglob("*.py")):
+                if "frontend" in path.parts or "node_modules" in path.parts:
+                    continue
+                relpath = path.relative_to(ROOT).as_posix()
+                found += [f"{relpath}:{line}" for line in asks_the_managers_chain(
+                    path.read_text(encoding="utf-8"), relpath)]
+        assert not found, found
+
+    @pytest.mark.parametrize("relpath,source", [
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write\n"
+                     "def f(sql):\n    return pg_managers_write.reads_the_chain(sql)\n",
+                     id="attribute"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    from core.pg_managers_write import reads_the_chain\n"
+                     "    if reads_the_chain(sql):\n        return 1\n",
+                     id="by_name"),
+        pytest.param("web/routes/api/admin.py",
+                     "from core.pg_managers_write import reads_the_chain as chained\n"
+                     "def f(sql):\n    return chained(sql)\n",
+                     id="by_name_aliased"),
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write as m5\n"
+                     "def f(sql):\n    return m5.reads_the_chain(sql)\n",
+                     id="module_aliased"),
+        pytest.param("bot/handlers_legacy.py",
+                     "import core.pg_managers_write as m5\n"
+                     "ask = m5.reads_the_chain\n",
+                     id="import_as_handed_on"),
+        pytest.param("scripts/x.py",
+                     "import core.pg_managers_write\n"
+                     "def f(sql):\n    return core.pg_managers_write.reads_the_chain(sql)\n",
+                     id="dotted"),
+        pytest.param("core/repositories/revenue.py",
+                     "from .. import pg_managers_write\n"
+                     "def f(sql):\n    return pg_managers_write.reads_the_chain(sql)\n",
+                     id="relative_module"),
+        pytest.param("core/x.py",
+                     "from .pg_managers_write import reads_the_chain\n",
+                     id="relative_name"),
+        pytest.param("deploy/x.py",
+                     "from core.pg_managers_write import *\n"
+                     "def f(sql):\n    return reads_the_chain(sql)\n",
+                     id="star"),
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write\n"
+                     "def f(sql):\n"
+                     "    return getattr(pg_managers_write, 'reads_the_chain')(sql)\n",
+                     id="getattr"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib\n"
+                     "m5 = importlib.import_module('core.pg_managers_write')\n"
+                     "def f(sql):\n    return m5.reads_the_chain(sql)\n",
+                     id="import_module"),
+        # The second review: the pre-review walk caught the first of these by
+        # its bare name, and the name-resolving one passed all of them.
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    import sys\n    import core.pg_managers_write\n"
+                     "    pg_managers_write = sys.modules['core.pg_managers_write']\n"
+                     "    if pg_managers_write.reads_the_chain(sql):\n        pass\n",
+                     id="sys_modules_under_its_own_name"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(pg_managers_write, sql):\n"
+                     "    return pg_managers_write.reads_the_chain(sql)\n",
+                     id="a_parameter_under_its_own_name"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(modules, sql):\n"
+                     "    for pg_managers_write in modules:\n"
+                     "        pg_managers_write.reads_the_chain(sql)\n",
+                     id="a_for_target_under_its_own_name"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib, types\n"
+                     "def f(sql):\n"
+                     "    m5: types.ModuleType = importlib.import_module("
+                     "'core.pg_managers_write')\n"
+                     "    return m5.reads_the_chain(sql)\n",
+                     id="an_annotated_assignment"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib\n"
+                     "def f(sql):\n"
+                     "    return importlib.import_module("
+                     "'core.pg_managers_write').reads_the_chain(sql)\n",
+                     id="import_module_inline"),
+        pytest.param("core/repositories/revenue.py",
+                     "from importlib import import_module\n"
+                     "def f(sql):\n"
+                     "    return import_module('.pg_managers_write', 'core')"
+                     ".reads_the_chain(sql)\n",
+                     id="import_module_relative"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    return sys.modules['core.pg_managers_write']"
+                     ".reads_the_chain(sql)\n",
+                     id="sys_modules_inline"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    return sys.modules.get('core.pg_managers_write')"
+                     ".reads_the_chain(sql)\n",
+                     id="sys_modules_get"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    return __import__('core.pg_managers_write', "
+                     "fromlist=['reads_the_chain']).reads_the_chain(sql)\n",
+                     id="dunder_import"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    return __import__('core').pg_managers_write"
+                     ".reads_the_chain(sql)\n",
+                     id="dunder_import_of_the_package"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    return getattr(sys.modules['core.pg_managers_write'], "
+                     "'reads_the_chain')(sql)\n",
+                     id="getattr_over_sys_modules"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    if (m5 := sys.modules['core.pg_managers_write']):\n"
+                     "        return m5.reads_the_chain(sql)\n",
+                     id="a_walrus"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib\n"
+                     "def f(sql):\n"
+                     "    m6 = m5\n"
+                     "    return m6.reads_the_chain(sql)\n"
+                     "m5 = importlib.import_module('core.pg_managers_write')\n",
+                     id="an_alias_of_an_alias_defined_later"),
+    ])
+    def test_the_walk_sees_every_way_of_asking(self, relpath, source):
+        """Each form a router could ask in, the review's by-name one first
+        (`from core.pg_managers_write import reads_the_chain` inside
+        `_dashboard_run`, which the attribute-only walk passed), then the
+        second review's: the module bound or reached by its name written out,
+        which the name-resolving walk passed."""
+        assert asks_the_managers_chain(source, relpath)
+
+    @pytest.mark.parametrize("relpath,source", [
+        pytest.param("core/repositories/goals.py",
+                     "from core import pg_forecast_write, pg_goals_write\n"
+                     "def f(sql):\n"
+                     "    return (pg_goals_write.reads_the_chain(sql)\n"
+                     "            or pg_forecast_write.reads_the_chain(sql))\n",
+                     id="the_goal_chains"),
+        pytest.param("core/x.py",
+                     "from core.pg_goals_write import reads_the_chain\n"
+                     "def f(sql):\n    return reads_the_chain(sql)\n",
+                     id="another_chain_by_name"),
+        pytest.param("core/pg_managers_write.py",
+                     "def reads_the_chain(sql):\n    return True\n",
+                     id="its_own_definition"),
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write\n"
+                     "def f():\n"
+                     "    '''used to ask `pg_managers_write.reads_the_chain`'''\n"
+                     "    return pg_managers_write.reads_postgres()\n",
+                     id="a_docstring_and_another_question"),
+        pytest.param("core/repositories/goals.py",
+                     "import importlib, sys\n"
+                     "def f(sql):\n"
+                     "    return (sys.modules['core.pg_goals_write'].reads_the_chain(sql)\n"
+                     "            or importlib.import_module('core.pg_forecast_write')"
+                     ".reads_the_chain(sql))\n",
+                     id="another_chain_by_its_name_written_out"),
+        pytest.param("core/pg_derivation.py",
+                     "SIGNALLERS = {'core.pg_managers_write': 'set_manager_retail_status'}\n"
+                     "def f(m):\n    return m.reads_the_chain\n",
+                     id="the_module_named_in_data_and_another_name_asked"),
+    ])
+    def test_the_walk_passes_what_is_not_asking_it(self, relpath, source):
+        assert not asks_the_managers_chain(source, relpath)
+
+
+class TestAFailureIsTheRefusalOffMade:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reader,surface,module,function,switch,call,handed", READERS, ids=IDS)
+    async def test_a_503_naming_the_surface_counted_as_a_refusal(
+        self, store, monkeypatch, caplog, reader, surface, module, function, switch,
+        call, handed,
+    ):
+        down = OSError("connection refused")
+        monkeypatch.setattr(f"core.{module}.{function}", AsyncMock(side_effect=down))
+
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                await call(store)
+
+        assert raised.value.surface == surface
+        assert raised.value.__cause__ is down
+        assert read_fallback.refusals()[surface]["count"] == 1
+        assert read_fallback.counts() == {}
+        # `fall_back`'s line under off, word for word: `read_refused`'s lever
+        # greps "read refused", the soak a fallback by the phrase below.
+        assert (f"read refused: {surface} — its engine failed, and "
+                f"KS_READ_FALLBACK=off forbids answering from DuckDB "
+                f"(1 refused since start): connection refused") in caplog.text
+        assert "falling back to DuckDB" not in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reader,surface,module,function,switch,call,handed", READERS, ids=IDS)
+    async def test_no_dsn_is_the_same_refusal(
+        self, store, monkeypatch, reader, surface, module, function, switch,
+        call, handed,
+    ):
+        """No pool patched and no DSN: `core.pg.dsn()` refuses to guess a
+        database, and that is the failure refused. It was `no_address`'s
+        before, naming the switch; the HTTP answer is the same 503."""
+        from core import pg
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setattr(pg, "_pool", None)
+        monkeypatch.setenv(switch, "postgres")
+
+        with pytest.raises(read_fallback.ReadUnavailable) as raised:
+            await call(store)
+
+        assert raised.value.surface == surface
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert "KS_PG_DSN is not set" in str(raised.value.__cause__)
+        assert read_fallback.refusals()[surface]["count"] == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,kwargs,module,function", [
+        ("get_summary_stats", {}, "pg_gold_read", "fetch_summary"),
+        ("get_summary_stats", {"brand": "BrandA"}, "pg_silver_read", "fetch"),
+        ("get_revenue_trend", {}, "pg_gold_read", "fetch_series"),
+        ("get_revenue_trend", {"promocode": "X"}, "pg_silver_read", "fetch"),
+        ("get_return_orders", {}, "pg_dashboard_read", "fetch"),
+        ("get_customer_insights", {}, "pg_dashboard_read", "fetch"),
+    ], ids=["summary_gold", "summary_silver", "trend_gold", "trend_silver",
+            "returns", "insights"])
+    async def test_the_dashboard_s_methods_refuse_through_them(
+        self, store, monkeypatch, method, kwargs, module, function,
+    ):
+        monkeypatch.setattr(f"core.{module}.{function}",
+                            AsyncMock(side_effect=OSError("down")))
+        with pytest.raises(read_fallback.ReadUnavailable) as raised:
+            await getattr(store, method)(D1, D2, **kwargs)
+        assert raised.value.surface == "dashboard"
+
+
+SUMMARY_KEYS = {"totalOrders", "totalRevenue", "avgCheck", "totalReturns",
+                "returnsRevenue", "startDate", "endDate"}
+DATASET_KEYS = {"label", "data", "borderColor", "backgroundColor", "fill",
+                "tension", "borderWidth"}
+
+
+class TestTheShape:
+    """What the card row and the chart receive, held apart from the numbers:
+    one key gone or renamed and the frontend draws a blank, with no number
+    in any literal changing to say so."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [{}, {"source_id": 1}, {"source_id": 3},
+                                        {"brand": "BrandA"}, {"category_id": 1}],
+                             ids=["gold", "gold_source", "zeros", "brand", "category"])
+    async def test_the_summary_has_its_seven_keys(self, store, monkeypatch, kwargs):
+        monkeypatch.setattr("core.pg_gold_read.fetch_summary",
+                            AsyncMock(return_value=(4, 1000.0, 1, 50.0)))
+        monkeypatch.setattr("core.pg_silver_read.fetch",
+                            AsyncMock(return_value=[(4, 1000.0)]))
+        monkeypatch.setattr("core.pg_lookups_read.fetch",
+                            AsyncMock(return_value=[(1,)]))
+        out = await store.get_summary_stats(D1, D2, **kwargs)
+        assert set(out) == SUMMARY_KEYS
+        assert (out["startDate"], out["endDate"]) == ("2026-08-01", "2026-08-03")
+        assert all(isinstance(out[k], int) for k in ("totalOrders", "totalReturns"))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs,measure", [
+        ({}, "revenue"), ({"source_id": 5}, "revenue"), ({"promocode": "X"}, "revenue"),
+        ({"brand": "BrandA"}, "goods_value"), ({"category_id": 1}, "goods_value"),
+    ], ids=["gold", "order_grain_source", "order_grain_promocode", "brand", "category"])
+    async def test_the_trend_with_its_comparison(self, store, monkeypatch, kwargs, measure):
+        rows = [(D1, 100.0, 1), (D2, 50.0, 2)]
+        monkeypatch.setattr("core.pg_gold_read.fetch_series", AsyncMock(return_value=rows))
+        monkeypatch.setattr("core.pg_silver_read.fetch", AsyncMock(return_value=rows))
+        monkeypatch.setattr("core.pg_lookups_read.fetch", AsyncMock(return_value=[(1,)]))
+
+        out = await store.get_revenue_trend(D1, D2, **kwargs)
+
+        assert set(out) == {"labels", "revenue", "orders", "datasets", "measure",
+                            "comparison"}
+        assert out["measure"] == measure
+        assert out["labels"] == ["01.08", "02.08", "03.08"]
+        assert out["revenue"] == [100.0, 0, 50.0] and out["orders"] == [1, 0, 2]
+        this, previous = out["datasets"]
+        assert set(this) == DATASET_KEYS and this["label"] == "This Period"
+        assert set(previous) == DATASET_KEYS | {"borderDash"}
+        assert previous["label"] == "Previous Period"
+        comparison = out["comparison"]
+        assert set(comparison) == {"labels", "revenue", "orders", "period", "totals"}
+        assert comparison["period"] == {"start": "2026-07-29", "end": "2026-07-31",
+                                        "type": "previous_period"}
+        assert set(comparison["totals"]) == {"current", "previous", "growth_percent"}
+
+    @pytest.mark.asyncio
+    async def test_the_trend_without_its_comparison_asks_one_period(
+        self, store, monkeypatch,
+    ):
+        series = AsyncMock(return_value=[])
+        monkeypatch.setattr("core.pg_gold_read.fetch_series", series)
+        out = await store.get_revenue_trend(D1, D2, include_comparison=False)
+        assert set(out) == {"labels", "revenue", "orders", "datasets", "measure"}
+        assert len(out["datasets"]) == 1
+        assert series.await_count == 1
+
+
+class TestJunkStartsWeb:
+    """Rule 3 of the plan: a variable the code stopped reading cannot stop
+    web, whatever it holds — neither its import nor its start. The start
+    that reads these variables is `configure_modes(web=True)`, which
+    `web/main.py`'s startup calls first: `read_fallback.configure_mode` scans
+    every `KS_READ_*` for a switch with no address. So both tests run it with
+    junk in all three."""
+
+    def test_a_fresh_interpreter_imports_and_starts_with_junk_in_every_one(self, tmp_path):
+        """The child's environment is exactly what is written here, with the
+        suite's test signing secrets (`tests/conftest.py`), from `tmp_path`,
+        so no `.env` above the cwd is loaded — the child asserts it found
+        none."""
+        code = (
+            "import importlib, sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from dotenv import find_dotenv\n"
+            "found = find_dotenv(usecwd=True)\n"
+            "assert not found, 'a .env above the cwd would be loaded: ' + found\n"
+            "import web.main\n"
+            "for m in %r:\n"
+            "    importlib.import_module('core.' + m)\n"
+            "importlib.import_module('core.repositories.revenue')\n"
+            "from core.runtime_modes import configure_modes\n"
+            "configure_modes(web=True)\n"
+            "configure_modes(web=True)\n"   # the scheduler's call, after the startup's
+            "print('ok')\n" % list(MODULES)
+        )
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
+               "TZ": "UTC",
+               "DASHBOARD_SECRET_KEY": os.environ["DASHBOARD_SECRET_KEY"],
+               "BOT_TOKEN": os.environ["BOT_TOKEN"],
+               **{s: "junk-s14-06" for s in SWITCHES}}
+        run = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path, env=env,
+                             capture_output=True, text=True, timeout=180)
+        assert run.returncode == 0, run.stderr[-3000:]
+        assert run.stdout.strip().endswith("ok")
+
+    def test_health_answers_and_publishes_none_of_them(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from core.runtime_modes import configure_modes
+        from web.main import app
+
+        # What `configure_modes` caches here, restored after the test (the
+        # duckdb switch and the warehouse writer are conftest's to reset).
+        for name in ("_misconfigured", "_unreported", "_configured"):
+            monkeypatch.setattr(read_fallback, name, getattr(read_fallback, name))
+        for switch in SWITCHES:
+            monkeypatch.setenv(switch, "junk-s14-06")
+        configure_modes(web=True)
+        response = TestClient(app).get("/api/health")
+        assert response.status_code == 200, response.text
+        block = response.json()["read_fallback_mode"]
+        assert not any(s in line for line in block["misconfigured"] for s in SWITCHES)

@@ -40,8 +40,11 @@ router must not turn the refusal into a quiet answer.
 5. **A router with no DuckDB tail refuses every engine failure** (step 14,
    S14-05). A `_*_run` router under `core/repositories/` with no gate and
    no DuckDB tail left — `_traffic_run`, `_margin_run`, `_intel_run`,
-   `_reports_run`, `_marketing_run` and `_lookups_run` first — or one that
-   calls `refuse` at all, must run every engine call
+   `_reports_run`, `_marketing_run` and `_lookups_run` first, the
+   dashboard's `_dashboard_run` since S14-06 — or any function there that
+   calls `refuse` at all (the dashboard's `_pg_gold_summary`,
+   `_pg_gold_series`, `_pg_silver` and `get_manager_sales_365d`), must run
+   every engine call
    (a function of a `core.pg_*` module it imports, or `get_pool`) inside a
    `try` whose handler for `Exception` is exactly `raise
    read_fallback.refuse("<surface>", <the caught exception>)`, and reach
@@ -63,12 +66,11 @@ decision, not a failure.
 from __future__ import annotations
 
 import ast
-import asyncio
 import logging
 import pathlib
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Dict, Iterable, List, Optional, Set
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -420,7 +422,12 @@ def walk_source(source: str, relpath: str, switches: Set[str]) -> List[Site]:
         aliases = _engine_aliases(tree)
         for fn in _functions(tree):
             name = getattr(fn, "name", "")
-            if not (name.startswith("_") and name.endswith("_run")):
+            refuses = any(isinstance(n, ast.Call) and _is_read_fallback_refuse(n)
+                          for n in _own_nodes(fn))
+            # A `_*_run` router, or anything that refuses at all: the
+            # dashboard's Gold and Silver helpers are not called `_*_run`
+            # (step 14, S14-06), and a refusal is a claim this rule checks.
+            if not ((name.startswith("_") and name.endswith("_run")) or refuses):
                 continue
             if any(_is_gate(n) for n in _own_nodes(fn)):
                 continue                      # the old shape; rules 2-4
@@ -429,8 +436,6 @@ def walk_source(source: str, relpath: str, switches: Set[str]) -> List[Site]:
                 continue
             reached = {_call_name(n) for n in _own_nodes(fn)
                        if isinstance(n, ast.Call)}
-            refuses = any(isinstance(n, ast.Call) and _is_read_fallback_refuse(n)
-                          for n in _own_nodes(fn))
             if reached & TAIL_READS and not refuses:
                 # A tail routed by a chain's own question — `_sms_run`,
                 # `_goal_tables_run` — is a shape of its own until its PR.
@@ -480,7 +485,22 @@ class TestTheWalk:
             ("core/repositories/revenue.py", "_reports_run"),
             ("core/repositories/revenue.py", "_marketing_run"),
             ("core/repositories/revenue.py", "_lookups_run"),
+            # The dashboard's, step 14's S14-06: its router, its Gold and
+            # Silver helpers and the managers screen's one read — the last
+            # four found because they refuse, not because of their names.
+            ("core/repositories/revenue.py", "_dashboard_run"),
+            ("core/repositories/revenue.py", "_pg_gold_summary"),
+            ("core/repositories/revenue.py", "_pg_gold_series"),
+            ("core/repositories/revenue.py", "_pg_silver"),
+            ("core/repositories/revenue.py", "get_manager_sales_365d"),
         } <= collapsed, sorted(collapsed)
+
+    def test_the_dashboard_file_holds_no_gate_and_no_handler(self, sites):
+        """Since S14-06 nothing in `core/repositories/revenue.py` routes by a
+        switch or catches a failure except to refuse it: the file appears in
+        rule 5 alone."""
+        rules = {s.rule for s in sites if s.path == "core/repositories/revenue.py"}
+        assert rules == {"refuse"}, rules
 
     def test_it_finds_backfilled(self, sites):
         """The site critique 7 found by hand: neither a gate nor a log line
@@ -492,17 +512,19 @@ class TestTheWalk:
         """Floors, not a list: the walk found the gates and the handlers it
         exists for. Twenty gates and seventeen handlers when it was written;
         twenty-three gates once the two Gold readers took the shape (DN-20b),
-        and every gate is also an address site."""
+        and every gate is also an address site. The dashboard's six gates —
+        its router, the two Gold readers, the Silver helper and the two
+        inline in `get_summary_stats` and `get_revenue_trend` — left with
+        their switches in step 14's S14-06 (rule 5 holds them now)."""
         gates = {(s.path, s.function) for s in sites if s.rule == "gate"}
         assert gates == {(s.path, s.function) for s in sites
                          if s.rule == "address"}
-        assert ("core/repositories/revenue.py", "_pg_gold_summary") in gates
-        assert ("core/repositories/revenue.py", "_pg_gold_series") in gates
         handlers = [s for s in sites if s.rule == "handler"]
-        assert len(gates) >= 15, sorted(gates)
+        assert len(gates) >= 10, sorted(gates)
         # Fourteen since step 14's S14-05, whose six routers left rule 3 for
-        # rule 5 with their switches (`test_the_routers_with_no_tail_...`).
-        assert len(handlers) >= 12, handlers
+        # rule 5 with their switches (`test_the_routers_with_no_tail_...`);
+        # ten since S14-06, whose dashboard handlers did the same.
+        assert len(handlers) >= 9, handlers
         assert {"core/repositories", "core/chat_tools.py",
                 "core/sync_service.py"} <= {
             p if not p.startswith("core/repositories/") else "core/repositories"
@@ -510,7 +532,10 @@ class TestTheWalk:
 
     def test_the_read_switches_are_found_not_listed(self):
         switches = read_switch_modules()
-        assert {"pg_expenses_read", "pg_gold_read", "ch_cohorts"} <= switches
+        # `pg_gold_read` was the example until step 14's S14-06 took its
+        # switch; `pg_inventory_read` still reads one.
+        assert {"pg_expenses_read", "pg_inventory_read", "ch_cohorts"} <= switches
+        assert not switches & {"pg_gold_read", "pg_silver_read", "pg_dashboard_read"}
         assert "read_fallback" not in switches
         assert "pg_sms_read" not in switches, (
             "the SMS tab fails closed on its own switch; it has no ENV here")
@@ -533,12 +558,12 @@ class TestTheWalk:
                             surfaces.add(arg.value)
                         else:
                             surfaces.add(ast.unparse(arg))
-        # `_pg_silver` passes its keyword on, and `backfilled` counts under
-        # the tab it gates.
-        assert "surface" in surfaces
-        literal = {s for s in surfaces if s != "surface"}
+        # Every one a literal since step 14's S14-06: `_pg_silver` passed its
+        # `surface` keyword on until then, and the managers screen names its
+        # own now.
+        literal = surfaces
         assert all(re.fullmatch(r"[a-z_]+", s) for s in literal), literal
-        assert {"dashboard", "expenses", "goals", "cohorts"} <= literal
+        assert {"dashboard", "managers", "expenses", "goals", "cohorts"} <= literal
         assert {"traffic", "margin", "products_intel", "reports", "marketing",
                 "lookups"} <= literal
 
@@ -745,6 +770,22 @@ class TestTheRules:
             "        return []\n"
         )
         assert self._refuse_ok(src) == []
+
+    def test_any_function_that_refuses_is_held_to_it_whatever_its_name(self):
+        """The dashboard's `_pg_gold_summary` and `get_manager_sales_365d` are
+        not `_*_run` (step 14, S14-06). A refusal anywhere makes the function
+        this rule's: the clean shape passes, a second engine call outside
+        the `try` is found, and a name that neither ends in `_run` nor
+        refuses is not this rule's at all."""
+        clean = self.REFUSING.replace("_x_run", "get_x")
+        assert self._refuse_ok(clean) == [True]
+        bare = clean.replace(
+            "        try:\n",
+            "        rows = await pg_x_read.fetch('SELECT 1')\n        try:\n")
+        assert self._refuse_ok(bare) == [False]
+        silent = clean.replace(
+            "            raise read_fallback.refuse('x', exc)\n", "            return []\n")
+        assert self._refuse_ok(silent) == []
 
     def test_a_switch_function_imported_by_name_is_reaching(self):
         src = (
@@ -1059,25 +1100,6 @@ def admin_client(monkeypatch):
          "auth_date": str(int(time.time()))}, role="admin")))
     yield client
     limiter.reset()
-
-
-def _seed_gold(day: date, revenue: float, orders: int) -> None:
-    """One Gold cell in the per-test DuckDB file the app is about to open."""
-    from core.duckdb_store import DuckDBStore
-
-    async def seed():
-        store = DuckDBStore()
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                conn.execute(
-                    "INSERT INTO gold_daily_revenue (date, sales_type, revenue, "
-                    "orders_count) VALUES (?, 'retail', ?, ?)",
-                    [day, revenue, orders])
-        finally:
-            await store.close()
-
-    asyncio.run(seed())
 
 
 class TestThroughTheApp:
