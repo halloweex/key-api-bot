@@ -10,6 +10,11 @@ the difference must be in the tab's list (`Divergence`) with its reason, and
 a listed difference that has gone away fails as well, so the list stays the
 list.
 
+A 501 from Rust is neither: nginx hands the request to Python
+(`nginx/rust/proxy.conf`) and the person reads Python's own answer. It is
+counted apart, by the reason the 501 names (`HandedOver`), and a phase of
+requests the page sends may hand nothing over.
+
 Each tab's harness (`tests/integration/test_rust_wave1_<tab>.py`) brings its
 contract, its seed and its list. This module brings the clock, the pair of
 clients, the comparisons and the report.
@@ -194,9 +199,35 @@ async def services(dsn: str, pilot: str, env: Mapping[str, str]) -> AsyncIterato
             await pool.close()
 
 
+class HandedOver(str):
+    """The reason Rust's 501 names: the request went to Python, whose answer
+    the person reads. No difference, and not identical either."""
+
+
+def handover(rs) -> Optional[HandedOver]:
+    """The reason Rust handed the request to Python — its 501's `branch` —
+    or None when it answered itself."""
+    if rs.status_code != 501:
+        return None
+    try:
+        reason = rs.json().get("branch")
+    except ValueError:
+        reason = None
+    return HandedOver(reason or "unnamed")
+
+
+def handed_over(rows: Sequence[Tuple[str, int, Optional[str]]]) -> List[str]:
+    """The requests among a phase's `rows` that Rust handed to Python."""
+    return [request for request, _, found in rows if isinstance(found, HandedOver)]
+
+
 def difference(py, rs, headers: Sequence[str] = ("content-type",)) -> Optional[str]:
     """Where two answers part — the status, a header the page reads, the
-    body's bytes — or None. The contract's comparison."""
+    body's bytes — or None. The contract's comparison. A hand-over is
+    returned as `HandedOver`, which `Report.phase` counts apart."""
+    handed = handover(rs)
+    if handed is not None:
+        return handed
     if py.status_code != rs.status_code:
         return f"status {py.status_code} against {rs.status_code}: {rs.text[:160]!r}"
     for name in headers:
@@ -226,7 +257,8 @@ def judge_hostile(answers: Sequence[Tuple[str, str, int, int]],
     whose requests all agree now, or that is never asked."""
     unlisted, differed = [], set()
     for kind, request, py, rs in answers:
-        if py == rs:
+        if py == rs or rs == 501:
+            # Agreed, or handed to Python, whose answer the person gets.
             continue
         entry = listed.get(kind)
         if entry and (entry.python, entry.rust) == (py, rs):
@@ -244,14 +276,25 @@ class Report:
     def __init__(self) -> None:
         self.data: Dict[str, Any] = {"phases": {}}
 
-    def phase(self, name: str, rows: Sequence[Tuple[str, int, Optional[str]]]) -> List[str]:
+    def phase(self, name: str, rows: Sequence[Tuple[str, int, Optional[str]]],
+              *, may_hand_over: bool = False) -> List[str]:
         """`rows` are (request, Python's status, the difference or None).
-        Records the phase, with the requests asked since the phase before
-        that took Python past its own limit, and returns its differences."""
-        differences = [f"{request}: {found}" for request, _, found in rows if found]
+        Records the phase — what Rust handed to Python counted apart, by
+        reason — with the requests asked since the phase before that took
+        Python past its own limit, and returns its differences. A hand-over
+        is one too unless the phase `may_hand_over`: the page's own requests
+        are Rust's to answer."""
+        handed = Counter(str(found) for _, _, found in rows if isinstance(found, HandedOver))
+        differences = [
+            f"{request}: handed to Python ({found})" if isinstance(found, HandedOver)
+            else f"{request}: {found}"
+            for request, _, found in rows
+            if found and not (may_hand_over and isinstance(found, HandedOver))
+        ]
         self.data["phases"][name] = {
             "requests": len(rows),
-            "identical": len(rows) - len(differences),
+            "identical": sum(1 for _, _, found in rows if not found),
+            "handed_over": dict(sorted(handed.items())),
             "statuses": {str(k): v for k, v in sorted(Counter(s for _, s, _ in rows).items())},
             "first_differences": differences[:20],
         }

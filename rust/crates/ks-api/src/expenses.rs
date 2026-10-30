@@ -320,7 +320,7 @@ async fn history(store: &PgReads) -> Result<(), Failure> {
         Some(true) => Ok(()),
         _ => Err(Failure::Unavailable(
             SURFACE,
-            ReadError("bronze.expenses holds no backfilled history in Postgres".to_owned()),
+            ReadError::Failed("bronze.expenses holds no backfilled history in Postgres".to_owned()),
         )),
     }
 }

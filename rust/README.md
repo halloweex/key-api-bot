@@ -27,6 +27,7 @@ rust/
 │   │   ├── gate.rs         api_gate, require_user/admin/permission/any_permission
 │   │   ├── store.rs        the three Postgres reads, the revision check first
 │   │   └── ratelimit.rs    slowapi's fixed window
+│   ├── src/handover.rs     where it steps aside: the 501 nginx turns into Python's answer
 │   ├── src/trend.rs        the endpoint: route + service + repository in one
 │   ├── src/gold.rs         core/pg_gold_read.fetch_series, statement for statement
 │   ├── src/validate.rs     core/validators.py, messages to the character
@@ -65,8 +66,18 @@ every request on the Gold branch — no `category_id`, no `brand`, no
 promocode, a source with a Gold channel (none, 1, 2, 4) — the validators'
 400s, FastAPI's 422s and the 500s Python raises on a date it cannot parse or
 a window outside the years 1–9999 included. 501 for the line-level filter,
-a promocode, source 3 and the forecast overlay; 503 when Postgres does not
-answer, as under `KS_READ_FALLBACK=off`.
+a promocode, source 3 and the forecast overlay; 503 when a statement fails,
+as under `KS_READ_FALLBACK=off`.
+
+**Where its own answer could be wrong for a reason the request does not
+carry, it hands the request to Python** — a 501 naming the reason, which
+nginx does not pass on (`src/handover.rs`): the schema at another revision
+than the contract's (every migration window), Postgres not answering the
+revision check every read asks first, no pooled connection within
+`KS_PILOT_POOL_WAIT` (2.5 s), and the session's own reads — the user list,
+the bot's list, the role matrix — failing. Python answers those requests as
+it would have: its 401, its 500, its fallback to the code's matrix, or the
+data its own reads found.
 
 What it never does: issue a session (the Telegram sign-in stays in Python),
 write anything (the role matrix Python seeds on its first read is computed
@@ -87,6 +98,7 @@ cd rust && cargo fmt --all --check && cargo clippy --workspace --all-targets --a
 
 Configuration shares the Python app's names where they mean the same:
 `KS_PG_DSN`, `KS_PG_POOL_MIN` (1), `KS_PG_POOL_MAX` (5), `KS_PG_TIMEOUT` (30 s),
+`KS_PILOT_POOL_WAIT` (2.5 s; the pilot's own, where asyncpg waits 30 s),
 the signing key `DASHBOARD_SECRET_KEY` — `BOT_TOKEN` when that is empty, as
 `web/routes/auth.py` falls back — and `KS_USER_STORE` / `KS_BOT_STORE`, which
 must both say `postgres`: access is read where production keeps it, and from

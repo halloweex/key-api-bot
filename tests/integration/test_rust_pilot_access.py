@@ -23,6 +23,11 @@ the same on both sides to the byte: the frontend redirects to sign-in on the
 route. Neither service has a way to be asked what a gate would decide: the
 stub is the test's, and the pilot's image carries no such door.
 
+Any other 501 is a hand-over — another schema revision, a store that did not
+answer: nginx gives the request to Python, and the person reads Python's
+answer. It is counted apart, and only the phases that break a store may have
+one.
+
 THE MATRIX
 
 - cookie states × routes with every kind of gate: none, garbage, another key,
@@ -67,6 +72,8 @@ from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
+
+from tests import rust_wave1
 
 asyncpg = pytest.importorskip("asyncpg")
 httpx = pytest.importorskip("httpx")
@@ -309,6 +316,10 @@ def _first_difference(a, b, path="$") -> Optional[str]:
 
 
 def _differs(py, rs, ported: bool) -> Optional[str]:
+    handed = rust_wave1.handover(rs)
+    if handed is not None and handed != "route":
+        # Handed to Python, whose answer the person reads: `Batch` counts it.
+        return handed
     if py.status_code == PASSED:
         if ported:
             return "the stub answered a route the pilot ports"
@@ -353,8 +364,10 @@ def _differs(py, rs, ported: bool) -> Optional[str]:
 class Batch:
     """One phase's requests, sent to both, compared, counted."""
 
-    def __init__(self, phase: str):
+    def __init__(self, phase: str, *, may_hand_over: bool = False):
         self.phase = phase
+        # A phase of what the app issues and asks may hand nothing over.
+        self.may_hand_over = may_hand_over
         self.statuses: Counter = Counter()
         self.kinds: Counter = Counter()
         self.differences: List[str] = []
@@ -372,7 +385,12 @@ class Batch:
         if py.status_code not in (200, PASSED) and py.content == rs.content:
             self.kinds["byte-identical refusal or error"] += 1
         found = _differs(py, rs, ported)
-        if found:
+        if isinstance(found, rust_wave1.HandedOver):
+            self.kinds[f"handed to Python: {found}"] += 1
+            if not self.may_hand_over:
+                self.differences.append(
+                    f"{label} | {method} {template}: handed to Python ({found})")
+        elif found:
             self.differences.append(f"{label} | {method} {template}: {found}")
 
     def close(self) -> None:
@@ -690,8 +708,10 @@ async def test_a_customised_matrix(services):
                                      "app.role_permissions"])
 async def test_when_a_store_cannot_answer(services, failure):
     """Another schema revision, and each table the session reads made
-    unreadable: an error in the user list is a 401, in the bot's list the
-    app's 500, in the matrix the code's own matrix."""
+    unreadable. Python answers its 401 for the user list, its 500 for the
+    bot's, the code's own matrix for the permissions; Rust hands each such
+    request to Python instead — in a migration window Python's image is the
+    schema's, and its reads are its own."""
     from core.pg import REQUIRED_REVISION
     from core.permissions import invalidate_permissions_cache
 
@@ -703,7 +723,7 @@ async def test_when_a_store_cannot_answer(services, failure):
         else:
             await conn.execute(f"ALTER TABLE {failure} RENAME TO {aside}")
     invalidate_permissions_cache()
-    batch = Batch(f"unreadable: {failure}")
+    batch = Batch(f"unreadable: {failure}", may_hand_over=True)
     try:
         for name in ["hardcoded admin", *SUBJECTS]:
             for method, url, template in PERMISSION_ROUTES[:4]:
@@ -717,6 +737,8 @@ async def test_when_a_store_cannot_answer(services, failure):
                 await conn.execute(f"ALTER TABLE app.{aside} RENAME TO {failure.split('.')[1]}")
         invalidate_permissions_cache()
     batch.close()
+    # Each failure reaches somebody's request, and that request went to Python.
+    assert any(kind.startswith("handed to Python") for kind in batch.kinds), dict(batch.kinds)
 
 
 async def test_the_trends_rate_limit(services, world):

@@ -9,6 +9,7 @@ pub mod access;
 pub mod expenses;
 pub mod goals;
 pub mod gold;
+pub mod handover;
 pub mod health;
 mod http;
 pub mod inventory;

@@ -9,6 +9,7 @@ use rust_decimal::Decimal;
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
+use crate::pgread;
 use crate::trend::{DayRow, Gold, ReadError};
 
 // The four texts `fetch_series` renders. Static, which sqlx 0.9 asks of any
@@ -35,11 +36,18 @@ pub struct PgGold {
     pool: PgPool,
     /// asyncpg's `command_timeout` (`KS_PG_TIMEOUT`, 30 s).
     timeout: Duration,
+    /// `REQUIRED_REVISION`. `fetch_series` does not ask it; the pilot does,
+    /// so that in a migration window every route it answers hands over.
+    revision: String,
 }
 
 impl PgGold {
-    pub fn new(pool: PgPool, timeout: Duration) -> Self {
-        Self { pool, timeout }
+    pub fn new(pool: PgPool, timeout: Duration, revision: String) -> Self {
+        Self {
+            pool,
+            timeout,
+            revision,
+        }
     }
 }
 
@@ -94,14 +102,12 @@ impl Gold for PgGold {
                 .bind(end)
                 .bind(source),
         };
-        let rows = tokio::time::timeout(self.timeout, query.fetch_all(&self.pool))
-            .await
-            .map_err(|_| ReadError(format!("no answer within {:?}", self.timeout)))?
-            .map_err(|e| ReadError(e.to_string()))?;
+        let mut conn = pgread::connection(&self.pool, &self.revision, self.timeout).await?;
+        let rows = pgread::fetch(query.fetch_all(&mut *conn), self.timeout).await?;
         rows.iter()
             .map(|row| decode(row, summed))
             .collect::<Result<_, _>>()
-            .map_err(|e| ReadError(e.to_string()))
+            .map_err(|e| ReadError::Failed(e.to_string()))
     }
 }
 

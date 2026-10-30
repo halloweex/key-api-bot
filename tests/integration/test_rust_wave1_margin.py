@@ -280,8 +280,9 @@ async def test_today_on_the_real_clock(pair):
 
 @pytest.mark.asyncio
 async def test_a_postgres_that_cannot_answer_is_the_same_503(pair):
-    """A schema this build does not know, then a table that cannot be read:
-    both services refuse with the 503 the page reads as "try again"."""
+    """A schema this build does not know, which Rust hands to Python, then a
+    table that cannot be read: both services refuse with the 503 the page
+    reads as "try again"."""
     query = frontend_contract.query(CONTRACT, period="month", sales_type="retail")
     rows = []
     async with pair.pool.acquire() as conn:
@@ -302,8 +303,12 @@ async def test_a_postgres_that_cannot_answer_is_the_same_503(pair):
         finally:
             async with pair.pool.acquire() as conn:
                 await conn.execute(mended)
-    differences = REPORT.phase("unreadable", rows)
+    differences = REPORT.phase("unreadable", rows, may_hand_over=True)
     assert not differences, "\n".join(differences)
+    # Another revision is a migration window: Rust hands every request to
+    # Python, whose image is the schema's. A table neither can read is the
+    # same answer from both.
+    assert rust_wave1.handed_over(rows) == [r for r, _, _ in rows if r.startswith("revision ")]
     assert {status for _, status, _ in rows} == {503}
     # And once mended, both answer again.
     py, rs = await pair.ask(OVERVIEW, query)
