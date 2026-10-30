@@ -1336,9 +1336,10 @@ nothing else — the text still goes out.
 Preview any of it on a real phone with `scripts/weekly_report_preview.py`,
 which honours the kill switch and writes nothing to the send ledger. It reads
 Postgres through the job's own readers (`build_report` and its `fetch_*`, or
-the traffic report's), refuses without `KS_READ_WEEKLY` (or `KS_READ_TRAFFIC`)
-at `postgres` and `KS_PG_DSN`, and hands them a store that refuses to
-connect, so it opens no DuckDB file (it read a DuckDB backup until S14-03).
+the traffic report's), refuses without `KS_PG_DSN` (the switches
+`KS_READ_WEEKLY` and `KS_READ_TRAFFIC` are not read since S14-07 and S14-05),
+and hands them a store that refuses to connect, so it opens no DuckDB file (it
+read a DuckDB backup until S14-03).
 `--fixture` renders the 31.08–06.09.2026 week from Gold rows copied out of
 Postgres, and reads nothing.
 
