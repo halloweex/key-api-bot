@@ -466,13 +466,12 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     """`{table: True | False | None}` — does DuckDB still write it, in this
     process, now. None is "cannot tell from here".
 
-    A registered chain answers through `core.write_chains.chain_modes()`, so a
-    latch counts exactly as it does for the writers (OD-19 (a)), and a flag
-    nobody can read is None: its writers raise rather than pick a store. A
-    shadow chain (`write_chains.is_shadow`, OD-02 (c)) was True whichever
-    store its mode named, while DuckDB was handed each row after the Postgres
-    commit; step 14's S14-10 retired the shadow, and it answers like any
-    other chain. A store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
+    A registered chain's table is False: every chain writes Postgres, which
+    until step 14's S14-11 this read through `write_chains.chain_modes()` (a
+    latch counted as it did for the writers, OD-19 (a)) and since then asks
+    nothing. A shadow chain (OD-02 (c)) was True whichever store its mode
+    named, while DuckDB was handed each row after the Postgres commit; step
+    14's S14-10 retired the shadow. A store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
     process configured, and None in a process where `configure_modes()` never
     ran — every process but web's. With no switch, DuckDB writes every table
     in its schema except a frozen archive; nothing writes a view, a table
@@ -492,14 +491,11 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     if duckdb_switch.is_off():
         return {name: False for name in FATES}
 
-    modes = write_chains.chain_modes()
-    chain_mode = {}
-    for chain in write_chains.WRITE_CHAINS:
-        mode = modes[write_chains.chain_name(chain)]["mode"]
-        if mode is None:
-            chain_mode[chain.WRITE_ENV] = None
-        else:
-            chain_mode[chain.WRITE_ENV] = mode == "duckdb"
+    # Every chain writes Postgres — since step 14's S14-11 asked of no flag
+    # (`write_chains.chain_modes()` answered "postgres" for every chain since
+    # S14-00, and went with the flags).
+    chain_mode: Dict[str, Optional[bool]] = {
+        chain.WRITE_ENV: False for chain in write_chains.WRITE_CHAINS}
 
     out: Dict[str, Optional[bool]] = {}
     for name, fate in FATES.items():

@@ -83,7 +83,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 from typing import (
-    Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+    Any, Dict, FrozenSet, List, Optional, Sequence, Tuple,
 )
 
 from core import chain_latch
@@ -91,7 +91,6 @@ from core.landing_rows import (
     OFFER_COLUMNS,
     STOCK_MOVEMENT_COLUMNS,
     OfferRow,
-    StockMovement,
     plan_stock_movements,
 )
 from core.sql_dialect import POSTGRES, sku_status_rebuild_select
