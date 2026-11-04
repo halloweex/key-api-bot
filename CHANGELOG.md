@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.313
+
+- The funnel asks GA4 only for the days it holds
+- Margin: the three defects, on a fixture that has them
+- GA4's funnel horizon rolls by the day, not the month
+- Margin: one cost row per SKU, the real root category, no 503 on a zero-sum window
+- Traffic tab shows the site's purchase funnel from GA4
+- WIP: S14-09 review — the deleted mirror and backfill walk in the past tense
+- WIP: S14-09 review — two sentences of the last commit read straight
+- WIP: S14-09 review — what the PR deleted is spoken of in the past tense
+- WIP: S14-09 review — chains 3, 6, 6a's writers are proved with no flag
+- WIP: S14-09 — the canary still reads chain 3's health entry, end to end
+- WIP: S14-09 — the typecheck baseline shrinks 987 → 975
+- WIP: S14-09 — the walks follow, and CLAUDE.md says what went
+- WIP: S14-09 — tests follow chains 3, 6, 6a to Postgres
+- WIP: S14-09 — chains 3, 6, 6a write Postgres with no routing left
+- WIP: step14-int — CLAUDE.md says the preview refuses without KS_PG_DSN alone
+- WIP: step14-int — the preview's host pin goes once S14-07 removes the branch it named
+
+
 ## 3.0.312
 
 - chore: bump version to 3.0.311 [skip ci]
