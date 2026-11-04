@@ -151,6 +151,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/customers/sms-campaigns/{c}/send` | Send through TurboSMS (POST, needs `sms` edit); requires `confirm_campaign`, refuses on balance or a recent overlap — see "What stops an SMS send" |
 | `/api/customers/sms/channels` | Configured channels and tariff; `include_balance=true` adds the gateway's balance |
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
+| `/api/traffic/funnel` | The site's purchase funnel from GA4, live: the period, the one before and a year ago, by traffic type, channel group and device (tab `traffic`). 503 "not configured" without the key — see "Воронка сайта из GA4" |
 | `/api/me/send-file` | A CSV the page already holds, sent by the bot to the requester's own chat — how every export works inside the Telegram Mini App, whose WebView saves no download (POST, any session; `utils/deliverFile.ts`) |
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
@@ -3553,6 +3554,44 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 За 30.04–27.10 розницы: 2 125 заказов, ₴4.94M; 689 новых (₴1.26M) и 1 006
 повторных (₴3.68M), из них первыми пришли через Instagram Direct 193, ссылку в
 профиле 99, рекламу Facebook 82.
+
+**Воронка сайта из GA4** (`GET /api/traffic/funnel`, блок «Воронка сайта (GA4)»
+сразу под карточками). Шаги — события GA4: начало сеанса → просмотр товара →
+корзина → оформление → покупка; воронка закрытая и считает людей, поэтому
+дубли просмотров от песочницы пикселя Shopify её не завышают. PPV, ACR, CAR,
+Checkout — доля дошедших до следующего шага. Только сайт: фильтры источника и
+типа продаж вкладки сюда не доходят.
+
+- **Читается вживую из GA4 Data API** (`core/ga4.py`, `runFunnelReport`
+  v1alpha), без таблицы в базе. Доступ — сервисный аккаунт `ga4-reader` с
+  ролью «Читатель» на ресурсе и без ролей в проекте Google Cloud; JSON-ключ
+  лежит на хосте в `/root/secrets/key-api-bot/` (вне дерева — репозиторий
+  публичный), права 640 с группой `appuser` контейнера, и монтируется в web
+  папкой на `/run/secrets/ks` только на чтение. `KS_GA4_PROPERTY_ID` и
+  `KS_GA4_KEY_FILE` — в compose. Без файла маршрут отвечает 503 «GA4 is not
+  configured», и блок так и пишет; в Google ничего не уходит. Подпись токена —
+  `cryptography`, единственная новая зависимость.
+- **Три окна за раз**: период, такой же перед ним и те же даты год назад; на
+  окно две воронки (по группе каналов сеанса, чья итоговая строка — весь сайт,
+  и по устройству) — шесть запросов параллельно
+  (`web/services/ga4_funnel_service.py`). Ответ держится час в процессе, не
+  больше 32 периодов, и при недоступном GA4 отдаётся последний с `stale:
+  true` — ради квоты GA4 на ресурс в час, не ради скорости.
+- **Тип трафика решается при чтении** (холодный: Paid Social, Cross-network,
+  Paid Shopping/Other/Video, Display; тёплый: Direct, Email, Organic Social,
+  Organic Search, Paid Search, Organic Shopping; остальное — «другой»), так
+  что деление меняется без перезаписи.
+- **Воронки GA4 видят только 14 месяцев** — максимум для обычного ресурса.
+  4.11.2026 они начинались с 2025-09-01, а январь–август 2025 приходили
+  пустыми; агрегатные отчёты при этом хранят всю историю. Сравнение с
+  прошлым годом блок прячет, если те даты старше `earliest`.
+- **Трендовая воронка GA4 — не дневная**: на отрезке она считает человека
+  один раз, в первый его день (за 01–02.10.2026 «вошли 2-го» 1 428 против
+  1 552 у воронки одного дня). Ряд по дням — только воронкой на каждый день.
+- **История в базе — следующий шаг**, после шага 14 (новая ревизия меняет
+  откат). До тех пор помесячная и понедельная история с сентября 2025 по
+  каналам и устройствам и дневная по каналам сохранены страховочной
+  выгрузкой в файлах артефакта «Воронка сайта KoreanStory».
 
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
 

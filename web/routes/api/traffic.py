@@ -7,9 +7,9 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
-from core import warehouse_cutover
+from core import ga4, warehouse_cutover
 from core.pg_utm_parse import reparse_router
-from web.services import dashboard_service
+from web.services import dashboard_service, ga4_funnel_service
 from web.routes.auth import require_admin
 from ._deps import (
     limiter, get_store,
@@ -103,6 +103,36 @@ async def get_traffic_pixel_only(
     return await store.get_traffic_pixel_only(
         start_date=start_dt, end_date=end_dt, sales_type=sales_type, source_id=source_id,
     )
+
+
+@router.get("/traffic/funnel")
+@limiter.limit("30/minute")
+async def get_traffic_funnel(
+    request: Request,
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+):
+    """The site's purchase funnel from GA4: the period, the one before, a year ago.
+
+    GA4 sees the website only, so the tab's source and sales-type filters do
+    not apply. See ``web/services/ga4_funnel_service.py``.
+    """
+    try:
+        validate_period(period)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not ga4.configured():
+        raise HTTPException(status_code=503, detail="GA4 is not configured")
+    try:
+        return await ga4_funnel_service.get_funnel(
+            _dt.strptime(start, "%Y-%m-%d").date(), _dt.strptime(end, "%Y-%m-%d").date(),
+        )
+    except ga4.GA4Unavailable as e:
+        logger.warning("GA4 funnel unavailable: %s", e)
+        raise HTTPException(status_code=503, detail="GA4 is unavailable")
 
 
 @router.get("/traffic/trend")
