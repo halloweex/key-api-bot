@@ -177,6 +177,51 @@ class TestTheHourlyShipperCannotRollTheWriterBack:
         assert await _row(pool, expense_id) is not None, "the hourly replace rolled it back"
 
 
-# `TestAFlagNotUnderstoodStandsDownOnlyItsChain` stood here until step 14's
-# S14-11 (DN-01): a typo in KS_WRITE_EXPENSES stood its chain down and was
-# stamped on its table. No flag is read since.
+class TestTheChainsTablesAreNotReadOutOfDuckDB:
+    """After stage 5 those DuckDB tables will not exist. With every chain
+    writing Postgres and their DuckDB tables gone, the copy still runs.
+    (This class was `TestAFlagNotUnderstoodStandsDownOnlyItsChain` until step
+    14's S14-11: its other test pinned DN-01, a typo in KS_WRITE_EXPENSES
+    standing its chain down and stamped on its table — no flag is read
+    since.)"""
+
+    @pytest_asyncio.fixture
+    async def stores(self, tmp_path, monkeypatch):
+        from core.duckdb_store import DuckDBStore
+
+        monkeypatch.setenv("KS_PG_DSN", DSN)
+        store = DuckDBStore(db_path=tmp_path / "typo.duckdb")
+        await store.connect()
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+            await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            yield store, pool, monkeypatch
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+            await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
+        await pool.close()
+        await store.close()
+
+    @pytest.mark.asyncio
+    async def test_stood_down_tables_are_not_even_read_out_of_duckdb(self, stores):
+        from core.pg_operational import replicate_operational
+
+        store, _pool, _env = stores
+        async with store.connection() as conn:
+            views = [r[0] for r in conn.execute(
+                "SELECT view_name FROM duckdb_views() WHERE NOT internal").fetchall()]
+            for view in views:
+                conn.execute(f"DROP VIEW IF EXISTS {view}")
+            for table in ("manual_expenses", "offers", "offer_stocks", "stock_movements",
+                          "sku_inventory_status", "inventory_sku_history", "inventory_history"):
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+        result = await replicate_operational(store)
+
+        assert "error" not in result, result
+        assert result["movements_appended"] is None and result["sku_history_appended"] is None
