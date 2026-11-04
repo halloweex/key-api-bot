@@ -416,37 +416,14 @@ class BackgroundScheduler:
 
         from core import duckdb_switch
 
+        # Both probes ask Postgres, which writes both tables (chain 1's
+        # snapshot, chain 9's journal). Until step 14's S14-11 a process
+        # under `KS_DUCKDB=on` opened DuckDB first and asked it whenever chain
+        # 1 still wrote DuckDB; S14-00 made web `off`, and S14-11 deleted that
+        # branch with the flag.
         try:
-            if duckdb_switch.is_off():
-                inventory_today = await _inventory_snapshot_taken_today_pg()
-                ages = await dq_journal.last_success_ages_pg()
-            else:
-                from core.duckdb_store import get_store
-                from core.pg_inventory_write import writes_postgres
-
-                store = await get_store()
-                async with store.connection() as conn:
-                    # Nested: a missing inventory_sku_history must not disable the
-                    # data-quality catch-ups below it.
-                    try:
-                        inventory_today = conn.execute(
-                            "SELECT 1 FROM inventory_sku_history "
-                            "WHERE date = CURRENT_DATE LIMIT 1"
-                        ).fetchone()
-                    except Exception as exc:
-                        logger.debug("inventory catch-up probe skipped: %s", exc)
-                        inventory_today = ()  # treat as present → queue nothing
-
-                # The probe has to ask whichever store the chain actually writes.
-                # Left on DuckDB after the writer moves, it finds no snapshot for
-                # today ever again and queues a catch-up on every boot — for a
-                # table that is being written correctly somewhere else.
-                if writes_postgres():
-                    inventory_today = await _inventory_snapshot_taken_today_pg()
-                # The quality journal's ages come from Postgres, which writes
-                # it (chain 9). DuckDB's, read inside the connection above and
-                # then replaced, went with step 14's S14-10.
-                ages = await dq_journal.last_success_ages_pg()
+            inventory_today = await _inventory_snapshot_taken_today_pg()
+            ages = await dq_journal.last_success_ages_pg()
         except Exception as e:
             logger.warning(f"Catch-up check skipped: {e}")
             return
@@ -1200,27 +1177,20 @@ class BackgroundScheduler:
             # ordinary tick: the pending query returns the ~19 buyers a day
             # KeyCRM adds, and KeyCRM has no gender field for any of them.
             #
-            # Under chain 4 the verdicts are written in Postgres
+            # Chain 4 writes the verdicts in Postgres
             # (`core/pg_buyers_write.py`) and the copy below stands down for
-            # them, so the derivation follows the chain's one answer: Postgres,
-            # DuckDB, or — a KS_WRITE_BUYERS nobody can read — neither, said
-            # rather than guessed. Its own `try`: both derivations never raise,
-            # and a fault in choosing between them must not cost the copy of
-            # tables nothing can rebuild either.
+            # them, so the derivation is Postgres's: `derive_gender_pg`,
+            # always. Until step 14's S14-11 it followed the chain's
+            # `mode()` — DuckDB's `derive_gender`, or nothing for a flag
+            # nobody could read. Its own `try`: the derivation never raises,
+            # and a fault in it must not cost the copy of tables nothing can
+            # rebuild either.
             from core import pg_buyers_write
-            from core.gender_backfill import derive_gender
 
             try:
-                gender_mode = pg_buyers_write.mode()
-                if gender_mode == "postgres":
-                    gender = await pg_buyers_write.derive_gender_pg()
-                elif gender_mode == "duckdb":
-                    gender = await derive_gender(store)
-                else:
-                    gender = {"stood_down": f"{pg_buyers_write.WRITE_ENV} is not "
-                                            "understood; no verdict was derived"}
+                gender = await pg_buyers_write.derive_gender_pg()
             except Exception as exc:  # noqa: BLE001 — carried, not raised
-                logger.error("gender derivation could not be routed: %s", exc,
+                logger.error("gender derivation failed: %s", exc,
                              exc_info=True)
                 gender = {"error": f"{type(exc).__name__}: {exc}"}
             result = await replicate_operational(store)
@@ -2109,14 +2079,12 @@ class BackgroundScheduler:
             # watching rather than reporting gaps it cannot see.
             inventory_calendar = None
             try:
-                from core.pg_inventory_write import (
-                    writes_postgres, read_snapshot_calendar,
-                )
-                if writes_postgres():
-                    from core.data_quality import INVENTORY_CONTINUITY_WINDOW_DAYS
-                    floor = (datetime.now().astimezone().date()
-                             - timedelta(days=INVENTORY_CONTINUITY_WINDOW_DAYS))
-                    inventory_calendar = await read_snapshot_calendar(floor)
+                from core.data_quality import INVENTORY_CONTINUITY_WINDOW_DAYS
+                from core.pg_inventory_write import read_snapshot_calendar
+
+                floor = (datetime.now().astimezone().date()
+                         - timedelta(days=INVENTORY_CONTINUITY_WINDOW_DAYS))
+                inventory_calendar = await read_snapshot_calendar(floor)
             except Exception as e:
                 logger.error(
                     "inventory snapshot calendar unreadable, continuity check "
@@ -2126,8 +2094,8 @@ class BackgroundScheduler:
             # freshness check is sync, `meta.chain_watermarks` is not.
             chain_watermarks = None
             try:
-                from core.write_chains import stood_down_sync_keys
-                moved_keys = stood_down_sync_keys()
+                from core.write_chains import sync_keys
+                moved_keys = sync_keys()
                 if moved_keys:
                     from core.pg_chain_watermarks import read_values
                     chain_watermarks = await read_values(moved_keys)
@@ -2241,11 +2209,9 @@ class BackgroundScheduler:
             # are Postgres facts about tables DuckDB no longer writes, so they
             # are read and judged after the DuckDB half whatever it did — never
             # inside `check_internal_integrity`, where a DuckDB fault would
-            # discard every one of them and hold back the page. No flag: who is
-            # watched is `chain_modes()`'s answer, and with no chain moved the
-            # read asks Postgres nothing. Production is not that state — chain 8
-            # is flagged, so this reads `app.manual_expenses`' allocator and NULL
-            # count every run. Neither call raises; a failure comes back as
+            # discard every one of them and hold back the page. No flag: every
+            # chain is watched (since step 14's S14-11; until then who was
+            # watched was `chain_modes()`'s answer). Neither call raises; a failure comes back as
             # `chain_invariants_unwatched`, which holds every condition. The
             # `except` is for that promise being broken, not the failure it
             # handles.

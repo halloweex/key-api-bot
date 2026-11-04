@@ -13,10 +13,6 @@ CAST, run in this process, not against what somebody believes it does.
 """
 from __future__ import annotations
 
-import ast
-import inspect
-import re
-import textwrap
 from datetime import date, datetime, timezone
 
 import duckdb
@@ -24,7 +20,7 @@ import pytest
 
 from core import landing_rows
 from core.landing_rows import (
-    BUYER_COLUMNS, CONTACT_COLUMNS, UNKNOWN_NAME, ContactRow, _as_date,
+    BUYER_COLUMNS, UNKNOWN_NAME, ContactRow, _as_date,
     birthday_is_unreadable, buyer_row, contact_rows, parse_buyers,
 )
 
@@ -190,33 +186,11 @@ class TestTheBatch:
         assert [bid for bid, _ in parsed.contacts] == [7, 8, 9]
 
 
-def _sql_in(func, table):
-    """The column list of the INSERT naming `table` inside `func`, parsed."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            m = re.search(rf"INSERT(?: OR REPLACE)? INTO {table}\s*\(([^)]*)\)",
-                          node.value)
-            if m:
-                return [c.strip() for c in m.group(1).split(",")]
-    raise AssertionError(f"no INSERT INTO {table} in {func.__qualname__}")
-
-
 class TestTheDuckDBWriterFollowsTheContract:
-    """The DuckDB writer — `_upsert_buyer_portion`, one transaction of the
-    portions `upsert_buyers` splits a batch into — passes each row POSITIONALLY. Reordering `BuyerRow`
-    would shift every value into its neighbour's column without an error — a
-    birthday in `note`, a phone in `email`. This is the only thing that says so."""
-
-    def test_the_buyers_insert_lists_the_contract_in_order(self):
-        from core.duckdb_store import DuckDBStore
-        assert _sql_in(DuckDBStore._upsert_buyer_portion, "buyers") == \
-            [*BUYER_COLUMNS, "synced_at"]
-
-    def test_the_contacts_insert_lists_the_contract_in_order(self):
-        from core.duckdb_store import DuckDBStore
-        assert _sql_in(DuckDBStore._upsert_buyer_portion, "buyer_contacts") == \
-            list(CONTACT_COLUMNS)
+    """The DuckDB writer — `_upsert_buyer_portion` — passed each row
+    POSITIONALLY, and two tests held its column lists to `BuyerRow`'s order.
+    It went with `KS_WRITE_BUYERS` in step 14's S14-11; the Postgres writer
+    builds its SQL from the same tuple (below)."""
 
     def test_the_contract_has_one_home(self):
         from core import pg_buyers

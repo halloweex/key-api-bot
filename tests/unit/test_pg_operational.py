@@ -234,7 +234,7 @@ class TestTheInventoryChainStandsDown:
     def test_the_shipper_and_the_comparison_read_one_list(self):
         import inspect
 
-        # Both sites now ask `core.write_chains.stood_down_tables()`, which is
+        # Both sites now ask `core.write_chains.chain_tables()`, which is
         # pinned — by walking `core/`, not by a list — in test_write_chains.py.
         # What stays here is chain 1's own contribution to that answer.
         from core.pg_inventory_write import CHAIN_TABLES
@@ -469,7 +469,7 @@ class TestItNeverRaises:
         assert set(pg_expenses_write.CHAIN_TABLES) <= set(every_table)
         # Since step 14's S14-00 every chain's tables stand down, a constant:
         # what the run was copying, and stamps, is the rest.
-        from core.write_chains import stood_down_tables
+        from core.write_chains import chain_tables as stood_down_tables
 
         moved = stood_down_tables()
         assert stamped and stamped == [t for t in every_table if t not in moved]

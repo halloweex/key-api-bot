@@ -36,14 +36,11 @@ tables are stored in Postgres (chain 7b-3, a constant since S14-00), so the
 history is seeded in Postgres' Bronze — Postgres derives Silver from it — and
 the stored tables are read back from `app.*`. The sweep runs in production's
 state: the chain's Postgres writers recorded, every Postgres read answering.
-The one-transaction tests hold DuckDB's writer branch, which stays until its
-chain's DuckDB branch goes (S14-11), and so keep the goal tables in a DuckDB
-store under the test (`route_chains_to_duckdb`). Skipped without `KS_PG_DSN`,
-which CI supplies.
+The one-transaction tests of DuckDB's writer branch went with it in step
+14's S14-11. Skipped without `KS_PG_DSN`, which CI supplies.
 """
 from __future__ import annotations
 
-import ast
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
@@ -55,8 +52,6 @@ from zoneinfo import ZoneInfo
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
-from core.repositories import goals as goals_module
 from tests.integration.pg_tab_seed import (
     derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
 )
@@ -323,126 +318,12 @@ class TestThePostIsRetailOnly:
 
 
 # ─── One transaction ──────────────────────────────────────────────────────
-
-def _write_statements() -> dict:
-    """Every module-level statement in goals.py that writes one of the three
-    shared tables — parsed, so a statement added to the writer is held to
-    the transaction the day it is written."""
-    tree = ast.parse((REPO / "core" / "repositories" / "goals.py").read_text())
-    out = {}
-    for node in tree.body:
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)):
-            text = node.value.value.upper()
-            if any(f"{verb} {t}".upper() in " ".join(text.split())
-                   for verb in ("INSERT INTO", "UPDATE")
-                   for t in ("seasonal_indices", "weekly_patterns", "growth_metrics")):
-                out[node.targets[0].id] = node.value.value
-    return out
-
-
-class _FailsAt:
-    """The store's connection, raising at one statement."""
-
-    def __init__(self, conn, statement: str):
-        self._conn, self._statement = conn, statement
-
-    def _check(self, sql):
-        if " ".join(sql.split()) == " ".join(self._statement.split()):
-            raise RuntimeError("injected failure mid-transaction")
-
-    def execute(self, sql, *args, **kwargs):
-        self._check(sql)
-        return self._conn.execute(sql, *args, **kwargs)
-
-    def executemany(self, sql, *args, **kwargs):
-        self._check(sql)
-        return self._conn.executemany(sql, *args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-
-def _duck_fingerprint(conn) -> dict:
-    return {t: sorted(repr(r) for r in conn.execute(f"SELECT * FROM {t}").fetchall())
-            for t in ("seasonal_indices", "growth_metrics", "weekly_patterns")}
-
-
-async def _store_fingerprint(store) -> dict:
-    async with store.connection() as conn:
-        return _duck_fingerprint(conn)
-
-
-@pytest_asyncio.fixture
-async def duck(tmp_path):
-    """A DuckDB store for the writer branch that still writes there."""
-    s = DuckDBStore(db_path=tmp_path / "goal-tables.duckdb")
-    await s.connect()
-    try:
-        yield s
-    finally:
-        await s.close()
-
-
-class TestTheWriterIsOneTransaction:
-    """DuckDB's writer branch, which stays until chain 7b-3's DuckDB branch
-    goes (S14-11): the goal tables in a DuckDB store under the test, the
-    history they are computed from in Postgres. Postgres' writer is held to
-    its own transaction in `tests/integration/test_forecast_writer.py`.
-
-    Mutation M8: drop the BEGIN/COMMIT, and the statements before the
-    failing one stay — this week's indices beside last week's growth."""
-
-    def test_every_write_statement_is_found(self):
-        found = _write_statements()
-        assert set(found) == {"_SEASONAL_UPSERT_SQL", "_YOY_OVERALL_UPSERT_SQL",
-                              "_MONTHLY_YOY_UPDATE_SQL", "_WEEKLY_UPSERT_SQL"}, found
-
-    @needs_postgres
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("statement", sorted(_write_statements()))
-    async def test_a_failure_anywhere_leaves_every_table_as_it_was(
-        self, duck, statement, monkeypatch,
-    ):
-        from core import pg_forecast_write
-        from tests.conftest import route_chains_to_duckdb
-
-        route_chains_to_duckdb(monkeypatch, pg_forecast_write)
-        store = duck
-        async with tab_in_postgres(DSN, monkeypatch, _seed_history_pg) as pool:
-            await self._fails_whole(store, pool, statement)
-
-    async def _fails_whole(self, store, pool, statement):
-        await store.recalculate_goal_tables(include_weekly=True)
-        # A week later, more orders: every stored number would move.
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE bronze.orders SET grand_total = grand_total * 1.5 "
-                "WHERE ordered_at >= '2025-06-01'")
-        await derive(pool)
-        before = await _store_fingerprint(store)
-
-        real = type(store).connection
-        text = getattr(goals_module, statement)
-
-        from contextlib import asynccontextmanager
-
-        @asynccontextmanager
-        async def failing(self):
-            async with real(self) as conn:
-                yield _FailsAt(conn, text)
-
-        with patch.object(type(store), "connection", failing):
-            with pytest.raises(RuntimeError, match="injected"):
-                await store.recalculate_goal_tables(include_weekly=True)
-
-        assert await _store_fingerprint(store) == before
-        # And the connection is usable afterwards: nothing left open.
-        tables = await store.recalculate_goal_tables(include_weekly=True)
-        assert await _store_fingerprint(store) != before
-        assert len(tables["seasonal"]) == 12
+#
+# `TestTheWriterIsOneTransaction` stood here until step 14's S14-11: DuckDB's
+# writer branch of the goal tables, its four statements in one BEGIN/COMMIT,
+# a failure at any of them leaving every table as it was. The branch went
+# with `KS_WRITE_FORECAST`; Postgres' writer is held to its own transaction
+# in `tests/integration/test_forecast_writer.py`.
 
 
 # ─── What is stored is what is computed ───────────────────────────────────
@@ -641,13 +522,6 @@ class TestTheMondayJobStoresRetail:
 # ─── Unchanged neighbours, kept pinned ────────────────────────────────────
 
 class TestPredictionsAndModelFilesLandWhole:
-    def test_store_predictions_is_one_transaction(self):
-        from core.repositories.goals import GoalsMixin
-        import inspect
-
-        src = inspect.getsource(GoalsMixin.store_predictions)
-        assert "BEGIN TRANSACTION" in src and "ROLLBACK" in src
-
     def test_json_files_are_replaced_not_truncated(self, tmp_path):
         from core.prediction_service import _write_json_atomically
 

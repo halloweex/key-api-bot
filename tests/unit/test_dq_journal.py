@@ -221,7 +221,10 @@ class TestTheOneDoor:
         from web.routes.api import health
 
         catchup = inspect.getsource(scheduler.BackgroundScheduler._schedule_catchup_runs)
-        assert catchup.count("dq_journal.last_success_ages_pg()") == 2
+        # Once since step 14's S14-11: the catch-up's DuckDB branch, which
+        # asked it a second time beside a DuckDB probe, went with chain 1's
+        # flag.
+        assert catchup.count("dq_journal.last_success_ages_pg()") == 1
         assert "fetch_last_success_ages" not in catchup
         assert "_journal_ages()" in inspect.getsource(health.health_check)
         assert list(inspect.signature(health._journal_ages).parameters) == []

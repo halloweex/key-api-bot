@@ -258,14 +258,15 @@ class TestTheOpener:
         store = DuckDBStore(db_path=tmp_path / "a.duckdb")
 
         async def sync():
-            # A key no chain owns: since S14-00 a chain's own key is asked of
-            # Postgres alone, and only DuckDB's own still reaches the file.
+            # A store method that still reaches the file: since step 14's
+            # S14-11 `get_last_sync_time`, which this used with a key no
+            # chain owned, asks Postgres alone for every key.
             with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
-                await asyncio.ensure_future(store.get_last_sync_time("meilisearch"))
+                await asyncio.ensure_future(store.get_stats())
 
         asyncio.run(sync())
         assert list(duckdb_switch.opened()) == [
-            "core.duckdb_store:get_last_sync_time (task)"]
+            "core.duckdb_store:get_stats (task)"]
 
     def test_an_application_frame_that_turns_the_loop_is_still_the_site(
         self, monkeypatch, tmp_path,

@@ -15,8 +15,8 @@ facing Postgres→DuckDB (`compare_shadow`). Since S14-00 the shadow stood down
 in web, which runs `KS_DUCKDB=off`, and the comparison compared nothing; S14-10
 deleted both, and the journal is Postgres's alone. The hourly copy stands
 down, as for every moved chain: its full replace out of DuckDB would delete
-each run DuckDB never received. `CHAIN_SHADOW` still says the shape to
-`core.write_chains`, which publishes it until S14-11.
+each run DuckDB never received. `CHAIN_SHADOW` said the shape to
+`core.write_chains`, which published it, until S14-11 deleted both.
 
 Everything else is the frozen chains' machinery unchanged. The first Postgres
 write latches the chain (OD-19 (a)), because a run whose shadow failed exists
@@ -79,14 +79,6 @@ CHAIN_TABLES: Tuple[str, ...] = (
     "app.data_quality_runs", "app.data_quality_issues", "app.data_quality_diffs",
 )
 
-# The third registry state (`core.write_chains.is_shadow`): DuckDB received
-# every row after the Postgres commit until S14-10. Kept for the `shadow` field
-# the registry publishes in `/api/health` until S14-11 reshapes the block.
-CHAIN_SHADOW = True
-
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # Not a sync watermark — `_freshness_check` would judge a `last_sync_*` key as
 # a stalled sync — but kept in `meta.chain_watermarks` for the same reason.
@@ -108,43 +100,17 @@ CHAIN_MARKER_KEYS: Tuple[str, ...] = (DIGEST_MARKER_KEY,)
 RUN_ID_LOCK_KEY = 0x6B73_0000_0000_0009
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_DQ_JOURNAL` alone says. An unrecognised value raises —
-    chain 8's rule (OD-18 (a)): it stops this chain and nothing else."""
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
+# `env_writes_postgres`, `unmet_precondition` and `writes_postgres` stood
+# here until step 14's S14-11, with `CHAIN_SHADOW` (the shape the registry
+# published as `shadow` after S14-10 deleted the shadow itself) and
+# `LOCKOUT_REVISION` (the revision a flip waited for — 0035, which
+# `tests/unit/test_chain_lockout.py` keeps as a literal). S14-00 made the
+# answers constants and S14-11 deleted them with the flag: the chain writes
+# Postgres, a constant. `WRITE_ENV` stays a name (revision 0035's comments and
+# an image from before step 14 read it).
 
-
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and the lock-out it waited on is not asked any
-    more — production requires 0035 and has latched the chain. Kept for the
-    registry's `unmet_precondition` field until S14-11."""
-    return None
-
-
-def writes_postgres() -> bool:
-    """True, a constant since step 14's S14-00: neither the flag, nor the
-    latch, nor the lock-out routes any more; the first write in a process
-    still takes the latch (decision 3). Its last production consumer, the
-    journal's door, stopped asking in S14-10; the registry's walk
-    (`tests/unit/test_write_chains.py`) and the routing tests read it until
-    S14-11 reshapes the registry."""
-    return True
-
-
-def reads_postgres() -> bool:
-    """Whether a read of the journal asks Postgres: True, a constant since
-    S14-00 — the readers follow the writer, with no fallback. Last consumer:
-    chain 1's preflight (`pg_inventory_write.preflight`), which drops its
-    gate on the journal's hourly copy while this is True — S14-11, with the
-    preflight. The journal's own door stopped asking in S14-10."""
-    return True
+# `reads_postgres` went with them; its last consumer was chain 1's
+# preflight, which S14-11 deleted too.
 
 
 def _latch() -> str:

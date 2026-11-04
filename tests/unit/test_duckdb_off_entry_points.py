@@ -72,9 +72,9 @@ OPENERS = {"connection", "connect"}
 # none is part of the week: `duckdb_switch` refuses each before the driver
 # runs (`test_duckdb_switch.py` pins their opener use; PR-10 their early
 # exits and messages).
+# `scripts/backfill_gender.py:main` was one until step 14's S14-11 deleted
+# its `--duckdb` preview and DuckDB write path: it reaches Postgres alone.
 HOST_ENTRIES: Dict[str, str] = {
-    "scripts/backfill_gender.py:main": (
-        "`--duckdb` reads the file; refused under off by the switch"),
     "scripts/backfill_utm.py:backfill_utm": (
         "re-parses in Postgres alone under step 13 (PR-6); the store is "
         "unconnected under off"),
@@ -310,11 +310,11 @@ class TestEveryWayIn:
         # jobs over `/expenses`, `/inventory`, `/goals`, the cohorts, the
         # assistant and the index stopped reaching the file (112 after it
         # alone), and S14-08 took the seventeen /sms and access routes below
-        # off it (118 after it alone): 95 with both, and S14-10 three more
-        # (92). Each step-14 PR that removes a DuckDB branch shrinks this; the
-        # floor is only that the walk still finds the ways in, not a count to
-        # keep.
-        assert count["door"] >= 92, dict(count)
+        # off it (118 after it alone): 95 with both, S14-10 three more (92),
+        # and S14-11's chains seven more (85). Each step-14 PR that removes a
+        # DuckDB branch shrinks this; the floor is only that the walk still
+        # finds the ways in, not a count to keep.
+        assert count["door"] >= 85, dict(count)
         assert count["held"] >= 10, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
         assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_integrity"] == "door"

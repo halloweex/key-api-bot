@@ -100,17 +100,18 @@ _buyer_watermark_cache: dict = {"age": None, "expires_at": 0.0}
 
 
 async def _buyer_sync_block() -> "dict | None":
-    """`_buyer_sync()`, plus — under chain 4 — `watermark_age_s`: the age of
-    the stamp the step writes to Postgres on every completion. The canary's
-    chain CRITICAL judges the older of the two, because the local clock is
-    floored at the process start and every recreate would otherwise reset a
-    stall and announce it resolved (review of PR-3). Read at most once a
-    minute; a store that cannot be read publishes None, and the canary falls
-    back to the local clock."""
-    from core import pg_buyer_sync_read, pg_buyers_write
+    """`_buyer_sync()`, plus `watermark_age_s`: the age of the stamp the step
+    writes to Postgres on every completion (chain 4; until step 14's S14-11
+    only while the chain's `mode()` said postgres). The canary's chain
+    CRITICAL judges the older of the two, because the local clock is floored
+    at the process start and every recreate would otherwise reset a stall and
+    announce it resolved (review of PR-3). Read at most once a minute; a
+    store that cannot be read publishes None, and the canary falls back to
+    the local clock."""
+    from core import pg_buyer_sync_read
 
     block = _buyer_sync()
-    if block is None or pg_buyers_write.mode() != "postgres":
+    if block is None:
         return block
     now = time.time()
     if now >= _buyer_watermark_cache["expires_at"]:
@@ -131,19 +132,19 @@ async def _buyer_sync_block() -> "dict | None":
 
 
 def _write_chains() -> dict:
-    """Each write chain's KS_WRITE_* as understood now, and whether the chain
-    has already written Postgres. Local state: the environment, plus the latch,
-    which is a cached read of the marker files beside the DuckDB database and
-    never a query — that is what lets this block answer while Postgres is down.
+    """`{chain: {}}` for every registered chain — the entries the block's
+    step states and spools are written into. Local state, no I/O.
 
-    Judged by the canary: a value not understood stops that chain's writers,
-    and `mismatch` says the chain owns its tables in Postgres while its
-    variable says otherwise (DN-06). The two copies of the latch are compared
-    against each other by the daily `reconcile_operational`, which is the only
-    thing that can read both."""
-    from core.write_chains import chain_modes
+    Until step 14's S14-11 each entry was the chain's KS_WRITE_* as
+    understood, its mode, its latch and the mismatch between them
+    (`write_chains.chain_modes()`), judged by the canary as
+    `write_chain_flag_invalid`, `write_chain_flag_mismatch` and
+    `write_chain_precondition_unmet`. No flag is read since: every chain
+    writes Postgres, and the two copies of the latch are compared by the
+    daily `reconcile_operational`, the only thing that can read both."""
+    from core.write_chains import WRITE_CHAINS, chain_name
 
-    return chain_modes()
+    return {chain_name(chain): {} for chain in WRITE_CHAINS}
 
 
 def _mark_stood_down(data_quality):
@@ -252,59 +253,10 @@ async def _journal_ages():
         return data
 
 
-# Chain 1's answer to "may it be switched to Postgres now?" (DN-24), on the same
-# TTL as the watermarks. Its own cache, because it is the one part of the
-# `write_chains` block that reads Postgres: the rest is local state and must
-# keep answering while Postgres cannot.
-_preflight_cache: dict = {"data": None, "expires_at": 0}
-_preflight_cache_lock = asyncio.Lock()
-
-# /api/health must answer; a Postgres that neither answers nor refuses would
-# otherwise hold it for the pool's connect timeout.
-_PREFLIGHT_TIMEOUT_S = 5
-
-
-def _retrieved(task: "asyncio.Future") -> None:
-    """Read a left-behind preflight's outcome, so an error it unwinds into is
-    not logged as never retrieved."""
-    if not task.cancelled():
-        task.exception()
-
-
-async def _bounded_preflight(preflight) -> dict:
-    """`preflight()` within `_PREFLIGHT_TIMEOUT_S`, behind a shield — the DN-05a
-    form the sync tick uses. A bare `wait_for` waits for the cancelled read to
-    unwind, and a Postgres read cut inside a query unwinds into asyncpg's
-    cancel request to a server that may not answer: with Postgres paused,
-    chain 3's preflight returned its "5 s" answer after 60 s, and chain 1's
-    after 30, holding its cache lock — and every later /api/health — the
-    whole time (batch-E review). Shielded, this returns at the bound, and the
-    read is cancelled and left to unwind on its own. Never raises for the
-    bound; a preflight that raises (each promises not to) still does."""
-    task = asyncio.ensure_future(preflight())
-    try:
-        return await asyncio.wait_for(asyncio.shield(task), _PREFLIGHT_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        return {"ok": False, "reasons": [
-            f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
-    finally:
-        task.cancel()
-        task.add_done_callback(_retrieved)
-
-
-async def _inventory_preflight() -> dict:
-    """`pg_inventory_write.preflight()`, cached. Never raises: a Postgres that
-    does not answer in time is an answer of its own, `ok: false`."""
-    from core import pg_inventory_write
-
-    now = time.time()
-    async with _preflight_cache_lock:
-        if _preflight_cache["data"] is not None and now < _preflight_cache["expires_at"]:
-            return _preflight_cache["data"]
-        data = await _bounded_preflight(pg_inventory_write.preflight)
-        _preflight_cache["data"] = data
-        _preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
-        return data
+# Chain 1's and chain 5's pre-flip answers (`preflight`, cached and bounded
+# behind a shield, asked at once with `asyncio.gather`) stood here until step
+# 14's S14-11: each said `ok: null` once its chain wrote Postgres, which since
+# S14-00 is always, and they went with the chains' flags.
 
 
 async def _inventory_sync_step() -> "dict | None":
@@ -335,31 +287,6 @@ async def _orders_sync_step() -> "dict | None":
         return None
 
 
-# Chain 3's pre-flip answer (`_orders_preflight`, on chain 1's cache shape)
-# stood here until step 14's S14-09: it said `ok: null` since S14-00, the
-# question being over, and went with `pg_orders_write.preflight`.
-
-
-# Chain 5's pre-flip answer, on the same cache shape as chain 1's.
-_managers_preflight_cache: dict = {"data": None, "expires_at": 0}
-_managers_preflight_cache_lock = asyncio.Lock()
-
-
-async def _managers_preflight() -> dict:
-    """`pg_managers_write.preflight()`, cached and bounded. Never raises."""
-    from core import pg_managers_write
-
-    now = time.time()
-    async with _managers_preflight_cache_lock:
-        if (_managers_preflight_cache["data"] is not None
-                and now < _managers_preflight_cache["expires_at"]):
-            return _managers_preflight_cache["data"]
-        data = await _bounded_preflight(pg_managers_write.preflight)
-        _managers_preflight_cache["data"] = data
-        _managers_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
-        return data
-
-
 async def _managers_sync_step() -> "dict | None":
     """What chain 5's managers step last did under the chain (failures in a
     row, the error's class, the retry window). Local state, no I/O; null when
@@ -374,61 +301,34 @@ async def _managers_sync_step() -> "dict | None":
 
 
 async def _write_chains_block() -> dict:
-    """The `write_chains` block: every chain's local state, and under chain 1's
-    entry its `preflight` — the three questions asked before
-    `KS_WRITE_INVENTORY` is switched on, `ok` null once the chain already
-    writes Postgres — and its `sync_step`, where a Postgres failure of the
-    offers or stocks step is recorded instead of ending the tick. Neither is
-    judged by the canary: the preflight is read by the person about to flip
-    the chain, and a stock step that keeps failing stops `last_sync_stocks`,
-    which the integrity job's chain invariants already watch.
+    """The `write_chains` block: `{chain: {sync_step?, pending?}}`.
 
-    Chain 5's entry carries the same two (`pg_managers_write.preflight` and
-    the managers step's state). Chain 3's carries the order step's state
-    alone, which the canary judges as `orders_sync_failing`; its preflight
-    went in step 14's S14-09, the question it answered being over since
-    S14-00. The preflights are asked at once, never one after the other: each
-    is bounded at `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row
-    would cost the canary's whole `HEALTH_TIMEOUT_S`."""
-    from core import pg_inventory_write, pg_managers_write, pg_orders_write
+    `sync_step` is what a chain's half of the sync tick last did, where a
+    Postgres failure is recorded instead of ending the tick: chain 1's offers
+    and stocks step, chain 3's order step — judged by the canary as
+    `orders_sync_failing` —, chain 5's managers step and chain 6's hourly
+    products step. `pending` is a report ledger's spool (chains 11a and 11b),
+    judged as `report_ledger_pending`. Local state, no I/O beyond the spool
+    directory, so the block answers while Postgres cannot.
+
+    Until step 14's S14-11 each entry also carried `env`, `mode`, `latched`,
+    `latched_at`, `mismatch` and `unmet_precondition`, and chains 1 and 5 a
+    `preflight` asking Postgres; they went with the flags."""
+    from core import (
+        pg_catalogue_write, pg_inventory_write, pg_managers_write,
+        pg_orders_write,
+    )
 
     block = _write_chains()
-    inventory = block.get(pg_inventory_write.CHAIN)
-    # Chain 3: the order step the canary judges.
-    orders = block.get(pg_orders_write.CHAIN)
-    # Chain 5: its preflight and its managers step.
-    managers = block.get(pg_managers_write.CHAIN)
-    # The preflights at once, never one after the other: each is bounded at
-    # `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row cost twice
-    # that — 10 s, the canary's whole `HEALTH_TIMEOUT_S` (the chain-3 review).
-    # Concurrently they cost one bound, however many chains ask — a bound
-    # that holds because each is shielded (`_bounded_preflight`): unshielded,
-    # a hung Postgres held them for asyncpg's cancel round trip instead.
-    preflights = await asyncio.gather(
-        _inventory_preflight() if isinstance(inventory, dict) else _nothing(),
-        _managers_preflight() if isinstance(managers, dict) else _nothing())
-    if isinstance(inventory, dict):
-        inventory["preflight"] = preflights[0]
-        inventory["sync_step"] = await _inventory_sync_step()
-    if isinstance(orders, dict):
-        orders["sync_step"] = await _orders_sync_step()
-    if isinstance(managers, dict):
-        managers["preflight"] = preflights[1]
-        managers["sync_step"] = await _managers_sync_step()
-    # Chain 6's hourly products step off DuckDB, in chain 1's shape: recorded
-    # instead of ending the tick. Not judged by the canary — the freshness
-    # check watches `last_sync_products` at 48 h.
-    from core import pg_catalogue_write
-
-    entry = block.get(pg_catalogue_write.CHAIN)
-    if isinstance(entry, dict):
-        entry["sync_step"] = await _catalogue_sync_step()
+    block[pg_inventory_write.CHAIN]["sync_step"] = await _inventory_sync_step()
+    block[pg_orders_write.CHAIN]["sync_step"] = await _orders_sync_step()
+    block[pg_managers_write.CHAIN]["sync_step"] = await _managers_sync_step()
+    # Chain 6's hourly products step, in chain 1's shape: recorded instead of
+    # ending the tick. Not judged by the canary — the freshness check watches
+    # `last_sync_products` at 48 h.
+    block[pg_catalogue_write.CHAIN]["sync_step"] = await _catalogue_sync_step()
     _pending_entries(block)
     return block
-
-
-async def _nothing() -> None:
-    return None
 
 
 def _pending_entries(block: dict) -> None:

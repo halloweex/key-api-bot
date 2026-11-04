@@ -1625,10 +1625,10 @@ uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
 cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
 checkpoint (~7 s at 900 MB) — ~67 s for an ordinary request. **Not for a slow
 one**: the eight `SLOW_ENDPOINTS` (`web/middleware.py`) get 300 s, uvicorn
-drains them too, and five write DuckDB (`/api/duckdb/resync`,
-`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`, and — until chain
-7b-3's `KS_WRITE_FORECAST=postgres` moves their tables — `/api/goals/recalculate`
-and `/api/revenue/forecast/train`). The list was kept by hand and named three;
+drains them too, and three write DuckDB (`/api/duckdb/resync`,
+`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`; `/api/goals/recalculate`
+and `/api/revenue/forecast/train` wrote it too until step 14's S14-11 took
+chain 7b-3's DuckDB branch). The list was kept by hand and named three;
 it is derived from the code now (`test_web_stop_grace.py` walks each handler
 to a store method executing a write). One in flight at a stop is killed. Covering them (~340 s) would leave a deploy — pull, stop,
 migrate, the 180 s health gate — no margin inside its 10-minute ssh timeout,
@@ -1990,10 +1990,10 @@ raising):
   `/api/duckdb/stats` and the DuckDB block of `/api/health` — leaves the buyer
   counts out rather than show DuckDB's frozen ones; the live count is
   `bronze.buyers` (`pg_buyer_sync_read.count_buyers`).
-- `scripts/backfill_gender.py` writes Postgres only for a chain web has
-  already latched (exit 4 otherwise): the latch is a marker web reads once and
-  caches, so a script taking the first write would leave web writing DuckDB
-  until it restarted.
+- `scripts/backfill_gender.py` writes Postgres alone since step 14's S14-11
+  (no `--duckdb`, no latch check); until then only for a chain web had
+  already latched (exit 4 otherwise), so a script taking the first write
+  could not leave web writing DuckDB until it restarted.
 - `reconcile_buyer_completeness` also runs under the chain with the landing
   mirror off — it is the one Postgres check that the writer is alive.
 
@@ -4017,14 +4017,23 @@ exist.
 ### A write flag is no longer a rollback
 
 **Since step 14's S14-00 nothing routes by a flag, a latch or a
-precondition: every chain writes Postgres, a constant** (`writes_postgres()`,
-`mode()`, `unmet_precondition()` and the registry's `mode` and
-`unmet_precondition`). A first write still takes the marker and the owner
-rows (decision 3), because an image from before step 14 — the rollback
-target, see "Before any rollback to an image from before step 14" — routes
-by them; `/api/health` still publishes `env`, `error`, `latched` and `mismatch`.
-**Since S14-04 nothing in the code hands a chain back to DuckDB either**: the
-copy-back is deleted and the way back is the image (below). History below.
+precondition: every chain writes Postgres, a constant. Since S14-11 no
+`KS_WRITE_*` is read at all**: `writes_postgres()`, `mode()`,
+`unmet_precondition()`, the preflights and the registry's `chain_modes` are
+deleted, `core/write_chains.py` is the list of chain modules with what each
+declares (`CHAIN`, `CHAIN_TABLES`, `CHAIN_SYNC_KEYS`), and the canary's
+`write_chain_flag_invalid`, `write_chain_flag_mismatch` and
+`write_chain_precondition_unmet` are gone with their emitters.
+`/api/health`'s `write_chains` is `{chain: {sync_step?, pending?}}`;
+`orders_sync_failing` and `buyer_sync_stalled_chain` are judged on the step
+alone, held unjudged by a probe that read no step. The standing watch dates a
+chain's handover by its `owner:` rows, not the local marker. The `.env` lines
+stay (rule 4): an image from before step 14 reads them. A first write still
+takes the marker and the owner rows (decision 3), because that image — the
+rollback target, see "Before any rollback to an image from before step 14" —
+routes by them. **Since S14-04 nothing in the code hands a chain back to
+DuckDB either**: the copy-back is deleted and the way back is the image
+(below). History below.
 
 Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`

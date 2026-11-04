@@ -549,7 +549,7 @@ def _judge_freshness(
     an entity whose verdict would rest on the copy — a key Postgres does not
     hold, of a chain that inherits, or of one that has not moved — is
     **unwatched** when the copy is unreadable, rather than "never synced"."""
-    from core.write_chains import WRITE_CHAINS, chain_name, stood_down_sync_keys_checked
+    from core.write_chains import WRITE_CHAINS, sync_keys
 
     issues: List[IntegrityIssue] = []
     if now is None:
@@ -562,7 +562,11 @@ def _judge_freshness(
     if not from_the_copy and not seen:
         return []
 
-    moved_keys, chain_errors = stood_down_sync_keys_checked()
+    # Every chain's key lives in `meta.chain_watermarks` — since step 14's
+    # S14-11 asked of nothing (`write_chains.sync_keys()`); until then a key
+    # moved only once its chain wrote Postgres, and a chain whose KS_WRITE_*
+    # was not understood left its keys unjudged.
+    moved_keys = sync_keys()
     moved = {key[len("last_sync_"):] for key in moved_keys}
     # Under `off` the same gate, over everything Postgres holds: the copy read
     # and empty, and no watermark of a moved chain — read and empty too, when
@@ -575,12 +579,8 @@ def _judge_freshness(
                 if getattr(c, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
                 for k in getattr(c, "CHAIN_SYNC_KEYS", ())}
     # Entities whose watermark cannot be judged this run: every moved one when
-    # the caller brought no watermarks, and those of a chain whose KS_WRITE_* is
-    # not understood (DN-01) — nobody knows which store holds theirs.
+    # the caller brought no watermarks.
     blind = set(moved) if chain_watermarks is None else set()
-    for name in chain_errors:
-        chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
-        blind.update(k[len("last_sync_"):] for k in getattr(chain, "CHAIN_SYNC_KEYS", ()))
     # Under `off` with the copy unreadable: every entity whose verdict would
     # rest on the copy. A moved key Postgres holds is judged as it stands, and
     # a moved key of a chain that does not inherit is "never synced" without
@@ -597,12 +597,8 @@ def _judge_freshness(
     # it here would say that a stall of it went unwatched this run.
     blind &= set(FRESHNESS_THRESHOLDS)
     if blind:
-        why = ("; ".join(f"{n}: {e}" for n, e in sorted(chain_errors.items()))
-               if chain_errors else "")
         reasons = []
-        if why:
-            reasons.append(f"Their chain's flag is not understood — {why}.")
-        if blind - copy_blind and not why:
+        if blind - copy_blind:
             reasons.append(
                 "Their chain writes Postgres and this check was called without "
                 "`chain_watermarks=` from core.pg_chain_watermarks.read_values.")
@@ -723,10 +719,10 @@ def _inventory_snapshot_continuity_check(
     today = now.date()
     yesterday = today - timedelta(days=1)
 
-    # This check follows the writer. Under `KS_WRITE_INVENTORY=postgres` the
-    # snapshot is taken into `app.inventory_sku_history`, and reading DuckDB
-    # here would file a finding for every day since the switch — about
-    # snapshots that are being taken correctly, in the other store.
+    # This check follows the writer: the snapshot is taken into
+    # `app.inventory_sku_history` (chain 1; since step 14's S14-11 asked of no
+    # flag), and reading DuckDB here would file a finding for every day since
+    # the switch — about snapshots taken correctly, in the other store.
     #
     # The facts arrive pre-read rather than being fetched here, because this
     # runs inside the **sync** `check_internal_integrity` while a Postgres read
@@ -736,13 +732,11 @@ def _inventory_snapshot_continuity_check(
     # `compare_table`'s arrangement, and the reason there is one body and not
     # two.
     #
-    # The guard stays, narrowed to what it now protects: a caller that has the
-    # flag on and supplied nothing. That is a forgotten call site, not a
+    # The guard stays, narrowed to what it now protects: a caller that
+    # supplied nothing. That is a forgotten call site, not a
     # migration, and it must still be loud — this is the one check standing
     # over the one table that cannot be reconstructed at any price.
-    from core.pg_inventory_write import writes_postgres
-
-    if calendar is None and writes_postgres():
+    if calendar is None:
         return [IntegrityIssue(
             check_name="inventory_continuity_unwatched",
             table_name="inventory_sku_history",
@@ -750,8 +744,8 @@ def _inventory_snapshot_continuity_check(
             count=1,
             sample_ids=(),
             description=(
-                "KS_WRITE_INVENTORY=postgres, so the per-SKU snapshot is "
-                "written to app.inventory_sku_history, and this check was "
+                "The per-SKU snapshot is written to "
+                "app.inventory_sku_history, and this check was "
                 "called without a pre-read calendar — so it is NOT watching "
                 "the only table here that cannot be reconstructed from any "
                 "source. The caller must pass `calendar=` from "
@@ -759,14 +753,7 @@ def _inventory_snapshot_continuity_check(
             ),
         )]
 
-    if calendar is None:
-        row = conn.execute(
-            "SELECT MIN(date), MAX(date) FROM inventory_sku_history"
-        ).fetchone()
-        first_day = row[0] if row else None
-        present: Optional[FrozenSet[date]] = None
-    else:
-        first_day, present = calendar
+    first_day, present = calendar
 
     if first_day is None:
         # No history at all → fresh install, not a stall. Same reasoning as
@@ -777,30 +764,15 @@ def _inventory_snapshot_continuity_check(
     if window_start > yesterday:
         return []
 
-    if present is None:
-        missing = [r[0] for r in conn.execute(
-            """
-            WITH cal AS (
-                SELECT UNNEST(GENERATE_SERIES(?::DATE, ?::DATE, INTERVAL 1 DAY))::DATE AS d
-            )
-            SELECT cal.d
-            FROM cal
-            LEFT JOIN (SELECT DISTINCT date FROM inventory_sku_history) h ON h.date = cal.d
-            WHERE h.date IS NULL
-            ORDER BY cal.d
-            """,
-            [window_start, yesterday],
-        ).fetchall()]
-    else:
-        # The calendar is enumerated here rather than in SQL, so the two
-        # engines cannot disagree about what a day is. `generate_series` exists
-        # in both and spells differently in each; a Python range spells the
-        # same everywhere and is the same arithmetic.
-        span_days = (yesterday - window_start).days
-        missing = [
-            d for d in (window_start + timedelta(days=i) for i in range(span_days + 1))
-            if d not in present
-        ]
+    # The calendar is enumerated here rather than in SQL, so the two
+    # engines cannot disagree about what a day is. `generate_series` exists
+    # in both and spells differently in each; a Python range spells the
+    # same everywhere and is the same arithmetic.
+    span_days = (yesterday - window_start).days
+    missing = [
+        d for d in (window_start + timedelta(days=i) for i in range(span_days + 1))
+        if d not in present
+    ]
 
     if not missing:
         return []
@@ -1855,12 +1827,12 @@ def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -
     if "inventory_continuity_unwatched" in found:
         names.add("inventory_snapshot_gaps")
     if "sync_watermarks_unwatched" in found:
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys
 
         # The judged entities only (`_freshness_check`'s `blind`): a moved key
         # with no threshold has no condition to hold.
         names.update(f"freshness_{key[len('last_sync_'):]}"
-                     for key in stood_down_sync_keys()
+                     for key in sync_keys()
                      if key[len("last_sync_"):] in FRESHNESS_THRESHOLDS)
     # What the finding itself names. Under `on` that is a subset of the moved
     # keys above, so nothing changes there; under `off` with
@@ -2141,8 +2113,6 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
     ("integrity_check_raised",
      "A check's table is gone or renamed — find which in the ERROR log; its findings are absent, not clean"),
-    ("write_chain_flag_invalid",
-     "Correct the named KS_WRITE_* in .env (duckdb or postgres) and recreate web; until then that chain's writes fail"),
     # Both halves of the ownership latch. Neither is repairable by a job: the
     # first needs a human to decide which copy is right, the second names rows
     # a shipment has already replaced. The shipment is the symptom: a shipper
@@ -2348,7 +2318,6 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
     "inventory_continuity_unwatched": "snapshot gaps no longer watched",
     "sync_watermarks_unwatched": "sync stalls no longer watched",
-    "write_chain_flag_invalid": "a write chain's flag is not understood",
     "chain_latch_disagrees": "the two copies of a chain's latch disagree",
     "chain_shipper_overwrote": "a copy out of DuckDB overwrote a table it no longer owns",
     "chain_owner_unregistered": "a write chain owns tables this build does not know",

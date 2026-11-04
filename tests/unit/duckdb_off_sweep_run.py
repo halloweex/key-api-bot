@@ -39,7 +39,7 @@ import pytest
 
 from core import duckdb_switch
 from tests.unit.test_duckdb_off_sweep import (
-    FLAVOR_ENV, LIVES, NOT_SCHEDULED, OFFLINES, OUT_ENV, STEP_TIMEOUT_S, UNLATCHED,
+    FLAVOR_ENV, LIVES, NOT_SCHEDULED, OFFLINES, OUT_ENV, STEP_TIMEOUT_S,
     FrozenFile, apply_target_state, name_the_key, optional_variants, variant_key,
 )
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
@@ -408,6 +408,11 @@ def canonical_postgres():
         asyncio.run(put_back(snapshot))
 
 
+# The handover the live flavour's owner rows carry: production's latest
+# (chain 5's, 2026-10-15).
+OWNER_STAMP = "2026-10-15T08:38:46.164760+00:00"
+
+
 async def _seed_live_facts(dsn: str) -> None:
     """What production's Postgres holds that the state reads: an owner row
     for every table of every latched chain — the audit half of the latch, the
@@ -419,15 +424,17 @@ async def _seed_live_facts(dsn: str) -> None:
 
     from core import chain_latch, warehouse_cutover as wc
     from core.pg_operational import SYNC_METADATA_TABLE
-    from core.write_chains import WRITE_CHAINS, chain_name
+    from core.write_chains import WRITE_CHAINS
     from tests.unit.test_duckdb_off_sweep import WRITER_RESOLVED
 
     conn = await asyncpg.connect(dsn)
     try:
         async with conn.transaction():
+            # The owner rows as production holds them, under one handover
+            # stamp. Since step 14's S14-11 no local marker is written first:
+            # the sweep latches nothing (the chains' first writes do).
             for chain in WRITE_CHAINS:
-                stamp = chain_latch.latched_at(chain_name(chain))
-                await chain_latch.claim(conn, tuple(chain.CHAIN_TABLES), stamp)
+                await chain_latch.claim(conn, tuple(chain.CHAIN_TABLES), OWNER_STAMP)
             await conn.execute(
                 "INSERT INTO meta.mirror_state (table_name, last_ok_at, backfilled_at) "
                 "VALUES ('bronze.expenses', now(), now())")
@@ -541,16 +548,9 @@ async def derive_in_postgres(record: "Recorder", step: str) -> None:
 def state(canonical_postgres, monkeypatch, tmp_path, fresh_read_fallback):  # noqa: F811
     """The target state, in the flavour this process was started for, and
     the frozen file beside it. Returns the file."""
-    from core import chain_latch
-    from core.write_chains import WRITE_CHAINS, chain_name
-
     if PG_LIVE:
-        # The local half of the latch first: the owner rows carry its stamp.
-        for chain in WRITE_CHAINS:
-            chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
         asyncio.run(_seed_live_facts(os.environ["KS_PG_DSN"]))
-    apply_target_state(monkeypatch, tmp_path, live=PG_LIVE,
-                       markers=FLAVOR not in UNLATCHED)
+    apply_target_state(monkeypatch, tmp_path, live=PG_LIVE)
     # A refusal under `get_last_sync_time` is recorded with its key.
     name_the_key(monkeypatch)
     import core.duckdb_store as store_module

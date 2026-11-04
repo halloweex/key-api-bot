@@ -530,7 +530,8 @@ class TestABlindProbeKeepsThePage:
         stalled["buyer_sync"] = {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
                                  "watermark_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
                                  "last_attempt_age_s": 120, "consecutive_failures": 0}
-        stalled["write_chains"] = {canary.BUYER_CHAIN: {"mode": "postgres"}}
+        # No `write_chains` entry: since step 14's S14-11 the CRITICAL is
+        # judged on the `buyer_sync` block alone.
         sent, agent, _ = await self._run([stalled, None, stalled])
         assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
 
@@ -544,7 +545,7 @@ class TestABlindProbeKeepsThePage:
         `unjudged_keys`."""
         failing = self._payload({})
         failing["write_chains"] = {canary.ORDERS_CHAIN: {
-            "mode": "postgres", "sync_step": {
+            "sync_step": {
                 "consecutive_failures": canary.ORDERS_SYNC_FAILURES + 2,
                 "last_ok_age_s": 3600, "last_attempt_age_s": 60,
                 "last_error_class": "TimeoutError"}}}
@@ -554,10 +555,10 @@ class TestABlindProbeKeepsThePage:
 
 
 class TestUnjudgedKeys:
-    # Chains 3 and 4 both on DuckDB: an entry for each, so both are judged.
+    # The buyers step's block and chain 3's step: both judged.
     _CHAIN4 = {"buyer_sync": {"last_ok_age_s": 60},
-               "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"},
-                                canary.ORDERS_CHAIN: {"mode": "duckdb"}}}
+               "write_chains": {canary.ORDERS_CHAIN: {
+                   "sync_step": {"consecutive_failures": 0}}}}
     # The switch block, and since S14-00 the backup evidence's.
     _SWITCH = {"duckdb_switch": {"mode": "on", "opened_while_off": {}},
                "backups": {"pitr_drill_age_h": 1.0}}
@@ -581,8 +582,10 @@ class TestUnjudgedKeys:
                                      **self._SWITCH}) == [
             "read_routed_to_duckdb", "read_refused"]
         both = {"read_fallbacks": {}, "read_fallback_mode": {}, **self._SWITCH}
+        # Since step 14's S14-11 chain 4's CRITICAL is held by the
+        # `buyer_sync` block alone, never by a `write_chains` entry.
         assert canary.unjudged_keys({**both, "buyer_sync": {"last_ok_age_s": 1}}) == [
-            "buyer_sync_stalled_chain", "orders_sync_failing"], "no chain entry"
+            "orders_sync_failing"], "no chain entry"
         assert canary.unjudged_keys({**both, "buyer_sync": None,
                                      "write_chains": self._CHAIN4["write_chains"]}) == [
             "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
@@ -606,32 +609,36 @@ class TestUnjudgedKeys:
             {"buyer_sync": {"consecutive_failures": 3}})}
         emitted |= {k for k, _ in canary.check_buyer_sync_chain(
             {"buyer_sync": {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 1,
-                            "last_attempt_age_s": 60},
-             "write_chains": {canary.BUYER_CHAIN: {"mode": "postgres"}}})}
+                            "last_attempt_age_s": 60}})}
         emitted |= {k for k, _ in canary.check_duckdb_switch(
             {"duckdb_switch": {"opened_while_off": {"a": _entry(1)}}})}
         emitted |= {k for k, _ in canary.check_duckdb_off_held_back(
             {"duckdb_switch": {"held_back": ["user_store"]}})}
         emitted |= {k for k, _ in canary.check_orders_sync_chain(
             {"write_chains": {canary.ORDERS_CHAIN: {
-                "mode": "postgres", "sync_step": {"consecutive_failures": 9}}}})}
+                "sync_step": {"consecutive_failures": 9}}}})}
         emitted |= {k for k, _ in canary.check_backup_evidence(
             {"backups": {"pitr_drill_age_h": None}})}
         assert set(canary.unjudged_keys(None)) == emitted
 
     @pytest.mark.parametrize("entry, held", [
         (None, True),                                              # no entry at all
-        ({"mode": "postgres"}, True),                              # no step to judge
-        ({"mode": "postgres", "sync_step": None}, True),
-        ({"mode": "postgres", "sync_step": {"consecutive_failures": 0}}, False),
-        ({"mode": "duckdb"}, False),                               # judged: not chain 3's
-        ({"mode": None}, False),
+        ({}, True),                                                # no step to judge
+        ({"sync_step": None}, True),
+        ({"sync_step": {"consecutive_failures": 0}}, False),
+        # An older web's entry: since step 14's S14-11 `mode` decides nothing,
+        # so a step-less entry is held whatever it says and a step is judged.
+        ({"mode": "postgres"}, True),
+        ({"mode": "duckdb"}, True),
+        ({"mode": "duckdb", "sync_step": {"consecutive_failures": 0}}, False),
     ])
     def test_chain_3s_key_is_held_only_when_it_cannot_be_judged(self, entry, held):
+        """By `sync_step` alone (S14-11). Mutation: gate the hold on `mode`
+        again."""
         payload = {"read_fallbacks": {}, "read_fallback_mode": {}, **self._SWITCH,
                    "buyer_sync": {"last_ok_age_s": 1},
-                   "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"},
-                                    **({canary.ORDERS_CHAIN: entry} if entry else {})}}
+                   "write_chains": {**({canary.ORDERS_CHAIN: entry}
+                                       if entry is not None else {})}}
         assert ("orders_sync_failing" in canary.unjudged_keys(payload)) is held
 
     @pytest.mark.asyncio

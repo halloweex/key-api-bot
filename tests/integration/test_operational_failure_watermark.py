@@ -85,7 +85,7 @@ async def stores(tmp_path, monkeypatch):
     # Since step 14's S14-00 every chain writes Postgres whatever its flag
     # says, so the copy stands every chain's tables down: what it still
     # ships, and stamps, is the rest — DuckDB's history tables.
-    from core.write_chains import stood_down_tables
+    from core.write_chains import chain_tables as stood_down_tables
 
     tables = tuple(t for t in _all_shipped_tables() if t not in stood_down_tables())
     assert "app.reconciliation_log" in tables

@@ -77,8 +77,8 @@ class TestTheRegistrySeesIt:
         """Since S14-00 the chain is on Postgres whatever its flag says, and
         its key with it."""
         assert write_chains.chain_for_sync_key("last_sync_expense_types") is chain
-        assert "last_sync_expense_types" in write_chains.stood_down_sync_keys()
-        assert "bronze.expense_types" in write_chains.stood_down_tables()
+        assert "last_sync_expense_types" in write_chains.sync_keys()
+        assert "bronze.expense_types" in write_chains.chain_tables()
 
     def test_the_table_is_one_the_shipper_replaces_and_the_comparison_reads(self):
         """Standing down a table neither touches would be a no-op that reads as
@@ -310,7 +310,7 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
         from core.data_quality import _freshness_check
 
         fresh = (self.NOW - timedelta(minutes=5)).isoformat()
-        others = {key: fresh for key in write_chains.stood_down_sync_keys()
+        others = {key: fresh for key in write_chains.sync_keys()
                   if key != "last_sync_expense_types"}
         return [(i.check_name, i.severity.value, i.count, i.description)
                 for i in _freshness_check(conn, self.NOW,
@@ -347,56 +347,8 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
         assert "never synced" in issue[3]
 
 
-class TestTheCanaryWarnsOnIt:
-    def _block(self, **state):
-        base = {"env": chain.WRITE_ENV, "mode": "duckdb", "error": None,
-                "latched": False, "latched_at": None, "mismatch": False,
-                "unmet_precondition": None}
-        base.update(state)
-        return {"write_chains": {chain.CHAIN: base}}
-
-    def test_held_on_duckdb_is_named_as_held(self):
-        from bot import canary
-
-        (key, message), = canary.check_write_chain_precondition(
-            self._block(unmet_precondition="KS_READ_EXPENSES is not postgres"))
-        assert key == "write_chain_precondition_unmet"
-        assert "held on DuckDB" in message and "KS_READ_EXPENSES" in message
-
-    def test_latched_it_says_the_writes_go_to_postgres(self):
-        from bot import canary
-
-        (_key, message), = canary.check_write_chain_precondition(self._block(
-            mode="postgres", latched=True,
-            unmet_precondition="KS_READ_EXPENSES is not postgres"))
-        assert "writes Postgres" in message
-
-    def test_nothing_unmet_and_an_older_web_are_quiet(self):
-        from bot import canary
-
-        assert canary.check_write_chain_precondition(self._block()) == []
-        assert canary.check_write_chain_precondition({}) == []
-        stale = self._block()
-        del stale["write_chains"][chain.CHAIN]["unmet_precondition"]
-        assert canary.check_write_chain_precondition(stale) == []
-
-    @pytest.mark.asyncio
-    async def test_run_canary_warns_and_names_the_lever(self):
-        import httpx
-        from datetime import timedelta
-
-        from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-
-        payload = _healthy_payload()
-        payload.update(self._block(unmet_precondition="KS_READ_EXPENSES is not postgres"))
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(lambda request: httpx.Response(200, json=payload)) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                result = await canary.run_canary(DASHBOARD, client=client)
-
-        assert result.severity == "warn"
-        assert "write_chain_precondition_unmet" in result.failure_keys
-        assert "read flag" in canary.format_alert(result, DASHBOARD)
-
+# `TestTheCanaryWarnsOnIt` stood here until step 14's S14-11: the canary
+# warning `write_chain_precondition_unmet` on the chain's published
+# precondition (KS_READ_EXPENSES not postgres), held or latched. The
+# precondition, its field on `/api/health` and the canary check went with the
+# flags.

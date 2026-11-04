@@ -168,20 +168,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),
-    # A KS_WRITE_* not understood: that chain's writers raise, its tables stand
-    # down. Emitted by the canary and by reconcile_operational (DN-01).
-    "write_chain_flag_invalid": _c("web restarts with a valid KS_WRITE_* value"),
-    # A chain that has already written Postgres while its KS_WRITE_* says
-    # duckdb. The latch wins (OD-19 (a)), so nothing is failing — but a
-    # rollback somebody believes happened has not (DN-06). Since step 14 no
-    # flag routes at all (S14-00) and nothing hands tables back (S14-04).
-    "write_chain_flag_mismatch": _c(
-        "the variable is set back to postgres; nothing in this build hands the "
-        "tables back to DuckDB. " + ROLLBACK_LEVER),
-    # A chain's own condition for moving is unmet: held on DuckDB against its
-    # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
-    "write_chain_precondition_unmet": _c(
-        "the read flag the chain names is set to postgres and web restarts"),
+    # `write_chain_flag_invalid`, `write_chain_flag_mismatch` and
+    # `write_chain_precondition_unmet` stood here until step 14's S14-11: a
+    # KS_WRITE_* not understood, a latch against its flag (DN-06) and a
+    # chain's own condition for moving unmet (DN-26). No flag is read since,
+    # so none of the three has an emitter.
     # What the host's backup scripts last proved, judged from `/api/health`'s
     # `backups` block at `core/backup_evidence.py`'s limits: a PITR drill or
     # an off-site restore drill older than eight days, an off-site shipment

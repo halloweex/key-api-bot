@@ -210,7 +210,9 @@ class TestChain8Expenses:
         read = "\n".join(conn.sql)
         assert "app.manual_expenses_id_seq" in read
         assert "FROM app.manual_expenses" in read
-        for chain_1 in ("stock_movements", "inventory", "offers", "chain_watermarks"):
+        # `key = ANY`: chain 1's watermark read. (The owner rows are read for
+        # every chain since step 14's S14-11, from the same table.)
+        for chain_1 in ("stock_movements", "inventory", "offers", "key = ANY"):
             assert chain_1 not in read, chain_1
         # Zero rows: an allocator with nothing to collide with, no NULLs.
         assert inv.check_chain_invariants(facts) == []
@@ -354,7 +356,7 @@ class TestChain7aGoals:
         assert facts.expense_types is None
         read = "\n".join(conn.sql)
         assert "FROM app.revenue_goals" in read
-        for other in ("manual_expenses", "stock_movements", "chain_watermarks"):
+        for other in ("manual_expenses", "stock_movements", "key = ANY"):
             assert other not in read, other
         assert inv.check_chain_invariants(facts) == []
 
@@ -635,24 +637,43 @@ class TestWhoIsWatched:
                 monkeypatch.setenv(chain.WRITE_ENV, flag)
         assert inv.watched_chains() == {chain_name(c): None for c in WRITE_CHAINS}
 
-    def test_a_latched_chain_brings_its_stamp(self, monkeypatch):
-        """The latch no longer routes, but its stamp is still when the
-        since-the-handover invariants measure from."""
-        monkeypatch.setenv("KS_WRITE_INVENTORY", "duckdb")
+    def test_the_local_marker_dates_nothing(self, monkeypatch):
+        """Since step 14's S14-11 the handover is dated by the owner rows
+        (below), not the local marker: a lost `./data` must not make every
+        "since the handover" invariant forget it. Mutation: read the marker's
+        stamp here again."""
         _latch("pg_inventory_write")
         watched = inv.watched_chains()
-        assert watched["pg_inventory_write"] == UTC_NOW.isoformat()
+        assert watched["pg_inventory_write"] is None
         assert watched["pg_expenses_write"] is None
 
-    def test_the_state_comes_from_write_chains_and_not_from_the_environment(self):
-        """Reused, not re-derived — a second reading of `KS_WRITE_*` here is
-        how a latched chain with a flipped-back variable would end up
-        unwatched by the check that exists for it."""
+    @pytest.mark.asyncio
+    async def test_the_handover_is_the_chains_earliest_owner_row(self, monkeypatch):
+        """No marker on disk, and chain 8's owner row in Postgres: the facts
+        carry its stamp. Mutation: date the handover by the marker again."""
+        _watch_only(monkeypatch, "pg_expenses_write")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+        stamp = "2026-10-15T08:00:00+00:00"
+
+        class _Owners(_Recorder):
+            async def fetch(self, sql, *args):
+                self._see(sql)
+                if "key LIKE" in sql:
+                    return [{"key": "owner:app.manual_expenses", "value": stamp}]
+                return []
+
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(_Owners()))
+        assert facts.expenses.latched_at == datetime.fromisoformat(stamp)
+
+    def test_every_chain_is_watched_asking_no_flag(self):
+        """Read off the registry, never off the environment or a chain's
+        answer (`chain_modes`, gone with the flags)."""
         source = textwrap.dedent(inspect.getsource(inv.watched_chains))
         calls = {n.func.id for n in ast.walk(ast.parse(source))
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "chain_modes" in calls
-        assert "getenv" not in source
+        assert "chain_modes" not in calls
+        assert "getenv" not in source and "WRITE_CHAINS" in source
 
 
 class TestBlindnessIsReported:
@@ -871,7 +892,9 @@ class TestTheWatermarks:
         failed read looked exactly like a chain with no sync keys at all."""
         _watch_only(monkeypatch, "pg_inventory_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        conn = _Recorder(fail_on="meta.chain_watermarks")
+        # The watermark read alone (`key = ANY`): the owner rows, read from
+        # the same table first since step 14's S14-11, answer.
+        conn = _Recorder(fail_on="key = ANY")
         with patch("core.pg.require_revision", new=AsyncMock()):
             facts = await inv.read_facts(pool=_Pool(conn))
         assert isinstance(facts.inventory, inv.Inventory)

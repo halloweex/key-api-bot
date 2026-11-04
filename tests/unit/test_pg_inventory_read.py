@@ -208,8 +208,10 @@ class TestTheHelperIsNeverCalledUnderTheLock:
         )
 
     def test_the_summary_reads_history_through_the_helper(self):
-        """`inventory_history` has two readers and only one may hold a
-        connection: the writer that records the snapshot."""
+        """`inventory_history` has two readers, and nothing in the
+        repository names the table unrendered — the DuckDB writer that
+        recorded the snapshot did, until step 14's S14-11 sent it to chain
+        1's Postgres writer alone."""
         source = Path("core/repositories/inventory.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         readers = set()
@@ -221,10 +223,9 @@ class TestTheHelperIsNeverCalledUnderTheLock:
                 readers.add(node.name)
         assert "get_stock_summary" in readers
         assert "get_average_inventory" in readers
-        # The writer is the only one allowed to name it unrendered.
         unrendered = {
             n.name for n in ast.walk(tree)
             if isinstance(n, ast.AsyncFunctionDef)
             and "FROM inventory_history" in (ast.get_source_segment(source, n) or "")
         }
-        assert unrendered == {"record_inventory_snapshot"}, unrendered
+        assert unrendered == set(), unrendered

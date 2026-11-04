@@ -78,14 +78,8 @@ def flagged_alone(flags):
     the tick's other steps keep their own paths. Since step 14's S14-09 the
     catalogue's step has no other path, and the flag routes nothing."""
     flags.setenv(chain.WRITE_ENV, "postgres")
-    # Since step 14's S14-00 every chain writes Postgres, a constant; the
-    # tick's other steps are faked here, and keep the DuckDB paths the store
-    # under the test answers.
-    from core import pg_buyers_write, pg_inventory_write, pg_managers_write, pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(flags, pg_orders_write, pg_managers_write, pg_buyers_write,
-                           pg_inventory_write)
+    # The tick's other steps are faked in `_tick` (every chain writes
+    # Postgres, and none of them is this test's subject).
     return flags
 
 
@@ -164,15 +158,11 @@ class TestTheFlag:
     answers that stood in for it: `mode()`, the precondition and its warning,
     the lock-out and the stand-in for an absent key."""
 
-    @pytest.mark.parametrize("value", ["duckdb", "yes", ""])
-    def test_whatever_it_says_the_chain_writes_postgres(self, flags, value):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, value)
-        assert chain.writes_postgres() is True
-
     @pytest.mark.parametrize("name", [
         "mode", "unmet_precondition", "_warn_unmet", "UNMET_WARN_EVERY_S",
-        "_unmet_warned", "LOCKOUT_REVISION", "CHAIN_WATERMARK_INHERITS_DUCKDB"])
+        "_unmet_warned", "LOCKOUT_REVISION", "CHAIN_WATERMARK_INHERITS_DUCKDB",
+        # S14-11, with the flag.
+        "writes_postgres", "env_writes_postgres"])
     def test_the_answers_that_routed_it_are_gone(self, name):
         assert not hasattr(chain, name)
 
@@ -194,8 +184,7 @@ class TestTheRegistrySeesIt:
     def test_the_watermarks_are_this_chains_and_move_with_it(self, met):
         for key in chain.CHAIN_SYNC_KEYS:
             assert write_chains.chain_for_sync_key(key) is chain
-        met.setenv(chain.WRITE_ENV, "postgres")
-        assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.stood_down_sync_keys()
+        assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.sync_keys()
 
 
     def test_each_table_is_a_unit_of_its_own(self):
@@ -521,15 +510,29 @@ def _tick(monkeypatch, store, *, upsert_products=None):
     monkeypatch.setattr(store, "record_inventory_snapshot", AsyncMock())
     writer = upsert_products or AsyncMock(return_value=2)
     monkeypatch.setattr(chain, "upsert_products", writer)
+    # The other chains' steps, each the one entry the tick reaches it by
+    # since step 14's S14-11 (every chain writes Postgres, asking nothing).
+    # Their watermarks are not the catalogue's, so they never read the
+    # `get_value` a test breaks: only `products` and `categories` go through.
+    real_get = store.get_last_sync_time
+
+    async def get_last_sync_time(key="orders"):
+        if key in ("products", "categories"):
+            return await real_get(key)
+        return None
+
+    monkeypatch.setattr(store, "get_last_sync_time", get_last_sync_time)
+    svc._orders_step = AsyncMock(return_value=[])
+    svc._managers_step_postgres = AsyncMock(return_value=0)
+    svc._inventory_step_postgres = AsyncMock()
     return svc, endpoints, writer
 
 
 def _rest_of_the_tick_ran(svc):
-    svc._fetch_orders_with_date_filter.assert_awaited()
-    svc.sync_managers.assert_awaited()
+    svc._orders_step.assert_awaited()
+    svc._managers_step_postgres.assert_awaited()
     svc.sync_missing_buyers.assert_awaited()
-    svc.sync_offers.assert_awaited()
-    svc.sync_stocks.assert_awaited()
+    svc._inventory_step_postgres.assert_awaited()
 
 
 class TestTheTickSurvivesTheChain:
@@ -613,7 +616,7 @@ class TestTheTickSurvivesTheChain:
             await svc.incremental_sync()
         assert getter.await_count == 1, "the retry window let the watermark read through"
         assert "products" not in endpoints
-        assert svc.sync_offers.await_count == 2      # the rest of each tick ran
+        assert svc._inventory_step_postgres.await_count == 2   # the rest of each tick ran
 
     @pytest.mark.asyncio
     async def test_after_the_window_a_success_writes_stamps_and_closes_it(
@@ -820,18 +823,11 @@ class TestTheStandingWatch:
 
 @pytest.fixture
 def health(flags):
-    """The health module with chain 1's preflight answered locally, so the
-    block is the registry's state and the two steps' recorders alone."""
-    from core import pg_inventory_write
+    """The health module: since step 14's S14-11 its `write_chains` block is
+    the steps' recorders and the spools alone, asking no Postgres."""
     from web.routes.api import health as module
 
-    async def preflight(*a, **kw):
-        return {"ok": False, "reasons": ["not asked here"]}
-
-    module._preflight_cache.update(data=None, expires_at=0)
-    flags.setattr(pg_inventory_write, "preflight", preflight)
-    yield module
-    module._preflight_cache.update(data=None, expires_at=0)
+    return module
 
 
 class TestHealthPublishesTheStep:
@@ -857,9 +853,8 @@ class TestHealthPublishesTheStep:
         assert "password" not in str(block)                 # the class, never the text
         # Each chain reads its own recorder: chain 1's stays clean.
         assert block["pg_inventory_write"]["sync_step"]["failures_since_ok"] == 0
-        # The registry's half is untouched: the canary reads `mode` and `error` there.
-        assert block[chain.CHAIN]["mode"] == "postgres"          # S14-00
-        assert "preflight" not in block[chain.CHAIN]
+        # No flag field beside it since S14-11.
+        assert set(block[chain.CHAIN]) == {"sync_step"}
 
     @pytest.mark.asyncio
     async def test_no_sync_service_is_null_not_empty(self, health, monkeypatch):

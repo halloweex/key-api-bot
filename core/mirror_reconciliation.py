@@ -3484,15 +3484,18 @@ async def reconcile_buyer_completeness(
     """Does every landed buyer have a current verdict, and does every buyer an
     order names exist? Postgres alone; reports only; no store.
 
-    Asked while the landing mirror is on, and also whenever chain 4 writes the
-    buyers in Postgres: then it is the one Postgres-side check that the chain's
-    writer is alive, and it must not switch off with a mirror flag the chain
-    does not consult (the plan critic's b2)."""
-    from core import pg_buyers_write, pg_landing
+    Asked while the landing mirror is on — `pg_landing.enabled()`, a
+    constant True until S14-13. Until step 14's S14-11 it was also asked
+    whenever chain 4 wrote the buyers in Postgres (`pg_buyers_write.mode()`),
+    the one Postgres-side check that the chain's writer is alive, which must
+    not switch off with a mirror flag the chain does not consult (the plan
+    critic's b2); the chain writes Postgres, a constant, so the gate is the
+    mirror's alone."""
+    from core import pg_landing
     from core.gender import RULES_VERSION
     from core.pg import get_pool, require_revision
 
-    if not (pg_landing.enabled() or pg_buyers_write.mode() == "postgres"):
+    if not pg_landing.enabled():
         return []
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
@@ -3611,28 +3614,6 @@ async def reconcile_expenses(
         EXPENSES_TABLE, dk_rows, dk_synced, pg_rows, watermark,
         now=now, grace_minutes=grace_minutes, max_samples=max_samples,
     )
-
-
-def _chain_flag_findings(chain_errors: Dict[str, str]) -> List[IntegrityIssue]:
-    """A KS_WRITE_* value no chain understands: its tables were stood down here
-    and by the shipper, so nothing compares or copies them until it is fixed.
-    CRITICAL — the chain's own writers raise on every call in the meantime,
-    unless it is latched, in which case they keep writing Postgres and the
-    finding below says the flag and the latch disagree as well."""
-    if not chain_errors:
-        return []
-    return [IntegrityIssue(
-        check_name="write_chain_flag_invalid",
-        table_name="(write chains)",
-        severity=Severity.CRITICAL,
-        count=len(chain_errors),
-        description=(
-            "Write chain flag(s) not understood — "
-            + "; ".join(f"{name}: {err}" for name, err in sorted(chain_errors.items()))
-            + ". Those chains' writers raise, and their tables are neither "
-            "shipped nor compared until the value is corrected."
-        ),
-    )]
 
 
 def _chain_latch_findings(
@@ -3910,12 +3891,15 @@ async def reconcile_operational(
     # the guarantee — it is declining to assert one about a copy that has
     # stopped being a copy.
     #
-    # It reads the same tuple the shipper stands down on, so the two cannot
-    # disagree about which tables have changed hands.
+    # It reads the same set the shipper stands down on, so the two cannot
+    # disagree about which tables have changed hands: every registered chain's
+    # tables (`write_chains.chain_tables()`), a constant since step 14's
+    # S14-11 — until then the chains whose flag or latch said postgres, and a
+    # flag not understood filed `write_chain_flag_invalid` here.
     from core import chain_latch
-    from core.write_chains import stood_down_tables_checked
+    from core.write_chains import chain_tables
 
-    stood_down, chain_errors = stood_down_tables_checked()
+    stood_down = chain_tables()
 
     # The owner rows, read once: they say which tables to stand down as well as
     # what the two copies of the latch disagree about. A chain whose local
@@ -3951,13 +3935,10 @@ async def reconcile_operational(
     # ── what the chains themselves say, before any row is read ──
     #
     # First, because these findings are about the chains and not about the
-    # tables: a flag typo or a broken latch reports the same way whether or not
-    # a fingerprint happened to disagree, and the drill-down below returns
-    # early when nothing does. Filed after it, `write_chain_flag_invalid` was
-    # unreachable on every run where the copies agreed — which is every healthy
-    # run, and the only kind this has had.
-    issues: List[IntegrityIssue] = _chain_flag_findings(chain_errors)
-    issues += _chain_latch_findings(
+    # tables: a broken latch reports the same way whether or not a
+    # fingerprint happened to disagree, and the drill-down below returns
+    # early when nothing does.
+    issues: List[IntegrityIssue] = _chain_latch_findings(
         owners, watermarks, await _read_mirror_stamps(pool, owners))
 
     # ── the four read whole ──

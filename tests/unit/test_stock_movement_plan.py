@@ -129,16 +129,18 @@ class TestItIsPure:
         assert tuple(m) == (1, 77, MOVEMENT_INITIAL, 0, 5, 5, 0, 0)
 
 
-class TestTheDuckDBWriterUsesIt:
+class TestTheWriterUsesIt:
     def test_upsert_stocks_does_not_classify_for_itself(self):
-        """By tree: the repository may read the previous state and write rows,
-        but the verdict must come from the shared planner."""
+        """By tree: chain 1's writer may read the previous state and write
+        rows, but the verdict must come from the shared planner. (DuckDB's
+        `InventoryMixin.upsert_stocks` was held to it until step 14's S14-11
+        sent the repository method to this writer alone.)"""
         import ast
         import inspect
 
-        from core.repositories import inventory
+        from core import pg_inventory_write
 
-        src = inspect.getsource(inventory.InventoryMixin.upsert_stocks)
+        src = inspect.getsource(pg_inventory_write.upsert_stocks)
         tree = ast.parse(src.lstrip())
         calls = {
             n.func.id for n in ast.walk(tree)
@@ -152,6 +154,6 @@ class TestTheDuckDBWriterUsesIt:
         for verdict in (MOVEMENT_IN, MOVEMENT_OUT, MOVEMENT_RESERVE,
                         MOVEMENT_INITIAL):
             assert verdict not in literals, (
-                f"{verdict!r} is spelled in the repository again — the "
+                f"{verdict!r} is spelled in the writer again — the "
                 "classification has grown a second home"
             )
