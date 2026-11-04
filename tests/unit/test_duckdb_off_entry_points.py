@@ -302,7 +302,7 @@ class TestEveryWayIn:
 
     def test_the_walk_finds_the_ways_in(self, kinds):
         """Non-vacuity, by kind and by name: the routes, the jobs, web's
-        start, and the callables the mirror job and the routes hand on."""
+        start, and the callables the routes hand on."""
         count = defaultdict(int)
         for kind in kinds.values():
             count[kind] += 1
@@ -311,17 +311,21 @@ class TestEveryWayIn:
         # assistant and the index stopped reaching the file (112 after it
         # alone), and S14-08 took the seventeen /sms and access routes below
         # off it (118 after it alone): 95 with both, S14-10 three more (92),
-        # and S14-11's chains seven more (85). Each step-14 PR that removes a
-        # DuckDB branch shrinks this; the floor is only that the walk still
-        # finds the ways in, not a count to keep.
-        assert count["door"] >= 85, dict(count)
-        assert count["held"] >= 10, dict(count)
+        # and S14-11's chains seven more (85), S14-12's mirror-landing job
+        # one more (84). Each step-14 PR that removes a DuckDB branch shrinks
+        # this; the floor is only that the walk still finds the ways in, not
+        # a count to keep. The mirror job's comparisons and lambdas were ten
+        # of the eleven callables held until S14-12; the route's background
+        # `run()` is what is left.
+        assert count["door"] >= 84, dict(count)
+        assert count["held"] >= 1, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
         assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_integrity"] == "door"
         assert kinds["web/routes/websocket.py:dashboard_websocket"] == "door"
         assert kinds["web/routes/auth.py:require_admin"] == "door"
-        assert kinds["core/mirror_reconciliation.py:reconcile_operational"] == "held"
-        assert kinds["core/scheduler.py:BackgroundScheduler.read_duckdb"] == "held"
+        assert kinds["web/routes/api/admin.py:run"] == "held"
+        # The mirror-landing job compares nothing against DuckDB since S14-12.
+        assert "core/scheduler.py:BackgroundScheduler._run_dq_mirror_landing" not in kinds
 
     def test_sms_and_access_reach_no_file(self, kinds):
         """Step 14's S14-08: `_sms_tx`, `_sms_run`, the audience, `_users_run`

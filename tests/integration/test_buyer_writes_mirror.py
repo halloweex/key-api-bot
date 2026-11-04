@@ -1,5 +1,4 @@
-"""A buyer changed by `sync-all-buyers` now reaches Postgres, and the daily
-comparison agrees (chain 4, PR-1, step 3).
+"""A buyer changed by `sync-all-buyers` reaches Postgres (chain 4, PR-1, step 3).
 
 `sync-all-buyers` used to write DuckDB alone. Every buyer it changed then
 differed between the stores for good: the hourly ids-diff ships only ids
@@ -16,12 +15,12 @@ still produce the CRITICAL, or this test is not measuring the mirror.
 Since step 14's S14-00 chain 4 writes Postgres whatever its flag says, so
 `upsert_buyers` reaches Postgres through the chain, the comparison stands
 down for its tables, and the control — a DuckDB write the comparison catches
-— went with the DuckDB path.
+— went with the DuckDB path. The comparison itself (`reconcile_buyers`) went
+in step 14's S14-12; what stays is the write it watched.
 """
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -36,7 +35,6 @@ DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 STATES = ("bronze.buyers", "bronze.buyer_contacts")
-PAST_THE_GRACE = timedelta(minutes=16)
 
 
 def _buyer(name, phones):
@@ -79,26 +77,11 @@ async def stores(tmp_path, monkeypatch):
         await store.close()
 
 
-async def _history_has_crossed(pool):
-    """Stamp backfilled_at: until it is set the comparison reports
-    `mirror_backfill_pending` and compares nothing."""
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE meta.mirror_state SET backfilled_at = now() "
-            "WHERE table_name = ANY($1::text[])", list(STATES))
-
-
-async def _findings(store):
-    from core.mirror_reconciliation import reconcile_buyers
-    return await reconcile_buyers(store, now=datetime.now(timezone.utc) + PAST_THE_GRACE)
-
-
 @pytest.mark.asyncio
-async def test_a_changed_buyer_reaches_postgres_and_the_comparison_is_clean(stores):
+async def test_a_changed_buyer_reaches_postgres(stores):
     store, pool = stores
     await store.upsert_buyers([_buyer("Олена Стара", ["+380500000001", "+380500000002"])])
     await store.upsert_buyers([_buyer("Олена Нова", ["+380500000003"])])   # sync-all's call
-    await _history_has_crossed(pool)
 
     async with pool.acquire() as conn:
         name = await conn.fetchval("SELECT full_name FROM bronze.buyers WHERE id = 9500001")
@@ -106,8 +89,5 @@ async def test_a_changed_buyer_reaches_postgres_and_the_comparison_is_clean(stor
             "SELECT value FROM bronze.buyer_contacts WHERE buyer_id = 9500001")]
     assert name == "Олена Нова"
     assert phones == ["+380500000003"], "a shrunk contact list kept an old number"
-    # The daily comparison stands down for chain 4's tables since step 14's
-    # S14-00: the chain writes them, and DuckDB's copy is not compared.
-    assert {f.check_name for f in await _findings(store)} <= {"mirror_stood_down"}
 
 

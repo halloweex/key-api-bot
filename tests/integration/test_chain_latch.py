@@ -15,14 +15,15 @@ marker says, so the tests whose setup needed a chain on DuckDB went with
 that path: the controls proving the replace would otherwise wipe the rows,
 and the order and classification shippers on an owner row alone — states the
 shippers out of DuckDB (S14-13) can no longer reach from this code. What a
-lost marker means for an image from before step 14 is still filed, by the daily comparison
-(`chain_latch_disagrees`).
+lost marker means for an image from before step 14 is still filed — by the
+daily comparison until step 14's S14-12, by the chain invariants on the
+integrity layer since (`chain_latch_disagrees`, decision 12).
 """
 from __future__ import annotations
 
 import asyncio
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -81,6 +82,17 @@ async def _expense_rows(pool):
 
 async def _owners(pool):
     return await chain_latch.read_owners(pool)
+
+
+async def _latch_findings(pool):
+    """`chain_latch_disagrees` as the integrity job files it: the chain
+    invariants' read and verdict, over the live database and the markers on
+    disk."""
+    from core import pg_chain_invariants as inv
+
+    facts = await inv.read_facts(pool=pool)
+    return [i for i in inv.check_chain_invariants(facts)
+            if i.check_name == "chain_latch_disagrees"]
 
 
 class TestChain8AfterTheFlagGoesBack:
@@ -243,15 +255,14 @@ class TestChain1AfterTheFlagGoesBack:
 
 class TestWhenTheFirstWriteFails:
     @pytest.mark.asyncio
-    async def test_the_marker_alone_latches_and_the_comparison_says_so(self, stores):
+    async def test_the_marker_alone_latches_and_files_nothing(self, stores):
         """The marker is taken before the write and the owner row inside it, so
         a write that fails leaves the chain latched with no audit copy. That is
-        the safe direction — the rows that did land stay reachable — and it is
-        invisible to everything except the daily comparison, which is the only
-        thing that reads both copies.
+        the safe direction — the rows that did land stay reachable — and since
+        step 14 nothing reads either copy to route, so it is not filed: the
+        daily comparison filed it until S14-12, and decision 12 kept only the
+        other direction. Mutation: judge every disagreement both ways.
         """
-        from core.mirror_reconciliation import reconcile_operational
-
         store, pool, env = stores
         env.setenv("KS_WRITE_EXPENSES", "postgres")
 
@@ -263,27 +274,30 @@ class TestWhenTheFirstWriteFails:
         assert chain_latch.latched("pg_expenses_write")
         assert await _owners(pool) == {}, "the owner row survived a rolled-back write"
 
-        issues = await reconcile_operational(store)
-        (found,) = [i for i in issues if i.check_name == "chain_latch_disagrees"]
-        assert found.severity.value == "CRITICAL"
-        assert found.table_name == "pg_expenses_write"
-        assert "0 of 1" in found.description
+        assert await _latch_findings(pool) == []
 
     @pytest.mark.asyncio
     async def test_an_owner_row_with_no_marker_is_the_dangerous_direction(self, stores):
-        """The marker is what routes the writes, so without it the flag decides
-        again — and a second writer starts the moment it says duckdb."""
-        from core.mirror_reconciliation import reconcile_operational
-
+        """In an image from before step 14 — the rollback target — the marker
+        is what routes the writes, so without it the flag decides again, and
+        a second writer starts the moment it says duckdb. Filed CRITICAL by
+        the chain invariants, read from the live owner rows and the markers on
+        disk afresh (decision 12). Mutation: judge the markers by
+        `watched_chains()`, which a step-14 build answers for every chain
+        whatever is on disk."""
         store, pool, env = stores
         env.setenv("KS_WRITE_EXPENSES", "postgres")
         await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
+        since = (await _owners(pool))[EXPENSES]
 
         chain_latch.release("pg_expenses_write")             # the volume was lost
 
-        issues = await reconcile_operational(store)
-        (found,) = [i for i in issues if i.check_name == "chain_latch_disagrees"]
-        assert "local marker is gone" in found.description
+        (found,) = await _latch_findings(pool)
+        assert found.severity.value == "CRITICAL"
+        assert found.table_name == "pg_expenses_write"
+        assert "marker under data/write-chain-owners/ is gone" in found.description
+        assert f"latched_at = {since}" in found.description
+        assert "1 of its 1 table(s)" in found.description
 
     @pytest.mark.asyncio
     async def test_the_shipper_stands_down_on_the_owner_row_alone(self, stores):
@@ -339,86 +353,34 @@ class TestWhenTheFirstWriteFails:
         assert ROLLBACK_LEVER in state["last_error"]
 
     @pytest.mark.asyncio
-    async def test_the_comparison_stands_down_on_it_too(self, stores):
-        """Same rows, same answer. Comparing a table Postgres owns against a
-        DuckDB that stopped receiving it files one CRITICAL per row for a state
-        `chain_latch_disagrees` already describes in one finding."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        store, _pool, env = stores
-        env.setenv("KS_WRITE_EXPENSES", "postgres")
-        await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 4200)
-        chain_latch.release("pg_expenses_write")
-        env.setenv("KS_WRITE_EXPENSES", "duckdb")
-
-        issues = await reconcile_operational(store)
-
-        assert [i.check_name for i in issues if i.table_name == EXPENSES] == []
-        assert [i for i in issues if i.check_name == "chain_latch_disagrees"]
-
-    @pytest.mark.asyncio
     async def test_a_healthy_latch_files_nothing(self, stores):
-        from core.mirror_reconciliation import reconcile_operational
-
-        store, _pool, env = stores
-        env.setenv("KS_WRITE_EXPENSES", "postgres")
-        await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
-
-        issues = await reconcile_operational(store)
-        assert [i for i in issues if i.check_name.startswith("chain_")] == []
-
-
-class TestTheShipperOverwroteDetector:
-    """E1 of the stage-4 plan. The shipper full-replaces these tables out of
-    DuckDB, so a successful shipment dated after the handover wrote over rows
-    only Postgres held — and nothing else in the system would ever say so."""
-
-    @pytest.mark.asyncio
-    async def test_a_shipment_after_the_handover_is_critical(self, stores):
-        from core.mirror_reconciliation import reconcile_operational
-
         store, pool, env = stores
         env.setenv("KS_WRITE_EXPENSES", "postgres")
         await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
 
-        after = datetime.now(timezone.utc) + timedelta(minutes=5)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO meta.mirror_state (table_name, last_attempted_at, "
-                "last_ok_at, failures_since_ok, last_rows) "
-                "VALUES ($1, $2, $2, 0, 0) ON CONFLICT (table_name) DO UPDATE "
-                "SET last_ok_at = EXCLUDED.last_ok_at", EXPENSES, after)
+        assert await _latch_findings(pool) == []
 
-        issues = await reconcile_operational(store)
 
-        (found,) = [i for i in issues if i.check_name == "chain_shipper_overwrote"]
-        assert found.severity.value == "CRITICAL" and found.table_name == EXPENSES
-        assert "Do not re-run the shipper" in found.description
+class TestTheOwnerRowNeverMovesForward:
+    """E1 of the stage-4 plan (`chain_shipper_overwrote`) read a shipment
+    after the handover off this row, until step 14's S14-12 deleted it with
+    the daily comparison; the row still dates the handover — the chain
+    invariants' "since the latch" verdicts, and `chain_latch_disagrees`'s
+    restore instruction, read it."""
 
     @pytest.mark.asyncio
-    async def test_the_owner_row_never_moves_forward(self, stores):
-        """`ON CONFLICT DO NOTHING` is what this detector stands on, and it was
-        asserted only in a comment.
-
-        The sequence it has to survive is the one above: latched at T1, the
-        marker lost, the shipper overwrites the table at T2, somebody restores
-        `KS_WRITE_EXPENSES=postgres` and the next typed expense mints a *fresh*
-        marker at T3 > T2. The finding compares `last_ok_at` against the owner
-        row, so if the second write moved that row to T3 the CRITICAL about a
-        shipment that did destroy rows would simply go quiet.
-
-        Two writes in one process cannot see this — `latch()` is idempotent and
-        hands both the same stamp — so the marker is released in between, which
-        is exactly what the dangerous case does to it.
-        """
-        from core.mirror_reconciliation import reconcile_operational
-
+    async def test_a_second_marker_does_not_move_it(self, stores):
+        """`ON CONFLICT DO NOTHING`, asserted rather than read in a comment.
+        Latched at T1, the marker lost, and the next typed expense mints a
+        *fresh* marker at T2 > T1: the row stays at T1. Two writes in one
+        process cannot see this — `latch()` is idempotent and hands both the
+        same stamp — so the marker is released in between, which is exactly
+        what the dangerous case does to it."""
         store, pool, env = stores
         env.setenv("KS_WRITE_EXPENSES", "postgres")
         await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
         first = (await _owners(pool))[EXPENSES]
 
-        overwritten = datetime.now(timezone.utc) + timedelta(seconds=1)
         chain_latch.release("pg_expenses_write")
         await asyncio.sleep(1.1)                     # a later moment, honestly
         await store.add_expense(date(2026, 9, 18), "marketing", "TikTok Ads", 20)
@@ -429,43 +391,13 @@ class TestTheShipperOverwroteDetector:
             "the owner row drifted forward; the handover moment is not the "
             "first write any more")
 
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO meta.mirror_state (table_name, last_attempted_at, "
-                "last_ok_at, failures_since_ok, last_rows) "
-                "VALUES ($1, $2, $2, 0, 0) ON CONFLICT (table_name) DO UPDATE "
-                "SET last_ok_at = EXCLUDED.last_ok_at", EXPENSES, overwritten)
-
-        issues = await reconcile_operational(store)
-        (found,) = [i for i in issues if i.check_name == "chain_shipper_overwrote"]
-        assert found.table_name == EXPENSES and first in found.description
-
-    @pytest.mark.asyncio
-    async def test_a_shipment_before_the_handover_is_not(self, stores):
-        """The ordinary case on the day of a switch: the table was shipped for
-        months, and the last shipment is older than the first typed row."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        store, pool, env = stores
-        before = datetime.now(timezone.utc) - timedelta(hours=1)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO meta.mirror_state (table_name, last_attempted_at, "
-                "last_ok_at, failures_since_ok, last_rows) VALUES ($1, $2, $2, 0, 0)",
-                EXPENSES, before)
-        env.setenv("KS_WRITE_EXPENSES", "postgres")
-        await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
-
-        issues = await reconcile_operational(store)
-        assert [i for i in issues if i.check_name == "chain_shipper_overwrote"] == []
-
 
 class TestTheLandingTablesOnAnOwnerRowAlone:
     """DN-22b against the real `meta.chain_watermarks`: the buyers and the
     order-level expenses, on an image older than the chain that owns them. No
     module here declares either table, so only the owner rows can say they
-    moved — and the paths that hold a pool must read them, write nothing, and
-    the comparisons must page rather than call it a decision. The control
+    moved — and the paths that hold a pool must read them and write nothing.
+    (The comparisons that paged it went in step 14's S14-12.) The control
     first, on the same database: without the rows the same calls ship."""
 
     BUYER_ID = 990_201
@@ -561,27 +493,6 @@ class TestTheLandingTablesOnAnOwnerRowAlone:
             [*self.BUYERS, self.EXPENSES]) == 0
 
     @pytest.mark.asyncio
-    async def test_the_comparisons_read_neither_table_and_say_what_the_sync_does(
-            self, landed):
-        """The expenses' per-tick mirror still ships on the local answer, so
-        that is a page; the buyers mirror reads the owner rows too (the
-        DN-22b review) and has stopped, so each buyers table is an INFO that
-        points at the latch's own finding."""
-        from core.mirror_reconciliation import reconcile_buyers, reconcile_expenses
-
-        store, pool = landed
-        await self._own(pool, "bronze.buyers", self.EXPENSES)
-        buyers = await reconcile_buyers(store)
-        expenses = await reconcile_expenses(store)
-        assert sorted((i.check_name, i.table_name, i.severity.value) for i in buyers) == [
-            ("mirror_stood_down", "bronze.buyer_contacts", "INFO"),
-            ("mirror_stood_down", "bronze.buyers", "INFO")]
-        assert [(i.check_name, i.table_name, i.severity.value) for i in expenses] == [
-            ("owner_row_without_marker", self.EXPENSES, "CRITICAL")]
-        assert "no chain in this build declares them" in expenses[0].description
-        assert all("chain_owner_unregistered" in i.description for i in buyers)
-
-    @pytest.mark.asyncio
     async def test_the_buyers_mirror_stands_down_on_them_too(self, landed):
         """The sync's own shipper of the buyers: nothing lands, no watermark
         moves. The control is the same batch without the row."""
@@ -611,7 +522,10 @@ class TestAnOwnerRowNoChainHereDeclares:
     overrode in Postgres that DuckDB never saw. The buyers' own paths stood
     down on the rows; the hourly full replace did not, and put DuckDB's
     verdict back within the hour — after which the two copies agreed and the
-    comparison had nothing to say. The control first, on the same database."""
+    comparison had nothing to say. (The comparison, and its
+    `chain_owner_unregistered`, went in step 14's S14-12; the copy stands down
+    on the rows until S14-13 deletes it.) The control first, on the same
+    database."""
 
     BUYER_ID = 990_301
     TABLES = ("bronze.buyers", "bronze.buyer_contacts", "app.buyer_gender")
@@ -663,8 +577,7 @@ class TestAnOwnerRowNoChainHereDeclares:
             "gender": "f", "method": "name", "override_by_human": False}
 
     @pytest.mark.asyncio
-    async def test_the_owner_rows_keep_it_and_the_comparison_pages(self, overridden):
-        from core.mirror_reconciliation import reconcile_operational
+    async def test_the_owner_rows_keep_it(self, overridden):
         from core.pg_buyers import hourly_ids_diff
         from core.pg_operational import replicate_operational
 
@@ -686,9 +599,3 @@ class TestAnOwnerRowNoChainHereDeclares:
             "the hourly copy replaced a verdict only Postgres held")
         assert "app.buyer_gender" in result["stood_down"]
         assert result["chain_owner_unregistered"] == {"app.buyer_gender": stamp}
-
-        issues = await reconcile_operational(store)
-        (page,) = [i for i in issues if i.check_name == "chain_owner_unregistered"]
-        assert page.severity.value == "CRITICAL"
-        assert page.table_name == ", ".join(sorted(self.TABLES))
-        assert [i for i in issues if i.table_name == "app.buyer_gender"] == []

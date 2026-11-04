@@ -11,9 +11,10 @@ same watermark and fails the same way.
 It used to fail with an ERROR line and nothing else. These run against a real
 PostgreSQL because the whole claim is about what `meta.mirror_state` holds
 afterwards: the failure counted on every table the run was copying, the last
-success left where it was, the count cleared by the next run that works — and
-what the 07:30 comparison makes of it, WARN for one failed hour and CRITICAL
-for two. The last test is the other way a failure used to be stamped: the
+success left where it was, the count cleared by the next run that works. (What
+the 07:30 comparison made of it — WARN for one failed hour, CRITICAL for two —
+went with `reconcile_operational` in step 14's S14-12; the copy itself goes in
+S14-13.) The last test is the other way a failure used to be stamped: the
 hourly copy and a manual expense's immediate one overlapping, which a lock
 now serialises.
 """
@@ -109,8 +110,6 @@ async def stores(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_duplicate_id_is_counted_on_every_table_until_the_run_succeeds(stores):
-    from core.data_quality import Severity
-    from core.mirror_reconciliation import reconcile_operational
     from core.pg_operational import replicate_operational
 
     store, pool, tables = stores
@@ -131,11 +130,8 @@ async def test_a_duplicate_id_is_counted_on_every_table_until_the_run_succeeds(s
             "SELECT COUNT(*) FROM reconciliation_log WHERE id = ?", [FIRST_ID + 1]
         ).fetchone()[0] == 2
 
-    # One failed hour, with the success moments ago, is WARN on every table:
-    # the next run usually repairs it. The second failure in a row is
-    # CRITICAL, which is how a duplicate that fails every run still pages
-    # within two hourly runs.
-    expected = {1: Severity.WARN, 2: Severity.CRITICAL}
+    # Each failed hour is counted on every table, and the last success stays
+    # where it was.
     for hour in (1, 2):
         result = await replicate_operational(store)
         assert "UniqueViolation" in result["error"], result
@@ -146,13 +142,6 @@ async def test_a_duplicate_id_is_counted_on_every_table_until_the_run_succeeds(s
             assert state["failures_since_ok"] == hour, table
             assert "duplicate key" in state["last_error"], table
             assert state["last_ok_at"] == healthy[table]["last_ok_at"], table
-
-        failing = {
-            issue.table_name: issue.severity
-            for issue in await reconcile_operational(store)
-            if issue.check_name == "mirror_failing"
-        }
-        assert failing == {table: expected[hour] for table in tables}, hour
 
     async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT MAX(id) FROM app.reconciliation_log") == FIRST_ID

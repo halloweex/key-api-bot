@@ -737,16 +737,16 @@ class TestEveryPostgresWriterAsksTheRegistry:
         writing = {key[0] for key in walk.writers()}
         assert chains <= writing, chains - writing
 
-    def test_the_operational_pair_asks_the_registry(self):
-        """The hourly shipper and the daily comparison of the operational
-        tables stand down on every chain's tables (`chain_tables`). Until
-        step 14's S14-11 they asked the form that handed a flag typo out to
-        be reported (`stood_down_tables_checked`, DN-01); no flag is read
-        since."""
-        from core import mirror_reconciliation, pg_operational
+    def test_the_operational_copy_asks_the_registry(self):
+        """The hourly shipper of the operational tables stands down on every
+        chain's tables (`chain_tables`). Until step 14's S14-11 it asked the
+        form that handed a flag typo out to be reported
+        (`stood_down_tables_checked`, DN-01); no flag is read since. Its daily
+        comparison, `reconcile_operational`, asked the same until S14-12
+        deleted it."""
+        from core import pg_operational
 
-        for fn in (pg_operational.replicate_operational,
-                   mirror_reconciliation.reconcile_operational):
+        for fn in (pg_operational.replicate_operational,):
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             calls = {n.func.id for n in ast.walk(tree)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
@@ -769,7 +769,10 @@ class TestEveryPostgresWriterAsksTheRegistry:
         `replicate_managers` holds it — and only the per-tick mirrors named
         below keep the local answer alone."""
         holding = [key for key in walk.consulting if walk.reaches_pool(key)]
-        assert len(holding) >= 19, holding
+        # 19 until step 14's S14-12 deleted the two daily comparisons among
+        # them (`reconcile_operational` and the landing one); the floor is
+        # that the walk still finds them, not a count to keep.
+        assert len(holding) >= 17, holding
         missing = sorted(key for key in holding
                          if not walk.calls[key] & _OWNER_READS
                          and key not in _PER_TICK_MIRRORS)
@@ -870,6 +873,7 @@ class TestTheWalkSeesWhatTheReviewFound:
         ('conn.copy_records_to_table("buyers", records=rows)', {"{?}"}),
         ('conn.copy_records_to_table("orders", schema_name="silver", records=rows)', set()),
     ])
+
     def test_a_copy_is_read_by_its_schema(self, call, expected):
         assert _targets_of(f"""
             APP = "app"
@@ -965,10 +969,10 @@ def _comparisons(walk) -> dict:
 
 # Comparisons of tables whose writer moved by a switch of its own before the
 # registry existed: each stands down on that switch, which it must evaluate.
+# `reconcile_sms` and `reconcile_dashboard_users` were two more, until step
+# 14's S14-12 deleted them.
 _OWN_SWITCH_COMPARISONS = {
     ("core/mirror_reconciliation.py", "reconcile_bot_state"): "ENGINE_ENV",
-    ("core/mirror_reconciliation.py", "reconcile_sms"): "sms_store_is_postgres",
-    ("core/mirror_reconciliation.py", "reconcile_dashboard_users"): "user_store_is_postgres",
 }
 
 
@@ -991,13 +995,15 @@ class TestEveryComparisonAsksTheRegistry:
         assert not missing, f"compares bronze.*/app.* without asking: {missing}"
 
     def test_the_walk_is_not_vacuous(self, walk):
+        """Step 14's S14-12 deleted every comparison of a table against
+        DuckDB's copy (`reconcile_mirror`, `reconcile_orders`,
+        `reconcile_expenses`, `reconcile_buyers`, `reconcile_operational`,
+        which the walk found here), so the one left to find is the bot
+        state's, SQLite against `app.*`. The walk stays for any comparison
+        added later."""
         found = _comparisons(walk)
-        assert {("core/mirror_reconciliation.py", name) for name in (
-            "reconcile_mirror", "reconcile_orders", "reconcile_expenses",
-            "reconcile_buyers", "reconcile_operational",
-        )} <= set(found), sorted(found)
-        assert {"bronze.products", "bronze.managers", "bronze.buyers",
-                "bronze.expenses", "bronze.orders"} <= set().union(*found.values())
+        assert set(found) == {("core/mirror_reconciliation.py", "reconcile_bot_state")}
+        assert "app.authorized_users" in set().union(*found.values())
 
     def test_the_own_switch_exemptions_are_found_and_read_their_switch(self, walk):
         found = _comparisons(walk)
@@ -1279,34 +1285,6 @@ class _NoStore:
         raise AssertionError("the stood-down comparison read DuckDB")
 
 
-class TestTheBucketComparison:
-    @pytest.mark.asyncio
-    async def test_it_files_info_for_both_tables_and_reads_neither_store(
-            self, pool, order_chain):
-        from core.data_quality import Severity
-        from core.mirror_reconciliation import reconcile_orders
-
-        order_chain(tables=(ORDERS,))
-        issues = await reconcile_orders(_NoStore())
-
-        assert [(i.check_name, i.table_name, i.severity) for i in issues] == [
-            ("mirror_stood_down", ORDERS, Severity.INFO),
-            ("mirror_stood_down", LINES, Severity.INFO),
-        ]
-        assert ORDERS in issues[0].description
-        _never_reached_postgres(pool)
-
-
-    def test_its_lever_is_not_the_generic_mirror_advice(self):
-        """`mirror_` says "wait for the re-ship", which is the one thing the
-        stand-down exists to prevent."""
-        from core.data_quality import remediation_for
-
-        assert remediation_for(["mirror_stood_down"]) != remediation_for(
-            ["mirror_missing_rows"])
-        assert "never backfill" in remediation_for(["mirror_stood_down"])[0].lower()
-
-
 class TestTheOwnerRowsStandTheOrderTablesDownToo:
     """DN-06's rule on the order paths that already hold a pool: stand down on
     either copy of the latch. The marker is the copy a lost `./data` loses;
@@ -1364,102 +1342,6 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
         with pytest.raises(RuntimeError, match="unreadable"):
             await order_tables_stood_down_or_owned(pool)
-
-
-async def _persisted(store, issues):
-    """The run as the 07:30 job writes it — the journal's door folds the
-    findings, `run_values` sets the status and the counts, `journal_rows` the
-    rows chain 9 commits — shaped the way the digest and
-    `/api/health/data-quality` shape them: `(run row, issue rows)`. Until
-    step 14's S14-10 this wrote a DuckDB journal and read it back; the
-    columns' round trip through Postgres is `test_dq_journal_pg.py`'s."""
-    from datetime import datetime, timezone
-
-    from core.data_quality import issue_dicts, journal_rows, run_values
-    from core.dq_journal import one_finding_per_key
-    from core.mirror_reconciliation import MIRROR_LAYER
-
-    now = datetime.now(timezone.utc)
-    issues = one_finding_per_key(issues)
-    values = run_values(
-        started_at=now, ended_at=now, as_of=now,
-        window_start=now.date(), window_end=now.date(),
-        layer=MIRROR_LAYER, issues=issues, discrepancies=[],
-    )
-    rows = journal_rows(1, values, issues, [])
-    run = {"status": values.status, "critical_count": values.critical_count}
-    return run, issue_dicts(r[1:] for r in rows.issues)
-
-
-def _what_a_human_reads(run, rows) -> str:
-    """Every surface that reaches a person prints the check's label, the count
-    and — on a page — the lever, and never the description: the page the job
-    sends when the run is CRITICAL, and the digest's one line per finding.
-    Rebuilt from the persisted rows, not from the objects that were written."""
-    from core.data_quality import (
-        IntegrityIssue, Severity, format_alert_message, human_check_name,
-    )
-    from core.mirror_reconciliation import MIRROR_LAYER
-
-    issues = [IntegrityIssue(
-        check_name=r["check_name"], table_name=r["table_name"],
-        severity=Severity(r["severity"]), count=r["count"],
-        description=r["description"]) for r in rows]
-    digest = [f"• {human_check_name(r['check_name'])}: {r['count']}" for r in rows]
-    page = (format_alert_message(MIRROR_LAYER, Severity.CRITICAL, issues, [])
-            if run["status"] == "CRITICAL" else "")
-    return "\n".join([page, *digest])
-
-
-class TestWhatTheStandDownTellsAHuman:
-    """DN-22a's review: with only the owner rows standing the order tables
-    down, the finding stayed INFO — and its label, its lever and its registry
-    entry all said "not a defect", while the per-tick sync mirror, which asks
-    only the local answer, went on writing DuckDB's copy over the chain's rows.
-    Pages and the digest print the label and the lever, never the description
-    that did say so. Each state is run through `reconcile_orders`, persisted
-    as the 07:30 job persists it, and judged from the rows read back."""
-
-    STAND_DOWN = {"mirror_stood_down", "order_owner_row_without_marker"}
-
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("state", ["marker_present", "flagged"])
-    async def test_on_the_local_answer_it_stays_info(
-            self, pool, order_chain, tmp_path, state):
-        """The marker is present (flag back at duckdb, both copies agree), or
-        the flag says postgres: the sync's mirror has stopped on the same
-        answer, and the stand-down is a decision — INFO, no page."""
-        from core import chain_latch
-        from core.mirror_reconciliation import reconcile_orders
-
-        if state == "marker_present":
-            order_chain(env=lambda: False)
-            chain_latch.latch("pg_orders_write")
-            pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        else:
-            order_chain()
-        store = await _store(tmp_path)
-        run, rows = await _persisted(store, await reconcile_orders(store))
-
-        assert sorted((r["check_name"], r["table_name"], r["severity"])
-                      for r in rows) == [
-            ("mirror_stood_down", LINES, "INFO"),
-            ("mirror_stood_down", ORDERS, "INFO"),
-        ]
-        assert run["status"] == "PASS" and run["critical_count"] == 0, run
-        assert "order_owner_row_without_marker" not in _what_a_human_reads(run, rows)
-
-
-    def test_the_registry_says_it_does_not_clear_by_itself(self):
-        """The REGISTRY comment on `mirror_stood_down` reads "a decision
-        somebody took, not a fault"; the owner-rows finding is the fault, and
-        its entry must not inherit that — nor clear on a job."""
-        from core.alerting import REGISTRY, Kind
-
-        spec = REGISTRY["order_owner_row_without_marker"]
-        assert spec.kind is Kind.CONDITION
-        assert "a human, not a job" in spec.clears
 
 
 def _admin_client(flags):
@@ -1803,6 +1685,7 @@ class TestTheSyncShippersStandDown:
     @pytest.mark.parametrize("path,half", [
         ("mirror_buyers", CONTACTS), ("replicate_managers", CLASSIFICATIONS),
     ])
+
     async def test_either_half_of_a_unit_stands_the_unit_down(
             self, pool, landing_chain, path, half):
         """The other half of each unit: `_write` and `write_managers` write
@@ -2037,158 +1920,13 @@ class TestTheAdminBuyerReship:
         return out
 
 
-# ─── DN-22b: the daily comparisons stand down with their shippers ───────────
-
-_COMPARED = {
-    # comparison: (the tables it stands down on the plan's fake chain,
-    #              the shipper whose claim its finding makes)
-    "reconcile_mirror": ((PRODUCTS, MANAGERS, CLASSIFICATIONS), "mirror_products"),
-    "reconcile_expenses": ((EXPENSES,), "mirror_expenses"),
-    "reconcile_buyers": ((BUYERS, CONTACTS), "mirror_buyers"),
-}
-
-
-# The tables whose sync shipper asks the local answer alone — `_mirror`, the
-# per-tick catalogue and expense mirror. The buyers mirror and the
-# classification copy read the owner rows too since the DN-22b review.
-_SHIPPED_ON_THE_LOCAL_ANSWER = {PRODUCTS, CATEGORIES, EXPENSES}
-
-
-async def _compare(name, store):
-    """Run one comparison the way the 07:30 job does. `reconcile_mirror` is
-    handed a DuckDB side holding the categories alone: a stood-down table it
-    went on to compare would fail on the missing key, not pass."""
-    from core import mirror_reconciliation as mr
-
-    if name == "reconcile_mirror":
-        if store is None:
-            dk_side = {CATEGORIES: ({}, {})}
-        else:
-            async with store.connection() as conn:
-                dk_side = mr.read_duckdb_side(conn)
-        return await mr.reconcile_mirror(dk_side)
-    return await getattr(mr, name)(store if store is not None else _NoStore())
-
-
-def _read_a_table(pool, tables) -> list:
-    """The statements that named one of `tables` — reads and writes alike."""
-    return [s for s in pool.sql if any(t in s for t in tables)]
-
-
-class TestTheComparisonsStandDown:
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(_COMPARED))
-    async def test_on_the_local_answer_info_per_table_and_no_read(
-            self, pool, landing_chain, name):
-        from core.data_quality import Severity
-
-        landing_chain()
-        issues = await _compare(name, None)
-        tables = _COMPARED[name][0]
-        stood = [(i.check_name, i.table_name, i.severity) for i in issues
-                 if i.check_name == "mirror_stood_down"]
-        assert stood == [("mirror_stood_down", t, Severity.INFO) for t in tables]
-        assert "owner_row_without_marker" not in {i.check_name for i in issues}
-        assert _read_a_table(pool, tables) == [], pool.sql
-        if name != "reconcile_mirror":
-            _never_reached_postgres(pool)
-
-    @pytest.mark.asyncio
-    async def test_a_catalogue_wholly_stood_down_costs_neither_store_anything(
-            self, pool, landing_chain):
-        """With every table of the landing comparison held on the local
-        answer, nothing is left to compare, and Postgres is not asked at all —
-        not the pool, not the revision, not the owner rows. The categories are
-        compared in the test above, so only this one can see the order."""
-        from core.mirror_reconciliation import MIRRORED_TABLES, reconcile_mirror
-
-        landing_chain(tables=LANDING + (CATEGORIES, CONTACTS, CLASSIFICATIONS))
-        issues = await reconcile_mirror({})
-        assert sorted(i.table_name for i in issues) == sorted(
-            s.pg_table for s in MIRRORED_TABLES)
-        assert {i.check_name for i in issues} == {"mirror_stood_down"}
-        _never_reached_postgres(pool)
-
-
-class TestTheLandingFindingSaysWhetherTheSyncStillShips:
-    """`TestTheStandDownFindingSaysWhetherTheSyncStillShips`, for DN-22b: the
-    claim each finding makes about the sync's shipper is checked against what
-    that shipper then does with the same recorder."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(_COMPARED))
-    @pytest.mark.parametrize("state", ["flagged", "marker_lost", "rolled_back"])
-    async def test_the_claim_is_what_the_shipper_does(
-            self, flags, pool, landing_chain, tmp_path, name, state):
-        tables, shipper = _COMPARED[name]
-        if state == "flagged":
-            landing_chain()
-        else:
-            if state == "marker_lost":
-                landing_chain(env=lambda: False)
-            else:
-                _no_landing_chain(flags)
-            pool.owner_rows = {t: "2026-09-20T08:00:00+00:00" for t in tables}
-        issues = [i for i in await _compare(name, None)
-                  if i.check_name in {"mirror_stood_down", "owner_row_without_marker"}]
-        assert issues, "no stand-down filed — nothing to check the claim of"
-        for text in {i.description for i in issues}:
-            stopped = "the sync no longer ships DuckDB's copy" in text
-            shipping = "the sync is still shipping" in text
-            assert stopped != shipping, f"says neither or both: {text}"
-
-        # Every sync shipper of the tables the findings cover — the catalogue
-        # comparison covers two, which since the DN-22b review can earn
-        # different claims — each checked against the finding naming its table.
-        store = await _landing_store(tmp_path)
-        shippers = {"reconcile_mirror": (("mirror_products", PRODUCTS),
-                                         ("replicate_managers", MANAGERS))}.get(
-            name, ((shipper, tables[0]),))
-        for path, table in shippers:
-            (issue,) = [i for i in issues if table in i.table_name.split(", ")]
-            shipping = "the sync is still shipping" in issue.description
-            pool.sql.clear()
-            await _ship(path, store)
-            assert pool.wrote(table) == shipping, (path, issue.description, pool.sql)
-            assert pool.wrote(table) == (issue.severity.value == "CRITICAL")
-
-
-class TestWhatTheLandingStandDownTellsAHuman:
-    """Persisted as the 07:30 job persists it, read back as the digest and a
-    page read it: the label and the lever, never the description."""
-
-    @pytest.mark.asyncio
-    async def test_on_the_local_answer_it_stays_info(
-            self, pool, landing_chain, tmp_path):
-        from core.mirror_reconciliation import reconcile_buyers
-
-        landing_chain()
-        store = await _landing_store(tmp_path)
-        run, rows = await _persisted(store, await reconcile_buyers(store))
-        assert sorted((r["check_name"], r["table_name"], r["severity"])
-                      for r in rows) == [
-            ("mirror_stood_down", CONTACTS, "INFO"),
-            ("mirror_stood_down", BUYERS, "INFO"),
-        ]
-        assert run["status"] == "PASS" and run["critical_count"] == 0, run
-
-
-    def test_the_registry_says_it_does_not_clear_by_itself(self):
-        from core.alerting import REGISTRY, Kind
-
-        spec = REGISTRY["owner_row_without_marker"]
-        assert spec.kind is Kind.CONDITION
-        assert "a human, not a job" in spec.clears
-
-    def test_the_local_lever_is_not_about_orders_alone(self):
-        """`mirror_stood_down` is filed for any table now; its lever must not
-        tell the reader of a buyers finding about the order tables."""
-        from core.data_quality import remediation_for
-
-        (lever,) = remediation_for(["mirror_stood_down"])
-        assert "order" not in lever.lower(), lever
-        assert "never backfill" in lever.lower()
+# ─── DN-22b: the daily comparisons stood down with their shippers ──────────
+#
+# `reconcile_mirror`, `reconcile_expenses`, `reconcile_buyers` and
+# `reconcile_operational` filed `mirror_stood_down` / `owner_row_without_marker`
+# / `chain_owner_unregistered` for a table a chain owns, and the classes here
+# held each claim to what its shipper did — until step 14's S14-12 deleted the
+# comparisons. The shippers' own stand-down stays above until S14-13.
 
 
 # ─── An owner row no chain here declares holds the operational copy too ──────
@@ -2258,69 +1996,6 @@ class TestAnUnregisteredOwnerRowHoldsTheOperationalCopy:
         assert _touched(pool, GENDER), pool.sql
 
 
-class TestTheComparisonSaysWhyItStoodDown:
-    @pytest.mark.asyncio
-    async def test_the_owner_row_alone_is_critical_and_the_table_is_not_read(
-            self, flags, pool, tmp_path):
-        from core.data_quality import Severity
-        from core.mirror_reconciliation import reconcile_operational
-
-        _no_chain_declares(flags, GENDER, BUYERS, CONTACTS)
-        pool.owner_rows = {GENDER: STAMP, BUYERS: STAMP, CONTACTS: STAMP}
-        issues = await reconcile_operational(await _landing_store(tmp_path))
-
-        (page,) = [i for i in issues if i.check_name == "chain_owner_unregistered"]
-        assert page.severity is Severity.CRITICAL
-        assert page.table_name == ", ".join(sorted((GENDER, BUYERS, CONTACTS)))
-        assert page.count == 3
-        assert STAMP in page.description
-        # The lever since step 14's S14-04 deleted the copy-back.
-        from core.rollback_lever import ROLLBACK_LEVER
-
-        assert ROLLBACK_LEVER in page.description
-        assert "chain_copy_back" not in page.description
-        assert [i for i in issues if i.table_name == GENDER] == []
-        assert _read_a_table(pool, [GENDER]) == [], pool.sql
-
-    @pytest.mark.asyncio
-    async def test_the_control_compares_it_and_files_nothing_about_owners(
-            self, flags, pool, tmp_path):
-        from core.mirror_reconciliation import reconcile_operational
-
-        _no_chain_declares(flags, GENDER)
-        issues = await reconcile_operational(await _landing_store(tmp_path))
-        assert "chain_owner_unregistered" not in {i.check_name for i in issues}
-        assert _read_a_table(pool, [GENDER]), pool.sql
-
-    @pytest.mark.asyncio
-    async def test_a_registered_chain_is_not_reported_as_unregistered(
-            self, pool, landing_chain, tmp_path):
-        """A chain this build declares is `chain_latch_disagrees`' business,
-        not this finding's — one fact, one page."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        landing_chain(tables=(GENDER,), env=lambda: False)
-        pool.owner_rows = {GENDER: STAMP}
-        issues = await reconcile_operational(await _landing_store(tmp_path))
-        names = {i.check_name for i in issues}
-        assert "chain_owner_unregistered" not in names
-        assert "chain_latch_disagrees" in names
-
-    def test_what_a_human_reads_names_the_lever(self):
-        from core.alerting import REGISTRY, Kind
-        from core.data_quality import human_check_name, remediation_for
-
-        from core.rollback_lever import ROLLBACK_LEVER
-
-        (lever,) = remediation_for(["chain_owner_unregistered"])
-        assert lever.startswith(ROLLBACK_LEVER) and len(lever) <= 150
-        assert "chain_copy_back" not in lever
-        assert "does not know" in human_check_name("chain_owner_unregistered")
-        spec = REGISTRY["chain_owner_unregistered"]
-        assert spec.kind is Kind.CONDITION
-        assert "a human, not a job" in spec.clears
-
-
 class TestEveryChainNamesItselfOnce:
     """`CHAIN` is the string the latch, the owner rows, health and the canary
     key on; `chain_name` is what the registry derives from the module. A chain
@@ -2332,6 +2007,7 @@ class TestEveryChainNamesItselfOnce:
     @pytest.mark.parametrize("chain", __import__(
         "core.write_chains", fromlist=["WRITE_CHAINS"]).WRITE_CHAINS,
         ids=lambda c: c.__name__)
+
     def test_chain_is_the_module_basename(self, chain):
         from core.write_chains import chain_name
         assert chain.CHAIN == chain_name(chain)

@@ -258,17 +258,20 @@ def stood_down_duckdb_checks() -> FrozenSet[str]:
 # `reconcile_gold`: on `dq:mirror_landing` a page of theirs would be announced
 # resolved by the first run after the switch exactly as a stood-down integrity
 # check's would. `gold_cell_values` is also the integrity check's name.
-# `tests/unit/test_warehouse_writer.py` reads the set out of `compare_gold`'s
-# source. `gold_rollup_mismatch` is not here: `pg_gold_internal_check` goes on
-# asking it.
+# `tests/unit/test_warehouse_writer.py` read the set out of `compare_gold`'s
+# source until step 14's S14-12 deleted it; frozen since, as the names an
+# image from before step 14 holds (rule 15). `gold_rollup_mismatch` is not
+# here: `pg_gold_internal_check` goes on asking it.
 RETIRED_COMPARISON_CONDITIONS: FrozenSet[str] = frozenset({
     "gold_missing_cells",
     "gold_orphan_cells",
     "gold_cell_values",
 })
 
-# The comparisons in `dq_mirror_landing` that DN-29 retires, by the name the
-# job runs each under.
+# The comparisons in `dq_mirror_landing` that DN-29 retired, by the name the
+# job ran each under — none of them in this build since step 14's S14-12,
+# which deleted them. Read by nothing in `core/` since; kept, with the marking
+# below, until S14-15 removes this module.
 RETIRED_COMPARISONS: Tuple[str, ...] = (
     "reconcile_silver", "reconcile_order_utm", "reconcile_gold")
 

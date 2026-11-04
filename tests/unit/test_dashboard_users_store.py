@@ -71,14 +71,8 @@ class TestTheReplicationStandsDown:
             out = await duf.replicate_dashboard_users(object())
         assert out == {"skipped": "KS_PG_DSN is not set"}
 
-    @pytest.mark.asyncio
-    async def test_the_comparison_stands_down_with_it(self, monkeypatch):
-        """Otherwise every approval made after the switch reads as a
-        discrepancy the check itself created."""
-        monkeypatch.setenv("KS_USER_STORE", "postgres")
-        from core.mirror_reconciliation import reconcile_dashboard_users
-
-        assert await reconcile_dashboard_users(object()) == []
+    # `test_the_comparison_stands_down_with_it` held `reconcile_dashboard_users`
+    # to nothing under the switch, until step 14's S14-12 deleted it.
 
 
 # ─── the column contract, both ends ──────────────────────────────────────────
