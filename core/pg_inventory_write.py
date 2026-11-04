@@ -63,7 +63,9 @@ flag back would otherwise let DuckDB's `seq_stock_movements_id` reissue ids the
 Postgres sequence has already handed out — one movement with two names, which
 is the rule revision 0030 restated. Every writer below latches once a
 connection is out of the pool and before its first write, and
-`scripts/chain_copy_back.py` is the only way back.
+`scripts/chain_copy_back.py` was the only way back (deleted in step 14's
+S14-04; the way back since is an image from before step 14,
+`core.rollback_lever`).
 
 FAILURE POLICY: THIS ONE RAISES
 
@@ -526,7 +528,7 @@ async def read_snapshot_calendar(
 # The six tables' last hourly copy must be younger than this. The flip is a
 # recreate of web, and the margin to the hour is the time it is given to land
 # in before the next stock sync writes DuckDB behind the copy — a row that
-# `scripts/chain_copy_back.py --handover` would then refuse the flip on.
+# `scripts/chain_copy_back.py --handover` would then have refused the flip on.
 PREFLIGHT_REPLICATED_WITHIN = timedelta(minutes=50)
 
 # The findings are read out of Postgres' copy of the quality journal, which is

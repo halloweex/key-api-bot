@@ -21,9 +21,6 @@ to stay true around it:
   frozen copy;
 - the hourly replace stands down for the four tables (a control proves it
   would otherwise wipe them), and stays down with the flag put back;
-- the copy-back carries the four tables into DuckDB, compares them at zero and
-  releases the latch, and `--handover` before a flip names what the flip
-  would strand;
 - the standing watch reads what it judges.
 
 The inputs are a three-year history seeded in DuckDB and its Silver copied
@@ -40,6 +37,9 @@ unflagged or held chain, the copy-back's round trip and the pre-flip
 handover. Where DuckDB must hold rows — the comparison of the two branches,
 the frozen copy a read must not show — they are written there on purpose
 (`tests.conftest.chains_on_duckdb`).
+
+The copy-back's own tests — the four stamps it carried exactly, its dry run,
+its refusal of an unlatched chain — went with the copy-back in S14-04.
 """
 from __future__ import annotations
 
@@ -53,7 +53,6 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_forecast_write, read_fallback
-from core.chain_transfer import CopyBackRefused, copy_back
 from tests.conftest import chains_on_duckdb
 
 asyncpg = pytest.importorskip("asyncpg")
@@ -655,68 +654,6 @@ class TestTheHourlyReplaceCannotRollItBack:
         block = _write_chains()[CHAIN]
         assert block["mode"] == "postgres" and block["latched"] is True
         assert block["mismatch"] is True
-
-
-# ─── The copy-back and the handover ─────────────────────────────────────────
-
-
-class TestTheCopyBack:
-    @pytest.mark.asyncio
-    async def test_the_stamps_no_run_restamps_arrive_exactly(self, stores):
-        """The copy-back's comparison forgives the four stamps (the daily
-        spec's `ignore_columns`, `test_chain_transfer.py` says why), so what
-        it carries is pinned here. Two of them outlive the next run: the
-        Monday job never restamps `weekly_patterns` — only the POST stores
-        them — and a training replaces only the range it predicts, so a past
-        day keeps its `created_at` for good. Built that way under the flag —
-        the POST, then the Monday job; two trainings over overlapping ranges
-        — and carried back: every stamp arrives as Postgres held it, row by
-        row."""
-        store, pool, env = stores
-        _flag(env)
-        await store.recalculate_goal_tables(include_weekly=True)    # the POST
-        posted = await _all_pg(pool, stamps=True)
-        await store.recalculate_goal_tables(include_weekly=False)   # Monday
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        later = [{"date": (date(2026, 10, 9) + timedelta(days=n)).isoformat(),
-                  "predicted_revenue": 2000.0 + n} for n in range(5)]
-        await store.store_predictions(later, "retail", METRICS)
-        written = await _all_pg(pool, stamps=True)
-
-        # The two facts the forgiving has to live with.
-        assert written[WEEKLY] == posted[WEEKLY], "the Monday job stored weeks"
-        assert {r[-1] for r in written[SEASONAL]}.isdisjoint(
-            {r[-1] for r in posted[SEASONAL]}), "the Monday job did not restamp"
-        stamp = {r[0]: r[-1] for r in written[PREDICTIONS]}
-        kept = {stamp[date(2026, 10, 7)], stamp[date(2026, 10, 8)]}
-        fresh = {stamp[date(2026, 10, 9) + timedelta(days=n)] for n in range(5)}
-        assert len(kept) == 1 and len(fresh) == 1 and kept != fresh
-        assert len(written[PREDICTIONS]) == 7
-
-        result = await copy_back(store, pg_forecast_write, dry_run=False)
-
-        assert result["findings"] == [] and result["released"] is True
-        assert await _all_duck(store, stamps=True) == written
-
-    @pytest.mark.asyncio
-    async def test_a_dry_run_writes_nothing_and_releases_nothing(self, stores):
-        store, _pool, env = stores
-        _flag(env)
-        await store.store_predictions(FORECAST, "retail", METRICS)
-
-        result = await copy_back(store, pg_forecast_write)
-
-        assert result["executed"] is False
-        assert result["rows"][PREDICTIONS] == 5
-        assert await _duck(store, PREDICTIONS) == []
-        assert chain_latch.latched(CHAIN)
-
-    @pytest.mark.asyncio
-    async def test_an_unlatched_chain_is_refused(self, stores):
-        store, _pool, env = stores
-        _flag(env)
-        with pytest.raises(CopyBackRefused, match="not latched"):
-            await copy_back(store, pg_forecast_write, dry_run=False)
 
 
 # ─── The standing watch reads what it judges ────────────────────────────────

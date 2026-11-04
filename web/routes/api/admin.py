@@ -11,7 +11,7 @@ from typing import Optional
 from core import read_fallback
 from web.routes.auth import require_admin
 from web.schemas import JobsResponse
-from ._deps import limiter, get_store
+from ._deps import limiter, get_store, validate_db_int
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -340,9 +340,9 @@ async def backfill_mirror_catalogue(
             status_code=409,
             detail=(
                 f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped by the mirror; a row only DuckDB holds is the copy-back "
-                "handover's to decide now (scripts/chain_copy_back.py catalogue "
-                "--handover)."
+                "shipped by the mirror; a row only DuckDB holds stays there, "
+                "since nothing in a step-14 image carries it (the copy-back "
+                "and its handover went with S14-04)."
             ),
         )
 
@@ -1075,6 +1075,7 @@ async def set_manager_retail_status(
     year's reports on the next refresh. Backdating is still available, but it
     is now something you ask for.
     """
+    validate_db_int(manager_id, "manager_id", allow_none=False)
     # Chain 5 (`core/pg_managers_write.py`). A `KS_WRITE_MANAGERS` nobody can
     # read writes neither store — the writer refuses and the replica stands
     # down — so it is refused here before anything is read: 409, the variable
