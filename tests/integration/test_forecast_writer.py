@@ -33,9 +33,9 @@ Since step 14's S14-00 the chain writes Postgres whatever its flag says, so
 the tests that needed the flag to route a write to DuckDB went with that
 path: the replace's control, a typo refusing both writers, the reads of an
 unflagged or held chain, the copy-back's round trip and the pre-flip
-handover. Where DuckDB must hold rows — the comparison of the two branches,
-the frozen copy a read must not show — they are written there on purpose
-(`tests.conftest.chains_on_duckdb`).
+handover. Since S14-11 there is no DuckDB branch to write through: the two
+tests that compared it with Postgres compare Postgres with the DuckDB
+answer captured before it went (`goal_tables_duckdb_answer.py`, rule 9).
 
 The copy-back's own tests — the four stamps it carried exactly, its dry run,
 its refusal of an unlatched chain — went with the copy-back in S14-04.
@@ -52,7 +52,7 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_forecast_write, read_fallback
-from tests.conftest import chains_on_duckdb
+from tests.integration.goal_tables_duckdb_answer import DUCKDB_ANSWER
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -99,8 +99,7 @@ async def stores(tmp_path, monkeypatch):
 
     Since step 14's S14-07 every goal read is Postgres' whatever any flag
     says; the history used to be seeded in DuckDB and its Silver copied
-    across. DuckDB is here for what must not reach it and, through
-    `chains_on_duckdb`, for the branch that still writes it."""
+    across. DuckDB is here for what must not reach it."""
     from core.duckdb_store import DuckDBStore
     from tests.integration.pg_tab_seed import tab_in_postgres
     from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
@@ -127,8 +126,8 @@ async def stores(tmp_path, monkeypatch):
 
 
 def _flag(env):
+    """Production's flag; read by nothing since step 14's S14-11."""
     env.setenv(pg_forecast_write.WRITE_ENV, "postgres")
-    assert pg_forecast_write.writes_postgres(), pg_forecast_write.unmet_precondition()
 
 
 async def _pg(pool, table, stamps=False):
@@ -213,23 +212,21 @@ class TestUnderTheFlag:
         assert await _duck(store, PREDICTIONS) == []
 
     @pytest.mark.asyncio
-    async def test_both_branches_store_the_same_rows(self, stores):
-        """The same history through the DuckDB branch and then the Postgres
-        one: every value equal, the stamps aside. A SET list that differs
-        from DuckDB's — `yoy_growth` in the index upsert, say — or a growth
-        row built from other columns, shows here."""
+    async def test_postgres_stores_what_the_duckdb_branch_stored(self, stores):
+        """The same history through the Postgres branch: every value equal to
+        what the DuckDB branch stored on this fixture, the stamps aside — the
+        literal captured before S14-11 deleted that branch (rule 9). A SET
+        list that differs from DuckDB's — `yoy_growth` in the index upsert,
+        say — or a growth row built from other columns, shows here."""
         store, pool, env = stores
-        # The DuckDB branch, kept for this comparison until it goes (S14-11).
-        with chains_on_duckdb(pg_forecast_write):
-            await store.recalculate_goal_tables(include_weekly=True)
-            await store.store_predictions(FORECAST, "retail", METRICS)
-        duck = await _all_duck(store)
+        duck = DUCKDB_ANSWER
         _flag(env)
         await store.recalculate_goal_tables(include_weekly=True)     # Postgres
         await store.store_predictions(FORECAST, "retail", METRICS)
 
         assert await _all_pg(pool) == duck
         assert len(duck[SEASONAL]) == 12 and len(duck[WEEKLY]) == 60
+        assert await _all_duck(store) == {t: [] for t in duck}
 
     @pytest.mark.asyncio
     async def test_over_the_hourly_copys_rows_every_column_is_rewritten(self, stores):
@@ -246,9 +243,7 @@ class TestUnderTheFlag:
         the copy's value beside a fresh stamp, which the standing watch,
         judging presence and stamps, would not notice."""
         store, pool, env = stores
-        with chains_on_duckdb(pg_forecast_write):                    # DuckDB
-            await store.recalculate_goal_tables(include_weekly=True)
-        duck = await _all_duck(store)
+        duck = DUCKDB_ANSWER                     # the DuckDB branch's (rule 9)
         assert len(duck[SEASONAL]) == 12 and len(duck[WEEKLY]) == 60
         assert duck[GROWTH][0][4] > 0, "a measured rate, so the row is rewritten"
         old = NOW - timedelta(days=30)
@@ -556,12 +551,10 @@ class TestTheReadsFollowTheChain:
     says which was read."""
 
     async def _two_versions(self, store, pool):
-        # Both stores hold the same rows, as the hourly copy left them before
-        # the flip — since S14-00 the DuckDB ones are written on purpose — and
-        # then Postgres moves on.
-        with chains_on_duckdb(pg_forecast_write):                       # DuckDB
-            await store.recalculate_goal_tables(include_weekly=True)
-            await store.store_predictions(FORECAST, "retail", METRICS)
+        # Postgres holds the rows, and then moves on. (Until step 14's S14-11
+        # DuckDB was written the same rows first, through its branch, as the
+        # hourly copy left them before the flip; the branch went, and a read
+        # of DuckDB now answers nothing at all.)
         await store.recalculate_goal_tables(include_weekly=True)        # Postgres
         await store.store_predictions(FORECAST, "retail", METRICS)
         assert len(await _pg(pool, SEASONAL)) == 12
@@ -638,8 +631,9 @@ class TestTheHourlyReplaceCannotRollItBack:
 
     @pytest.mark.asyncio
     async def test_the_flag_put_back_moves_nothing(self, stores):
-        """OD-19 (a): latched, `KS_WRITE_FORECAST=duckdb` is a disagreement,
-        not a rollback."""
+        """OD-19 (a): `KS_WRITE_FORECAST=duckdb` is not a rollback. Since step
+        14's S14-11 it is not even a disagreement — nothing reads the flag,
+        so neither the copy nor `/api/health` says anything of it."""
         from core.pg_operational import replicate_operational
         from web.routes.api.health import _write_chains
 
@@ -655,10 +649,8 @@ class TestTheHourlyReplaceCannotRollItBack:
         assert await _all_duck(store) == before, "a second writer started in DuckDB"
         result = await replicate_operational(store)
         assert set(TABLES) <= set(result["stood_down"])
-        assert list(result["chain_flag_mismatch"]) == [CHAIN]
-        block = _write_chains()[CHAIN]
-        assert block["mode"] == "postgres" and block["latched"] is True
-        assert block["mismatch"] is True
+        assert "chain_flag_mismatch" not in result
+        assert _write_chains()[CHAIN] == {}
 
 
 # ─── The standing watch reads what it judges ────────────────────────────────

@@ -35,8 +35,10 @@ CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 
 
 def _declares_a_write_chain(path: pathlib.Path) -> bool:
-    """Top-level `CHAIN_TABLES = ...` and `def writes_postgres` — parsed, not
-    imported, so walking the package has no side effects."""
+    """Top-level `CHAIN_TABLES = ...` and `def _latch` — parsed, not
+    imported, so walking the package has no side effects. (`writes_postgres`
+    until step 14's S14-11 deleted it with the flags; every chain still takes
+    its latch on its first write.)"""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names = set()
     for node in tree.body:
@@ -45,7 +47,7 @@ def _declares_a_write_chain(path: pathlib.Path) -> bool:
             names.update(t.id for t in targets if isinstance(t, ast.Name))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             names.add(node.name)
-    return {"CHAIN_TABLES", "writes_postgres"} <= names
+    return {"CHAIN_TABLES", "_latch"} <= names
 
 
 class TestEveryWriteChainIsRegistered:
@@ -557,8 +559,11 @@ class _Walk:
         for it (`*stood_down*`), so a wrapper such as
         `pg_landing.tables_stood_down` counts and a caller that merely reaches
         a shipper that asks does not."""
+        # `chain_tables` since step 14's S14-11, when the `stood_down_*`
+        # questions became that constant and went with the flags.
         roots = {key for key in self.fns if key[0] == "core/write_chains.py"
-                 and key[1].startswith("stood_down") and "sync_keys" not in key[1]}
+                 and (key[1].startswith("stood_down") or key[1] == "chain_tables")
+                 and "sync_keys" not in key[1]}
         names = {key[1] for key in roots}
         while True:
             more = {key[1] for key, called in self.calls.items()
@@ -732,10 +737,12 @@ class TestEveryPostgresWriterAsksTheRegistry:
         writing = {key[0] for key in walk.writers()}
         assert chains <= writing, chains - writing
 
-    def test_the_operational_pair_asks_the_checked_form(self):
-        """Since DN-01 the hourly shipper and the daily comparison of the
-        operational tables ask the form that hands a flag typo out to be
-        reported; the other paths ask the narrow one, which logs it."""
+    def test_the_operational_pair_asks_the_registry(self):
+        """The hourly shipper and the daily comparison of the operational
+        tables stand down on every chain's tables (`chain_tables`). Until
+        step 14's S14-11 they asked the form that handed a flag typo out to
+        be reported (`stood_down_tables_checked`, DN-01); no flag is read
+        since."""
         from core import mirror_reconciliation, pg_operational
 
         for fn in (pg_operational.replicate_operational,
@@ -743,7 +750,7 @@ class TestEveryPostgresWriterAsksTheRegistry:
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             calls = {n.func.id for n in ast.walk(tree)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            assert "stood_down_tables_checked" in calls, fn.__name__
+            assert "chain_tables" in calls, fn.__name__
 
     def test_no_asker_spells_a_chain(self, walk):
         """The rule has one home: nothing that ships or compares asks a single
@@ -1257,57 +1264,12 @@ class TestOwnershipOfTheOrderTablesPassesAsAUnit:
         assert _chains_splitting_the_order_tables((whole,)) == []
 
 
-class TestTheOrderTablesAskOnlyTheirOwnChain:
-
-
-    def test_the_owning_chains_typo_stands_it_down_and_does_not_raise(
-            self, order_chain, caplog):
-        from core.pg_landing import order_tables_stood_down
-
-        def typo():
-            raise RuntimeError("KS_WRITE_ORDERS='postgre' is not understood")
-
-        order_chain(env=typo)
-        with caplog.at_level("ERROR", logger="core.write_chains"):
-            assert order_tables_stood_down() == frozenset({ORDERS, LINES})
-        assert "postgre" in caplog.text
-
-    def test_a_latched_owning_chain_stands_down_whatever_its_flag(self, order_chain):
-        from core import chain_latch
-        from core.pg_landing import order_tables_stood_down
-
-        order_chain(env=lambda: False)
-        chain_latch.MARKER_DIR.mkdir(parents=True, exist_ok=True)
-        chain_latch.marker_path("pg_orders_write").write_text(
-            '{"latched_at": "2026-09-18T12:00:00+00:00"}', encoding="utf-8")
-        chain_latch.load()
-        assert order_tables_stood_down() == frozenset({ORDERS, LINES})
-
-    @pytest.mark.parametrize("config", ["none", "expenses", "inventory", "orders",
-                                        "orders_typo", "orders_off"])
-    def test_it_is_the_shippers_answer_narrowed(self, flags, order_chain, config):
-        """One rule, two doors: the narrow question may never disagree with
-        the whole one about a table they both name."""
-        from core import pg_inventory_write
-        from core.write_chains import stood_down_among, stood_down_tables
-
-        def typo():
-            raise RuntimeError("not understood")
-
-        if config == "expenses":
-            flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        elif config == "inventory":
-            flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        elif config == "orders":
-            order_chain()
-        elif config == "orders_typo":
-            order_chain(env=typo)
-        elif config == "orders_off":
-            order_chain(env=lambda: False)
-
-        for asked in ({ORDERS, LINES}, {"app.manual_expenses", ORDERS},
-                      set(pg_inventory_write.CHAIN_TABLES)):
-            assert stood_down_among(asked) == stood_down_tables() & asked, asked
+# `TestTheOrderTablesAskOnlyTheirOwnChain` stood here until step 14's S14-11:
+# the order tables' stand-down asked only the chains declaring them
+# (`write_chains.stood_down_among`), a typo in the owning chain's flag stood
+# them down and was logged (DN-01), and the narrow question equalled the
+# whole one. Both questions became `chain_tables()`, a constant, and went with
+# the flags.
 
 
 class _NoStore:

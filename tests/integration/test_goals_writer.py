@@ -40,7 +40,17 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_goals_write
-from tests.conftest import chains_on_duckdb
+from decimal import Decimal
+
+# What chain 7a's DuckDB branch stored for `test_postgres_stores_what_duckdb_
+# stored`'s calls on this fixture, bookkeeping aside — captured on the S14-10
+# head before step 14's S14-11 deleted that branch (rule 9). Not to be edited
+# by hand: a difference is a change of what Postgres stores.
+DUCKDB_GOALS = {
+    "daily": ("daily", Decimal("50000.00"), False, Decimal("50000.00"), Decimal("1.10")),
+    "monthly": ("monthly", Decimal("1234500.00"), True, Decimal("1000000.00"),
+                Decimal("1.20")),
+}
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -200,21 +210,18 @@ class TestUnderTheFlag:
         assert mirrored > old, "the rewrite left this store's own stamp behind"
 
     @pytest.mark.asyncio
-    async def test_both_branches_store_the_same_goal(self, stores):
-        """The same calls through `GoalsMixin.set_goal` under each engine store
-        the same row, bookkeeping aside — the two clocks and Postgres'
-        `mirrored_at`, which differ by construction. `calculated_goal` is the
-        column this is really about: it is the suggestion, computed in the
-        repository and handed to both branches, and a Postgres branch handed
-        the amount instead would pass every other test here. The typed
-        monthly amount is therefore chosen off the suggestion."""
+    async def test_postgres_stores_what_duckdb_stored(self, stores):
+        """The same calls through `GoalsMixin.set_goal` store the row the
+        DuckDB branch stored on this fixture, bookkeeping aside — the two
+        clocks and Postgres' `mirrored_at`, which differ by construction; the
+        literal was captured before S14-11 deleted that branch (rule 9).
+        `calculated_goal` is the column this is really about: it is the
+        suggestion, computed in the repository and handed to the writer, and
+        a writer handed the amount instead would pass every other test here.
+        The typed monthly amount is therefore chosen off the suggestion."""
         store, pool, env = stores
 
-        # The DuckDB branch, kept for this comparison until it goes (S14-11).
-        with chains_on_duckdb(pg_goals_write):
-            await store.set_goal("monthly", 1_234_500.0, growth_factor=1.2)
-            await store.reset_goal_to_auto("daily")
-        duck = await _duck_goals(store)
+        duck = DUCKDB_GOALS
         await store.set_goal("monthly", 1_234_500.0, growth_factor=1.2)   # Postgres
         await store.reset_goal_to_auto("daily")
         pg = await _pg_goals(pool)
@@ -345,13 +352,13 @@ class TestTheReadsFollowTheChain:
     TYPED = 2_500_000.0
 
     async def _flip_after_a_shipped_goal(self, store, env):
-        # Both stores hold the pre-flip goal, as the hourly copy left them
-        # before the flip; since S14-00 the DuckDB one is written on purpose.
-        with chains_on_duckdb(pg_goals_write):
-            await store.set_goal("monthly", self.PRE_FLIP)      # DuckDB
+        # Postgres holds the pre-flip goal and then the typed one. (Until step
+        # 14's S14-11 DuckDB was written the pre-flip goal first, through its
+        # branch, as the hourly copy left it; the branch went, and DuckDB's
+        # table stays empty — a read of it would answer no goal at all.)
         await store.set_goal("monthly", self.PRE_FLIP)          # Postgres
         await store.set_goal("monthly", self.TYPED)             # Postgres
-        assert float((await _duck_goals(store))["monthly"][1]) == self.PRE_FLIP
+        assert await _duck_goals(store) == {}
 
     @pytest.mark.asyncio
     async def test_the_goals_page_reads_the_chain_with_its_flag_at_duckdb(self, stores):
@@ -485,17 +492,17 @@ class TestTheFlagGoesBackWithoutTheCopyBack:
         result = await replicate_operational(store)
         assert "error" not in result, result
         assert GOALS in result["stood_down"]
-        assert list(result["chain_flag_mismatch"]) == [CHAIN]
         assert set(await _pg_goals(pool)) == {"monthly", "weekly"}
+        # Since step 14's S14-11 the flag is read by nothing: the copy files
+        # no mismatch and stamps no failure on the chain's table (until then
+        # `chain_flag_mismatch` and "owned by Postgres since …"), and
+        # `/api/health` publishes nothing of it.
+        assert "chain_flag_mismatch" not in result
         async with pool.acquire() as conn:
             state = await conn.fetchrow(
                 "SELECT failures_since_ok, last_error FROM meta.mirror_state "
                 "WHERE table_name = $1", GOALS)
-        assert state["failures_since_ok"] >= 1
-        assert "owned by Postgres since" in state["last_error"]
-
-        block = _write_chains()[CHAIN]
-        assert block["mode"] == "postgres" and block["latched"] is True
-        assert block["mismatch"] is True
+        assert state is None or not state["failures_since_ok"], dict(state or {})
+        assert _write_chains()[CHAIN] == {}
 
 
