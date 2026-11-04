@@ -1,69 +1,44 @@
 """Reading gold.daily_revenue from Postgres — step 1 of «Одна бронза».
 
-The switch covers exactly the two Gold primitives the dashboard has:
-period totals for /api/summary and the daily series for /api/revenue/trend.
+The reader covers exactly the two Gold primitives the dashboard has: period
+totals for /api/summary and the daily series for /api/revenue/trend.
 Everything above them — comparison periods, granularity, forecast merge,
 label building — stays in the one existing implementation, because a second
 copy of that logic is how the two Silver definitions diverged in a day.
 
-`KS_READ_GOLD=postgres` turns it on; `duckdb` (and absence) is the default;
-anything else raises — `KS_BOT_STORE`'s rule, for the same reason: a typo in
-the variable that decides where revenue numbers come from should stop the
-request loudly, not quietly serve the old store.
+NO FALLBACK SINCE STEP 14 (S14-06)
+
+The dashboard's Gold reads Postgres. `KS_READ_GOLD`, which chose the engine
+(`postgres` in production since 2026-08-28), chooses nothing now: the callers
+(`_pg_gold_summary`, `_pg_gold_series`) ask Postgres and nothing else, and a
+failure — a lost DSN line included — is refused as a 503 naming `dashboard`
+(`read_fallback.refuse`), which is what `KS_READ_FALLBACK=off` made of it
+since 2026-10-09.
 
 WHAT MAPS TO WHAT
 
-DuckDB's Gold keys on (date, sales_type) and splits channels into columns;
+DuckDB's Gold keyed on (date, sales_type) and split channels into columns;
 Postgres keys on (date, sales_type, source_id) with `source_id IS NULL` as
 the all-channels roll-up. So:
 
     all sources               → roll-up rows (source_id IS NULL)
     source_id in {1, 2, 4}    → the fine rows — including per-source returns,
-                                which DuckDB has to fetch from Silver because
+                                which DuckDB had to fetch from Silver because
                                 its Gold never grew return columns per channel
 
-The interception mirrors DuckDB's own routing: sources Gold cannot answer in
-DuckDB (5, or none-such) never reach these readers either, so flipping the
-flag changes the engine and nothing else. Postgres *could* answer source 5
-from its fine rows — deliberately not done here: parity first, better answers
-as their own change with their own verification.
-
-Failure falls back to DuckDB with an ERROR log: step 1 is обкатка чтения, and
-a dashboard that goes down because the optional engine hiccuped would teach
-everyone to never flip the flag again. The fallback is visible in logs, and
-the flag itself is the rollback.
+The callers' routing still mirrors DuckDB's own: sources DuckDB's Gold could
+not answer (3, 5) never reach these readers. Postgres *could* answer them
+from its fine rows — deliberately not done: parity first (`/api/summary`
+answers those two with zeros, the owner's decision 5 for step 14), better
+answers as their own change with their own verification.
 """
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_GOLD"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the old store."
-        )
-    return value == "postgres" and bool(os.getenv("KS_PG_DSN", "").strip())
-
-
-def available() -> bool:
-    """Postgres is configured at all. `enabled()` already folds it in — it
-    predates the other switches — so at the gate this changes nothing; it is
-    here so the gate reads `enabled() and available()` like every other
-    switch's, which is the shape the fallback walk
-    (`tests/unit/test_read_fallback_sites.py`) finds and holds to
-    `read_fallback.no_address` (DN-20b)."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 def _predicate(

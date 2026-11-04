@@ -359,12 +359,14 @@ class TestEveryReadSwitchIsDecided:
         "KS_USER_STORE",
     }
     # Read by nothing since step 14's S14-05, whose six routers ask Postgres
-    # whatever these say. Still on `WAREHOUSE_READERS` — the cutover's
-    # readiness on `/api/warehouse/status` reads the environment for them
-    # until S14-15 removes the cutover — so production's answer there is
-    # unchanged; no module declares them any more.
+    # whatever these say, and S14-06, whose dashboard does the same with the
+    # last three. Still on `WAREHOUSE_READERS` — the cutover's readiness on
+    # `/api/warehouse/status` reads the environment for them until S14-15
+    # removes the cutover — so production's answer there is unchanged; no
+    # module declares them any more.
     RETIRED = {"KS_READ_TRAFFIC", "KS_READ_MARGIN", "KS_READ_PRODUCTS_INTEL",
-               "KS_READ_REPORTS", "KS_READ_MARKETING", "KS_READ_LOOKUPS"}
+               "KS_READ_REPORTS", "KS_READ_MARKETING", "KS_READ_LOOKUPS",
+               "KS_READ_GOLD", "KS_READ_SILVER", "KS_READ_DASHBOARD"}
 
     @classmethod
     def _names_in(cls, source: str) -> set:
@@ -387,8 +389,8 @@ class TestEveryReadSwitchIsDecided:
 
     def test_every_read_switch_is_a_precondition_or_excluded_by_name(self):
         declared = self._declared()
-        # 22 until S14-05 retired six (`RETIRED`).
-        assert len(declared) >= 16, "the walk is not looking"
+        # 22 until S14-05 retired six and S14-06 three more (`RETIRED`).
+        assert len(declared) >= 13, "the walk is not looking"
         decided = set(wc.WAREHOUSE_READERS) | {wc.COHORTS} | self.NOT_READERS
         undecided = {name: sorted(where) for name, where in declared.items()
                      if name not in decided}
@@ -426,8 +428,8 @@ class TestEveryReadSwitchIsDecided:
         assert self.NOT_READERS <= declared
 
     def test_a_retired_switch_is_declared_nowhere(self):
-        """Mutation: give one of S14-05's routers its switch back — it is
-        then a reader again and must come off `RETIRED`."""
+        """Mutation: give one of S14-05's or S14-06's routers its switch
+        back — it is then a reader again and must come off `RETIRED`."""
         assert not self.RETIRED & set(self._declared())
         assert self.RETIRED <= set(wc.WAREHOUSE_READERS)
 

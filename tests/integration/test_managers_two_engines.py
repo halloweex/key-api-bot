@@ -1,16 +1,23 @@
-"""The managers screen reads the same year from DuckDB and Postgres.
+"""The managers screen reads the Kyiv year out of Postgres's Silver.
 
 `GET /api/managers` sums a year of Silver per manager and sales type — the one
-screen an admin classifies managers from. It rides `KS_READ_SILVER`, and this
-proves the two engines hand the route the same rows in the same order.
+screen an admin classifies managers from. It rode `KS_READ_SILVER`, and this
+proved DuckDB and Postgres handed the route the same rows in the same order.
 
-BOTH SILVERS ARE DERIVED, NOT COPIED
+ONE ENGINE SINCE STEP 14 (S14-06)
 
-The same Bronze goes into both stores and each engine builds its own Silver —
-DuckDB through `refresh_warehouse_layers`, Postgres through
-`core.pg_silver.rebuild_silver`, the production path. Copying DuckDB's Silver
-across would hand Postgres DuckDB's Kyiv dates, and the orders near midnight
-below would then prove nothing about Postgres.
+`get_manager_sales_365d` reads Postgres alone. Each answer is held to the rows
+computed here, in Python, from the fixture — the truth this file already held
+both engines to (`_expected`), and the only literal a window relative to
+today can have (rule 9 of the step-14 plan: DuckDB's answer was asserted equal
+to it until its side was deleted). The store's DuckDB connection is a trap.
+
+SILVER IS DERIVED, NOT COPIED
+
+Bronze goes into Postgres and `core.pg_silver.rebuild_silver` — the production
+path — builds Silver. Copying a Silver from elsewhere would hand Postgres
+somebody else's Kyiv dates, and the orders near midnight below would then
+prove nothing about Postgres.
 
 THE FIXTURE THINKS IN KYIV
 
@@ -21,11 +28,11 @@ is `today in Kyiv − 365 days`, and it gets four orders: 00:30 on the edge day,
 whose UTC date is the day before and which is in; 23:30 the evening before,
 which is out; and noon on either side.
 
-WHAT A DIFFERENTIAL TEST CANNOT SEE
+WHAT AN ENGINE CANNOT SEE OF ITSELF
 
-Under CI both engines sit in UTC, so a window that took its day from
-`CURRENT_DATE` would be wrong identically on both. The expected rows are
-therefore also computed here, in Python, from the Kyiv date — and
+Under CI the server sits in UTC, so a window that took its day from
+`CURRENT_DATE` would be wrong there and right in production. The expected rows
+are therefore computed here, in Python, from the Kyiv date — and
 `tests/unit/test_no_inherited_timezone.py` forbids the spelling outright.
 
 Skipped without `KS_PG_DSN`; CI and `deploy/gate_with_stores.sh` supply one.
@@ -42,7 +49,7 @@ import pytest
 import pytest_asyncio
 
 from core.duckdb_constants import B2B_MANAGER_ID, REVENUE_SOURCE_IDS
-from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import store_that_never_reaches_duckdb
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -62,8 +69,8 @@ MANAGERS = [
     (RETAIL_MANAGER, "Retail", True),
     (STAFF_MANAGER, "Staff", False),
 ]
-# A baseline interval for each, as the DuckDB migration seeds them, so neither
-# engine falls through to the `RETAIL_MANAGER_IDS` constant.
+# A baseline interval for each, as the migrations seed them, so the CASE does
+# not fall through to the `RETAIL_MANAGER_IDS` constant.
 CLASSIFICATIONS = [
     (B2B_MANAGER_ID, False, date(1970, 1, 1)),
     (RETAIL_MANAGER, True, date(1970, 1, 1)),
@@ -92,7 +99,7 @@ def _orders(today: date):
          None, 7, "retail"),
         # The brief's boundary case: 16.09 in UTC, 00:30 on 17.09 in Kyiv.
         # Fixed rather than relative, so a year after 2026-09-17 it leaves the
-        # window on both engines at once — the Python expectation follows it.
+        # window — and the Python expectation follows it.
         (2, 4, 1, Decimal("799.99"), datetime(2026, 9, 16, 21, 30, tzinfo=timezone.utc),
          None, 8, "retail"),
         (3, 2, 1, Decimal("2500.00"), _kyiv(today - timedelta(days=10), 12),
@@ -141,21 +148,6 @@ def _expected(orders, today: date):
     )
 
 
-async def _seed_duckdb(store, orders):
-    async with store.connection() as conn:
-        conn.executemany(
-            "INSERT INTO managers (id, name, is_retail) VALUES (?,?,?)", MANAGERS)
-        conn.executemany(
-            "INSERT INTO manager_classifications (manager_id, is_retail, valid_from)"
-            " VALUES (?,?,?)", CLASSIFICATIONS)
-        conn.executemany(
-            "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,"
-            " buyer_id, manager_id) VALUES (?,?,?,?,?,?,?)",
-            [(oid, src, status, total, at, buyer, manager)
-             for oid, src, status, total, at, manager, buyer, _ in orders])
-    await store.refresh_warehouse_layers(trigger="manual")
-
-
 async def _seed_postgres(pool, orders):
     from core.pg_silver import rebuild_silver
 
@@ -181,14 +173,12 @@ async def _seed_postgres(pool, orders):
 
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
+async def in_postgres(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.delenv("KS_READ_SILVER", raising=False)
     today = _today_in_kyiv()
     orders = _orders(today)
 
-    store = DuckDBStore(db_path=tmp_path / "managers.duckdb")
-    await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     async with pool.acquire() as conn:
         # `rebuild_silver` stamps Silver's watermark; put back whatever the
@@ -196,8 +186,8 @@ async def both_engines(tmp_path, monkeypatch):
         saved = await conn.fetchrow(
             "SELECT * FROM meta.mirror_state WHERE table_name = 'silver.orders'")
     try:
-        await _seed_duckdb(store, orders)
         await _seed_postgres(pool, orders)
+        store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the managers screen")
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
             yield store, pool, orders, today
     finally:
@@ -213,86 +203,51 @@ async def both_engines(tmp_path, monkeypatch):
                     f" VALUES ({', '.join(f'${i + 1}' for i in range(len(columns)))})",
                     *saved.values())
         await pool.close()
-        await store.close()
-
-
-async def _both(store, monkeypatch):
-    """Each engine once — and the Postgres leg with DuckDB made fatal.
-
-    `_pg_silver` returns None on any failure and the method falls back, so a
-    plain double call can pass while Postgres never answered: the two
-    "engines" would agree because they were the same one.
-    """
-    monkeypatch.delenv("KS_READ_SILVER", raising=False)
-    duck = await store.get_manager_sales_365d()
-
-    monkeypatch.setenv("KS_READ_SILVER", "postgres")
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            "get_manager_sales_365d fell back to DuckDB — Postgres did not "
-            "answer, so the comparison would have compared DuckDB with itself"
-        )
-
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres = await store.get_manager_sales_365d()
-    monkeypatch.delenv("KS_READ_SILVER", raising=False)
-    return duck, postgres
 
 
 def _plain(rows):
-    """Money as Decimal, whatever each driver chose to hand back."""
+    """Money as Decimal, whatever the driver chose to hand back."""
     return [(r[0], r[1], Decimal(str(r[2]))) for r in rows]
 
 
-class TestTheTwoEnginesAgree:
+class TestTheScreenReadsTheKyivYear:
     @pytest.mark.asyncio
-    async def test_the_rows_are_identical_and_in_the_same_order(
-        self, both_engines, monkeypatch,
+    @pytest.mark.parametrize("switch", [None, "duckdb", "junk-s14-06"],
+                             ids=["unset", "duckdb", "junk"])
+    async def test_the_rows_are_the_kyiv_year_in_the_body_s_order(
+        self, in_postgres, monkeypatch, switch,
     ):
-        store, _pool, _orders, _today = both_engines
-        duck, postgres = await _both(store, monkeypatch)
-        assert _plain(duck) == _plain(postgres)
+        """Against a truth no engine computed: the edge day's first minute is
+        in, the evening before is out, a return and a retired source bring
+        nothing — whatever `KS_READ_SILVER` says, which nothing reads since
+        step 14's S14-06."""
+        store, _pool, orders, today = in_postgres
+        if switch is not None:
+            monkeypatch.setenv("KS_READ_SILVER", switch)
+        assert _plain(await store.get_manager_sales_365d()) == _expected(orders, today)
 
     @pytest.mark.asyncio
-    async def test_both_are_the_kyiv_year(self, both_engines, monkeypatch):
-        """Against a truth neither engine computed: the edge day's first
-        minute is in, the evening before is out, a return and a retired source
-        bring nothing."""
-        store, _pool, orders, today = both_engines
-        duck, postgres = await _both(store, monkeypatch)
-        expected = _expected(orders, today)
-        assert _plain(duck) == expected
-        assert _plain(postgres) == expected
-
-    @pytest.mark.asyncio
-    async def test_the_tie_arrives_in_the_same_order(self, both_engines, monkeypatch):
+    async def test_the_tie_arrives_in_the_body_s_order(self, in_postgres):
         """The route joins a manager's types by revenue and keeps arrival order
         on a tie, so the label on the screen is decided here."""
-        store, _pool, _orders, _today = both_engines
-        duck, postgres = await _both(store, monkeypatch)
-        for rows in (duck, postgres):
-            staff = [r[1] for r in rows if r[0] == STAFF_MANAGER]
-            assert staff == ["exhibition", "internal"]
+        store, _pool, _orders, _today = in_postgres
+        rows = await store.get_manager_sales_365d()
+        staff = [r[1] for r in rows if r[0] == STAFF_MANAGER]
+        assert staff == ["exhibition", "internal"]
 
 
-class TestBothSilversPlaceTheOrderOnItsKyivDay:
+class TestSilverPlacesTheOrderOnItsKyivDay:
     @pytest.mark.asyncio
-    async def test_the_boundary_orders_carry_the_same_kyiv_date(self, both_engines):
-        """The window is only as Kyiv as `order_date` is. Each engine derived
-        its own, and 21:30 UTC must be the next day in both."""
-        store, pool, orders, _today = both_engines
+    async def test_the_boundary_orders_carry_their_kyiv_date(self, in_postgres):
+        """The window is only as Kyiv as `order_date` is: 21:30 UTC must be
+        the next day."""
+        _store, pool, orders, _today = in_postgres
         ids = [1, 2, 9, 10, 11, 12]
-        async with store.connection() as conn:
-            duck = dict(conn.execute(
-                "SELECT id, order_date FROM silver_orders"
-                f" WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall())
         async with pool.acquire() as conn:
             pg = {r["id"]: r["order_date"] for r in await conn.fetch(
                 "SELECT id, order_date FROM silver.orders WHERE id = ANY($1::int[])", ids)}
 
         by_id = {o[0]: o for o in orders}
         truth = {i: by_id[i][4].astimezone(KYIV).date() for i in ids}
-        assert duck == truth
         assert pg == truth
         assert truth[2] == date(2026, 9, 17)

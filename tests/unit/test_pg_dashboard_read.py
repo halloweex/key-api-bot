@@ -1,18 +1,18 @@
-"""Which engine answers the rest of `/dashboard`, and what the flag may not touch.
+"""What answers the rest of `/dashboard`, and what it may not touch.
 
 The numbers are `tests/integration/test_dashboard_two_engines.py`'s job. Here:
 
-  * an unknown value stops the read instead of quietly serving the other store;
-  * a Postgres read never touches DuckDB's lock (§34), with the mirror test so
-    it cannot pass by the routing being broken in both directions;
-  * a Postgres fault still answers;
-  * each routed method returns rather than hanging — the store lock is not
-    reentrant and a nested acquisition does not raise, it never comes back;
+  * a read never touches DuckDB's lock (§34) — since step 14's S14-06 there
+    is no DuckDB tail at all, and nothing in `core/repositories/revenue.py`
+    takes the store lock;
   * **the doughnut's filtered branch does not call the connection-taking
     category helper.** That is the specific deadlock `/reports` shipped: the
     method used to hold a connection and pass it to
     `_get_category_with_children`; routed, it holds nothing, so it must use
     `_category_ids`, the twin that goes through the router.
+
+That the switch (`KS_READ_DASHBOARD`) is not read and a failure is refused
+naming `dashboard` is `tests/unit/test_dashboard_routers_postgres_only.py`'s.
 
 AND THE HOLE THAT IS NOT A NAME
 
@@ -25,7 +25,6 @@ number that is merely wrong.
 from __future__ import annotations
 
 import ast
-import asyncio
 import re
 from datetime import date, timedelta
 from pathlib import Path
@@ -33,38 +32,24 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core import pg_dashboard_read
 from core.duckdb_store import DuckDBStore
-
-
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the KS_READ_DASHBOARD read switch (S14-06); the
-    returns list joins the managers, whose reads follow chain 5 to
-    Postgres once it writes there. So this module keeps DuckDB as the
-    chains' store (`tests.conftest.route_chains_to_duckdb`) until their
-    DuckDB branches go."""
-    from core import pg_managers_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_managers_write)
 
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
-TIMEOUT_S = 20
 
 TODAY = date.today()
 WINDOW = (TODAY - timedelta(days=30), TODAY)
 
 # The routed methods that live in `revenue.py` — the file the structural tests
-# below parse. `get_customer_insights` rides the same flag but lives in the
+# below parse. `get_customer_insights` rides the same router but lives in the
 # customers mixin, so it is checked by `TestTheCustomerBlock`, against its own
 # file. Adding it here instead made two tests raise `StopIteration` looking for
-# it in the wrong tree.
+# it in the wrong tree. The last three are the Gold and Silver readers' (step
+# 14, S14-06), which had a DuckDB tail of their own until then.
 METHODS = ("get_return_orders", "get_sales_by_source", "get_subcategory_breakdown",
-           "get_top_products", "get_product_performance", "get_brand_analytics")
+           "get_top_products", "get_product_performance", "get_brand_analytics",
+           "get_summary_stats", "get_revenue_trend", "get_manager_sales_365d")
 
 CALLS = (
     ("get_return_orders", {}),
@@ -113,33 +98,6 @@ def _call(store, name, kwargs):
     return getattr(store, name)(*WINDOW, **kwargs)
 
 
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_READ_DASHBOARD", raising=False)
-        assert pg_dashboard_read.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_DASHBOARD", "postgres")
-        assert pg_dashboard_read.enabled() is True
-
-    def test_a_typo_raises_rather_than_serving_the_other_store(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_DASHBOARD", "postgress")
-        with pytest.raises(ValueError, match="KS_READ_DASHBOARD"):
-            pg_dashboard_read.enabled()
-
-    def test_it_is_not_the_gold_flag(self, monkeypatch):
-        """`KS_READ_GOLD` is already `postgres` in production. If these reads
-        rode on it they would have switched at deploy rather than at a
-        decision, which is the whole reason for a flag per surface."""
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        monkeypatch.delenv("KS_READ_DASHBOARD", raising=False)
-        assert pg_dashboard_read.enabled() is False
-
-    def test_without_a_dsn_there_is_nothing_to_ask(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        assert pg_dashboard_read.available() is False
-
-
 class TestItDoesNotTakeTheDuckDbLock:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -149,53 +107,31 @@ class TestItDoesNotTakeTheDuckDbLock:
     async def test_a_postgres_read_answers_while_the_store_lock_raises(
         self, tmp_path, monkeypatch, name, kwargs,
     ):
-        monkeypatch.setenv("KS_READ_DASHBOARD", "postgres")
         # The category walk is filter chrome, so it belongs to the filter
         # bar's router and not to whichever tab is asking (it rode
         # `KS_READ_REPORTS` until this test caught it reaching for DuckDB
-        # with this tab's flag on). Since step 14's S14-05 that router reads
-        # Postgres whatever `KS_READ_LOOKUPS` says; its fetch is stubbed below.
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
+        # with this tab's flag on). Both routers read Postgres whatever any
+        # switch says (step 14, S14-05 and S14-06); their fetches are stubbed
+        # below.
+        # A store never connected, as web's is under `KS_DUCKDB=off`.
         store = DuckDBStore(db_path=tmp_path / f"d-{name}-{len(kwargs)}.duckdb")
-        await store.connect()
-        try:
-            def boom(*_a, **_k):
-                raise AssertionError(f"{name} reached for DuckDB")
 
-            with patch.object(type(store), "connection", boom), \
-                 patch("core.pg_lookups_read.fetch",
-                       new=AsyncMock(return_value=[])), \
-                 patch("core.pg_dashboard_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await _call(store, name, kwargs)
-            assert fetch.await_count >= 1
-        finally:
-            await store.close()
+        def boom(*_a, **_k):
+            raise AssertionError(f"{name} reached for DuckDB")
 
-
-class TestEveryMethodReturns:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "name,kwargs", CALLS,
-        ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
-    )
-    async def test_it_returns_rather_than_hanging(self, tmp_path, monkeypatch, name, kwargs):
-        monkeypatch.delenv("KS_READ_DASHBOARD", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"d-ret-{name}-{len(kwargs)}.duckdb")
-        await store.connect()
-        try:
-            # The category walk is the filter bar's, which reads Postgres
-            # alone since step 14's S14-05; what this asks is whether the
-            # DuckDB tail beside it hangs.
-            with patch("core.pg_lookups_read.fetch", new=AsyncMock(return_value=[])):
-                await asyncio.wait_for(_call(store, name, kwargs), timeout=TIMEOUT_S)
-        finally:
-            await store.close()
+        with patch.object(type(store), "connection", boom), \
+             patch("core.pg_lookups_read.fetch",
+                   new=AsyncMock(return_value=[])), \
+             patch("core.pg_dashboard_read.fetch",
+                   new=AsyncMock(return_value=[])) as fetch:
+            await _call(store, name, kwargs)
+        assert fetch.await_count >= 1
+        assert not (tmp_path / f"d-{name}-{len(kwargs)}.duckdb").exists()
 
 
 class TestTheRoutedBodies:
-    def test_both_renderings_leave_no_hole(self):
-        from core.sql_dialect import DUCKDB, POSTGRES
+    def test_the_postgres_rendering_leaves_no_hole(self):
+        from core.sql_dialect import POSTGRES
         from core.repositories import revenue
         from core.repositories.revenue import RevenueMixin
 
@@ -203,25 +139,9 @@ class TestTheRoutedBodies:
             sql = getattr(revenue, name)
             for hole in CALLER_HOLES:
                 sql = sql.replace(hole, "TRUE" if hole == "{where}" else "")
-            for dialect in (DUCKDB, POSTGRES):
-                rendered = RevenueMixin._render_report(sql, dialect)
-                assert "{" not in rendered and "}" not in rendered, (
-                    f"{name} still has a hole for {dialect.name}: {rendered}"
-                )
-
-    def test_the_two_renderings_differ(self):
-        from core.sql_dialect import DUCKDB, POSTGRES
-        from core.repositories import revenue
-        from core.repositories.revenue import RevenueMixin
-
-        for name in BODIES:
-            sql = getattr(revenue, name)
-            for hole in CALLER_HOLES:
-                sql = sql.replace(hole, "TRUE" if hole == "{where}" else "")
-            assert (RevenueMixin._render_report(sql, DUCKDB)
-                    != RevenueMixin._render_report(sql, POSTGRES)), (
-                f"{name} renders identically for both engines — it names a "
-                f"table rather than a hole"
+            rendered = RevenueMixin._render_report(sql, POSTGRES)
+            assert "{" not in rendered and "}" not in rendered, (
+                f"{name} still has a hole for Postgres: {rendered}"
             )
 
     def test_no_dashboard_method_opens_the_store_itself(self):
@@ -241,29 +161,21 @@ class TestTheRoutedBodies:
                 f"deadlock, and it does not raise"
             )
 
-    def test_the_router_is_never_called_under_the_lock(self):
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-
-        def opens_the_store(node):
-            return any(
-                isinstance(i.context_expr, ast.Call)
-                and isinstance(i.context_expr.func, ast.Attribute)
-                and i.context_expr.func.attr == "connection"
-                for i in getattr(node, "items", [])
-            )
-
-        offenders = [
-            inner.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.With, ast.AsyncWith)) and opens_the_store(node)
-            for inner in ast.walk(node)
-            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
-            and inner.func.attr in ("_dashboard_run", "_category_ids")
-        ]
-        assert not offenders, (
-            f"routing helper called inside `self.connection()` at {offenders}"
-        )
+    def test_the_file_never_takes_the_store_lock(self):
+        """Was "the router is never called under the lock": a router called
+        inside `self.connection()` held the lock DuckDB's single writer
+        queues on across a network round trip. Since step 14's S14-06 the
+        file has no DuckDB tail to take the lock for — no `connection()`,
+        no `_fetch_*`, no `nullcontext` standing in for it — so the question
+        is answered for every method at once, read off the tree."""
+        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
+        reached = sorted(
+            (n.lineno, n.func.attr) for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr in ("connection", "_fetch_one", "_fetch_all"))
+        assert not reached, reached
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert "nullcontext" not in names and "duckdb_switch" not in names
 
     def test_every_ordered_body_ends_on_a_key_that_cannot_tie(self):
         """Two engines break a tie differently. `_RETURN_ORDERS_SQL` carries a
@@ -386,22 +298,21 @@ class TestNothingHereReadsTheDeadGold:
 
 
 class TestTheCustomerBlock:
-    """`/api/customers/insights` rides this flag too, and its bodies live in
+    """`/api/customers/insights` rides this router too, and its bodies live in
     the customers mixin. Three things it must not do again."""
 
     def _bodies(self):
         from core.repositories import customers
         return {n: getattr(customers, n) for n in INSIGHT_BODIES}
 
-    def test_both_renderings_leave_no_hole(self):
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+    def test_the_postgres_rendering_leaves_no_hole(self):
+        from core.sql_dialect import POSTGRES, render_tables
 
         for name, sql in self._bodies().items():
             filled = (sql.replace("{where}", "TRUE")
                          .replace("{sales_where}", "TRUE"))
-            for dialect in (DUCKDB, POSTGRES):
-                rendered = render_tables(filled, dialect)
-                assert "{" not in rendered and "}" not in rendered, (name, dialect.name)
+            rendered = render_tables(filled, POSTGRES)
+            assert "{" not in rendered and "}" not in rendered, name
 
     def test_every_gold_read_carries_the_rollup_predicate(self):
         """Postgres' Gold holds a roll-up row *and* a row per source. Summing

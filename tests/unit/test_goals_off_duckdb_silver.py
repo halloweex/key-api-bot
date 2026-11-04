@@ -156,26 +156,6 @@ EXPECTED = {
 }
 
 
-async def _seed_equivalence(store, scenario: str) -> None:
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM manager_classifications")
-        conn.execute("DELETE FROM managers")
-        if scenario != "nothing_synced":
-            conn.executemany(
-                "INSERT INTO managers (id, name, is_retail) VALUES (?, 'm', ?)",
-                MANAGERS)
-        if scenario == "classified":
-            conn.executemany(
-                "INSERT INTO manager_classifications "
-                "(manager_id, is_retail, valid_from, valid_to) VALUES (?, ?, ?, ?)",
-                INTERVALS)
-        conn.executemany(
-            "INSERT INTO orders (id, source_id, status_id, grand_total, "
-            "ordered_at, buyer_id, manager_id) VALUES (?, ?, ?, 1000.0, ?, 1, ?)",
-            [(oid, src, st, when, mgr) for oid, src, st, mgr, when in ORDERS])
-    await store.refresh_warehouse_layers(trigger="manual")
-
-
 @pytest_asyncio.fixture
 async def store(tmp_path):
     s = DuckDBStore(db_path=tmp_path / "goals.duckdb")
@@ -184,35 +164,6 @@ async def store(tmp_path):
         yield s
     finally:
         await s.close()
-
-
-class TestTheSummaryFallbackReadsTheRowsOwnSalesType:
-    """`get_summary_stats`' DuckDB branch for one source counts that source's
-    returns from `silver_orders` — through an EXISTS back into `silver_orders`
-    for the same id until DN-12, now through the row's own column. Same row,
-    same answer, and an unknown sales_type still refuses."""
-
-    WINDOW = (date(2026, 2, 1), date(2026, 3, 31))
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("sales_type,returns", [
-        ("retail", 1), ("b2b", 0), ("internal", 0), ("all", 1)])
-    async def test_the_returns_of_one_source(self, store, monkeypatch, sales_type, returns):
-        monkeypatch.delenv("KS_READ_GOLD", raising=False)
-        monkeypatch.delenv("KS_READ_SILVER", raising=False)
-        await _seed_equivalence(store, "classified")
-        out = await store.get_summary_stats(*self.WINDOW, source_id=4,
-                                            sales_type=sales_type)
-        assert out["totalReturns"] == returns
-        assert out["returnsRevenue"] == 1000.0 * returns
-
-    @pytest.mark.asyncio
-    async def test_an_unknown_sales_type_still_refuses(self, store, monkeypatch):
-        monkeypatch.delenv("KS_READ_GOLD", raising=False)
-        await _seed_equivalence(store, "classified")
-        with pytest.raises(ValueError):
-            await store.get_summary_stats(*self.WINDOW, source_id=4,
-                                          sales_type="wholsale")
 
 
 # ─── Three years of history, for the calculators ───────────────────────────

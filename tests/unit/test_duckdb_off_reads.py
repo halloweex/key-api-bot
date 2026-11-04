@@ -7,7 +7,8 @@ read path is four places that let DuckDB answer by routing, not by failure
 
 - `/api/summary?source_id=3` — Opencart has no column in Gold, so Postgres is
   not asked and DuckDB's Gold branch answered four zeros through a
-  connection. Under `off` the same zeros, without one.
+  connection. Under `off` the same zeros, without one — and since step 14's
+  S14-06, with no DuckDB branch left, a constant (the owner's decision 5).
 - `/api/warehouse/status` nested DuckDB's last refresh out of the file. Under
   `off` it is read out of the hourly copy, `app.warehouse_refreshes`, which
   holds the same rows (OD-S5-4), or says `off` and the error's class.
@@ -84,13 +85,19 @@ def _cards(body: dict) -> dict:
 # ─── /api/summary for a source with no column in Gold ──────────────────────
 
 class TestTheSummaryForASourceGoldCannotName:
-    @pytest.mark.parametrize("gold", [None, "postgres"], ids=["unset", "postgres"])
+    @pytest.mark.parametrize("gold", [None, "postgres", "duckdb", "junk-s14-06"],
+                             ids=["unset", "postgres", "duckdb", "junk"])
     def test_under_off_the_zeros_come_without_a_connection(
         self, gold, admin_client, pg_refuses, duckdb_off, monkeypatch,
     ):
         """The design's proof: 200, zeros, `opened == {}` — whatever
-        `KS_READ_GOLD` says, since this answer never asked it. Mutation: drop
-        the `off` branch in `get_summary_stats` — a 503 naming `duckdb`."""
+        `KS_READ_GOLD` says, since this answer never asked it, and with a
+        Postgres that refuses, which it never asked either. Since step 14's
+        S14-06 the zeros are a constant (`_NO_GOLD_SOURCE_TOTALS`, the
+        owner's decision 5). Mutation: send source 3 to Gold — a 503 naming
+        `dashboard`. (Source 5 shares the constant in the store —
+        `tests/unit/test_step12_odna_bronza.py` — but this route's validator
+        answers it 400 before anything is read.)"""
         if gold:
             monkeypatch.setenv("KS_READ_GOLD", gold)
         taken = _connections_taken(monkeypatch)
@@ -102,38 +109,26 @@ class TestTheSummaryForASourceGoldCannotName:
         assert read_fallback.refusals() == {} and read_fallback.counts() == {}
         assert not duckdb_off.exists()
 
-    @pytest.mark.parametrize("gold", [None, "postgres"], ids=["unset", "postgres"])
-    def test_under_on_duckdb_answers_the_same_body(
-        self, gold, admin_client, pg_refuses, duckdb_off, monkeypatch,
-    ):
-        """`on` is untouched: DuckDB's Gold branch answers, through its
-        connection, and the body is byte for byte the one `off` gives."""
-        if gold:
-            monkeypatch.setenv("KS_READ_GOLD", gold)
-        off = admin_client.get(SUMMARY, params=OPENCART).json()
-
-        # The same process back under on: the store published unconnected
-        # under off is forgotten, as a restart would.
-        monkeypatch.setenv(duckdb_switch.ENV, "on")
-        duckdb_switch.configure_mode()
-        monkeypatch.setattr("core.duckdb_store._store_instance", None)
-        taken = _connections_taken(monkeypatch)
-        on = admin_client.get(SUMMARY, params=OPENCART)
-        assert on.status_code == 200, on.text
-        assert taken, "under on DuckDB answered this, through its connection"
-        assert on.json() == off
-        assert read_fallback.counts() == {}, "routing, not a fallback"
-
     def test_a_source_gold_names_is_not_this_branch(
         self, admin_client, pg_refuses, duckdb_off, monkeypatch,
     ):
-        """Only Gold's missing column is answered with zeros: Instagram goes
-        to Postgres, and a Postgres that fails is refused, not zeroed."""
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
+        """Only a source Gold is not asked about is answered with zeros:
+        Instagram goes to Postgres, and a Postgres that fails is refused,
+        not zeroed."""
         response = admin_client.get(SUMMARY, params={**WINDOW, "source_id": 1})
         assert response.status_code == 503, response.text
         assert response.json()["surface"] == "dashboard"
         assert duckdb_switch.opened() == {}
+
+    def test_a_product_filter_beside_it_is_not_this_branch(
+        self, admin_client, pg_refuses, duckdb_off, monkeypatch,
+    ):
+        """A brand beside source 3 reads the order lines, as it always has:
+        Postgres is asked, and refusing, refuses the card row."""
+        response = admin_client.get(
+            SUMMARY, params={**OPENCART, "brand": "BrandA"})
+        assert response.status_code == 503, response.text
+        assert response.json()["surface"] == "dashboard"
 
 
 # ─── /api/warehouse/status: DuckDB's last refresh, from its copy ───────────

@@ -1022,7 +1022,7 @@ async def list_managers(request: Request, admin: dict = Depends(require_admin)):
     # is FALSE for them, which is not the same as unclassified — and labelled
     # ₴15.5M of wholesale as `other` on the very screen meant to tell the two
     # apart. There is one CASE for this, it lives in Silver, and this reports
-    # its output — from whichever Silver `KS_READ_SILVER` names.
+    # its output, from Postgres's Silver.
     rows = await store.get_manager_sales_365d()
 
     revenue: dict = {}

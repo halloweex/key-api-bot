@@ -2,21 +2,20 @@
 from __future__ import annotations
 
 import logging
-from contextlib import nullcontext
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
-from core.duckdb_constants import KNOWN_SALES_TYPES, UNKNOWN_BRAND, brand_where
+from core.duckdb_constants import UNKNOWN_BRAND, brand_where
 from core.models import OrderStatus
 from core.sql_dialect import TODAY_IN_KYIV
-from core import duckdb_switch, read_fallback
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
 
-# The category tree, one body for both engines. Six other methods still run it
-# on a connection they already hold, and the three report methods run it
-# through the router — so the text lives here rather than in either of them.
+# The category tree. Every tab's category filter resolves it through the
+# filter bar's router (`_category_ids`), so the text lives here rather than in
+# any one of them.
 _CATEGORY_TREE_SQL = """
     WITH RECURSIVE category_tree AS (
         SELECT id FROM {categories} WHERE id = ?
@@ -78,9 +77,9 @@ _PROMOCODES_SQL = """
 
 # ─── What `/dashboard` reads besides Gold ───────────────────────────────────
 #
-# One body each, two engines. `{where}` and `{ids}` are predicates the caller
-# builds from validated parts and never from user text; everything else is a
-# table name that already existed on `Dialect`.
+# One body each, rendered for Postgres (`_dashboard_run`). `{where}` and
+# `{ids}` are predicates the caller builds from validated parts and never
+# from user text; everything else is a table name on `Dialect`.
 
 _RETURN_ORDERS_SQL = """
     SELECT
@@ -234,21 +233,20 @@ _SUBCATEGORY_SQL = """
 # ─── The managers screen ────────────────────────────────────────────────────
 #
 # What each manager sold in a year, split by the `sales_type` Silver gave it —
-# the one screen an admin classifies managers from. It reads Silver and only
-# Silver, so it rides `KS_READ_SILVER` beside the `/summary` and `/trend`
-# escapes rather than a flag of its own.
+# the one screen an admin classifies managers from. It reads Postgres's Silver
+# and nothing else (`get_manager_sales_365d`); a failure is refused naming
+# `managers`.
 #
-# The window starts from Kyiv's day in both engines, not from `CURRENT_DATE`.
-# That was the container's day: Kyiv in production DuckDB, because `web` runs
-# `TZ=Europe/Kyiv`, and UTC on the Postgres server — so between 21:00 and
-# midnight UTC a Postgres read would have reached one day further back than
-# the DuckDB one. `order_date` is already the Kyiv date in both Silvers, so
-# once today is too, the two sides of the comparison are the same calendar.
+# The window starts from Kyiv's day, not from `CURRENT_DATE`. That is the
+# server's day, UTC on the Postgres server — so between 21:00 and midnight UTC
+# a read would reach one day further back than the dashboard means.
+# `order_date` is already the Kyiv date in Silver, so once today is too, the
+# window is one calendar.
 #
 # The `ORDER BY` is not cosmetic. The route joins a manager's sales types in
 # descending revenue and keeps the arrival order on a tie; without it that
-# order is whatever each engine's hash aggregate produced, and the label on
-# the screen would depend on which engine answered.
+# order is whatever the hash aggregate produced, and the label on the screen
+# could change from one read to the next.
 _MANAGER_SALES_365D_SQL = """
     SELECT manager_id, sales_type, COALESCE(SUM(grand_total), 0) AS revenue
     FROM {silver_orders}
@@ -257,6 +255,18 @@ _MANAGER_SALES_365D_SQL = """
     GROUP BY manager_id, sales_type
     ORDER BY manager_id NULLS FIRST, sales_type
 """
+
+
+# `/api/summary` for a source the dashboard does not ask Gold about — 3
+# (Opencart) or 5 (Виставка), with no category, brand or promocode — answers
+# four zeros, as it has since the summary first read Gold: DuckDB's Gold had
+# no column for either, and its routing answered zeros without a row read.
+# Kept as a constant by the owner's decision 5 for step 14 (2026-10-21), even
+# though the trend shows source 5's money: correcting it is a change of its
+# own, to be made once the answer from Gold's `source_id` dimension is ready,
+# and never inside a change whose claim is that no number moved.
+# `tests/unit/test_duckdb_off_reads.py` pins it.
+_NO_GOLD_SOURCE_TOTALS: Tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
 def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
@@ -333,15 +343,18 @@ _MARKETING_LINES_PERIOD_SQL = """
 
 class RevenueMixin:
 
-    # ── What answers `/reports`, `/marketing` and the filter bar ───────────
+    # ── What answers `/reports`, `/marketing`, the filter bar and `/dashboard`
     #
-    # Postgres, and nothing else since step 14's S14-05: `_reports_run`,
-    # `_marketing_run` and `_lookups_run` each run their statement there and,
-    # on any failure, raise `read_fallback.refuse(<surface>, exc)` — the 503
-    # naming the surface that `fall_back` gave under `KS_READ_FALLBACK=off`,
-    # production's mode since 2026-10-09. Their `KS_READ_*` switches are no
-    # longer read, and without `KS_PG_DSN` the pool raises and that is the
-    # refusal. None of the three takes the DuckDB store lock.
+    # Postgres, and nothing else: `_reports_run`, `_marketing_run` and
+    # `_lookups_run` since step 14's S14-05, and since S14-06 the dashboard's
+    # four — `_dashboard_run`, `_pg_gold_summary`, `_pg_gold_series` and
+    # `_pg_silver` — with `get_manager_sales_365d`. Each runs its statement
+    # there and, on any failure, raises `read_fallback.refuse(<surface>, exc)`
+    # — the 503 naming the surface that `fall_back` gave under
+    # `KS_READ_FALLBACK=off`, production's mode since 2026-10-09. Their
+    # `KS_READ_*` switches are no longer read, and without `KS_PG_DSN` the pool
+    # raises and that is the refusal. None of them takes the DuckDB store
+    # lock, and nothing in this mixin reaches DuckDB any more.
 
     async def _reports_run(
         self, sql: str, params: Optional[List[Any]] = None,
@@ -400,39 +413,26 @@ class RevenueMixin:
     async def _dashboard_run(
         self, sql: str, params: Optional[List[Any]] = None,
     ) -> List[Tuple]:
-        """`_reports_run`'s twin for what `/dashboard` reads besides Gold.
+        """`_reports_run`'s twin for what `/dashboard` reads besides Gold:
+        Postgres, and a failure is a refusal naming `dashboard`.
 
-        Its own switch and not `KS_READ_GOLD`'s: that one is already
-        `postgres` in production, so folding these into it would turn them on
-        at deploy rather than at a decision. `core/pg_dashboard_read.py` has
-        the rest of the reasoning.
+        One path since step 14's S14-06. `KS_READ_DASHBOARD` is not read. A
+        statement reading `{managers}` (the returns list) used to take a
+        branch of its own here, to Postgres with no fallback while chain 5
+        wrote there (`pg_managers_write.reads_the_chain`); with every read in
+        Postgres that branch is this one, and a failed join is now counted and
+        refused like the rest of the page, where it used to escape uncounted.
         """
-        from core.sql_dialect import DUCKDB, POSTGRES
+        from core.sql_dialect import POSTGRES
 
-        from core import pg_dashboard_read, pg_managers_write
+        from core import pg_dashboard_read
 
         params = list(params or [])
-        # A statement reading `{managers}` goes where chain 5 writes, and
-        # without a fallback — `_marketing_run`'s rule for the goals, for
-        # `core/pg_managers_read.py`'s reason: after the flip DuckDB's
-        # managers are frozen, not an older answer.
-        if pg_managers_write.reads_the_chain(sql):
+        try:
             return await pg_dashboard_read.fetch(
-                self._render_report(sql, POSTGRES), params,
-            )
-        read_fallback.no_address("dashboard", pg_dashboard_read)
-        if pg_dashboard_read.enabled() and pg_dashboard_read.available():
-            try:
-                return await pg_dashboard_read.fetch(
-                    self._render_report(sql, POSTGRES), params,
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("dashboard", exc)
-
-        async with self.connection() as conn:
-            return conn.execute(
-                self._render_report(sql, DUCKDB), params,
-            ).fetchall()
+                self._render_report(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("dashboard", exc)
 
     async def _lookups_run(
         self, sql: str, params: Optional[List[Any]] = None,
@@ -478,14 +478,13 @@ class RevenueMixin:
         rows = await self._lookups_run(_CATEGORY_TREE_SQL, [category_id])
         return _at_least_the_root(category_id, [row[0] for row in rows])
 
-    # ── Step 1 of «Одна бронза»: the Gold primitives can read Postgres ──────
+    # ── The Gold primitives: `/api/summary`'s totals, the trend's series ────
     #
-    # Interception mirrors DuckDB's own routing exactly: a request DuckDB's
-    # Gold cannot answer (a source without a channel column, a line-level
-    # filter) never reaches the Postgres reader either, so KS_READ_GOLD
-    # changes the engine and nothing else. A failed Postgres read falls back
-    # to DuckDB with an ERROR in the log — the flag is обкатка, and the
-    # dashboard staying up is what makes flipping it survivable.
+    # Postgres's `gold.daily_revenue`, one path since step 14's S14-06: a
+    # failure is a refusal naming `dashboard`, and `KS_READ_GOLD` is not read.
+    # Which requests reach Gold at all is the callers' routing, unchanged from
+    # when DuckDB's Gold decided it: no line-level filter, no promocode, and
+    # no source outside `_GOLD_SOURCE_IDS`.
 
     async def _pg_gold_summary(
         self,
@@ -493,29 +492,22 @@ class RevenueMixin:
         end_date: date,
         sales_type: str,
         source_id: Optional[int],
-    ) -> Optional[Tuple[int, float, int, float]]:
+    ) -> Tuple[int, float, int, float]:
+        """`(orders, revenue, returns, returns_revenue)` from Gold."""
         from core import pg_gold_read
 
-        if source_id and source_id not in self._GOLD_SOURCE_COLUMNS:
-            return None  # DuckDB answers zeros here; parity keeps it that way
-        read_fallback.no_address("dashboard", pg_gold_read)
-        if not (pg_gold_read.enabled() and pg_gold_read.available()):
-            return None
         try:
             return await pg_gold_read.fetch_summary(
-                start_date, end_date, sales_type, source_id
-            )
-        except Exception as e:
-            read_fallback.fall_back("dashboard", e)
-            return None
+                start_date, end_date, sales_type, source_id)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("dashboard", exc)
 
     @staticmethod
     def _comparison_window(
         start_date: date, end_date: date, compare_type: str,
     ) -> Tuple[date, date]:
-        """The comparison period's bounds — one home for the trend (its
-        pre-lock Postgres prefetch and its in-lock DuckDB path), the organic
-        traffic block and the marketing report."""
+        """The comparison period's bounds — one home for the trend, the
+        organic traffic block and the marketing report."""
         if compare_type == "year_ago":
             from dateutil.relativedelta import relativedelta
             return start_date - relativedelta(years=1), end_date - relativedelta(years=1)
@@ -532,21 +524,16 @@ class RevenueMixin:
         end_date: date,
         sales_type: str,
         source_id: Optional[int],
-    ) -> Optional[List[Tuple[date, float, int]]]:
+    ) -> List[Tuple[date, float, int]]:
+        """`(day, revenue, order_count)` rows from Gold, days with no row
+        absent — the caller fills the calendar."""
         from core import pg_gold_read
 
-        if source_id and source_id not in self._GOLD_SOURCE_COLUMNS:
-            return None  # same guard as the summary twin — parity by routing
-        read_fallback.no_address("dashboard", pg_gold_read)
-        if not (pg_gold_read.enabled() and pg_gold_read.available()):
-            return None
         try:
             return await pg_gold_read.fetch_series(
-                start_date, end_date, sales_type, source_id
-            )
-        except Exception as e:
-            read_fallback.fall_back("dashboard", e)
-            return None
+                start_date, end_date, sales_type, source_id)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("dashboard", exc)
 
     async def get_summary_stats(
         self,
@@ -558,172 +545,49 @@ class RevenueMixin:
         sales_type: str = "retail",
         promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Get summary statistics for a date range (from Gold/Silver layers)."""
-        # Step 1 of «Одна бронза» — and it happens BEFORE the store lock, not
-        # inside it: `self.connection()` serialises every DuckDB access in the
-        # process, and holding that lock across a network round trip hands a
-        # hung Postgres the entire dashboard plus the 2-minute refresh queue.
-        # The rule is the scheduler's own: the store's lock is not held across
-        # the network. The Gold-only branch needs no DuckDB at all when
-        # Postgres answers, so on success the lock is never taken.
-        if not (category_id or brand or promocode):
-            pg_totals = await self._pg_gold_summary(
-                start_date, end_date, sales_type, source_id
-            )
+        """Summary statistics for a date range, from Postgres's Gold or Silver.
+
+        A category, brand or promocode reads the order lines (Silver), since
+        Gold has folded them away; anything else reads Gold — except a source
+        Gold is not asked about (`_GOLD_SOURCE_IDS`), which answers zeros
+        (`_NO_GOLD_SOURCE_TOTALS`, the owner's decision 5). None of it takes
+        the DuckDB store lock (step 14, S14-06).
+        """
+        if category_id or brand or promocode:
+            # The line level keeps distinct order counts correct: it holds the
+            # order id beside every line. The category tree is the filter
+            # bar's (`_category_ids`), resolved first, as it always was.
+            cat_ids = (await self._category_ids(category_id)
+                       if category_id else None)
+            lines_sql, lines_params, ret_sql, ret_params = (
+                self._build_silver_filtered_summary_queries(
+                    start_date, end_date, sales_type, source_id,
+                    cat_ids, brand, promocode,
+                ))
+            lines = await self._pg_silver(lines_sql, lines_params)
+            returns = await self._pg_silver(ret_sql, ret_params)
+            totals: Tuple[Any, Any, Any, Any] = (
+                lines[0][0], lines[0][1], returns[0][0], returns[0][1])
+        elif source_id and source_id not in self._GOLD_SOURCE_IDS:
+            totals = _NO_GOLD_SOURCE_TOTALS
         else:
-            # The Silver grain, under the same rule: before the lock. The
-            # category tree comes from the routed `_category_ids`, which
-            # takes no connection.
-            pg_totals = None
-            from core import pg_silver_read
-            read_fallback.no_address("dashboard", pg_silver_read)
-            if pg_silver_read.enabled() and pg_silver_read.available():
-                cat_ids = (await self._category_ids(category_id)
-                           if category_id else None)
-                lines_sql, lines_params, ret_sql, ret_params = (
-                    self._build_silver_filtered_summary_queries(
-                        start_date, end_date, sales_type, source_id,
-                        cat_ids, brand, promocode,
-                    ))
-                lines = await self._pg_silver(lines_sql, lines_params)
-                # Both halves from one engine, or not at all: returns from
-                # Postgres beside orders from DuckDB is two stores in one tile.
-                returns = (await self._pg_silver(ret_sql, ret_params)
-                           if lines is not None else None)
-                if lines is not None and returns is not None:
-                    pg_totals = (lines[0][0], lines[0][1],
-                                 returns[0][0], returns[0][1])
-        if (pg_totals is None and duckdb_switch.is_off()
-                and not (category_id or brand or promocode)
-                and source_id and source_id not in self._GOLD_SOURCE_COLUMNS):
-            # A source with no column in Gold (Opencart): Postgres is not
-            # asked, by routing, and DuckDB's Gold branch below answers four
-            # zeros without reading a row — through a connection all the
-            # same, the one the file switched off refuses. Under KS_DUCKDB=off
-            # the same zeros, without it (stage 5, PR-8). Every other way to
-            # the block below was refused before it: a gate by `no_address`,
-            # a failed read by `fall_back`.
-            pg_totals = (0, 0, 0, 0)
-        if pg_totals is not None:
-            total_orders, total_revenue = int(pg_totals[0]), float(pg_totals[1])
-            total_returns, returns_revenue = int(pg_totals[2]), float(pg_totals[3])
-            avg_check = total_revenue / total_orders if total_orders > 0 else 0
-            # The same seven keys the DuckDB tail builds — the API shape
-            # must not change with the engine.
-            return {
-                "totalOrders": total_orders,
-                "totalRevenue": round(total_revenue, 2),
-                "avgCheck": round(avg_check, 2),
-                "totalReturns": total_returns,
-                "returnsRevenue": round(returns_revenue, 2),
-                "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat(),
-            }
+            totals = await self._pg_gold_summary(
+                start_date, end_date, sales_type, source_id)
 
-        # The DuckDB tail below goes in step 14's S14-06. Its category tree
-        # is the filter bar's, from Postgres since S14-05 — resolved before
-        # the store lock, which a Postgres round trip must not be held under.
-        tail_cat_ids = (await self._category_ids(category_id)
-                        if category_id else None)
-        async with self.connection() as conn:
-            if category_id or brand or promocode:
-                # The line level keeps distinct order counts correct: it holds
-                # the order id beside every line. One body with the Postgres
-                # read above — `_build_silver_filtered_summary_queries`.
-                from core.sql_dialect import DUCKDB, render_tables
-
-                cat_ids = tail_cat_ids
-                lines_sql, lines_params, ret_sql, ret_params = (
-                    self._build_silver_filtered_summary_queries(
-                        start_date, end_date, sales_type, source_id,
-                        cat_ids, brand, promocode,
-                    ))
-                result = conn.execute(
-                    render_tables(lines_sql, DUCKDB), lines_params).fetchone()
-                total_orders = int(result[0] or 0)
-                total_revenue = float(result[1] or 0)
-
-                ret_result = conn.execute(
-                    render_tables(ret_sql, DUCKDB), ret_params).fetchone()
-                total_returns = int(ret_result[0])
-                returns_revenue = float(ret_result[1])
-            else:
-                # Use gold_daily_revenue for non-product queries. (Postgres
-                # was already given its chance above, before the lock.)
-                params = [start_date, end_date]
-                where_clauses = ["date BETWEEN ? AND ?"]
-
-                if sales_type != "all":
-                    where_clauses.append("sales_type = ?")
-                    params.append(sales_type)
-
-                where_sql = " AND ".join(where_clauses)
-
-                if source_id:
-                    # Source-specific: sum per-source columns for orders/revenue
-                    source_col_map = {1: "instagram", 2: "telegram", 4: "shopify"}
-                    src_name = source_col_map.get(source_id)
-                    if src_name:
-                        result = conn.execute(f"""
-                            SELECT
-                                SUM({src_name}_orders) as total_orders,
-                                SUM({src_name}_revenue) as total_revenue
-                            FROM gold_daily_revenue
-                            WHERE {where_sql}
-                        """, params).fetchone()
-                        # Gold doesn't have per-source return columns — query Silver
-                        # The row's own `sales_type`, which is what the Gold
-                        # cells above were built from. This was an EXISTS back
-                        # into `silver_orders` for the same id — the same row,
-                        # read twice — through a filter that has since left
-                        # (DN-12); the column is that answer without the detour.
-                        ret_params = [start_date, end_date, source_id]
-                        sales_filter = "1=1"
-                        if sales_type != "all":
-                            if sales_type not in KNOWN_SALES_TYPES:
-                                raise ValueError(
-                                    f"unknown sales_type {sales_type!r}; expected one of "
-                                    f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
-                                )
-                            sales_filter = "sales_type = ?"
-                            ret_params.append(sales_type)
-                        ret_result = conn.execute(f"""
-                            SELECT COUNT(DISTINCT id), COALESCE(SUM(grand_total), 0)
-                            FROM silver_orders
-                            WHERE order_date BETWEEN ? AND ?
-                              AND is_return AND is_active_source AND source_id = ?
-                              AND {sales_filter}
-                        """, ret_params).fetchone()
-                        result = (result[0], result[1], ret_result[0], ret_result[1])
-                    else:
-                        result = (0, 0, 0, 0)
-                else:
-                    result = conn.execute(f"""
-                        SELECT
-                            SUM(orders_count) as total_orders,
-                            SUM(revenue) as total_revenue,
-                            SUM(returns_count) as total_returns,
-                            SUM(returns_revenue) as returns_revenue
-                        FROM gold_daily_revenue
-                        WHERE {where_sql}
-                    """, params).fetchone()
-
-                total_orders = int(result[0] or 0)
-                total_revenue = float(result[1] or 0)
-                total_returns = int(result[2] or 0)
-                returns_revenue = float(result[3] or 0)
-
-            avg_check = total_revenue / total_orders if total_orders > 0 else 0
-
-            return {
-                "totalOrders": total_orders,
-                "totalRevenue": round(total_revenue, 2),
-                "avgCheck": round(avg_check, 2),
-                "totalReturns": total_returns,
-                "returnsRevenue": round(returns_revenue, 2),
-                "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat()
-            }
+        total_orders, total_revenue = int(totals[0]), float(totals[1])
+        total_returns, returns_revenue = int(totals[2]), float(totals[3])
+        avg_check = total_revenue / total_orders if total_orders > 0 else 0
+        # The seven keys of the card row; `tests/unit/test_step12_odna_bronza.py`
+        # pins the shape.
+        return {
+            "totalOrders": total_orders,
+            "totalRevenue": round(total_revenue, 2),
+            "avgCheck": round(avg_check, 2),
+            "totalReturns": total_returns,
+            "returnsRevenue": round(returns_revenue, 2),
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+        }
 
     async def get_return_orders(
         self,
@@ -779,82 +643,13 @@ class RevenueMixin:
             for row in result
         ]
 
-    def _build_gold_revenue_query(
-        self,
-        start_date: date,
-        end_date: date,
-        sales_type: str = "retail",
-        source_id: Optional[int] = None,
-    ) -> Tuple[str, list]:
-        """Build a query against gold_daily_revenue for a date range.
-
-        Returns (sql, params) tuple that SELECTs day, revenue, order_count.
-        When sales_type='all', aggregates across sales types with GROUP BY.
-        """
-        params = [start_date, end_date]
-        where_clauses = ["date BETWEEN ? AND ?"]
-        needs_group_by = sales_type == "all"
-
-        if sales_type != "all":
-            where_clauses.append("sales_type = ?")
-            params.append(sales_type)
-
-        where_sql = " AND ".join(where_clauses)
-
-        if source_id:
-            source_col_map = {1: "instagram", 2: "telegram", 4: "shopify"}
-            src = source_col_map.get(source_id)
-            if src:
-                if needs_group_by:
-                    sql = f"""
-                        SELECT date AS day, SUM({src}_revenue) AS revenue, SUM({src}_orders) AS order_count
-                        FROM gold_daily_revenue
-                        WHERE {where_sql}
-                        GROUP BY date
-                        ORDER BY date
-                    """
-                else:
-                    sql = f"""
-                        SELECT date AS day, {src}_revenue AS revenue, {src}_orders AS order_count
-                        FROM gold_daily_revenue
-                        WHERE {where_sql}
-                        ORDER BY date
-                    """
-            else:
-                # Gold holds no column for this source, so it cannot answer.
-                # `params` is emptied with the SQL: the two used to part ways
-                # here, and passing three bound values to a statement taking
-                # none raised `Parameter argument/count mismatch` — a 500 on
-                # every /api/revenue/trend?source_id=5.
-                #
-                # `get_revenue_trend` no longer routes an unanswerable source
-                # here at all; it goes to `_build_silver_orders_revenue_query`,
-                # which returns the real number. This stays consistent for any
-                # future caller rather than staying a trap.
-                sql = "SELECT NULL::DATE, 0, 0 WHERE FALSE"
-                params = []
-        else:
-            if needs_group_by:
-                sql = f"""
-                    SELECT date AS day, SUM(revenue) AS revenue, SUM(orders_count) AS order_count
-                    FROM gold_daily_revenue
-                    WHERE {where_sql}
-                    GROUP BY date
-                    ORDER BY date
-                """
-            else:
-                sql = f"""
-                    SELECT date AS day, revenue, orders_count AS order_count
-                    FROM gold_daily_revenue
-                    WHERE {where_sql}
-                    ORDER BY date
-                """
-        return sql, params
-
-    # Which source ids `gold_daily_revenue` can answer for on its own. The Gold
-    # row carries one column per source, so a source without a column cannot be
-    # asked about here — it is not a missing filter but an absent column.
-    _GOLD_SOURCE_COLUMNS = {1: "instagram", 2: "telegram", 4: "shopify"}
+    # Which source ids the dashboard asks Gold about one at a time: the three
+    # DuckDB's Gold carried a channel column for. Postgres's Gold carries every
+    # source as a dimension and could answer 3 (Opencart) and 5 (Виставка)
+    # too; it is not asked, so a number on screen did not move when the
+    # engine did. The trend routes those two to Silver's order grain, which
+    # answers them; the summary answers `_NO_GOLD_SOURCE_TOTALS`.
+    _GOLD_SOURCE_IDS = frozenset({1, 2, 4})
 
     def _build_silver_filtered_summary_queries(
         self,
@@ -869,11 +664,10 @@ class RevenueMixin:
         """`/api/summary`'s answer when a product filter is set, as one body.
 
         Returns `(lines_sql, lines_params, returns_sql, returns_params)` with
-        `{order_lines}` and `{silver_orders}` holes, so the DuckDB fallback and
-        the Postgres read render the same text rather than two copies of it.
+        `{order_lines}` and `{silver_orders}` holes, which `_pg_silver`
+        renders for Postgres.
 
-        `cat_ids` arrives resolved, by the routed `_category_ids`, before
-        any lock.
+        `cat_ids` arrives resolved, by the filter bar's `_category_ids`.
 
         **Returns are not narrowed by category, brand or promocode**, only by
         date, sales type and source. That is how this branch has always
@@ -921,30 +715,23 @@ class RevenueMixin:
         """
         return lines_sql, params, returns_sql, ret_params
 
-    async def _pg_silver(self, sql: str, params: list, *, surface: str = "dashboard"):
-        """One Silver-grain query from Postgres, or None to let DuckDB answer.
+    async def _pg_silver(self, sql: str, params: list) -> List[Tuple]:
+        """One Silver-grain query of the dashboard's from Postgres; a failure
+        is a refusal naming `dashboard`.
 
-        None on the flag being off, on no DSN, and on any failure — the
-        `_pg_gold_summary` contract, so the two grains of one endpoint fail the
-        same way. Rendered here, never by the caller: a caller that picks the
-        fragment from the flag renders the Postgres shape into the DuckDB
-        fallback, which is how `/marketing` was broken for an hour.
-
-        `surface` names the page a failure is counted against
-        (`core.read_fallback`): the dashboard's summary and trend by default,
-        the managers screen for `get_manager_sales_365d`.
+        Rendered here, never by the caller: a caller that picked the fragment
+        itself rendered one engine's shape into the other's read once, which
+        is how `/marketing` was broken for an hour. One path since step 14's
+        S14-06: `KS_READ_SILVER` is not read. The managers screen's Silver
+        read is `get_manager_sales_365d`'s own, refused naming `managers`.
         """
         from core import pg_silver_read
         from core.sql_dialect import POSTGRES, render_tables
 
-        read_fallback.no_address(surface, pg_silver_read)
-        if not (pg_silver_read.enabled() and pg_silver_read.available()):
-            return None
         try:
             return await pg_silver_read.fetch(render_tables(sql, POSTGRES), params)
-        except Exception as e:
-            read_fallback.fall_back(surface, e)
-            return None
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("dashboard", exc)
 
     def _build_silver_orders_revenue_query(
         self,
@@ -956,19 +743,21 @@ class RevenueMixin:
     ) -> Tuple[str, list]:
         """Revenue at the ORDER grain, for order-level filters Gold cannot express.
 
-        Same measure as `_build_gold_revenue_query` — `SUM(grand_total)` over
-        non-return rows on an active source — computed from `silver_orders`
-        instead of read from the pre-aggregate. Gold is the fast path for the
-        shapes it holds a column for; this is the general one.
+        Same measure as Gold's daily series (`_pg_gold_series`) —
+        `SUM(grand_total)` over non-return rows on an active source — computed
+        from `silver_orders` instead of read from the pre-aggregate. Gold is
+        the fast path for the shapes the dashboard asks it about; this is the
+        general one.
 
         Two filters need it, and both used to be a 500 rather than an answer.
-        `promocode` has no Gold column at all. And a `source_id` Gold has no
-        column for fell to a guard that builds
+        `promocode` has no Gold column at all. And a `source_id` outside
+        `_GOLD_SOURCE_IDS` fell to a guard in DuckDB's Gold builder that built
         `SELECT NULL::DATE, 0, 0 WHERE FALSE` while still returning three
         bound parameters, so DuckDB raised
         `Parameter argument/count mismatch` — that is what
         `/api/revenue/trend?source_id=5` did, on the Виставка source worth
         ₴266k that PR #101 had just finished putting back into the numbers.
+        (That builder went with DuckDB's Gold reads in step 14's S14-06.)
 
         Deliberately NOT the line-grain query: an order-level filter selects
         whole orders, so the answer is the money those orders brought in. The
@@ -1060,22 +849,20 @@ class RevenueMixin:
         return sql, params
 
     async def get_manager_sales_365d(self) -> List[Tuple]:
-        """`(manager_id, sales_type, revenue)` over the last 365 Kyiv days.
+        """`(manager_id, sales_type, revenue)` over the last 365 Kyiv days,
+        from Postgres's Silver; a failure is a refusal naming `managers`.
 
-        Postgres first and before the store lock, `get_summary_stats`' rule;
-        DuckDB when the flag is off, when there is no DSN, or when the read
-        fails — `_pg_silver`'s contract, so this screen fails over the same way
-        the other Silver reads do. One body, rendered for whichever engine
-        answers.
+        One path since step 14's S14-06: `KS_READ_SILVER` is not read, and
+        DuckDB is never asked.
         """
-        from core.sql_dialect import DUCKDB, render_tables
+        from core import pg_silver_read
+        from core.sql_dialect import POSTGRES, render_tables
 
-        rows = await self._pg_silver(_MANAGER_SALES_365D_SQL, [], surface="managers")
-        if rows is not None:
-            return rows
-        async with self.connection() as conn:
-            return conn.execute(
-                render_tables(_MANAGER_SALES_365D_SQL, DUCKDB)).fetchall()
+        try:
+            return await pg_silver_read.fetch(
+                render_tables(_MANAGER_SALES_365D_SQL, POSTGRES), [])
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("managers", exc)
 
     async def get_revenue_trend(
         self,
@@ -1120,201 +907,121 @@ class RevenueMixin:
         use_lines = bool(category_id or brand)
         gold_can_answer = (
             not promocode
-            and (not source_id or source_id in self._GOLD_SOURCE_COLUMNS)
+            and (not source_id or source_id in self._GOLD_SOURCE_IDS)
         )
 
-        # Step 1 of «Одна бронза»: both Gold series — current and comparison —
-        # are read from Postgres BEFORE the store lock, get_summary_stats'
-        # reasoning: the lock serialises every DuckDB access in the process
-        # and must not be held across the network.
-        pg_series = prev_pg_series = None
+        # Both periods — current and comparison — from one grain, or the
+        # growth number becomes a ratio between two different questions. All
+        # of it from Postgres (step 14, S14-06): Gold for the shapes it is
+        # asked about, otherwise Silver — the order lines for a line-level
+        # filter, the order grain for a promocode or a source outside
+        # `_GOLD_SOURCE_IDS`.
+        prev_start, prev_end = self._comparison_window(
+            start_date, end_date, compare_type)
         if not use_lines and gold_can_answer:
-            pg_series = await self._pg_gold_series(
-                start_date, end_date, sales_type, source_id
-            )
-            if include_comparison and pg_series is not None:
-                prev_start, prev_end = self._comparison_window(
-                    start_date, end_date, compare_type
-                )
-                # Same engine as the current period, or the growth number
-                # becomes a ratio between two stores.
-                prev_pg_series = await self._pg_gold_series(
-                    prev_start, prev_end, sales_type, source_id
-                )
+            results = await self._pg_gold_series(
+                start_date, end_date, sales_type, source_id)
+            prev_results = (await self._pg_gold_series(
+                prev_start, prev_end, sales_type, source_id)
+                if include_comparison else [])
         else:
-            # Everything Gold cannot answer — a line-level filter, a promocode,
-            # a source with no Gold column — under `KS_READ_SILVER`, and under
-            # the same rule: before the lock. The bodies are the builders the
-            # DuckDB fallback below uses, rendered for Postgres by `_pg_silver`.
-            from core import pg_silver_read
-            read_fallback.no_address("dashboard", pg_silver_read)
-            if pg_silver_read.enabled() and pg_silver_read.available():
-                pre_cat_ids = (await self._category_ids(category_id)
-                               if category_id else None)
+            cat_ids = (await self._category_ids(category_id)
+                       if category_id else None)
 
-                def silver_query(a: date, b: date):
-                    if use_lines:
-                        return self._build_silver_products_revenue_query(
-                            a, b, sales_type, source_id, pre_cat_ids, brand, promocode)
-                    return self._build_silver_orders_revenue_query(
-                        a, b, sales_type, source_id, promocode)
-
-                pg_series = await self._pg_silver(*silver_query(start_date, end_date))
-                if include_comparison and pg_series is not None:
-                    prev_start, prev_end = self._comparison_window(
-                        start_date, end_date, compare_type
-                    )
-                    # Same engine for both periods, the Gold branch's reason.
-                    prev_pg_series = await self._pg_silver(
-                        *silver_query(prev_start, prev_end))
-
-        # When Postgres answered everything the method will ask for, the store
-        # is not touched at all — not even an empty lock acquisition, which
-        # would still serialise this request behind a running rebuild. It no
-        # longer depends on the grain: either branch above can answer fully.
-        fully_pg = (
-            pg_series is not None
-            and (not include_comparison or prev_pg_series is not None)
-        )
-        # The DuckDB tail below goes in step 14's S14-06. When Postgres
-        # answered everything the tree is not needed — the builders below are
-        # only rendered, never run; otherwise it is the filter bar's, from
-        # Postgres since S14-05, resolved before the store lock.
-        cat_ids = None
-        if category_id and not fully_pg:
-            cat_ids = await self._category_ids(category_id)
-        async with (nullcontext(None) if fully_pg else self.connection()) as conn:
-            from core.sql_dialect import DUCKDB, render_tables
-
-            if use_lines:
-                sql, params = self._build_silver_products_revenue_query(
-                    start_date, end_date, sales_type, source_id, cat_ids, brand, promocode
-                )
-            elif gold_can_answer:
-                # pg_series may already hold the Postgres answer (prefetched
-                # above, before the lock); None falls through to DuckDB.
-                sql, params = self._build_gold_revenue_query(
-                    start_date, end_date, sales_type, source_id
-                )
-            else:
-                sql, params = self._build_silver_orders_revenue_query(
-                    start_date, end_date, sales_type, source_id, promocode
-                )
-
-            results = (
-                pg_series if pg_series is not None
-                else conn.execute(render_tables(sql, DUCKDB), params).fetchall()
-            )
-            daily_data = {row[0]: (float(row[1]), int(row[2])) for row in results}
-
-            # Build labels and data
-            labels = []
-            data = []
-            orders_data = []
-            current = start_date
-            while current <= end_date:
-                labels.append(current.strftime("%d.%m"))
-                revenue_val, orders_val = daily_data.get(current, (0, 0))
-                data.append(round(revenue_val, 2))
-                orders_data.append(orders_val)
-                current += timedelta(days=1)
-
-            datasets = [{
-                "label": "This Period",
-                "data": data,
-                "borderColor": "#16A34A",
-                "backgroundColor": "rgba(22, 163, 74, 0.1)",
-                "fill": True,
-                "tension": 0.3,
-                "borderWidth": 2
-            }]
-
-            # Add previous period comparison
-            if include_comparison:
-                prev_start, prev_end = self._comparison_window(
-                    start_date, end_date, compare_type
-                )
-
-                # The comparison period has to be measured the same way as the
-                # current one, or the growth percentage is a ratio between two
-                # different questions.
+            def silver_query(a: date, b: date) -> Tuple[str, list]:
                 if use_lines:
-                    prev_sql, prev_params = self._build_silver_products_revenue_query(
-                        prev_start, prev_end, sales_type, source_id, cat_ids, brand, promocode
-                    )
-                elif gold_can_answer:
-                    # prev_pg_series was prefetched above, before the lock,
-                    # from the same engine as the current period.
-                    prev_sql, prev_params = self._build_gold_revenue_query(
-                        prev_start, prev_end, sales_type, source_id
-                    )
-                else:
-                    prev_sql, prev_params = self._build_silver_orders_revenue_query(
-                        prev_start, prev_end, sales_type, source_id, promocode
-                    )
+                    return self._build_silver_products_revenue_query(
+                        a, b, sales_type, source_id, cat_ids, brand, promocode)
+                return self._build_silver_orders_revenue_query(
+                    a, b, sales_type, source_id, promocode)
 
-                # Only need day + revenue for comparison
-                prev_results = (
-                    prev_pg_series if prev_pg_series is not None
-                    else conn.execute(render_tables(prev_sql, DUCKDB), prev_params).fetchall()
-                )
-                prev_daily = {row[0]: float(row[1]) for row in prev_results}
+            results = await self._pg_silver(*silver_query(start_date, end_date))
+            prev_results = (await self._pg_silver(*silver_query(prev_start, prev_end))
+                            if include_comparison else [])
+        daily_data = {row[0]: (float(row[1]), int(row[2])) for row in results}
 
-                prev_data = []
-                prev_current = prev_start
-                while prev_current <= prev_end:
-                    prev_data.append(round(prev_daily.get(prev_current, 0), 2))
-                    prev_current += timedelta(days=1)
+        # Build labels and data
+        labels = []
+        data = []
+        orders_data = []
+        current = start_date
+        while current <= end_date:
+            labels.append(current.strftime("%d.%m"))
+            revenue_val, orders_val = daily_data.get(current, (0, 0))
+            data.append(round(revenue_val, 2))
+            orders_data.append(orders_val)
+            current += timedelta(days=1)
 
-                datasets.append({
-                    "label": "Previous Period",
-                    "data": prev_data,
-                    "borderColor": "#9CA3AF",
-                    "backgroundColor": "rgba(156, 163, 175, 0.1)",
-                    "fill": False,
-                    "tension": 0.3,
-                    "borderWidth": 2,
-                    "borderDash": [5, 5]
-                })
+        datasets = [{
+            "label": "This Period",
+            "data": data,
+            "borderColor": "#16A34A",
+            "backgroundColor": "rgba(22, 163, 74, 0.1)",
+            "fill": True,
+            "tension": 0.3,
+            "borderWidth": 2
+        }]
 
-            # Build comparison object for v2 frontend
-            comparison = None
-            if include_comparison and len(datasets) > 1:
-                prev_dataset = datasets[1]
-                current_total = sum(data)
-                prev_total = sum(prev_dataset["data"])
-                growth_percent = ((current_total - prev_total) / prev_total * 100) if prev_total > 0 else 0
+        # Add previous period comparison
+        if include_comparison:
+            # Only need day + revenue for comparison
+            prev_daily = {row[0]: float(row[1]) for row in prev_results}
 
-                comparison = {
-                    "labels": labels,
-                    "revenue": prev_dataset["data"],
-                    "orders": [],
-                    "period": {
-                        "start": prev_start.isoformat(),
-                        "end": prev_end.isoformat(),
-                        "type": compare_type
-                    },
-                    "totals": {
-                        "current": round(current_total, 2),
-                        "previous": round(prev_total, 2),
-                        "growth_percent": round(growth_percent, 1)
-                    }
-                }
+            prev_data = []
+            prev_current = prev_start
+            while prev_current <= prev_end:
+                prev_data.append(round(prev_daily.get(prev_current, 0), 2))
+                prev_current += timedelta(days=1)
 
-            result = {
+            datasets.append({
+                "label": "Previous Period",
+                "data": prev_data,
+                "borderColor": "#9CA3AF",
+                "backgroundColor": "rgba(156, 163, 175, 0.1)",
+                "fill": False,
+                "tension": 0.3,
+                "borderWidth": 2,
+                "borderDash": [5, 5]
+            })
+
+        # Build comparison object for v2 frontend
+        comparison = None
+        if include_comparison and len(datasets) > 1:
+            prev_dataset = datasets[1]
+            current_total = sum(data)
+            prev_total = sum(prev_dataset["data"])
+            growth_percent = ((current_total - prev_total) / prev_total * 100) if prev_total > 0 else 0
+
+            comparison = {
                 "labels": labels,
-                "revenue": data,
-                "orders": orders_data,
-                "datasets": datasets,
-                # Which of the two measures the numbers above are. A caller
-                # that draws them under one axis label without reading this
-                # reintroduces the defect: the series steps by ~1.5% when a
-                # brand filter goes on, and nothing on screen says why.
-                "measure": "goods_value" if use_lines else "revenue",
+                "revenue": prev_dataset["data"],
+                "orders": [],
+                "period": {
+                    "start": prev_start.isoformat(),
+                    "end": prev_end.isoformat(),
+                    "type": compare_type
+                },
+                "totals": {
+                    "current": round(current_total, 2),
+                    "previous": round(prev_total, 2),
+                    "growth_percent": round(growth_percent, 1)
+                }
             }
-            if comparison:
-                result["comparison"] = comparison
-            return result
+
+        result = {
+            "labels": labels,
+            "revenue": data,
+            "orders": orders_data,
+            "datasets": datasets,
+            # Which of the two measures the numbers above are. A caller
+            # that draws them under one axis label without reading this
+            # reintroduces the defect: the series steps by ~1.5% when a
+            # brand filter goes on, and nothing on screen says why.
+            "measure": "goods_value" if use_lines else "revenue",
+        }
+        if comparison:
+            result["comparison"] = comparison
+        return result
 
     async def get_sales_by_source(
         self,
