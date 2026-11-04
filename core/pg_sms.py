@@ -310,42 +310,13 @@ def sms_store_is_postgres() -> bool:
     S14-00 — production since 2026-09-06, with no way back.
 
     `KS_SMS_STORE` is read for nothing, so no value of it can stop the
-    container. Last consumers: `core/repositories/customers.py`,
-    `core/mirror_reconciliation.py`, `core/duckdb_table_fates.py`; the
-    DuckDB branches go in S14-08. Until S14-00 an unknown value raised —
-    `KS_BOT_STORE`'s rule.
+    container. Since S14-08 nothing routes on this: the DuckDB branches of
+    `_sms_tx`, `_sms_run` and the audience are gone, and with them the
+    half-switch guard (`refuse_while_unported`, `UNPORTED`), which had been
+    empty since every `/sms` path ran on both engines. Last consumers, by
+    rule 16 of the step-14 plan: `replicate_sms` above and
+    `core/mirror_reconciliation.reconcile_sms` (both go in S14-12/S14-13),
+    and `core/duckdb_table_fates.py` (S14-18). Until S14-00 an unknown value
+    raised — `KS_BOT_STORE`'s rule.
     """
     return True
-
-
-# The names still answered by DuckDB alone. Empty: every path `/sms` uses now
-# runs against whichever store `KS_SMS_STORE` names. The guard and this tuple
-# stay rather than being deleted — the next thing to move onto two engines will
-# want the same half-switch protection, and a mechanism removed the day it
-# first reaches empty is a mechanism nobody rebuilds in time.
-UNPORTED: Tuple[str, ...] = ()
-
-
-def refuse_while_unported(operation: str) -> None:
-    """Stop a half-switched `/sms` from writing to the store nobody is reading.
-
-    `KS_SMS_STORE=postgres` moves the audience read. It does not yet move the
-    roster, the opt-outs or the presets, and a flag that moved one without the
-    other is the exact failure this codebase keeps paying for: the audience
-    would be computed from Postgres while the campaign it produced was frozen
-    into DuckDB, so the frozen roster and the store being read would drift
-    apart silently — and a campaign whose roster is not the audience it was
-    built from cannot be measured at all.
-
-    So the unported half refuses, loudly, rather than writing somewhere the
-    reader will not look. When each name below moves, it drops off `UNPORTED`
-    and this call goes with it; `tests/unit/test_pg_sms_read.py` fails if the
-    list and the guarded methods stop agreeing.
-    """
-    if sms_store_is_postgres():
-        raise NotImplementedError(
-            f"{operation} still writes DuckDB, and KS_SMS_STORE=postgres has "
-            f"moved the audience read to Postgres. Flipping one without the "
-            f"other would freeze a roster into a store nobody is reading. "
-            f"Unset KS_SMS_STORE until the remaining paths are ported."
-        )

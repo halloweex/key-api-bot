@@ -6,6 +6,15 @@ since 2026-08-28, and the promocode chart reads `silver.orders`. This flag is
 about the third, the monthly report, which needed all of the following before
 it could move — and each turned out to be an answer rather than a blocker.
 
+NO FALLBACK SINCE STEP 14 (S14-05)
+
+`/marketing` reads Postgres, the goals included. The flag that chose the
+engine (`KS_READ_MARKETING`) chooses nothing now: the router asks Postgres and
+nothing else, and a failure — a lost DSN line included — is refused as a 503
+naming `marketing` (`read_fallback.refuse`), which is what
+`KS_READ_FALLBACK=off` made of it since 2026-10-09. The paragraphs below are
+the history of the port.
+
 **The channel figures.** `_fetch_month` wants `instagram_revenue` and its five
 siblings, and Postgres has no such columns *by design*: it carries `source_id`
 as a dimension with `source_id IS NULL` as the roll-up, because a column can
@@ -29,7 +38,7 @@ display lag, not the security hole the same lag would have been on the user
 list. Under chain 7a (`KS_WRITE_GOALS`) the goals API writes Postgres instead,
 and this read follows the chain rather than this flag — see below.
 
-WHY THIS FALLS BACK
+WHY IT FELL BACK, UNTIL S14-05
 
 Nothing diverges: the tab writes nothing, and every table it reads is one
 Postgres receives or derives from what DuckDB holds. A fault costs the engine
@@ -41,7 +50,7 @@ then written by nothing, so the target line goes to Postgres while the chain
 writes there and does not fall back (`RevenueMixin._marketing_run`,
 `core/pg_goals_write.py`).
 
-WHY ITS OWN FLAG AND NOT `KS_READ_REPORTS`
+WHY IT HAD ITS OWN FLAG AND NOT `KS_READ_REPORTS`
 
 The two tabs read different things — `/reports` only Silver, this one Gold and
 the goals as well — so they can fail differently, and a rollback should cost
@@ -50,35 +59,9 @@ one of them rather than both.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_MARKETING"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the marketing queries should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working tab into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

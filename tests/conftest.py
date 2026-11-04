@@ -202,20 +202,6 @@ def duckdb_off(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _goals_history_unset(monkeypatch):
-    """Every test starts with KS_GOALS_HISTORY unset — Silver, the only goal
-    history since chain 7b-4 retired the variable.
-
-    A developer's shell or `.env` still carrying `KS_GOALS_HISTORY=bridge`
-    (the default and the rollback before 7b-4) would refuse every goal
-    history read, and a test would fail for a reason CI never sees. Tests
-    that mean a value set it after this ran."""
-    from core import pg_goals_read
-
-    monkeypatch.delenv(pg_goals_read.HISTORY_ENV, raising=False)
-
-
-@pytest.fixture(autouse=True)
 def _never_the_real_chain_latch(monkeypatch, tmp_path):
     """No test may latch a write chain in the real data directory.
 
@@ -344,74 +330,6 @@ def route_chains_to_duckdb(monkeypatch, *chains) -> None:
                 monkeypatch.setattr(chain, name, lambda value=value: value)
         if hasattr(chain, "_routes_postgres"):
             monkeypatch.setattr(chain, "_routes_postgres", lambda *, log=False: False)
-
-
-def sms_store_on_duckdb(monkeypatch) -> None:
-    """Route `/sms`'s store back to DuckDB inside one test.
-
-    Since step 14's S14-00 `sms_store_is_postgres()` is True, a constant —
-    production's answer since 2026-09-06. The audience, freeze, results and
-    delivery tests were written against DuckDB, the engine both stores run
-    one rendered body on (`_sms_run`), and they are the bulk of the proof of
-    that body; they keep DuckDB as their engine with this until S14-08, which
-    takes the DuckDB branch away and converts them. Every module that holds
-    the predicate is patched: `core.repositories.customers` imported it by
-    name, the rest ask `core.pg_sms` when they run.
-    """
-    from core import pg_sms
-    from core.repositories import customers
-
-    monkeypatch.setattr(pg_sms, "sms_store_is_postgres", lambda: False)
-    monkeypatch.setattr(customers, "sms_store_is_postgres", lambda: False)
-
-
-def user_store_on_duckdb(monkeypatch) -> None:
-    """Route the dashboard's user list back to DuckDB inside one test.
-
-    Since step 14's S14-00 `user_store_is_postgres()` is True, a constant —
-    production's answer since 2026-09-07. Tests written against the DuckDB
-    user list keep it with this until S14-08 takes that branch away. Every
-    consumer asks `core.pg_dashboard_users` when it runs, so one patch
-    reaches them all.
-    """
-    from core import pg_dashboard_users
-
-    monkeypatch.setattr(pg_dashboard_users, "user_store_is_postgres", lambda: False)
-
-
-def _env_says_postgres(name: str) -> bool:
-    import os
-
-    return os.getenv(name, "duckdb").strip().lower() == "postgres"
-
-
-def sms_store_follows_env(monkeypatch) -> None:
-    """`/sms`'s store chosen by `KS_SMS_STORE` again, inside one test.
-
-    For the two-engine tests (`*_two_engines.py`, the send guards): they run
-    one question twice, flipping the variable between the two runs, and are
-    the proof that Postgres answers as DuckDB did. Since S14-00 the variable
-    decides nothing (`sms_store_is_postgres()` is True), so both runs would
-    ask Postgres and compare it with itself. This puts the variable's old
-    rule back for the test alone — unset or `duckdb` is DuckDB, `postgres`
-    is Postgres — until S14-08 turns the DuckDB half into literals."""
-    from core import pg_sms
-    from core.repositories import customers
-
-    monkeypatch.setattr(pg_sms, "sms_store_is_postgres",
-                        lambda: _env_says_postgres("KS_SMS_STORE"))
-    monkeypatch.setattr(customers, "sms_store_is_postgres",
-                        lambda: _env_says_postgres("KS_SMS_STORE"))
-
-
-def user_store_follows_env(monkeypatch) -> None:
-    """The dashboard's user list chosen by `KS_USER_STORE` again, inside one
-    test — `sms_store_follows_env`'s reason, for the user list's two-engine
-    tests, until S14-08."""
-    from core import pg_dashboard_users
-
-    monkeypatch.setattr(pg_dashboard_users, "user_store_is_postgres",
-                        lambda: _env_says_postgres("KS_USER_STORE"))
 
 
 @contextlib.contextmanager

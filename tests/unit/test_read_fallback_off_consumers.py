@@ -26,13 +26,21 @@ pre-existing failure, not a refusal; for those, the refusal comes from a
 switch naming Postgres with no `KS_PG_DSN` at all, the one route to DuckDB
 nothing else marks. Under `duckdb`, the default, each behaves exactly as it
 did before this change.
+
+Since step 14's S14-07 no reader consults a switch, so that route — and the
+tests that took it, a switch naming Postgres with no `KS_PG_DSN` — is gone:
+without a DSN the readers with no fallback fail with the pool's own error,
+the raising-pool case each keeps. A refusal still reaches these consumers
+from the routers that refuse — the traffic tab, `/goals` and its forecast,
+`/expenses` — and that is what is held here now. The goal tables are
+Postgres', as production writes them.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-from datetime import date, datetime, timezone
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -47,12 +55,6 @@ from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
 
 def _refused(surface: str) -> dict:
     return {"reason": read_fallback.READ_UNAVAILABLE, "surface": surface}
-
-
-def _unaddressed(monkeypatch, switch: str) -> None:
-    """The switch names Postgres and this process has no address for it."""
-    monkeypatch.setenv(switch, "postgres")
-    monkeypatch.delenv("KS_PG_DSN", raising=False)
 
 
 async def _duck(tmp_path, name="consumers.duckdb"):
@@ -88,14 +90,19 @@ def _serve(monkeypatch, store) -> None:
 
 class TestWeeklyReport:
     """Its reads have no fallback — a Postgres failure raises, and the daily
-    tick is the retry. What `off` adds is the switch with no address."""
+    tick is the retry. What `off` added was the switch with no address; it
+    went with the switch (step 14, S14-07)."""
 
     async def _job(self, monkeypatch, tmp_path):
+        """The job wired as the scheduler runs it, with nothing seeded: the
+        pool raises at the first read, so a warehouse would never be read."""
+        from core.scheduler import SCHEDULER_TIMEZONE
+        from core.weekly_report import last_complete_week
         from tests.unit.test_weekly_report import TestSchedulerJob, _store
 
         harness = TestSchedulerJob()
         store = await _store(tmp_path)
-        week_start = await harness._seed(store, complete=True)
+        week_start, _end = last_complete_week(datetime.now(SCHEDULER_TIMEZONE).date())
         sent: list = []
         scheduler = harness._wire(monkeypatch, store, sent, tmp_path)
         return store, week_start, sent, scheduler
@@ -106,27 +113,6 @@ class TestWeeklyReport:
 
         async with store.connection() as conn:
             return already_sent(conn, week_start, "retail")
-
-    @pytest.mark.asyncio
-    async def test_under_off_an_unaddressed_switch_defers_with_no_ledger_row(
-        self, stores, monkeypatch, tmp_path,
-    ):
-        store, week_start, sent, scheduler = await self._job(monkeypatch, tmp_path)
-        try:
-            marked = _ledger_answers(monkeypatch)
-            _unaddressed(monkeypatch, "KS_READ_WEEKLY")
-            _mode(monkeypatch, "off")
-
-            result = await scheduler._run_weekly_report()
-
-            assert result == {"sent": False, "week": week_start.isoformat(),
-                              **_refused("weekly_report")}
-            assert sent == []
-            marked.assert_not_awaited()
-            assert read_fallback.refusals()["weekly_report"]["count"] >= 1
-            assert read_fallback.counts() == {}
-        finally:
-            await store.close()
 
     @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_writes_no_ledger_row(
@@ -194,15 +180,26 @@ class TestTrafficReport:
         async with store.connection() as conn:
             return already_sent(conn, week_start, "retail")
 
+    @staticmethod
+    def _the_warehouse_is_ready(monkeypatch):
+        """The readiness gate answering, past the reported week: it reads
+        Postgres' Gold since step 14's S14-07, which the raising pool would
+        stop first — and its own failure is no refusal."""
+        from core.scheduler import SCHEDULER_TIMEZONE
+        from core.weekly_report import last_complete_week
+
+        start, end = last_complete_week(datetime.now(SCHEDULER_TIMEZONE).date())
+        monkeypatch.setattr("core.weekly_report.warehouse_max_date",
+                            AsyncMock(return_value=end))
+        return start
+
     @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_defers_with_no_ledger_row(
         self, stores, monkeypatch, tmp_path,
     ):
-        from tests.unit.test_traffic_report import _seed_gold
-
         store = await _duck(tmp_path)
         try:
-            week_start = await _seed_gold(store)
+            week_start = self._the_warehouse_is_ready(monkeypatch)
             scheduler, sent = self._wire(monkeypatch, store, tmp_path)
             marked = _ledger_answers(monkeypatch)
             monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
@@ -219,57 +216,20 @@ class TestTrafficReport:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_under_off_the_readiness_gate_defers_it_too(
-        self, stores, monkeypatch, tmp_path,
-    ):
-        """`warehouse_max_date` is the sales report's reader, shared — its
-        refusal defers this report under the surface it was refused on."""
-        from tests.unit.test_traffic_report import _seed_gold
-
-        store = await _duck(tmp_path)
-        try:
-            week_start = await _seed_gold(store)
-            scheduler, sent = self._wire(monkeypatch, store, tmp_path)
-            marked = _ledger_answers(monkeypatch)
-            _unaddressed(monkeypatch, "KS_READ_WEEKLY")
-            _mode(monkeypatch, "off")
-
-            result = await scheduler._run_traffic_report()
-
-            assert result == {"sent": False, "week": week_start.isoformat(),
-                              **_refused("weekly_report")}
-            assert sent == []
-            marked.assert_not_awaited()
-        finally:
-            await store.close()
-
-
 # ─── The Monday goals job ─────────────────────────────────────────────────
 
-MARCH = date(2025, 3, 1)
+def _writer_recorded(monkeypatch) -> list:
+    """Chain 7b-3's store of the goal tables, recorded: production's one
+    writer of them (a constant since S14-00)."""
+    from core import pg_forecast_write
 
+    written = []
 
-async def _goals_store(tmp_path):
-    """Twenty-five retail days in one month: enough for the seasonality pass
-    to write a row, so "nothing written" is a claim about a table that would
-    otherwise have one. Silver is built from them: the goal history is
-    Silver's since chain 7b-4 deleted the bridge over DuckDB `orders`."""
-    store = await _duck(tmp_path, "goals.duckdb")
-    async with store.connection() as conn:
-        for n in range(25):
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id) VALUES (?, 1, 1, 1000, ?, 9)",
-                [n + 1, datetime(2025, 3, 1 + n, 12, tzinfo=timezone.utc)])
-    await store.refresh_warehouse_layers(trigger="manual")
-    return store
+    async def _persist(*args, **kwargs):
+        written.append(args)
 
-
-async def _goal_tables(store):
-    async with store.connection() as conn:
-        return (conn.execute("SELECT COUNT(*) FROM seasonal_indices").fetchone()[0],
-                conn.execute("SELECT COUNT(*) FROM growth_metrics").fetchone()[0])
+    monkeypatch.setattr(pg_forecast_write, "persist_goal_tables", _persist)
+    return written
 
 
 class TestSeasonalityJob:
@@ -279,66 +239,72 @@ class TestSeasonalityJob:
     ):
         from core.scheduler import BackgroundScheduler
 
-        store = await _goals_store(tmp_path)
+        store = await _duck(tmp_path, "goals.duckdb")
         try:
             _serve(monkeypatch, store)
-            monkeypatch.setenv("KS_READ_GOALS", "postgres")
+            written = _writer_recorded(monkeypatch)
             _mode(monkeypatch, "off")
 
             result = await BackgroundScheduler()._run_seasonality_calc()
 
             assert result == {"skipped": True, **_refused("goals")}
-            assert await _goal_tables(store) == (0, 0), (
-                "a refused job wrote a goal table — half an update")
+            assert written == [], "a refused job wrote a goal table — half an update"
         finally:
             await store.close()
 
 
 class TestSeasonalityJobRefusedAtEveryRead:
-    """Chain 7b: under KS_GOALS_HISTORY=silver every history read the job
-    makes goes through the goal router, so a refusal can come at any of them
-    — the suggestions, the indices, either YoY read, the bounds. Wherever it
-    comes, the job defers whole and every table keeps last week's rows: the
-    writer reads everything first (7b-1). Injected at each routed read in
-    turn, counted from a clean run rather than listed. Mutation M9: persist
-    the indices before computing the YoY, and a refusal at the YoY read
-    leaves this week's indices beside last week's growth — named here."""
+    """Every history read the job makes goes through the goal router, so a
+    refusal can come at any of them — the suggestions, the indices, either
+    YoY read, the bounds. Wherever it comes, the job defers whole and every
+    table keeps last week's rows: the writer reads everything first (7b-1).
+    Injected at each routed read in turn, counted from a clean run rather
+    than listed, against a real Postgres holding the history and the goal
+    tables (skipped without `KS_PG_DSN`). Mutation M9: persist the indices
+    before computing the YoY, and a refusal at the YoY read leaves this
+    week's indices beside last week's growth — named here."""
 
     @staticmethod
-    async def _tables(store):
-        async with store.connection() as conn:
-            return {t: sorted(repr(r) for r in conn.execute(
-                f"SELECT * FROM {t}").fetchall())
-                for t in ("seasonal_indices", "growth_metrics", "weekly_patterns")}
+    async def _tables(pool):
+        async with pool.acquire() as conn:
+            out = {}
+            for table in ("app.seasonal_indices", "app.growth_metrics",
+                          "app.weekly_patterns"):
+                rows = await conn.fetch(f"SELECT * FROM {table}")
+                out[table] = sorted(repr(tuple(r)) for r in rows)
+            return out
+
+    @staticmethod
+    async def _scale(pool, factor: float):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE silver.orders SET grand_total = grand_total * $1 "
+                "WHERE order_date >= '2025-06-01'", factor)
 
     @pytest.mark.asyncio
     async def test_a_refusal_at_any_read_writes_nothing(
-        self, stores, monkeypatch, tmp_path,
+        self, fresh_read_fallback, monkeypatch, tmp_path,
     ):
-        from core import pg_forecast_write
         from core.repositories.goals import GoalsMixin
         from core.scheduler import BackgroundScheduler
-        from tests.conftest import route_chains_to_duckdb
-        from tests.unit.test_goals_off_duckdb_silver import _seed_history
+        from tests.integration.pg_tab_seed import (
+            store_that_never_reaches_duckdb, tab_in_postgres,
+        )
+        from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
 
-        store = await _duck(tmp_path, "goals-every-read.duckdb")
-        try:
-            # The property is the job's — read everything, then store once —
-            # and not the store's: the goal tables stay in DuckDB here, as
-            # they were before S14-00 made chain 7b-3 a constant.
-            route_chains_to_duckdb(monkeypatch, pg_forecast_write)
+        dsn = os.getenv("KS_PG_DSN")
+        if not dsn:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+        async with tab_in_postgres(dsn, monkeypatch, _seed_history_pg) as pool:
+            store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the goals job")
             _serve(monkeypatch, store)
-            monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
-            monkeypatch.delenv("KS_READ_GOALS", raising=False)
+            monkeypatch.setattr("core.pg.require_revision", AsyncMock())
             _mode(monkeypatch, "off")
-            await _seed_history(store)
             first = await BackgroundScheduler()._run_seasonality_calc()
             assert first["retail_months"] == 12
             # A week later every number would move.
-            async with store.connection() as conn:
-                conn.execute("UPDATE silver_orders SET grand_total = grand_total * 1.5 "
-                             "WHERE order_date >= '2025-06-01'")
-            before = await self._tables(store)
+            await self._scale(pool, 1.5)
+            before = await self._tables(pool)
 
             real = GoalsMixin._goals_run
             calls = {"n": 0, "fail_at": None}
@@ -346,33 +312,27 @@ class TestSeasonalityJobRefusedAtEveryRead:
             async def counted(self, sql, params=None):
                 calls["n"] += 1
                 if calls["n"] == calls["fail_at"]:
-                    read_fallback.fall_back("goals", OSError("postgres is gone"))
+                    raise read_fallback.refuse("goals", OSError("postgres is gone"))
                 return await real(self, sql, params)
 
             monkeypatch.setattr(GoalsMixin, "_goals_run", counted)
             await BackgroundScheduler()._run_seasonality_calc()
             total = calls["n"]
-            assert await self._tables(store) != before, "a clean run moved nothing"
+            assert await self._tables(pool) != before, "a clean run moved nothing"
             assert total >= 6, f"only {total} routed reads — the history is not routed"
             # Back to last week's, then refuse at each read in turn.
-            async with store.connection() as conn:
-                conn.execute("UPDATE silver_orders SET grand_total = grand_total / 1.5 "
-                             "WHERE order_date >= '2025-06-01'")
+            await self._scale(pool, 1 / 1.5)
             await BackgroundScheduler()._run_seasonality_calc()
-            async with store.connection() as conn:
-                conn.execute("UPDATE silver_orders SET grand_total = grand_total * 1.5 "
-                             "WHERE order_date >= '2025-06-01'")
-            before = await self._tables(store)
+            await self._scale(pool, 1.5)
+            before = await self._tables(pool)
 
             for fail_at in range(1, total + 1):
                 calls.update(n=0, fail_at=fail_at)
                 result = await BackgroundScheduler()._run_seasonality_calc()
                 assert result == {"skipped": True, **_refused("goals")}, fail_at
-                assert await self._tables(store) == before, (
+                assert await self._tables(pool) == before, (
                     f"refused at routed read {fail_at} of {total}, and a goal "
                     f"table was written — half an update")
-        finally:
-            await store.close()
 
 
 # ─── Training ─────────────────────────────────────────────────────────────
@@ -404,27 +364,9 @@ def model(tmp_path, monkeypatch):
 
 class TestTraining:
     """The input gate has no fallback: a Postgres failure is `status: error`
-    and the model stands, as before. What `off` adds is the switch with no
-    address, and there the job now skips by name."""
-
-    @pytest.mark.asyncio
-    async def test_under_off_an_unaddressed_switch_skips_and_keeps_the_model(
-        self, stores, model, monkeypatch, tmp_path,
-    ):
-        from core.scheduler import BackgroundScheduler
-
-        store = await _duck(tmp_path)
-        try:
-            _serve(monkeypatch, store)
-            _unaddressed(monkeypatch, "KS_READ_FORECAST_INPUT")
-            _mode(monkeypatch, "off")
-
-            result = await BackgroundScheduler()._run_revenue_prediction()
-
-            assert result == {"status": "skipped", **_refused("forecast")}
-            assert model(), "the model file or the model in memory changed"
-        finally:
-            await store.close()
+    and the model stands, as before. What `off` added was the switch with no
+    address, where the job skipped by name and the manual trigger answered
+    503; it went with the switch (step 14, S14-07)."""
 
     @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_is_an_error_and_keeps_the_model(
@@ -435,7 +377,6 @@ class TestTraining:
         store = await _duck(tmp_path)
         try:
             _serve(monkeypatch, store)
-            monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
             _mode(monkeypatch, "off")
 
             result = await BackgroundScheduler()._run_revenue_prediction()
@@ -443,43 +384,6 @@ class TestTraining:
             assert result["status"] == "error"
             assert model()
             assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
-
-
-    def test_the_manual_trigger_is_a_503_like_any_route(
-        self, stores, model, admin_client, monkeypatch,
-    ):
-        """It shares `train` with the job. Answered inside `_train_impl`, the
-        refusal came back as 200 `"status": "error"`; let through, the
-        route answers it as the dashboard's routes do."""
-        _unaddressed(monkeypatch, "KS_READ_FORECAST_INPUT")
-        _mode(monkeypatch, "off")
-
-        response = admin_client.post("/api/revenue/forecast/train")
-
-        assert response.status_code == 503, response.text
-        assert response.json()["surface"] == "forecast"
-        assert model()
-
-    @pytest.mark.asyncio
-    async def test_the_boot_training_contains_it(
-        self, stores, model, monkeypatch, tmp_path, caplog,
-    ):
-        import web.main as web_main
-
-        store = await _duck(tmp_path)
-        try:
-            _serve(monkeypatch, store)
-            monkeypatch.setattr("asyncio.sleep", AsyncMock())
-            _unaddressed(monkeypatch, "KS_READ_FORECAST_INPUT")
-            _mode(monkeypatch, "off")
-
-            with caplog.at_level(logging.WARNING):
-                await web_main._train_prediction_model()
-
-            assert model()
-            assert "Background prediction training failed" in caplog.text
         finally:
             await store.close()
 
@@ -517,29 +421,15 @@ class TestAssistant:
             await store.close()
 
     @pytest.mark.asyncio
-    async def test_under_off_an_unaddressed_switch_is_the_same_result(
-        self, stores, monkeypatch,
-    ):
-        from core.chat_tools import DATA_UNAVAILABLE, execute_tool
-
-        _unaddressed(monkeypatch, "KS_READ_CHAT")
-        _mode(monkeypatch, "off")
-
-        result = await execute_tool("get_revenue_summary", {"period": "week"})
-
-        assert result["error"] == DATA_UNAVAILABLE
-        assert result["surface"] == "assistant"
-
-    @pytest.mark.asyncio
     async def test_under_duckdb_a_failure_is_the_error_it_always_was(
         self, stores, monkeypatch,
     ):
         """The assistant's own reads have no fallback: a Postgres failure is
-        `{"error": <text>}` to the model, as before. Only a refusal is
-        named."""
+        `{"error": <text>}` to the model, as before — and since step 14's
+        S14-07, whatever `KS_READ_CHAT` or `KS_READ_FALLBACK` says. Only a
+        refusal is named."""
         from core.chat_tools import execute_tool
 
-        monkeypatch.setenv("KS_READ_CHAT", "postgres")
         _mode(monkeypatch, "duckdb")
 
         result = await execute_tool("get_revenue_summary", {"period": "week"})
@@ -548,11 +438,14 @@ class TestAssistant:
 
     @pytest.mark.asyncio
     async def test_the_model_reads_the_named_result_in_the_conversation(
-        self, stores, monkeypatch,
+        self, stores, monkeypatch, tmp_path,
     ):
         """Through `ChatService.chat`, which `POST /api/chat` calls: the tool
         result the model is given is the named one."""
+        from core.duckdb_store import DuckDBStore
         from web.services import chat_service as cs
+
+        self._serve_tools(monkeypatch, DuckDBStore(db_path=tmp_path / "chat.duckdb"))
 
         class _LLM:
             is_available = True
@@ -564,12 +457,13 @@ class TestAssistant:
                 self.calls += 1
                 if self.calls == 1:
                     return {"content": "", "usage": {}, "tool_calls": [{
-                        "id": "t1", "name": "get_revenue_summary",
-                        "input": {"period": "week"}}]}
+                        "id": "t1", "name": "list_expenses", "input": {}}]}
                 return {"content": "Those numbers are unavailable.", "usage": {}}
 
         monkeypatch.setattr(cs, "get_llm_client", lambda: _LLM())
-        _unaddressed(monkeypatch, "KS_READ_CHAT")
+        # A tool whose router refuses: the expenses' (since step 14's S14-07
+        # the revenue tools read Postgres with no fallback, and fail as they
+        # always did).
         _mode(monkeypatch, "off")
 
         service = cs.ChatService()
@@ -610,27 +504,6 @@ def _sync_service(monkeypatch, store):
 
 class TestSearchIndex:
     @pytest.mark.asyncio
-    async def test_under_off_an_unaddressed_switch_skips_the_step(
-        self, stores, meili, monkeypatch, tmp_path,
-    ):
-        from core.scheduler import BackgroundScheduler
-
-        store = await _duck(tmp_path)
-        try:
-            _sync_service(monkeypatch, store)
-            _unaddressed(monkeypatch, "KS_READ_SEARCH_INDEX")
-            _mode(monkeypatch, "off")
-
-            result = await BackgroundScheduler()._run_meilisearch_sync()
-
-            assert result == {"skipped": True, **_refused("search_index")}
-            store.set_last_sync_time.assert_not_awaited()
-            meili.index_buyers.assert_not_awaited()
-            meili.index_orders.assert_not_awaited()
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_skips_it_as_before(
         self, stores, meili, monkeypatch, tmp_path,
     ):
@@ -641,7 +514,6 @@ class TestSearchIndex:
         store = await _duck(tmp_path)
         try:
             _sync_service(monkeypatch, store)
-            monkeypatch.setenv("KS_READ_SEARCH_INDEX", "postgres")
             _mode(monkeypatch, "off")
 
             result = await BackgroundScheduler()._run_meilisearch_sync()
@@ -659,7 +531,9 @@ class TestSearchIndex:
     ):
         """Web's boot, which since S14-00 is always `KS_DUCKDB=off`: the
         orders held are asked of where they are written, never DuckDB's
-        counts."""
+        counts. The index's read fails with the pool, and the index's own
+        handler contains it (since step 14's S14-07 no switch can make it a
+        refusal)."""
         from core import duckdb_switch
         from core import sync_service as sync_mod
 
@@ -676,14 +550,13 @@ class TestSearchIndex:
             service = _sync_service(monkeypatch, store)
             service.incremental_sync = AsyncMock(return_value={})
             monkeypatch.setattr(sync_mod, "init_meilisearch", AsyncMock(return_value=True))
-            _unaddressed(monkeypatch, "KS_READ_SEARCH_INDEX")
             _mode(monkeypatch, "off")
 
             with caplog.at_level(logging.WARNING):
                 await sync_mod.init_and_sync()
 
             store.set_last_sync_time.assert_not_awaited()
-            assert "Meilisearch initialization failed" in caplog.text
+            assert "Meilisearch sync error: connection refused" in caplog.text
         finally:
             await store.close()
 

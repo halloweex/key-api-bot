@@ -125,6 +125,21 @@ STOPPED_READING = (
 )
 JUNK = "junk-s14"
 
+# What a later step-14 PR took away on purpose, by the plan, and which PR:
+# `EXPECTED` and `H0` stay as captured, every comparison leaves these out, and
+# `/api/health` is asserted to publish none of them. S14-07 deleted the
+# `KS_GOALS_HISTORY` refusal with its health block and canary check.
+RETIRED = {"goals_history": "S14-07"}
+
+
+def _without_retired(result: dict) -> dict:
+    """`result`, a capture or a literal, without the blocks `RETIRED` names."""
+    result = json.loads(json.dumps(result))
+    for key in RETIRED:
+        result.pop(key, None)
+        result.get("health", {}).pop(key, None)
+    return result
+
 # Captured on 57fd7c22 — see the module's docstring. Not to be edited by hand:
 # a difference here is a change of behaviour, and the answer is a recapture
 # with the command above and a reason in the commit.
@@ -906,7 +921,7 @@ def capture() -> dict:
     """Every mode and predicate the plan's S14-00 lists, as this process
     answers it after web's `configure_modes`. Only names both sides of
     S14-00 define."""
-    from core import (duckdb_switch, pg_dashboard_users, pg_derivation, pg_goals_read,
+    from core import (duckdb_switch, pg_dashboard_users, pg_derivation,
                       pg_landing, pg_sms, pg_utm_parse, pg_warehouse_dq, read_fallback,
                       runtime_modes, warehouse_cutover as wc, write_chains)
     from core import pg_forecast_write, pg_managers_write, pg_orders_write
@@ -946,8 +961,6 @@ def capture() -> dict:
                             "refusing": read_fallback.refusing(),
                             "misconfigured": read_fallback.misconfigured(),
                             "no_engine": read_fallback.no_engine_routes()}
-    out["goals_history"] = {"mode": pg_goals_read.history_mode(),
-                            "state": pg_goals_read.history_state()}
     out["pg_twins_flag"] = list(pg_warehouse_dq.flag())
     out["mirror"] = {"enabled": pg_landing.enabled(),
                      "mirror_on": pg_landing.mirror_on(os.environ.get(pg_landing.MIRROR_ENV))}
@@ -1033,7 +1046,7 @@ def _constants(result: dict) -> dict:
     """`result` without what is published as read — a variable's value, a
     chain flag's error and the mismatch it makes with a latch — which a junk
     value changes by design (rule 3: the answer must not)."""
-    result = json.loads(json.dumps(result))
+    result = _without_retired(result)
     for block in (result["duckdb_switch"], result["duckdb_switch"]["health_block"],
                   result["health"]["duckdb_switch"], result["warehouse_cutover"],
                   result["warehouse_cutover"]["status"],
@@ -1116,7 +1129,7 @@ def test_every_answer_is_what_the_code_before_s14_00_gave(production, markers):
     production(markers=markers)
     result = capture()
     latched = _latched_out(result)
-    assert result == EXPECTED
+    assert _without_retired(result) == _without_retired(EXPECTED)
     for name, (flag, at, published) in latched.items():
         stamp = PROD_MARKERS.get(name) if markers else None
         assert (flag, at, published) == (stamp is not None, stamp, stamp is not None), name
@@ -1130,8 +1143,10 @@ def test_the_literal_is_what_production_published(production):
     health = capture()["health"]
     assert health["status_code"] == 200
     for block in ("duckdb_switch", "warehouse_writer_mode", "derivation", "utm_parse",
-                  "read_fallback_mode", "goals_history"):
+                  "read_fallback_mode"):
         assert health[block] == H0[block], block
+    for block in RETIRED:
+        assert health[block] is None, f"{block} went with {RETIRED[block]}"
     for name, entry in H0["write_chains"].items():
         published = health["write_chains"][name]
         assert {k: published[k] for k in entry} == entry, name

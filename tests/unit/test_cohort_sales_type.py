@@ -136,21 +136,26 @@ class TestTheOneSpellingThatCannotBeShared:
     @pytest.mark.parametrize("fn_name", BODIES)
     def test_the_extracted_body_renders_each_engine_its_own_today(self, fn_name):
         """All five queries left their methods, so the check follows them: the
-        hole exists precisely because no literal serves both engines, and the
-        table name must be the only *other* difference — that is what would
-        catch a sixth divergence sneaking in."""
+        dialect fills exactly two holes, the table name and today's date, and
+        nothing else may differ — that is what would catch a third divergence
+        sneaking in. Until step 14's S14-07 this compared ClickHouse's
+        rendering with DuckDB's; DuckDB's analytics dialect went with the
+        cohorts' fallback, so ClickHouse's is compared with a stand-in that
+        marks the two holes."""
         import core.sql_dialect as dialects
 
         render = getattr(dialects, fn_name)
         kw = dict(sales_type_filter="AND o.sales_type = 'retail'", months_back=12)
-        duck = render(dialects.DUCKDB_ANALYTICS, **kw)
         clickhouse = render(dialects.CLICKHOUSE_ANALYTICS, **kw)
+        marked = render(dialects.AnalyticsDialect(
+            name="marked", silver_orders="<<SILVER>>", today="<<TODAY>>"), **kw)
 
-        assert duck != clickhouse, f"{fn_name}: the dialect does nothing"
-        undone = clickhouse.replace("silver.orders", "silver_orders").replace(
-            dialects.CLICKHOUSE_ANALYTICS.today, dialects.DUCKDB_ANALYTICS.today)
-        assert undone == duck, (
-            f"{fn_name} differs between engines somewhere other than the table "
+        assert clickhouse != marked, f"{fn_name}: the dialect does nothing"
+        assert "<<SILVER>>" in marked and "<<TODAY>>" in marked, fn_name
+        undone = clickhouse.replace("silver.orders", "<<SILVER>>").replace(
+            dialects.CLICKHOUSE_ANALYTICS.today, "<<TODAY>>")
+        assert undone == marked, (
+            f"{fn_name} differs from its body somewhere other than the table "
             f"name and today's date"
         )
 
@@ -175,7 +180,7 @@ class TestTheOneSpellingThatCannotBeShared:
         from core.duckdb_constants import DISPLAY_TIMEZONE
 
         kw = dict(sales_type_filter="", months_back=12)
-        for dialect in (dialects.DUCKDB_ANALYTICS, dialects.CLICKHOUSE_ANALYTICS):
+        for dialect in (dialects.CLICKHOUSE_ANALYTICS,):
             sql = getattr(dialects, fn_name)(dialect, **kw)
             code = "\n".join(line.split("--")[0] for line in sql.splitlines())
             assert "CURRENT_DATE" not in code, (
@@ -192,7 +197,10 @@ class TestTheOneSpellingThatCannotBeShared:
         version. So the hole survives the timezone fix; only its reason grew."""
         import core.sql_dialect as dialects
 
-        assert "AT TIME ZONE" in dialects.DUCKDB_ANALYTICS.today
+        # DuckDB's analytics dialect spelled it `TODAY_IN_KYIV` until step
+        # 14's S14-07; that form stays Postgres' and DuckDB's elsewhere.
+        assert "AT TIME ZONE" in dialects.TODAY_IN_KYIV
+        assert not hasattr(dialects, "DUCKDB_ANALYTICS")
         assert "toTimeZone" in dialects.CLICKHOUSE_ANALYTICS.today
         assert "AT TIME ZONE" not in dialects.CLICKHOUSE_ANALYTICS.today
 
@@ -265,7 +273,7 @@ class TestTheColumnTypesDescribeTheProjection:
         import core.sql_dialect as dialects
 
         sql = getattr(dialects, fn_name)(
-            dialects.DUCKDB_ANALYTICS, sales_type_filter="", months_back=12,
+            dialects.CLICKHOUSE_ANALYTICS, sales_type_filter="", months_back=12,
         )
         assert len(getattr(dialects, types_name)) == self._projection_width(sql), (
             f"{types_name} does not describe {fn_name}'s projection"

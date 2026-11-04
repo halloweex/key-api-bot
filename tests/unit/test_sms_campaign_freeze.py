@@ -3,28 +3,31 @@
 The roster recorded at export time is the only control group that will exist
 when results are measured — the eligible population shifts daily, so it cannot
 be reconstructed afterwards. These tests pin the behaviour that protects it.
+
+On Postgres, `/sms`'s one store since step 14's S14-08 (they ran on DuckDB
+until then; `tests/integration/pg_sms_seed.py`). Skipped without `KS_PG_DSN`.
 """
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import needs_postgres, pg_conn
+
+pytestmark = needs_postgres
 
 
-@pytest.fixture(autouse=True)
-def _sms_on_duckdb(monkeypatch):
-    """This module's engine is DuckDB, as it was before step 14's S14-00 made
-    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(monkeypatch):
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        yield
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    return store
+    return pg_sms_seed.store(tmp_path, "test.duckdb")
 
 
 def _member(buyer_id: int, tier: str, assignment: str) -> dict:
@@ -71,12 +74,12 @@ async def test_roster_is_recorded_with_both_groups(tmp_path):
     assert result["totals"] == {"customers": 4, "target": 3, "holdout": 1}
     assert [s["tier"] for s in result["segments"]] == ["VIP", "CORE", "REACTIVATION"]
 
-    async with store.connection() as conn:
-        rows = conn.execute(
+    async with pg_conn() as conn:
+        rows = await conn.fetch(
             "SELECT buyer_id, tier, assignment, revenue_ltv_at_export,"
-            " margin_ltv_at_export FROM sms_campaign_members"
+            " margin_ltv_at_export FROM app.sms_campaign_members"
             " WHERE campaign = 'aug-promo' ORDER BY buyer_id"
-        ).fetchall()
+        )
 
     assert len(rows) == 4, "the holdout is stored too — it is the control group"
     assert rows[1][2] == "holdout"
@@ -92,11 +95,11 @@ async def test_criteria_snapshot_is_kept(tmp_path):
     store = await _make_store(tmp_path)
     await _freeze(store)
 
-    async with store.connection() as conn:
-        row = conn.execute(
+    async with pg_conn() as conn:
+        row = await conn.fetchrow(
             "SELECT ltv_basis, sales_type, holdout_pct, criteria, exported_at, sent_at"
-            " FROM sms_campaigns WHERE campaign = 'aug-promo'"
-        ).fetchone()
+            " FROM app.sms_campaigns WHERE campaign = 'aug-promo'"
+        )
 
     assert row[0] == "margin"
     assert row[1] == "retail"
@@ -129,10 +132,10 @@ async def test_overwrite_replaces_roster_before_send(tmp_path):
 
     assert result["totals"]["customers"] == 1
 
-    async with store.connection() as conn:
-        ids = [r[0] for r in conn.execute(
-            "SELECT buyer_id FROM sms_campaign_members WHERE campaign = 'aug-promo'"
-        ).fetchall()]
+    async with pg_conn() as conn:
+        ids = [r[0] for r in await conn.fetch(
+            "SELECT buyer_id FROM app.sms_campaign_members WHERE campaign = 'aug-promo'"
+        )]
     assert ids == [9], "the previous roster is gone, not merged"
 
     await store.close()
@@ -148,10 +151,10 @@ async def test_sent_roster_cannot_be_rewritten(tmp_path):
     with pytest.raises(ValueError, match="already sent"):
         await _freeze(store, roster=[_member(9, "VIP", "target")], overwrite=True)
 
-    async with store.connection() as conn:
-        n = conn.execute(
-            "SELECT COUNT(*) FROM sms_campaign_members WHERE campaign = 'aug-promo'"
-        ).fetchone()[0]
+    async with pg_conn() as conn:
+        n = await conn.fetchval(
+            "SELECT COUNT(*) FROM app.sms_campaign_members WHERE campaign = 'aug-promo'"
+        )
     assert n == 4, "the original roster survives the refused overwrite"
 
     await store.close()

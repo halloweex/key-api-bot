@@ -340,9 +340,9 @@ async def backfill_mirror_catalogue(
             status_code=409,
             detail=(
                 f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped by the mirror; a row only DuckDB holds is the copy-back "
-                "handover's to decide now (scripts/chain_copy_back.py catalogue "
-                "--handover)."
+                "shipped by the mirror; a row only DuckDB holds stays there, "
+                "since nothing in a step-14 image carries it (the copy-back "
+                "and its handover went with S14-04)."
             ),
         )
 
@@ -673,6 +673,7 @@ async def rebuild_silver_from_scratch(
     from core.duckdb_store import (
         SILVER_ORDERS_DDL, silver_select_sql, silver_pass2_sql,
     )
+    from core.sql_dialect import DUCKDB
 
     if not warehouse_cutover.duckdb_derives():
         # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB's Silver is frozen on
@@ -686,8 +687,9 @@ async def rebuild_silver_from_scratch(
         async with store.connection() as conn:
             conn.execute("DROP TABLE IF EXISTS silver_orders")
             conn.execute(SILVER_ORDERS_DDL)
-            conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
-            conn.execute(silver_pass2_sql())
+            conn.execute(
+                f"INSERT INTO silver_orders SELECT {silver_select_sql(DUCKDB)} FROM orders o")
+            conn.execute(silver_pass2_sql(dialect=DUCKDB))
             count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
 
@@ -1022,7 +1024,7 @@ async def list_managers(request: Request, admin: dict = Depends(require_admin)):
     # is FALSE for them, which is not the same as unclassified — and labelled
     # ₴15.5M of wholesale as `other` on the very screen meant to tell the two
     # apart. There is one CASE for this, it lives in Silver, and this reports
-    # its output — from whichever Silver `KS_READ_SILVER` names.
+    # its output, from Postgres's Silver.
     rows = await store.get_manager_sales_365d()
 
     revenue: dict = {}

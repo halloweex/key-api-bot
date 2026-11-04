@@ -396,9 +396,11 @@ class TestTheStandingWatchReadsTheShape:
 class TestTheReadsFollow:
     @pytest.mark.asyncio
     async def test_the_dashboard_names_the_manager_postgres_holds(self, stores):
-        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: under the
-        chain the join reads Postgres. Mutation: drop `reads_the_chain` in
-        `_dashboard_run`."""
+        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: the join
+        reads Postgres, whatever that switch says. It took a branch on
+        `reads_the_chain` until step 14's S14-06 gave `_dashboard_run` one
+        path, Postgres. Mutation: give `_dashboard_run` back a DuckDB tail
+        routed by the switch."""
         from core.repositories.revenue import _RETURN_ORDERS_SQL
 
         store, pool, env = stores

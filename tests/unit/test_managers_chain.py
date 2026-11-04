@@ -4,9 +4,11 @@ What is pinned here, each with the mutation it must kill:
 
 - the payload is read once, for both stores (`core.landing_rows.manager_row`);
 - the stats body is one text, and its date is Kyiv's in both engines rather
-  than the process's — a laptop or CI under UTC used to store a day early;
-- the copy-back's fourth source derives chain 5's two tables from what the
-  replicator ships and what the daily comparison compares.
+  than the process's — a laptop or CI under UTC used to store a day early.
+
+The copy-back's fourth source — chain 5's two tables derived from what the
+replicator ships and the daily comparison compares — its handover and its
+full rebuild went with the copy-back in step 14's S14-04.
 
 Everything that needs Postgres is in
 `tests/integration/test_managers_chain_writer.py`.
@@ -104,322 +106,11 @@ class TestTheStatsBody:
         assert "DATE(ordered_at)" not in sql and "ordered_at::date" not in sql
 
 
-# ─── The copy-back's fourth source ──────────────────────────────────────────
-
-
-class TestTheReplicatedShapes:
-    def test_the_shipping_shape_is_what_write_managers_writes(self):
-        """`REPLICATED_SHAPES` is read by the copy-back as the way these two
-        tables are carried; it must name the columns the replicator ships."""
-        from core.pg_replication import (
-            CLASSIFICATION_COLUMNS, MANAGER_COLUMNS, MANAGER_UNIT, REPLICATED_SHAPES,
-        )
-
-        assert tuple(s[0] for s in REPLICATED_SHAPES) == MANAGER_UNIT
-        shapes = {s[0]: s for s in REPLICATED_SHAPES}
-        assert shapes["bronze.managers"][1:3] == ("managers", MANAGER_COLUMNS)
-        assert shapes["app.manager_classifications"][1:3] == (
-            "manager_classifications", CLASSIFICATION_COLUMNS)
-
-    def test_the_daily_specs_are_looked_up_not_restated(self):
-        from core.mirror_reconciliation import MIRRORED_TABLES, REPLICATED_TABLES
-
-        assert REPLICATED_TABLES and all(s in MIRRORED_TABLES for s in REPLICATED_TABLES)
-        assert {s.pg_table for s in REPLICATED_TABLES} == {
-            "bronze.managers", "app.manager_classifications"}
-        assert all(s.full_replace for s in REPLICATED_TABLES)
-
-
-# ─── The copy-back: chain 5's two tables ────────────────────────────────────
-
-
-def _fake_chain(**attrs):
-    """A chain module declaring the unit, for the copy-back's derivations
-    before (and independently of) the real one."""
-    import types
-
-    chain = types.ModuleType("core.pg_fake_managers_write")
-    chain.CHAIN = "pg_fake_managers_write"
-    chain.WRITE_ENV = "KS_WRITE_FAKE_MANAGERS"
-    chain.CHAIN_TABLES = ("bronze.managers", "app.manager_classifications")
-    chain.CHAIN_SYNC_KEYS = ("last_sync_managers",)
-    for name, value in attrs.items():
-        setattr(chain, name, value)
-    return chain
-
-
 def _utc(*args) -> datetime:
     return datetime(*args, tzinfo=timezone.utc)
 
 
-class TestTheCopyBackDerivesTheUnit:
-    def test_two_full_replace_specs_with_their_clocks(self):
-        """Mutation: drop the replicated source — `chain_specs` raised
-        `LookupError` for these two before chain 5 (design, M9)."""
-        from core import chain_transfer
-        from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
-
-        managers, classifications = chain_transfer.chain_specs(_fake_chain())
-        assert (managers.pg_table, managers.dk_table, managers.kind) == (
-            "bronze.managers", "managers", "replicated")
-        assert (classifications.pg_table, classifications.dk_table) == (
-            "app.manager_classifications", "manager_classifications")
-        assert managers.columns == MANAGER_COLUMNS
-        assert classifications.columns == CLASSIFICATION_COLUMNS
-        assert not managers.is_append and not managers.is_mirrored
-        # `set_at` is carried by both stores as a value and dates a human's
-        # decision; the managers carry no per-row clock both stores share.
-        assert managers.clock == () and classifications.clock == ("set_at",)
-        assert managers.compare.full_replace and classifications.compare.full_replace
-        assert classifications.compare.key_columns == ("manager_id", "valid_from")
-        assert chain_transfer.chain_sequences(_fake_chain()) == ()
-
-    def test_a_table_in_no_source_still_raises(self):
-        from core import chain_transfer
-
-        with pytest.raises(LookupError, match="REPLICATED_SHAPES"):
-            chain_transfer.chain_specs(_fake_chain(CHAIN_TABLES=("app.nowhere",)))
-
-
-def _cspec(table):
-    from core import chain_transfer
-
-    (spec,) = [s for s in chain_transfer.chain_specs(_fake_chain())
-               if s.pg_table == table]
-    return spec
-
-
-def _crow(spec, **values):
-    return tuple(values.get(c) for c in spec.compare.columns)
-
-
 T0 = _utc(2026, 10, 7, 9)
-
-
-class TestTheHandoverOfAReplicatedTable:
-    """`classify_handover` for `kind == "replicated"` (design §8)."""
-
-    def _interval(self, spec, manager_id, valid_from, *, set_at=T0, retail=False):
-        return _crow(spec, manager_id=manager_id, is_retail=retail,
-                     valid_from=valid_from, set_at=set_at, note="n")
-
-    def test_before_a_flip_a_key_only_postgres_holds_is_critical(self):
-        """There is no next full replace after a flip: a ghost interval would
-        stay in the source of truth and reclassify past orders. Mutation:
-        leave it INFO (design, M10)."""
-        from core.chain_transfer import classify_handover
-
-        spec = _cspec("app.manager_classifications")
-        ghost = self._interval(spec, 7, date(2026, 1, 1), retail=True)
-        issues = classify_handover(spec, {}, {(7, date(2026, 1, 1)): ghost},
-                                   moved_on=False)
-        (issue,) = issues
-        assert (issue.check_name, issue.severity.value) == (
-            "handover_rows_ahead", "CRITICAL")
-        assert "ghost interval" in issue.description
-
-    def test_after_the_latch_it_is_the_size_of_the_copy(self):
-        from core.chain_transfer import classify_handover
-
-        spec = _cspec("app.manager_classifications")
-        row = self._interval(spec, 7, date(2026, 1, 1))
-        (issue,) = classify_handover(spec, {}, {(7, date(2026, 1, 1)): row},
-                                     moved_on=True)
-        assert (issue.check_name, issue.severity.value) == (
-            "handover_rows_ahead", "INFO")
-
-    @pytest.mark.parametrize("table", ["bronze.managers", "app.manager_classifications"])
-    def test_the_pre_flip_lever_is_this_pairs_shipper(self, table):
-        """`replicate_operational` never ships these tables. Mutation: the
-        operational sentence."""
-        from core.chain_transfer import classify_handover
-
-        spec = _cspec(table)
-        key = 7 if table == "bronze.managers" else (7, date(2026, 1, 1))
-        row = (_crow(spec, id=7, name="M", is_retail=False, order_count=0)
-               if table == "bronze.managers" else self._interval(spec, 7, date(2026, 1, 1)))
-        for dk, pg in (({key: row}, {}), ({}, {key: row})):
-            issues = classify_handover(spec, dk, pg, moved_on=False)
-            assert issues and all(i.severity.value == "CRITICAL" for i in issues)
-            for issue in issues:
-                assert "replicate_managers" in issue.description
-                assert "manager_stats/trigger" in issue.description
-                assert "replicate_operational" not in issue.description
-
-    def test_a_pre_flip_difference_is_refused_with_the_lever(self):
-        from core.chain_transfer import classify_handover
-
-        spec = _cspec("bronze.managers")
-        dk = {7: _crow(spec, id=7, name="M", is_retail=True, order_count=1)}
-        pg = {7: _crow(spec, id=7, name="M", is_retail=False, order_count=1)}
-        (issue,) = classify_handover(spec, dk, pg, moved_on=False)
-        assert (issue.check_name, issue.severity.value) == (
-            "handover_rows_differ", "CRITICAL")
-        assert "replicate_managers" in issue.description
-
-    def test_after_the_latch_a_key_only_duckdb_holds_is_a_write_after_it(self):
-        """The writer never removes a key, so this is DuckDB written after the
-        latch, and the copy would delete it."""
-        from core.chain_transfer import classify_handover
-
-        spec = _cspec("app.manager_classifications")
-        row = self._interval(spec, 7, date(2026, 5, 1))
-        (issue,) = classify_handover(spec, {(7, date(2026, 5, 1)): row}, {},
-                                     moved_on=True)
-        assert (issue.check_name, issue.severity.value) == (
-            "handover_rows_missing", "CRITICAL")
-        assert "never removes a key" in issue.description
-        assert "retail-status" in issue.description
-
-    def test_after_the_latch_a_later_duckdb_decision_is_refused_by_its_clock(self):
-        from core.chain_transfer import classify_handover
-
-        spec = _cspec("app.manager_classifications")
-        key = (7, date(2026, 5, 1))
-        dk = {key: self._interval(spec, 7, date(2026, 5, 1), set_at=T0, retail=True)}
-        pg = {key: self._interval(spec, 7, date(2026, 5, 1),
-                                  set_at=T0.replace(hour=8), retail=False)}
-        (issue,) = classify_handover(spec, dk, pg, moved_on=True)
-        assert (issue.check_name, issue.severity.value) == (
-            "handover_rows_newer_in_duckdb", "CRITICAL")
-        # And the other way round it is the chain's later write: INFO.
-        (issue,) = classify_handover(spec, pg, dk, moved_on=True)
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_differ", "INFO")
-
-    def test_null_where_duckdb_says_not_null_is_still_refused(self):
-        from core.chain_transfer import classify_handover
-
-        spec = _cspec("bronze.managers")
-        pg = {7: _crow(spec, id=7, name=None, is_retail=False, order_count=0)}
-        issues = classify_handover(spec, {}, pg, moved_on=True, required=("id", "name"))
-        assert ("handover_rows_unwritable", "CRITICAL") in {
-            (i.check_name, i.severity.value) for i in issues}
-
-    def test_the_operational_tables_keep_their_own_lever(self):
-        """The dispatch is by kind: an operational table keeps the operational
-        sentence and lever, never this pair's. Since F6 (review of #265) its
-        pre-flip key only Postgres holds is CRITICAL too, for the same reason
-        — the copy that would remove it stands down at the flip — so what
-        tells the two apart is the lever, not the severity. Mutation: the
-        replicated rewrite applied to every table."""
-        from core import pg_goals_write
-        from core.chain_transfer import chain_specs, classify_handover
-
-        (spec,) = chain_specs(pg_goals_write)
-        row = _crow(spec, period_type="daily", goal_amount=1, is_custom=True,
-                    updated_at=T0)
-        (issue,) = classify_handover(spec, {}, {"daily": row}, moved_on=False)
-        assert (issue.check_name, issue.severity.value) == (
-            "handover_rows_ahead", "CRITICAL")
-        assert "replicate_managers" not in issue.description
-        assert "replicate_operational" in issue.description
-
-
-class _Conn:
-    """A DuckDB connection that records what the copy-back asked of it."""
-
-    def __init__(self):
-        self.calls = []
-
-    def execute(self, sql, params=None):
-        self.calls.append((sql, params))
-        return self
-
-    def fetchone(self):
-        return (False,)
-
-    def fetchall(self):
-        return []
-
-
-class _Store:
-    def __init__(self, conn):
-        self.conn = conn
-        self.checkpoints = 0
-
-    def connection(self):
-        conn = self.conn
-
-        class _Ctx:
-            async def __aenter__(self_inner):
-                return conn
-
-            async def __aexit__(self_inner, *exc):
-                return False
-        return _Ctx()
-
-    async def checkpoint(self):
-        self.checkpoints += 1
-
-
-class TestTheCopyBackOwesAFullRebuild:
-    """`sales_type` is materialised at rebuild time, and an incremental
-    rebuild re-derives only the order ids it is handed — so a classification
-    carried back owes DuckDB a full rebuild, in the copy's own transaction."""
-
-    async def _execute(self, chain):
-        from unittest.mock import AsyncMock, patch
-
-        from core import chain_transfer
-
-        conn = _Conn()
-        store = _Store(conn)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
-                patch("core.pg.require_revision", new=AsyncMock()), \
-                patch.object(chain_transfer, "_owned_since",
-                             new=AsyncMock(return_value="2026-10-07T09:00:00+00:00")), \
-                patch.object(chain_transfer, "_handover_issues", new=AsyncMock(return_value=[])), \
-                patch.object(chain_transfer, "_read_pg", new=AsyncMock(return_value=[])), \
-                patch.object(chain_transfer, "_read_sync_keys",
-                             new=AsyncMock(return_value={"last_sync_managers": "x"})), \
-                patch.object(chain_transfer, "_read_pg_sequences", new=AsyncMock(return_value={})), \
-                patch.object(chain_transfer, "verify", new=AsyncMock(return_value=[])), \
-                patch.object(chain_transfer, "release_chain", new=AsyncMock(return_value=True)):
-            plan = await chain_transfer.copy_back(store, chain, dry_run=False)
-        return plan, [sql for sql, _p in conn.calls]
-
-    @pytest.mark.asyncio
-    async def test_marked_full_inside_the_transaction(self):
-        """Mutation: skip the mark, or write it after the COMMIT."""
-        plan, statements = await self._execute(
-            _fake_chain(CHAIN_COPY_BACK_OWES_FULL_REBUILD=True))
-        assert plan["released"] is True and plan["full_rebuild_owed"] is True
-        begin = statements.index("BEGIN TRANSACTION")
-        commit = statements.index("COMMIT")
-        marks = [i for i, sql in enumerate(statements)
-                 if "warehouse_dirty" in sql and "'full'" in sql]
-        assert marks and all(begin < i < commit for i in marks), statements
-
-    @pytest.mark.asyncio
-    async def test_and_not_for_a_chain_that_does_not_declare_it(self):
-        """Mutation: mark for every chain — chain 7a's goals are not read by
-        Silver and owe no rebuild."""
-        plan, statements = await self._execute(
-            _fake_chain(CHAIN_TABLES=("app.revenue_goals",), CHAIN_SYNC_KEYS=()))
-        assert "full_rebuild_owed" not in plan
-        assert not [s for s in statements if "warehouse_dirty" in s]
-
-    def test_the_released_runbook_names_the_shipper_and_the_rebuild(self):
-        from core import chain_transfer
-
-        text = "\n".join(chain_transfer._runbook(
-            _fake_chain(), executed=True, released=True))
-        assert "KS_WRITE_FAKE_MANAGERS=duckdb" in text
-        assert "replicate_managers" in text and "manager_stats/trigger" in text
-        assert "warehouse_dirty=full" in text
-        assert "replicate_operational" not in text and "hourly copy" not in text
-
-    def test_the_marker_only_steps_say_which_copy_resumes(self):
-        from core import chain_transfer
-
-        text = chain_transfer._marker_only(_fake_chain(), "pg_fake_managers_write",
-                                           "2026-10-07T09:00:00+00:00")
-        assert "--handover" in text and "replicate_managers" in text
-        # And no other chain is told about it.
-        from core import pg_goals_write
-
-        other = chain_transfer._marker_only(pg_goals_write, "pg_goals_write", "x")
-        assert "replicate_managers" not in other
 
 
 # ─── The chain: flag, preconditions, registry ───────────────────────────────
@@ -518,7 +209,8 @@ class TestTheDerivationSignal:
         causes goes. Mutation: mark there without revisiting this: a Silver
         that starts reading the columns must come back here."""
         from core import pg_managers_write
-        from core.duckdb_store import silver_select_sql
+        from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_select_sql
 
         calls = {getattr(n.func, "id", getattr(n.func, "attr", ""))
                  for n in ast.walk(_fn_tree(pg_managers_write.update_manager_stats))
@@ -526,7 +218,7 @@ class TestTheDerivationSignal:
         assert "mark_if_owned" not in calls and "mark" not in calls
         import re
 
-        silver = silver_select_sql()
+        silver = silver_select_sql(POSTGRES)
         for column in ("first_order_date", "last_order_date", "order_count"):
             # `buyer_first_order_date` is the buyer's, not the manager's.
             assert not re.search(rf"\b{column}\b", silver), column
@@ -995,13 +687,17 @@ class TestTheManagersStep:
 
 
 def _read_walk():
-    """`(routers that ask, [(file, line, call) a hole statement is handed to],
-    [stray (file, line)])` over `core/` and `web/`.
+    """`(routers that read where the chain writes, [(file, line, call) a hole
+    statement is handed to], [stray (file, line)])` over `core/` and `web/`.
 
     A statement is a string constant carrying one of the chain's holes, not in
     an f-string (the Silver CASE renders its names, it is not routed) and not a
     write: the stats UPDATE is the writer's own body. Chain 7a's walk
-    (`test_goals_reads_follow_chain.py`) in miniature.
+    (`test_goals_reads_follow_chain.py`) in miniature. A router qualifies by
+    asking `reads_the_chain`, or — since step 14's S14-06, when
+    `_dashboard_run` lost its DuckDB tail and the branch on the chain with it
+    — by reading Postgres alone: it refuses a failure and reaches DuckDB
+    through nothing.
     """
     import pathlib
 
@@ -1026,9 +722,23 @@ def _read_walk():
             stack.extend(ast.iter_child_nodes(node))
         return out
 
+    def dotted_calls(fn):
+        out = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and isinstance(node.func.value, ast.Name):
+                out.add(f"{node.func.value.id}.{node.func.attr}")
+        return out
+
+    def postgres_only(fn):
+        calls = dotted_calls(fn)
+        return ("read_fallback.refuse" in calls
+                and not calls & {"self.connection", "self._fetch_one",
+                                 "self._fetch_all"})
+
     routers = {fn.name for _r, tree in trees for fn in ast.walk(tree)
                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and "reads_the_chain" in own_calls(fn)}
+               and ("reads_the_chain" in own_calls(fn) or postgres_only(fn))}
 
     def is_statement(node):
         return (isinstance(node, ast.Constant) and isinstance(node.value, str)
@@ -1075,15 +785,17 @@ def _read_walk():
 
 class TestEveryReadOfTheTablesFollowsTheChain:
     def test_the_walk_finds_the_reads_there_are(self):
-        """Non-vacuity: the dashboard's returns list joins `{managers}`."""
+        """Non-vacuity: the dashboard's returns list joins `{managers}`, and
+        its router reads Postgres alone since step 14's S14-06."""
         routers, sites, _stray = _read_walk()
         assert "_dashboard_run" in routers
         assert ("core/repositories/revenue.py", "_dashboard_run") in {
             (rel, name) for rel, _line, name in sites}
 
-    def test_each_is_handed_to_a_router_that_asks(self):
-        """Mutation: drop `reads_the_chain` from `_dashboard_run` — after the
-        flip that join would name managers out of a DuckDB nothing writes."""
+    def test_each_is_handed_to_a_router_that_reads_where_the_chain_writes(self):
+        """Mutation: give `_dashboard_run` back a DuckDB tail — it is no
+        longer Postgres-only, and the join would name managers out of a
+        DuckDB nothing writes."""
         routers, sites, _stray = _read_walk()
         wrong = [s for s in sites if s[2] not in routers]
         assert not wrong, wrong
@@ -1093,28 +805,42 @@ class TestEveryReadOfTheTablesFollowsTheChain:
         assert not stray, stray
 
     @pytest.mark.asyncio
-    async def test_the_dashboard_join_reads_postgres_under_the_chain_without_a_fallback(
-            self, flags):
-        """`_RETURN_ORDERS_SQL` under the chain, with `KS_READ_DASHBOARD` at
-        duckdb: Postgres, and a Postgres failure raises."""
+    @pytest.mark.parametrize("switch", [None, "duckdb", "junk-s14-06"],
+                             ids=["unset", "duckdb", "junk"])
+    async def test_the_dashboard_join_reads_postgres_and_a_failure_is_refused(
+            self, flags, switch):
+        """`_RETURN_ORDERS_SQL`, whatever `KS_READ_DASHBOARD` says: Postgres,
+        and a Postgres failure is refused naming `dashboard` — counted, the
+        page's 503 — where until step 14's S14-06 the chain's branch let it
+        escape uncounted."""
         from unittest.mock import AsyncMock, patch
 
-        from core import chain_latch, pg_managers_write
+        from core import read_fallback
         from core.duckdb_store import DuckDBStore
         from core.repositories.revenue import _RETURN_ORDERS_SQL
 
-        flags.setenv("KS_READ_DASHBOARD", "duckdb")
-        chain_latch.latch(pg_managers_write.CHAIN)
+        if switch is None:
+            flags.delenv("KS_READ_DASHBOARD", raising=False)
+        else:
+            flags.setenv("KS_READ_DASHBOARD", switch)
         store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
         with patch("core.pg_dashboard_read.fetch",
                    new=AsyncMock(return_value=[(1,)])) as fetch:
             assert await store._dashboard_run(_RETURN_ORDERS_SQL.replace(
                 "{where}", "TRUE"), [5]) == [(1,)]
         assert "bronze.managers" in fetch.await_args.args[0]
-        with patch("core.pg_dashboard_read.fetch",
-                   new=AsyncMock(side_effect=OSError("down"))):
-            with pytest.raises(OSError):
-                await store._dashboard_run("SELECT name FROM {managers}", [])
+        down = OSError("down")
+        read_fallback.reset_counts()
+        try:
+            with patch("core.pg_dashboard_read.fetch",
+                       new=AsyncMock(side_effect=down)):
+                with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                    await store._dashboard_run("SELECT name FROM {managers}", [])
+            assert raised.value.surface == "dashboard"
+            assert raised.value.__cause__ is down
+            assert read_fallback.refusals()["dashboard"]["count"] == 1
+        finally:
+            read_fallback.reset_counts()
 
 
 # ─── The route ──────────────────────────────────────────────────────────────

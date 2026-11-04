@@ -1747,7 +1747,7 @@ class DuckDBStore(
         # Silver's shape lives at module level — see silver_select_sql above.
         # It used to be built here and copied into web/routes/api/admin.py,
         # which is how the two drifted apart in under a day.
-        _silver_select_cols = silver_select_sql()
+        _silver_select_cols = silver_select_sql(_DUCKDB_DIALECT)
         _silver_pass2_sql = silver_pass2_sql
 
         try:
@@ -1848,7 +1848,8 @@ class DuckDBStore(
                         if silver_affected_buyers:
                             bph = ",".join("?" * len(silver_affected_buyers))
                             conn.execute(
-                                _silver_pass2_sql(buyer_filter=bph),
+                                _silver_pass2_sql(buyer_filter=bph,
+                                                  dialect=_DUCKDB_DIALECT),
                                 silver_affected_buyers + silver_affected_buyers,
                             )
                     else:
@@ -1858,7 +1859,7 @@ class DuckDBStore(
                             SELECT {_silver_select_cols}
                             FROM orders o
                         """)
-                        conn.execute(_silver_pass2_sql())
+                        conn.execute(_silver_pass2_sql(dialect=_DUCKDB_DIALECT))
                     conn.execute("COMMIT")
                 except Exception:
                     try:
@@ -3502,7 +3503,7 @@ class DuckDBStore(
             List of buyer IDs that need to be synced
         """
         from core import pg_buyer_sync_read
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        from core.sql_dialect import POSTGRES, render_tables
 
         # Use silver_orders which has is_return flag, prioritize returns
         # Also include buyers with NULL full_name (need re-sync)
@@ -3525,33 +3526,16 @@ class DuckDBStore(
                 ORDER BY has_return DESC, latest_order DESC, buyer_id DESC
                 LIMIT ?
             """
-        # Chain 4 first, and not the read switch: once the buyers are written
-        # in Postgres (`core/pg_buyers_write.py`) DuckDB's copy has stopped,
-        # and selecting from it would fetch the same buyers from KeyCRM every
-        # hour for ever. The chain's one answer decides, and never raises —
-        # `KS_READ_BUYER_SYNC` is not consulted at all then, so its typo
-        # cannot stop the step (decision 11). A chain nobody can read (None)
-        # reads Postgres too: that is where a latched chain's buyers are, and
-        # the step refuses before it writes anyway.
-        from core import pg_buyers_write
-        if pg_buyers_write.mode() != "duckdb":
-            rows = await pg_buyer_sync_read.fetch(render_tables(sql, POSTGRES), [limit])
-            return [row[0] for row in rows]
-
-        # No fallback — `core/pg_buyer_sync_read.py` says why, and where a
-        # failure is contained instead. The switch with no address is the one
-        # silent route to DuckDB left, and under KS_READ_FALLBACK=off it is
-        # refused: the step records the refusal and passes it on to the tick
-        # or the route that called it (DN-20c).
-        from core import read_fallback
-        read_fallback.no_address("buyer_sync", pg_buyer_sync_read)
-        if pg_buyer_sync_read.enabled() and pg_buyer_sync_read.available():
-            rows = await pg_buyer_sync_read.fetch(render_tables(sql, POSTGRES), [limit])
-            return [row[0] for row in rows]
-
-        async with self.connection() as conn:
-            result = conn.execute(render_tables(sql, DUCKDB), [limit]).fetchall()
-            return [row[0] for row in result]
+        # Postgres, and nowhere else (step 14, S14-07). Chain 4 writes the
+        # buyers there (`core/pg_buyers_write.py`), so DuckDB's copy has
+        # stopped, and selecting from it would fetch the same buyers from
+        # KeyCRM every hour for ever. Neither the chain's mode nor
+        # `KS_READ_BUYER_SYNC` is asked any more: the first is `postgres`, a
+        # constant since S14-00, and the second chose DuckDB before it. No
+        # fallback — `core/pg_buyer_sync_read.py` says why, and where a
+        # failure is contained instead.
+        rows = await pg_buyer_sync_read.fetch(render_tables(sql, POSTGRES), [limit])
+        return [row[0] for row in rows]
 
     async def update_manager_stats(self) -> int:
         """Update manager order statistics from orders table.

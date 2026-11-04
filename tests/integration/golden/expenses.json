@@ -1,0 +1,1033 @@
+{
+ "answers": {
+  "get_ad_spend_by_platform[[\"2026-08-21\", \"2026-09-15\"], {}]": {
+   "by_platform": {
+    "facebook": {
+     "entries": 1,
+     "spend": 500.0
+    },
+    "tiktok": {
+     "entries": 1,
+     "spend": 250.0
+    }
+   },
+   "total_spend": 750.0
+  },
+  "get_expense_summary[[\"2026-08-21\", \"2026-09-15\"], {\"expense_type_id\": 1}]": {
+   "byType": {
+    "backgroundColor": [
+     "#EF4444"
+    ],
+    "counts": [
+     5
+    ],
+    "data": [
+     425.0
+    ],
+    "labels": [
+     "Delivery"
+    ]
+   },
+   "metrics": {
+    "avgExpensePerOrder": 106.25,
+    "expenseCount": 5,
+    "ordersWithExpenses": 4,
+    "totalExpenses": 425.0
+   },
+   "trend": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "borderWidth": 2,
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       60.0,
+       0,
+       40.0,
+       200.0,
+       125.0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Expenses (UAH)",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   }
+  },
+  "get_expense_summary[[\"2026-08-21\", \"2026-09-15\"], {\"sales_type\": \"all\"}]": {
+   "byType": {
+    "backgroundColor": [
+     "#EF4444",
+     "#F59E0B"
+    ],
+    "counts": [
+     6,
+     2
+    ],
+    "data": [
+     925.0,
+     80.0
+    ],
+    "labels": [
+     "Delivery",
+     "Комісія"
+    ]
+   },
+   "metrics": {
+    "avgExpensePerOrder": 201.0,
+    "expenseCount": 8,
+    "ordersWithExpenses": 5,
+    "totalExpenses": 1005.0
+   },
+   "trend": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "borderWidth": 2,
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       60.0,
+       500.0,
+       40.0,
+       230.0,
+       175.0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Expenses (UAH)",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   }
+  },
+  "get_expense_summary[[\"2026-08-21\", \"2026-09-15\"], {\"sales_type\": \"b2b\"}]": {
+   "byType": {
+    "backgroundColor": [
+     "#EF4444"
+    ],
+    "counts": [
+     1
+    ],
+    "data": [
+     500.0
+    ],
+    "labels": [
+     "Delivery"
+    ]
+   },
+   "metrics": {
+    "avgExpensePerOrder": 500.0,
+    "expenseCount": 1,
+    "ordersWithExpenses": 1,
+    "totalExpenses": 500.0
+   },
+   "trend": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "borderWidth": 2,
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       500.0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Expenses (UAH)",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   }
+  },
+  "get_expense_summary[[\"2026-08-21\", \"2026-09-15\"], {\"source_id\": 1}]": {
+   "byType": {
+    "backgroundColor": [
+     "#EF4444",
+     "#F59E0B"
+    ],
+    "counts": [
+     4,
+     2
+    ],
+    "data": [
+     385.0,
+     80.0
+    ],
+    "labels": [
+     "Delivery",
+     "Комісія"
+    ]
+   },
+   "metrics": {
+    "avgExpensePerOrder": 155.0,
+    "expenseCount": 6,
+    "ordersWithExpenses": 3,
+    "totalExpenses": 465.0
+   },
+   "trend": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "borderWidth": 2,
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       60.0,
+       0,
+       0,
+       230.0,
+       175.0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Expenses (UAH)",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   }
+  },
+  "get_expense_summary[[\"2026-08-21\", \"2026-09-15\"], {}]": {
+   "byType": {
+    "backgroundColor": [
+     "#EF4444",
+     "#F59E0B"
+    ],
+    "counts": [
+     5,
+     2
+    ],
+    "data": [
+     425.0,
+     80.0
+    ],
+    "labels": [
+     "Delivery",
+     "Комісія"
+    ]
+   },
+   "metrics": {
+    "avgExpensePerOrder": 126.25,
+    "expenseCount": 7,
+    "ordersWithExpenses": 4,
+    "totalExpenses": 505.0
+   },
+   "trend": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "borderWidth": 2,
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       60.0,
+       0,
+       40.0,
+       230.0,
+       175.0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Expenses (UAH)",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   }
+  },
+  "get_expense_types[[], {}]": [
+   {
+    "alias": "delivery",
+    "id": 1,
+    "name": "Delivery"
+   },
+   {
+    "alias": "commission",
+    "id": 2,
+    "name": "Комісія"
+   }
+  ],
+  "get_expenses_summary[[], {}]": {
+   "by_category": [
+    {
+     "category": "salary",
+     "count": 1,
+     "total": 9999.0
+    },
+    {
+     "category": "marketing",
+     "count": 2,
+     "total": 750.0
+    }
+   ],
+   "count": 3,
+   "total": 10749.0
+  },
+  "get_profit_analysis[[\"2026-08-21\", \"2026-09-15\"], {\"sales_type\": \"all\"}]": {
+   "chart": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(22, 163, 74, 0.1)",
+      "borderColor": "#16A34A",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       9000.0,
+       500.0,
+       2000.0,
+       1000.0,
+       0,
+       0
+      ],
+      "fill": false,
+      "label": "Revenue",
+      "tension": 0.3
+     },
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       500.0,
+       40.0,
+       230.0,
+       175.0,
+       0,
+       0
+      ],
+      "fill": false,
+      "label": "Expenses",
+      "tension": 0.3
+     },
+     {
+      "backgroundColor": "rgba(37, 99, 235, 0.2)",
+      "borderColor": "#2563EB",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       8500.0,
+       460.0,
+       1770.0,
+       825.0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Gross Profit",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   },
+   "metrics": {
+    "grossProfit": 11555.0,
+    "profitMargin": 92.4,
+    "totalExpenses": 945.0,
+    "totalRevenue": 12500.0
+   }
+  },
+  "get_profit_analysis[[\"2026-08-21\", \"2026-09-15\"], {\"source_id\": 2}]": {
+   "chart": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(22, 163, 74, 0.1)",
+      "borderColor": "#16A34A",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       500.0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "fill": false,
+      "label": "Revenue",
+      "tension": 0.3
+     },
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       40.0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "fill": false,
+      "label": "Expenses",
+      "tension": 0.3
+     },
+     {
+      "backgroundColor": "rgba(37, 99, 235, 0.2)",
+      "borderColor": "#2563EB",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       460.0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Gross Profit",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   },
+   "metrics": {
+    "grossProfit": 460.0,
+    "profitMargin": 92.0,
+    "totalExpenses": 40.0,
+    "totalRevenue": 500.0
+   }
+  },
+  "get_profit_analysis[[\"2026-08-21\", \"2026-09-15\"], {}]": {
+   "chart": {
+    "datasets": [
+     {
+      "backgroundColor": "rgba(22, 163, 74, 0.1)",
+      "borderColor": "#16A34A",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       500.0,
+       2000.0,
+       1000.0,
+       0,
+       0
+      ],
+      "fill": false,
+      "label": "Revenue",
+      "tension": 0.3
+     },
+     {
+      "backgroundColor": "rgba(239, 68, 68, 0.1)",
+      "borderColor": "#EF4444",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       40.0,
+       230.0,
+       175.0,
+       0,
+       0
+      ],
+      "fill": false,
+      "label": "Expenses",
+      "tension": 0.3
+     },
+     {
+      "backgroundColor": "rgba(37, 99, 235, 0.2)",
+      "borderColor": "#2563EB",
+      "data": [
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       460.0,
+       1770.0,
+       825.0,
+       0,
+       0
+      ],
+      "fill": true,
+      "label": "Gross Profit",
+      "tension": 0.3
+     }
+    ],
+    "labels": [
+     "21.08",
+     "22.08",
+     "23.08",
+     "24.08",
+     "25.08",
+     "26.08",
+     "27.08",
+     "28.08",
+     "29.08",
+     "30.08",
+     "31.08",
+     "01.09",
+     "02.09",
+     "03.09",
+     "04.09",
+     "05.09",
+     "06.09",
+     "07.09",
+     "08.09",
+     "09.09",
+     "10.09",
+     "11.09",
+     "12.09",
+     "13.09",
+     "14.09",
+     "15.09"
+    ]
+   },
+   "metrics": {
+    "grossProfit": 3055.0,
+    "profitMargin": 87.3,
+    "totalExpenses": 445.0,
+    "totalRevenue": 3500.0
+   }
+  },
+  "list_expenses[[], {\"category\": \"marketing\"}]": [
+   {
+    "amount": 500.0,
+    "category": "marketing",
+    "created_at": "2026-09-12T09:00:00+00:00",
+    "currency": "UAH",
+    "expense_date": "2026-09-12",
+    "expense_type": "Facebook Ads",
+    "id": 1,
+    "note": null,
+    "platform": "facebook",
+    "updated_at": null
+   },
+   {
+    "amount": 250.0,
+    "category": "marketing",
+    "created_at": "2026-09-11T09:00:00+00:00",
+    "currency": "UAH",
+    "expense_date": "2026-09-11",
+    "expense_type": "TikTok Ads",
+    "id": 2,
+    "note": null,
+    "platform": "tiktok",
+    "updated_at": null
+   }
+  ],
+  "list_expenses[[], {\"limit\": 2}]": [
+   {
+    "amount": 500.0,
+    "category": "marketing",
+    "created_at": "2026-09-12T09:00:00+00:00",
+    "currency": "UAH",
+    "expense_date": "2026-09-12",
+    "expense_type": "Facebook Ads",
+    "id": 1,
+    "note": null,
+    "platform": "facebook",
+    "updated_at": null
+   },
+   {
+    "amount": 250.0,
+    "category": "marketing",
+    "created_at": "2026-09-11T09:00:00+00:00",
+    "currency": "UAH",
+    "expense_date": "2026-09-11",
+    "expense_type": "TikTok Ads",
+    "id": 2,
+    "note": null,
+    "platform": "tiktok",
+    "updated_at": null
+   }
+  ],
+  "list_expenses[[], {}]": [
+   {
+    "amount": 500.0,
+    "category": "marketing",
+    "created_at": "2026-09-12T09:00:00+00:00",
+    "currency": "UAH",
+    "expense_date": "2026-09-12",
+    "expense_type": "Facebook Ads",
+    "id": 1,
+    "note": null,
+    "platform": "facebook",
+    "updated_at": null
+   },
+   {
+    "amount": 250.0,
+    "category": "marketing",
+    "created_at": "2026-09-11T09:00:00+00:00",
+    "currency": "UAH",
+    "expense_date": "2026-09-11",
+    "expense_type": "TikTok Ads",
+    "id": 2,
+    "note": null,
+    "platform": "tiktok",
+    "updated_at": null
+   },
+   {
+    "amount": 9999.0,
+    "category": "salary",
+    "created_at": "2026-09-10T09:00:00+00:00",
+    "currency": "UAH",
+    "expense_date": "2026-09-10",
+    "expense_type": "Salary",
+    "id": 3,
+    "note": null,
+    "platform": null,
+    "updated_at": null
+   }
+  ]
+ },
+ "source": "DuckDB's answer to every two-engine call of tests/integration/test_expenses_two_engines.py on that file's fixture, recorded at step 14's S14-07 on the code before it (67e8e733) while the same run asserted Postgres answered each one equally. The fixture is pinned to 2026-09-15. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it."
+}

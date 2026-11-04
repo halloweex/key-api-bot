@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.304
+
+- Keep a bounded log of /api requests on the host
+
+
 ## 3.0.303
 
 - A NUL in retail-status's note is the edge's 400 now; its two tests say so
