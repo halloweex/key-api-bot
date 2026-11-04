@@ -363,10 +363,10 @@ class TestTheScheduler:
 
 class TestTheMirrorLandingComparisons:
     """`reconcile_silver`, `reconcile_order_utm` and `reconcile_gold` set
-    DuckDB's copies against Postgres', and stand down when DuckDB's are
-    frozen; the Gold roll-up question is asked of Postgres alone instead."""
-
-    COMPARED = ("reconcile_silver", "reconcile_order_utm", "reconcile_gold")
+    DuckDB's copies against Postgres' and stood down while DuckDB's were
+    frozen, the Gold roll-up asked of Postgres alone instead. Step 14's S14-12
+    deleted the three: the job runs none of them in any state of this module,
+    and asks the roll-up every run."""
 
     @staticmethod
     def _run():
@@ -376,18 +376,22 @@ class TestTheMirrorLandingComparisons:
         asyncio.run(_run({}, mocks=mocks))
         return mocks
 
+    def test_none_of_them_runs(self):
+        from tests.unit.test_mirror_landing_isolation import check_order
+
+        assert not set(wc.RETIRED_COMPARISONS) & set(check_order())
+        from core import mirror_reconciliation
+
+        for name in wc.RETIRED_COMPARISONS:
+            assert not hasattr(mirror_reconciliation, name), name
+
     def test_under_postgres(self, postgres):
         mocks = self._run()
-        for name in self.COMPARED:
-            mocks[name].assert_not_awaited()
         mocks["pg_gold_internal_check"].assert_awaited_once_with()
-        mocks["reconcile_orders"].assert_awaited_once()
 
     def test_held_on_the_way_back(self, monkeypatch):
         monkeypatch.setattr(wc, "_held", True)
         mocks = self._run()
-        for name in self.COMPARED:
-            mocks[name].assert_not_awaited()
         mocks["pg_gold_internal_check"].assert_awaited_once_with()
 
 
@@ -902,24 +906,26 @@ class TestAHoldThatDoesNotEndIsSaid:
 
 
 class TestTheRetiredComparisonsConditions:
-    def test_they_are_what_compare_gold_names(self):
-        """Read out of the source: a name `compare_gold` learns later is a
-        page the first run after the switch would announce resolved."""
-        tree = ast.parse((REPO / "core/mirror_reconciliation.py").read_text(encoding="utf-8"))
-        (fn,) = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-                 and n.name == "compare_gold"]
-        named = {kw.value.value for n in ast.walk(fn) if isinstance(n, ast.Call)
-                 for kw in n.keywords
-                 if kw.arg == "check_name" and isinstance(kw.value, ast.Constant)}
-        assert named == wc.RETIRED_COMPARISON_CONDITIONS
+    def test_they_are_what_compare_gold_named(self):
+        """Read out of `compare_gold`'s source until step 14's S14-12 deleted
+        it; frozen since, as the names an image from before step 14 holds
+        (rule 15)."""
+        assert wc.RETIRED_COMPARISON_CONDITIONS == frozenset(
+            {"gold_missing_cells", "gold_orphan_cells", "gold_cell_values"})
         assert "gold_rollup_mismatch" not in wc.retired_conditions()
 
     def test_an_open_page_under_one_holds_the_switch(self):
-        from core.alerting import _gate
+        """`gold_cell_values`, the one of them that is also the integrity
+        check's name and so still a registered condition. `gold_missing_cells`
+        and `gold_orphan_cells` left the REGISTRY with `compare_gold` in step
+        14's S14-12, so no page can be delivered under them any more."""
+        from core.alerting import _gate, is_condition
 
-        _gate.note_delivered_conditions(["gold_missing_cells"], "dq:mirror_landing")
+        _gate.note_delivered_conditions(["gold_cell_values"], "dq:mirror_landing")
         facts = asyncio.run(wc.gather_facts({}))
-        assert facts.open_retired == {"gold_missing_cells": "dq:mirror_landing"}
+        assert facts.open_retired == {"gold_cell_values": "dq:mirror_landing"}
+        assert not is_condition("gold_missing_cells")
+        assert not is_condition("gold_orphan_cells")
 
 
 # ─── The retired comparisons' shared names: marked, not retired by name ──────
@@ -961,83 +967,35 @@ def _mirror_run(outcomes):
 
 
 class TestTheRetiredComparisonsSharedNames:
-    """R1-2/R2-4: `reconcile_silver` and `reconcile_order_utm` report under
-    `mirror_*` names the comparisons that stay up report too, and the Gate
-    keys a page by condition and group alone. A page of theirs would be
-    announced resolved by the first run after the switch — so the job marks
-    it, and a marked page holds the switch like a retired condition."""
+    """R1-2/R2-4: `reconcile_silver` and `reconcile_order_utm` reported under
+    `mirror_*` names the comparisons that stayed up reported too, and the
+    Gate keys a page by condition and group alone, so the job marked a page
+    of theirs (`warehouse_cutover.note_comparisons_reported`) and a marked
+    page held the switch like a retired condition. None of them has run since
+    step 13, and step 14's S14-12 deleted them and the marking: the job marks
+    nothing now. The Gate's marks stay until S14-15, with the module that
+    reads them (`TestTheGateMarks`)."""
 
     GROUP = "dq:mirror_landing"
 
-    def test_every_name_they_report_is_retired_marked_or_asked_again(self):
-        """Derived from the source: what the three retired comparisons can
-        report is either reported by nothing that stays (retired by name), or
-        shared — and a shared name is covered by the mark, except the one
-        `pg_gold_internal_check` asks again of Postgres itself."""
-        fns = _module_functions("core/mirror_reconciliation.py")
-        retired = set().union(*(_check_names_reached(fns, name)
-                                for name in wc.RETIRED_COMPARISONS))
-        staying = set().union(*(_check_names_reached(fns, name) for name in fns
-                                if name.startswith("reconcile_")
-                                and name not in wc.RETIRED_COMPARISONS))
-        asked_again = _check_names_reached(fns, "pg_gold_internal_check")
-        assert retired - staying - asked_again == wc.RETIRED_COMPARISON_CONDITIONS
-        shared = (retired & staying) - asked_again
-        # The finding's names, so a walk that read nothing cannot pass.
-        assert {"mirror_row_values", "mirror_buckets_disagree",
-                "mirror_missing_rows"} <= shared
-        assert not shared & wc.retired_conditions(), (
-            "a shared name retired outright holds the switch over pages the "
-            "comparisons that stay deliver — and, after a flip, runs a restart "
-            "as duckdb over one")
-
-    def test_the_job_names_the_three_it_runs(self):
-        from tests.unit.test_mirror_landing_isolation import check_order
-
-        assert set(wc.RETIRED_COMPARISONS) <= set(check_order())
-
-
-    def test_a_page_only_a_comparison_that_stays_reports_does_not(self):
-        """The same name, from `reconcile_orders`: the switch does not wait on
-        it — and after a flip a restart is not run as duckdb over it."""
+    def test_the_job_marks_nothing(self):
         from core.alerting import _gate
 
         _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        _mirror_run({"reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
+        _mirror_run({"reconcile_order_versions": [
+            _critical("mirror_row_values", "bronze.orders")]})
         assert wc.open_retired_conditions() == {}
+        assert _gate.delivered_marked(wc.COMPARISON_MARK) == {}
 
-    def test_a_finding_of_theirs_below_critical_does_not_make_it_theirs(self):
-        """Only a CRITICAL holds a page open (`_resolve_dq_layer`), so a WARN
-        from Silver leaves it open for `bronze.orders` alone — a page the
-        comparison that stays verifies, which the switch need not wait on."""
-        from core.alerting import _gate
-        from core.data_quality import IntegrityIssue, Severity
+    def test_the_job_does_not_call_the_marker(self):
+        from core.scheduler import BackgroundScheduler
+        import inspect
+        import textwrap
 
-        warn = IntegrityIssue(check_name="mirror_row_values", table_name="silver.orders",
-                              severity=Severity.WARN, count=1)
-        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        _mirror_run({"reconcile_silver": [warn],
-                     "reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
-        assert "mirror_row_values" in _gate.delivered_groups()
-        assert wc.open_retired_conditions() == {}
-
-
-    def test_a_run_that_stood_them_down_marks_nothing(self, postgres):
-        from core.alerting import _gate
-
-        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")],
-                     "reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
-        assert wc.open_retired_conditions() == {}
-
-    def test_the_mark_goes_with_the_page(self):
-        from core.alerting import _gate
-
-        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")]})
-        _gate.take_resolved(self.GROUP)
-        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        assert wc.open_retired_conditions() == {}
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)))
+        assert "note_comparisons_reported" not in {
+            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
 
 
 class TestTheGateMarks:

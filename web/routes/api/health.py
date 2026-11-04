@@ -147,22 +147,6 @@ def _write_chains() -> dict:
     return {chain_name(chain): {} for chain in WRITE_CHAINS}
 
 
-def _mark_stood_down(data_quality):
-    """The `data_quality` block with every layer chain 3 stood down marked
-    `stood_down: true` — written by nothing by design, so the canary does not
-    page its age (`pg_orders_write.stood_down_layers`). Applied per response,
-    not in the 60-second stats cache, because a first write can move the
-    chain between two reads. None stays None: its absence is meaningful."""
-    if not isinstance(data_quality, dict):
-        return data_quality
-    from core.pg_orders_write import stood_down_layers
-
-    stood = stood_down_layers()
-    return {layer: ({**entry, "stood_down": True}
-                    if layer in stood and isinstance(entry, dict) else entry)
-            for layer, entry in data_quality.items()}
-
-
 def _read_fallbacks() -> dict:
     """`{surface: {count, last_at}}` — every read this process answered from
     DuckDB because the engine it was sent to failed (DN-20a). Local state, no
@@ -598,14 +582,10 @@ async def health_check(request: Request):
     # None when Postgres cannot answer, and that absence is meaningful: the
     # canary pages `dq_block_missing` on a missing block, so never substitute
     # an empty dict for "we could not tell".
+    # Every layer in it is written by a job that runs: DuckDB's
+    # `reconciliation`, published marked `stood_down` since chain 3's flip,
+    # left the watched layers in step 14's S14-12.
     data_quality = await _journal_ages()
-    # Chain 3: the layers it stood down marked — per response, after the
-    # journal's own cache, which holds Postgres's block unmarked; marked
-    # before it, the mark was dropped with the block DuckDB's stats handed in,
-    # and the canary paged the stood-down layer's age every day
-    # (`test_orders_chain_reconciliation.py`,
-    # `test_the_endpoint_marks_the_block_chain_9_answers`).
-    data_quality = _mark_stood_down(data_quality)
 
     # The schema ledger. A migration that fails is retried on the next boot and
     # never recorded as applied, so it cannot be skipped past — but somebody has

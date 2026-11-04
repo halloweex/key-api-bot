@@ -1183,8 +1183,8 @@ whole reason the group is read from the source now.
 | `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard; not registered under `KS_WRITE_WAREHOUSE=postgres` |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
-| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **all three stores** (DuckDB, PG, ClickHouse), one fetch; слои `reconciliation`, `reconciliation_pg`, `reconciliation_ch` |
-| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, the five `app.*` tables, `bot.db` — tolerance zero — then the order-version archive, which is a liveness check and not a comparison |
+| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
+| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, the витрина, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
 | `replicate_operational` | every 1 h | Copy the five irreplaceable tables and `data/bot.db` into Postgres |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
@@ -1221,8 +1221,9 @@ nothing to forgive. That cost `dq_reconciliation` every Sunday.
 
 `BackgroundScheduler.start()` queues a one-off catch-up for any check whose
 last *successful* verdict is older than its cadence (`CATCHUP_CHECKS`), which
-also covers deploys landing on a cron instant. For `dq_reconciliation` that is
-the oldest of the layers it writes in this process (`CATCHUP_SIBLING_LAYERS`:
+also covers deploys landing on a cron instant. For `dq_reconciliation`, which
+has no layer of its own since step 14's S14-12 deleted DuckDB's, that is the
+oldest of the layers it writes in this process (`CATCHUP_SIBLING_LAYERS`:
 `reconciliation_pg` with `KS_PG_DSN`, `reconciliation_ch` with `KS_CH_URL` as
 well — a host without one never writes the layer, and would otherwise re-fetch
 KeyCRM on every start). Every layer the canary pages on is read by a catch-up
@@ -1813,8 +1814,9 @@ the end of `connect()`.
 - **Run-age watchdog**: `/api/health` publishes the age of the last successful
   run per layer, keyed on `error_message IS NULL` — a failed run writes a row
   too, so row-existence alone reads green. `bot/canary.py` judges it from the
-  *other* container every 15 min: 30 h for reconciliation, 12 h for integrity,
-  30 h for mirror_landing, and since DN-21 30 h for
+  *other* container every 15 min: 12 h for integrity,
+  30 h for mirror_landing (30 h for reconciliation, DuckDB's arm, until step
+  14's S14-12 deleted it with its layer), and since DN-21 30 h for
   reconciliation_pg — the Postgres half of the 05:30 job, and the comparison
   against KeyCRM meant to outlive DuckDB. It does not yet: the job runs it
   only once the DuckDB extraction has succeeded, and journals it in DuckDB,
@@ -2268,7 +2270,10 @@ review found it, while this file said chain 3 carried it.
 
 **What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
 `reconciliation`): against a DuckDB that no longer receives orders it would
-page every morning and re-fetch every new order. The Postgres arm, from the
+page every morning and re-fetch every new order. **Step 14's S14-12 deleted
+the arm, its layer and its marks** (`stood_down_layers`, `/api/health`'s
+`stood_down`); the repair takes its discrepancies from the Postgres arm alone,
+and the layer is in no watched list. History follows. The Postgres arm, from the
 same KeyCRM snapshot, drives the repair; the stood-down arm journals no run.
 `/api/health` marks the layer `stood_down` — after chain 9's `_journal_ages`,
 which answers Postgres's block and ignores the one it is handed, so marking
@@ -2583,6 +2588,12 @@ once live `meta.chain_watermarks` holds an owner row naming one. And a walk in
 to the router that keeps it off the frozen copy.
 
 ### Postgres against KeyCRM — the other half of the criterion
+**Since step 14's S14-12 the job compares Postgres and ClickHouse only**:
+DuckDB's arm (`reconciliation_io.duckdb_orders_in_window`, layer
+`reconciliation`), standing down since chain 3's flip, is deleted, and
+`MISSING_IN_DK` in the Postgres arm's verdict is what the job re-fetches by
+id. History below.
+
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the
 source. So step 05 closes on **two** things — zero differences between the
@@ -2621,6 +2632,19 @@ load-bearing here — exact equality would buy a daily discrepancy of two
 nanohryvnia.
 
 ### Reconciliation A — the two stores against each other
+**Deleted in step 14's S14-12**, with every comparison against DuckDB in
+`dq_mirror_landing` — the landing mirror, the orders' fingerprints, Silver,
+UTM and Gold (standing down since step 13), the order-level expenses, the
+operational tables, the buyers, SMS and the dashboard's users — and their
+conditions (`mirror_stood_down`, `owner_row_without_marker`,
+`order_owner_row_without_marker`, `chain_shipper_overwrote`,
+`chain_owner_unregistered`, `mirror_buckets_disagree`, `gold_missing_cells`,
+`gold_orphan_cells`). Every chain writes Postgres since S14-00, so there was
+no second copy to compare. The job keeps its Postgres-alone checks and
+ClickHouse's; `chain_latch_disagrees` moved to the chain invariants (below).
+`fetch_duckdb_rows` and the catalogue's specs stay for
+`pg_landing.carry_retired_catalogue` until S14-13. History below.
+
 `dq_mirror_landing` (layer `mirror_landing`, daily 07:30) compares
 `bronze.products` and `bronze.categories` in Postgres against `products` and
 `categories` in DuckDB, **column by column with a tolerance of zero**. Landing
@@ -3279,10 +3303,9 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 отгружает то, что сравнивает, так что сбой отгрузки и есть устаревшая копия);
 при сбое чтения обратно; при двух пустых Gold; при исключении или прогоне,
 не дошедшем до сверки — эти два файлит сам джоб, сверке нечего вернуть.
-**WARN, пока Gold DuckDB ещё сравнивается с Postgres, CRITICAL — когда нет**:
-`warehouse_checks_stand_down()`, тот же предикат, на котором джоб снимает
-`reconcile_gold` (Postgres деривит один, или путь назад держит сравнения), а
-нечитаемый предикат — тоже CRITICAL. Такой прогон держит `ch_silver_roundtrip`
+**CRITICAL всегда с S14-12 шага 14**: до него — WARN, пока Gold DuckDB ещё
+сравнивался с Postgres, и CRITICAL, когда нет (`warehouse_checks_stand_down()`,
+константа с S14-00); S14-12 удалил `reconcile_gold` и предикат вместе с ним. Такой прогон держит `ch_silver_roundtrip`
 и `ch_engines_gold_*` как были, а не объявляет их решёнными; и архив так же:
 прогон, не посчитавший бакеты (`ch_history_unreachable`, `[]` без
 `KS_CH_URL`, исключение), держит `ch_history_buckets`, который закрывает
@@ -4086,7 +4109,8 @@ itself (never a table another shipper carries — chain 4's bronze buyers are th
 buyers mirror's, and a stamp there only that mirror's next success could clear),
 and the daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
 (both CRITICAL) — and `chain_owner_unregistered` for an owner row no chain in
-the running build declares. Today nothing is latched: `app.manual_expenses` holds zero
+the running build declares. (Since step 14's S14-12 the daily comparison is
+gone with those two, and `chain_latch_disagrees` is the chain invariants'.) Today nothing is latched: `app.manual_expenses` holds zero
 rows, so chain 8's flag can still be moved freely, and the first typed expense
 ends that.
 
@@ -4195,6 +4219,21 @@ sales_type the code does not know, so it reports and stops rather than driving
 a rebuild every two minutes.
 
 ### The standing watch on a moved chain's tables
+
+**It judges the latch's two copies too, since step 14's S14-12** (decision
+12): `chain_latch_disagrees`, CRITICAL, for every registered chain whose
+`owner:` rows stand in `meta.chain_watermarks` with no marker under
+`data/write-chain-owners/` — read afresh from disk on every run, never the
+process's cache. A step-14 image routes by neither copy; an image from before
+step 14 (the rollback target) routes by the marker and, without it, by its
+flag and preconditions again. So the lever is: do not roll back until the
+marker is restored (its content: `latched_at` = the earliest owner row), and
+"Before any rollback to an image from before step 14". The other direction —
+a marker with no owner row, a first write that failed — is safe and is not
+filed. An unreadable marker directory is `chain_invariants_unwatched` on
+`data/write-chain-owners`, which holds every condition. The daily
+`reconcile_operational` judged both directions on `mirror_landing` until
+S14-12 deleted it.
 
 Once a chain is latched or flagged, `replicate_operational` and
 `reconcile_operational` both stand down for its tables — the comparison without

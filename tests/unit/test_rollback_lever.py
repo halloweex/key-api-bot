@@ -47,24 +47,25 @@ GONE = re.compile(r"chain_copy_back|--handover|chain_transfer|lever_journal")
 # The conditions whose lever this PR rewrote — REMEDIATION, the registry's
 # `clears` and the canary's actions. Literal on purpose: a later PR that drops
 # one of them must say so here, beside rule 15's literal.
-REMEDIATION_REWRITTEN = ("order_owner_row_without_marker", "owner_row_without_marker",
-                         "chain_latch_disagrees", "chain_owner_unregistered")
+REMEDIATION_REWRITTEN = ("chain_latch_disagrees",)
 # `write_chain_flag_mismatch` was in both until step 14's S14-11 deleted the
 # condition with its emitter, the flags (rule 8; `test_write_flags_are_not_read`
-# holds that it is gone everywhere).
-CLEARS_REWRITTEN = ("order_owner_row_without_marker",
-                    "owner_row_without_marker", "chain_shipper_overwrote",
-                    "chain_owner_unregistered", "warehouse_way_back_refused")
+# holds that it is gone everywhere). `order_owner_row_without_marker`,
+# `owner_row_without_marker`, `chain_owner_unregistered` (both lists) and
+# `chain_shipper_overwrote` (the second) went in S14-12 with their emitters,
+# the daily comparisons against DuckDB (rule 8); `chain_latch_disagrees` moved
+# to the chain invariants with its lever (decision 12).
+CLEARS_REWRITTEN = ("warehouse_way_back_refused",)
 CANARY_REWRITTEN = ("warehouse_way_back_refused",)
 # Rewritten too, to say what is true without the copy-back, with no lever of
 # their own about a chain's ownership. `shadow_missing_in_duckdb` was the one
 # until step 14's S14-10 deleted it with `compare_shadow`, its emitter
 # (rule 15's literal in `test_rollback_condition_names.py` keeps the name).
 TOUCHED_ONLY: tuple = ()
-# Its `clears` said the chain handing its tables back to DuckDB clears it.
-# Rewritten without a lever: an INFO, a decision rather than a fault, with no
-# REMEDIATION entry (the S14-04 review).
-CLEARS_REWORDED = ("mirror_stood_down",)
+# `mirror_stood_down`'s `clears` said the chain handing its tables back to
+# DuckDB clears it, and was rewritten without a lever (the S14-04 review); the
+# condition went in S14-12 with the comparisons that filed it.
+CLEARS_REWORDED: tuple = ()
 
 # What GONE cannot see: the copy-back in prose — "copied back to DuckDB",
 # "hands its tables back" — with no script named (the S14-04 review found two
@@ -320,14 +321,20 @@ class TestEveryLeverNamesTheOneLine:
         script = (ROOT / "deploy" / "stage4_soak.sh").read_text(encoding="utf-8")
         assert _uncommented(script, "#").count(ROLLBACK_LEVER) == 4
 
-    def test_the_findings_that_named_it(self):
-        """The two owner-rows-only findings, built as the comparison builds
-        them, for a chain this build declares and for one it does not."""
-        from core.mirror_reconciliation import _owner_rows_only_description
+    def test_the_finding_that_names_it(self):
+        """`chain_latch_disagrees` as the chain invariants build it (since
+        step 14's S14-12; the comparison's two owner-rows-only findings went
+        with it): the runbook, the marker's content, and no way back."""
+        from core import pg_chain_invariants as inv
 
-        for tables in ({"bronze.orders"}, {"bronze.nowhere"}):
-            text = _owner_rows_only_description("bronze.orders", tables)
-            assert f"{ROLLBACK_LEVER}." in text and not GONE.search(text), text
+        (issue,) = inv.check_chain_invariants(inv.Facts(
+            watched=("pg_orders_write",), latch=inv.Latch(lost=(inv.LostMarker(
+                chain="pg_orders_write", claimed=4, tables=4,
+                since="2026-10-15T08:04:08.775536+00:00"),))))
+        assert issue.check_name == "chain_latch_disagrees"
+        text = issue.description
+        assert ROLLBACK_RUNBOOK in text and not GONE.search(text), text
+        assert "latched_at = 2026-10-15T08:04:08.775536+00:00" in text
 
 
 # ─── no condition went with the texts ────────────────────────────────────────
@@ -372,7 +379,7 @@ class TestThePageAndTheDigestRender:
         from core.data_quality import Severity, format_alert_message
 
         msg = format_alert_message(
-            "mirror_landing", Severity.CRITICAL,
+            "integrity", Severity.CRITICAL,
             [self._issue("chain_latch_disagrees", Severity.CRITICAL)], [])
         assert msg.splitlines()[-1] == f"→ {ROLLBACK_LEVER} (CLAUDE.md)", msg
         assert not GONE.search(msg)
@@ -384,7 +391,7 @@ class TestThePageAndTheDigestRender:
                  "severity": "WARN", "count": 1, "sample_ids": [],
                  "description": "x"} for name in REMEDIATION_REWRITTEN]
         msg = build_digest([DigestSection(
-            layer="mirror_landing",
+            layer="integrity",
             run={"run_id": 1, "status": "WARN",
                  "started_at": "2026-10-25T07:30:00+03:00"},
             issues=rows, age_hours=2)])

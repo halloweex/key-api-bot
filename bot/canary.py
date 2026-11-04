@@ -78,11 +78,14 @@ def defer_flaky(
 # Reconciliation matters most — it is the only check that can see a wrong
 # status, a wrong source, or two errors that cancel out.
 DQ_MAX_AGE_S = {
-    "reconciliation": 30 * 3600,  # 24h cycle + 6h grace
-    # The same 05:30 job's Postgres half, compared against the same KeyCRM
-    # snapshot, and so the same limit — the digest's too. It is a layer of its
-    # own so that a Postgres half which stops cannot hide behind a fresh DuckDB
-    # one, and until DN-21 only the 09:00 digest would say so.
+    # `reconciliation`, the 05:30 job's DuckDB half, was paged here at 30 h
+    # until chain 3's flip stood it down (published `stood_down`, unjudged);
+    # step 14's S14-12 deleted the half and the layer with it.
+    #
+    # The same 05:30 job's Postgres half, compared against the KeyCRM
+    # snapshot — the digest's limit too. It is a layer of its own so that a
+    # Postgres half which stops cannot hide behind a fresh sibling, and until
+    # DN-21 only the 09:00 digest would say so.
     # It is meant to be the comparison against the source that is left once
     # DuckDB stops being fed. It is not independent of DuckDB yet: the job
     # runs it only after the DuckDB extraction succeeded, inside the same try,
@@ -337,12 +340,6 @@ def check_dq_freshness(
             continue
 
         age = entry.get("age_seconds")
-        if entry.get("stood_down") is True:
-            # Not written by design (chain 3 stands DuckDB's reconciliation
-            # arm down): its age grows by construction, and `reconciliation_pg`
-            # is the page that remains.
-            ages[layer] = age
-            continue
         ages[layer] = age
         if age is None:
             failures.append(

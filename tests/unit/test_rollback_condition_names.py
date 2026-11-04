@@ -80,7 +80,37 @@ class TestTheLiteralIsTheRollbackImages:
 
         assert (pg_orders_write.retired_conditions()
                 == ROLLBACK_RETIRED["pg_orders_write.retired_conditions"])
-        assert pg_orders_write.RECONCILIATION_GROUP in ROLLBACK_RETIRED_GROUPS
+
+    def test_the_retired_group_is_paged_by_nothing(self):
+        """`dq:reconciliation` was the group of the 05:30 job's DuckDB arm
+        (`pg_orders_write.RECONCILIATION_GROUP`), which stood down from chain
+        3's flip; step 14's S14-12 deleted the arm, its layer and the name.
+        Nothing delivers a page under the group: no watched layer is
+        `reconciliation`, and no condition the REGISTRY holds names it.
+        Mutation: give the layer back to `WATCHED_LAYERS`."""
+        from core import pg_orders_write
+        from core.alerting import REGISTRY
+        from core.data_quality import WATCHED_LAYERS
+
+        (group,) = ROLLBACK_RETIRED_GROUPS
+        layer = group.split(":", 1)[1]
+        assert layer not in WATCHED_LAYERS
+        assert not [k for k in REGISTRY if k.endswith(f":{layer}")]
+        assert not hasattr(pg_orders_write, "RECONCILIATION_GROUP")
+
+    def test_compare_golds_names_went_with_it(self):
+        """`gold_missing_cells` and `gold_orphan_cells` had one emitter,
+        `compare_gold`, deleted in step 14's S14-12 with their REGISTRY
+        entries; `gold_cell_values` is also the integrity check's name and
+        stays registered until S14-14. Mutation: put either back."""
+        from core.alerting import REGISTRY
+
+        gone = {"gold_missing_cells", "gold_orphan_cells"}
+        assert gone <= ROLLBACK_RETIRED["warehouse_cutover.retired_conditions"]
+        emitted = set().union(*(_check_names_in(path)
+                                for path in sorted((ROOT / "core").glob("*.py"))))
+        assert not gone & emitted
+        assert not gone & set(REGISTRY)
 
     def test_offs_set_is_what_its_sources_emitted(self):
         """`core/duckdb_off.py` is gone (S14-00); its set was the scan's

@@ -1100,3 +1100,72 @@ def test_read_facts_never_raises_on_an_unreachable_store(monkeypatch):
         facts = asyncio.run(inv.read_facts())
     assert facts.whole is not None and "refused" in facts.whole.reason
     assert [i.check_name for i in inv.check_chain_invariants(facts)] == [inv.UNWATCHED]
+
+
+class TestTheLatchsTwoCopies:
+    """`chain_latch_disagrees`, judged here since step 14's S14-12 (decision
+    12): the daily `reconcile_operational` judged it until the comparison went.
+    Only one direction is filed — owner rows standing with no marker, which is
+    what an image from before step 14 would route by its flag again — and it
+    is CRITICAL, on the integrity layer, under the `chain_` family."""
+
+    OWNERS = {"bronze.orders": "2026-10-15T08:04:08+00:00",
+              "bronze.order_products": "2026-10-15T08:04:08+00:00",
+              "bronze.expenses": "2026-10-15T08:04:09+00:00"}
+
+    def _issues(self, owners, markers):
+        latch = inv._latch_facts(owners, markers)
+        return inv.check_chain_invariants(inv.Facts(watched=("pg_orders_write",),
+                                                     latch=latch))
+
+    def test_owner_rows_with_no_marker_are_critical(self):
+        from core.data_quality import Severity
+
+        (issue,) = self._issues(self.OWNERS, {})
+        assert issue.check_name == inv.LATCH_DISAGREES == "chain_latch_disagrees"
+        assert issue.severity is Severity.CRITICAL
+        assert issue.table_name == "pg_orders_write"
+        assert issue.count == 3
+        # The earliest stamp is the latch: the marker's content to restore.
+        assert "latched_at = 2026-10-15T08:04:08+00:00" in issue.description
+        assert "3 of its 4 table(s)" in issue.description
+
+    def test_a_marker_present_files_nothing(self):
+        assert self._issues(self.OWNERS, {"pg_orders_write": "x"}) == []
+
+    def test_a_marker_with_no_owner_row_files_nothing(self):
+        """The other direction — a first write that failed after its marker —
+        is the safe one and no step-14 build reads either copy to route;
+        decision 12 let it go. Mutation: judge both directions."""
+        assert self._issues({}, {"pg_orders_write": "x"}) == []
+
+    def test_an_unreadable_directory_is_blindness_not_a_lost_marker(self):
+        facts = inv.Facts(watched=("pg_orders_write",),
+                          latch=inv.Unwatched("data/write-chain-owners unreadable"))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert (issue.check_name, issue.table_name) == (inv.UNWATCHED, inv.MARKERS_PART)
+        # …and blindness holds every condition, this one included.
+        assert inv.LATCH_DISAGREES in inv.unverified_conditions([issue])
+
+    def test_it_is_one_of_the_family_the_integrity_job_resolves(self):
+        assert inv.LATCH_DISAGREES in inv.CONDITIONS
+        assert inv.LATCH_DISAGREES.startswith(inv.PREFIX)
+
+    def test_the_markers_are_read_afresh_from_disk(self, monkeypatch, tmp_path):
+        """Not the process's cache: a marker lost while web runs is a marker
+        lost. Mutation: answer from `chain_latch._cache()`."""
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "owners")
+        assert chain_latch.markers_on_disk() == {}
+        _latch("pg_orders_write")
+        assert set(chain_latch.markers_on_disk()) == {"pg_orders_write"}
+        (tmp_path / "owners" / "pg_orders_write").unlink()
+        assert chain_latch.latched("pg_orders_write")      # the cache still says so
+        assert chain_latch.markers_on_disk() == {}
+
+    def test_the_job_that_judged_it_no_longer_does(self):
+        """It left `dq_mirror_landing` with `reconcile_operational`; nothing
+        there files it."""
+        from core import mirror_reconciliation
+
+        assert not hasattr(mirror_reconciliation, "reconcile_operational")
+        assert not hasattr(mirror_reconciliation, "_chain_latch_findings")

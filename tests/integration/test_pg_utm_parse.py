@@ -271,11 +271,16 @@ class TestTheIncrementalParse:
         await conn.execute("UPDATE bronze.orders SET mirrored_at = $1", long_ago)
         await parse.parse_incremental()
 
+        # The grace at the default floor (`pg_warehouse_dq.silver_grace_minutes`);
+        # `mr.SILVER_GRACE_MINUTES` until step 14's S14-12 deleted it with the
+        # Silver comparison.
+        from core.pg_warehouse_dq import silver_grace_minutes
+
+        grace = silver_grace_minutes()
         row = await mr.order_utm_completeness_row(
             conn, now=datetime.now(timezone.utc),
-            grace_minutes=mr.SILVER_GRACE_MINUTES, max_samples=10)
-        assert mr.order_utm_completeness_findings(
-            row, grace_minutes=mr.SILVER_GRACE_MINUTES) == []
+            grace_minutes=grace, max_samples=10)
+        assert mr.order_utm_completeness_findings(row, grace_minutes=grace) == []
 
 
 # ── the full parse ────────────────────────────────────────────────────────────

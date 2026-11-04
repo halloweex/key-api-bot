@@ -4200,22 +4200,6 @@
                     "endColumn": 65,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportOptionalCall",
-                "range": {
-                    "startColumn": 24,
-                    "endColumn": 42,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportGeneralTypeIssues",
-                "range": {
-                    "startColumn": 43,
-                    "endColumn": 56,
-                    "lineCount": 1
-                }
             }
         ],
         "./core/observability.py": [

@@ -1,7 +1,8 @@
 """I/O helpers for Layer-2 reconciliation.
 
-Builds (month, source_id) → metric rollups from DuckDB and KeyCRM. Format
-matches what core.data_quality.classify_discrepancies expects:
+Builds (month, source_id) → metric rollups from KeyCRM, Postgres and
+ClickHouse. Format matches what core.data_quality.classify_discrepancies
+expects:
 
     {(month_yyyy_mm, source_id): {orders, qty, revenue, returns_count, returns_revenue}}
 
@@ -14,9 +15,12 @@ exists in the comparison. Three rules keep them aligned:
   * both are clipped to [window_start, window_end] — the KeyCRM side iterates
     whole calendar months only as a fetching strategy;
   * the watermark is applied on the KeyCRM side, and the ids it holds back are
-    passed to the DuckDB side. DuckDB's updated_at is a synced copy that can
+    passed to the store's side. A store's updated_at is a synced copy that can
     only be older, so applying the same timestamp independently cuts a smaller
     set here than there.
+
+DuckDB's extractor, `duckdb_orders_in_window`, went with the job's DuckDB arm
+in step 14's S14-12.
 
 Keeping the per-order facts also makes the order-level comparison free: the API
 calls are the expensive part, and a rollup throws away exactly the detail that
@@ -168,44 +172,6 @@ def rollup_from_orders(orders: OrderFacts) -> Rollup:
     return dict(rollup)
 
 
-def duckdb_orders_in_window(
-    conn,
-    window_start: date,
-    window_end: date,
-    *,
-    watermark: datetime,
-    exclude_ids: "set[int] | frozenset[int] | None" = None,
-) -> OrderFacts:
-    """Per-order facts from the warehouse, on the same terms as the KeyCRM side."""
-    excluded = [int(i) for i in (exclude_ids or ())]
-    rows = conn.execute(f"""
-        SELECT o.id, o.status_id, o.source_id, o.manager_id, o.buyer_id,
-               CAST(o.grand_total AS DOUBLE),
-               (o.ordered_at AT TIME ZONE 'Europe/Kyiv')::DATE,
-               COALESCE(li.n, 0), COALESCE(li.qty, 0), COALESCE(li.amount, 0)
-        FROM orders o
-        LEFT JOIN (
-            SELECT order_id, COUNT(*) AS n, SUM(quantity) AS qty,
-                   ROUND(SUM(price_sold * quantity), 2) AS amount
-            FROM order_products GROUP BY order_id
-        ) li ON li.order_id = o.id
-        WHERE (o.ordered_at AT TIME ZONE 'Europe/Kyiv')::DATE BETWEEN ?::DATE AND ?::DATE
-          AND o.source_id IN ({", ".join(str(s) for s in ACTIVE_SOURCES)})
-          AND (o.updated_at IS NULL OR o.updated_at < ?::TIMESTAMP WITH TIME ZONE)
-          AND NOT list_contains(CAST(? AS BIGINT[]), o.id)
-    """, [window_start.isoformat(), window_end.isoformat(),
-          watermark.astimezone(timezone.utc).isoformat(), excluded]).fetchall()
-    return {
-        int(r[0]): {
-            "status_id": r[1], "source_id": r[2],
-            "manager_id": r[3], "buyer_id": r[4],
-            "grand_total": float(r[5] or 0), "order_date": r[6],
-            "n_lines": int(r[7]), "qty": int(r[8]), "line_amount": float(r[9] or 0),
-        }
-        for r in rows
-    }
-
-
 async def postgres_orders_in_window(
     pool,
     window_start: date,
@@ -216,7 +182,8 @@ async def postgres_orders_in_window(
 ) -> OrderFacts:
     """The same per-order facts, from the Postgres mirror.
 
-    A deliberate transliteration of `duckdb_orders_in_window`, not a rewrite:
+    A deliberate transliteration of DuckDB's extractor
+    (`duckdb_orders_in_window`, deleted in step 14's S14-12), not a rewrite:
     same columns, same window, same source filter, same watermark, same
     exclusions. Anything expressed differently here would show up as drift that
     exists only in the comparison — the failure this module's docstring opens
@@ -272,7 +239,7 @@ async def postgres_orders_in_window(
     }
 
 
-# ─── DuckDB rollup ────────────────────────────────────────────────────────────
+# ─── KeyCRM months ───────────────────────────────────────────────────────────
 
 
 def _enumerate_months(start: date, end: date) -> list[str]:

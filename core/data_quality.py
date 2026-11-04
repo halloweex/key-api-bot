@@ -2126,21 +2126,9 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("mirror_backfill_pending",
      "POST /api/mirror/backfill/<orders|expenses> for the table named, "
      "then wait for 07:30"),
-    # The generic `mirror_` line would send the reader to a re-ship the stand
-    # down exists to prevent. Filed wherever the sync's shipper has stopped
-    # too: on the local answer, and on the owner rows alone for the buyers and
-    # the classification, whose latch fault is paged under its own name.
-    ("mirror_stood_down",
-     "Not a defect: a write chain owns the table. Never backfill it from DuckDB"),
-    # The owner rows alone: before step 14 the sync's mirror had NOT stopped,
-    # and every tick wrote DuckDB's copy over the chain's rows. A step-14 build
-    # routes by neither copy of the latch (S14-00) and has no way back
-    # (S14-04), so a lost marker matters to the rollback image alone, which
-    # routes by it: the lever every ownership page names (`ROLLBACK_LEVER`).
-    ("order_owner_row_without_marker", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
-    # The same, for the catalogue and the order-level expenses (DN-22b), whose
-    # per-tick mirror asked the local answer alone.
-    ("owner_row_without_marker", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
+    # `mirror_stood_down`, `order_owner_row_without_marker` and
+    # `owner_row_without_marker` had their lines here until step 14's S14-12
+    # deleted the comparisons that filed them.
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
@@ -2150,17 +2138,11 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
     ("integrity_check_raised",
      "A check's table is gone or renamed — find which in the ERROR log; its findings are absent, not clean"),
-    # Both halves of the ownership latch. Neither is repairable by a job: the
-    # first needs a human to decide which copy is right, the second names rows
-    # a shipment has already replaced. The shipment is the symptom: a shipper
-    # reaches a chain's table only where it does not see the latch, so the
-    # lever starts there. The catalogue's mirror carries the same KeyCRM
-    # payload the chain writes, so there is nothing to restore — a dump would
-    # only roll the chain's own writes back.
+    # The ownership latch: owner rows standing with no marker (the chain
+    # invariants since step 14's S14-12). Not repairable by a job — a human
+    # puts the marker back. `chain_shipper_overwrote` and
+    # `chain_owner_unregistered` went with the daily comparison.
     ("chain_latch_disagrees", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
-    ("chain_shipper_overwrote",
-     "Do not re-run the shipper. Find why it shipped (marker vs owner: rows); restore what it overwrote from the nightly dump, not the catalogue"),
-    ("chain_owner_unregistered", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     # The standing watch on a chain's own tables (DN-07). Nothing here is
@@ -2356,14 +2338,9 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "inventory_continuity_unwatched": "snapshot gaps no longer watched",
     "sync_watermarks_unwatched": "sync stalls no longer watched",
     "chain_latch_disagrees": "the two copies of a chain's latch disagree",
-    "chain_shipper_overwrote": "a copy out of DuckDB overwrote a table it no longer owns",
-    "chain_owner_unregistered": "a write chain owns tables this build does not know",
     "integrity_check_raised": "integrity checks crashed",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
-    "mirror_stood_down": "copy not compared: a write chain owns it",
-    "order_owner_row_without_marker": "the sync is overwriting order tables a write chain owns",
-    "owner_row_without_marker": "the sync is overwriting tables a write chain owns",
     "mirror_failing": "mirror failing",
     "orders_without_line_items": "orders without line items",
     "headline_vs_line_items": "order total ≠ line items",
@@ -2397,7 +2374,6 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_order_utm_in_flight": "traffic verdicts still on their way",
     "buyers_without_verdict": "buyers with no gender verdict",
     "buyers_missing_for_orders": "orders whose buyer never arrived",
-    "gold_missing_cells": "days missing from Gold",
     "gold_cell_values": "Gold cells differ",
     "silver_row_values": "Silver differs between engines",
     "order_versions_stalled": "version archive went silent",
@@ -2515,7 +2491,6 @@ def format_alert_message(
     icon = {"CRITICAL": "🚨", "WARN": "⚠️", "INFO": "ℹ️"}[severity.value]
     titles = {
         "integrity": "Integrity",
-        "reconciliation": "KeyCRM check",
         "mirror_landing": "Mirror check",
         "reconciliation_pg": "Postgres vs KeyCRM",
         "reconciliation_ch": "ClickHouse vs KeyCRM",
@@ -2608,8 +2583,8 @@ def run_dict(row) -> Optional[Dict[str, Any]]:
 # Layers a run-age watchdog is expected to see. A layer that never appears
 # here would be watched by nobody.
 # The layers with a cadence, a digest section and an age. `mirror_landing` is
-# step 05's Reconciliation A — landing in Postgres against landing in DuckDB,
-# daily at 07:30 — and it belongs here for three separate reasons: the digest
+# the 07:30 job (it was step 05's Reconciliation A, Postgres against DuckDB,
+# until step 14's S14-12), and it belongs here for three separate reasons: the digest
 # renders one section per layer, `dq_journal.last_success_ages_pg` reports one
 # age per layer, and the scheduler's catch-up reads those ages to decide what
 # it missed.
@@ -2621,8 +2596,12 @@ def run_dict(row) -> Optional[Dict[str, Any]]:
 # was held back for — the canary's first probe firing 90 s after a restart,
 # before the catch-up run finishes — only bites when the layer is already past
 # 30 h at that restart, which is a genuine outage worth one page.
+#
+# `reconciliation`, DuckDB's arm of the 05:30 job, left in step 14's S14-12:
+# it stood down from chain 3's flip (2026-10-15) and was written by nothing,
+# so its age was published marked `stood_down` and judged by nobody.
 WATCHED_LAYERS: Tuple[str, ...] = (
-    "integrity", "reconciliation", "mirror_landing", "reconciliation_pg",
+    "integrity", "mirror_landing", "reconciliation_pg",
     # The third arm of the source reconciliation: ClickHouse against the same
     # 05:30 snapshot. Its own layer for reconciliation_pg's reason — an arm
     # that stops running must not hide behind a fresh sibling.
@@ -2764,14 +2743,13 @@ BASELINE_RUN_ID_SQL = """
 # How stale a layer's newest verdict may be before the digest calls it out.
 # One cycle plus grace, same reasoning as the canary's thresholds.
 DIGEST_MAX_AGE_HOURS = {
-    "reconciliation": 30, "integrity": 12,
+    "integrity": 12,
     # Daily at 07:30, so 30h is one cycle plus six hours of grace — the
-    # same arithmetic as the reconciliation above it.
+    # same arithmetic as the reconciliation arms below.
     "mirror_landing": 30,
-    # Rides inside `dq_reconciliation`, so it shares that job's 05:30 cadence
-    # and therefore its limit. A `reconciliation_pg` older than the
-    # `reconciliation` beside it means the Postgres half stopped while the
-    # DuckDB half kept going — which is precisely why it is a layer of its own.
+    # The two arms of `dq_reconciliation` (daily 05:30), so they share that
+    # job's cadence and therefore its limit. Each is a layer of its own so
+    # that an arm which stopped cannot hide behind a fresh sibling.
     "reconciliation_ch": 30,
     "reconciliation_pg": 30,
 }

@@ -330,12 +330,14 @@ class TestPageConditionsAreCriticalOnly:
     '✅ mirror_retired_rows — stood 0m' about a standing INFO that had not
     gone anywhere. The page is about what pages; the digest owns the rest."""
 
-    def test_the_five_dq_sites_pass_critical_only(self):
+    def test_the_four_dq_sites_pass_critical_only(self):
+        """Five until step 14's S14-12 deleted the DuckDB arm of
+        `dq_reconciliation` and its page."""
         import pathlib
 
         src = pathlib.Path("core/scheduler.py").read_text()
         assert src.count(
             "if i.severity == Severity.CRITICAL],"
-        ) == 5
+        ) == 4
         # And the old unfiltered form is extinct.
         assert "conditions=[i.check_name for i in issues]," not in src
