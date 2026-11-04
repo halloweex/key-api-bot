@@ -13,6 +13,14 @@ bounds what a busy tab can spend. While GA4 cannot be asked, the last good
 answer for the period comes back marked stale. Bounded by construction: at
 most ``MAX_ENTRIES`` periods, the oldest dropped first.
 
+**Only the days GA4 holds are asked.** A funnel exists from ``earliest_day``
+to today, Kyiv time, so a window is cut to those days before it is asked, and
+a window with none of them is zeros with no request. The counts are the same
+either way. What it buys is that GA4 is never sent what it refuses. The
+dashboard's date window admits a backwards range and days before 2015-08-14,
+GA4's first day. Asked for either, GA4 answered 400 (measured 2026-11-04),
+and the route answered "GA4 is unavailable".
+
 **The traffic type is decided here, at read time,** from GA4's channel group,
 so the split can change without anything to rewrite. Cold is advertising shown
 to people who do not know the brand yet; warm is people who know it or look
@@ -27,11 +35,14 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import time
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from core import ga4
 
+#: The property counts days in Kyiv time, so its "today" is Kyiv's.
+_KYIV_TZ = ZoneInfo("Europe/Kyiv")
 TTL_S = 3600
 MAX_ENTRIES = 32
 CHANNEL = "sessionDefaultChannelGroup"
@@ -92,6 +103,12 @@ def earliest_day(today: date) -> date:
     return date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
 
 
+def asked_window(start: date, end: date, today: date) -> Optional[Tuple[date, date]]:
+    """The days of ``start..end`` GA4 holds a funnel for, or None if there are none."""
+    first, last = max(start, earliest_day(today)), min(end, today)
+    return (first, last) if first <= last else None
+
+
 def _empty() -> Dict[str, int]:
     return {c: 0 for c in ga4.COLUMNS}
 
@@ -149,17 +166,22 @@ def assemble(
 async def _ask(start: date, end: date, client: httpx.AsyncClient, today: date) -> Dict[str, Any]:
     prev = previous_window(start, end)
     windows = {"current": (start, end), "previous": prev, "year_ago": (year_ago(start), year_ago(end))}
-    token = await ga4.access_token(client)
     names = list(windows)
-    asks = [
-        ga4.run_funnel(client, token, s, e, breakdown)
-        for w in names
-        for (s, e) in [windows[w]]
-        for breakdown in (CHANNEL, DEVICE)
-    ]
-    answers = await asyncio.gather(*asks)
-    by_channel = {w: answers[2 * i] for i, w in enumerate(names)}
-    by_device = {w: answers[2 * i + 1] for i, w in enumerate(names)}
+    plan: List[Tuple[str, date, date, str]] = []
+    for w in names:
+        asked = asked_window(*windows[w], today)
+        if asked is not None:
+            plan += [(w, asked[0], asked[1], breakdown) for breakdown in (CHANNEL, DEVICE)]
+    answers: List[Dict[str, Dict[str, int]]] = []
+    if plan:
+        token = await ga4.access_token(client)
+        answers = list(await asyncio.gather(*(
+            ga4.run_funnel(client, token, s, e, breakdown) for _, s, e, breakdown in plan
+        )))
+    by_channel: Dict[str, Dict[str, Dict[str, int]]] = {w: {} for w in names}
+    by_device: Dict[str, Dict[str, Dict[str, int]]] = {w: {} for w in names}
+    for (w, _, _, breakdown), answer in zip(plan, answers):
+        (by_channel if breakdown == CHANNEL else by_device)[w] = answer
     return assemble(windows, by_channel, by_device, today=today)
 
 
@@ -178,7 +200,7 @@ async def get_funnel(
     Only with no earlier answer does it raise ``ga4.GA4Unavailable``.
     """
     key = (start, end)
-    day = today or datetime.now(timezone.utc).date()
+    day = today or datetime.now(_KYIV_TZ).date()
     async with _lock:
         cached = _cache.get(key)
         if cached is not None and clock() < cached["expires_at"]:

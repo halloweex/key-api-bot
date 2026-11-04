@@ -213,6 +213,36 @@ class TestTheService:
         assert svc.earliest_day(date(2026, 1, 15)) == date(2024, 11, 15)
         assert svc.earliest_day(date(2026, 4, 30)) == date(2025, 2, 28)
 
+    def test_only_the_days_ga4_holds_are_asked(self):
+        today = date(2026, 11, 4)  # GA4 holds funnels from 2025-09-04
+        assert svc.asked_window(*OCT, today) == OCT
+        assert svc.asked_window(date(2025, 8, 1), date(2025, 9, 30), today) == (date(2025, 9, 4), date(2025, 9, 30))
+        assert svc.asked_window(date(2026, 11, 1), date(2026, 11, 30), today) == (date(2026, 11, 1), today)
+        assert svc.asked_window(date(2000, 1, 1), date(2025, 9, 3), today) is None
+        assert svc.asked_window(date(2026, 11, 5), date(2099, 12, 31), today) is None
+        assert svc.asked_window(date(2026, 10, 31), date(2026, 10, 1), today) is None
+
+    @pytest.mark.asyncio
+    async def test_a_window_is_cut_to_the_days_ga4_holds(self):
+        # September 2025 is asked from the 4th. Its previous month and its year
+        # ago lie wholly before 2025-09-04, so neither is asked.
+        google = _Google()
+        out = await _get(google, window=(date(2025, 9, 1), date(2025, 9, 30)))
+        spans = {(f["dateRanges"][0]["startDate"], f["dateRanges"][0]["endDate"]) for f in google.funnels}
+        assert len(google.funnels) == 2 and spans == {("2025-09-04", "2025-09-30")}
+        assert out["periods"]["current"] == {"start": "2025-09-01", "end": "2025-09-30"}
+        assert out["total"]["year_ago"] == dict.fromkeys(ga4.COLUMNS, 0)
+
+    @pytest.mark.asyncio
+    async def test_a_window_with_no_day_ga4_holds_asks_nothing(self):
+        # The dashboard's date window admits both, and GA4 refuses both.
+        for window in [(date(2000, 1, 1), date(2000, 1, 1)), (date(2099, 12, 31), date(2000, 1, 1))]:
+            google = _Google()
+            out = await _get(google, window=window)
+            assert google.tokens == 0 and google.funnels == []
+            assert out["total"]["current"] == dict.fromkeys(ga4.COLUMNS, 0)
+            assert out["by_channel"] == [] and out["by_device"] == []
+
     @pytest.mark.asyncio
     async def test_three_windows_by_channel_and_device_make_the_answer(self):
         google = _Google()

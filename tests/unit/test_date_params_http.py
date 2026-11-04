@@ -134,6 +134,42 @@ def _needs_postgres(path: str) -> None:
         pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
 
 
+# The routes that answer from Google Analytics, not a store. They are
+# configured with the funnel tests' key and answered by their fake Google, so
+# nothing leaves the suite. Today no date sent here falls inside the 14 months
+# GA4 holds, and the service asks nothing for a window with none of those
+# days. The fake is there for the day one does.
+GA4_ROUTES = ("/api/traffic/funnel",)
+
+
+@pytest.fixture
+def ga4_faked(monkeypatch, tmp_path):
+    import json
+
+    import httpx
+
+    from core import ga4
+    from tests.unit.test_ga4_funnel import INFO, _Google
+    from web.services import ga4_funnel_service
+
+    key = tmp_path / "ga4-reader.json"
+    key.write_text(json.dumps(INFO))
+    monkeypatch.setenv("KS_GA4_KEY_FILE", str(key))
+    monkeypatch.setenv("KS_GA4_PROPERTY_ID", "123")
+    ga4_funnel_service._reset_cache()
+    ga4._reset_token()
+    real = ga4_funnel_service.get_funnel
+
+    async def get_funnel(start, end, **kwargs):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_Google())) as client:
+            return await real(start, end, client=client, **kwargs)
+
+    monkeypatch.setattr(ga4_funnel_service, "get_funnel", get_funnel)
+    yield
+    ga4_funnel_service._reset_cache()
+    ga4._reset_token()
+
+
 DATED = sorted(
     (e for e in iter_endpoints(app)
      if "GET" in e.methods and e.path.startswith("/api/")
@@ -251,8 +287,11 @@ INSIDE = [
 
 @pytest.mark.parametrize("start, end", INSIDE)
 @pytest.mark.parametrize("endpoint", DATED, ids=lambda e: e.path)
-def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end):
-    _needs_postgres(endpoint.path)
+def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end, request):
+    if endpoint.path in GA4_ROUTES:
+        request.getfixturevalue("ga4_faked")
+    else:
+        _needs_postgres(endpoint.path)
     r = _get(admin_client, endpoint, start_date=start, end_date=end)
     assert r.status_code == 200, r.text
 
