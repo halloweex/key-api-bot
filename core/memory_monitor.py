@@ -219,20 +219,20 @@ def read_cgroup_memory(cgroup_root: str = "/sys/fs/cgroup") -> Optional[dict]:
 # ─── Persistence (memory_samples) ────────────────────────────────────────────
 
 
-# The table's name as a hole: one text per statement for both stores, `app.*`
-# with `?` numbered once chain 10 (`core/pg_watchdog_write.py`, OD-02 (c))
-# writes the samples to Postgres.
-MEMORY_TABLES = {"duckdb": "memory_samples", "postgres": "app.memory_samples"}
+# The table's name as a hole. Chain 10 (`core/pg_watchdog_write.py`, OD-02 (c))
+# writes and reads the samples in Postgres and renders each statement below
+# for it: `app.memory_samples`, `?` numbered. The same texts served DuckDB's
+# bare name until step 14's S14-10 deleted its writer and readers; the hole
+# stays so the rendering is byte for byte the one chain 10 ran, and any engine
+# but `postgres` is a `KeyError`.
+MEMORY_TABLES = {"postgres": "app.memory_samples"}
 MEMORY_RETENTION_DAYS = 14
 
 
-def memory_sql(sql: str, engine: str = "duckdb") -> str:
-    rendered = sql.format(memory_samples=MEMORY_TABLES[engine])
-    if engine == "postgres":
-        from core.sql_dialect import numbered
+def memory_sql(sql: str, engine: str = "postgres") -> str:
+    from core.sql_dialect import numbered
 
-        return numbered(rendered)
-    return rendered
+    return numbered(sql.format(memory_samples=MEMORY_TABLES[engine]))
 
 
 MEMORY_INSERT_SQL = (
@@ -240,17 +240,20 @@ MEMORY_INSERT_SQL = (
     "(sampled_at, working_set_mb, page_cache_mb, limit_mb, oom_kills) "
     "VALUES (?, ?, ?, ?, ?)"
 )
+# The most recent persisted sample. This is what makes an OOM kill detectable
+# across a container recreate: the kernel counter resets, ours does not.
 MEMORY_LAST_SQL = (
     "SELECT sampled_at, working_set_mb, page_cache_mb, limit_mb, oom_kills "
     "FROM {memory_samples} ORDER BY sampled_at DESC LIMIT 1"
 )
+# The highest working set in the last hours, across restarts — the
+# replacement for memory.peak, which a restart erases.
 MEMORY_PEAK_SQL = "SELECT MAX(working_set_mb) FROM {memory_samples} WHERE sampled_at >= ?"
 MEMORY_PRUNE_SQL = "DELETE FROM {memory_samples} WHERE sampled_at < ? RETURNING sampled_at"
 
 
 def memory_row(sample: dict, sampled_at: datetime) -> list:
-    """The values one memory sample is stored as — the same list to both
-    stores, rounded once."""
+    """The values one memory sample is stored as, rounded once."""
     mb = 1024 * 1024
     return [
         sampled_at,
@@ -271,44 +274,3 @@ def memory_sample_dict(row) -> Optional[dict]:
         "limit_mb": float(row[3]) if row[3] is not None else None,
         "oom_kills": int(row[4]),
     }
-
-
-def insert_sample(conn, sample: dict, sampled_at: Optional[datetime] = None) -> None:
-    """Persist one memory sample. Single INSERT, cheap."""
-    from datetime import timezone
-    if sampled_at is None:
-        sampled_at = datetime.now(timezone.utc)
-    conn.execute(memory_sql(MEMORY_INSERT_SQL), memory_row(sample, sampled_at))
-
-
-def fetch_last_sample(conn) -> Optional[dict]:
-    """Most recent persisted sample, or None when the table is empty.
-
-    This is what makes an OOM kill detectable across a container recreate: the
-    kernel counter resets, ours does not.
-    """
-    return memory_sample_dict(conn.execute(memory_sql(MEMORY_LAST_SQL)).fetchone())
-
-
-def fetch_peak_working_set_mb(conn, hours: int = 24) -> Optional[float]:
-    """Highest working set seen in the last `hours`, across restarts.
-
-    The replacement for memory.peak, which a restart erases.
-    """
-    from datetime import timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    row = conn.execute(memory_sql(MEMORY_PEAK_SQL), [cutoff]).fetchone()
-    return float(row[0]) if row and row[0] is not None else None
-
-
-def prune_old_samples(conn, retention_days: int = MEMORY_RETENTION_DAYS,
-                      cutoff: Optional[datetime] = None) -> int:
-    """Delete samples older than retention_days. Tiny table; cheap to clean.
-
-    `cutoff`, when given, is the instant itself: chain 10 computes it once and
-    hands it to both stores."""
-    from datetime import timedelta, timezone
-    if cutoff is None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    result = conn.execute(memory_sql(MEMORY_PRUNE_SQL), [cutoff]).fetchall()
-    return len(result)

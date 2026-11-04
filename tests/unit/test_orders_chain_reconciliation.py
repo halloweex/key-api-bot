@@ -48,6 +48,16 @@ class _Store:
         return _Conn()
 
 
+def _door(persist):
+    """`dq_journal.journal_run`, the job's one door to the journal, as
+    `persist(**kwargs)`. Until step 14's S14-10 DuckDB's `persist_run` behind
+    the door was patched instead."""
+    async def journal_run(**kwargs):
+        return persist(**kwargs)
+
+    return journal_run
+
+
 def _missing(*ids):
     return Discrepancy(
         month="2026-09", source_id=4, diff_class=DiscrepancyClass.MISSING_IN_DK,
@@ -70,7 +80,7 @@ async def _run(*, duckdb_orders, persist, pg_result, classify=()):
          patch("core.reconciliation_io.duckdb_orders_in_window", new=duckdb_orders), \
          patch("core.data_quality.classify_discrepancies", return_value=list(classify)), \
          patch("core.data_quality.classify_order_discrepancies", return_value=[]), \
-         patch("core.data_quality.persist_run", new=persist), \
+         patch("core.dq_journal.journal_run", new=_door(persist)), \
          patch("core.data_quality.machine_attempts_note", return_value=None), \
          patch("core.sync_service.get_sync_service", new=AsyncMock(return_value=sync)), \
          patch("core.duckdb_store.get_store", new=AsyncMock(return_value=_Store())):
@@ -103,30 +113,25 @@ class TestTheJob:
         """A stood-down arm compared nothing, so a run on its layer would be a
         fresh, clean `reconciliation` verdict — through chain 9's door, into
         Postgres while chain 9 writes there. Recorded at the door every route
-        goes through (`dq_journal.journal_run`), with `persist_run` recording
-        too rather than raising: the test above raises from `persist`, and the
-        job's own `except Exception` swallows it. Mutation: drop
-        `if duckdb_arm:` in front of the journal write. The unlatched case
-        proves the recorder sees the door."""
-        from core import dq_journal
-
+        goes through (`dq_journal.journal_run`), recording rather than raising:
+        the test above raises from `persist`, and the job's own `except
+        Exception` swallows it. Mutation: drop `if duckdb_arm:` in front of
+        the journal write. The unlatched case proved the recorder saw the
+        door."""
         journalled = []
 
-        async def journal_run(store, **kwargs):
+        def journal_run(**kwargs):
             journalled.append(kwargs["layer"])
             return 7
 
-        monkeypatch.setattr(dq_journal, "journal_run", journal_run)
         if latched:
             chain_latch.latch(pg_orders_write.CHAIN)
-        persist = MagicMock(return_value=7)
         sched, _sync, result = await _run(
-            duckdb_orders=MagicMock(return_value={}), persist=persist,
+            duckdb_orders=MagicMock(return_value={}), persist=journal_run,
             pg_result={"issues": [], "discrepancies": [], "error": None})
         assert result["error"] is None
         if latched:
             assert journalled == []
-            persist.assert_not_called()
             assert result["run_id"] is None
         else:
             assert journalled == ["reconciliation"]
@@ -183,21 +188,18 @@ class TestTheLayerIsNotWatched:
         assert DataQualityFreshness(**marked["reconciliation"]).stood_down is True
         assert DataQualityFreshness.model_fields["stood_down"].description
 
-    @pytest.mark.parametrize("journal_chain", [True])
-    def test_the_endpoint_marks_the_block_chain_9_answers(self, off, journal_chain):
-        """Through `/api/health` and the canary, with chain 3 latched. Under
-        chain 9 `_journal_ages` answers Postgres's block and ignores the one
-        it is handed, so the mark has to go on after it. Mutation: chain 3's
-        original order — `_mark_stood_down(stats.pop(...))`, then
-        `_journal_ages` — loses `stood_down`, and the canary pages
-        `dq_stale:reconciliation` every day once both chains are on. Without
-        chain 9 the block is DuckDB's either way, and marked either way."""
-        import time
-
+    def test_the_endpoint_marks_the_block_chain_9_answers(self, off):
+        """Through `/api/health` and the canary, with chain 3 latched.
+        `_journal_ages` answers Postgres's block (chain 9), so the mark has to
+        go on after it. Mutation: chain 3's original order —
+        `_mark_stood_down(...)` before `_journal_ages` — loses `stood_down`,
+        and the canary pages `dq_stale:reconciliation` every day. (Until step
+        14's S14-10 `_journal_ages` was handed DuckDB's block out of the
+        store's stats and dropped it; it is handed nothing since.)"""
         from fastapi.testclient import TestClient
 
         from bot.canary import check_dq_freshness
-        from core import dq_journal, pg_dq_journal_write
+        from core import dq_journal
         from web.main import app
         from web.ratelimit import limiter
         from web.routes.api import health
@@ -212,15 +214,8 @@ class TestTheLayerIsNotWatched:
         async def from_postgres(layers=None):
             return {layer: dict(entry) for layer, entry in block.items()}
 
-        if journal_chain:
-            chain_latch.latch(pg_dq_journal_write.CHAIN)
-            off.setattr(dq_journal, "last_success_ages_pg", from_postgres)
-            from_duckdb = {layer: dict(fresh) for layer in layers}   # frozen copy
-        else:
-            from_duckdb = block
+        off.setattr(dq_journal, "last_success_ages_pg", from_postgres)
         chain_latch.latch(pg_orders_write.CHAIN)
-        off.setitem(health._stats_cache, "data", {"data_quality": from_duckdb})
-        off.setitem(health._stats_cache, "expires_at", time.time() + 600)
         off.setitem(health._journal_ages_cache, "data", None)
         off.setitem(health._journal_ages_cache, "expires_at", 0)
 
@@ -266,41 +261,36 @@ class TestTheLayerIsNotWatched:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("latched", [True])
-    async def test_the_digest_skips_it(self, off, tmp_path, latched):
-        """Run against a real journal, every watched layer fresh and clean but
-        `reconciliation`, which nothing has written. Mutation: digest the
+    async def test_the_digest_skips_it(self, off, latched):
+        """Run against a journal holding every watched layer fresh and clean
+        but `reconciliation`, which nothing has written. Mutation: digest the
         stood-down layer — a "no successful run" section every morning, in
         the one message WARN findings reach anyone by. Since the merge with
-        chain 9 that is one word, `digest_inputs(store, WATCHED_LAYERS, now)`,
-        and the source-text check this replaced passed it. The unlatched case
-        proves the layer's absence is news, so the quiet is the skip's."""
+        chain 9 that is one word, `digest_inputs(WATCHED_LAYERS, now)`, and
+        the source-text check this replaced passed it. The unlatched case
+        proved the layer's absence is news, so the quiet is the skip's. The
+        journal is chain 9's functions over a list (`tests/journal_fake.py`);
+        until step 14's S14-10 it was a DuckDB store the chain was routed
+        back to."""
         from datetime import date, timedelta
 
-        from core.data_quality import WATCHED_LAYERS, persist_run
-        from tests.unit.test_dq_digest_beat import _install_outbox, _make_store
+        from core import dq_journal
+        from core.data_quality import WATCHED_LAYERS
+        from tests.journal_fake import install_journal
+        from tests.unit.test_dq_digest_beat import _install_outbox
 
-        from core import pg_dq_journal_write
-        from tests.conftest import route_chains_to_duckdb
-
-        # The journal written and read in DuckDB here, as the digest's own
-        # tests keep it (`tests/unit/test_dq_digest_beat.py`).
-        route_chains_to_duckdb(off, pg_dq_journal_write)
-        store = await _make_store(tmp_path, off)
+        install_journal(off)
         outbox = _install_outbox(off)
         at = datetime.now(timezone.utc) - timedelta(minutes=30)
-        async with store.connection() as conn:
-            for layer in WATCHED_LAYERS:
-                if layer != "reconciliation":
-                    persist_run(conn, started_at=at, ended_at=at, as_of=at,
-                                window_start=date(2026, 1, 1),
-                                window_end=date(2026, 9, 30),
-                                layer=layer, issues=[], discrepancies=[])
+        for layer in WATCHED_LAYERS:
+            if layer != "reconciliation":
+                await dq_journal.journal_run(
+                    started_at=at, ended_at=at, as_of=at,
+                    window_start=date(2026, 1, 1), window_end=date(2026, 9, 30),
+                    layer=layer, issues=[], discrepancies=[])
         if latched:
             chain_latch.latch(pg_orders_write.CHAIN)
-        try:
-            result = await BackgroundScheduler()._run_dq_digest()
-        finally:
-            await store.close()
+        result = await BackgroundScheduler()._run_dq_digest()
         if latched:
             assert result["quiet"] is True and result["sent"] is False
             assert outbox.messages == []

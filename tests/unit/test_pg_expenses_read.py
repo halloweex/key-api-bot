@@ -199,33 +199,26 @@ class TestAWriteReachesPostgresAtOnce:
 
     WRITES = ("add_expense", "update_expense", "delete_expense")
 
-    def test_every_write_replicates(self):
+    def test_every_write_is_chain_8s_and_needs_no_replica(self):
+        """Since step 14's S14-11 each write goes to chain 8's Postgres writer
+        and nothing else: the page reads what it wrote, with no copy in
+        between. Until then a write that landed in DuckDB (the flag at
+        duckdb) replicated to Postgres at once
+        (`replicate_after_manual_expense`), outside the store lock — which
+        these two tests held. Mutation: a DuckDB connection, or the replica,
+        in a writer again."""
         src = REPOSITORY.read_text(encoding="utf-8")
         tree = ast.parse(src)
+        seen = set()
         for fn in ast.walk(tree):
             if not (isinstance(fn, ast.AsyncFunctionDef) and fn.name in self.WRITES):
                 continue
-            calls = {
-                getattr(n.func, "id", None)
-                for n in ast.walk(fn) if isinstance(n, ast.Call)
-            }
-            assert "replicate_after_manual_expense" in calls, fn.name
-
-    def test_none_of_them_replicates_under_the_store_lock(self):
-        """It awaits the network, and that lock is global."""
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for fn in ast.walk(tree):
-            if not (isinstance(fn, ast.AsyncFunctionDef) and fn.name in self.WRITES):
-                continue
-            for node in ast.walk(fn):
-                if not (isinstance(node, ast.AsyncWith)
-                        and "connection()" in ast.unparse(node.items[0].context_expr)):
-                    continue
-                for inner in ast.walk(node):
-                    if (isinstance(inner, ast.Call)
-                            and getattr(inner.func, "id", None) == "replicate_after_manual_expense"):
-                        pytest.fail(f"{fn.name} replicates while holding the store")
+            seen.add(fn.name)
+            calls = {getattr(n.func, "id", getattr(n.func, "attr", None))
+                     for n in ast.walk(fn) if isinstance(n, ast.Call)}
+            assert fn.name in calls, f"{fn.name} does not reach pg_expenses_write"
+            assert not calls & {"replicate_after_manual_expense", "connection"}, fn.name
+        assert seen == set(self.WRITES)
 
     @pytest.mark.asyncio
     async def test_it_never_raises(self):

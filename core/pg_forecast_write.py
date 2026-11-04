@@ -59,11 +59,12 @@ where they are written. One difference from 7a: `reads_postgres` honours the
 precondition, or a flagged-but-held chain would send reads to a Postgres the
 hourly copy is still filling while the writes go to DuckDB.
 
-A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
+A PRECONDITION THE FLAG ENFORCED — UNTIL STEP 14
 
-Since step 14's S14-00 the chain writes Postgres whatever its flag says and
-asks no precondition (`writes_postgres`, `unmet_precondition`, `reads_postgres` are
-constants). What follows is the history.
+Since step 14's S14-00 the chain wrote Postgres whatever its flag said and
+asked no precondition, and since S14-11 the flag and every answer that read
+it are gone (`writes_postgres`, `unmet_precondition`, `reads_postgres`,
+`reads_the_chain`). What follows is the history.
 
 `unmet_precondition()` — chain 6a's arrangement. The calculators' inputs must
 already be Postgres, or the chain would store, in the only copy left, numbers
@@ -103,7 +104,6 @@ file, not a table, and does not move.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date, datetime
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -127,13 +127,12 @@ CHAIN_TABLES: Tuple[str, ...] = (
     "app.weekly_patterns", "app.revenue_predictions",
 )
 
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
-
 # The holes every shared statement that reads one of these tables carries —
 # `core.sql_dialect.render_tables` fills them with the bare DuckDB name or the
-# `app.` one. `reads_the_chain` recognises a read of the chain by them.
+# `app.` one. `tests/unit/test_goals_reads_follow_chain.py` walks every
+# statement carrying one to a router that reads Postgres alone
+# (`reads_the_chain` recognised a read of the chain by them until step 14's
+# S14-11).
 TABLE_HOLES: Tuple[str, ...] = (
     "{seasonal_indices}", "{growth_metrics}",
     "{weekly_patterns}", "{revenue_predictions}",
@@ -169,61 +168,13 @@ SALES_TYPE_MAX = 32
 _INT32_MAX = 2 ** 31 - 1
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_FORECAST` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands its tables down,
-    and the two writers raise.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and nothing it waited on is asked any more —
-    production met every clause, and the readers it named read Postgres.
-    Kept for the registry's `unmet_precondition` field, which keeps its shape
-    until S14-11."""
-    return None
-
-
-def _routes_postgres(*, log: bool) -> bool:
-    """True, a constant since step 14's S14-00 (`log` is kept for the two
-    callers below, and says nothing now)."""
-    return True
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
-    nor a precondition routes any more; the first write in a process still
-    takes the latch (decision 3), which the images before step 14 route by.
-    Last consumers:
-    `persist_goal_tables`, `store_predictions` and the registry — S14-11.
-    """
-    return True
-
-
-def reads_postgres() -> bool:
-    """Whether a read of this chain's tables must ask Postgres, whatever the
-    page's own read flag says: True, a constant since S14-00."""
-    return True
-
-
-def reads_the_chain(sql: str) -> bool:
-    """Whether this statement reads one of the chain's tables while the chain
-    owns them. Decided from the body, so a statement that starts reading one
-    of the four tomorrow follows the chain through whichever router carries
-    it; `tests/unit/test_goals_reads_follow_chain.py` walks `core/` for every
-    such statement and fails if its router does not ask."""
-    return any(hole in sql for hole in TABLE_HOLES) and reads_postgres()
+# `env_writes_postgres`, `unmet_precondition`, `_routes_postgres`,
+# `writes_postgres`, `reads_postgres` and `reads_the_chain` stood here until
+# step 14's S14-11. S14-00 made every answer a constant — the two writers
+# write Postgres, and every read of the four tables asks Postgres, whatever
+# `KS_WRITE_FORECAST` says — and S14-11 deleted them with the flag. What the
+# chain guards is unchanged: the YoY UPDATE that must land (`persist_goal_tables`)
+# and the refusal of NaN and overflow before the latch (`_fits`).
 
 
 def _fits(column: str, value, *, nullable: bool) -> None:

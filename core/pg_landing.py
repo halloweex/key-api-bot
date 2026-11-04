@@ -251,11 +251,15 @@ async def _record_failure(table: str, error: str) -> bool:
 def tables_stood_down(unit: Sequence[str]) -> FrozenSet[str]:
     """Which of `unit` a write chain has taken — the local answer. Never raises.
 
-    The marker and the flag, asked of only the chains that declare one of these
-    tables (`write_chains.stood_down_among`): with none declaring them nothing
-    is evaluated at all, so a mirror that asks reads no variable and opens no
-    file. That was every table here once; since #280 registered chains 3, 5
-    and 6 a chain declares each of them.
+    Every table of `unit` a registered chain declares, a constant since step
+    14's S14-11: every chain writes Postgres, so every declared table is
+    held. Until then it asked the marker and the flag of only the chains that
+    declared one of these tables (`write_chains.stood_down_among`, deleted
+    with the flags). Since #280 registered chains 3, 5 and 6 a chain declares
+    each of them. Last consumers: the mirrors, backfills and copies of
+    `pg_landing`, `pg_buyers`, `pg_replication`, `pg_backfill` and
+    `pg_expense_backfill`, and the daily comparisons — they go in S14-12 and
+    S14-13.
 
     This is the only answer the **sync's mirrors** take — `_mirror` and,
     until step 14's S14-09, the orders mirror in DuckDB's `upsert_orders` —
@@ -268,9 +272,9 @@ def tables_stood_down(unit: Sequence[str]) -> FrozenSet[str]:
     `tables_stood_down_or_owned` next, the buyers mirror and the
     classification copy included (`sync_reads_the_owner_rows`).
     """
-    from core.write_chains import stood_down_among
+    from core.write_chains import chain_tables
 
-    return stood_down_among(unit)
+    return chain_tables() & frozenset(unit)
 
 
 def sync_reads_the_owner_rows(unit: Sequence[str]) -> bool:

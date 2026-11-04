@@ -27,7 +27,10 @@ retired (Z3).
 Since S14-00 this code still computes the first and the third, and the second
 is deleted with `core/duckdb_off.py`; while a source stands, the literal must
 equal it. From S14-14 on, none of these may be in REGISTRY or be emitted at
-all — the DuckDB checks that emit them today go before that.
+all — the DuckDB checks that emit them today go before that. The four
+`shadow_*` names went first: S14-10 deleted `compare_shadow`, their one
+emitter, with their REGISTRY and REMEDIATION entries, and the literal keeps
+them.
 """
 from __future__ import annotations
 
@@ -79,17 +82,25 @@ class TestTheLiteralIsTheRollbackImages:
                 == ROLLBACK_RETIRED["pg_orders_write.retired_conditions"])
         assert pg_orders_write.RECONCILIATION_GROUP in ROLLBACK_RETIRED_GROUPS
 
-    def test_offs_set_is_what_its_two_sources_still_emit(self):
+    def test_offs_set_is_what_its_sources_emitted(self):
         """`core/duckdb_off.py` is gone (S14-00); its set was the scan's
-        three stood-down pk checks and `compare_shadow`'s four conditions,
-        and both are still emitted by the code that stays until S14-10 and
-        S14-14."""
-        from core.data_quality import DUCKDB_OFF_STOOD_DOWN
+        three stood-down pk checks, still emitted by the code that stays
+        until S14-14, and `compare_shadow`'s four conditions, which S14-10
+        deleted with their emitter: no module emits a `shadow_*` name, and
+        none is registered. Mutation: put `compare_shadow` back, or one of
+        its names in REGISTRY."""
+        from core.alerting import REGISTRY
+        from core.data_quality import DUCKDB_OFF_STOOD_DOWN, REMEDIATION
 
         off = ROLLBACK_RETIRED["duckdb_off.retired_conditions"]
         assert DUCKDB_OFF_STOOD_DOWN == {c for c in off if c.startswith("pk_uniqueness_")}
         shadow = {c for c in off if c.startswith("shadow_")}
-        assert shadow <= _check_names_in(ROOT / "core" / "mirror_reconciliation.py")
+        assert len(shadow) == 4
+        emitted = set().union(*(_check_names_in(path)
+                                for path in sorted((ROOT / "core").glob("*.py"))))
+        assert not shadow & emitted
+        assert not shadow & set(REGISTRY)
+        assert not shadow & {prefix for prefix, _ in REMEDIATION}
 
 
 def _check_names_in(path: Path) -> set:

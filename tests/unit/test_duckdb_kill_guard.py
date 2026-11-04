@@ -18,7 +18,10 @@ that ran out of grace — and a restart through `DuckDBStore.connect()` and
 
 The judge is the write that must remove every row from every index:
 `DELETE FROM t`, on a copy per table. A short index is the FATAL. And the
-read the product makes: `fetch_run_issues` by run id, through an index.
+read the product made until step 14's S14-10 — `fetch_run_issues` by run id,
+through an index — whose statement is written out here (`_RUN_ISSUES`), as is
+the journal's writer (`_dq_run`): S14-10 deleted both from `core`, and the
+DQ journal's indexed tables are still the fixture's.
 """
 from __future__ import annotations
 
@@ -98,16 +101,40 @@ def _write_rows(con, tables, numbers) -> dict:
 
 
 def _dq_run(con, issues: int) -> int:
-    from core.data_quality import IntegrityIssue, Severity, persist_run
-
+    """One run and its findings as DuckDB's `persist_run` wrote them until
+    step 14's S14-10: one transaction, the run's id from the table's own
+    sequence, the findings under it."""
     now = datetime.now(timezone.utc)
-    return persist_run(
-        con, started_at=now, ended_at=now, as_of=now,
-        window_start=date.today(), window_end=date.today(),
-        layer="integrity", discrepancies=[],
-        issues=[IntegrityIssue(f"check_{k}", "silver.orders", Severity.WARN, 1, (5,))
-                for k in range(issues)],
-    )
+    con.execute("BEGIN TRANSACTION")
+    try:
+        (run_id,) = con.execute(
+            "INSERT INTO data_quality_runs (started_at, ended_at, as_of, window_start, "
+            "window_end, layer, status, integrity_issues_count, discrepancies_count, "
+            "critical_count, warn_count, api_calls_used, duration_ms, error_message) "
+            "VALUES (?, ?, ?, ?, ?, 'integrity', 'WARN', ?, 0, 0, ?, 0, 0, NULL) "
+            "RETURNING run_id",
+            [now, now, now, date.today(), date.today(), issues, issues]).fetchone()
+        if issues:
+            con.executemany(
+                "INSERT INTO data_quality_issues (run_id, check_name, table_name, "
+                "severity, count, sample_ids, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(int(run_id), f"check_{k}", "silver.orders", "WARN", 1, "[5]", "")
+                 for k in range(issues)])
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    return int(run_id)
+
+
+# `fetch_run_issues`' statement as DuckDB ran it: by run id, through
+# `idx_dqi_run`.
+_RUN_ISSUES = (
+    "SELECT check_name, table_name, severity, count, sample_ids, description "
+    "FROM data_quality_issues WHERE run_id = ? "
+    "ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 "
+    "WHEN 'INFO' THEN 2 ELSE 3 END, check_name LIMIT ?"
+)
 
 
 async def _connect(path: Path) -> DuckDBStore:
@@ -191,11 +218,9 @@ def _fatal_tables(path: Path, tables, scratch: Path) -> list:
 
 
 def _run_issues_seen(path: Path, runs) -> list:
-    from core.data_quality import fetch_run_issues
-
     con = duckdb.connect(str(path), read_only=True)
     try:
-        return [len(fetch_run_issues(con, run)) for run in runs]
+        return [len(con.execute(_RUN_ISSUES, [run, 100]).fetchall()) for run in runs]
     finally:
         con.close()
 

@@ -41,10 +41,11 @@ def flags(monkeypatch):
 
 @pytest.fixture
 def latched(flags):
-    """Chain 3 writes Postgres by its latch, whatever the flag says."""
+    """Chain 3 latched, as production's is. (It writes Postgres whatever the
+    latch or the flag says since step 14's S14-11, which deleted
+    `writes_postgres`; the latch is production's state, not a route.)"""
     chain_latch.latch(pg_orders_write.CHAIN, pg_orders_write.WRITE_ENV)
     chain_latch._latched = None
-    assert pg_orders_write.writes_postgres()
     yield flags
     chain_latch.release(pg_orders_write.CHAIN)
     chain_latch._latched = None

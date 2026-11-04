@@ -377,9 +377,10 @@ class TestUnderDuckdbOff:
 
     @pytest.fixture(autouse=True)
     def _chain5_moved(self, monkeypatch):
-        from core import pg_managers_read, pg_managers_write
+        from core import pg_managers_read
 
-        monkeypatch.setattr(pg_managers_write, "reads_postgres", lambda: True)
+        # Chain 5 reads Postgres asking nothing since step 14's S14-11
+        # (`reads_postgres`, patched here until then, went with the flag).
         monkeypatch.setattr(pg_managers_read, "fetch_all_managers",
                             AsyncMock(return_value=[]))
 

@@ -625,7 +625,7 @@ def test_format_alert_includes_failures_and_extras():
     (["health_status"], "Dashboard DOWN"),
     ([], "Dashboard DOWN"),
     (["cert_expiring"], "Dashboard critical"),
-    (["write_chain_flag_invalid"], "Dashboard critical"),
+    (["orders_sync_failing"], "Dashboard critical"),
     (["warehouse_preconditions_unmet"], "Warehouse switch held back"),
     (["duckdb_off_held_back"], "DuckDB switch held back"),
     # Step 13 held makes `warehouse_postgres` off's symptom: its title first.
@@ -748,17 +748,10 @@ class TestBuyerSync:
     # ── chain 4: the step as the only writer of buyers ──
 
     @classmethod
-    def _chain(cls, mode="postgres", **kw):
-        payload = cls._block(**kw)
-        payload["write_chains"] = {canary.BUYER_CHAIN: {"mode": mode}}
-        return payload
-
-    def test_the_chain_name_is_the_chains(self):
-        """Spelled in the canary, because nothing under bot/ may import
-        core.pg*; pinned here so a rename cannot silence the page."""
-        from core import pg_buyers_write
-
-        assert canary.BUYER_CHAIN == pg_buyers_write.CHAIN
+    def _chain(cls, **kw):
+        # Since step 14's S14-11 the CRITICAL is judged on `buyer_sync`
+        # alone: no `write_chains` entry gates it.
+        return cls._block(**kw)
 
     def test_under_chain_4_three_hours_without_a_success_pages(self):
         stale = canary.BUYER_SYNC_CHAIN_STALE_S + 1
@@ -770,15 +763,17 @@ class TestBuyerSync:
         assert canary.check_buyer_sync_chain(
             self._chain(last_ok_age_s=canary.BUYER_SYNC_CHAIN_STALE_S)) == []
 
-    def test_only_under_the_chain(self):
-        """A web on DuckDB, or one publishing no chain block, still has the
-        mirror behind every buyer: the WARN is the whole judgement there."""
+    def test_judged_whatever_a_chain_entry_says(self):
+        """Chain 4 writes Postgres, a constant: an older web's entry saying
+        duckdb, or none at all, gates nothing since step 14's S14-11; with no
+        `buyer_sync` block there is nothing to judge."""
         stale = canary.BUYER_SYNC_CHAIN_STALE_S + 1
-        assert canary.check_buyer_sync_chain(
-            self._chain(mode="duckdb", last_ok_age_s=stale)) == []
-        assert canary.check_buyer_sync_chain(
-            self._chain(mode=None, last_ok_age_s=stale)) == []
-        assert canary.check_buyer_sync_chain(self._block(last_ok_age_s=stale)) == []
+        for chains in (None, {"pg_buyers_write": {"mode": "duckdb"}}, {}):
+            payload = self._chain(last_ok_age_s=stale, last_attempt_age_s=60)
+            if chains is not None:
+                payload["write_chains"] = chains
+            [(key, _)] = canary.check_buyer_sync_chain(payload)
+            assert key == "buyer_sync_stalled_chain", chains
         assert canary.check_buyer_sync_chain(None) == []
 
     def test_a_restart_does_not_reset_the_stall(self):

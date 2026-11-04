@@ -1625,10 +1625,10 @@ uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
 cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
 checkpoint (~7 s at 900 MB) — ~67 s for an ordinary request. **Not for a slow
 one**: the eight `SLOW_ENDPOINTS` (`web/middleware.py`) get 300 s, uvicorn
-drains them too, and five write DuckDB (`/api/duckdb/resync`,
-`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`, and — until chain
-7b-3's `KS_WRITE_FORECAST=postgres` moves their tables — `/api/goals/recalculate`
-and `/api/revenue/forecast/train`). The list was kept by hand and named three;
+drains them too, and three write DuckDB (`/api/duckdb/resync`,
+`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`; `/api/goals/recalculate`
+and `/api/revenue/forecast/train` wrote it too until step 14's S14-11 took
+chain 7b-3's DuckDB branch). The list was kept by hand and named three;
 it is derived from the code now (`test_web_stop_grace.py` walks each handler
 to a store method executing a write). One in flight at a stop is killed. Covering them (~340 s) would leave a deploy — pull, stop,
 migrate, the 180 s health gate — no margin inside its 10-minute ssh timeout,
@@ -1990,10 +1990,10 @@ raising):
   `/api/duckdb/stats` and the DuckDB block of `/api/health` — leaves the buyer
   counts out rather than show DuckDB's frozen ones; the live count is
   `bronze.buyers` (`pg_buyer_sync_read.count_buyers`).
-- `scripts/backfill_gender.py` writes Postgres only for a chain web has
-  already latched (exit 4 otherwise): the latch is a marker web reads once and
-  caches, so a script taking the first write would leave web writing DuckDB
-  until it restarted.
+- `scripts/backfill_gender.py` writes Postgres alone since step 14's S14-11
+  (no `--duckdb`, no latch check); until then only for a chain web had
+  already latched (exit 4 otherwise), so a script taking the first write
+  could not leave web writing DuckDB until it restarted.
 - `reconcile_buyer_completeness` also runs under the chain with the landing
   mirror off — it is the one Postgres check that the writer is alive.
 
@@ -4017,14 +4017,23 @@ exist.
 ### A write flag is no longer a rollback
 
 **Since step 14's S14-00 nothing routes by a flag, a latch or a
-precondition: every chain writes Postgres, a constant** (`writes_postgres()`,
-`mode()`, `unmet_precondition()` and the registry's `mode` and
-`unmet_precondition`). A first write still takes the marker and the owner
-rows (decision 3), because an image from before step 14 — the rollback
-target, see "Before any rollback to an image from before step 14" — routes
-by them; `/api/health` still publishes `env`, `error`, `latched` and `mismatch`.
-**Since S14-04 nothing in the code hands a chain back to DuckDB either**: the
-copy-back is deleted and the way back is the image (below). History below.
+precondition: every chain writes Postgres, a constant. Since S14-11 no
+`KS_WRITE_*` is read at all**: `writes_postgres()`, `mode()`,
+`unmet_precondition()`, the preflights and the registry's `chain_modes` are
+deleted, `core/write_chains.py` is the list of chain modules with what each
+declares (`CHAIN`, `CHAIN_TABLES`, `CHAIN_SYNC_KEYS`), and the canary's
+`write_chain_flag_invalid`, `write_chain_flag_mismatch` and
+`write_chain_precondition_unmet` are gone with their emitters.
+`/api/health`'s `write_chains` is `{chain: {sync_step?, pending?}}`;
+`orders_sync_failing` and `buyer_sync_stalled_chain` are judged on the step
+alone, held unjudged by a probe that read no step. The standing watch dates a
+chain's handover by its `owner:` rows, not the local marker. The `.env` lines
+stay (rule 4): an image from before step 14 reads them. A first write still
+takes the marker and the owner rows (decision 3), because that image — the
+rollback target, see "Before any rollback to an image from before step 14" —
+routes by them. **Since S14-04 nothing in the code hands a chain back to
+DuckDB either**: the copy-back is deleted and the way back is the image
+(below). History below.
 
 Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
@@ -4580,20 +4589,23 @@ file answers 503 `surface: duckdb` beside `ReadUnavailable`. `/api/health`,
 `duckdb.status` and `migrations.status` read `off`, `fatal` is null, and
 `duckdb` is never in `degraded_by` — so the canary's probe and the Docker
 healthcheck are neither a tripwire site nor an outage, and a healthy probe
-writes `duckdb_silent: true`. The shadow chains (9, 10, 11a, 11b) stand
+writes `duckdb_silent: true`. The shadow chains (9, 10, 11a, 11b) stood
 their DuckDB half down before `store.connection()` (PR-4): counted apart as
 `shadow_stood_down` under `off`, never as a failure or at ERROR;
-`compared_in_shadow()` is empty, so the daily comparison does not read those
-tables, and `duckdb_written()` reads every table False. Under `on`, in the
-target state, DuckDB still writes exactly ten tables — the shadow chains'
-eight, `sync_metadata` and `schema_migrations` — pinned in
-`test_duckdb_table_fates.py`. After a week under `off` a way back reads the
-week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)), accepted
+`compared_in_shadow()` was empty, so the daily comparison did not read those
+tables (step 14's S14-10 deleted the shadow, the counter and the comparison),
+and `duckdb_written()` reads every table False. Under `on`, in the
+target state, DuckDB still writes exactly two tables — `sync_metadata` and
+`schema_migrations` — pinned in `test_duckdb_table_fates.py`; the shadow
+chains' eight were there too until step 14's S14-10 deleted the shadow.
+After a week under `off` a way back read the week's rows as
+`shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)), accepted
 until the drop: the finding dates its rows on Postgres's clock, its lever says
 rows of a week under `off` are expected (it used to add that
 `scripts/chain_copy_back.py` was never the cure; the script went with
-S14-04), and the soak's H2 lists it as accepted, not failed, once
-the canary's `watch:duckdb_switch` row exists. On the read
+S14-04), and the soak's H2 listed it as accepted, not failed, once
+the canary's `watch:duckdb_switch` row existed (the finding and H2 went with
+the shadow in S14-10). On the read
 path (PR-8) DuckDB answers nothing even by routing: `/api/summary?source_id=3`
 (Opencart, no column in Gold) answers DuckDB's zeros without a connection;
 `/api/warehouse/status` reads DuckDB's last refresh out of its copy,
@@ -5387,6 +5399,28 @@ copy-back itself.
 
 ### Chains 9, 10, 11a, 11b: the shadow state (OD-02 (c), all off)
 
+**Since step 14's S14-10 there is no shadow: the four chains write and read
+Postgres alone.** `core/shadow_writes.py`, the `duckdb` branches of the three
+doors and the `store` they took, DuckDB's writers and readers behind them
+(`data_quality.persist_run` and the `fetch_*` family, the monitors' sample
+statements, the reports' `already_sent`/`mark_sent`/`fetch_sent`), the
+ledgers' adoption of a week only DuckDB held, `compare_shadow` with its four
+`shadow_*` conditions (REGISTRY, `REMEDIATION`; the names stay in rule 15's
+literal), `write_chains.compared_in_shadow`, `/api/health`'s
+`shadow_failures` and `shadow_stood_down`, and soak H2 are gone. Under `off`,
+production's since 2026-10-16, the shadow had stood down and the comparison
+compared nothing, so nothing a person sees moved. What stays: the spool
+(`data/report-ledger-pending/<chain>/`, the same path and JSON, which every
+image before step 14 drains), `pending` under the ledgers' entries and the
+canary's `report_ledger_pending`, the standing watch, the beat in
+`meta.chain_watermarks` — inherited from `app.sync_metadata` whenever the key
+is absent, in either `KS_DUCKDB` mode (H6: production holds it) — and the
+journal rendered in the host's zone (`_zone`; DuckDB's session zone was
+asked under `on`, and the digest's labels are pinned across the collapse,
+`tests/unit/test_dq_digest_zone.py`). `CHAIN_SHADOW`, `is_shadow` and the
+published `shadow` stay until S14-11 reshapes the registry; so do the
+chains' constant `writes_postgres()`. History below.
+
 The quality journal (`data_quality_runs`/`_issues`/`_diffs` and the digest's
 beat, chain 9, `KS_WRITE_DQ_JOURNAL`), the watchdogs' samples (`disk_samples`,
 `data_dir_samples`, `memory_samples`, chain 10, `KS_WRITE_WATCHDOGS`) and the
@@ -5482,7 +5516,8 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows, a failure counting for the day it was stamped; H2
 (`29_h2`) — the 07:30 run filed no `shadow_*` above INFO (bar
-`shadow_missing_in_duckdb` once web has run `KS_DUCKDB=off`, OD-S5-3 (a)). D8,
+`shadow_missing_in_duckdb` once web has run `KS_DUCKDB=off`, OD-S5-3 (a)) —
+went with the comparison in S14-10. D8,
 20, 21 and 22 stop gating on the journal's copy once chain 9 writes it directly
 (the flag, the latch, or its owner row); chain 1's preflight does the same on
 the flag or the latch (chain 7b's goals dry run did, until 7b-4 retired it).
@@ -5853,8 +5888,9 @@ comparisons state, the migrated Postgres schema and the registered chains. **A
 chain that registers names its `KS_WRITE_*` on the tables it takes in the same
 change** — chain 4 was the first the guard stopped, and chains 3, 5, 6, 7b-3,
 9, 10, 11a and 11b met it at the stage-4 integration. A shadow chain's tables
-(OD-02 (c)) read DuckDB-written in either mode, because the shadow still hands
-DuckDB every row. OD-11 is pinned there too:
+(OD-02 (c)) read DuckDB-written in either mode until step 14's S14-10 deleted
+the shadow; they read as every latched chain's since, and the walk finds no
+DuckDB writer of them. OD-11 is pinned there too:
 `DERIVED_TABLES` and the set with no DDL are literals, so a DROP says so in
 the diff.
 

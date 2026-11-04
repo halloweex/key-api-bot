@@ -171,6 +171,9 @@ async def latched(monkeypatch):
 
     async with pool.acquire() as conn:
         await _seed_healthy(conn, latched_at, today)
+        # The handover is the owner rows since step 14's S14-11.
+        await _own(conn, ("pg_expenses_write", "pg_inventory_write", "pg_goals_write"),
+                   latched_at)
 
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
          patch("core.pg.require_revision", new=AsyncMock()):
@@ -184,22 +187,38 @@ async def _findings(names_only: bool = True):
     return sorted(i.check_name for i in issues) if names_only else issues
 
 
-def _relatch(ago: timedelta) -> datetime:
+async def _relatch(pool, ago: timedelta) -> datetime:
     """Move the inventory handover to `ago` before now.
 
     Inside the day, the per-day invariants have no complete day to judge,
     which is what isolates the burst check in the tests that use this.
     """
-    return _relatch_at(datetime.now(timezone.utc) - ago)
+    return await _relatch_at(pool, datetime.now(timezone.utc) - ago)
 
 
-def _relatch_at(stamp: datetime) -> datetime:
-    """Move the inventory handover to exactly `stamp`."""
+async def _relatch_at(pool, stamp: datetime) -> datetime:
+    """Move the inventory handover to exactly `stamp`: its owner rows, which
+    date it since step 14's S14-11, and the marker beside them."""
     (chain_latch.MARKER_DIR / "pg_inventory_write").write_text(
         f'{{"chain": "pg_inventory_write", "latched_at": "{stamp.isoformat()}"}}',
         encoding="utf-8")
     chain_latch.load()
+    async with pool.acquire() as conn:
+        await _own(conn, ("pg_inventory_write",), stamp, replace=True)
     return stamp
+
+
+async def _own(conn, chains, stamp: datetime, *, replace: bool = False) -> None:
+    """The chains' owner rows, under `stamp` — what dates a handover."""
+    from core import write_chains
+
+    by_name = {write_chains.chain_name(c): c for c in write_chains.WRITE_CHAINS}
+    conflict = ("DO UPDATE SET value = EXCLUDED.value" if replace else "DO NOTHING")
+    await conn.executemany(
+        "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+        f"VALUES ($1, $2, now()) ON CONFLICT (key) {conflict}",
+        [(chain_latch.owner_key(t), stamp.isoformat())
+         for name in chains for t in by_name[name].CHAIN_TABLES])
 
 
 async def _initial_batch(pool, at) -> None:
@@ -237,7 +256,7 @@ async def _seed_sixty_days(pool, today: date) -> date:
     — what `rebuild_sku_inventory_status` and `record_sku_inventory_snapshot`
     write for an offer KeyCRM starts serving. Returns the handover day.
     """
-    latch_day = _kyiv_day(_relatch(timedelta(days=60)))
+    latch_day = _kyiv_day(await _relatch(pool, timedelta(days=60)))
     old, new = 840, 50
     history_from = latch_day - timedelta(days=30)
     yesterday = today - timedelta(days=1)
@@ -398,7 +417,7 @@ class TestOneMutationEach:
         handover changed nothing and wrote no movement, then the base was lost.
         "The earliest batch since the latch" was this one, and it was excused."""
         pool, _, _ = latched
-        _relatch(timedelta(hours=3))
+        await _relatch(pool, timedelta(hours=3))
         await _initial_batch(pool, datetime.now(timezone.utc))
         found = [i for i in await _findings(names_only=False)
                  if i.check_name == inv.INITIAL_BURST]
@@ -412,7 +431,7 @@ class TestOneMutationEach:
         latch, so a first sync labelling the catalogue is a base that never
         arrived — the finding's own failure."""
         pool, _, _ = latched
-        stamp = _relatch(timedelta(hours=1))
+        stamp = await _relatch(pool, timedelta(hours=1))
         await _initial_batch(pool, stamp + timedelta(minutes=1))
         found = [i for i in await _findings(names_only=False)
                  if i.check_name == inv.INITIAL_BURST]
@@ -426,7 +445,7 @@ class TestOneMutationEach:
         """Inside the 24 hours and before the latch: DuckDB's movement, carried
         across by the replication. The chain that took over did not write it."""
         pool, _, _ = latched
-        stamp = _relatch(timedelta(hours=1))
+        stamp = await _relatch(pool, timedelta(hours=1))
         await _initial_batch(pool, stamp - timedelta(hours=1))
         assert inv.INITIAL_BURST not in await _findings()
 
@@ -486,7 +505,7 @@ class TestOneMutationEach:
         on `latched_at.date()`, the check judged both."""
         pool, latched_at, _ = latched
         utc_day = latched_at.date()
-        stamp = _relatch_at(datetime(utc_day.year, utc_day.month, utc_day.day,
+        stamp = await _relatch_at(pool, datetime(utc_day.year, utc_day.month, utc_day.day,
                                      22, 30, tzinfo=timezone.utc))
         assert _kyiv_day(stamp) == utc_day + timedelta(days=1)
         async with pool.acquire() as conn:
@@ -651,7 +670,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
 
     @pytest.mark.asyncio
     async def test_a_movement_allocator_at_max_is_persisted_and_pages(self, job):
-        from core.data_quality import fetch_run_issues
+        from core import pg_dq_journal_write
 
         pool, scheduler, store, sent, resolve = job
         async with pool.acquire() as conn:
@@ -664,9 +683,11 @@ class TestTheJobWhenTheDuckDBHalfFails:
             result = await scheduler._run_dq_integrity()
 
         assert "DuckDB file will not open" in result["error"]
-        async with store.connection() as conn:
-            persisted = {r["check_name"]: r
-                         for r in fetch_run_issues(conn, result["run_id"])}
+        # Read back from the journal's one store, Postgres (chain 9); until
+        # step 14's S14-10 from DuckDB's shadow of it.
+        async with pg_dq_journal_write.reading() as conn:
+            persisted = {r["check_name"]: r for r in
+                         await pg_dq_journal_write.run_issues(conn, result["run_id"])}
         assert persisted[inv.SEQUENCE_BEHIND]["severity"] == "CRITICAL"
         assert persisted[inv.SEQUENCE_BEHIND]["table_name"] == "app.stock_movements"
         assert sent.await_count == 1

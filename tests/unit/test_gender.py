@@ -257,21 +257,21 @@ class TestTheDerivationRidesTheReplicationTick:
             if isinstance(n, ast.Call):
                 name = getattr(n.func, "id", getattr(n.func, "attr", None))
                 lines.setdefault(name, []).append(n.lineno)
-        assert "derive_gender" in lines, "the tick no longer derives gender"
-        # Chain 4's derivation rides the same place, in Postgres.
-        assert "derive_gender_pg" in lines, "the tick no longer follows chain 4"
+        # Chain 4's derivation, in Postgres — the only one since step 14's
+        # S14-11 (DuckDB's `derive_gender` went with the flag).
+        assert "derive_gender_pg" in lines, "the tick no longer derives gender"
+        assert "derive_gender" not in lines, "the tick derives in DuckDB again"
         assert "replicate_operational" in lines
-        assert max(lines["derive_gender"] + lines["derive_gender_pg"]) < min(
-            lines["replicate_operational"])
+        assert max(lines["derive_gender_pg"]) < min(lines["replicate_operational"])
 
     def test_the_cli_and_the_tick_share_one_implementation(self):
-        """Two callers, one home — charter rule 1."""
+        """Two callers, one home — charter rule 1: both run chain 4's
+        derivation."""
         import inspect
 
         import scripts.backfill_gender as cli
-        from core import gender_backfill
 
-        assert cli.derive_gender is gender_backfill.derive_gender
+        assert "derive_gender_pg" in inspect.getsource(cli.run)
         # The CLI must not carry its own copy of the SQL.
         assert "INSERT INTO buyer_gender" not in inspect.getsource(cli)
 
@@ -282,16 +282,16 @@ class TestTheDerivationRidesTheReplicationTick:
         for sql in (_PENDING_NEW, _PENDING_ALL):
             assert "override_by_human = FALSE" in sql
 
-    def test_the_derivation_never_raises_into_the_tick(self):
-        """It shares a runner with the copy of tables nothing can rebuild."""
-        import asyncio
+    @pytest.mark.asyncio
+    async def test_the_derivation_never_raises_into_the_tick(self, monkeypatch):
+        """It shares a runner with the copy of tables nothing can rebuild:
+        chain 4's derivation returns its error, never raises it."""
+        from unittest.mock import AsyncMock
 
-        from core.gender_backfill import derive_gender
+        from core import pg, pg_buyers_write
 
-        class Exploding:
-            def connection(self):
-                raise RuntimeError("store is gone")
-
-        result = asyncio.run(derive_gender(Exploding()))
+        monkeypatch.setattr(pg, "get_pool", AsyncMock(side_effect=RuntimeError("store is gone")))
+        monkeypatch.setattr(pg, "require_revision", AsyncMock())
+        result = await pg_buyers_write.derive_gender_pg()
         assert result["error"] and "RuntimeError" in result["error"]
         assert result["written"] == 0

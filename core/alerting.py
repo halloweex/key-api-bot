@@ -168,20 +168,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),
-    # A KS_WRITE_* not understood: that chain's writers raise, its tables stand
-    # down. Emitted by the canary and by reconcile_operational (DN-01).
-    "write_chain_flag_invalid": _c("web restarts with a valid KS_WRITE_* value"),
-    # A chain that has already written Postgres while its KS_WRITE_* says
-    # duckdb. The latch wins (OD-19 (a)), so nothing is failing — but a
-    # rollback somebody believes happened has not (DN-06). Since step 14 no
-    # flag routes at all (S14-00) and nothing hands tables back (S14-04).
-    "write_chain_flag_mismatch": _c(
-        "the variable is set back to postgres; nothing in this build hands the "
-        "tables back to DuckDB. " + ROLLBACK_LEVER),
-    # A chain's own condition for moving is unmet: held on DuckDB against its
-    # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
-    "write_chain_precondition_unmet": _c(
-        "the read flag the chain names is set to postgres and web restarts"),
+    # `write_chain_flag_invalid`, `write_chain_flag_mismatch` and
+    # `write_chain_precondition_unmet` stood here until step 14's S14-11: a
+    # KS_WRITE_* not understood, a latch against its flag (DN-06) and a
+    # chain's own condition for moving unmet (DN-26). No flag is read since,
+    # so none of the three has an emitter.
     # What the host's backup scripts last proved, judged from `/api/health`'s
     # `backups` block at `core/backup_evidence.py`'s limits: a PITR drill or
     # an off-site restore drill older than eight days, an off-site shipment
@@ -268,21 +259,6 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # what matters — a sweep that suddenly takes far more than usual is the
     # one thing this cannot tell apart from a loss.
     "mirror_pruned_rows": _c("the next full replace removes them"),
-    # The shadow chains' comparison (OD-02 (c)): Postgres writes, DuckDB is
-    # handed each row after the commit. Nothing re-ships these tables, so
-    # none clears by a job running again — each clears when the rows on the
-    # two sides agree. A row DuckDB never received is never carried there —
-    # the copy-back that could was a rollback, not a cure, and step 14's
-    # S14-04 deleted it — and after a week under KS_DUCKDB=off these rows
-    # stand until the drop, accepted (OD-S5-3 (a)).
-    "shadow_duckdb_only_rows": _c(
-        "the writer that went round the chain is found and its rows decided "
-        "— a human, not a job"),
-    "shadow_missing_in_duckdb": _c(
-        "the rows age out of Postgres, or DuckDB is dropped; nothing in this "
-        "build carries them to DuckDB"),
-    "shadow_row_values": _c("the two stores agree on the row again"),
-    "shadow_pruned_rows": _c("the next shadow prune removes them"),
     # Not a data defect: the writer moved and its watchdog did not. It
     # clears when the check is ported or the flag goes back to duckdb.
     "inventory_continuity_unwatched": _c(
@@ -412,8 +388,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_goal_tables_stale": _c(
         "a seasonality_calc run (the Monday job or its trigger) stores"),
     "chain_forecast_stale": _c("a training stores a retail forecast"),
-    # The shadow chains' standing watch (OD-02 (c)). Chain 9: a finding whose
-    # run is gone stays until a human finds the writer and the rows.
+    # The standing watch of chains 9, 10, 11a and 11b (OD-02 (c)). Chain 9: a
+    # finding whose run is gone stays until a human finds the writer and the
+    # rows.
     "chain_orphan_children": _c(
         "the orphaned findings are corrected or their run restored — a human, not a job"),
     # Chain 10: the next stored sample clears the first; the next prune the

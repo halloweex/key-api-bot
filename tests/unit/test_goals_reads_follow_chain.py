@@ -43,7 +43,7 @@ from typing import Dict, Iterable, List, Set, Tuple
 
 import pytest
 
-from core import chain_latch, pg_forecast_write, pg_goals_write
+from core import pg_forecast_write, pg_goals_write
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 WALKED = ("core", "web")
@@ -73,30 +73,10 @@ DUCKDB_REACH = {"self.connection", "self._fetch_one", "self._fetch_all"}
 REFUSES = "read_fallback.refuse"
 
 
-@pytest.fixture
-def flag(monkeypatch):
-    monkeypatch.delenv(pg_goals_write.WRITE_ENV, raising=False)
-    return monkeypatch
-
-
-class TestReadsPostgres:
-    def test_the_flag_turns_it_on(self, flag):
-        flag.setenv(pg_goals_write.WRITE_ENV, "postgres")
-        assert pg_goals_write.reads_postgres() is True
-
-    @pytest.mark.parametrize("value", ["duckdb", "postgre", None])
-    def test_the_latch_outranks_any_flag(self, flag, value):
-        if value is not None:
-            flag.setenv(pg_goals_write.WRITE_ENV, value)
-        chain_latch.latch(pg_goals_write.CHAIN, pg_goals_write.WRITE_ENV)
-        assert pg_goals_write.reads_postgres() is True
-
-    def test_only_a_statement_carrying_the_hole_follows(self, flag):
-        chain_latch.latch(pg_goals_write.CHAIN, pg_goals_write.WRITE_ENV)
-        assert pg_goals_write.reads_the_chain(
-            "SELECT goal_amount FROM {revenue_goals}") is True
-        assert pg_goals_write.reads_the_chain(
-            "SELECT SUM(revenue) FROM {gold_daily_revenue}") is False
+# `TestReadsPostgres` stood here until step 14's S14-11: the flag and the
+# latch turning `pg_goals_write.reads_postgres()` on, and
+# `reads_the_chain()` following only a statement with the hole. Both went with
+# `KS_WRITE_GOALS`; every goal read goes to Postgres (below).
 
 
 # ─── The walk ──────────────────────────────────────────────────────────────

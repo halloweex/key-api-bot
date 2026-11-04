@@ -10,9 +10,11 @@ ONE ENGINE SINCE STEP 14 (S14-07). The report reads Postgres' Gold and
 Silver and nothing else (`core.weekly_report._weekly_run`), so the tests that
 seed a warehouse seed Postgres — `gold.daily_revenue` roll-up rows,
 `silver.orders`, `bronze.order_products` under `silver.order_lines` — and are
-skipped without `KS_PG_DSN`, which CI supplies. The send ledger stays in the
-DuckDB store under the test (`_chains_on_duckdb`) until its DuckDB branch
-goes.
+skipped without `KS_PG_DSN`, which CI supplies. The send ledger is Postgres's
+alone since S14-10 (`core.report_ledger`); here its two Postgres calls are a
+dict (`ledger`), since this module's subject is the report and its delivery —
+the ledger's own proof is `tests/unit/test_report_ledger.py` and
+`tests/integration/test_report_ledger_pg.py`.
 """
 from __future__ import annotations
 
@@ -32,7 +34,6 @@ from core.weekly_report import (
     ProductMove,
     WeekTotals,
     WeeklyReport,
-    already_sent,
     build_report,
     decompose,
     fetch_product_moves,
@@ -40,7 +41,6 @@ from core.weekly_report import (
     fetch_weekly_series,
     format_report,
     last_complete_week,
-    mark_sent,
     pct_change,
     same_week_last_year,
     share_of,
@@ -49,16 +49,27 @@ from core.weekly_report import (
 
 
 @pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the report and its delivery, not where the send
-    ledger lives, and it was written against DuckDB. So this module keeps
-    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
-    until their DuckDB branches go."""
-    from core import pg_weekly_ledger_write, pg_traffic_ledger_write
-    from tests.conftest import route_chains_to_duckdb
+def ledger(monkeypatch):
+    """The two send ledgers' Postgres calls (`mark_sent`, `find_sent`) over a
+    dict keyed `(chain, week_start, sales_type)`. Until S14-10 this module
+    kept the ledger in the DuckDB store under the test; the job goes through
+    the real door, `core.report_ledger`, either way."""
+    from core import pg_traffic_ledger_write, pg_weekly_ledger_write
 
-    route_chains_to_duckdb(monkeypatch, pg_weekly_ledger_write, pg_traffic_ledger_write)
+    rows = {}
+    for chain in (pg_weekly_ledger_write, pg_traffic_ledger_write):
+        async def mark_sent(week_start, sales_type, revenue, orders, sent_at,
+                            chain=chain):
+            rows[(chain.CHAIN, week_start, sales_type)] = dict(
+                week_start=week_start, sales_type=sales_type, revenue=revenue,
+                orders=orders, sent_at=sent_at)
+
+        async def find_sent(week_start, sales_type, chain=chain):
+            return rows.get((chain.CHAIN, week_start, sales_type))
+
+        monkeypatch.setattr(chain, "mark_sent", mark_sent)
+        monkeypatch.setattr(chain, "find_sent", find_sent)
+    return rows
 
 
 def _report(**overrides) -> WeeklyReport:
@@ -276,9 +287,14 @@ def reads(tmp_path, monkeypatch):
 
 
 async def _store(tmp_path: Path) -> DuckDBStore:
-    """The DuckDB store the send ledger lives in (`_chains_on_duckdb`)."""
+    """The store the job is handed: never connected, its DuckDB connection a
+    trap — the report reads Postgres and the ledger is `ledger`'s dict."""
     s = DuckDBStore(db_path=tmp_path / "weekly.duckdb")
-    await s.connect()
+
+    def _no_duckdb(*_a, **_k):
+        raise AssertionError("the weekly report reached for DuckDB")
+
+    s.connection = _no_duckdb
     return s
 
 
@@ -446,38 +462,6 @@ class TestBaselineSeries:
             reads, date(2026, 5, 18), "retail", weeks=12,
         )
         assert series == [100_000]
-
-
-class TestSendLedger:
-    @pytest.mark.asyncio
-    async def test_a_week_is_delivered_once(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            week = date(2026, 5, 18)
-            async with store.connection() as conn:
-                assert already_sent(conn, week, "retail") is False
-                mark_sent(conn, week, "retail", 968_638.0, 355)
-                assert already_sent(conn, week, "retail") is True
-                # A different week, and a different book, are still pending.
-                assert already_sent(conn, date(2026, 5, 25), "retail") is False
-                assert already_sent(conn, week, "b2b") is False
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_recording_twice_does_not_raise(self, tmp_path):
-        """A retry after a partial failure must not poison the ledger."""
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                mark_sent(conn, date(2026, 5, 18), "retail", 1.0, 1)
-                mark_sent(conn, date(2026, 5, 18), "retail", 2.0, 2)
-                row = conn.execute(
-                    "SELECT revenue, orders FROM weekly_report_sends"
-                ).fetchall()
-            assert row == [(pytest.approx(2.0), 2)]
-        finally:
-            await store.close()
 
 
 class TestReadinessGate:
@@ -813,8 +797,10 @@ class TestSchedulerJob:
             assert result == {"sent": False, "reason": "not_delivered",
                               "week": week_start.isoformat()}
 
-            async with store.connection() as conn:
-                assert already_sent(conn, week_start, "retail") is False
+            from core import report_ledger
+
+            assert await report_ledger.already_sent(
+                report_ledger.WEEKLY, week_start, "retail") is False
         finally:
             await store.close()
 

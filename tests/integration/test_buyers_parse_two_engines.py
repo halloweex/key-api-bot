@@ -1,10 +1,12 @@
-"""One awkward buyer batch, written by both real writers, reads back equal.
+"""One awkward buyer batch, written by chain 4's writer, reads back as DuckDB's did.
 
-The unit tests prove the parser; this proves the stores. A batch built from real
-KeyCRM-shaped payloads goes through `DuckDBStore.upsert_buyers` into a real
-DuckDB file and through `pg_buyers.mirror_buyers` into a real PostgreSQL, and
-the two are compared value by value after parsing — never by rendering, which
-has manufactured three false differences in this repository already.
+The unit tests prove the parser; this proves the store. A batch built from real
+KeyCRM-shaped payloads goes through `DuckDBStore.upsert_buyers` — chain 4's
+writer — into a real PostgreSQL, and is compared value by value after
+parsing — never by rendering, which has manufactured three false differences
+in this repository already — with what DuckDB's own branch stored for the same
+batch. That branch went in step 14's S14-11; its answer is the literal below,
+captured before it went (rule 9).
 
 Every buyer in it used to break something:
 
@@ -23,7 +25,7 @@ test shares the CI database without touching anybody else's rows.
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -115,28 +117,37 @@ async def both_engines(tmp_path, monkeypatch):
         await store.close()
 
 
-@pytest.mark.asyncio
-async def test_one_awkward_batch_reads_back_equal_from_both_stores(both_engines):
-    from core import pg_buyers_write
-    from tests.conftest import chains_on_duckdb
+# What chain 4's DuckDB branch stored for `BATCH`, normalised as the test
+# reads both stores (`_normal`) — captured on the S14-10 head before step 14's
+# S14-11 deleted that branch (rule 9). Not to be edited by hand: a difference
+# is a change of what Postgres stores.
+DUCKDB_BUYERS = {
+    9400001: (9400001, 'Покупець 1', date(1990, 1, 5), None, '+380500000001', None, None, None, None, None, None, None, None, 0.0, 0.0, datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc), datetime(2026, 9, 2, 11, 30, tzinfo=timezone.utc)),
+    9400002: (9400002, 'Покупець 2', None, None, '+380500000002', None, None, None, None, None, None, None, None, 0.0, 0.0, datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc), datetime(2026, 9, 2, 11, 30, tzinfo=timezone.utc)),
+    9400003: (9400003, 'Покупець 3', None, 'доставка', '+380500000003', None, None, None, None, None, None, None, None, 0.0, 0.0, datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc), datetime(2026, 9, 2, 11, 30, tzinfo=timezone.utc)),
+    9400004: (9400004, 'Unknown', None, None, '+380500000004', None, None, None, None, None, None, None, None, 0.0, 0.0, datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc), datetime(2026, 9, 2, 11, 30, tzinfo=timezone.utc)),
+    9400005: (9400005, 'Покупець 5', None, None, '', None, None, None, None, None, None, None, None, 0.0, 0.0, datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc), datetime(2026, 9, 2, 11, 30, tzinfo=timezone.utc)),
+    9400006: (9400006, 'Покупець 6', date(1992, 4, 17), None, '+380500000006', None, None, None, None, 'Київ', 'Київська', 'Club', None, 5.0, 1234.5, datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc), datetime(2026, 9, 2, 11, 30, tzinfo=timezone.utc)),
+}
+DUCKDB_CONTACTS = [
+    (9400001, 'phone', '+380500000001', True),
+    (9400002, 'phone', '+380500000002', True),
+    (9400003, 'phone', '+380500000003', True),
+    (9400004, 'phone', '+380500000004', True),
+    (9400005, 'phone', '+380501112233', False),
+    (9400006, 'phone', '+380500000006', True),
+]
 
+
+@pytest.mark.asyncio
+async def test_one_awkward_batch_reads_back_as_duckdb_stored_it(both_engines):
     store, pool = both_engines
-    # Neither writer may refuse the batch: that refusal was the whole bug.
-    # DuckDB's through its own branch, which since step 14's S14-00 nothing
-    # routes to but this; Postgres' through chain 4's writer, which took the
-    # mirror's place for these tables.
-    with chains_on_duckdb(pg_buyers_write):
-        assert await store.upsert_buyers(BATCH) == len(BATCH)
+    # The writer may not refuse the batch: that refusal was the whole bug.
+    # Chain 4's writer, which took the mirror's place for these tables.
     assert await store.upsert_buyers(BATCH) == len(BATCH)
 
     cols = ", ".join(BUYER_COLUMNS)
-    async with store.connection() as conn:
-        duck = {r[0]: tuple(_normal(v) for v in r) for r in conn.execute(
-            f"SELECT {cols} FROM buyers WHERE id IN ({', '.join('?' * len(IDS))})",
-            IDS).fetchall()}
-        duck_contacts = sorted(tuple(r) for r in conn.execute(
-            "SELECT buyer_id, contact_type, value, is_primary FROM buyer_contacts "
-            f"WHERE buyer_id IN ({', '.join('?' * len(IDS))})", IDS).fetchall())
+    duck, duck_contacts = DUCKDB_BUYERS, DUCKDB_CONTACTS
     async with pool.acquire() as conn:
         pg = {r["id"]: tuple(_normal(v) for v in r.values()) for r in await conn.fetch(
             f"SELECT {cols} FROM bronze.buyers WHERE id = ANY($1::int[])", IDS)}

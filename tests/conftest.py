@@ -30,7 +30,6 @@ self-sufficient wherever it runs.
 the production key or hold the real bot token — the autouse guard below stops
 the requests, and this stops the credentials from being there at all.
 """
-import contextlib
 import os
 
 # Credentials of exactly the shape the real ones have, and unmistakably not
@@ -142,23 +141,10 @@ def _never_the_production_database(monkeypatch, tmp_path):
     monkeypatch.setattr("core.duckdb_store._store_instance", None, raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _no_write_chain_flag_from_outside(monkeypatch):
-    """Every registered write chain starts each test with its KS_WRITE_* unset.
-
-    A chain's flag decides where its writers write, and a developer's shell or
-    `.env` may carry one — a test that inherited `KS_WRITE_EXPENSES=postgres`
-    would exercise a different code path than CI does and pass or fail for a
-    reason nobody can see. Thirteen test files cleared the variables of the
-    chains they knew about, by name; this clears the variable of every chain in
-    `WRITE_CHAINS`, so a chain added to the registry is covered the moment it
-    is registered rather than when somebody remembers the fixtures. Tests still
-    set the flag they mean to test, after this has run.
-    """
-    from core.write_chains import WRITE_CHAINS
-
-    for chain in WRITE_CHAINS:
-        monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+# `_no_write_chain_flag_from_outside`, which cleared every chain's KS_WRITE_*
+# before each test, stood here until step 14's S14-11: a flag inherited from a
+# developer's `.env` decided where a chain's writers wrote. Nothing reads one
+# since (`tests/unit/test_write_flags_are_not_read.py`).
 
 
 @pytest.fixture(autouse=True)
@@ -209,8 +195,8 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
     that a chain writes Postgres and no `KS_WRITE_*` may move it back
     (`core/chain_latch.py`). A test that wrote one into `data/` would hand that
     decision to whatever runs next on the developer's machine — and the suite
-    reaches the writers through the repository methods, so it is one
-    `KS_WRITE_EXPENSES=postgres` away from doing it.
+    reaches the writers through the repository methods, every one of which
+    writes Postgres and takes the latch on its first write.
 
     Redirected and reset per test, `_never_the_production_database`'s
     arrangement: each test starts with nothing latched, and no test can see
@@ -296,47 +282,7 @@ def _a_fresh_warehouse_writer(monkeypatch, tmp_path):
     monkeypatch.setattr(wc, "UTM_MARKER", tmp_path / "warehouse-utm-reparsed-at")
 
 
-def route_chains_to_duckdb(monkeypatch, *chains) -> None:
-    """Route the given write chains back to DuckDB inside one test.
-
-    Since step 14's S14-00 every write chain writes Postgres, a constant
-    (`writes_postgres()`, `reads_postgres()`, `mode()`). A test whose subject
-    is a flow that does not depend on where a chain's tables live — a job
-    that reads everything before it stores anything, a door that answers a
-    refusal — and that was written with DuckDB as its store keeps that store
-    with this: the chain modules' own answers are patched back to DuckDB for
-    the test alone. Production never takes these branches; what Postgres
-    does is held by the chains' own tests. The DuckDB branches, and this
-    helper with them, go in S14-09 to S14-11.
-    """
-    for chain in chains:
-        for name, value in (("writes_postgres", False), ("reads_postgres", False),
-                            ("mode", "duckdb")):
-            if hasattr(chain, name):
-                monkeypatch.setattr(chain, name, lambda value=value: value)
-        if hasattr(chain, "_routes_postgres"):
-            monkeypatch.setattr(chain, "_routes_postgres", lambda *, log=False: False)
-
-
-@contextlib.contextmanager
-def chains_on_duckdb(*chains):
-    """`route_chains_to_duckdb` for a block rather than a whole test.
-
-    For a test that compares the DuckDB branch of a chain's writer with its
-    Postgres branch on the same calls — the proof that the Postgres branch
-    stores what DuckDB did, until the DuckDB branch goes (S14-09 to S14-11) —
-    or that needs DuckDB to hold a stale copy before Postgres is written:
-    inside the block the chains answer DuckDB, after it Postgres again."""
-    from unittest.mock import patch
-
-    with contextlib.ExitStack() as stack:
-        for chain in chains:
-            for name, value in (("writes_postgres", False), ("reads_postgres", False),
-                                ("mode", "duckdb")):
-                if hasattr(chain, name):
-                    stack.enter_context(
-                        patch.object(chain, name, lambda value=value: value))
-            if hasattr(chain, "_routes_postgres"):
-                stack.enter_context(
-                    patch.object(chain, "_routes_postgres", lambda *, log=False: False))
-        yield
+# `route_chains_to_duckdb` and `chains_on_duckdb` stood here until step 14's
+# S14-11: they patched a chain's `writes_postgres()`/`reads_postgres()`/
+# `mode()` back to DuckDB for one test or one block. Those answers went with
+# the flags, and with them the DuckDB branches the helpers reached.

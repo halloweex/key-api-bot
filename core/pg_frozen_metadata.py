@@ -1,6 +1,6 @@
 """DuckDB's `sync_metadata` as Postgres last copied it — what `KS_DUCKDB=off` inherits.
 
-Four places read DuckDB's `sync_metadata` for a key Postgres does not hold
+Three places read DuckDB's `sync_metadata` for a key Postgres does not hold
 yet, because a value that stopped moving at a chain's flip is still the right
 stand-in for one that has not been written since (stage 5's design, 2.5):
 
@@ -9,30 +9,31 @@ stand-in for one that has not been written since (stage 5's design, 2.5):
    step 14's S14-09);
 2. `core.data_quality._freshness_check` — the same stand-in, judged, and the
    bootstrap gate ("no sync history at all");
-3. `core.dq_journal.digest_inputs` — the digest's beat;
-4. `core.report_ledger.already_sent` — adopting a week delivered before the
-   flip (which, under `off`, does not read anything: below).
+3. `core.dq_journal.digest_inputs` — the digest's beat, read here whatever
+   `KS_DUCKDB` says since step 14's S14-10 deleted the journal's DuckDB half.
 
-Under `KS_DUCKDB=off` the file may not be opened, and none of the four may
+A fourth, `core.report_ledger.already_sent`, adopted a week only DuckDB held,
+and under `off` read nothing at all — the authority was the chain's own
+`find_sent` in Postgres, and the weeks delivered before the flips of 11a and
+11b reached Postgres by the hourly copy before those flips. S14-10 deleted
+the adoption.
+
+Under `KS_DUCKDB=off` the file may not be opened, and none of the three may
 answer "absent" instead: for `last_sync_orders` that is the window "an hour
 ago", the defect chain 3's review found (orders KeyCRM updated between the
 stamps are never fetched), and `last_sync_categories` and
 `last_sync_expense_types` move only on the Sunday full sync, so Postgres may
-lack them for a week after a flip. So the first three read **`app.sync_metadata`
+lack them for a week after a flip. So all three read **`app.sync_metadata`
 in Postgres** — the hourly full copy of the same DuckDB table
 (`core/pg_operational.py`, `SYNC_METADATA_SOURCE`). Once every chain is
 latched, DuckDB's values for those keys no longer move, so the copy equals
 the original — provided it ran after the last latch, which is the `off`
 verdict's `sync_metadata_copied` key (PR-2), not this module's to judge.
 
-The fourth reads nothing under `off`: the authority is the chain's own
-`find_sent` in Postgres, and the weeks delivered before the flips of 11a and
-11b reached Postgres by the hourly copy before those flips.
-
 Reads only, and only the copy: nothing here writes `app.sync_metadata`, whose
 one writer stands down under `off` with the rest of what is copied out of
-DuckDB (PR-7). Every caller is behind `duckdb_switch.is_off()`; under `on`
-nothing here is asked.
+DuckDB (PR-7). The first two callers are behind `duckdb_switch.is_off()`;
+the digest's beat asks the copy in either mode.
 """
 from __future__ import annotations
 

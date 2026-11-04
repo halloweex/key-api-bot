@@ -24,20 +24,6 @@ from core.data_quality import (
 from core.duckdb_store import DuckDBStore
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the integrity checks' judgement, which the
-    inventory continuity check makes the same over either store's
-    calendar, and it was written against DuckDB's. So this module keeps
-    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
-    until their DuckDB branches go."""
-    from core import pg_inventory_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_inventory_write)
-
-
 async def _make_store(tmp_path: Path) -> DuckDBStore:
     s = DuckDBStore(db_path=tmp_path / "test.duckdb")
     await s.connect()
@@ -224,7 +210,11 @@ class TestCheckInternalIntegrity:
         store = await _make_store(tmp_path)
         try:
             async with store.connection() as conn:
-                issues = check_internal_integrity(conn)
+                # Chain 1's calendar, pre-read as the job reads it from
+                # Postgres: none yet. Without it the continuity check says
+                # it is not watching (`inventory_continuity_unwatched`).
+                issues = check_internal_integrity(
+                    conn, inventory_calendar=(None, frozenset()))
             assert issues == []
         finally:
             await store.close()
@@ -265,113 +255,70 @@ def _days_back(now: datetime, n: int) -> date:
     return now.date() - timedelta(days=n)
 
 
+def _calendar(now: datetime, days) -> tuple:
+    """The `(first_day, present_days)` chain 1's Postgres reader hands the
+    check (`pg_inventory_write.read_snapshot_calendar`), for snapshots taken
+    `days` days back."""
+    present = frozenset(_days_back(now, n) for n in days)
+    return (min(present) if present else None), present
+
+
+def _check(now: datetime, days):
+    return _inventory_snapshot_continuity_check(None, now=now, calendar=_calendar(now, days))
+
+
 class TestInventorySnapshotContinuity:
     """A missed snapshot is the one loss here that cannot be re-fetched.
 
     Stock history is written from *current* stock and KeyCRM serves current
     stock only, so a day the job did not run is gone the moment the day is.
+
+    Judged over the calendar chain 1's Postgres reader pre-reads. Until step
+    14's S14-11 these drove DuckDB's own `inventory_sku_history` (the check
+    read it when no calendar was handed in, under a chain on DuckDB), and a
+    test held that reading and the calendar's to the same findings; the
+    expectations below are the ones those DuckDB-driven tests asserted.
     """
 
-    @pytest.mark.asyncio
-    async def test_empty_history_is_not_an_accusation(self, tmp_path):
+    def test_empty_history_is_not_an_accusation(self):
         """A fresh install has no snapshots and has lost nothing."""
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                assert _inventory_snapshot_continuity_check(conn) == []
-        finally:
-            await store.close()
+        assert _check(datetime.now().astimezone(), ()) == []
 
-    @pytest.mark.asyncio
-    async def test_unbroken_run_is_silent(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            async with store.connection() as conn:
-                for n in range(1, 8):
-                    _snapshot(conn, _days_back(now, n))
-                assert _inventory_snapshot_continuity_check(conn, now=now) == []
-        finally:
-            await store.close()
+    def test_unbroken_run_is_silent(self):
+        assert _check(datetime.now().astimezone(), range(1, 8)) == []
 
-    @pytest.mark.asyncio
-    async def test_missing_today_alone_is_silent(self, tmp_path):
+    def test_missing_today_alone_is_silent(self):
         """The job runs at 01:00; before that, today legitimately has none."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            async with store.connection() as conn:
-                for n in range(1, 5):
-                    _snapshot(conn, _days_back(now, n))
-                assert _inventory_snapshot_continuity_check(conn, now=now) == []
-        finally:
-            await store.close()
+        assert _check(datetime.now().astimezone(), range(1, 5)) == []
 
-    @pytest.mark.asyncio
-    async def test_missing_yesterday_warns(self, tmp_path):
+    def test_missing_yesterday_warns(self):
         """Yesterday absent means the job is failing now, and today is next."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            async with store.connection() as conn:
-                for n in (2, 3, 4, 5):
-                    _snapshot(conn, _days_back(now, n))
-                issues = _inventory_snapshot_continuity_check(conn, now=now)
-            assert len(issues) == 1
-            assert issues[0].severity == Severity.WARN
-            assert issues[0].check_name == "inventory_snapshot_gaps"
-            assert issues[0].count == 1
-            assert "cannot be backfilled" in issues[0].description
-        finally:
-            await store.close()
+        issues = _check(datetime.now().astimezone(), (2, 3, 4, 5))
+        assert len(issues) == 1
+        assert issues[0].severity == Severity.WARN
+        assert issues[0].check_name == "inventory_snapshot_gaps"
+        assert issues[0].count == 1
+        assert "cannot be backfilled" in issues[0].description
 
-    @pytest.mark.asyncio
-    async def test_old_gap_is_counted_not_warned(self, tmp_path):
+    def test_old_gap_is_counted_not_warned(self):
         """Already-permanent losses are reported so the number is visible, but
         they are not a live fault — there is nothing left to act on."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            async with store.connection() as conn:
-                for n in range(1, 11):
-                    if n in (6, 7):      # a two-day hole, safely in the past
-                        continue
-                    _snapshot(conn, _days_back(now, n))
-                issues = _inventory_snapshot_continuity_check(conn, now=now)
-            assert len(issues) == 1
-            assert issues[0].severity == Severity.INFO
-            assert issues[0].count == 2
-        finally:
-            await store.close()
+        issues = _check(datetime.now().astimezone(),
+                        [n for n in range(1, 11) if n not in (6, 7)])
+        assert len(issues) == 1
+        assert issues[0].severity == Severity.INFO
+        assert issues[0].count == 2
 
-    @pytest.mark.asyncio
-    async def test_gaps_before_the_first_snapshot_are_not_gaps(self, tmp_path):
+    def test_gaps_before_the_first_snapshot_are_not_gaps(self):
         """History starting three days ago has not "missed" the days before it."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            async with store.connection() as conn:
-                for n in (1, 2, 3):
-                    _snapshot(conn, _days_back(now, n))
-                assert _inventory_snapshot_continuity_check(conn, now=now) == []
-        finally:
-            await store.close()
+        assert _check(datetime.now().astimezone(), (1, 2, 3)) == []
 
-    @pytest.mark.asyncio
-    async def test_losses_older_than_the_window_stop_being_reported(self, tmp_path):
+    def test_losses_older_than_the_window_stop_being_reported(self):
         """The 2026 hole is permanent. Reporting it forever is noise, and noise
         is the failure mode that let it happen."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            old_gap = INVENTORY_CONTINUITY_WINDOW_DAYS + 5
-            async with store.connection() as conn:
-                _snapshot(conn, _days_back(now, old_gap + 1))
-                for n in range(1, INVENTORY_CONTINUITY_WINDOW_DAYS + 1):
-                    _snapshot(conn, _days_back(now, n))
-                assert _inventory_snapshot_continuity_check(conn, now=now) == []
-        finally:
-            await store.close()
+        old_gap = INVENTORY_CONTINUITY_WINDOW_DAYS + 5
+        days = [old_gap + 1, *range(1, INVENTORY_CONTINUITY_WINDOW_DAYS + 1)]
+        assert _check(datetime.now().astimezone(), days) == []
 
     @pytest.mark.asyncio
     async def test_wired_into_the_full_integrity_run(self, tmp_path):
@@ -379,58 +326,31 @@ class TestInventorySnapshotContinuity:
         try:
             now = datetime.now().astimezone()
             async with store.connection() as conn:
-                for n in (2, 3, 4):
-                    _snapshot(conn, _days_back(now, n))
-                names = {i.check_name for i in check_internal_integrity(conn)}
+                names = {i.check_name for i in check_internal_integrity(
+                    conn, inventory_calendar=_calendar(now, (2, 3, 4)))}
             assert "inventory_snapshot_gaps" in names
         finally:
             await store.close()
 
-    # ── Following the writer (stage 4, KS_WRITE_INVENTORY) ──────────────────
-    #
-    # Under the flag the snapshot is taken into `app.inventory_sku_history`,
-    # so this check must read that and not the DuckDB table it used to own.
-    # The facts arrive pre-read because the check is sync and the Postgres
-    # read is async; these pin the three states that arrangement can be in.
-
-    @pytest.mark.asyncio
-    async def test_the_flag_without_a_calendar_says_it_is_not_watching(
-        self, tmp_path, monkeypatch,
-    ):
+    def test_without_a_calendar_it_says_it_is_not_watching(self):
         """A caller that forgot is loud, not silent and not wrong.
 
         This is the one table here that cannot be reconstructed at any price,
         so 'I am not watching it' has to reach a human. It must not report
-        gaps either — the DuckDB copy is frozen under the flag and every day
-        since the switch would look missing.
+        gaps either. Since step 14's S14-11 this holds whatever
+        `KS_WRITE_INVENTORY` says: the check reads no DuckDB table at all.
         """
-        from core import pg_inventory_write
-
-        # Production's state, which this module's fixture otherwise routes
-        # away from: chain 1 writes Postgres (a constant since S14-00).
-        monkeypatch.setattr(pg_inventory_write, "writes_postgres", lambda: True)
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            async with store.connection() as conn:
-                for n in (2, 3, 4):
-                    _snapshot(conn, _days_back(now, n))
-                issues = _inventory_snapshot_continuity_check(conn, now=now)
-            assert [i.check_name for i in issues] == ["inventory_continuity_unwatched"]
-        finally:
-            await store.close()
+        issues = _inventory_snapshot_continuity_check(None, now=datetime.now().astimezone())
+        assert [i.check_name for i in issues] == ["inventory_continuity_unwatched"]
 
     @pytest.mark.asyncio
-    async def test_a_supplied_calendar_is_believed_over_the_local_table(
-        self, tmp_path, monkeypatch,
-    ):
+    async def test_a_supplied_calendar_is_believed_over_the_local_table(self, tmp_path):
         """The calendar decides, so the check genuinely follows the writer.
 
         DuckDB is given a complete run of snapshots and the calendar a gap at
         yesterday. Reading the wrong one returns [], so this fails loudly if
         the local table is still consulted.
         """
-        monkeypatch.setenv("KS_WRITE_INVENTORY", "postgres")
         store = await _make_store(tmp_path)
         try:
             now = datetime.now().astimezone()
@@ -443,37 +363,5 @@ class TestInventorySnapshotContinuity:
                     conn, now=now, calendar=(first, present))
             assert [i.check_name for i in issues] == ["inventory_snapshot_gaps"]
             assert _days_back(now, 1).isoformat() in issues[0].description
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_both_readings_agree_on_the_same_facts(self, tmp_path):
-        """One body, two engines — so the two enumerations must not differ.
-
-        The DuckDB path enumerates the window with GENERATE_SERIES in SQL; the
-        supplied-calendar path enumerates it with a Python range, because
-        `generate_series` spells differently in the two engines and a Python
-        range spells the same everywhere. That is only safe if they agree, so
-        this drives both over identical facts and compares the findings.
-        """
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now().astimezone()
-            kept = (2, 3, 5, 6, 9)
-            async with store.connection() as conn:
-                for n in kept:
-                    _snapshot(conn, _days_back(now, n))
-                from_duckdb = _inventory_snapshot_continuity_check(conn, now=now)
-
-                first = _days_back(now, max(kept))
-                present = frozenset(_days_back(now, n) for n in kept)
-                from_calendar = _inventory_snapshot_continuity_check(
-                    conn, now=now, calendar=(first, present))
-
-            assert from_duckdb and from_calendar, "both must find the gaps"
-            assert [(i.check_name, i.severity, i.count, i.description)
-                    for i in from_duckdb] == \
-                   [(i.check_name, i.severity, i.count, i.description)
-                    for i in from_calendar]
         finally:
             await store.close()
