@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.316
+
+- fix(dq): freshness_orders judges when the order step last wrote
+
+
 ## 3.0.315
 
 - WIP: S14-11 — the copy's not-read-out-of-DuckDB proof stays, without its flag
