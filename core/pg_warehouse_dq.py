@@ -630,9 +630,9 @@ def _row_values_sql() -> str:
     flight, then waiting, then *abandoned*.
     """
     from core.data_quality import _SILVER_ROW_COLUMNS, _silver_row_differs
-    from core.duckdb_store import silver_recompute_ctes
     from core.pg_replication import CLASSIFICATIONS_TABLE, MANAGERS_TABLE
     from core.sql_dialect import POSTGRES
+    from core.warehouse_sql import silver_recompute_ctes
 
     columns = [c for c, _ in _SILVER_ROW_COLUMNS]
     flags = ",\n           ".join(

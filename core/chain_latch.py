@@ -24,9 +24,12 @@ THE ANSWER THE OWNER CHOSE (OD-19 (a), 2026-09-17): THE LATCH WINS
 
 The first Postgres write a chain performs *latches* it. From then on
 `writes_postgres()` answers True whatever the environment says, every consumer
-reads that one answer, and the only way back is `scripts/chain_copy_back.py`
-(DN-08), which copies the rows to DuckDB, compares them at zero and then
-releases both copies of the latch. An environment that disagrees with the latch
+reads that one answer, and the only way back was `scripts/chain_copy_back.py`
+(DN-08), which copied the rows to DuckDB, compared them at zero and then
+released both copies of the latch. Step 14 deleted it (S14-04): a step-14 image
+routes by neither copy (S14-00) and has no way back but an image from before
+step 14, which routes by both — `core.rollback_lever`, the line every page
+about a chain's ownership names. An environment that disagrees with the latch
 is not silently obeyed and not silently ignored: it is published in
 `/api/health`, paged as WARN by the canary, and stamped on the chain's tables
 in `meta.mirror_state` by the shipper.
@@ -65,21 +68,26 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, FrozenSet, Mapping, Optional, Sequence
 
-from core.duckdb_constants import DB_DIR
+# The two file primitives moved to `core.atomic_file` in step 14's S14-01,
+# unchanged. The private names stay bound to them here: `latch` and `release`
+# call them, the suite patches them here, and they keep any caller of the old
+# names working for one release.
+from core.atomic_file import fsync_dir as _fsync_dir
+from core.atomic_file import write_atomic as _write_marker
+from core.paths import DATA_DIR
+from core.rollback_lever import ROLLBACK_RUNBOOK
 
 logger = logging.getLogger(__name__)
 
 # Beside the DuckDB file, resolved the same way it is — `./data` is the one
 # directory both containers mount and the only one the web container (uid 999)
 # is known to be able to write, because it writes the database there.
-MARKER_DIR: Path = DB_DIR / "write-chain-owners"
+MARKER_DIR: Path = DATA_DIR / "write-chain-owners"
 
 # The prefix the audit copy lives under in `meta.chain_watermarks`. Revision
 # 0032's table is reused rather than a new one migrated: it already exists to
@@ -180,23 +188,25 @@ def latch(chain: str, env: str = "") -> str:
         {"chain": chain, "env": env, "latched_at": stamp}, ensure_ascii=False))
     _cache()[chain] = stamp
     logger.warning(
-        "chain latch: %s now owns its tables in Postgres (%s). Only "
-        "scripts/chain_copy_back.py releases this.", chain, stamp)
+        "chain latch: %s now owns its tables in Postgres (%s). Nothing in "
+        "this build releases it; an image from before step 14 routes by this "
+        "marker, so keep it (%s).", chain, stamp, ROLLBACK_RUNBOOK)
     return stamp
 
 
 def release(chain: str) -> bool:
-    """Drop the local marker. DN-08's copy-back is the only caller there should
-    ever be; the tests use it to prove the unlatched behaviour is still real.
+    """Drop the local marker. DN-08's copy-back was the only production caller
+    until step 14's S14-04 deleted it; the tests use it to put a marker back
+    the way they found it.
 
     **The removal is as durable as the creation**, and it has to be for the
     same reason one step later. `_write_marker` fsyncs the directory so a
     rename that never reached the disk cannot unlatch a chain on the next
-    power cut; the copy-back releases the latch *after* it has copied the rows
-    into DuckDB and put `KS_WRITE_*` back, so an unlink that never reached the
-    disk brings the marker back to a chain whose rows are now in both stores —
-    two writers allocating `stock_movements` ids, the state revision 0030
-    forbids and the one this module exists to prevent.
+    power cut; the copy-back released the latch *after* it had copied the
+    rows into DuckDB and put `KS_WRITE_*` back, so an unlink that never
+    reached the disk brought the marker back to a chain whose rows were then
+    in both stores — two writers allocating `stock_movements` ids, the state
+    revision 0030 forbids and the one this module exists to prevent.
     """
     try:
         marker_path(chain).unlink()
@@ -207,38 +217,6 @@ def release(chain: str) -> bool:
         _fsync_dir(MARKER_DIR)
     _cache().pop(chain, None)
     return removed
-
-
-def _fsync_dir(path: Path) -> None:
-    """Push a directory entry — a create or an unlink — to the disk itself."""
-    dir_fd = os.open(str(path), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
-def _write_marker(path: Path, payload: str) -> None:
-    """Temp file, fsync, rename, fsync the directory.
-
-    The marker decides where a chain's writes go for the rest of the machine's
-    life, so a half-written one is worse than none: `_stamp_of` would have to
-    guess, and a rename that never reached the disk would unlatch the chain on
-    the next power cut. This is the arrangement the rest of the repository uses
-    where a file is a decision rather than a cache.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    _fsync_dir(path.parent)
 
 
 def owner_key(table: str) -> str:
@@ -296,8 +274,9 @@ def claimed_chains(owners: Mapping[str, str]) -> Dict[str, str]:
     `writes_postgres()` exists to avoid.
 
     A chain, not a table: ownership passes for a chain as a unit, so one owner
-    row holds all of its tables down. DN-08's copy-back deletes both copies, so
-    a chain released deliberately is not held by this.
+    row holds all of its tables down. DN-08's copy-back deleted both copies,
+    so a chain it released was not held by this; nothing releases one since
+    step 14's S14-04.
     """
     from core.write_chains import WRITE_CHAINS, chain_name
 
@@ -343,7 +322,7 @@ def owned_tables(owners: Mapping[str, str]) -> FrozenSet[str]:
 def unregistered_owned_tables(owners: Mapping[str, str]) -> Dict[str, str]:
     """`{table: latched_at}` for every owner row that names a table no chain in
     this build declares — an image older than the chain, or a chain dropped
-    from `WRITE_CHAINS` without its copy-back. Held down by `owned_tables`,
+    from `WRITE_CHAINS`. Held down by `owned_tables`,
     reported by the daily comparison as `chain_owner_unregistered`."""
     from core.write_chains import WRITE_CHAINS
 

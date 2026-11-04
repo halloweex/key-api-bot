@@ -4,7 +4,8 @@
 This is about the machinery that keeps them agreeing, and every case here is
 one the port shipped wrong or left unguarded:
 
-1. the routed reads lost the thread-pool offload and the query timeout;
+1. the routed reads lost the thread-pool offload and the query timeout
+   (moot since step 14's S14-05, which left them no DuckDB path);
 2. a failing shipper left no trace in the watermark;
 3. three admin endpoints rewrote the UTM in DuckDB and never shipped it —
    and since DN-19, which store a re-parse reaches is `KS_UTM_PARSE`'s to
@@ -98,15 +99,15 @@ class TestTheReadsKeepTheirTimeout:
     with a bare `conn.execute` under `self.connection()`, which blocks the
     whole application and can hold the global store lock without bound —
     worst exactly when the DuckDB path is reached at all, Postgres being down.
+
+    Since step 14's S14-05 there is no DuckDB path to reach: the router asks
+    Postgres and refuses a failure. What stays pinned is that it never takes
+    the store lock and that no traffic read goes round it.
     """
 
     def _router(self):
         from core.repositories.traffic import TrafficMixin
         return inspect.getsource(TrafficMixin._traffic_run)
-
-    def test_the_duckdb_branch_goes_through_the_offloading_helpers(self):
-        src = self._router()
-        assert "self._fetch_one(" in src and "self._fetch_all(" in src
 
     def test_it_does_not_take_the_store_lock_itself(self):
         """The helpers take it. Taking it here as well is a nested

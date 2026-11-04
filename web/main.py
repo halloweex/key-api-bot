@@ -15,7 +15,9 @@ from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
 from web.ratelimit import limiter
 from web.routes import api, pages, auth, chat, websocket
 from web.routes.auth import api_gate, require_admin
-from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
+from web.middleware import (
+    RejectNulMiddleware, RequestLoggingMiddleware, RequestTimeoutMiddleware,
+)
 from bot.database import init_database
 from core import duckdb_switch
 from core.duckdb_store import get_store, close_store
@@ -147,6 +149,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         content={"error": "Internal Server Error", "detail": "An unexpected error occurred."}
     )
 
+
+# Refuse a NUL in an /api/ path or query string before routing (400). Added
+# first, so it sits innermost and the logging middleware still records it.
+app.add_middleware(RejectNulMiddleware)
 
 # Add request logging middleware (adds correlation IDs and timing)
 app.add_middleware(RequestLoggingMiddleware)
@@ -309,8 +315,8 @@ async def startup_event():
     #
     # The write fills NULLs only, so this is a no-op on every boot after the
     # first, and it can never overwrite a campaign the app recorded itself.
-    # Through the SMS router (`_sms_run`), so under KS_SMS_STORE=postgres it
-    # writes Postgres whatever KS_DUCKDB says; the store is only its host.
+    # Through the SMS router (`_sms_run`), so it writes Postgres whatever
+    # KS_DUCKDB says; the store is only its host.
     if store is not None:
         try:
             restored = await store.backfill_sms_campaign_record(

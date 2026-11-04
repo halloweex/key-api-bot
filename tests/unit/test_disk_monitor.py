@@ -379,6 +379,59 @@ class TestSchedulerJob:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_the_directory_is_the_data_directory_not_the_store_s(
+            self, tmp_path, monkeypatch):
+        """Step 14's S14-01: the directory sampled and the heartbeat host cron
+        reads are `core.paths.DATA_DIR`'s; only the file's own size is read
+        through the DuckDB store. In production the two are one directory —
+        the file sits in it — so here they are pulled apart, and the store is
+        not a DuckDB store at all, so nothing but the path decides where the
+        heartbeat lands. Mutation: `store.db_path.parent` back in either the
+        `sample_data_dir` call or `health_dir`."""
+        from types import SimpleNamespace
+
+        import core.disk_monitor as disk_monitor
+        import core.scheduler as scheduler_module
+        from core import watchdog_samples
+        from core.scheduler import BackgroundScheduler
+
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "something").write_bytes(b"x" * 4096)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        store = SimpleNamespace(db_path=elsewhere / "analytics.duckdb")
+        monkeypatch.setattr(scheduler_module, "DATA_DIR", data)
+
+        disk_states, dirs = [], []
+        real_sample_data_dir = disk_monitor.sample_data_dir
+
+        def disk_state(path):
+            disk_states.append(path)
+            return {"sampled_at": datetime.now(timezone.utc), "db_size_mb": 10.0,
+                    "disk_pct_used": 25.0, "disk_free_gb": 55.0}
+
+        def data_dir(path, **kwargs):
+            dirs.append(path)
+            return real_sample_data_dir(path, **kwargs)
+
+        with patch("core.disk_monitor.sample_disk_state", side_effect=disk_state), \
+             patch("core.disk_monitor.sample_data_dir", side_effect=data_dir), \
+             patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+             patch.object(watchdog_samples, "disk_tick",
+                          AsyncMock(return_value=dict(watchdog_samples.EMPTY_DISK))), \
+             patch("core.alerting.resolve_group", new=AsyncMock()), \
+             patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
+            result = await BackgroundScheduler()._run_disk_watchdog()
+
+        assert disk_states == [str(elsewhere / "analytics.duckdb")]
+        assert dirs == [str(data)]
+        assert result["data_dir_mb"] is not None
+        assert (data / "health" / "watchdog_last_sample").exists()
+        assert not (elsewhere / "health").exists()
+        send.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_growth_is_measured_and_reported_but_never_paged(self, tmp_path):
         """A mid-week sawtooth reading: +618 MB in 24h, the exact delta that
         paged CRITICAL on 2026-08-12. The number must reach the job result

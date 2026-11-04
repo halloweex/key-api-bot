@@ -27,6 +27,10 @@ from urllib.parse import urlparse
 
 import httpx
 
+# The ownership lever since step 14's S14-04 (a module with no imports of its
+# own: this one must not import the latch module, `test_chain_latch.py`).
+from core.rollback_lever import ROLLBACK_LEVER
+
 logger = logging.getLogger(__name__)
 
 # ─── Tunables ───────────────────────────────────────────────────────────────
@@ -474,8 +478,9 @@ def check_write_chain_latch(payload: Optional[dict]) -> "list[tuple[str, str]]":
     Warn, not critical: nothing is failing. The writes go where the rows are,
     which is the safe answer and the deliberate one — but somebody has edited
     a variable expecting a rollback that did not happen, and the shipper is
-    stamping those tables failing meanwhile. The only way back is
-    `scripts/chain_copy_back.py`.
+    stamping those tables failing meanwhile. Since step 14 no flag routes
+    (S14-00) and no copy-back exists (S14-04): the lever is
+    `core.rollback_lever.ROLLBACK_LEVER`, as for every ownership page.
 
     Judged from the published block alone, and not from the marker files —
     which this container *can* see, since `docker-compose.yml` mounts the same
@@ -1168,7 +1173,9 @@ def check_warehouse_way_back_refused(payload: Optional[dict]) -> "list[tuple[str
 
     Pages: either somebody asked for the way back and did not get it, or a
     start with a precondition unmet took it on its own; both need a person,
-    and the lever is not the way back's — the chains are copied back first.
+    and the lever is not the way back's. It was to copy the chains back
+    first; since step 14's S14-04 nothing does, and the action names
+    `core.rollback_lever.ROLLBACK_LEVER`.
     Web serves. Postgres derives only on its own signal: under any other
     KS_PG_DERIVE its rebuild rides the DuckDB tick, which a `postgres` start
     does not run, so then NOTHING derives and the message says so — read
@@ -1342,28 +1349,6 @@ def duckdb_silent(payload: Optional[dict]) -> Optional[bool]:
     if not isinstance(block, dict) or block.get("mode") != "off":
         return None
     return not block.get("opened_while_off")
-
-
-def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `goals_history` block: a KS_GOALS_HISTORY web refuses
-    (chain 7b). Since chain 7b-4 the variable is retired — unset and `silver`
-    both read Silver — so this is anything else, `bridge` included.
-
-    Critical, unlike the siblings above, and for `write_chain_flag_invalid`'s
-    reason: those run as duckdb and nothing fails, while this one raises at
-    every goal history read on purpose — a value naming a history that does
-    not exist must not be answered in silence — so the dashboard's goal
-    widget (`/goals/smart`), the other calculator pages under `/goals/` and
-    `POST /goals/recalculate` answer 500 and the Monday job fails, and none
-    of those pages anybody by itself (`GET /goals`, `/goals/history` and
-    setting a goal never read that history, and answer). An absent block is
-    not a failure; an older web publishes none.
-    """
-    block = (payload or {}).get("goals_history")
-    if isinstance(block, dict) and block.get("error"):
-        return [("goals_history_mode_invalid",
-                 f"goal history: {block['error']}")]
-    return []
 
 
 # `(field of /api/health's backups block, what it proves, the script that
@@ -1625,15 +1610,6 @@ async def run_canary(
         if held_back:
             severity = "critical"
 
-        # A KS_GOALS_HISTORY web refuses (anything but unset or silver since
-        # chain 7b-4): every goal history read raises, so this pages rather
-        # than warns.
-        goals_history_failures = check_goals_history_mode(payload)
-        for key, message in goals_history_failures:
-            fail(key, message)
-        if goals_history_failures:
-            severity = "critical"
-
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
         marks_failures = check_derivation_marks(payload)
@@ -1748,8 +1724,9 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
     ("warehouse_preconditions_unmet",
      "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
-    ("warehouse_way_back_refused",
-     "Copy the named chains back first (scripts/chain_copy_back.py, chain 5 before chain 3), then recreate web for the way back; nothing derives meanwhile unless KS_PG_DERIVE=own"),
+    # Since step 14 nothing copies a chain back (S14-04): the way back from
+    # step 13 is an image from before step 14, and only after its checks.
+    ("warehouse_way_back_refused", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     # After step 13's: when it is held, `warehouse_postgres` is its symptom.
     # The host's sidecars read `.env`, not the verdict, so a hold also stops
     # the nightly snapshot and the Sunday compaction of the file web writes
@@ -1768,7 +1745,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("buyer_sync_",
      "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
     ("write_chain_flag_mismatch",
-     "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
+     f"Set KS_WRITE_* to postgres. {ROLLBACK_LEVER}"),
     ("read_fallback_mode_invalid",
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
     ("warehouse_mode_invalid",
@@ -1786,8 +1763,6 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     ("duckdb_mode_invalid",
      "Set KS_DUCKDB to on or off in .env, then recreate web"),
-    ("goals_history_mode_invalid",
-     "Set KS_GOALS_HISTORY=silver in .env and keep the line (an image from before 7b-4 reads it unset as the bridge), then recreate web; the calculators, smart goal and Monday job fail until then"),
     # Last: when an engine is down its own key names the cause, and a fallback
     # or a refusal is what that cause cost the pages. A route is a cause of
     # its own, and its lever is `.env`, so it goes first of the three.

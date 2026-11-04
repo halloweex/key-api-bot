@@ -58,7 +58,6 @@ async def pool(monkeypatch):
     for name in ("KS_READ_WEEKLY", "KS_READ_TRAFFIC"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setenv("KS_READ_WEEKLY", "postgres")
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     rows = []
@@ -109,8 +108,8 @@ async def test_the_preview_builds_the_week_from_postgres(pool):
 # ─── The traffic report ─────────────────────────────────────────────────────
 #
 # `--report traffic` builds the week through the traffic tab's own repository
-# methods, which read `silver.orders LEFT JOIN silver.order_utm` once
-# `KS_READ_TRAFFIC=postgres`. Seeded here for a week of its own, under ids no
+# methods, which read `silver.orders LEFT JOIN silver.order_utm` (Postgres
+# alone since step 14's S14-05). Seeded here for a week of its own, under ids no
 # other fixture uses, and built by `send_traffic` itself with only the
 # Telegram send stood in — so a read that went anywhere but Postgres would
 # reach the store that refuses to connect and stop the run.
@@ -153,7 +152,6 @@ async def traffic_pool(monkeypatch):
     for name in ("KS_READ_WEEKLY", "KS_READ_TRAFFIC"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean_traffic(pool)
     async with pool.acquire() as conn:

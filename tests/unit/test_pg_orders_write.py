@@ -96,15 +96,15 @@ class TestTheDeclaration:
 
     def test_the_archive_is_not_a_chain_table(self):
         """`app.order_versions` has one writer in both modes and no DuckDB
-        copy; declaring it would make `chain_specs` raise."""
+        copy (declaring it made the copy-back's `chain_specs` raise, until
+        step 14's S14-04 deleted it)."""
         assert "app.order_versions" not in pow_.CHAIN_TABLES
         assert "bronze.expense_types" not in pow_.CHAIN_TABLES   # chain 6a's
 
-    def test_registered_and_resolved_by_its_short_name(self):
-        from core.chain_transfer import resolve_chain
-
+    def test_registered_and_found_by_its_sync_key(self):
+        """It was resolved by its short name too, by the copy-back that step
+        14's S14-04 deleted."""
         assert pow_ in write_chains.WRITE_CHAINS
-        assert resolve_chain("orders") is pow_
         assert write_chains.chain_for_sync_key("last_sync_orders") is pow_
 
 
@@ -245,7 +245,7 @@ class TestTheRouting:
     async def test_the_sync_s_one_write_goes_to_postgres(self, met, duck):
         """Mutation: remove the branch in `_upsert_orders_with_expenses` —
         DuckDB's writer then refuses, and the order step fails."""
-        from core.duckdb_store import UpsertResult
+        from core.pg_orders_write import UpsertResult
         from core.sync_service import SyncService
 
         met.setenv("KS_WRITE_ORDERS", "postgres")
@@ -566,11 +566,6 @@ class TestTheSearchCursorMovesWithTheChain:
                 "SELECT value FROM sync_metadata WHERE key = 'last_sync_meilisearch_pg'"
             ).fetchone()[0] == frozen.isoformat()
 
-    def test_the_copy_back_carries_it_and_the_release_deletes_it(self):
-        from core.chain_transfer import _carried_keys
-
-        assert "last_sync_meilisearch_pg" in _carried_keys(pow_)
-
     @pytest.mark.asyncio
     async def test_the_freshness_check_does_not_call_it_unwatched(self, flags, duck):
         """It has no threshold, so it is watched in no mode; a run that could
@@ -772,14 +767,28 @@ class TestThePreflight:
         """Each preflight is bounded at `_PREFLIGHT_TIMEOUT_S` (5 s). Asked one
         after the other, a hung Postgres cost 10 s — the canary's whole
         `HEALTH_TIMEOUT_S` — before anything else `/api/health` builds (the
-        chain-3 review). Mutation: await the two in turn."""
-        import time
+        chain-3 review). Mutation: await the two in turn.
 
+        Judged by order, not by the clock: both must be asked before the
+        first bound expires. A stopwatch round the block measured everything
+        else it builds too, and a CI runner once took 1.30 s against a limit
+        of 0.85 — more than two bounds in a row would have cost."""
         from core import pg_inventory_write
         from web.routes.api import health
 
+        seen = []
+
         async def hang():
+            seen.append("asked")
             await asyncio.sleep(3600)
+
+        bounded = health._bounded_preflight
+
+        async def bounded_and_seen(preflight):
+            answer = await bounded(preflight)
+            if preflight is hang:          # it never answers: the bound expired
+                seen.append("bound expired")
+            return answer
 
         bound = 0.5
         health._preflight_cache.update(data=None, expires_at=0)
@@ -787,14 +796,14 @@ class TestThePreflight:
         try:
             with patch.object(pg_inventory_write, "preflight", hang), \
                     patch.object(pow_, "preflight", hang), \
+                    patch.object(health, "_bounded_preflight", bounded_and_seen), \
                     patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                started = time.monotonic()
                 block = await health._write_chains_block()
-                took = time.monotonic() - started
         finally:
             health._preflight_cache.update(data=None, expires_at=0)
             health._orders_preflight_cache.update(data=None, expires_at=0)
-        assert took < 1.7 * bound, f"{took:.2f} s for two preflights bounded at {bound} s"
+        assert seen == ["asked", "asked", "bound expired", "bound expired"], (
+            f"the second preflight was not asked before the first bound expired: {seen}")
         for chain in (pg_inventory_write.CHAIN, pow_.CHAIN):
             assert block[chain]["preflight"]["ok"] is False
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
@@ -806,19 +815,26 @@ class TestThePreflight:
         "5 s" answer came after 60 s for chain 3 and 30 s for chain 1, and
         each held its cache lock — and every later /api/health — meanwhile
         (batch-E review). A hang that cancels promptly, as above, cannot see
-        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`."""
-        import time
+        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`.
 
+        Judged by order, not by the clock: the cancel request is answered
+        only after the block has answered, so the block must answer while
+        every cut read is still unwinding — and every one must then unwind.
+        It was `took < 1.7 × bound`, a margin of 0.21 s for whatever else the
+        block builds, the margin a CI runner overran in the test above."""
         from core import pg_inventory_write, pg_managers_write
         from web.routes.api import health
 
-        bound, unwind = 0.3, 2.0
+        bound = 0.3
+        cancel_answered = asyncio.Event()
+        unwound = []
 
         async def cancel_hangs():
             try:
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
-                await asyncio.sleep(unwind)        # the cancel request, unanswered
+                await cancel_answered.wait()        # the cancel request, unanswered
+                unwound.append("unwound")
                 raise
 
         caches = (health._preflight_cache, health._orders_preflight_cache,
@@ -830,14 +846,24 @@ class TestThePreflight:
                     patch.object(pow_, "preflight", cancel_hangs), \
                     patch.object(pg_managers_write, "preflight", cancel_hangs), \
                     patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                started = time.monotonic()
-                block = await health._write_chains_block()
-                took = time.monotonic() - started
-                await asyncio.sleep(unwind + 0.2)    # let the left-behind reads end
+                # Not a limit on the answer: a block that waits for the
+                # unwind waits for ever, and this turns that into a failure.
+                try:
+                    block = await asyncio.wait_for(health._write_chains_block(), 10)
+                except asyncio.TimeoutError:
+                    pytest.fail("the answer waited for the cut reads to unwind")
+                unwound_at_answer = list(unwound)
+                cancel_answered.set()
+                for _ in range(200):                 # let the left-behind reads end
+                    if len(unwound) == 3:
+                        break
+                    await asyncio.sleep(0.01)
         finally:
+            cancel_answered.set()
             for cache in caches:
                 cache.update(data=None, expires_at=0)
-        assert took < 1.7 * bound, f"{took:.2f} s for preflights bounded at {bound} s"
+        assert unwound_at_answer == [], "the answer waited for a cut read to unwind"
+        assert unwound == ["unwound"] * 3, "a read cut at the bound was not cancelled"
         for chain in (pg_inventory_write.CHAIN, pow_.CHAIN, pg_managers_write.CHAIN):
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
 

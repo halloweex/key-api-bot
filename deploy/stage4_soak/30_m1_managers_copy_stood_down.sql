@@ -63,9 +63,9 @@
 --   stood down and nothing is written anywhere. Fix the .env line.
 -- - owner rows and managers_on=0, or pending with the rows older than the
 --   script's read of the marker: the marker is lost. Restore
---   data/write-chain-owners/pg_managers_write, else
---   scripts/chain_copy_back.py managers. Not the flag: at duckdb it is the
---   same state.
+--   data/write-chain-owners/pg_managers_write. Not the flag: at duckdb it is
+--   the same state. The copy-back went with step 14's S14-04; the detail
+--   names core.rollback_lever's lever.
 -- - a table written or failing after the handover: something is writing
 --   DuckDB's copy over the chain's. Read M2, then the web log for 'replicate:'.
 WITH clock AS (
@@ -136,8 +136,8 @@ SELECT 'M1 managers copy stood down'::text AS "check",
                    'data/write-chain-owners/pg_managers_write is gone with KS_WRITE_MANAGERS not '
                    'postgres: the marker is lost, a classification is written to DuckDB again '
                    'and the replica stands down on the owner rows, so it never reaches Postgres '
-                   '(chain_latch_disagrees). Restore the marker, else '
-                   'scripts/chain_copy_back.py managers',
+                   '(chain_latch_disagrees). Restore the marker. '
+                   'Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'neither table written by a copy ' || since.said END
@@ -159,8 +159,8 @@ SELECT 'M1 managers copy stood down'::text AS "check",
                    'the marker is lost. While a precondition is unmet (/api/health '
                    'write_chains.pg_managers_write.unmet_precondition) a classification goes to '
                    'DuckDB, and the replica stands down on the owner rows, so it never reaches '
-                   'Postgres (chain_latch_disagrees). Restore the marker, else '
-                   'scripts/chain_copy_back.py managers; taking the flag back changes nothing',
+                   'Postgres (chain_latch_disagrees). Restore the marker; taking the flag back '
+                   'changes nothing. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN 'invalid' THEN
                'KS_WRITE_MANAGERS is set to a value no chain understands: chain 5 is stood down'

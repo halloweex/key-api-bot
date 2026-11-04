@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 from core.utm_classify import (
     ORGANIC_CHANNELS,
     classify_traffic,
+    first_order_channel,
     organic_channel,
     organic_detail,
     parse_utm_from_comment,
@@ -33,50 +34,29 @@ class TrafficMixin:
     async def _traffic_run(
         self, sql: str, params: "list | None" = None, *, mode: str = "all",
     ):
-        """Run one traffic statement against whichever engine the flag names.
+        """Run one traffic statement against Postgres.
 
         The bodies below carry `{silver_orders}`, `{order_utm}`,
         `{gold_daily_revenue}`, `{gold_revenue_rollup}` and
-        `{manual_expenses}` holes; `render_tables` fills them for the engine
-        that is about to answer. One body, two engines — and the fill happens
-        *inside* this method rather than at the call site, because a caller
-        that picks the fragment from the flag renders the Postgres shape into
-        the DuckDB fallback, which is how `/marketing` was broken for an hour.
+        `{manual_expenses}` holes; `render_tables` fills them for Postgres
+        here rather than at the call site.
+
+        One path since step 14's S14-05: the Postgres read, and on any
+        failure a refusal — the 503 naming `traffic` that `fall_back` gave
+        under `KS_READ_FALLBACK=off`, production's mode since 2026-10-09.
+        `KS_READ_TRAFFIC` is not read here, and nothing here reaches for
+        DuckDB; without `KS_PG_DSN` the pool raises and that is the refusal.
         """
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        from core.sql_dialect import POSTGRES, render_tables
 
         from core import pg_traffic_read
 
         params = list(params or [])
-        read_fallback.no_address("traffic", pg_traffic_read)
-        if pg_traffic_read.enabled() and pg_traffic_read.available():
-            try:
-                rows = await pg_traffic_read.fetch(
-                    render_tables(sql, POSTGRES), params,
-                )
-                return (rows[0] if rows else None) if mode == "one" else rows
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("traffic", exc)
-
-        # `_fetch_one`/`_fetch_all`, not a bare `conn.execute` under
-        # `self.connection()`. They take the store lock themselves — so this
-        # must not be wrapped in one, the lock is not reentrant and a nested
-        # acquisition hangs rather than raises — and they add the two things
-        # this tab is the only repository to have ever had: the query runs in
-        # a thread so the event loop keeps answering, and it is bounded by
-        # DEFAULT_QUERY_TIMEOUT, on whose expiry they call `conn.interrupt()`
-        # and wait for the thread to come off the connection before raising.
-        #
-        # The first cut of this router called `conn.execute` directly, which
-        # is what the other four ported tabs do — but they never had the
-        # offloading to lose, and this one did. Without it the fallback path
-        # blocks the whole application for the length of a DuckDB query and
-        # can hold the global store lock without bound, which is worst
-        # exactly when it is reached: Postgres already being down.
-        duck = render_tables(sql, DUCKDB)
-        if mode == "one":
-            return await self._fetch_one(duck, params)
-        return await self._fetch_all(duck, params)
+        try:
+            rows = await pg_traffic_read.fetch(render_tables(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("traffic", exc)
+        return (rows[0] if rows else None) if mode == "one" else rows
 
     # The two expressions that decide what a chart calls an order, repeated
     # verbatim in five places below because a GROUP BY cannot name the alias
@@ -528,6 +508,132 @@ class TrafficMixin:
                     'details_total': len(details.get(c, {})),
                 }
                 for c in names
+            ],
+        }
+
+    async def get_traffic_pixel_only(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "all",
+        source_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """The pixel-only orders, by the buyer: new or returning, and the
+        channel their very first order came through.
+
+        `pixel_only` is a website order that arrived with no tags, only the
+        Meta or TikTok pixel's cookie — and the pixel fires on most tagged
+        orders too, so the bucket says "no tag reached us", not "the pixel
+        brought them". Measured on production 2026-10-28, 180 days of retail:
+        of 1 616 such buyers 38% had also bought through organic and 21%
+        through ads, and in August 2026, when the comment template lost its
+        UTM, the bucket went from ~30% of website orders to 70% while organic
+        fell from 35% to 10%. This says which of those people the shop already
+        knew, and from where.
+
+        "First" is Silver's own rule for a new buyer: the earliest order that
+        is not a return, from every source and sales type, ties broken by id —
+        so a buyer counted new here is exactly the one `is_new_customer`
+        marks. A new buyer's pixel order is on their first day; their first
+        channel is usually `pixel_only` itself, or another order the same day.
+        People do not add up: a buyer with a pixel order on their first day
+        and another later is in both `new` and `returning`, once in `totals`.
+        """
+        filters = [
+            "NOT s.is_return",
+            "s.is_active_source",
+            "s.order_date IS NOT NULL",
+            "s.order_date >= ?",
+            "s.order_date <= ?",
+            f"{self._TRAFFIC_TYPE_EXPR} = 'pixel_only'",
+        ]
+        params: list = [start_date, end_date]
+        if source_id:
+            filters.append("s.source_id = ?")
+            params.append(source_id)
+        if sales_type != "all":
+            filters.append("s.sales_type = ?")
+            params.append(sales_type)
+        where_clause = " AND ".join(filters)
+
+        # Every buyer's first order is ranked over the whole of Silver rather
+        # than over the buyers in the window: a second copy of the filters
+        # inside the ranking would be a second place to keep them in step.
+        rows = await self._traffic_run(f"""
+            SELECT p.id, p.buyer_id, p.is_new_customer, p.grand_total,
+                   f.source_id, f.tagged, f.platform, f.traffic_type,
+                   f.utm_medium, f.utm_campaign
+            FROM (
+                SELECT s.id, s.buyer_id, s.is_new_customer, s.grand_total
+                FROM {{silver_orders}} s
+                LEFT JOIN {{order_utm}} u ON s.id = u.order_id
+                WHERE {where_clause}
+            ) AS p
+            LEFT JOIN (
+                SELECT ranked.buyer_id, ranked.source_id, ranked.tagged,
+                       ranked.platform, ranked.traffic_type,
+                       ranked.utm_medium, ranked.utm_campaign
+                FROM (
+                    SELECT s.buyer_id, s.source_id,
+                        u.traffic_type IS NOT NULL AS tagged,
+                        {self._PLATFORM_EXPR} AS platform,
+                        {self._TRAFFIC_TYPE_EXPR} AS traffic_type,
+                        COALESCE(u.utm_medium, '') AS utm_medium,
+                        COALESCE(u.utm_campaign, '') AS utm_campaign,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY s.buyer_id ORDER BY s.order_date, s.id
+                        ) AS rn
+                    FROM {{silver_orders}} s
+                    LEFT JOIN {{order_utm}} u ON s.id = u.order_id
+                    WHERE NOT s.is_return
+                      AND s.buyer_id IS NOT NULL
+                      AND s.order_date IS NOT NULL
+                ) AS ranked
+                WHERE ranked.rn = 1
+            ) AS f ON f.buyer_id = p.buyer_id
+        """, params)
+
+        def _bucket() -> Dict[str, Any]:
+            return {'orders': 0, 'revenue': 0.0, 'buyers': set()}
+
+        totals, new, returning = _bucket(), _bucket(), _bucket()
+        firsts: Dict[tuple, Dict[str, Any]] = {}
+        # `or []` for the checker: `_traffic_run` is typed for `mode="one"` too.
+        for (_oid, buyer_id, is_new, total, f_source, f_tagged, f_platform,
+             f_type, f_medium, f_campaign) in rows or []:
+            if f_type is None:
+                key = ("unknown", "unknown")
+            else:
+                key = first_order_channel(
+                    source_id=f_source, tagged=bool(f_tagged),
+                    platform=f_platform, traffic_type=f_type,
+                    utm_medium=f_medium, utm_campaign=f_campaign,
+                )
+            row = firsts.setdefault(key, {**_bucket(), 'new_buyers': set()})
+            for bucket in (totals, new if is_new else returning, row):
+                bucket['orders'] += 1
+                bucket['revenue'] += float(total)
+                if buyer_id is not None:
+                    bucket['buyers'].add(buyer_id)
+            if is_new and buyer_id is not None:
+                row['new_buyers'].add(buyer_id)
+
+        def _out(bucket: Dict[str, Any]) -> Dict[str, Any]:
+            return {**_rounded(bucket), 'buyers': len(bucket['buyers'])}
+
+        return {
+            'period': {'start': start_date.isoformat(), 'end': end_date.isoformat()},
+            'totals': _out(totals),
+            'new': _out(new),
+            'returning': _out(returning),
+            'first_channels': [
+                {'group': group, 'channel': channel, **_out(v),
+                 'new_buyers': len(v['new_buyers'])}
+                for (group, channel), v in sorted(
+                    firsts.items(),
+                    key=lambda kv: (-kv[1]['revenue'], -len(kv[1]['buyers']),
+                                    kv[0]),
+                )
             ],
         }
 

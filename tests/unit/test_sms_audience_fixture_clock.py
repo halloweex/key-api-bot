@@ -37,8 +37,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import tests
-from core.duckdb_store import DuckDBStore
 from core.repositories.customers import SmsAudienceFilters, SmsAudienceGroup
+from tests.integration import pg_sms_seed
 
 KYIV = ZoneInfo("Europe/Kyiv")
 TESTS = Path(tests.__file__).parent
@@ -283,19 +283,19 @@ async def test_a_suite_collected_before_midnight_still_finds_the_92nd_day(
     tmp_path, monkeypatch,
 ):
     """Collected yesterday at 23:59, run today: buyer 12 is exactly 92 days
-    back from the store's today, and stays in the 92-day window."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)   # DuckDB is this test's engine (S14-00)
+    back from the store's today, and stays in the 92-day window. The store is
+    Postgres, `/sms`'s only one since step 14's S14-08 (it was DuckDB until
+    then); skipped without `KS_PG_DSN`."""
+    if not pg_sms_seed.DSN:
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
     yesterday = datetime.now(KYIV).date() - timedelta(days=1)
     clock = _Clock(datetime.combine(yesterday, time(23, 59), KYIV))
     fx = _load(FIXTURE, clock, monkeypatch)          # collection
     clock.moment = None                              # the run, past midnight
-    store = DuckDBStore(db_path=tmp_path / "midnight.duckdb")
-    await store.connect()
-    try:
-        async with store.connection() as conn:
-            fx.seed_duckdb_conn(conn)
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        store = pg_sms_seed.store(tmp_path, "midnight.duckdb")
+        async with pg_sms_seed.pg_conn() as conn:
+            await fx.seed_postgres(conn)
 
         async def ids(group):
             result = await store.get_sms_segments(
@@ -312,5 +312,3 @@ async def test_a_suite_collected_before_midnight_still_finds_the_92nd_day(
             assert fx.recipients(fx.matched(window, **terms)) == answer, label
             got = await ids(SmsAudienceGroup(window, SmsAudienceFilters(**fields())))
             assert got == answer, label
-    finally:
-        await store.close()

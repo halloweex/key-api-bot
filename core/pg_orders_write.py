@@ -16,9 +16,10 @@ here IS the write: a failure raises, the sync's order step records it and
 holds `last_sync_orders` where it was (`SyncService._orders_step_postgres`),
 and the next tick re-fetches the same 24-hour window. Nothing is lost while
 Postgres is away — KeyCRM still holds every order — and nothing lands in a
-store nobody reads. The way back is `scripts/chain_copy_back.py orders`, and
-the flip waits for evidence that Postgres itself can be got back
-(`unmet_precondition`).
+store nobody reads. The way back was `scripts/chain_copy_back.py orders`
+(deleted in step 14's S14-04; the way back since is an image from before
+step 14, `core.rollback_lever`), and the flip waited for evidence that
+Postgres itself can be got back (`unmet_precondition`).
 
 WHAT MOVES TOGETHER, AND WHY IN ONE TRANSACTION
 
@@ -83,10 +84,12 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` and claims the four owner rows inside the writing
 transaction, so the owner row shares an `xmin` with the row it was taken for.
-From the first order written here only `scripts/chain_copy_back.py orders` can
-move the writes back to DuckDB. A batch with nothing to write — every order
-already in its state and no expense — reads that on the same connection
-before the latch and returns, so an idle tick latches nothing.
+From the first order written here only `scripts/chain_copy_back.py orders`
+could move the writes back to DuckDB (deleted in step 14's S14-04; the way
+back since is an image from before step 14, `core.rollback_lever`). A batch
+with nothing to write — every order already in its state and no expense —
+reads that on the same connection before the latch and returns, so an idle
+tick latches nothing.
 
 PRECONDITIONS THE FLAG ENFORCED — UNTIL S14-00
 
@@ -124,14 +127,16 @@ the order step asks every minute.
 
 A process that once found one unmet under the flag stays held until it ends
 (`held_until_restart`): the facts above move inside a running web, and the
-flip must happen at a start, after `--handover`, never on its own in the
-middle of a day (`unmet_precondition`).
+flip had to happen at a start, after `--handover` (deleted with the way
+back in step 14's S14-04), never on its own in the middle of a day
+(`unmet_precondition`).
 """
 from __future__ import annotations
 
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -140,17 +145,45 @@ from core import chain_latch
 
 logger = logging.getLogger(__name__)
 
+
+# What an order upsert did — the shape `upsert_orders_with_expenses` returns
+# and `SyncService._upsert_orders_with_expenses` reads. It was DuckDB's
+# (`core.duckdb_store`) until step 14's S14-01 moved it to its one remaining
+# producer, unchanged; `core.duckdb_store` re-exports it for one release.
+@dataclass(frozen=True)
+class UpsertResult:
+    """What an order upsert actually did.
+
+    `count` used to be the whole return, and it counts a row that was already
+    in the desired state as a success — correct for "did this work", useless
+    for "what changed". The sync loop consumed it as the latter and marked the
+    entire fetched window dirty on every cycle, which is how a warehouse with
+    no new data rebuilt 583 dates every two minutes. `changed_ids` is the set
+    of rows actually written, and it is what callers should drive work from.
+    """
+
+    count: int                  # rows in the desired state (written or already correct)
+    changed_ids: List[int]      # rows this call actually wrote
+    skipped_unchanged: int      # rows already in the desired state
+    failed: int                 # rows rejected by a constraint/transaction error
+    deferred_to_full_sync: int = 0  # unknown ids a header-only refresh left for a full writer
+
+    def __len__(self) -> int:
+        return self.count
+
+
 WRITE_ENV = "KS_WRITE_ORDERS"
 
 # What this chain is called in `core.write_chains`, in the local latch marker
 # and in the `/api/health` block. One spelling, so a marker written by one
-# release is still read by the next. `scripts/chain_copy_back.py orders`.
+# release is still read by the next.
 CHAIN = "pg_orders_write"
 
 # The tables this chain writes (module docstring). `core.write_chains` reads
 # this, and through it the sync's mirrors, the hourly shipper (the misses),
-# the backfills, the daily comparisons and the copy-back. The two order tables
-# are `pg_landing.ORDER_UNIT` and pass as one.
+# the backfills and the daily comparisons (and the copy-back, until step 14's
+# S14-04 deleted it). The two order tables are `pg_landing.ORDER_UNIT` and
+# pass as one.
 CHAIN_TABLES: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses",
     "app.order_backfill_misses")
@@ -183,7 +216,8 @@ LOCKOUT_REVISION = "0035_batch_e_chains"
 # The `sync_metadata` keys that move with it. The store's getter and setter
 # route both through `core.write_chains.chain_for_sync_key` to
 # `meta.chain_watermarks`, so the monotonicity guard reads the row it writes;
-# the copy-back carries both into DuckDB and the release deletes both.
+# the copy-back carried both into DuckDB and its release deleted both, until
+# step 14's S14-04 deleted it.
 #
 # `last_sync_orders` — what the incremental sync stamps after a batch lands
 # and the full sync stamps from `MAX(updated_at)`.
@@ -198,7 +232,9 @@ LOCKOUT_REVISION = "0035_batch_e_chains"
 # instead of re-indexing everything. Neither `_freshness_check` nor the
 # standing watch judges it: it is in no `FRESHNESS_THRESHOLDS` entry, and
 # `CHAIN_WATERMARK_MAX_AGE_MIN` is None. `last_sync_meilisearch`, the cursor
-# of the index built from DuckDB, is a DuckDB clock and stays DuckDB's.
+# of the index built from DuckDB, was a DuckDB clock and stayed DuckDB's,
+# never a chain's; it went with that index's frames in step 14's S14-07, and
+# nothing reads it now (history).
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders", "last_sync_meilisearch_pg")
 
 # Not judged by `core.pg_chain_invariants`: `last_sync_orders` holds KeyCRM's
@@ -383,8 +419,8 @@ async def preflight() -> Dict[str, Any]:
     what Postgres says of the landing the chain inherits: the history of each
     of the three tables carried across (`backfilled_at`), and none of their
     mirrors failing. The error's class only — the endpoint is public. Not a
-    substitute for `scripts/chain_copy_back.py orders --handover`, which is
-    the gate: read this first, then stop web and ask the handover."""
+    substitute for `scripts/chain_copy_back.py orders --handover`, which was
+    the gate (deleted with the way back in step 14's S14-04)."""
     if mode() == "postgres":
         return {"ok": None, "reasons": []}
     # One entry per precondition, never the joined form split back apart.
@@ -641,7 +677,6 @@ async def upsert_orders_with_expenses(
     `changed_ids` what was written, `failed` what Postgres would refuse.
     """
     from core import pg_landing
-    from core.duckdb_store import UpsertResult
     from core.landing_rows import EXPENSE_COLUMNS, expense_rows, landed_orders
     from core.pg_order_versions import CHANGE
 
@@ -761,8 +796,9 @@ async def record_backfill_misses(misses: Mapping[int, str]) -> int:
 
     `checked_at` is the web process's UTC clock, passed in — the clock
     DuckDB's `CURRENT_TIMESTAMP` was, and the one the copy-back's handover
-    orders the two stores' rows by — never Postgres's `now()`. The statement
-    is spelled here so the latch walk sees a writer."""
+    ordered the two stores' rows by (an image from before step 14 still does;
+    S14-04 deleted this build's) — never Postgres's `now()`. The statement is
+    spelled here so the latch walk sees a writer."""
     if not misses:
         return 0
     checked_at = _now_utc()

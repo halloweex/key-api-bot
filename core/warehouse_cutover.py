@@ -92,7 +92,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 from core import duckdb_switch
-from core.duckdb_constants import DB_DIR
+from core.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -967,7 +967,7 @@ _FROZEN_WRITER_SQL = f"SELECT value FROM {FROZEN_COPY} WHERE key = $1"
 
 # Beside the DuckDB file whose verdicts it describes, as the write-chain
 # markers are (`core.chain_latch.MARKER_DIR`); `tests/conftest.py` redirects it.
-UTM_MARKER: Path = DB_DIR / "warehouse-utm-reparsed-at"
+UTM_MARKER: Path = DATA_DIR / "warehouse-utm-reparsed-at"
 
 
 async def read_frozen_writer(conn=None) -> Optional[Dict[str, Any]]:
@@ -1029,10 +1029,10 @@ def utm_marker_stamp() -> Optional[str]:
 
 def _note_utm_marker() -> str:
     """Write the marker, keeping the later of its stamp and now. Returns it."""
-    from core.chain_latch import _write_marker
+    from core.atomic_file import write_atomic
 
     stamp = _later(utm_marker_stamp(), _now_iso())
-    _write_marker(UTM_MARKER, json.dumps({UTM_REPARSED: stamp}, sort_keys=True))
+    write_atomic(UTM_MARKER, json.dumps({UTM_REPARSED: stamp}, sort_keys=True))
     return stamp
 
 
@@ -1079,10 +1079,10 @@ def _remove_utm_marker(why: str) -> None:
     """Take the marker away, durably. A removal that fails is logged and left
     to the next start, which finds the note spent (`_marker_spent`)."""
     try:
-        from core.chain_latch import _fsync_dir
+        from core.atomic_file import fsync_dir
 
         UTM_MARKER.unlink()
-        _fsync_dir(UTM_MARKER.parent)
+        fsync_dir(UTM_MARKER.parent)
     except FileNotFoundError:
         pass
     except OSError as exc:
@@ -1436,16 +1436,18 @@ async def readiness(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
 # `managers.is_retail` and the intervals), under chain 3 every order since the
 # latch would be missing, and the Silver and Gold comparisons the way back
 # brings back would be set against that Silver. The copy-back's
-# `warehouse_dirty='full'` mark covers the order of ways back only when the
-# copy-back has already run, and an automatic way back runs no runbook.
+# `warehouse_dirty='full'` mark covered the order of ways back only when the
+# copy-back had already run (it went with step 14's S14-04), and an automatic
+# way back runs no runbook.
 #
 # So the start refuses it: it stays `postgres` — DuckDB does not derive,
 # Postgres goes on deriving from the tables the chains write — publishes the
 # chains in `/api/health` under `warehouse_writer_mode.way_back_refused`, and
-# the canary pages `warehouse_way_back_refused` (CRITICAL) with the lever:
-# copy the chains back (`scripts/chain_copy_back.py`, chain 5 before chain 3),
-# then take the way back. The latch outranks KS_WRITE_WAREHOUSE as it outranks
-# a chain's own flag (OD-19 (a)).
+# the canary pages `warehouse_way_back_refused` (CRITICAL) with the lever,
+# which was to copy the chains back (`scripts/chain_copy_back.py`, chain 5
+# before chain 3), then take the way back. Step 14's S14-04 deleted the
+# copy-back, so the lever is `core.rollback_lever` since. The latch outranks
+# KS_WRITE_WAREHOUSE as it outranks a chain's own flag (OD-19 (a)).
 #
 # Postgres derives on its own signal only under KS_PG_DERIVE=own; under
 # `piggyback` its rebuild rides the DuckDB tick, which a `postgres` start does
@@ -1508,18 +1510,19 @@ def _the_way_back(holding: Tuple[str, ...], why: str) -> str:
     global _way_back_refused
     if holding and holding != _way_back_refused:
         from core import pg_derivation
+        from core.rollback_lever import ROLLBACK_LEVER, ROLLBACK_RUNBOOK
 
         logger.critical(
             "%s would run as duckdb, but the way back is refused: write chain(s) "
             "%s own tables DuckDB derives from (%s) and froze DuckDB's copy at "
             "their latch, so a DuckDB rebuild would derive from them. Staying "
-            "postgres: DuckDB does not derive, and %s. Copy them back first "
-            "(scripts/chain_copy_back.py, chain 5 before chain 3), then take "
-            "the way back.", why, ", ".join(holding),
+            "postgres: DuckDB does not derive, and %s. Nothing in a step-14 "
+            "image copies them back: %s (%s).", why, ", ".join(holding),
             ", ".join(DUCKDB_DERIVATION_SOURCES),
             "Postgres derives on its own signal" if pg_derivation.owns() else
             f"NOTHING derives: {pg_derivation.ENV} is not own, so the Postgres "
-            "rebuild rides a DuckDB tick this process does not run")
+            "rebuild rides a DuckDB tick this process does not run",
+            ROLLBACK_LEVER, ROLLBACK_RUNBOOK)
     _way_back_refused = holding
     return POSTGRES if holding else DUCKDB
 

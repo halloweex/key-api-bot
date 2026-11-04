@@ -3,8 +3,10 @@
 Until step 14's S14-03 the preview opened a DuckDB file of its own — usually a
 backup — with `duckdb.connect(..., read_only=True)` and handed `build_report`
 a connection to it. It now hands the jobs' own readers a store that refuses
-to connect, and asks the two variables those readers route by before it
-reads anything. Each test names the mutation it catches.
+to connect, and asks for the address those readers use before it reads
+anything. The engine switches it asked as well (`KS_READ_WEEKLY`,
+`KS_READ_TRAFFIC`) went with step 14's S14-07 and S14-05, which made those
+readers Postgres alone. Each test names the mutation it catches.
 """
 from __future__ import annotations
 
@@ -41,36 +43,35 @@ def _forbid(monkeypatch, *targets):
 
 
 class TestItRefusesBeforeReading:
-    @pytest.mark.parametrize("env, says", [
-        ({"KS_PG_DSN": FAKE_DSN}, "KS_READ_WEEKLY is not postgres"),
-        ({"KS_PG_DSN": FAKE_DSN, "KS_READ_WEEKLY": "duckdb"}, "KS_READ_WEEKLY is not postgres"),
-        ({"KS_READ_WEEKLY": "postgres"}, "KS_PG_DSN is not set"),
-        ({"KS_PG_DSN": FAKE_DSN, "KS_READ_WEEKLY": "postgress"}, "unknown engine"),
+    @pytest.mark.parametrize("report, forbidden, hint", [
+        ("sales", ("build_report", "send"), True),
+        ("traffic", ("send_traffic",), False),
     ])
-    def test_the_sales_report_without_its_switch_or_address(
-            self, monkeypatch, capsys, env, says):
-        """Mutation: drop the up-front `postgres_unready` — the read starts and
-        either asks a store that refuses or a Postgres that is not there."""
+    def test_a_live_report_without_its_address(
+            self, monkeypatch, capsys, report, forbidden, hint):
+        """No `KS_PG_DSN`: exit 2 before any read, and only the sales report,
+        which has a fixture, points at `--fixture`. Mutation: drop the
+        up-front `postgres_unready` — the read starts and asks a Postgres
+        that is not there."""
         _no_switches(monkeypatch)
-        for name, value in env.items():
-            monkeypatch.setenv(name, value)
-        _forbid(monkeypatch, (preview, "build_report"), (preview, "send"))
+        _forbid(monkeypatch, *((preview, name) for name in forbidden))
 
-        assert preview.main(["--chat-id", "1"]) == 2
+        assert preview.main(["--chat-id", "1", "--report", report]) == 2
         err = capsys.readouterr().err
-        assert says in err and "--fixture" in err, err
+        assert "KS_PG_DSN is not set" in err, err
+        assert ("--fixture" in err) is hint, err
 
-    def test_the_traffic_report_asks_its_own_switch(self, monkeypatch, capsys):
-        """The weekly switch set is not enough: the traffic report's reads
-        route by KS_READ_TRAFFIC. Mutation: ask KS_READ_WEEKLY for both."""
+    @pytest.mark.parametrize("value", ["duckdb", "postgress", ""])
+    @pytest.mark.parametrize("report", ["sales", "traffic"])
+    def test_the_retired_switches_change_nothing(self, monkeypatch, report, value):
+        """A laptop `.env` still naming an engine — or garbage — is not read:
+        with the address set the preview is ready. Mutation: ask
+        `pg_weekly_read`/`pg_traffic_read` for a switch again."""
         _no_switches(monkeypatch)
         monkeypatch.setenv("KS_PG_DSN", FAKE_DSN)
-        monkeypatch.setenv("KS_READ_WEEKLY", "postgres")
-        _forbid(monkeypatch, (preview, "send_traffic"))
-
-        assert preview.main(["--chat-id", "1", "--report", "traffic"]) == 2
-        err = capsys.readouterr().err
-        assert "KS_READ_TRAFFIC is not postgres" in err and "--fixture" not in err, err
+        monkeypatch.setenv("KS_READ_WEEKLY", value)
+        monkeypatch.setenv("KS_READ_TRAFFIC", value)
+        assert preview.postgres_unready(report) is None
 
 
 class TestTheStoreItHandsTheReaders:
@@ -89,17 +90,6 @@ class TestTheStoreItHandsTheReaders:
             asyncio.run(ask())
         assert not path.exists() and not path.parent.joinpath(path.name + ".wal").exists()
 
-    def test_a_reader_routed_to_duckdb_stops_the_preview(self, monkeypatch):
-        """Even past the up-front check — a switch flipped between the check
-        and the read — the sales readers' DuckDB branch reaches the store and
-        stops there."""
-        from core import duckdb_switch
-
-        monkeypatch.setenv("KS_READ_WEEKLY", "duckdb")
-        monkeypatch.setattr(duckdb_switch, "_mode", duckdb_switch.ON)
-        with pytest.raises(preview.PostgresOnly):
-            asyncio.run(preview.live_report("retail", date(2026, 9, 7)))
-
 
 class TestItReadsWhatTheJobReads:
     def test_the_sales_report_is_the_jobs_build_report(self):
@@ -113,7 +103,6 @@ class TestItReadsWhatTheJobReads:
         DuckDB body reaches the store, which refuses."""
         _no_switches(monkeypatch)
         monkeypatch.setenv("KS_PG_DSN", FAKE_DSN)
-        monkeypatch.setenv("KS_READ_WEEKLY", "postgres")
         channels = len(channel_totals_items(POSTGRES))
         seen = []
 
@@ -149,7 +138,7 @@ class TestItReadsWhatTheJobReads:
         assert any("gold.daily_revenue" in sql for sql in seen)
 
     def test_the_fixture_reads_nothing(self, monkeypatch):
-        """`--fixture` needs no database and no switch. Mutation: ask
+        """`--fixture` needs no database and no address. Mutation: ask
         `postgres_unready` (or a reader) before the fixture."""
         _no_switches(monkeypatch)
         _forbid(monkeypatch, (preview, "build_report"))
@@ -208,13 +197,12 @@ class TestTheTrafficReport:
         assert sent.await_args.kwargs["chat_ids"] == [7]
         assert "31.08" in sent.await_args.args[0], sent.await_args.args[0]
 
-    def test_main_sends_the_traffic_week_once_its_switch_is_set(self, monkeypatch):
+    def test_main_sends_the_traffic_week_once_postgres_is_configured(self, monkeypatch):
         """`--report traffic` past the up-front check reaches `send_traffic`
         with the chat it was given. Mutation: return before sending, or send
         the sales report instead."""
         _no_switches(monkeypatch)
         monkeypatch.setenv("KS_PG_DSN", FAKE_DSN)
-        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
         _forbid(monkeypatch, (preview, "build_report"), (preview, "send"))
         traffic = AsyncMock()
         monkeypatch.setattr(preview, "send_traffic", traffic)

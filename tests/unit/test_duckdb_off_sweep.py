@@ -246,6 +246,9 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool, markers: bool = Tru
     data = tmp_path / "data"
     monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
     monkeypatch.setattr("core.duckdb_store.DB_PATH", data / "analytics.duckdb")
+    # The disk watchdog's directory and heartbeat, beside the file as in
+    # production (S14-01: read from `core.paths.DATA_DIR`, not the store).
+    monkeypatch.setattr("core.scheduler.DATA_DIR", data)
     monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
     # Since S14-00 nothing at the start asks Postgres — not step 13's revision,
     # not off's frozen facts — so nothing here stands in for them.

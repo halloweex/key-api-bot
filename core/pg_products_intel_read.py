@@ -3,6 +3,15 @@
 Six methods behind three endpoints — basket distribution, brand affinity,
 product momentum — and the interesting half is what they read *from*.
 
+NO FALLBACK SINCE STEP 14 (S14-05)
+
+The product-intelligence reads go to Postgres. The flag that chose the engine
+(`KS_READ_PRODUCTS_INTEL`) chooses nothing now: the router asks Postgres and
+nothing else, and a failure — a lost DSN line included — is refused as a 503
+naming `products_intel` (`read_fallback.refuse`), which is what
+`KS_READ_FALLBACK=off` made of it since 2026-10-09. The paragraphs below are
+the history of the port.
+
 FIVE OF THE SIX WERE ALREADY PORTABLE
 
 They read `silver.order_lines` and `bronze.products`, both in Postgres, and
@@ -24,7 +33,7 @@ grouped the way Gold groups. `product_name` stays in the grouping key because
 Gold's rows carry the name *as sold*, and a product sold under two names is
 two rows there; dropping it would quietly merge them.
 
-WHY IT FALLS BACK, AND WHY THAT IS NOT A LICENCE
+WHY IT FELL BACK UNTIL S14-05, AND WHY THAT WAS NOT A LICENCE
 
 Nothing diverges — the tab writes nothing and both engines read the same
 Silver. But a fallback is also how a broken port hides: `/margin` shipped a
@@ -36,35 +45,9 @@ before flipping any flag.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_PRODUCTS_INTEL"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the product-intelligence queries should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working tab into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

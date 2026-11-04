@@ -38,6 +38,12 @@ the same question but a frozen one: nothing writes it and the hourly replace
 no longer runs. A Postgres failure on these reads raises, so the page fails
 where it can be seen instead of showing a goal nobody typed last.
 
+**Since step 14's S14-05 the /marketing target line no longer asks
+`reads_the_chain`.** `_marketing_run` has one path, Postgres, whatever
+`KS_READ_MARKETING` says, and a failure there is the page's counted refusal
+(`read_fallback.refuse("marketing", exc)`, a 503 naming `marketing`) rather
+than a raw raise. `get_goals` and `get_smart_goals` still ask it.
+
 THE ONE WRITER EVERY CALLER GOES THROUGH
 
 `set_goal` is the table's only writer: `POST /api/goals` calls it directly and
@@ -59,15 +65,18 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
 connection has come out of the pool and before the transaction opens. From
 the first goal typed here the flag cannot move the writes back to DuckDB; only
-`scripts/chain_copy_back.py goals` can, and it carries the three rows back and
-compares them at zero before it releases anything.
+`scripts/chain_copy_back.py goals` could, carrying the three rows back and
+comparing them at zero before it released anything (deleted in step 14's
+S14-04; the way back since is an image from before step 14,
+`core.rollback_lever`).
 
 ONE CLOCK FOR BOTH STORES
 
 `updated_at` is supplied by the caller — the web container's clock, the same
 `datetime.now(DEFAULT_TZ)` DuckDB's branch stamps — never Postgres' `now()`.
 It is the column the copy-back's handover orders two versions of one goal by
-(`chain_transfer._shared_clock`), and a version DuckDB stamped against one
+(`chain_transfer._shared_clock`; an image from before step 14 still orders
+by it, since S14-04 deleted this build's), and a version DuckDB stamped against one
 written here must be compared on one clock, not on two machines' idea of it.
 The Postgres column has no default, so a writer that forgot it would leave
 the handover nothing to order by; `core/pg_chain_invariants.py` watches for
@@ -92,7 +101,8 @@ WRITE_ENV = "KS_WRITE_GOALS"
 CHAIN = "pg_goals_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper, the daily comparison and the copy-back.
+# the hourly shipper and the daily comparison (and the copy-back, until step
+# 14's S14-04 deleted it).
 CHAIN_TABLES: Tuple[str, ...] = ("app.revenue_goals",)
 
 # The period types `set_goal` accepts. The repository refuses anything else
@@ -146,7 +156,9 @@ def reads_the_chain(sql: str) -> bool:
     router asks this of every statement it is handed, so a query that starts
     reading `{revenue_goals}` tomorrow follows the chain the day it does,
     through whichever router carries it. `tests/unit/test_goals_reads_follow_chain.py`
-    walks `core/` for every such statement and fails if its router does not ask.
+    walks `core/` for every such statement and fails if its router does not
+    ask — unless the router has no DuckDB tail to leave the chain by and
+    refuses a failure (`_marketing_run`, since step 14's S14-05).
     """
     return TABLE_HOLE in sql and reads_postgres()
 

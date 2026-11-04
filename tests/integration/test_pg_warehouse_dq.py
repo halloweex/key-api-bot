@@ -608,12 +608,14 @@ class TestTheRowValues:
         and not in flight either — held. Found reviewing DN-13 twice: judged
         as covered they read "another would repeat it", and dated by the
         rule's load they cleared every standing page after a restart."""
-        from core import duckdb_store, pg_silver
+        from core import pg_silver, warehouse_sql
         from core.data_quality import Severity
         from core.pg_warehouse_dq import check_pg_warehouse, read_facts
 
-        monkeypatch.setattr(duckdb_store, "REVENUE_SOURCE_IDS",
-                            tuple(s for s in duckdb_store.REVENUE_SOURCE_IDS if s != 1))
+        # Where the Silver projection reads it: `core.warehouse_sql` since
+        # S14-01 (it was `core.duckdb_store` before the move).
+        monkeypatch.setattr(warehouse_sql, "REVENUE_SOURCE_IDS",
+                            tuple(s for s in warehouse_sql.REVENUE_SOURCE_IDS if s != 1))
         monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)   # a fresh process
         now = datetime.now(timezone.utc)
 

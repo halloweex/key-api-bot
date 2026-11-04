@@ -14,8 +14,9 @@ import re
 from pathlib import Path
 
 from core import pg
-from core.duckdb_store import SILVER_ORDERS_DDL, silver_select_sql
+from core.duckdb_store import SILVER_ORDERS_DDL
 from core.sql_dialect import POSTGRES
+from core.warehouse_sql import silver_select_sql
 
 REPO = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(

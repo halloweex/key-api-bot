@@ -4,39 +4,42 @@ The page sent all three flags from its cached copy of the matrix, so a click
 made from a snapshot up to a minute old — or before the previous click's
 refetch had landed — put the other two columns back to what the snapshot
 held: another admin's grant undone, or the caller's own previous toggle.
+
+The matrix is `app.role_permissions`, the only store the router knows since
+step 14's S14-08 (these ran on DuckDB until then;
+`tests/integration/pg_sms_seed.py`); skipped without `KS_PG_DSN`.
 """
 import inspect
 import re
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
-
-
-@pytest.fixture(autouse=True)
-def _users_on_duckdb(monkeypatch):
-    """This module's user list is DuckDB's, as it was before step 14's S14-00
-    made its store a constant (`tests.conftest.user_store_on_duckdb`)."""
-    from tests.conftest import user_store_on_duckdb
-
-    user_store_on_duckdb(monkeypatch)
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import ACCESS_TABLES, as_tuple, pg_conn
 
 REPO = Path(__file__).resolve().parents[2]
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(request, monkeypatch):
+    async with pg_sms_seed.for_async_tests(request, monkeypatch, ACCESS_TABLES,
+                                           what="the access path"):
+        yield
+
+
 async def _cell(store, role, feature):
-    async with store.connection() as conn:
-        return conn.execute(
-            "SELECT can_view, can_edit, can_delete FROM role_permissions "
-            "WHERE role = ? AND feature = ?", [role, feature],
-        ).fetchone()
+    async with pg_conn() as conn:
+        return as_tuple(await conn.fetchrow(
+            "SELECT can_view, can_edit, can_delete FROM app.role_permissions "
+            "WHERE role = $1 AND feature = $2", role, feature,
+        ))
 
 
 @pytest.mark.asyncio
 async def test_a_flag_left_none_keeps_its_stored_value(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "perm.duckdb")
-    await store.connect()
+    store = pg_sms_seed.store(tmp_path, "perm.duckdb")
     try:
         await store.set_permission("editor", "expenses", True, False, False, 1)
         # Admin B grants edit; admin A, from a stale copy, grants delete.
@@ -52,11 +55,11 @@ async def test_a_flag_left_none_keeps_its_stored_value(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_new_pair_defaults_the_flags_it_was_not_given(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "perm.duckdb")
-    await store.connect()
+    store = pg_sms_seed.store(tmp_path, "perm.duckdb")
     try:
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM role_permissions WHERE role = 'marketer' AND feature = 'traffic'")
+        async with pg_conn() as conn:
+            await conn.execute("DELETE FROM app.role_permissions"
+                               " WHERE role = 'marketer' AND feature = 'traffic'")
         await store.set_permission("marketer", "traffic", True, None, None, 1)
         assert await _cell(store, "marketer", "traffic") == (True, False, False)
     finally:

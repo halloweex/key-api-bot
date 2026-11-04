@@ -1,5 +1,14 @@
 """Reading the `/inventory` tab from Postgres.
 
+NO FALLBACK SINCE STEP 14 (S14-07)
+
+`/inventory` reads Postgres. The flag that chose the engine
+(`KS_READ_INVENTORY`) chooses nothing now: `InventoryMixin._inventory_batch`
+asks Postgres and nothing else, and a failure — a lost DSN line included — is
+refused as a 503 naming `inventory` (`read_fallback.refuse`), which is what
+`KS_READ_FALLBACK=off` made of it since 2026-10-09. The paragraphs below are
+the history of the port.
+
 The tab reads eleven views and eight repository methods are their only
 consumers. Revision 0014 put the same eleven in `gold`, rendered from the same
 body as DuckDB's, so what is left is choosing which engine answers.
@@ -13,7 +22,7 @@ dead-stock threshold per-category, has no ClickHouse spelling. And neither of
 the two stock tables is shipped to ClickHouse at all, so the move would have
 begun by replicating them.
 
-WHY THIS FALLS BACK AND `/sms` DOES NOT
+WHY IT FELL BACK, UNTIL S14-07
 
 `core/pg_sms_read.py` refuses to fall back because after that switch the two
 stores diverge, and answering from the stale one would look perfectly
@@ -42,35 +51,9 @@ diverged in a day.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_INVENTORY"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the inventory queries should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working tab into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

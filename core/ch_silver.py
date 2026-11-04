@@ -163,7 +163,7 @@ async def _ship_silver_rows(rows: Sequence[Tuple[Any, ...]]) -> None:
 
 def _gold_measure_items() -> str:
     """The eight measures, verbatim from the one home all engines render."""
-    from core.duckdb_store import GOLD_MEASURES
+    from core.warehouse_sql import GOLD_MEASURES
 
     return ",\n    ".join(
         f"{expr} AS {name}" for name, expr in GOLD_MEASURES.items()

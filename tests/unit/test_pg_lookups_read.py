@@ -1,16 +1,13 @@
-"""Which engine answers the filter bar, and what the flag may not touch.
+"""The filter bar's statements, and what reaches Postgres.
 
-The numbers are `tests/integration/test_lookups_two_engines.py`'s job. Here:
+The numbers are `tests/integration/test_lookups_two_engines.py`'s job, against
+a real Postgres; that the router asks Postgres and nothing else since step
+14's S14-05 — whatever `KS_READ_LOOKUPS` says, and a failure refused naming
+`lookups` — is `tests/unit/test_read_routers_postgres_only.py`'s. Here:
 
-  * an unknown value stops the read instead of quietly serving the other store;
-  * a Postgres read never touches DuckDB's lock (§34), tested by making the
-    lock fatal, with the mirror test so it cannot pass by the routing being
-    broken in both directions;
-  * a Postgres fault still answers — these four are drawn on every page, so a
-    fault that took them down would take down nine tabs, not one;
-  * each of the four returns rather than hanging. The store lock is not
-    reentrant and a nested acquisition does not raise — it simply never comes
-    back, which is how the cohort port shipped a deadlock past a green suite.
+  * every one of the four sends its statements to Postgres, on a store whose
+    DuckDB connection is a trap;
+  * the bodies render with no hole left, and none is inlined at a call site.
 
 WHY THE BODIES ARE CHECKED BY NAME AND NOT BY SCANNING FOR LITERALS
 
@@ -24,18 +21,15 @@ the rendering test would never see.
 from __future__ import annotations
 
 import ast
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core import pg_lookups_read
 from core.duckdb_store import DuckDBStore
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
-TIMEOUT_S = 20
 
 METHODS = ("get_categories", "get_child_categories", "get_brands", "get_promocodes")
 
@@ -59,122 +53,55 @@ BODIES = (
 )
 
 
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
-        assert pg_lookups_read.enabled() is False
-
-    def test_an_empty_value_is_the_default_too(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_LOOKUPS", "  ")
-        assert pg_lookups_read.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
-        assert pg_lookups_read.enabled() is True
-
-    def test_a_typo_raises_rather_than_serving_the_other_store(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_LOOKUPS", "postgres ")   # trailing space is fine
-        assert pg_lookups_read.enabled() is True
-        monkeypatch.setenv("KS_READ_LOOKUPS", "postgress")
-        with pytest.raises(ValueError, match="KS_READ_LOOKUPS"):
-            pg_lookups_read.enabled()
-
-    def test_without_a_dsn_there_is_nothing_to_ask(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        assert pg_lookups_read.available() is False
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        assert pg_lookups_read.available() is True
-
-
-class TestItDoesNotTakeTheDuckDbLock:
-    """The invariant, tested by making the lock fatal."""
+class TestEveryLookupReadsPostgres:
+    """The four, each sent to Postgres, on a store whose DuckDB connection is
+    a trap — whatever the switch that used to choose says."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name,args", CALLS, ids=[c[0] for c in CALLS])
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
+    async def test_each_sends_its_statements_to_postgres(
         self, tmp_path, monkeypatch, name, args,
     ):
-        monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
+        monkeypatch.setenv("KS_READ_LOOKUPS", "duckdb")   # not read any more
         store = DuckDBStore(db_path=tmp_path / f"l-{name}.duckdb")
-        await store.connect()
-        try:
-            def boom(*_a, **_k):
-                raise AssertionError(f"{name} reached for DuckDB")
 
-            with patch.object(type(store), "connection", boom), \
-                 patch("core.pg_lookups_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await getattr(store, name)(*args)
-            assert fetch.await_count >= 1
-            sql = fetch.await_args.args[0]
-            assert "bronze." in sql or "silver." in sql, sql[:160]
-        finally:
-            await store.close()
+        def boom(*_a, **_k):
+            raise AssertionError(f"{name} reached for DuckDB")
 
-    @pytest.mark.asyncio
-    async def test_the_duckdb_path_still_uses_the_store(self, tmp_path, monkeypatch):
-        """The mirror: without it the test above could pass by the routing
-        being broken in both directions."""
-        monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "l-mirror.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_lookups_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_categories()
-                await store.get_brands()
-            fetch.assert_not_awaited()
-        finally:
-            await store.close()
-
-
-class TestEveryMethodReturns:
-    """A nested acquisition of the store lock does not raise; it hangs. So the
-    assertion is a timeout, and every routed method is walked."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,args", CALLS, ids=[c[0] for c in CALLS])
-    async def test_it_returns_rather_than_hanging(self, tmp_path, monkeypatch, name, args):
-        monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"l-ret-{name}.duckdb")
-        await store.connect()
-        try:
-            await asyncio.wait_for(
-                getattr(store, name)(*args), timeout=TIMEOUT_S,
-            )
-        finally:
-            await store.close()
+        with patch.object(type(store), "connection", boom), \
+             patch("core.pg_lookups_read.fetch",
+                   new=AsyncMock(return_value=[])) as fetch:
+            await getattr(store, name)(*args)
+        assert fetch.await_count >= 1
+        sql = fetch.await_args.args[0]
+        assert "bronze." in sql or "silver." in sql, sql[:160]
 
 
 class TestTheRoutedBodies:
-    def test_both_renderings_leave_no_hole(self):
-        from core.sql_dialect import DUCKDB, POSTGRES
+    def test_the_rendering_leaves_no_hole(self):
+        from core.sql_dialect import POSTGRES
         from core.repositories import revenue
         from core.repositories.revenue import RevenueMixin
 
         for name in BODIES:
             sql = getattr(revenue, name)
-            for dialect in (DUCKDB, POSTGRES):
-                rendered = RevenueMixin._render_report(sql, dialect)
-                assert "{" not in rendered and "}" not in rendered, (
-                    f"{name} still has a hole for {dialect.name}"
-                )
-
-    def test_the_two_renderings_differ(self):
-        """Otherwise a body with no hole at all would pass the test above while
-        naming a DuckDB table Postgres does not have."""
-        from core.sql_dialect import DUCKDB, POSTGRES
-        from core.repositories import revenue
-        from core.repositories.revenue import RevenueMixin
-
-        for name in BODIES:
-            sql = getattr(revenue, name)
-            assert (RevenueMixin._render_report(sql, DUCKDB)
-                    != RevenueMixin._render_report(sql, POSTGRES)), (
-                f"{name} renders identically for both engines — it names a "
-                f"table rather than a hole"
+            rendered = RevenueMixin._render_report(sql, POSTGRES)
+            assert "{" not in rendered and "}" not in rendered, (
+                f"{name} still has a hole for {POSTGRES.name}"
             )
+
+    def test_every_body_names_its_table_through_a_hole(self):
+        """Otherwise a body with no hole at all would pass the test above while
+        naming a table by a name Postgres does not have (the bare DuckDB one)."""
+        from core.sql_dialect import POSTGRES
+        from core.repositories import revenue
+        from core.repositories.revenue import RevenueMixin
+
+        for name in BODIES:
+            sql = getattr(revenue, name)
+            rendered = RevenueMixin._render_report(sql, POSTGRES)
+            assert rendered != sql and ("bronze." in rendered or "silver." in rendered), (
+                f"{name} names a table rather than a hole")
 
     def test_every_router_call_passes_one_of_those_names(self):
         """A sixth body inlined at the call site would never be rendered by the

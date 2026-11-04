@@ -28,7 +28,7 @@ from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
     validate_period, validate_source_id, validate_brand_name, validate_sales_type,
-    validate_promocode,
+    validate_promocode, validate_db_int,
     ValidationError,
 )
 
@@ -1602,6 +1602,7 @@ async def add_marketing_optout(
     stoplist and never suppress the number it names — the phone column exists
     precisely to catch the same number under a second buyer record.
     """
+    validate_db_int(buyer_id, "buyer_id", allow_none=False)
     normalised_phone = _require_ua_phone(phone) if phone is not None else None
     store = await get_store()
     result = await store.add_marketing_optout(

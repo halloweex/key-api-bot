@@ -78,18 +78,9 @@ HOST_ENTRIES: Dict[str, str] = {
     "scripts/backfill_utm.py:backfill_utm": (
         "re-parses in Postgres alone under step 13 (PR-6); the store is "
         "unconnected under off"),
-    "scripts/chain_copy_back.py:main": (
-        "the way back; refused under off, exit 2 (PR-0) — `-e KS_DUCKDB=on` "
-        "is the decision to restart both clocks"),
     "scripts/compact_duckdb.py:main": (
         "the Sunday compaction's sidecar; refused under off before the "
         "driver runs, its cron line retired at the start of the week"),
-    "scripts/weekly_report_preview.py:main": (
-        "a preview on a phone: reads Postgres through the weekly jobs' own "
-        "readers, refuses without their switch at postgres and KS_PG_DSN, and "
-        "hands them a store that refuses to connect (S14-03). The walk still "
-        "reaches the DuckDB branch of `core/weekly_report.py:_weekly_run`, the "
-        "job's own reader; this pin goes when S14-07 removes that branch"),
 }
 
 # Entries no production code calls. Kept, not deleted: OD-11 forbids
@@ -315,7 +306,14 @@ class TestEveryWayIn:
         count = defaultdict(int)
         for kind in kinds.values():
             count[kind] += 1
-        assert count["door"] >= 120, dict(count)
+        # 135 doors until step 14's S14-07 and S14-08. S14-07's routes and
+        # jobs over `/expenses`, `/inventory`, `/goals`, the cohorts, the
+        # assistant and the index stopped reaching the file (112 after it
+        # alone), and S14-08 took the seventeen /sms and access routes below
+        # off it (118 after it alone): 95 with both. Each step-14 PR that
+        # removes a DuckDB branch shrinks this; the floor is only that the
+        # walk still finds the ways in, not a count to keep.
+        assert count["door"] >= 95, dict(count)
         assert count["held"] >= 10, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
         assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_digest"] == "door"
@@ -323,6 +321,26 @@ class TestEveryWayIn:
         assert kinds["web/routes/auth.py:require_admin"] == "door"
         assert kinds["core/mirror_reconciliation.py:reconcile_operational"] == "held"
         assert kinds["core/scheduler.py:BackgroundScheduler.read_duckdb"] == "held"
+
+    def test_sms_and_access_reach_no_file(self, kinds):
+        """Step 14's S14-08: `_sms_tx`, `_sms_run`, the audience, `_users_run`
+        and `_perms_run` lost their DuckDB branches, so none of these routes
+        reaches the file any more — not even by a branch a mode never takes,
+        which is what the walk counts (135 doors before, 118 after)."""
+        gone = {
+            "web/routes/api/customers.py:" + name for name in (
+                "add_marketing_optout", "create_sms_campaign",
+                "delete_sms_audience_preset", "export_sms_segments_csv",
+                "get_sms_campaign_results", "list_sms_audience_presets",
+                "list_sms_campaigns", "mark_sms_campaign_sent",
+                "save_sms_audience_preset", "send_sms_campaign")
+        } | {
+            "web/routes/api/users.py:" + name for name in (
+                "approve_access_request", "get_user", "list_users",
+                "update_user_features", "update_user_role", "update_user_status")
+        } | {"web/routes/api/webhooks.py:turbosms_delivery_report"}
+        still = sorted(gone & set(kinds))
+        assert not still, f"these reach the DuckDB file again: {still}"
 
     def test_a_call_by_name_alone_is_not_followed(self, graph):
         """`self._thread.start()` in the bot store's loop is not the

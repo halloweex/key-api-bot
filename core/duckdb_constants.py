@@ -1,11 +1,13 @@
 """Shared constants and helpers for DuckDB store and repository mixins."""
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from bot.config import DEFAULT_TIMEZONE
+from core.paths import DATA_DIR
 
-# Database configuration
-DB_DIR = Path(__file__).parent.parent / "data"
+# Database configuration. The data directory is `core.paths.DATA_DIR` since
+# step 14's S14-01; `DB_DIR` is the same object, kept for one release because
+# `core.duckdb_store` and the suite still address the DuckDB file through it.
+DB_DIR = DATA_DIR
 DB_PATH = DB_DIR / "analytics.duckdb"
 DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 
