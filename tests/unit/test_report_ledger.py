@@ -460,17 +460,14 @@ class TestTheCanary:
         never see a spooled week."""
         from web.routes.api import health
 
-        monkeypatch.setattr(health, "_inventory_preflight", AsyncMock(return_value=None))
         monkeypatch.setattr(health, "_inventory_sync_step", AsyncMock(return_value=None))
         report_ledger.spool(pg_weekly_ledger_write.CHAIN, WEEK, "retail",
                             Decimal("1.00"), 1, datetime.now(timezone.utc))
         block = await health._write_chains_block()
         assert block["pg_weekly_ledger_write"]["pending"]["count"] == 1
-        # The registry's `shadow` shape is published until S14-11; the two
-        # counters beside it went with the shadow in S14-10.
-        assert block["pg_weekly_ledger_write"]["shadow"] is True
-        for entry in block.values():
-            assert not {"shadow_failures", "shadow_stood_down"} & set(entry)
+        # The registry's `shadow` went in S14-11 with every flag field, the
+        # two counters beside it with the shadow in S14-10: `pending` alone.
+        assert set(block["pg_weekly_ledger_write"]) == {"pending"}
 
     @pytest.mark.asyncio
     async def test_the_probe_warns_on_it(self):

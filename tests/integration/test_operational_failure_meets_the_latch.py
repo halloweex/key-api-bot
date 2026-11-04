@@ -115,7 +115,7 @@ async def test_a_failure_after_the_owner_rows_leaves_the_owned_watermark_alone(s
     states = await _states(pool)
     # What the run was copying: since step 14's S14-00 every chain's tables
     # stand down, so DuckDB's history tables — never the owned one.
-    from core.write_chains import stood_down_tables
+    from core.write_chains import chain_tables as stood_down_tables
 
     copying = [t for t in _shipped() if t not in stood_down_tables()]
     assert copying and EXPENSES not in copying

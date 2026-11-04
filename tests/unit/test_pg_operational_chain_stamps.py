@@ -1,9 +1,9 @@
 """A chain's disagreement is stamped only on the tables this job ships.
 
-`replicate_operational` stamps a write chain's tables failing when the chain
-is latched against its flag, when its owner rows outlived their marker, and
-when its flag cannot be read — so a watermark says so instead of ageing
-quietly. Chains 1, 8, 7a and 6a own only tables this job ships, which is why
+`replicate_operational` stamps a write chain's tables failing when its owner
+rows outlived their marker — so a watermark says so instead of ageing
+quietly. (Until step 14's S14-11 also when the chain was latched against its
+flag, and when its flag could not be read; no flag is read since.) Chains 1, 8, 7a and 6a own only tables this job ships, which is why
 it stamped every `CHAIN_TABLES` entry. Chain 4 is the first to own tables
 another shipper carries: `bronze.buyers` and `bronze.buyer_contacts` are the
 buyers mirror's. A failure stamped there is a count only the mirror's next
@@ -12,7 +12,7 @@ page `mirror_failing` on two stores that agree (chain 4 plan, step 8e).
 
 These register a fake chain shaped like chain 4 — two mirrored bronze tables
 and `app.buyer_gender`, which this job does ship — and put it in each of the
-three states.
+state that is left.
 """
 from __future__ import annotations
 
@@ -127,8 +127,7 @@ def test_the_shape_this_depends_on():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["latched_against_flag", "owner_rows_no_marker",
-                                   "flag_not_understood"])
+@pytest.mark.parametrize("state", ["owner_rows_no_marker"])
 async def test_only_the_shipped_table_is_stamped(no_flags, tmp_path, state):
     owners = {}
     real_latched_at = chain_latch.latched_at

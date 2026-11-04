@@ -49,7 +49,7 @@ class TestWhatTheScanCouldNotSee:
     def test_unwatched_watermarks_leave_the_moved_freshness_unverified(self, monkeypatch):
         """Every chain's watermarks have moved since step 14's S14-00 (a
         constant), so every one of them with a freshness threshold is held."""
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys as stood_down_sync_keys
 
         moved = sorted(f"freshness_{k[len('last_sync_'):]}" for k in stood_down_sync_keys()
                        if k[len("last_sync_"):] in dq.FRESHNESS_THRESHOLDS)
