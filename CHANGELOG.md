@@ -2,6 +2,155 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.313
+
+- The funnel asks GA4 only for the days it holds
+- Margin: the three defects, on a fixture that has them
+- GA4's funnel horizon rolls by the day, not the month
+- Margin: one cost row per SKU, the real root category, no 503 on a zero-sum window
+- Traffic tab shows the site's purchase funnel from GA4
+- WIP: S14-09 review — the deleted mirror and backfill walk in the past tense
+- WIP: S14-09 review — two sentences of the last commit read straight
+- WIP: S14-09 review — what the PR deleted is spoken of in the past tense
+- WIP: S14-09 review — chains 3, 6, 6a's writers are proved with no flag
+- WIP: S14-09 — the canary still reads chain 3's health entry, end to end
+- WIP: S14-09 — the typecheck baseline shrinks 987 → 975
+- WIP: S14-09 — the walks follow, and CLAUDE.md says what went
+- WIP: S14-09 — tests follow chains 3, 6, 6a to Postgres
+- WIP: S14-09 — chains 3, 6, 6a write Postgres with no routing left
+- WIP: step14-int — CLAUDE.md says the preview refuses without KS_PG_DSN alone
+- WIP: step14-int — the preview's host pin goes once S14-07 removes the branch it named
+
+
+## 3.0.312
+
+- chore: bump version to 3.0.311 [skip ci]
+- chore: bump version to 3.0.310 [skip ci]
+- Forecast evaluation is an admin lever, like train and tune
+- The manual-expenses list reads its window like every other route
+- The CSV summary lists only the products its filters chose
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-03: the DuckDB tools nothing schedules are deleted
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
+## 3.0.311
+
+- chore: bump version to 3.0.310 [skip ci]
+- Forecast evaluation is an admin lever, like train and tune
+- The manual-expenses list reads its window like every other route
+- The CSV summary lists only the products its filters chose
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-03: the DuckDB tools nothing schedules are deleted
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
+## 3.0.310
+
+- The manual-expenses list reads its window like every other route
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
+## 3.0.309
+
+- WIP: S14-08 review 2: the docstring says which tests the mutation passed
+- WIP: S14-08 review 2: the access routers are held to the hole they render
+- WIP: S14-08 review: the access docs say what the code does now
+- WIP: S14-08 review: CLAUDE.md claims only what the walks catch
+- WIP: S14-08 review: the /sms and access guards read attributes and helpers
+- WIP: S14-08 review: the routers are held to their syntax, not to a grep
+- WIP: S14-08 the entry-points walk: seventeen /sms and access routes no longer reach the file
+- WIP: S14-08 two docstrings stop naming a switch nothing reads
+- WIP: S14-08 CLAUDE.md lines rewrapped
+- WIP: S14-08 the type baseline shrinks by the five DuckDB branches
+- WIP: S14-08 CLAUDE.md paragraphs
+- WIP: S14-08 the conftest store helpers go
+- WIP: S14-08 audience groups two-engine test to golden literals
+- WIP: S14-08 SMS segments two-engine test to golden literals
+- WIP: S14-08 dashboard users two-engine test to golden literals
+- WIP: S14-08 the write-chain walk exempts the store helpers as Postgres's
+- WIP: S14-08 store-switch literal in the fates manifest test; the unported guard's tests
+- WIP: S14-08 dashboard users store tests
+- WIP: S14-08 access tests on Postgres
+- WIP: S14-08 send guards, webhook and DLR replay on Postgres
+- WIP: S14-08 delivery tests on Postgres
+- WIP: S14-08 freeze, results, groups tests on Postgres
+- WIP: S14-08 audience tests on Postgres
+- WIP: S14-08 /sms and access routers on Postgres alone
+
+
+## 3.0.308
+
+- WIP: S14-07 merge review — CLAUDE.md says what the writer allowance covers
+- WIP: S14-07 merge review — the writer allowance is judged per function, not per module
+- WIP: S14-07 merge review — CLAUDE.md's guard sentence reads as four short ones
+- WIP: S14-07 merge — CLAUDE.md's new sentence names its subject
+- WIP: S14-07 merge — the sweep's docstring names the third set
+- WIP: S14-07 merge — CLAUDE.md says what holds S14-07's readers to their routers
+- WIP: S14-07 merge — a clean helper's ClickHouse calls are allowed; the sweep names a mutation it sees
+- WIP: S14-07 merge — the round-the-router walk holds S14-07's files; its pins read the tree
+- WIP: S14-07 merge — the base's guards read ClickHouse and hold S14-07's routes
+- WIP: S14-07 review 2: misconfigured is no longer said to be what is refused
+- WIP: S14-07 review 2: chain 3's paragraph keeps its last_sync_meilisearch sentence
+- WIP: S14-07 review: texts the removed routing left behind say what is true
+- WIP: S14-07 review: chain 7a's failed read is pinned as a counted 503 and a page
+- S14-07 CLAUDE.md says what a lost DSN line is for the readers with no fallback
+- WIP: S14-07 the no-DSN HTTP case starts from an unasked expenses latch
+- WIP: S14-07 the typecheck baseline shrinks with the DuckDB tails (1090 -> 1084)
+- WIP: S14-07 CLAUDE.md says the third set reads one engine
+- WIP: S14-07 the dialects lose what has no user left
+- WIP: S14-07 the goal tests' DuckDB history seed goes with its last user
+- WIP: S14-07 the walks over switches, goal reads and ways in
+- WIP: S14-07 the date-params sweep reads /expenses from Postgres
+- WIP: S14-07 the consumers walk derives the two left
+- WIP: S14-07 the fallback walks know no switch is left
+- WIP: S14-07 the consumers of a refusal meet the routers that refuse
+- WIP: S14-07 the readers' tests follow one engine
+- WIP: S14-07 the routers' unit tests hold one engine
+- WIP: S14-07 the report tests seed Postgres' Gold and Silver
+- WIP: S14-07 two-engine tests become literals; the goal tests seed Postgres
+- WIP: S14-07 the third set of read routers reads one engine
+- WIP: S14-07 golden literals recorded on the base
+
+
+## 3.0.307
+
+- WIP: S14-06 merge review — rule 5's engine names are a required argument
+- WIP: S14-06 merge review — CLAUDE.md says what rule 5 reads now
+- WIP: S14-06 merge review — the allowance drops only what rule 5 judges
+- WIP: S14-06 merge review — rule 5 reads every spelling of an engine call
+- WIP: S14-06 merge — CLAUDE.md says what holds the dashboard to its routers
+- WIP: S14-06 merge — S14-05's round-the-router guards hold the dashboard too
+- WIP: S14-06 the managers-chain walk takes the module's own name however it is bound
+- WIP: S14-06 no present-tense line names the Gold readers' gate or fallback
+- WIP: S14-06 the managers-chain walk resolves names and walks every production tree
+- WIP: S14-06 the date-params sweep and the switch walk know the dashboard reads Postgres
+- WIP: S14-06 the typecheck baseline shrinks with the DuckDB tails (1100 -> 1090)
+- WIP: S14-06 keep _comparable for the assistant's two-engine test
+- WIP: S14-06 CLAUDE.md says the dashboard reads Postgres alone
+- WIP: S14-06 two-engine dashboard tests become literals; the routers' contract
+- WIP: S14-06 the dashboard's unit tests read Postgres alone
+- WIP: S14-06 the fallback walks know the dashboard's routers refuse
+- WIP: S14-06 the dashboard's routers read Postgres alone
+- WIP: S14-06 dashboard golden literals recorded on the base
+
+
+## 3.0.306
+
+- WIP: S14-05 merge review — the pixel-only filters and route are held by tests
+- WIP: S14-05 merge review — the traffic reader's docstring counts seven methods
+- WIP: S14-05 merge — name the walk's synthetic cases
+- WIP: S14-05 merge — the tab guards hold a reader that goes round the router
+- Step 14 S14-05: six read routers read Postgres alone
+
+
+## 3.0.305
+
+- The runbook check reads the checkout, so it runs where the checkout is
+- Step 14 S14-04: the way back into DuckDB is deleted
+
+
 ## 3.0.304
 
 - Keep a bounded log of /api requests on the host

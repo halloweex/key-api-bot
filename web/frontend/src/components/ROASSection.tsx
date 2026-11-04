@@ -11,7 +11,7 @@ import { ProtectedSection } from './ProtectedSection'
 import { useToast } from './Toast'
 import { formatCurrency } from '../utils/formatters'
 import { useTrafficROAS, useCreateExpense, useDeleteExpense } from '../hooks'
-import { useFilterStore } from '../store/filterStore'
+import { setPeriodParams, useFilterStore } from '../store/filterStore'
 import type { CreateExpenseRequest } from '../types/api'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -293,13 +293,13 @@ const RecentEntries = memo(function RecentEntries() {
   const { addToast } = useToast()
   const deleteExpense = useDeleteExpense()
   const [deletingId, setDeletingId] = useState<number | null>(null)
-  const { period } = useFilterStore()
+  const { period, startDate, endDate } = useFilterStore()
 
   const { data } = useQuery<ExpenseListResponse>({
-    queryKey: ['manualExpenses', period, 'marketing'],
+    queryKey: ['manualExpenses', period, startDate, endDate, 'marketing'],
     queryFn: async () => {
       const params = new URLSearchParams()
-      if (period) params.set('period', period)
+      setPeriodParams(params, period, startDate, endDate)
       params.set('category', 'marketing')
       params.set('limit', '20')
       const response = await fetch(`/api/expenses?${params}`)
