@@ -11,8 +11,9 @@
 //!
 //! A row that is not `approved` is no session; one that is carries its own
 //! role and tab set, never the cookie's. No row falls back to the bot's list,
-//! as a `viewer` with no tab set — and that read is outside the try that
-//! guards the first, so its failure is the app's 500, not a 401.
+//! as a `viewer` with no tab set. A read of either list that fails hands the
+//! request to Python (`crate::handover`), which answers as it would — its 401
+//! for the user list, its 500 for the bot's — or reads what this could not.
 
 use std::collections::BTreeSet;
 
@@ -21,6 +22,7 @@ use super::permissions::parse_features;
 use super::pyjson::PyValue;
 use super::signer::{self, LoadError, SessionKey};
 use super::store::AccessStore;
+use crate::handover::Reason;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Caller {
@@ -37,6 +39,21 @@ pub enum Caller {
 /// What `_resolve_session` raises instead of answering: the app's 500.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Raised;
+
+/// What the session check ends in, other than a caller.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unresolved {
+    /// Python raises: the app's 500.
+    Raised,
+    /// A read it needs failed here: the request goes to Python.
+    HandOver(Reason),
+}
+
+impl From<Raised> for Unresolved {
+    fn from(_: Raised) -> Self {
+        Unresolved::Raised
+    }
+}
 
 /// `user_id in ADMIN_USER_IDS`.
 fn hardcoded(user_id: &PyValue, admins: &BTreeSet<i64>) -> Result<bool, Raised> {
@@ -76,7 +93,7 @@ pub struct Resolver<'a, S> {
 
 impl<S: AccessStore> Resolver<'_, S> {
     /// `_resolve_session(cookie)` at the instant `now`, in Unix seconds.
-    pub async fn resolve(&self, cookie: Option<&str>, now: i64) -> Result<Caller, Raised> {
+    pub async fn resolve(&self, cookie: Option<&str>, now: i64) -> Result<Caller, Unresolved> {
         let Some(cookie) = cookie.filter(|c| !c.is_empty()) else {
             return Ok(Caller::Anonymous);
         };
@@ -84,10 +101,10 @@ impl<S: AccessStore> Resolver<'_, S> {
         let data = match signer::loads(cookie, self.key, now, max_age) {
             Ok(data) => data,
             Err(LoadError::Refused) => return Ok(Caller::Anonymous),
-            Err(LoadError::Payload | LoadError::Raised) => return Err(Raised),
+            Err(LoadError::Payload | LoadError::Raised) => return Err(Unresolved::Raised),
         };
         if !matches!(data, PyValue::Dict(_)) {
-            return Err(Raised);
+            return Err(Unresolved::Raised);
         }
         let missing = PyValue::None;
         let user_id = data.get("user_id").unwrap_or(&missing);
@@ -102,8 +119,9 @@ impl<S: AccessStore> Resolver<'_, S> {
         };
         match self.store.dashboard_user(id).await {
             Err(error) => {
-                tracing::error!(%id, error = %error.0, "session check failed; refusing the request");
-                Ok(Caller::Anonymous)
+                tracing::warn!(%id, reason = error.reason.as_str(), error = %error.message,
+                    "the user list did not answer; handing the request to Python");
+                Err(Unresolved::HandOver(error.reason))
             }
             Ok(Some(row)) if row.status == "approved" => Ok(Caller::User {
                 role: row.role,
@@ -112,8 +130,9 @@ impl<S: AccessStore> Resolver<'_, S> {
             Ok(Some(_)) => Ok(Caller::Anonymous),
             Ok(None) => match self.store.bot_status(id).await {
                 Err(error) => {
-                    tracing::error!(%id, error = %error.0, "the bot's list did not answer");
-                    Err(Raised)
+                    tracing::warn!(%id, reason = error.reason.as_str(), error = %error.message,
+                        "the bot's list did not answer; handing the request to Python");
+                    Err(Unresolved::HandOver(error.reason))
                 }
                 Ok(Some(Some(status))) if status == "approved" => Ok(Caller::User {
                     role: "viewer".into(),

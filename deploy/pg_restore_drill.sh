@@ -103,9 +103,10 @@ fail() {
 # is on the absolute gap in either direction: the /expenses form deletes
 # app.manual_expenses rows, a buyer's contacts are replaced whole on every
 # write of that buyer, so a phone list that lost a number is one row fewer,
-# and scripts/chain_copy_back.py deletes a chain's owner: and last_sync_* keys
-# from meta.chain_watermarks when it releases the chain — a rollback between
-# the dump and the drill is a few keys fewer, not keys lost.
+# and the copy-back deletes a chain's owner: and last_sync_* keys from
+# meta.chain_watermarks when it releases the chain — a rollback between the
+# dump and the drill is a few keys fewer, not keys lost. (That is the
+# copy-back of an image from before step 14: S14-04 deleted this build's.)
 #
 # The three buyer tables are chain 4's. Once it writes them Postgres is their
 # only store — DuckDB's copy has stopped — so this dump is the one backup of a

@@ -477,15 +477,20 @@ class TestTheRunbook:
         chains can rightly lack. Mutation: name another chain as needing a
         latch, or go back to "a marker per chain"."""
         # `core/duckdb_off.py` is gone (step 14's S14-00); its question was
-        # the copy-back's own helper, asked here directly.
-        from core.chain_transfer import _carried_keys
+        # the copy-back's own helper, and that went with the copy-back in
+        # S14-04: the keys a chain keeps in `meta.chain_watermarks` are its
+        # declared sync keys and marker keys, read off the chain here.
         from core.write_chains import WRITE_CHAINS, chain_name
+
+        def _kept_keys(chain):
+            return (tuple(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+                    + tuple(getattr(chain, "CHAIN_MARKER_KEYS", ())))
 
         item = self._item("Preconditions", 4)
         assert "a marker per chain" not in item
         assert "`mode` `postgres`" in item and "by its latch or by its flag" in item
         latched = set(re.findall(r"`(pg_\w+_write)`", item))
-        keeping = {chain_name(c) for c in WRITE_CHAINS if _carried_keys(c)}
+        keeping = {chain_name(c) for c in WRITE_CHAINS if _kept_keys(c)}
         assert latched == keeping, latched
         assert latched < {chain_name(c) for c in WRITE_CHAINS}
 

@@ -1022,7 +1022,7 @@ async fn marketing(store: &PgReads, w: &Window) -> Result<Marketing, Failure> {
     let goals = store
         .rows(GOAL_SQL.to_owned(), &[])
         .await
-        .map_err(|_| Failure::Raised("the goal read failed"))?;
+        .map_err(|e| e.raised("the goal read failed"))?;
     let goal = match goals.first() {
         Some(row) => Some(float_req(row, 0)?),
         None => None,

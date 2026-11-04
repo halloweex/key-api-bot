@@ -3,18 +3,25 @@
 //! requires at start.
 //!
 //! The dashboard's user list and the role matrix are read the way
-//! `core/pg_dashboard_users.py` reads them: the schema revision first, and a
-//! revision that is not this build's is an error like any other. The bot's
-//! list is read the way `bot/store_postgres.py` reads it — no revision check,
-//! the bot store checks it once at `initialise()`.
+//! `core/pg_dashboard_users.py` reads them: the schema revision first. The
+//! bot's list is read the way `bot/store_postgres.py` reads it — no revision
+//! check, the bot store checks it once at `initialise()`.
+//!
+//! None of their failures is answered here. Python refuses a request whose
+//! user list it cannot read, 500s on an unreadable bot list and falls back to
+//! the code's matrix — and in a migration window its own reads succeed where
+//! these fail — so a failure hands the request to Python, which answers it as
+//! it would have (`crate::handover`).
 
 use std::future::Future;
 use std::time::Duration;
 
 use sqlx::PgPool;
-use sqlx::postgres::PgConnection;
 
 use super::permissions::{Actions, StoredPermission};
+use crate::handover::{self, Reason};
+use crate::pgread;
+use crate::trend::ReadError;
 
 /// The columns of `app.dashboard_users` a session needs.
 #[derive(Clone, Debug)]
@@ -24,12 +31,31 @@ pub struct UserRow {
     pub allowed_features: Option<String>,
 }
 
+/// A read the session needed and did not get, and why the request is handed over.
 #[derive(Debug)]
-pub struct StoreError(pub String);
+pub struct StoreError {
+    pub reason: Reason,
+    pub message: String,
+}
 
 impl From<sqlx::Error> for StoreError {
     fn from(error: sqlx::Error) -> Self {
-        StoreError(error.to_string())
+        StoreError {
+            reason: handover::of(&error, Reason::Session),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<ReadError> for StoreError {
+    fn from(error: ReadError) -> Self {
+        match error {
+            ReadError::HandOver(reason, message) => StoreError { reason, message },
+            ReadError::Failed(message) => StoreError {
+                reason: Reason::Session,
+                message,
+            },
+        }
     }
 }
 
@@ -74,42 +100,26 @@ impl PgAccess {
     ) -> Result<T, StoreError> {
         tokio::time::timeout(self.timeout, work)
             .await
-            .map_err(|_| StoreError(format!("no answer within {:?}", self.timeout)))?
+            .map_err(|_| StoreError {
+                reason: Reason::Session,
+                message: format!("no answer within {:?}", self.timeout),
+            })?
     }
 
     /// Whether this service can answer anybody: Postgres answers its role,
     /// and the schema is at the revision the contract was exported from. An
-    /// image older than the schema refuses every session, so `/readyz` —
+    /// image behind the schema hands every request to Python, so `/readyz` —
     /// the container's healthcheck — asks exactly this.
     pub async fn ready(&self) -> Result<(), StoreError> {
-        self.within(async {
-            let mut conn = self.pool.acquire().await?;
-            self.require_revision(&mut conn).await
-        })
-        .await
-    }
-
-    /// `require_revision()`: absent, unreadable or another revision all fail.
-    async fn require_revision(&self, conn: &mut PgConnection) -> Result<(), StoreError> {
-        let found: Option<String> =
-            sqlx::query_scalar("SELECT version_num FROM meta.alembic_version LIMIT 1")
-                .fetch_optional(&mut *conn)
-                .await?;
-        match found {
-            Some(v) if v == self.revision => Ok(()),
-            other => Err(StoreError(format!(
-                "schema is at {other:?}, this build requires {:?}",
-                self.revision
-            ))),
-        }
+        pgread::connection(&self.pool, &self.revision, self.timeout).await?;
+        Ok(())
     }
 }
 
 impl AccessStore for PgAccess {
     async fn dashboard_user(&self, user_id: i64) -> Result<Option<UserRow>, StoreError> {
         self.within(async {
-            let mut conn = self.pool.acquire().await?;
-            self.require_revision(&mut conn).await?;
+            let mut conn = pgread::connection(&self.pool, &self.revision, self.timeout).await?;
             let row: Option<(String, String, Option<String>)> = sqlx::query_as(
                 "SELECT role, status, allowed_features FROM app.dashboard_users WHERE user_id = $1",
             )
@@ -139,8 +149,7 @@ impl AccessStore for PgAccess {
 
     async fn role_permissions(&self, role: &str) -> Result<Vec<StoredPermission>, StoreError> {
         self.within(async {
-            let mut conn = self.pool.acquire().await?;
-            self.require_revision(&mut conn).await?;
+            let mut conn = pgread::connection(&self.pool, &self.revision, self.timeout).await?;
             let rows: Vec<(String, bool, bool, bool)> = sqlx::query_as(
                 "SELECT feature, can_view, can_edit, can_delete \
                  FROM app.role_permissions WHERE role = $1",

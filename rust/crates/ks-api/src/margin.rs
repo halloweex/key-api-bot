@@ -22,6 +22,7 @@ use sqlx::{AssertSqlSafe, PgPool, Row};
 use crate::gold::decimal_to_float;
 use crate::params::FieldError;
 use crate::period;
+use crate::pgread;
 use crate::pyrt::{PyNum, round_float};
 use crate::trend::{Failure, ReadError};
 use crate::validate;
@@ -351,35 +352,19 @@ impl PgMargin {
         q: &Query,
         dates: (NaiveDate, NaiveDate),
     ) -> Result<Vec<PgRow>, ReadError> {
-        let work = async {
-            let found: Option<String> =
-                sqlx::query_scalar("SELECT version_num FROM meta.alembic_version LIMIT 1")
-                    .fetch_optional(&self.pool)
-                    .await?;
-            if found.as_deref() != Some(self.revision.as_str()) {
-                return Err(sqlx::Error::Protocol(format!(
-                    "schema is at {found:?}, this build requires {:?}",
-                    self.revision
-                )));
-            }
-            let mut query = sqlx::query(AssertSqlSafe(statement(route, &q.sales_type)))
-                .bind(dates.0)
-                .bind(dates.1);
-            if q.sales_type != "all" {
-                query = query.bind(q.sales_type.clone());
-            }
-            query = match route {
-                Route::ByBrand => query.bind(q.limit),
-                Route::BrandCategory | Route::Alerts => query.bind(q.min_revenue),
-                _ => query,
-            };
-            query.fetch_all(&self.pool).await
-        };
-        match tokio::time::timeout(self.timeout, work).await {
-            Ok(Ok(rows)) => Ok(rows),
-            Ok(Err(error)) => Err(ReadError(error.to_string())),
-            Err(_) => Err(ReadError(format!("no answer within {:?}", self.timeout))),
+        let mut conn = pgread::connection(&self.pool, &self.revision, self.timeout).await?;
+        let mut query = sqlx::query(AssertSqlSafe(statement(route, &q.sales_type)))
+            .bind(dates.0)
+            .bind(dates.1);
+        if q.sales_type != "all" {
+            query = query.bind(q.sales_type.clone());
         }
+        query = match route {
+            Route::ByBrand => query.bind(q.limit),
+            Route::BrandCategory | Route::Alerts => query.bind(q.min_revenue),
+            _ => query,
+        };
+        pgread::fetch(query.fetch_all(&mut *conn), self.timeout).await
     }
 }
 

@@ -146,10 +146,11 @@ def _m0006_seed_manager_classifications(self) -> None:
     # Not once chain 5 has written Postgres (`core/pg_managers_write.py`): its
     # writer seeds the baselines there, in the transaction that lands each
     # manager, and a baseline seeded here after the latch is a key only DuckDB
-    # holds — which `scripts/chain_copy_back.py managers` refuses on, because
-    # its copy would delete it. The marker is a local file, read with no
-    # Postgres, which is all a boot can ask. The table is still created: the
-    # DuckDB schema does not depend on who writes it.
+    # holds — which `scripts/chain_copy_back.py managers` refused on, because
+    # its copy would delete it (an image from before step 14's still does).
+    # The marker is a local file, read with no Postgres, which is all a boot
+    # can ask. The table is still created: the DuckDB schema does not depend
+    # on who writes it.
     from core import chain_latch
 
     seed = not chain_latch.latched("pg_managers_write")

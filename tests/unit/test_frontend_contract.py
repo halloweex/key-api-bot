@@ -184,3 +184,20 @@ def test_what_the_goal_routes_are_sent_is_what_their_harness_sends():
         "sales_type=retail")
     assert fc.goal_query("/api/goals/smart", sales_type="all", year=2026, month=9) == (
         "sales_type=all&year=2026&month=9")
+
+
+def test_what_the_inventory_page_sends_is_what_its_harness_sends():
+    assert fc.inventory_stock_summary_limit() == 15
+    assert fc.inventory_trend_options() == ((30, 90, 180, 365), ("daily", "monthly"))
+    assert fc.inventory_turnover_options() == {
+        "days": (30.0, 60.0, 90.0), "lead_time": (1.0, 90.0),
+        "safety_multiplier": (1.0, 3.0), "buffer_days": (0.0, 30.0),
+        "max_acceptable_days": (30.0, 365.0)}
+    assert fc.inventory_turnover_query(days=30, lead_time=14, safety_multiplier=1.5,
+                                       buffer_days=5, max_acceptable_days=60) == (
+        "days=30&lead_time=14&safety_multiplier=1.5&buffer_days=5&max_acceptable_days=60")
+    assert fc.js_number(1.0) == "1" and fc.js_number(2.3) == "2.3"
+    assert fc.inventory_abc_classes() == ("A", "B", "C")
+    assert fc.inventory_bare_paths() == (
+        "/api/stocks/analysis", "/api/stocks/brand-rotation", "/api/stocks/skus",
+        "/api/stocks/actions", "/api/stocks/alerts")

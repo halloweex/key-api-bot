@@ -373,7 +373,7 @@ async fn stored_goals(store: &PgReads) -> Result<Vec<StoredGoal>, Failure> {
             &[],
         )
         .await
-        .map_err(|_| Failure::Raised("the stored goals could not be read"))?;
+        .map_err(|e| e.raised("the stored goals could not be read"))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let period: Option<String> = text(row, 0)?;

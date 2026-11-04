@@ -532,3 +532,105 @@ def goal_query(path: str, **values: object) -> str:
     return "&".join(f"{n}={text(values[n])}" for n in names
                     if not (path == "/api/goals/smart" and n in ("year", "month")
                             and values.get(n) is None))
+
+
+# ─── /inventory ──────────────────────────────────────────────────────────────
+
+# The inventory GETs the client sends with no query at all.
+_BARE_STOCK_CALLS = {
+    "/stocks/analysis": "getInventoryAnalysis", "/stocks/brand-rotation": "getBrandRotation",
+    "/stocks/skus": "getSkus", "/stocks/actions": "getStockActions",
+    "/stocks/alerts": "getRestockAlerts",
+}
+# The turnover's URLSearchParams, in the order `getInventoryTurnover` sets them.
+TURNOVER_PARAMS = ("days", "lead_time", "safety_multiplier", "buffer_days",
+                   "max_acceptable_days")
+
+
+def js_number(x: float) -> str:
+    """`String(x)` in JavaScript: an integral number without a fraction (`1`,
+    not `1.0`), otherwise the shortest round trip, as `repr` writes it in
+    the range the page offers."""
+    return str(int(x)) if float(x).is_integer() else repr(float(x))
+
+
+def inventory_stock_summary_limit() -> int:
+    """`useStockSummary(n)` in the stock cards: the one `limit` sent."""
+    _require("api/client.ts",
+             r"getStockSummary: \(limit = 20, options\?: FetchOptions\) =>\s*"
+             r"fetchApi<StockSummaryResponse>\('/stocks/summary', `limit=\$\{limit\}`, options\)")
+    m = re.search(r"useStockSummary\((\d+)\)", _read("components/StockSummaryChart.tsx"))
+    if not m:
+        raise FrontendShapeError("StockSummaryChart.tsx: no useStockSummary(n)")
+    return int(m.group(1))
+
+
+def inventory_trend_options() -> Tuple[Tuple[int, ...], Tuple[str, ...]]:
+    """The trend chart's period buttons and its two granularities."""
+    _require("api/client.ts",
+             r"fetchApi<InventoryTrendResponse>\('/stocks/trend', "
+             r"`days=\$\{days\}&granularity=\$\{granularity\}`, options\)")
+    text = _require("components/InventoryTrendChart.tsx",
+                    r"useInventoryTrend\(days, granularity\)")
+    days = tuple(int(d) for d in re.findall(r"setDays\((\d+)\)", text))
+    granularities = tuple(re.findall(r"setGranularity\('(\w+)'\)", text))
+    if not days or not granularities:
+        raise FrontendShapeError("InventoryTrendChart.tsx: no period or granularity buttons")
+    return days, granularities
+
+
+def inventory_turnover_options() -> Dict[str, Tuple[float, ...]]:
+    """What the turnover card can send: its period buttons, and each setting's
+    `min` and `max` as the inputs enforce them (the multiplier is the one
+    the page does not round to an integer)."""
+    m = re.search(r"getInventoryTurnover: \(params: \{(.*?)"
+                  r"return fetchApi<InventoryTurnoverResponse>\('/stocks/turnover', p\.toString\(\)",
+                  _read("api/client.ts"), re.S)
+    if not m:
+        raise FrontendShapeError("api/client.ts: getInventoryTurnover is not URLSearchParams")
+    sets = re.findall(r"p\.set\('(\w+)'", m.group(1))
+    if tuple(sets) != TURNOVER_PARAMS:
+        raise FrontendShapeError(f"api/client.ts: getInventoryTurnover sets {sets}")
+    _require("api/client.ts", r"p\.set\('days', String\(params\.days \?\? 30\)\)")
+    text = _require(
+        "components/InventoryTurnoverChart.tsx",
+        r"useInventoryTurnover\(\{\s*days, leadTime, safetyMultiplier: safetyMult, "
+        r"bufferDays, maxAcceptableDays: maxDays,\s*\}\)",
+        r"onChange\(step < 1 \? v : Math\.round\(v\)\)")
+    periods = tuple(int(v) for v in re.findall(r"\{ value: (\d+), label: '\d+d' \}", text))
+    bounds = re.findall(r"min=\{([\d.]+)\} max=\{([\d.]+)\}", text)
+    if not periods or len(bounds) != 4:
+        raise FrontendShapeError("InventoryTurnoverChart.tsx: periods or settings moved")
+    out: Dict[str, Tuple[float, ...]] = {"days": tuple(float(p) for p in periods)}
+    for name, (lo, hi) in zip(TURNOVER_PARAMS[1:], bounds):
+        out[name] = (float(lo), float(hi))
+    return out
+
+
+def inventory_turnover_query(**values: float) -> str:
+    """`URLSearchParams` as the client fills it: all five, in its order."""
+    return "&".join(f"{n}={js_number(values[n])}" for n in TURNOVER_PARAMS)
+
+
+def inventory_abc_classes() -> Tuple[str, ...]:
+    """The ABC rows that expand into `/stocks/abc/{class}`."""
+    _require("api/client.ts",
+             r"fetchApi<ABCSkuItem\[\]>\(`/stocks/abc/\$\{abcClass\}`, undefined, options\)")
+    m = re.search(r"\(\[('[A-Z]'(?:, '[A-Z]')*)\] as const\)\.map\(cls",
+                  _read("components/InventoryTurnoverChart.tsx"))
+    if not m:
+        raise FrontendShapeError("InventoryTurnoverChart.tsx: no (['A', …] as const).map(cls")
+    return tuple(re.findall(r"'([A-Z])'", m.group(1)))
+
+
+def inventory_bare_paths() -> Tuple[str, ...]:
+    """The stock GETs the client sends without a query."""
+    text = _read("api/client.ts")
+    for path, fn in _BARE_STOCK_CALLS.items():
+        if not re.search(rf"{fn}: \(options\?: FetchOptions\) =>\s*"
+                         rf"fetchApi<\w+(?:\[\])?>\('{re.escape(path)}', undefined, options\)",
+                         text):
+            raise FrontendShapeError(f"api/client.ts: {fn} is not fetchApi('{path}', undefined)")
+    if "/stocks/average" in text:
+        raise FrontendShapeError("api/client.ts: /stocks/average has a caller now")
+    return tuple("/api" + p for p in _BARE_STOCK_CALLS)

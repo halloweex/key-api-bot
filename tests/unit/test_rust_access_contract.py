@@ -49,6 +49,21 @@ def test_the_committed_contract_is_what_the_app_says():
     )
 
 
+def test_the_pilot_requires_the_revision_the_app_requires():
+    """The deploy's guard. The pilot embeds this file when it is built and
+    hands every request to Python while the schema is at another revision
+    than the file's. A migration that moves `REQUIRED_REVISION` and leaves
+    the file behind would ship a pilot that, once the migration ran, answers
+    nothing itself — so the two move in one change."""
+    from core.pg import REQUIRED_REVISION
+
+    assert _committed()["required_revision"] == REQUIRED_REVISION, (
+        f"rust/contract/access.json requires {_committed()['required_revision']!r}, "
+        f"core.pg.REQUIRED_REVISION is {REQUIRED_REVISION!r}: regenerate the contract "
+        "(`python -m tests.rust_access_contract`) in the change that moves the revision"
+    )
+
+
 def test_the_file_is_its_own_rendering():
     """A hand edit that keeps the values and changes the text is drift too."""
     text = CONTRACT_PATH.read_text(encoding="utf-8")

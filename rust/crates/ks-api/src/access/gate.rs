@@ -15,9 +15,10 @@ use std::collections::BTreeSet;
 use super::contract::{ApiRoute, Contract, Dependency, Gate};
 use super::paths::url_path;
 use super::permissions::{self, Matrix};
-use super::session::{Caller, Raised, Resolver};
+use super::session::{Caller, Resolver, Unresolved};
 use super::signer::SessionKey;
 use super::store::AccessStore;
+use crate::handover::Reason;
 use crate::pyrt::py_lower_strip;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,6 +29,9 @@ pub enum Refusal {
     Forbidden(String),
     /// The app's 500.
     Raised,
+    /// The session or its permissions could not be read here: a 501, and
+    /// the Python app answers (`crate::handover`).
+    HandOver(Reason),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -82,16 +86,22 @@ impl<S: AccessStore> Access<S> {
         }
     }
 
-    /// `effective_permissions(user)`.
-    async fn matrix(&self, role: &str, tabs: Option<&[String]>) -> Matrix {
-        let base = match self.store.role_permissions(role).await {
-            Ok(rows) => permissions::stored(&self.contract, role, &rows),
-            Err(error) => {
-                tracing::warn!(role, error = %error.0, "permissions unreadable; the code's matrix stands");
-                permissions::coded(&self.contract, role)
-            }
-        };
-        permissions::apply_feature_override(&self.contract, base, tabs, role)
+    /// `effective_permissions(user)`. Python falls back to the code's matrix
+    /// when it cannot read the stored one; here an unread matrix hands the
+    /// request to Python, which answers from its own read or that fallback.
+    async fn matrix(&self, role: &str, tabs: Option<&[String]>) -> Result<Matrix, Reason> {
+        let rows = self.store.role_permissions(role).await.map_err(|error| {
+            tracing::warn!(role, reason = error.reason.as_str(), error = %error.message,
+                "permissions unreadable; handing the request to Python");
+            error.reason
+        })?;
+        let base = permissions::stored(&self.contract, role, &rows);
+        Ok(permissions::apply_feature_override(
+            &self.contract,
+            base,
+            tabs,
+            role,
+        ))
     }
 
     /// Run `route`'s gates for `ask`.
@@ -111,7 +121,10 @@ impl<S: AccessStore> Access<S> {
             if caller.is_none() {
                 match self.resolver().resolve(ask.cookie, ask.now).await {
                     Ok(resolved) => caller = Some(resolved),
-                    Err(Raised) => return Verdict::Refused(Refusal::Raised),
+                    Err(Unresolved::Raised) => return Verdict::Refused(Refusal::Raised),
+                    Err(Unresolved::HandOver(reason)) => {
+                        return Verdict::Refused(Refusal::HandOver(reason));
+                    }
                 }
             }
             let Some(who) = caller.as_ref() else {
@@ -140,7 +153,10 @@ impl<S: AccessStore> Access<S> {
                         continue;
                     };
                     if matrix.is_none() {
-                        matrix = Some(self.matrix(role, tabs.as_deref()).await);
+                        match self.matrix(role, tabs.as_deref()).await {
+                            Ok(found) => matrix = Some(found),
+                            Err(reason) => return Verdict::Refused(Refusal::HandOver(reason)),
+                        }
                     }
                     let allowed = matrix
                         .as_ref()
@@ -155,7 +171,10 @@ impl<S: AccessStore> Access<S> {
                         continue;
                     };
                     if matrix.is_none() {
-                        matrix = Some(self.matrix(role, tabs.as_deref()).await);
+                        match self.matrix(role, tabs.as_deref()).await {
+                            Ok(found) => matrix = Some(found),
+                            Err(reason) => return Verdict::Refused(Refusal::HandOver(reason)),
+                        }
                     }
                     let any = features.iter().any(|f| {
                         matrix

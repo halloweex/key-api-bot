@@ -326,8 +326,12 @@ async def test_a_postgres_that_cannot_answer_is_the_same_failure(pair):
         finally:
             async with pair.pool.acquire() as conn:
                 await conn.execute(mended)
-    differences = REPORT.phase("unreadable", rows)
+    differences = REPORT.phase("unreadable", rows, may_hand_over=True)
     assert not differences, "\n".join(differences)
+    # Another revision is a migration window: Rust hands every request to
+    # Python, whose image is the schema's. A table neither can read is the
+    # same answer from both.
+    assert rust_wave1.handed_over(rows) == [r for r, _, _ in rows if r.startswith("revision ")]
     order = [path for path, _ in asks]
     REPORT.data["unreadable_statuses"] = {name: [statuses[(name, p)] for p in order]
                                           for name, _, _ in breaks}

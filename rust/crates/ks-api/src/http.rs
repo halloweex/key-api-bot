@@ -10,8 +10,11 @@
 //! and the SPA
 //! catch-all's JSON 404 for an unmatched `/api` path. Every other route that
 //! a request is let through to is a 501 naming it — the Python app serves it,
-//! and nginx hands it there (`nginx/rust/proxy.conf`). Two paths of its own,
-//! outside the app's table: `/healthz` (alive) and `/readyz` (able to answer).
+//! and nginx hands it there (`nginx/rust/proxy.conf`). So is a request whose
+//! answer here could be wrong for a reason it does not carry — another schema
+//! revision, a store that did not answer before the first read
+//! (`crate::handover`). Two paths of its own, outside the app's table:
+//! `/healthz` (alive) and `/readyz` (able to answer, or why not).
 
 use std::any::Any;
 use std::collections::hash_map::RandomState;
@@ -41,14 +44,30 @@ use crate::access::store::PgAccess;
 use crate::expenses;
 use crate::goals;
 use crate::gold::PgGold;
+use crate::handover::Reason;
+use crate::inventory;
 use crate::margin::{self, PgMargin};
 use crate::pgread::PgReads;
 use crate::products_intel;
 use crate::reports;
-use crate::trend::{self, Failure};
+use crate::trend::{self, Failure, ReadError};
 
 /// `DEFAULT_REQUEST_TIMEOUT` in `web/middleware.py`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// `SLOW_ENDPOINT_TIMEOUT`, for the paths in `SLOW_ENDPOINTS`.
+const SLOW_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// `SLOW_ENDPOINTS`, matched against the decoded path as
+/// `request.url.path` is.
+const SLOW_ENDPOINTS: [&str; 8] = [
+    "/api/duckdb/resync",
+    "/api/duckdb/refresh-statuses",
+    "/api/goals/recalculate",
+    "/api/stocks/analysis",
+    "/api/revenue/forecast/train",
+    "/api/revenue/forecast/evaluate",
+    "/api/revenue/forecast/tune",
+    "/api/traffic/reclassify",
+];
 /// The endpoints the pilot answers past the gates, by the contract's name.
 const TREND: &str = "web.routes.api.analytics.get_revenue_trend";
 const SPA_CATCH_ALL: &str = "web.routes.pages.catch_all_spa";
@@ -184,6 +203,19 @@ fn not_in_pilot(what: String, branch: &str) -> Response {
     )
 }
 
+/// A request handed to the Python app: the 501 nginx does not pass on, its
+/// `branch` the reason.
+fn hand_over(reason: Reason) -> Response {
+    json(
+        StatusCode::NOT_IMPLEMENTED,
+        &NotInPilot {
+            error: "Not Implemented",
+            detail: format!("{}; the Python app serves it", reason.sentence()),
+            branch: reason.as_str(),
+        },
+    )
+}
+
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         match self {
@@ -195,8 +227,17 @@ impl IntoResponse for Failure {
                 tracing::error!(why, "the Python app raises here; answering its 500");
                 json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL)
             }
-            Failure::Unavailable(surface, error) => {
-                tracing::error!(surface, error = %error.0, "read failed");
+            Failure::Unavailable(surface, ReadError::HandOver(reason, why)) => {
+                tracing::warn!(
+                    surface,
+                    reason = reason.as_str(),
+                    why,
+                    "handed to the Python app"
+                );
+                hand_over(reason)
+            }
+            Failure::Unavailable(surface, ReadError::Failed(error)) => {
+                tracing::error!(surface, error, "read failed");
                 let detail = format!(
                     "The data behind '{surface}' cannot be read right now. Try again shortly."
                 );
@@ -210,6 +251,10 @@ impl IntoResponse for Failure {
                 )
             }
             Failure::NotInPilot(branch) => not_in_pilot(branch.to_owned(), branch),
+            Failure::HandOver(reason, why) => {
+                tracing::warn!(reason = reason.as_str(), why, "handed to the Python app");
+                hand_over(reason)
+            }
             Failure::RateLimited(limit) => json(
                 StatusCode::TOO_MANY_REQUESTS,
                 &TooMany {
@@ -233,6 +278,7 @@ fn refused(refusal: Refusal) -> Response {
             tracing::error!("the session check raises here in Python; answering its 500");
             json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL)
         }
+        Refusal::HandOver(reason) => hand_over(reason),
     }
 }
 
@@ -375,6 +421,15 @@ async fn endpoint(
         name if goals::Route::from_endpoint(name).is_some() => {
             let which = goals::Route::from_endpoint(name).expect("matched above");
             goals_route(state, which, route, query, headers, peer).await
+        }
+        name if inventory::Route::from_endpoint(name).is_some() => {
+            let which = inventory::Route::from_endpoint(name).expect("matched above");
+            let admit = admitter(state, route, headers, peer);
+            let abc_class = captures.get("abc_class").map(String::as_str);
+            match inventory::answer(which, &state.reads, query, abc_class, admit).await {
+                Ok(body) => raw_json(StatusCode::OK, body),
+                Err(failure) => failure.into_response(),
+            }
         }
         SPA_CATCH_ALL => {
             // `path == "api" or path.startswith("api/")`, before any session check.
@@ -586,15 +641,17 @@ async fn healthz() -> Response {
 
 /// Readiness, which the container's healthcheck asks (`ks-api healthcheck`):
 /// Postgres answers this service's role, and the schema is at the contract's
-/// revision. Not the app's either — nginx routes no client to it.
+/// revision. Not the app's either — nginx routes no client to it. Not ready
+/// names the reason every request is being handed over for.
 async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     match state.access.store.ready().await {
         Ok(()) => raw_json(StatusCode::OK, br#"{"status":"ok"}"#.to_vec()),
         Err(error) => {
-            tracing::warn!("not ready: {}", error.0);
+            let reason = error.reason.as_str();
+            tracing::warn!(reason, "not ready: {}", error.message);
             raw_json(
                 StatusCode::SERVICE_UNAVAILABLE,
-                br#"{"status":"unavailable"}"#.to_vec(),
+                format!(r#"{{"status":"unavailable","reason":"{reason}"}}"#).into_bytes(),
             )
         }
     }
@@ -685,7 +742,12 @@ async fn observe(request: Request, next: Next) -> Response {
         tracing::info!(%method, %path, request_id = %id, "Request started");
     }
 
-    let mut response = match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
+    let (limit, detail) = if SLOW_ENDPOINTS.contains(&uvicorn_path(&path).as_str()) {
+        (SLOW_REQUEST_TIMEOUT, "Request exceeded 300.0s timeout")
+    } else {
+        (REQUEST_TIMEOUT, "Request exceeded 30.0s timeout")
+    };
+    let mut response = match tokio::time::timeout(limit, next.run(request)).await {
         Ok(response) => response,
         Err(_) => {
             tracing::warn!(%method, %path, request_id = %id, "Request timeout");
@@ -693,7 +755,7 @@ async fn observe(request: Request, next: Next) -> Response {
                 StatusCode::GATEWAY_TIMEOUT,
                 &Timeout {
                     error: "Request Timeout",
-                    detail: "Request exceeded 30.0s timeout",
+                    detail,
                     path: &path,
                     correlation_id: &id,
                 },

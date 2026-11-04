@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.305
+
+- The runbook check reads the checkout, so it runs where the checkout is
+- Step 14 S14-04: the way back into DuckDB is deleted
+
+
+## 3.0.304
+
+- Keep a bounded log of /api requests on the host
+
+
 ## 3.0.303
 
 - A NUL in retail-status's note is the edge's 400 now; its two tests say so

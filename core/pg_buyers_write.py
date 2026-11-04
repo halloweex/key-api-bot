@@ -50,7 +50,8 @@ A person's decision is never overwritten (`override_by_human`), and a verdict
 equal to the stored one is not rewritten, so `decided_at` keeps the moment the
 answer last changed. `decided_at` is the web process's UTC clock, passed in —
 the clock DuckDB's rows carry and the copy-back's handover orders by
-(`chain_transfer._shared_clock`) — never Postgres' `now()`.
+(`chain_transfer._shared_clock`; an image from before step 14 still orders by
+it, since S14-04 deleted this build's) — never Postgres' `now()`.
 
 FAILURE POLICY: THE BUYERS RAISE, THE VERDICTS DO NOT, THE DERIVATION NEVER
 
@@ -78,11 +79,12 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` and before its transaction, and claims the three owner rows
 inside that transaction. From the first buyer written here only
-`scripts/chain_copy_back.py buyers` can move the writes back to DuckDB. Two
-things are done before the latch so that a write which could not have landed
-does not spend the rollback: the refusal check above, and the derivation's
-read of what is pending — an hourly run with nothing to decide latches
-nothing.
+`scripts/chain_copy_back.py buyers` could move the writes back to DuckDB
+(deleted in step 14's S14-04; the way back since is an image from before
+step 14, `core.rollback_lever`). Two things are done before the latch so that
+a write which could not have landed does not spend the rollback: the refusal
+check above, and the derivation's read of what is pending — an hourly run
+with nothing to decide latches nothing.
 
 A PRECONDITION THE FLAG ENFORCED — UNTIL S14-00
 
@@ -127,8 +129,9 @@ WRITE_ENV = "KS_WRITE_BUYERS"
 CHAIN = "pg_buyers_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper (`app.buyer_gender`), the buyers mirror, the daily
-# comparisons and the copy-back. The two bronze tables are `pg_buyers.BUYER_UNIT`
+# the hourly shipper (`app.buyer_gender`), the buyers mirror and the daily
+# comparisons (and the copy-back, until step 14's S14-04 deleted it). The two
+# bronze tables are `pg_buyers.BUYER_UNIT`
 # — what one writer writes in one transaction changes hands as one — and the
 # gender rides with them because it is decided from their names.
 CHAIN_TABLES: Tuple[str, ...] = (
