@@ -121,6 +121,13 @@ _RELATIONAL = {"create": "TABLE", "to_table": "TABLE",
 _RELATIONAL_NAME_KW = ("table_name", "view_name")
 
 
+
+# The four chains that shadowed DuckDB until step 14's S14-10 (OD-02 (c)) —
+# `write_chains.is_shadow` named them by their `CHAIN_SHADOW` until S14-11
+# deleted the question with the flags.
+SHADOW_CHAINS = frozenset({"pg_dq_journal_write", "pg_watchdog_write",
+                           "pg_weekly_ledger_write", "pg_traffic_ledger_write"})
+
 def _py_files(trees=DUCKDB_TREES) -> Iterator[Path]:
     for tree in trees:
         for path in sorted((REPO / tree).rglob("*.py")):
@@ -1813,7 +1820,7 @@ class TestDuckdbWritten:
         again, or for every chain; or drop the `off` answer in
         `duckdb_written`."""
         from core import chain_latch, duckdb_switch
-        from core.write_chains import chain_name, is_shadow
+        from core.write_chains import chain_name
 
         monkeypatch.setenv(duckdb_switch.ENV, duckdb)
         duckdb_switch.configure_mode()
@@ -1821,7 +1828,7 @@ class TestDuckdbWritten:
         for env, chain in _chain_switches().items():
             chain_latch.latch(chain_name(chain), env)
             written = fates_mod.duckdb_written()
-            shadow = is_shadow(chain)
+            shadow = chain_name(chain) in SHADOW_CHAINS
             shapes.add(shadow)
             for name in fates_mod.tables_by_switch(env):
                 assert written[name] is False, (env, name, shadow, duckdb)
@@ -1868,9 +1875,9 @@ class TestDuckdbWritten:
         the honest answer for a latched shadow chain. S14-10 deleted them all:
         the walk finds no DuckDB write of any of them. Mutation: put any of
         them back (`persist_run`, `insert_sample`, a report's `mark_sent`)."""
-        from core.write_chains import WRITE_CHAINS, is_shadow
+        from core.write_chains import WRITE_CHAINS, chain_name
 
-        shadow = [c for c in WRITE_CHAINS if is_shadow(c)]
+        shadow = [c for c in WRITE_CHAINS if chain_name(c) in SHADOW_CHAINS]
         assert shadow
         by_code = writes.written()
         for chain in shadow:

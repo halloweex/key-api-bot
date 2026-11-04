@@ -56,7 +56,16 @@ def _owned_by_chains() -> frozenset:
 
 
 def _every_owner_row() -> dict:
-    """Production's owner rows once every chain is latched: one per table."""
+    """Production's owner rows once every chain is latched: one per table —
+    with each chain's local marker beside them, as production's are. Since
+    step 14's S14-11 the sweep's target state latches nothing, so the marker
+    half is written here: owner rows with no marker are the copy's
+    `chain_marker_lost` stamp, a different state."""
+    from core import chain_latch
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    for chain in WRITE_CHAINS:
+        chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
     return {table: STAMP for table in _owned_by_chains()}
 
 
@@ -467,11 +476,9 @@ class TestTheHistoryTables:
             self, target_state):  # noqa: F811
         """The design's proof: `_tables_to_ship` over what the copy stands
         down — every chain's tables and the history — is empty."""
-        from core.write_chains import stood_down_tables_checked
+        from core.write_chains import chain_tables
 
-        stood_down, errors = stood_down_tables_checked()
-        assert errors == {}
-        assert _tables_to_ship(stood_down | stood_down_under_off()) == ()
+        assert _tables_to_ship(chain_tables() | stood_down_under_off()) == ()
 
 
 class TestTheOperationalCopyUnderOff:

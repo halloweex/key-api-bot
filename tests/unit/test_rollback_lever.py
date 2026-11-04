@@ -49,10 +49,13 @@ GONE = re.compile(r"chain_copy_back|--handover|chain_transfer|lever_journal")
 # one of them must say so here, beside rule 15's literal.
 REMEDIATION_REWRITTEN = ("order_owner_row_without_marker", "owner_row_without_marker",
                          "chain_latch_disagrees", "chain_owner_unregistered")
-CLEARS_REWRITTEN = ("write_chain_flag_mismatch", "order_owner_row_without_marker",
+# `write_chain_flag_mismatch` was in both until step 14's S14-11 deleted the
+# condition with its emitter, the flags (rule 8; `test_write_flags_are_not_read`
+# holds that it is gone everywhere).
+CLEARS_REWRITTEN = ("order_owner_row_without_marker",
                     "owner_row_without_marker", "chain_shipper_overwrote",
                     "chain_owner_unregistered", "warehouse_way_back_refused")
-CANARY_REWRITTEN = ("warehouse_way_back_refused", "write_chain_flag_mismatch")
+CANARY_REWRITTEN = ("warehouse_way_back_refused",)
 # Rewritten too, to say what is true without the copy-back, with no lever of
 # their own about a chain's ownership. `shadow_missing_in_duckdb` was the one
 # until step 14's S14-10 deleted it with `compare_shadow`, its emitter
@@ -316,12 +319,6 @@ class TestEveryLeverNamesTheOneLine:
     def test_the_soak_script_notes(self):
         script = (ROOT / "deploy" / "stage4_soak.sh").read_text(encoding="utf-8")
         assert _uncommented(script, "#").count(ROLLBACK_LEVER) == 4
-
-    def test_the_health_description(self):
-        from web.schemas import HealthResponse
-
-        described = HealthResponse.model_fields["write_chains"].description
-        assert ROLLBACK_LEVER.lower() in described.lower()
 
     def test_the_findings_that_named_it(self):
         """The two owner-rows-only findings, built as the comparison builds
