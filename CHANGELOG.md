@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.312
+
+- chore: bump version to 3.0.311 [skip ci]
+- chore: bump version to 3.0.310 [skip ci]
+- Forecast evaluation is an admin lever, like train and tune
+- The manual-expenses list reads its window like every other route
+- The CSV summary lists only the products its filters chose
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-03: the DuckDB tools nothing schedules are deleted
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
 ## 3.0.311
 
 - chore: bump version to 3.0.310 [skip ci]
