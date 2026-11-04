@@ -475,8 +475,9 @@ NETWORK_ROUTES = {
 }
 
 # The /traffic GET routes that read no store: the backfill's status is the
-# process's own dict. Every other route of the tab refuses when Postgres does.
-TRAFFIC_READS_NOTHING = frozenset({"/api/traffic/backfill-utm/status"})
+# process's own dict, and the site's funnel asks Google Analytics
+# (`core/ga4.py`). Every other route of the tab refuses when Postgres does.
+TRAFFIC_READS_NOTHING = frozenset({"/api/traffic/backfill-utm/status", "/api/traffic/funnel"})
 
 # The dashboard's GET routes (step 14, S14-06): every one reads Postgres
 # alone through `core/repositories/revenue.py`'s readers, and refuses when it

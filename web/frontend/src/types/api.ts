@@ -1133,6 +1133,30 @@ export interface TrafficPixelOnlyResponse {
   first_channels: PixelOnlyFirstChannel[]
 }
 
+/** The site's purchase funnel from GA4 (`/api/traffic/funnel`): people per step. */
+export type FunnelStep = 'entered' | 'viewed_product' | 'added_to_cart' | 'began_checkout' | 'purchased'
+export type FunnelCounts = Record<FunnelStep, number>
+export type FunnelWindow = 'current' | 'previous' | 'year_ago'
+export type FunnelTrafficType = 'cold' | 'warm' | 'other'
+
+export interface FunnelRow extends Record<FunnelWindow, FunnelCounts> {
+  key: string
+  type?: FunnelTrafficType
+}
+
+export interface TrafficFunnelResponse {
+  periods: Record<FunnelWindow, { start: string; end: string }>
+  /** The first day GA4 still holds funnel data for (it keeps 14 months). */
+  earliest: string
+  steps: FunnelStep[]
+  total: Record<FunnelWindow, FunnelCounts>
+  by_type: FunnelRow[]
+  by_channel: FunnelRow[]
+  by_device: FunnelRow[]
+  stale: boolean
+  fetched_at: string
+}
+
 export interface TrafficTrendDay {
   date: string
   paid_orders: number
