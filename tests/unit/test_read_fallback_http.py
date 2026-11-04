@@ -263,8 +263,14 @@ class TestOffRefuses:
         assert response.status_code == 503
         assert response.json()["surface"] == "expenses"
 
+    @pytest.mark.parametrize("params", [
+        {"period": "month"},
+        {"period": "week"},
+        {"start_date": date.today().isoformat(),
+         "end_date": (date.today() + timedelta(days=5)).isoformat()},
+    ], ids=["month", "week", "future-range"])
     def test_a_refused_forecast_drops_the_overlay_not_the_chart(
-        self, admin_client, stores, monkeypatch,
+        self, params, admin_client, stores, monkeypatch,
     ):
         """The trend's forecast is an overlay, and its reads already degrade
         to "no forecast" on any failure (`get_forecast_data`, and the handler
@@ -277,13 +283,15 @@ class TestOffRefuses:
 
         The chart's own series is Gold's in Postgres since step 14's S14-06,
         so it is given an answer here — the pool still raises for the
-        forecast's reads, which is what this asks about."""
+        forecast's reads, which is what this asks about. The week and a
+        future range read the stored forecast as the month does since
+        2026-11-04, so the same refusal is theirs."""
         _mode(monkeypatch, "off")
         _switches(monkeypatch, {"KS_READ_GOALS": "postgres"})
         monkeypatch.setattr("core.pg_gold_read.fetch_series",
                             AsyncMock(return_value=[]))
         response = admin_client.get("/api/revenue/trend", params={
-            "period": "month", "include_forecast": "true"})
+            **params, "include_forecast": "true"})
         assert response.status_code == 200, response.text
         assert "forecast" not in response.json()
         assert read_fallback.refusals()["goals"]["count"] >= 1

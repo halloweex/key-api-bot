@@ -543,6 +543,68 @@ class TestTheForecast:
         assert await _pg(pool, PREDICTIONS) == []
 
 
+class TestTheForecastShownSaysWhichTrainingMadeIt:
+    """The trend and /revenue/forecast publish the stored rows with the day
+    and the metrics of the training that stored them, read beside the rows
+    (owner's decision, 2026-11-04). Two trainings, the second over a later
+    range, as Monday's and Thursday's are."""
+
+    MONDAY = datetime(2026, 10, 5, 0, 30, tzinfo=timezone.utc)      # 03:30 Kyiv
+    THURSDAY = datetime(2026, 10, 8, 0, 30, tzinfo=timezone.utc)
+
+    async def _two_trainings(self):
+        await pg_forecast_write.store_predictions(
+            [{"date": date(2026, 10, 5) + timedelta(days=n), "predicted_revenue": 500.0}
+             for n in range(10)], "retail", {"mae": 1.0, "mape": 2.0, "wape": 3.0},
+            self.MONDAY)
+        await pg_forecast_write.store_predictions(
+            [{"date": date(2026, 10, 8) + timedelta(days=n), "predicted_revenue": 700.0 + n}
+             for n in range(10)], "retail", METRICS, self.THURSDAY)
+
+    @pytest.mark.asyncio
+    async def test_from_today_on_the_rows_are_the_last_trainings(self, stores):
+        store, _pool, _env = stores
+        await self._two_trainings()
+        rows, trained_at = await store.get_stored_forecast(
+            date(2026, 10, 9), date(2026, 10, 15))
+        assert trained_at == self.THURSDAY
+        assert [r["predicted_revenue"] for r in rows] == [701.0 + n for n in range(7)]
+        assert rows == await store.get_predictions(date(2026, 10, 9), date(2026, 10, 15))
+
+    @pytest.mark.asyncio
+    async def test_the_trend_shows_that_training_with_no_model_loaded(
+            self, stores, monkeypatch):
+        import core.prediction_service as ps
+
+        store, _pool, _env = stores
+        await self._two_trainings()
+
+        async def the_store():
+            return store
+
+        def never(*args, **kwargs):
+            raise AssertionError("the model ran on a request")
+
+        monkeypatch.setattr("core.duckdb_store.get_store", the_store)
+        monkeypatch.setattr(ps, "_today_kyiv", lambda: date(2026, 10, 9))
+        monkeypatch.setattr(ps, "_predict_future", never)
+        svc = ps.PredictionService()
+        assert not svc.is_ready
+
+        week = await svc.get_range_forecast(date(2026, 10, 5), date(2026, 10, 11))
+        assert [p["date"] for p in week["daily_predictions"]] == [
+            "2026-10-09", "2026-10-10", "2026-10-11"]
+        assert week["predicted_total"] == 701.0 + 702.0 + 703.0
+        assert week["last_trained"] == "2026-10-08"
+        assert week["model_metrics"] == METRICS
+        assert await svc.get_range_forecast(
+            date(2026, 10, 9), date(2026, 10, 11), "b2b") is None
+
+        month = await svc.get_forecast("retail")
+        assert month["last_trained"] == "2026-10-08"
+        assert month["model_metrics"] == METRICS
+
+
 # ─── The reads follow the chain ─────────────────────────────────────────────
 
 
