@@ -333,43 +333,31 @@ _MARKETING_LINES_PERIOD_SQL = """
 
 class RevenueMixin:
 
-    # ── Which engine answers `/reports` ────────────────────────────────────
+    # ── What answers `/reports`, `/marketing` and the filter bar ───────────
     #
-    # Three methods, all reading Silver, which Postgres has had since 0005 and
-    # 0011. No migration, no replication — only a choice of engine, made
-    # BEFORE any connection is taken. That ordering is `/inventory`'s §34
-    # invariant: a read bound for Postgres must not first queue behind
-    # DuckDB's single writer, or the flag has moved the bottleneck rather than
-    # left it behind.
-    #
-    # **Never call these from inside `self.connection()`.** The store lock is
-    # not reentrant and the deadlock does not raise — it simply never returns.
-    # That is why `_category_ids` exists beside the older
-    # `_get_category_with_children`: the six unported callers hold a
-    # connection and pass it in; these three hold nothing.
+    # Postgres, and nothing else since step 14's S14-05: `_reports_run`,
+    # `_marketing_run` and `_lookups_run` each run their statement there and,
+    # on any failure, raise `read_fallback.refuse(<surface>, exc)` — the 503
+    # naming the surface that `fall_back` gave under `KS_READ_FALLBACK=off`,
+    # production's mode since 2026-10-09. Their `KS_READ_*` switches are no
+    # longer read, and without `KS_PG_DSN` the pool raises and that is the
+    # refusal. None of the three takes the DuckDB store lock.
 
     async def _reports_run(
         self, sql: str, params: Optional[List[Any]] = None,
     ) -> List[Tuple]:
-        """Run one report query against whichever engine the flag names."""
-        from core.sql_dialect import DUCKDB, POSTGRES
+        """Run one report query against Postgres; a failure is a refusal
+        naming `reports`."""
+        from core.sql_dialect import POSTGRES
 
         from core import pg_reports_read
 
         params = list(params or [])
-        read_fallback.no_address("reports", pg_reports_read)
-        if pg_reports_read.enabled() and pg_reports_read.available():
-            try:
-                return await pg_reports_read.fetch(
-                    self._render_report(sql, POSTGRES), params,
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("reports", exc)
-
-        async with self.connection() as conn:
-            return conn.execute(
-                self._render_report(sql, DUCKDB), params,
-            ).fetchall()
+        try:
+            return await pg_reports_read.fetch(
+                self._render_report(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("reports", exc)
 
     @staticmethod
     def _render_report(sql: str, dialect, **extra) -> str:
@@ -388,39 +376,26 @@ class RevenueMixin:
     async def _marketing_run(
         self, sql: str, params: Optional[List[Any]] = None, **extra,
     ) -> List[Tuple]:
-        """`_reports_run`'s twin for `/marketing`, on its own flag.
+        """`_reports_run`'s twin for `/marketing`: Postgres, and a failure is
+        a refusal naming `marketing`.
 
-        A separate switch rather than a shared one, because the two tabs can
-        fail differently and a rollback should cost one of them. `/marketing`
-        also reads Gold and the goals, where `/reports` reads only Silver — so
-        the surfaces genuinely differ, and so does what going wrong looks like.
-
-        The goals are the exception to the flag: a statement reading
-        `{revenue_goals}` goes where chain 7a writes, and without a fallback —
-        `GoalsMixin._goals_run`'s rule, for `core/pg_goals_write.py`'s reason.
+        `/marketing` reads Gold and the goals as well as Silver. The goals
+        (`{revenue_goals}`, chain 7a's table) used to take a branch of their
+        own here, to Postgres with no fallback while the chain wrote there;
+        with every read in Postgres that branch is this one. A failed goal
+        read is now counted and refused like the rest of the page, where it
+        used to escape uncounted.
         """
-        from core.sql_dialect import DUCKDB, POSTGRES
+        from core.sql_dialect import POSTGRES
 
-        from core import pg_goals_write, pg_marketing_read
+        from core import pg_marketing_read
 
         params = list(params or [])
-        if pg_goals_write.reads_the_chain(sql):
+        try:
             return await pg_marketing_read.fetch(
-                self._render_report(sql, POSTGRES, **extra), params,
-            )
-        read_fallback.no_address("marketing", pg_marketing_read)
-        if pg_marketing_read.enabled() and pg_marketing_read.available():
-            try:
-                return await pg_marketing_read.fetch(
-                    self._render_report(sql, POSTGRES, **extra), params,
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("marketing", exc)
-
-        async with self.connection() as conn:
-            return conn.execute(
-                self._render_report(sql, DUCKDB, **extra), params,
-            ).fetchall()
+                self._render_report(sql, POSTGRES, **extra), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("marketing", exc)
 
     async def _dashboard_run(
         self, sql: str, params: Optional[List[Any]] = None,
@@ -462,62 +437,43 @@ class RevenueMixin:
     async def _lookups_run(
         self, sql: str, params: Optional[List[Any]] = None,
     ) -> List[Tuple]:
-        """`_reports_run`'s twin for the filter bar, on its own flag.
+        """`_reports_run`'s twin for the filter bar: Postgres, and a failure
+        is a refusal naming `lookups`.
 
-        Its own switch for the reason the others have theirs, sharpened: these
-        four are drawn on *every* page, so a rollback here is the one that
-        must not be tangled up with a tab's. It is also the only router in
-        this file whose failure would be visible on nine tabs at once, which
-        is why, under the default, the fallback below is not negotiable.
-
-        Under `KS_READ_FALLBACK=off` it is refused like the tab it sits on
-        (DN-20b): `/api/categories`, `/api/brands`, `/api/promocodes` and the
-        category children answer 503 naming `lookups`, on every tab at once.
-        Deliberately — a filter bar drawn from a DuckDB nothing writes any
-        more would offer categories and brands the page's own numbers no
-        longer know, and `off` is the promise that no DuckDB answer reaches a
-        page. `tests/unit/test_read_fallback_http.py` pins it.
+        Refused like the tab it sits on (DN-20b): `/api/categories`,
+        `/api/brands`, `/api/promocodes` and the category children answer 503
+        naming `lookups`, on every tab at once — as they have under
+        `KS_READ_FALLBACK=off` since 2026-10-09. A filter bar drawn from a
+        DuckDB nothing writes any more would offer categories and brands the
+        page's own numbers no longer know.
+        `tests/unit/test_read_fallback_http.py` pins it.
         """
-        from core.sql_dialect import DUCKDB, POSTGRES
+        from core.sql_dialect import POSTGRES
 
         from core import pg_lookups_read
 
         params = list(params or [])
-        read_fallback.no_address("lookups", pg_lookups_read)
-        if pg_lookups_read.enabled() and pg_lookups_read.available():
-            try:
-                return await pg_lookups_read.fetch(
-                    self._render_report(sql, POSTGRES), params,
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("lookups", exc)
-
-        async with self.connection() as conn:
-            return conn.execute(
-                self._render_report(sql, DUCKDB), params,
-            ).fetchall()
+        try:
+            return await pg_lookups_read.fetch(
+                self._render_report(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("lookups", exc)
 
     async def _category_ids(self, category_id: int) -> List[int]:
-        """A category and its descendants, from whichever engine answers.
+        """A category and its descendants, from Postgres.
 
-        The routed twin of `_get_category_with_children`, sharing its SQL. The
-        older one keeps taking a connection because its six callers are inside
-        one; this one must not, for the reentrancy reason above.
+        ON THE FILTER BAR'S ROUTER RATHER THAN THE CALLING TAB'S
 
-        ON `KS_READ_LOOKUPS` RATHER THAN THE CALLING TAB'S FLAG
+        It rode `/reports`' router while that was its only caller, and that
+        stopped being right the moment a second tab used it. The tree is
+        filter chrome — the same thing the four header dropdowns are, shared
+        by every tab's callers and belonging to none of them — so it runs on
+        `_lookups_run`, and a failure is refused naming `lookups`.
 
-        It rode `KS_READ_REPORTS` while `/reports` was its only routed caller,
-        and that stopped being right the moment a second tab used it: resolving
-        `?category_id=` on `/dashboard` would then have taken the DuckDB lock
-        unless a *different* tab's flag happened to be on. Found by a lock test
-        that set this tab's flag and watched the category branch reach for
-        DuckDB anyway.
-
-        The tree is filter chrome — the same thing the four header dropdowns
-        are, shared by seven callers across tabs and belonging to none of them
-        — so it belongs on the flag that already means "the filter bar".
-        Production has both set to `postgres`, so this moves nothing today; it
-        stops the next tab inheriting the coupling.
+        It takes no connection and no store lock, so a caller may ask it from
+        anywhere — the older `_get_category_with_children`, which ran the same
+        text on a DuckDB connection its caller held, went with the DuckDB
+        tails it served (step 14, S14-05).
         """
         rows = await self._lookups_run(_CATEGORY_TREE_SQL, [category_id])
         return _at_least_the_root(category_id, [row[0] for row in rows])
@@ -616,9 +572,8 @@ class RevenueMixin:
             )
         else:
             # The Silver grain, under the same rule: before the lock. The
-            # category tree comes from the routed `_category_ids`, because
-            # `_get_category_with_children` needs a connection and taking one
-            # here is exactly the lock this block exists to avoid.
+            # category tree comes from the routed `_category_ids`, which
+            # takes no connection.
             pg_totals = None
             from core import pg_silver_read
             read_fallback.no_address("dashboard", pg_silver_read)
@@ -665,6 +620,11 @@ class RevenueMixin:
                 "endDate": end_date.isoformat(),
             }
 
+        # The DuckDB tail below goes in step 14's S14-06. Its category tree
+        # is the filter bar's, from Postgres since S14-05 — resolved before
+        # the store lock, which a Postgres round trip must not be held under.
+        tail_cat_ids = (await self._category_ids(category_id)
+                        if category_id else None)
         async with self.connection() as conn:
             if category_id or brand or promocode:
                 # The line level keeps distinct order counts correct: it holds
@@ -672,8 +632,7 @@ class RevenueMixin:
                 # read above — `_build_silver_filtered_summary_queries`.
                 from core.sql_dialect import DUCKDB, render_tables
 
-                cat_ids = (await self._get_category_with_children(conn, category_id)
-                           if category_id else None)
+                cat_ids = tail_cat_ids
                 lines_sql, lines_params, ret_sql, ret_params = (
                     self._build_silver_filtered_summary_queries(
                         start_date, end_date, sales_type, source_id,
@@ -913,10 +872,8 @@ class RevenueMixin:
         `{order_lines}` and `{silver_orders}` holes, so the DuckDB fallback and
         the Postgres read render the same text rather than two copies of it.
 
-        `cat_ids` arrives resolved. The two callers resolve it differently —
-        the Postgres path through the routed `_category_ids` before the lock,
-        the DuckDB path through `_get_category_with_children` inside it — and
-        the tree is the same data either way.
+        `cat_ids` arrives resolved, by the routed `_category_ids`, before
+        any lock.
 
         **Returns are not narrowed by category, brand or promocode**, only by
         date, sales type and source. That is how this branch has always
@@ -1219,14 +1176,15 @@ class RevenueMixin:
             pg_series is not None
             and (not include_comparison or prev_pg_series is not None)
         )
+        # The DuckDB tail below goes in step 14's S14-06. When Postgres
+        # answered everything the tree is not needed — the builders below are
+        # only rendered, never run; otherwise it is the filter bar's, from
+        # Postgres since S14-05, resolved before the store lock.
+        cat_ids = None
+        if category_id and not fully_pg:
+            cat_ids = await self._category_ids(category_id)
         async with (nullcontext(None) if fully_pg else self.connection()) as conn:
             from core.sql_dialect import DUCKDB, render_tables
-
-            # `conn` is None when Postgres answered everything, and the tree is
-            # then not needed — the builders below are only rendered, never run.
-            cat_ids = None
-            if category_id and conn is not None:
-                cat_ids = await self._get_category_with_children(conn, category_id)
 
             if use_lines:
                 sql, params = self._build_silver_products_revenue_query(
@@ -1382,9 +1340,6 @@ class RevenueMixin:
                 params.append(sales_type)
 
             if category_id:
-                # `_category_ids`, not `_get_category_with_children`: the
-                # latter takes a connection this method no longer holds, and
-                # nesting the store lock does not raise — it hangs.
                 cat_ids = await self._category_ids(category_id)
                 where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
                 params.extend(cat_ids)
@@ -1541,28 +1496,6 @@ class RevenueMixin:
         return [{"name": row[0]} for row in rows]
 
     # ─── Helper Methods ───────────────────────────────────────────────────────
-
-    async def _get_category_with_children(
-        self,
-        conn: duckdb.DuckDBPyConnection,
-        category_id: int
-    ) -> List[int]:
-        """A category and its descendants, on a connection the caller holds.
-
-        Shares `_CATEGORY_TREE_SQL` with `_category_ids`, which is the routed
-        twin the three report methods use. Six methods still call this one
-        from inside `self.connection()`, and the store lock is not reentrant,
-        so they cannot use the router — hence two executors over one body
-        rather than two bodies.
-
-        (The `result = [category_id]` this used to open with looked dead — the
-        recursive term already yields the root — but it was guarding something
-        real; see `_at_least_the_root`.)
-        """
-        children = conn.execute(
-            _CATEGORY_TREE_SQL.format(categories="categories"), [category_id],
-        ).fetchall()
-        return _at_least_the_root(category_id, [row[0] for row in children])
 
     @staticmethod
     def _wrap_label(text: str, max_chars: int = 25) -> List[str]:
@@ -2322,13 +2255,11 @@ class RevenueMixin:
                 "share_pct": round(rev / total_brand_revenue * 100, 1) if total_brand_revenue > 0 else 0,
             })
 
-        # The target line. Postgres holds an hourly read replica of the goals
-        # (revision 0017); the goals API writes DuckDB by default, so a target
-        # set this hour appears here next hour. That is a display lag on a
-        # figure changed a few times a year. Under `KS_WRITE_GOALS=postgres`
-        # (chain 7a) the goal is written to Postgres directly and there is no
-        # lag: `_marketing_run` sends this read where the chain writes,
-        # whatever `KS_READ_MARKETING` says.
+        # The target line, read from `app.revenue_goals` in Postgres like the
+        # rest of the page (step 14's S14-05), whatever `KS_READ_MARKETING`
+        # says. Since S14-00 the goals API writes there directly (chain 7a,
+        # a constant), so a target set now shows here at once; and a failure
+        # of this read is the page's counted refusal naming `marketing`.
         goal_rows = await self._marketing_run(
             "SELECT goal_amount FROM {revenue_goals} WHERE period_type = 'monthly'"
         )

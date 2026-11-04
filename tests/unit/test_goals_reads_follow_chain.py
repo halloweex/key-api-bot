@@ -15,7 +15,10 @@ Two things are pinned here, without a database:
   hands the choice back to the page instead of raising;
 - **the walk**: every shared statement under `core/` and `web/` that carries
   the `{revenue_goals}` hole is handed to a router that asks
-  `pg_goals_write.reads_the_chain`. Found by reading the code, never listed,
+  `pg_goals_write.reads_the_chain` — or to one with no DuckDB tail at all,
+  which reads Postgres whatever any flag says and refuses a failure
+  (`read_fallback.refuse`; `_marketing_run` since step 14's S14-05, whose
+  branch on the chain went with its tail). Found by reading the code, never listed,
   so a goal read added tomorrow through a router that does not ask fails here
   rather than in front of the owner. The behaviour itself — the page, the
   target line, the refusal to fall back — is proven against a real Postgres
@@ -62,6 +65,11 @@ CHAINS = {
 # String methods a statement passes through on its way to a router; the
 # statement is the receiver, so the router is still the call it lands in.
 TRANSFORMS = {"replace", "format", "strip", "lstrip", "rstrip"}
+# What a router reaches DuckDB through. One that calls none of these and
+# refuses a failure has no DuckDB tail: it reads Postgres whatever any flag
+# says, so a statement handed to it follows every chain (step 14, S14-05).
+DUCKDB_REACH = {"self.connection", "self._fetch_one", "self._fetch_all"}
+REFUSES = "read_fallback.refuse"
 
 
 @pytest.fixture
@@ -143,6 +151,19 @@ def _own_calls(fn: ast.AST) -> Set[str]:
     return out
 
 
+def _postgres_only(fn: ast.AST) -> bool:
+    """A router with no DuckDB tail: it refuses a failure and reaches DuckDB
+    through nothing."""
+    calls = _own_calls(fn)
+    return REFUSES in calls and not (calls & DUCKDB_REACH)
+
+
+def _postgres_only_routers() -> Set[str]:
+    return {fn.name for _rel, tree in _modules() for fn in ast.walk(tree)
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _postgres_only(fn)}
+
+
 def _has_hole(value: str, holes: Tuple[str, ...]) -> bool:
     return any(h in value for h in holes)
 
@@ -211,7 +232,7 @@ def _walk(chain: str = "pg_goals_write"):
     trees = list(_modules())
     routers = {fn.name for _rel, tree in trees for fn in ast.walk(tree)
                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and f"{chain}.{ASKS}" in _own_calls(fn)}
+               and (f"{chain}.{ASKS}" in _own_calls(fn) or _postgres_only(fn))}
     sites, stray = [], []
     for rel, tree in trees:
         docs = _docstrings(tree)
@@ -246,9 +267,11 @@ def _walk(chain: str = "pg_goals_write"):
 class TestEveryGoalReadIsHandedToARouterThatAsks:
     def test_the_walk_finds_the_goal_reads_there_are(self):
         """Non-vacuity: the stored goals — `get_goals` and `get_smart_goals`
-        — and the /marketing target line."""
+        — and the /marketing target line, whose router has no DuckDB tail
+        since step 14's S14-05."""
         routers, sites, _stray = _walk()
         assert {"_goals_run", "_marketing_run"} <= routers
+        assert "_marketing_run" in _postgres_only_routers()
         by_router = {}
         for rel, _line, name in sites:
             by_router.setdefault((rel, name), 0)
@@ -262,7 +285,6 @@ class TestEveryGoalReadIsHandedToARouterThatAsks:
         through `_goal_tables_run`."""
         routers, sites, _stray = _walk("pg_forecast_write")
         assert {"_goals_run", "_goal_tables_run"} <= routers
-        assert "_marketing_run" not in routers
         in_goals = [name for rel, _l, name in sites
                     if rel == "core/repositories/goals.py"]
         assert in_goals.count("_goals_run") >= 2
@@ -288,12 +310,31 @@ class TestEveryGoalReadIsHandedToARouterThatAsks:
         assert not stray, f"{CHAINS[chain][0]} used where the walk cannot follow it: {stray}"
 
     def test_a_router_asking_only_the_other_chain_does_not_pass(self):
-        """`_marketing_run` asks 7a's question. Were a forecast read handed to
-        it, 7b-3's walk must name it — the qualification is the point."""
-        routers, _sites, _stray = _walk("pg_forecast_write")
-        assert "_marketing_run" not in routers
+        """`_goal_tables_run` asks 7b-3's question and still has a DuckDB
+        tail. Were a goal read handed to it, 7a's walk must name it — the
+        qualification is the point. (`_marketing_run` asked 7a's alone until
+        step 14's S14-05 took its tail; a router with none passes for every
+        chain, below.)"""
         routers, _sites, _stray = _walk("pg_goals_write")
         assert "_goal_tables_run" not in routers
+
+    def test_a_router_passes_without_asking_only_when_nothing_reaches_duckdb(self):
+        """The exemption bites: the same body with a DuckDB tail is not one."""
+        src = ("async def _x_run(self, sql):\n"
+               "    try:\n"
+               "        return await pg_x_read.fetch(sql)\n"
+               "    except Exception as exc:\n"
+               "        raise read_fallback.refuse('x', exc)\n")
+        fn = ast.parse(src).body[0]
+        assert _postgres_only(fn)
+        tailed = src.replace(
+            "        raise read_fallback.refuse('x', exc)\n",
+            "        raise read_fallback.refuse('x', exc)\n"
+            "    async with self.connection() as conn:\n"
+            "        return conn.execute(sql).fetchall()\n")
+        assert not _postgres_only(ast.parse(tailed).body[0])
+        assert not _postgres_only(ast.parse(src.replace(
+            "raise read_fallback.refuse('x', exc)", "return []")).body[0])
 
 
 # ─── Chain 7b-3's two rules of its own ──────────────────────────────────────

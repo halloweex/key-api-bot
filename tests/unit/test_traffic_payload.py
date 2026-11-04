@@ -11,79 +11,104 @@ highlight only ever matched in English.
 The other is small and in the same dict: five of the seven summary buckets
 were rounded to the kopeck and two were handed straight out of the
 accumulator, so the payload carried 1182863.0299999998 beside 1182863.03.
+
+Since step 14's S14-05 the tab reads Postgres alone, so the rows behind the
+payload go into Postgres — `silver.orders`, `silver.order_utm`, the revenue
+Gold's roll-up row and `app.manual_expenses` — where they used to go into
+DuckDB. Those tests skip without `KS_PG_DSN`.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
-from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
 from core.repositories.traffic import TrafficMixin
+from tests.integration.pg_tab_seed import (
+    needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
+)
 
 DAY = date(2026, 8, 12)
 WINDOW = (DAY - timedelta(days=1), DAY + timedelta(days=1))
 
 
-async def _store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "payload.duckdb")
-    await s.connect()
-    return s
+async def _nothing(conn, pool):
+    """Each test writes the rows it is about."""
 
 
-async def _order(store: DuckDBStore, order_id: int, total: float,
-                 source_id: int = 4) -> None:
-    async with store.connection() as conn:
-        conn.execute(
+@pytest_asyncio.fixture
+async def tab(tmp_path, monkeypatch):
+    """`(store, pool)`: the tab's store, which can only answer from Postgres,
+    and the pool the rows go in through."""
+    async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _nothing) as pool:
+        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "/traffic"), pool
+
+
+async def _order(pool, order_id: int, total: float, source_id: int = 4) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
             """
-            INSERT INTO silver_orders (
+            INSERT INTO silver.orders (
                 id, source_id, status_id, grand_total, ordered_at, buyer_id,
                 manager_id, order_date, is_return, sales_type, is_active_source,
                 source_name, is_new_customer, buyer_first_order_date, promocode
-            ) VALUES (?, ?, 12, ?, NULL, NULL, NULL, ?, FALSE, 'retail',
+            ) VALUES ($1, $2, 12, $3, NULL, NULL, NULL, $4, FALSE, 'retail',
                       TRUE, 'Shopify', FALSE, NULL, NULL)
             """,
-            [order_id, source_id, total, DAY],
+            order_id, source_id, total, DAY,
         )
 
 
-async def _gold(store: DuckDBStore, revenue: float) -> None:
+async def _verdict(pool, order_id: int, traffic_type: str, platform: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO silver.order_utm (order_id, traffic_type, platform,"
+            " parsed_at) VALUES ($1, $2, $3, now())",
+            order_id, traffic_type, platform,
+        )
+
+
+async def _gold(pool, revenue: float) -> None:
     """The revenue Gold is what blended ROAS divides; ROAS does not read
-    `silver_orders` for its numerator."""
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO gold_daily_revenue (date, sales_type, revenue) "
-            "VALUES (?, 'retail', ?)",
-            [DAY, revenue],
+    `silver.orders` for its numerator. The roll-up row (`source_id IS
+    NULL`), the one its predicate reads."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+            " orders_count, unique_customers, new_customers, returning_customers,"
+            " returns_count, returns_revenue, avg_order_value)"
+            " VALUES ($1, 'retail', NULL, $2, 1, 0, 0, 0, 0, 0, 0)",
+            DAY, revenue,
         )
 
 
-async def _spend(store: DuckDBStore, amount: float,
-                 platform: str = "facebook") -> None:
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO manual_expenses (expense_date, category, expense_type,"
+async def _spend(pool, amount: float, platform: str = "facebook") -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO app.manual_expenses (expense_date, category, expense_type,"
             " amount, currency, note, platform)"
-            " VALUES (?, 'marketing', 'Facebook Ads', ?, 'UAH', NULL, ?)",
-            [DAY, amount, platform],
+            " VALUES ($1, 'marketing', 'Facebook Ads', $2, 'UAH', NULL, $3)",
+            DAY, amount, platform,
         )
 
 
-async def _roas(store: DuckDBStore) -> dict:
+async def _roas(store) -> dict:
     return await store.get_traffic_roas(
         start_date=WINDOW[0], end_date=WINDOW[1], sales_type="retail")
 
 
+@needs_postgres
 class TestTheBonusTierIsAVerdictOrNothing:
 
     @pytest.mark.asyncio
-    async def test_no_spend_recorded_means_no_tier(self, tmp_path):
+    async def test_no_spend_recorded_means_no_tier(self, tab):
         """The production case. Revenue exists, spend does not, so there is
         no ratio — and therefore no tier. It used to answer "No bonus"."""
-        store = await _store(tmp_path)
-        await _order(store, 1, 1_000.0)
-        await _gold(store, 1_000.0)
+        store, pool = tab
+        await _order(pool, 1, 1_000.0)
+        await _gold(pool, 1_000.0)
 
         out = await _roas(store)
         assert out["blended"]["roas"] is None
@@ -99,25 +124,25 @@ class TestTheBonusTierIsAVerdictOrNothing:
         (4_500.0, 1_000.0, "base"),
         (1_000.0, 1_000.0, "none"),
     ])
-    async def test_a_real_ratio_lands_in_a_tier(self, tmp_path, revenue, spend,
+    async def test_a_real_ratio_lands_in_a_tier(self, tab, revenue, spend,
                                                 expected):
-        store = await _store(tmp_path)
-        await _order(store, 1, revenue)
-        await _gold(store, revenue)
-        await _spend(store, spend)
+        store, pool = tab
+        await _order(pool, 1, revenue)
+        await _gold(pool, revenue)
+        await _spend(pool, spend)
 
         out = await _roas(store)
         assert out["bonus_tier"] == expected
 
     @pytest.mark.asyncio
-    async def test_the_tier_is_a_key_and_never_a_sentence(self, tmp_path):
+    async def test_the_tier_is_a_key_and_never_a_sentence(self, tab):
         """A display string here has to be translated by whoever renders it,
         and the renderer cannot translate a value it also has to compare
         against. Keys are the only thing both halves can agree on."""
-        store = await _store(tmp_path)
-        await _order(store, 1, 9_000.0)
-        await _gold(store, 9_000.0)
-        await _spend(store, 1_000.0)
+        store, pool = tab
+        await _order(pool, 1, 9_000.0)
+        await _gold(pool, 9_000.0)
+        await _spend(pool, 1_000.0)
 
         out = await _roas(store)
         assert out["bonus_tier"] in {k for _, k in TrafficMixin.BONUS_TIERS}
@@ -125,40 +150,30 @@ class TestTheBonusTierIsAVerdictOrNothing:
         assert "%" not in out["bonus_tier"]
 
 
+@needs_postgres
 class TestEveryBucketIsRoundedTheSameWay:
 
     @pytest.mark.asyncio
-    async def test_all_seven_summary_buckets_carry_two_decimals(self, tmp_path):
+    async def test_all_seven_summary_buckets_carry_two_decimals(self, tab):
         """Three thirds of a hryvnia in each bucket: the sum is periodic in
         binary, so an unrounded accumulator shows it."""
-        store = await _store(tmp_path)
+        store, pool = tab
         # One order per traffic type the fallback and the UTM rows can produce.
-        await _order(store, 1, 10.01, source_id=1)   # organic (no UTM row)
-        await _order(store, 2, 10.01, source_id=4)   # unknown (no UTM row)
+        await _order(pool, 1, 10.01, source_id=1)   # organic (no UTM row)
+        await _order(pool, 2, 10.01, source_id=4)   # unknown (no UTM row)
         for oid, total, tt, pf in (
             (3, 10.01, "paid_confirmed", "facebook"),
             (4, 10.01, "paid_likely", "facebook"),
             (5, 10.01, "manager", "manager"),
             (6, 10.01, "pixel_only", "other"),
         ):
-            await _order(store, oid, total)
-            async with store.connection() as conn:
-                conn.execute(
-                    "INSERT INTO silver_order_utm (order_id, traffic_type,"
-                    " platform, parsed_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                    [oid, tt, pf],
-                )
+            await _order(pool, oid, total)
+            await _verdict(pool, oid, tt, pf)
         # Three more into each of the two buckets that used to skip rounding,
         # so their totals are 10.01 * 4 and cannot be exact in binary.
         for oid, source_id in ((7, 4), (8, 4), (9, 4)):
-            await _order(store, oid, 10.01, source_id=source_id)
-            async with store.connection() as conn:
-                conn.execute(
-                    "INSERT INTO silver_order_utm (order_id, traffic_type,"
-                    " platform, parsed_at) VALUES (?, 'pixel_only', 'other',"
-                    " CURRENT_TIMESTAMP)",
-                    [oid],
-                )
+            await _order(pool, oid, 10.01, source_id=source_id)
+            await _verdict(pool, oid, "pixel_only", "other")
 
         out = await store.get_traffic_analytics(
             start_date=WINDOW[0], end_date=WINDOW[1], sales_type="retail")
@@ -169,10 +184,10 @@ class TestEveryBucketIsRoundedTheSameWay:
             assert isinstance(bucket["orders"], int), name
 
     @pytest.mark.asyncio
-    async def test_an_absent_bucket_is_zero_and_not_missing(self, tmp_path):
+    async def test_an_absent_bucket_is_zero_and_not_missing(self, tab):
         """The frontend reads all five cards unconditionally."""
-        store = await _store(tmp_path)
-        await _order(store, 1, 100.0, source_id=1)
+        store, pool = tab
+        await _order(pool, 1, 100.0, source_id=1)
 
         out = await store.get_traffic_analytics(
             start_date=WINDOW[0], end_date=WINDOW[1], sales_type="retail")
