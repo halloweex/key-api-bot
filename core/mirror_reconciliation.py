@@ -887,8 +887,8 @@ def _gold_internal_findings(
     is deleted.
     """
     sums: Dict[Tuple[Any, str], Dict[str, Decimal]] = {}
-    for (date, sales_type, _source), row in fine.items():
-        acc = sums.setdefault((date, sales_type), {c: Decimal(0) for c in _GOLD_ADDITIVE})
+    for (day, sales_type, _source), row in fine.items():
+        acc = sums.setdefault((day, sales_type), {c: Decimal(0) for c in _GOLD_ADDITIVE})
         for column in _GOLD_ADDITIVE:
             acc[column] += row[column] or Decimal(0)
 
