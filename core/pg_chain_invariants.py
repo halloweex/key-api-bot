@@ -1596,8 +1596,7 @@ def unwatched_issue(reason: str, watched: Tuple[str, ...],
         description=(
             f"The invariants of {', '.join(watched) or 'the write chains'} "
             f"could not be checked this run: {reason}. Nothing else watches "
-            "these tables — the hourly replication and the daily comparison "
-            "both stand down for them — so "
+            "these tables — the hourly replication stands down for them — so "
             + ", ".join(CONDITIONS)
             + " are held as they were, not cleared."))
 

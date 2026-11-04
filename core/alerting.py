@@ -286,7 +286,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_latch_disagrees": _c(
         "the marker and the owner rows agree again — a human, not a job"),
     # The standing watch on the tables a chain has taken (DN-07). The hourly
-    # shipper and the daily comparison both stand down for them, so these are
+    # shipper stands down for them (the daily comparison did too, until step
+    # 14's S14-12 deleted it), so these are
     # the only checks those tables have — and none of them clears by itself:
     # some clear on a human fixing the writer or the rows, and the rest name a
     # fact that has already happened and only age out.
