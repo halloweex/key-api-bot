@@ -135,11 +135,12 @@ def signal_unreadable_ticks() -> int:
 # manager classification; the customer profile reads `bronze.buyers`. A test
 # walks the code for writers of those tables and fails on one not listed here,
 # and fails on a listed one that does not call `mark_if_owned`. The buyers'
-# writer is `core.pg_buyer_rows`, which the landing mirror and chain 4's writer
-# both run, so one mark covers both.
+# writer is `core.pg_buyer_rows`, which chain 4's writer runs (the landing
+# mirror ran it too, until step 14's S14-13 deleted `core.pg_buyers`).
+# `core.pg_replication.write_managers`, the classification copy, was listed
+# here until S14-13 deleted it with its module.
 MARK_SITES: Dict[str, str] = {
     "core.pg_landing": "_write_order_rows",
-    "core.pg_replication": "write_managers",
     "core.pg_buyer_rows": "_write_buyer_rows",
     # Chain 5's classification writer; its `upsert_managers` marks too, pinned
     # in tests/unit/test_managers_chain.py — one function per module here.

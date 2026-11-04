@@ -340,7 +340,6 @@ class BackgroundScheduler:
         logger.info("Background scheduler started")
 
         await self._schedule_catchup_runs()
-        await self._replicate_classification_once()
 
     @staticmethod
     async def _settle_warehouse_writer() -> None:
@@ -359,41 +358,6 @@ class BackgroundScheduler:
             await warehouse_cutover.settle_writer(await get_store())
         except Exception as e:
             logger.error("Warehouse writer not settled: %s", e, exc_info=True)
-
-    async def _replicate_classification_once(self) -> None:
-        """Copy the manager classification to Postgres, once, at startup.
-
-        `replicate_managers` is called from two places that are both correct
-        and both too rare: `upsert_managers`, which the sync reaches **once a
-        day**, and the retail-status endpoint, which a human reaches almost
-        never. Between a deploy and the next daily sync — up to 24 hours —
-        Postgres holds no classification at all.
-
-        That was not hypothetical. Revision 0005 shipped, the deploy succeeded,
-        and `bronze.managers` sat at 0 rows because the daily sync had already
-        run that morning. Every one of the four `sales_type` branches that
-        reads these tables would have resolved against nothing.
-
-        Once, not on a schedule: it is thirty-nine managers and thirty-nine
-        intervals, the two writers above keep it current afterwards, and a job
-        that rewrites two tables on a timer is a job that can rewrite them
-        wrongly on a timer. Best effort throughout — `replicate_managers` does
-        not raise, and a scheduler that cannot start because Postgres is down
-        is a worse outcome than a stale copy.
-        """
-        try:
-            from core.mirror_reconciliation import configured
-
-            if not configured():
-                return
-
-            from core.duckdb_store import get_store
-            from core.pg_replication import replicate_managers
-
-            result = await replicate_managers(await get_store())
-            logger.info("Classification replicated at startup: %s", result)
-        except Exception as e:
-            logger.warning(f"Startup classification replication skipped: {e}")
 
     async def _schedule_catchup_runs(self) -> None:
         """Queue a one-off run for any check whose due instant we missed.
@@ -794,35 +758,28 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: Replicate the operational history into Postgres (hourly)
+        # Job: the buyers' gender and the bot's state (hourly).
         #
-        # One call site on purpose. Five separate code paths write these tables
-        # — the inventory snapshot job, two branches of the sync service, and
-        # both repair jobs — and hooking each of them is how the sixth gets
-        # forgotten. That is not hypothetical: `update_manager_stats`
-        # recomputed three columns without replicating them for exactly this
-        # reason, and it took a daily CRITICAL to notice (cf34e8b, 2026-08-27).
-        #
-        # A job instead. Idempotent, self-watermarking, and cheap when nothing
-        # moved: two MAX() reads and ~1,100 rows replaced. The cost is lag —
-        # Postgres is behind by up to one interval, which is why
-        # OPERATIONAL_GRACE_MINUTES is sized against this number and must be
-        # raised with it.
+        # The id is the one this job has always had, so `/api/jobs`' history
+        # and the catch-up do not break. Until step 14's S14-13 it copied the
+        # operational history out of DuckDB (`core.pg_operational`), with the
+        # three ids-diffs, the SMS state and the dashboard's user list riding
+        # along; each had stood down since its chain or store moved, and they
+        # went with S14-13. What is left: `derive_gender_pg`, the one writer of
+        # new gender verdicts, and the copy of `data/bot.db`, which stands
+        # down under `KS_BOT_STORE=postgres`.
         self._add_job(
             job_id="replicate_operational",
             name="Replicate: operational history and bot state",
-            description="Copy the irreplaceable tables and data/bot.db into Postgres",
+            description="Derive new buyers' gender in Postgres and copy data/bot.db",
             func=self._run_replicate_operational,
             trigger=IntervalTrigger(hours=1),
             max_instances=1,
             coalesce=True,
-            # Ninety seconds after start, not an hour. This family is a cheap
-            # idempotent copy — 116 ms when nothing moved — and it is what
-            # carries `bronze.expense_types`, whose absence collapses the
-            # `/expenses` breakdown into a single "Other". Waiting an hour
-            # after every deploy for that is the wrong trade, and the delay is
-            # there at all so the copy does not compete with the app's own
-            # startup.
+            # Ninety seconds after start, not an hour: a buyer KeyCRM added
+            # while web was down gets its verdict within two minutes of the
+            # start, and the delay is there at all so the job does not compete
+            # with the app's own startup.
             first_run_delay_s=90,
         )
 
@@ -1154,101 +1111,48 @@ class BackgroundScheduler:
             return result
 
     async def _run_replicate_operational(self) -> Dict[str, Any]:
-        """Copy `stock_movements` and its four neighbours into Postgres.
+        """The hourly job that kept its id: the buyers' gender, then the bot.
 
-        The five tables step 05 routes to Postgres rather than ClickHouse,
-        because none of them can be rebuilt from KeyCRM — see revision 0008.
+        The id `replicate_operational` stays — `/api/jobs`' history and the
+        catch-up read it — but since step 14's S14-13 nothing here copies out
+        of DuckDB. Until then it carried the operational history
+        (`core.pg_operational`), the three ids-diffs (`pg_buyers`,
+        `pg_backfill`, `pg_expense_backfill`), the SMS state and the
+        dashboard's user list; every one of them had stood down since its
+        write chain or store switch moved, and they went with S14-13.
 
-        Never raises: `replicate_operational` returns its own error rather than
+        What is left is the one writer of new gender verdicts and the copy of
+        `data/bot.db`. Never raises: each returns its own error rather than
         propagating, so a Postgres fault cannot take a scheduler job into the
         failure history it shares with the sync.
         """
-        from core.duckdb_store import get_store
         from core.pg_bot_state import replicate_bot_state
-        from core.pg_operational import replicate_operational
 
         with correlation_context():
-            store = await get_store()
-            # Derived FIRST, shipped second, in one tick — `pg_gold`'s
-            # arrangement with `pg_silver` and for the same reason: a copy that
-            # ran before the derivation would carry yesterday's verdict for a
-            # buyer DuckDB decided an hour ago, and the daily reconciliation
-            # would report a difference the ordering created. Cheap on an
-            # ordinary tick: the pending query returns the ~19 buyers a day
-            # KeyCRM adds, and KeyCRM has no gender field for any of them.
-            #
             # Chain 4 writes the verdicts in Postgres
-            # (`core/pg_buyers_write.py`) and the copy below stands down for
-            # them, so the derivation is Postgres's: `derive_gender_pg`,
-            # always. Until step 14's S14-11 it followed the chain's
-            # `mode()` — DuckDB's `derive_gender`, or nothing for a flag
-            # nobody could read. Its own `try`: the derivation never raises,
-            # and a fault in it must not cost the copy of tables nothing can
-            # rebuild either.
+            # (`core/pg_buyers_write.py`), so the derivation is Postgres's:
+            # `derive_gender_pg`, always — the only writer of new verdicts. It
+            # picks up the ~19 buyers a day KeyCRM adds, and KeyCRM has no
+            # gender field for any of them. Until step 14's S14-11 it followed
+            # the chain's `mode()` — DuckDB's `derive_gender`, or nothing for a
+            # flag nobody could read. Its own `try`: the derivation never
+            # raises, and a fault in it must not cost the copy of the bot's
+            # state either.
             from core import pg_buyers_write
 
+            result: Dict[str, Any] = {}
             try:
                 gender = await pg_buyers_write.derive_gender_pg()
             except Exception as exc:  # noqa: BLE001 — carried, not raised
                 logger.error("gender derivation failed: %s", exc,
                              exc_info=True)
                 gender = {"error": f"{type(exc).__name__}: {exc}"}
-            result = await replicate_operational(store)
             result["gender"] = gender
             # `data/bot.db` rides the same job rather than getting one of its
             # own: same cadence, same grace window, and one schedule to reason
-            # about. It reads the file the web container already opens
-            # read-only for the weekly report, so the bot is not touched.
+            # about. It stands down under `KS_BOT_STORE=postgres`.
             result["bot_state"] = await replicate_bot_state()
-            # The buyers ids-diff rides here every hour: it needs the store,
-            # the store admits one process, and a diff that ships only what
-            # is missing costs two ~20k-id scans when nothing is. A heal is
-            # logged WARNING and surfaces as an INFO finding at 07:30.
-            from core.pg_buyers import hourly_ids_diff
-
-            result["buyers_backfill"] = await hourly_ids_diff(store)
-            # The orders ids-diff rides here too. A mirror write lost between
-            # the DuckDB commit and the Postgres commit was re-shipped by
-            # nothing on a schedule — the next tick skips the order as
-            # unchanged and only a human-run backfill re-issued the write.
-            # Each chunk runs under the heavy-job lock so it cannot straddle a
-            # sync's write-and-mirror; the diff itself does not. Stands down on
-            # its own once a write chain owns an order table (DN-22a).
-            from core.pg_backfill import hourly_orders_ids_diff
-
-            result["orders_backfill"] = await hourly_orders_ids_diff(
-                store, lock=self._heavy_job_lock,
-            )
-            # And the expenses ids-diff, for the orders diff's reason at a
-            # twentieth of the scale: 15,020 narrow rows, and on the ordinary
-            # tick the difference is empty. It is also what makes the
-            # `/expenses` rollout safe without an operator remembering an
-            # order — history arrives on its own, so `backfilled_at` is set by
-            # the machine (revision 0020).
-            from core.pg_expense_backfill import hourly_expenses_ids_diff
-
-            result["expenses_backfill"] = await hourly_expenses_ids_diff(store)
-            # The SMS tab's own state rides here for the same reason as the
-            # rest: one call site. All five tables are irreplaceable — a
-            # frozen roster cannot be recomputed, because the eligible
-            # population moves every day. Stands down on its own once
-            # KS_SMS_STORE=postgres makes DuckDB no longer the writer, which
-            # is why `bronze.offer_stocks` is no longer among them: DuckDB
-            # keeps receiving it from KeyCRM, so it ships with the
-            # operational tables above.
-            from core.pg_sms import replicate_sms
-
-            result["sms_state"] = await replicate_sms(store)
-            # The dashboard's own user list rides here too, and for the same
-            # one-call-site reason. It carries the rows across before
-            # KS_USER_STORE=postgres moves the writer, and stands down after
-            # — a full replace out of a frozen DuckDB would roll back every
-            # approval and role change made since the switch.
-            from core.pg_dashboard_users import replicate_dashboard_users
-
-            result["dashboard_users"] = await replicate_dashboard_users(store)
-            if "skipped" not in result:
-                logger.info("Operational replication: %s", result)
+            logger.info("Operational replication: %s", result)
             return result
 
     async def _run_ch_sync(self) -> Dict[str, Any]:
@@ -2937,7 +2841,8 @@ class BackgroundScheduler:
                         "Postgres has not been backfilled, so it cannot be "
                         "reconciled against KeyCRM: every order predating the "
                         "mirror would read as missing from the source's point "
-                        "of view. Run POST /api/mirror/backfill/orders."
+                        "of view. Restore bronze.orders from the nightly "
+                        "Postgres dump, which carries backfilled_at with it."
                     ),
                 ))
                 return {"issues": issues, "discrepancies": [], "error": None}

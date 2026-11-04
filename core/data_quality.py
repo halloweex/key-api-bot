@@ -2086,9 +2086,12 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # Two layers share this check name — orders and, since revision 0020,
     # expenses — and REMEDIATION keys on the name alone, so the lever has to
     # name the table it applies to rather than assume one of them.
+    # Since step 14's S14-13 there is no backfill route: Postgres is the
+    # store of record, so a table without its history is restored from the
+    # nightly dump, which carries `meta.mirror_state.backfilled_at` with it.
     ("mirror_backfill_pending",
-     "POST /api/mirror/backfill/<orders|expenses> for the table named, "
-     "then wait for 07:30"),
+     "Restore the table named from the nightly Postgres dump; "
+     "never set backfilled_at by hand"),
     # `mirror_stood_down`, `order_owner_row_without_marker` and
     # `owner_row_without_marker` had their lines here until step 14's S14-12
     # deleted the comparisons that filed them.
@@ -2399,17 +2402,19 @@ def machine_attempts_note(now: Optional[datetime] = None) -> Optional[str]:
 
     Rule 5 of the charter: an alert must not *trigger* a repair, but it owes
     the reader the count. Without it the honest reading of a CRITICAL is "and
-    nothing is being done", which is false for every mirror finding — the
-    hourly ids-diffs have usually already re-shipped rows by the time the
-    07:30 comparison speaks.
+    nothing is being done", which was false for every mirror finding — the
+    hourly ids-diffs had usually already re-shipped rows by the time the
+    07:30 comparison spoke.
 
-    Reads the two in-process heal ledgers. Returns None when neither has run,
-    which is the common case and must not produce an empty line.
+    Reads the in-process heal ledger of the ClickHouse archive. Returns None
+    when it has not run, which is the common case and must not produce an
+    empty line. The buyers' ledger (`core.pg_buyers`, the buyers ids-diff)
+    was the other until step 14's S14-13 deleted the diff with the module.
     """
     reference = now or datetime.now(timezone.utc)
     parts: List[str] = []
     for label, module in (
-        ("buyers", "core.pg_buyers"), ("archive", "core.ch_history"),
+        ("archive", "core.ch_history"),
     ):
         try:
             heal = importlib.import_module(module).last_heal

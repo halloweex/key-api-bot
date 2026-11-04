@@ -656,6 +656,23 @@ async def record_backfill_misses(misses: Mapping[int, str]) -> int:
     return len(rows)
 
 
+# Said by a caller that restores comments from outside the web container,
+# where the scheduler's heavy-job lock does not exist: a CLI runs in its own
+# process, so `get_scheduler()._heavy_job_lock` there would be a brand-new
+# lock guarding nothing. `tests/unit/test_heavy_lock_coverage.py` accepts
+# this constant in place of the lock, which is why it is a constant a script
+# prints rather than a sentence in a docstring. It lived in `core.pg_backfill`
+# until step 14's S14-13 deleted that module; the sentence was about a DuckDB
+# UPDATE shipped to Postgres, and is about this chain's write now.
+WEB_MUST_BE_STOPPED = (
+    "Stop the web container before running this. It restores order comments "
+    "in Postgres without the scheduler's heavy-job lock, which lives in the "
+    "web process and cannot be taken from here — and a sync tick landing "
+    "between the read and the write leaves Postgres holding the older copy, "
+    "with the version archive recording a transition that never happened."
+)
+
+
 async def restore_manager_comments(comments: Mapping[int, str]) -> List[int]:
     """Fill in `manager_comment` where Postgres holds NULL, from KeyCRM.
 

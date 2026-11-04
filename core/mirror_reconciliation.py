@@ -24,8 +24,9 @@ The job adds `reconcile_customer_profile` (`core.pg_vitrina`) and the
 ClickHouse comparisons (`core.ch_silver`, `core.ch_history`). Report only:
 nothing here repairs anything.
 
-The catalogue specs and `fetch_duckdb_rows` stay for one more reader,
-`core.pg_landing.carry_retired_catalogue` (S14-13 deletes it).
+The catalogue specs and `fetch_duckdb_rows` stayed for one more reader,
+`core.pg_landing.carry_retired_catalogue`, until step 14's S14-13 deleted it
+and them.
 """
 from __future__ import annotations
 
@@ -40,7 +41,6 @@ from typing import (
 )
 
 from core.data_quality import IntegrityIssue, Severity
-from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
 from core.pg_bot_state import (
     AUTHORIZED_COLUMNS,
     MILESTONE_COLUMNS,
@@ -215,24 +215,6 @@ _COPIED_FROM_SQLITE = (
 )
 
 
-# The catalogue, for the carry of the rows only DuckDB holds
-# (`core.pg_landing.carry_retired_catalogue`, deleted in S14-13). The daily
-# comparison read them too, until step 14's S14-12 deleted it, and chain 6's
-# copy-back until S14-04.
-PRODUCTS_SPEC = MirroredTable(
-    pg_table="bronze.products",
-    dk_table="products",
-    columns=tuple(PRODUCT_COLUMNS),
-    numeric=("price",),
-)
-
-CATEGORIES_SPEC = MirroredTable(
-    pg_table="bronze.categories",
-    dk_table="categories",
-    columns=tuple(CATEGORY_COLUMNS),
-)
-
-
 def configured() -> bool:
     """Is there a Postgres to compare against at all?
 
@@ -300,36 +282,6 @@ def _row_key(spec: MirroredTable, row: Sequence[Any]) -> Any:
         return int(values[0])
     except (TypeError, ValueError):
         return values[0]
-
-
-def fetch_duckdb_rows(
-    conn, spec: MirroredTable,
-) -> Tuple[Dict[Any, Tuple[Any, ...]], Dict[Any, Optional[datetime]]]:
-    """Every row of one landing table, plus when this store last wrote it.
-
-    The timestamp is read alongside but never compared: it is DuckDB's own
-    bookkeeping and Postgres keeps `mirrored_at` for the same purpose, so two
-    correct copies disagree on it by construction. It is here because it is
-    what tells a row still in flight from one that was lost.
-    """
-    cols = ", ".join(spec.columns)
-    stamp = spec.synced_column
-    rows = conn.execute(
-        f"SELECT {cols}" + (f", {stamp}" if stamp else "") + f" FROM {spec.dk_table}"
-    ).fetchall()
-
-    values: Dict[Any, Tuple[Any, ...]] = {}
-    synced: Dict[Any, Optional[datetime]] = {}
-    width = len(spec.columns)
-    for row in rows:
-        if any(row[spec.columns.index(c)] is None for c in spec.key_columns):
-            continue
-        key = _row_key(spec, row)
-        values[key] = _normalise_row(
-            row[:width], spec.columns, spec.numeric, spec.ignore_columns,
-        )
-        synced[key] = row[width] if stamp else None
-    return values, synced
 
 
 async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]:
@@ -1250,11 +1202,10 @@ async def reconcile_order_utm_completeness(
     import, so the two move together. A floor that is not a number raises
     here, and the job's `check` names the error on the run.
     """
-    from core import pg_landing
     from core.pg import get_pool, require_revision
     from core.pg_warehouse_dq import silver_grace_minutes
 
-    if not pg_landing.enabled():
+    if not configured():
         return []
 
     if grace_minutes is None:
@@ -1414,18 +1365,19 @@ async def reconcile_buyer_completeness(
     """Does every landed buyer have a current verdict, and does every buyer an
     order names exist? Postgres alone; reports only; no store.
 
-    Asked while the landing mirror is on — `pg_landing.enabled()`, a
-    constant True until S14-13. Until step 14's S14-11 it was also asked
+    Asked whenever there is a Postgres (`configured()`, `KS_PG_DSN`) since
+    step 14's S14-13; until then while the landing mirror was on
+    (`pg_landing.enabled()`, a constant True since S14-00). Until S14-11 it
+    was also asked
     whenever chain 4 wrote the buyers in Postgres (`pg_buyers_write.mode()`),
     the one Postgres-side check that the chain's writer is alive, which must
     not switch off with a mirror flag the chain does not consult (the plan
     critic's b2); the chain writes Postgres, a constant, so the gate is the
     mirror's alone."""
-    from core import pg_landing
     from core.gender import RULES_VERSION
     from core.pg import get_pool, require_revision
 
-    if not pg_landing.enabled():
+    if not configured():
         return []
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
@@ -1560,13 +1512,12 @@ async def reconcile_bot_state(
     """
     import sqlite3
 
-    from core import pg_landing
     from core.bot_prefs import BOT_DB_PATH
     from core.bot_store import ENGINE_ENV
     from core.pg import get_pool, require_revision
     from core.pg_bot_state import BUSY_TIMEOUT_SECONDS
 
-    if not pg_landing.enabled():
+    if not configured():
         return []
     if os.getenv(ENGINE_ENV, "sqlite").strip().lower() == "postgres":
         return []
@@ -1688,10 +1639,9 @@ async def reconcile_order_versions(
     is the one liveness check on the one table nothing can rebuild, at the
     moment its writer changes hands.
     """
-    from core import pg_landing
     from core.pg import get_pool, require_revision
 
-    if not pg_landing.enabled():
+    if not configured():
         return []
 
     now = now or datetime.now(timezone.utc)
