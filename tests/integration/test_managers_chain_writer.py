@@ -32,7 +32,11 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_managers_write
-from tests.conftest import chains_on_duckdb
+
+# What DuckDB's `get_all_managers` answered per manager, until S14-11.
+DUCKDB_MANAGER_KEYS = {"id", "name", "email", "status", "is_retail",
+                       "first_order_date", "last_order_date", "order_count",
+                       "synced_at"}
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -62,14 +66,12 @@ async def _clean(pool):
 
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
-    """A real DuckDB, a live Postgres, the landing mirror on (so the replica
-    ships while the chain is off), no chain flag set, and chain 5's
-    preconditions held met."""
+    """A real DuckDB, a live Postgres, the landing mirror on, and no chain
+    flag set (none routes anything since step 14's S14-11)."""
     from core.duckdb_store import DuckDBStore
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_MIRROR_LANDING", "on")
-    monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
     store = DuckDBStore(db_path=tmp_path / "managers.duckdb")
     await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=2, max_size=6)
@@ -362,8 +364,11 @@ class TestTheStandingWatchReadsTheShape:
         from core import pg_chain_invariants as inv
 
         store, pool, _env = stores
-        chain_latch.latch(CHAIN)
+        stamp = chain_latch.latch(CHAIN)
         async with pool.acquire() as conn:
+            # The handover the "from the latch on" watch measures from is the
+            # owner rows since step 14's S14-11, not the local marker.
+            await chain_latch.claim(conn, pg_managers_write.CHAIN_TABLES, stamp)
             await conn.execute(
                 "INSERT INTO bronze.managers (id, name, is_retail) VALUES "
                 "(1,'clean',TRUE),(2,'overlap',FALSE),(3,'gap',FALSE),"
@@ -396,9 +401,11 @@ class TestTheStandingWatchReadsTheShape:
 class TestTheReadsFollow:
     @pytest.mark.asyncio
     async def test_the_dashboard_names_the_manager_postgres_holds(self, stores):
-        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: under the
-        chain the join reads Postgres. Mutation: drop `reads_the_chain` in
-        `_dashboard_run`."""
+        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: the join
+        reads Postgres, whatever that switch says. It took a branch on
+        `reads_the_chain` until step 14's S14-06 gave `_dashboard_run` one
+        path, Postgres. Mutation: give `_dashboard_run` back a DuckDB tail
+        routed by the switch."""
         from core.repositories.revenue import _RETURN_ORDERS_SQL
 
         store, pool, env = stores
@@ -521,11 +528,13 @@ class TestTheReviewAgainstARealPostgres:
             (BASELINE, clock), (date(2026, 6, 1), clock)]
 
     @pytest.mark.asyncio
-    async def test_the_route_answers_422_for_a_refusal_postgres_never_saw(
+    async def test_a_note_carrying_nul_is_refused_before_postgres_is_asked(
             self, stores, monkeypatch):
         """A note carrying NUL is refused before Postgres is asked; the review
         reproduced a 503 "Postgres did not answer" for it. Nothing stored.
-        Mutation: drop the route's `ClassificationRefused` mapping."""
+        Through the app the edge refuses it first (`RejectNulMiddleware`,
+        400); the writer's own refusal and the route's 422 for it are
+        tests/unit/test_managers_chain.py's."""
         import time as _time
 
         import httpx
@@ -556,8 +565,8 @@ class TestTheReviewAgainstARealPostgres:
                                         "&effective_from=2026-10-07&note=a%00b")
         finally:
             limiter.reset()
-        assert res.status_code == 422, res.text
-        assert "note carries NUL" in res.json()["detail"]
+        assert res.status_code == 400, res.text
+        assert res.json()["detail"] == "query: Must not contain a NUL character"
         assert await _pg_intervals(pool) == before
 
     @pytest.mark.asyncio
@@ -568,14 +577,11 @@ class TestTheReviewAgainstARealPostgres:
         from core import pg_managers_read
 
         store, pool, env = stores
-        # DuckDB's answer, written and read there on purpose since S14-00.
-        with chains_on_duckdb(pg_managers_write), \
-                patch("core.pg_replication.replicate_managers", new=AsyncMock()):
-            await store.upsert_managers([{"id": 34, "name": "M"}])
-            duck = await store.get_all_managers()
-        env.setenv(ENV, "postgres")
         await store.upsert_managers([{"id": 34, "name": "M"}])
         pg = await pg_managers_read.fetch_all_managers()
-        assert [set(r) for r in pg] == [set(r) for r in duck]
+        # DuckDB's answer, as a literal (rule 9): the keys its
+        # `get_all_managers` returned, read off its DuckDB branch before step
+        # 14's S14-11 deleted it.
+        assert [set(r) for r in pg] == [DUCKDB_MANAGER_KEYS]
         assert pg[0]["synced_at"] is not None
 

@@ -6,8 +6,10 @@ the setter, the getter the sync gate reads, and the freshness check that pages
 on a stalled sync. They disagreed once — written to Postgres, read from DuckDB,
 wiped hourly — and revision 0032 records how.
 
-Chain-agnostic on purpose. `core.write_chains.stood_down_sync_keys()` decides
-WHICH keys are owned here; this module only stores them. Chains 3, 4 and 5 each
+Chain-agnostic on purpose. Which keys are owned here was decided by
+`core.write_chains.stood_down_sync_keys()` until step 14's S14-11; since then
+every chain's key is (`write_chains.sync_keys()`), and the store's getter and
+setter come here for every key without asking. This module only stores them. Chains 3, 4 and 5 each
 carry `last_sync_*` keys of their own, and a store per chain is how the getter
 and the setter came apart the first time.
 """

@@ -6,10 +6,9 @@ decision OD-07 (a)). The counters live in web's process and every deploy
 empties them with its log, so the week is proven by the process that outlives
 web's: the canary pages `read_fallback_used` whenever `/api/health`'s
 `read_fallbacks` is non-empty, and rewrites one `watch:read_fallbacks` row on
-every probe that read the block. `deploy/stage4_soak/22_f1_read_fallbacks.sql`
-judges the two, and `tests/integration/test_stage4_soak_sql.py` holds it to
-them against a real Postgres; the watch row's own arithmetic is held in
-`tests/integration/test_read_fallback_watch.py`.
+every probe that read the block. The soak's F1 judged the two until step
+14's S14-02 retired it with the week it licensed; the watch row's own
+arithmetic is held in `tests/integration/test_read_fallback_watch.py`.
 
 What is held here: what the canary reads and says, that a refusal under `off`
 is never a fallback, what production's payload today does (nothing), that the
@@ -365,22 +364,23 @@ class TestRoutedReads:
         assert "\n" not in lever and len(lever) <= 150
 
 
-class TestWhatOffWouldRefuseIsPublished:
-    """Web publishes a route to DuckDB exactly when `off` would refuse it.
-    The cohorts' gate is `ch_cohorts.enabled() and ch_cohorts.available()`,
-    and under `off` everything else goes to `no_engine` and is refused;
-    `misconfigured` and `no_engine` together must name exactly that."""
+class TestWhatOffWouldRefuseIsSeen:
+    """Until step 14's S14-07 the cohorts' gate was `ch_cohorts.enabled() and
+    ch_cohorts.available()`, and web published a route to DuckDB
+    (`misconfigured`, `no_engine`) exactly when `off` would refuse it. The
+    cohorts ask ClickHouse whatever `KS_READ_COHORTS` says now, so nothing
+    routes them anywhere: they are refused exactly when there is no
+    ClickHouse to ask, and every such refusal is counted, which the canary
+    pages as `read_refused`. Mutation: let a missing `KS_CH_URL` answer, or
+    refuse a configured one by the switch."""
 
-    def test_the_engine_only_table_is_the_cohorts_gate(self):
-        from core import ch_cohorts, read_fallback
-
-        assert read_fallback.ENGINE_ONLY == {"cohorts": (ch_cohorts.ENV, "clickhouse")}
-
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("switch", [None, "duckdb", "clickhouse", " ClickHouse "])
     @pytest.mark.parametrize("url", [None, "http://ks-clickhouse:8123"])
-    def test_published_exactly_when_refused(self, fresh_read_fallback, monkeypatch,
-                                            switch, url):
-        from core import ch_cohorts
+    async def test_refused_exactly_without_an_address_and_counted(
+        self, fresh_read_fallback, monkeypatch, tmp_path, switch, url,
+    ):
+        from core.duckdb_store import DuckDBStore
 
         if switch is None:
             monkeypatch.delenv("KS_READ_COHORTS", raising=False)
@@ -392,12 +392,22 @@ class TestWhatOffWouldRefuseIsPublished:
             monkeypatch.setenv("KS_CH_URL", url)
         fresh_read_fallback.configure_mode()
 
-        refused_under_off = not (ch_cohorts.enabled() and ch_cohorts.available())
-        published = [line for line in (fresh_read_fallback.misconfigured()
-                                       + fresh_read_fallback.no_engine_routes())
-                     if "KS_READ_COHORTS" in line]
-        assert bool(published) == refused_under_off, published
-        assert len(published) <= 1, "one cause, one line"
+        async def _answers(sql, **_):
+            return ""
+
+        monkeypatch.setattr("core.ch_common.execute", _answers)
+        store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+        try:
+            rows = await store._analytics_rows(
+                lambda d: f"SELECT 1 FROM {d.silver_orders} o", [], ("int",))
+        except fresh_read_fallback.ReadUnavailable as refused:
+            assert url is None, "a configured ClickHouse was refused"
+            assert refused.surface == "cohorts"
+            assert fresh_read_fallback.refusals()["cohorts"]["count"] == 1
+        else:
+            assert url is not None, "no ClickHouse, and the cohorts answered"
+            assert rows == []
+        assert fresh_read_fallback.no_engine_routes() == []
 
 
 # ─── A probe that read nothing clears nothing ──────────────────────────────
@@ -520,7 +530,8 @@ class TestABlindProbeKeepsThePage:
         stalled["buyer_sync"] = {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
                                  "watermark_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
                                  "last_attempt_age_s": 120, "consecutive_failures": 0}
-        stalled["write_chains"] = {canary.BUYER_CHAIN: {"mode": "postgres"}}
+        # No `write_chains` entry: since step 14's S14-11 the CRITICAL is
+        # judged on the `buyer_sync` block alone.
         sent, agent, _ = await self._run([stalled, None, stalled])
         assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
 
@@ -534,7 +545,7 @@ class TestABlindProbeKeepsThePage:
         `unjudged_keys`."""
         failing = self._payload({})
         failing["write_chains"] = {canary.ORDERS_CHAIN: {
-            "mode": "postgres", "sync_step": {
+            "sync_step": {
                 "consecutive_failures": canary.ORDERS_SYNC_FAILURES + 2,
                 "last_ok_age_s": 3600, "last_attempt_age_s": 60,
                 "last_error_class": "TimeoutError"}}}
@@ -544,10 +555,10 @@ class TestABlindProbeKeepsThePage:
 
 
 class TestUnjudgedKeys:
-    # Chains 3 and 4 both on DuckDB: an entry for each, so both are judged.
+    # The buyers step's block and chain 3's step: both judged.
     _CHAIN4 = {"buyer_sync": {"last_ok_age_s": 60},
-               "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"},
-                                canary.ORDERS_CHAIN: {"mode": "duckdb"}}}
+               "write_chains": {canary.ORDERS_CHAIN: {
+                   "sync_step": {"consecutive_failures": 0}}}}
     # The switch block, and since S14-00 the backup evidence's.
     _SWITCH = {"duckdb_switch": {"mode": "on", "opened_while_off": {}},
                "backups": {"pitr_drill_age_h": 1.0}}
@@ -571,8 +582,10 @@ class TestUnjudgedKeys:
                                      **self._SWITCH}) == [
             "read_routed_to_duckdb", "read_refused"]
         both = {"read_fallbacks": {}, "read_fallback_mode": {}, **self._SWITCH}
+        # Since step 14's S14-11 chain 4's CRITICAL is held by the
+        # `buyer_sync` block alone, never by a `write_chains` entry.
         assert canary.unjudged_keys({**both, "buyer_sync": {"last_ok_age_s": 1}}) == [
-            "buyer_sync_stalled_chain", "orders_sync_failing"], "no chain entry"
+            "orders_sync_failing"], "no chain entry"
         assert canary.unjudged_keys({**both, "buyer_sync": None,
                                      "write_chains": self._CHAIN4["write_chains"]}) == [
             "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
@@ -596,32 +609,36 @@ class TestUnjudgedKeys:
             {"buyer_sync": {"consecutive_failures": 3}})}
         emitted |= {k for k, _ in canary.check_buyer_sync_chain(
             {"buyer_sync": {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 1,
-                            "last_attempt_age_s": 60},
-             "write_chains": {canary.BUYER_CHAIN: {"mode": "postgres"}}})}
+                            "last_attempt_age_s": 60}})}
         emitted |= {k for k, _ in canary.check_duckdb_switch(
             {"duckdb_switch": {"opened_while_off": {"a": _entry(1)}}})}
         emitted |= {k for k, _ in canary.check_duckdb_off_held_back(
             {"duckdb_switch": {"held_back": ["user_store"]}})}
         emitted |= {k for k, _ in canary.check_orders_sync_chain(
             {"write_chains": {canary.ORDERS_CHAIN: {
-                "mode": "postgres", "sync_step": {"consecutive_failures": 9}}}})}
+                "sync_step": {"consecutive_failures": 9}}}})}
         emitted |= {k for k, _ in canary.check_backup_evidence(
             {"backups": {"pitr_drill_age_h": None}})}
         assert set(canary.unjudged_keys(None)) == emitted
 
     @pytest.mark.parametrize("entry, held", [
         (None, True),                                              # no entry at all
-        ({"mode": "postgres"}, True),                              # no step to judge
-        ({"mode": "postgres", "sync_step": None}, True),
-        ({"mode": "postgres", "sync_step": {"consecutive_failures": 0}}, False),
-        ({"mode": "duckdb"}, False),                               # judged: not chain 3's
-        ({"mode": None}, False),
+        ({}, True),                                                # no step to judge
+        ({"sync_step": None}, True),
+        ({"sync_step": {"consecutive_failures": 0}}, False),
+        # An older web's entry: since step 14's S14-11 `mode` decides nothing,
+        # so a step-less entry is held whatever it says and a step is judged.
+        ({"mode": "postgres"}, True),
+        ({"mode": "duckdb"}, True),
+        ({"mode": "duckdb", "sync_step": {"consecutive_failures": 0}}, False),
     ])
     def test_chain_3s_key_is_held_only_when_it_cannot_be_judged(self, entry, held):
+        """By `sync_step` alone (S14-11). Mutation: gate the hold on `mode`
+        again."""
         payload = {"read_fallbacks": {}, "read_fallback_mode": {}, **self._SWITCH,
                    "buyer_sync": {"last_ok_age_s": 1},
-                   "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"},
-                                    **({canary.ORDERS_CHAIN: entry} if entry else {})}}
+                   "write_chains": {**({canary.ORDERS_CHAIN: entry}
+                                       if entry is not None else {})}}
         assert ("orders_sync_failing" in canary.unjudged_keys(payload)) is held
 
     @pytest.mark.asyncio

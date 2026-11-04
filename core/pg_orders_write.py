@@ -6,8 +6,9 @@ mirror (`core.pg_landing.mirror_orders`) shipped exactly those rows to Postgres;
 `upsert_expenses_batch` and `mirror_expenses` did the same for the order-level
 costs; `record_backfill_misses` remembered in DuckDB the ids KeyCRM could not
 supply, and the hourly `replicate_operational` copied that ledger across.
-Under `KS_WRITE_ORDERS=postgres` all four tables are written here and DuckDB's
-copies freeze.
+Under `KS_WRITE_ORDERS=postgres` all four tables were written here and DuckDB's
+copies froze; since step 14 they are written here alone, whatever the flag
+says (PRECONDITIONS AND ROUTING, below).
 
 OWNER DECISION OD-13 (a), 2026-10-01: A RAISING WRITER
 
@@ -16,9 +17,10 @@ here IS the write: a failure raises, the sync's order step records it and
 holds `last_sync_orders` where it was (`SyncService._orders_step_postgres`),
 and the next tick re-fetches the same 24-hour window. Nothing is lost while
 Postgres is away — KeyCRM still holds every order — and nothing lands in a
-store nobody reads. The way back is `scripts/chain_copy_back.py orders`, and
-the flip waits for evidence that Postgres itself can be got back
-(`unmet_precondition`).
+store nobody reads. The way back was `scripts/chain_copy_back.py orders`
+(deleted in step 14's S14-04; the way back since is an image from before
+step 14, `core.rollback_lever`), and the flip waited for evidence that
+Postgres itself can be got back (`unmet_precondition`).
 
 WHAT MOVES TOGETHER, AND WHY IN ONE TRANSACTION
 
@@ -43,13 +45,14 @@ archive goes on across a flip and across a rollback with nothing to copy.
 
 THE ONE WRITER OF THE ORDER TABLES STAYS ONE WRITER
 
-The rows come from `core.landing_rows`, the parse DuckDB is handed too, and
-are written by `pg_landing._write_order_rows` and `pg_landing._write_rows` —
-the statements every DuckDB-to-Postgres shipment runs. So the version is
-captured in the row's own transaction, the `bronze.orders` watermark the
-canary's `mirror_stale` reads keeps moving, and `order_versions_stalled` keeps
-meaning what it says (DN-22b; `tests/unit/test_write_chains.py` walks for a
-second writer). What only the chain does lives here: the decision, the latch
+The rows come from `core.landing_rows`, the parse DuckDB was handed too until
+step 14's S14-09 deleted its order writer, and are written by
+`pg_landing._write_order_rows` and `pg_landing._write_rows` — the statements
+every DuckDB-to-Postgres shipment runs. So the version is captured in the
+row's own transaction, the `bronze.orders` watermark the canary's
+`mirror_stale` reads keeps moving, and `order_versions_stalled` keeps meaning
+what it says (DN-22b; `tests/unit/test_write_chains.py` walks for a second
+writer). What only the chain does lives here: the decision, the latch
 and its owner rows, and what to do with an order Postgres would refuse.
 
 THE DECIDER READ IS THE WRITE DECISION
@@ -83,55 +86,30 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` and claims the four owner rows inside the writing
 transaction, so the owner row shares an `xmin` with the row it was taken for.
-From the first order written here only `scripts/chain_copy_back.py orders` can
-move the writes back to DuckDB. A batch with nothing to write — every order
-already in its state and no expense — reads that on the same connection
-before the latch and returns, so an idle tick latches nothing.
+From the first order written here only `scripts/chain_copy_back.py orders`
+could move the writes back to DuckDB (deleted in step 14's S14-04; the way
+back since is an image from before step 14, `core.rollback_lever`). A batch
+with nothing to write — every order already in its state and no expense —
+reads that on the same connection before the latch and returns, so an idle
+tick latches nothing.
 
-PRECONDITIONS THE FLAG ENFORCED — UNTIL S14-00
+PRECONDITIONS AND ROUTING — UNTIL STEP 14
 
-Since step 14's S14-00 the chain writes Postgres whatever its flag says and
-asks no precondition: `writes_postgres`, `mode`, `unmet_precondition`,
-`stood_down_layers` and `landing_checks_stood_down` are constants, and the
-start hold is gone. The backup evidence is judged by the canary instead
-(`backup_evidence_stale`). What follows is the history.
-
-`unmet_precondition()` named what must hold before `KS_WRITE_ORDERS=postgres`
-moves the writes; until all of it does an unlatched chain runs as duckdb
-whatever the flag says (DN-26's rule, generic in the registry since DN-27).
-`goals_bridge` was the first, while the goal calculators rendered the DN-12
-sales-type bridge over DuckDB `orders`; chain 7b-4 deleted the bridge, and the
-goal history is Silver's, which step 13 makes Postgres':
-
-- `lockout` — this build requires `LOCKOUT_REVISION` (0035), which refuses
-  every image built before the chain (`chain_latch.lockout_unmet`).
-- `step13` — Postgres alone derives the warehouse (`warehouse_cutover`). On a
-  DuckDB that still derives, frozen landing would freeze Silver and Gold.
-- `chain1` — inventory writes Postgres: DuckDB's SKU rebuild reads DuckDB
-  order lines (`core/repositories/inventory.py`), which freeze here.
-- `pitr_drill`, `pg_offsite`, `remote_restore` — OD-13 (a)'s evidence that
-  Postgres can be got back, from the markers the host's scripts leave
-  (`core/backup_evidence.py`). One provider: OD-01 (c) was cancelled by the
-  owner on 2026-10-01.
-- `landing_pages_clear` — no delivered page open under a condition this
-  chain's stand-down retires (`landing_checks_stood_down`), or the first run
-  after the flip would announce it resolved with no check looking — step 13's
-  `retired_conditions_clear`, for landing.
-
-Every one is read locally: `/api/health` asks this through the registry and
-must answer with Postgres down. The warning is rate-limited, chain 4's reason:
-the order step asks every minute.
-
-A process that once found one unmet under the flag stays held until it ends
-(`held_until_restart`): the facts above move inside a running web, and the
-flip must happen at a start, after `--handover`, never on its own in the
-middle of a day (`unmet_precondition`).
+Until step 14's S14-00 `KS_WRITE_ORDERS=postgres` moved the writes only once
+the lock-out revision, step 13, chain 1, the backup evidence and no delivered
+page under a retired landing check all held, and a process that once found
+one unmet stayed held until it ended. S14-00 made the answers constants; S14-09
+deleted them, with the routing they fed: the sync's order step, the store's
+selections and the boot ask nothing, and DuckDB's order writers are gone. The
+backup evidence is judged by the canary (`backup_evidence_stale`). Kept:
+`WRITE_ENV` as a name (revision 0035's comments name it, and an image from
+before step 14 reads it) and the latch and its owner rows (decision 3: that
+image routes by them). `env_writes_postgres` and `writes_postgres()`, which
+the registry read until then, went in S14-11 with the flag.
 """
 from __future__ import annotations
 
 import logging
-import os
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -172,13 +150,15 @@ WRITE_ENV = "KS_WRITE_ORDERS"
 
 # What this chain is called in `core.write_chains`, in the local latch marker
 # and in the `/api/health` block. One spelling, so a marker written by one
-# release is still read by the next. `scripts/chain_copy_back.py orders`.
+# release is still read by the next.
 CHAIN = "pg_orders_write"
 
 # The tables this chain writes (module docstring). `core.write_chains` reads
-# this, and through it the sync's mirrors, the hourly shipper (the misses),
-# the backfills, the daily comparisons and the copy-back. The two order tables
-# are `pg_landing.ORDER_UNIT` and pass as one.
+# this, and through it the hourly shipper (the misses), the backfills and the
+# daily comparisons — and, until step 14 took them, the sync's orders and
+# expenses mirrors (their last callers went in S14-09) and the copy-back
+# (deleted in S14-04). The two order tables are `pg_landing.ORDER_UNIT` and
+# pass as one.
 CHAIN_TABLES: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses",
     "app.order_backfill_misses")
@@ -193,10 +173,10 @@ CHAIN_TABLES: Tuple[str, ...] = (
 # so the daily comparison cannot tell its writes from a shipment's here and
 # does not judge these three for `chain_shipper_overwrote`
 # (`core.chain_latch.MirrorStamp`). Decided rather than owed: no shipper
-# reaches these tables while the chain is latched — DuckDB's writers raise
-# `ChainOwnsOrders` before the mirror, and every other order shipper stands
-# down on the marker and the owner rows (DN-22a, DN-22b) — and with the marker
-# lost `chain_latch_disagrees` and `order_owner_row_without_marker` say so,
+# reaches these tables while the chain is latched — DuckDB's order writers
+# are gone (step 14's S14-09), and every other order shipper stands down on
+# the marker and the owner rows (DN-22a, DN-22b) — and with the marker lost
+# `chain_latch_disagrees` and `order_owner_row_without_marker` say so,
 # CRITICAL, for as long as it lasts. A record would add little besides: the
 # chain moves these watermarks on every tick that writes an order or its
 # costs, so a stamp not its own would seldom survive to the morning's
@@ -204,14 +184,11 @@ CHAIN_TABLES: Tuple[str, ...] = (
 CHAIN_STAMPS_MIRROR_STATE: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses")
 
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
-
 # The `sync_metadata` keys that move with it. The store's getter and setter
 # route both through `core.write_chains.chain_for_sync_key` to
 # `meta.chain_watermarks`, so the monotonicity guard reads the row it writes;
-# the copy-back carries both into DuckDB and the release deletes both.
+# the copy-back carried both into DuckDB and its release deleted both, until
+# step 14's S14-04 deleted it.
 #
 # `last_sync_orders` — what the incremental sync stamps after a batch lands
 # and the full sync stamps from `MAX(updated_at)`.
@@ -226,7 +203,9 @@ LOCKOUT_REVISION = "0035_batch_e_chains"
 # instead of re-indexing everything. Neither `_freshness_check` nor the
 # standing watch judges it: it is in no `FRESHNESS_THRESHOLDS` entry, and
 # `CHAIN_WATERMARK_MAX_AGE_MIN` is None. `last_sync_meilisearch`, the cursor
-# of the index built from DuckDB, is a DuckDB clock and stays DuckDB's.
+# of the index built from DuckDB, was a DuckDB clock and stayed DuckDB's,
+# never a chain's; it went with that index's frames in step 14's S14-07, and
+# nothing reads it now (history).
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders", "last_sync_meilisearch_pg")
 
 # Not judged by `core.pg_chain_invariants`: `last_sync_orders` holds KeyCRM's
@@ -242,10 +221,20 @@ CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 # order KeyCRM updated between DuckDB's last stamp and then was never fetched
 # by the incremental sync (the chain-3 review: a three-day-old DuckDB stamp
 # skipped two days). Declared, the store's getter answers DuckDB's frozen
-# stamp for the absent key (`DuckDBStore.get_last_sync_time`), and
-# `_freshness_check` judges the same value — one stand-in for both. For the
-# search cursor the same stand-in is what keeps the first index tick after
-# the flip incremental.
+# stamp for the absent key (`DuckDBStore.get_last_sync_time`) — read, since
+# `KS_DUCKDB=off`, from its copy in Postgres, `app.sync_metadata`
+# (`core.pg_frozen_metadata`) — and `_freshness_check` judges the same value:
+# one stand-in for both. For the search cursor the same stand-in is what keeps
+# the first index tick after the flip incremental.
+#
+# KEPT IN STEP 14's S14-09, which removed it from chains 6 and 6a. Production
+# holds both keys in `meta.chain_watermarks` (H6, 2026-10-29), so nothing
+# reads the stand-in today; but a key that went missing — a row deleted by
+# hand, a restore — would otherwise open the 25-hour window again for orders,
+# and a full re-index for the cursor. Chains 6 and 6a lose nothing by an
+# absent key: the hourly products step syncs at once, and the categories and
+# expense types are never read back by the sync. S14-11 moves the stand-in
+# into the getter for every chain key (`tests/unit/test_absent_chain_keys.py`).
 CHAIN_WATERMARK_INHERITS_DUCKDB = True
 
 # Per statement, inside every transaction here (DN-05a: the server is asked to
@@ -256,43 +245,22 @@ STATEMENT_TIMEOUT = "60s"
 # the order step holds the heavy-job lock while it writes.
 ACQUIRE_TIMEOUT_S = 10
 
-# How often the unmet-precondition warning may repeat for one reason.
-UNMET_WARN_EVERY_S = 3600.0
-_unmet_warned: Dict[str, float] = {}
+
+# `env_writes_postgres` stood here until step 14's S14-11: S14-09 left it for
+# the registry alone — `error` and `mismatch` in `/api/health` — and S14-11
+# deleted it with the flag and that reader. `WRITE_ENV` stays a name
+# (revision 0035's comments and an image from before step 14 read it).
 
 
-class ChainOwnsOrders(RuntimeError):
-    """A DuckDB writer of a chain-3 table was called while the chain writes
-    Postgres. Raised as the writer's first statement, so a caller that goes
-    round `SyncService._upsert_orders_with_expenses` fails loudly instead of
-    writing the store nobody reads."""
-
-
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_ORDERS` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands its tables down,
-    and the sync's order step records the raise and goes on with the rest of
-    the tick (owner question Q6 of the chain-3 design).
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-# ─── Preconditions — none since S14-00 ──────────────────────────────────────
+# ─── What the chain's move stood down — constants since S14-00 ─────────────
 #
 # Until step 14's S14-00 the flag moved the writes only with the lock-out
 # revision, step 13 and chain 1 in force, no delivered page under a check the
 # flip retires, and the backup evidence fresh (OD-13 (a)). Production met all
-# of them; their checks went with them. The backup evidence is judged by the
-# canary instead (`backup_evidence_stale`), so a drill that silently stopped
-# running is still seen.
+# of them; their checks went with them, and S14-09 deleted the answers that
+# stood in. The backup evidence is judged by the canary instead
+# (`backup_evidence_stale`), so a drill that silently stopped running is still
+# seen. What the move stood down stays named below until its readers go.
 
 
 def landing_checks_stood_down() -> frozenset:
@@ -342,102 +310,9 @@ def stood_down_layers() -> frozenset:
     return STOOD_DOWN_LAYERS
 
 
-# The hold this process used to take the first time it found a precondition
-# unmet under `KS_WRITE_ORDERS=postgres`. Never set since S14-00; the
-# attribute stays for `tests/conftest.py`, which resets it, until S14-09.
-_held: Optional[Tuple[str, str]] = None
-
-HELD_KEY = "held_until_restart"
-
-
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and nothing it waited on is asked any more.
-    Kept for the registry's `unmet_precondition` field, which keeps its shape
-    until S14-11."""
-    return None
-
-
-def unmet_reasons() -> List[str]:
-    """Empty, a constant since S14-00 (`unmet_precondition`)."""
-    return []
-
-
-def settle_hold() -> Optional[str]:
-    """Does nothing since S14-00: there is no precondition left to hold on,
-    and `configure_modes()` no longer calls it. Kept until S14-09 for its
-    other callers."""
-    return None
-
-
-def _warn_unmet(reason: str) -> None:
-    now = time.monotonic()
-    last = _unmet_warned.get(reason)
-    if last is not None and now - last < UNMET_WARN_EVERY_S:
-        return
-    _unmet_warned[reason] = now
-    logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, reason)
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
-    nor a precondition routes any more; the first write in a process still
-    takes the latch (decision 3), which the images before step 14 route by.
-    Last
-    consumers: the sync's order step, the repository's order writers and
-    selections, and the registry — S14-09."""
-    return True
-
-
-def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", a constant since step 14's
-    S14-00 — never None, since no flag is read for it."""
-    return "postgres"
-
-
-# The landing tables whose history must be in Postgres before the flip: the
-# chain writes deltas, so an order or an expense the backfill never carried
-# would be missing for good once DuckDB stops shipping.
-_BACKFILLED = ("bronze.orders", "bronze.order_products", "bronze.expenses")
-
-
-async def preflight() -> Dict[str, Any]:
-    """Chain 3's answer to "may `KS_WRITE_ORDERS` be switched on now?", for
-    `/api/health` (`write_chains.pg_orders_write.preflight`). Never raises;
-    bounded and cached by the route.
-
-    `ok` is null once the chain writes Postgres — the question is over. Before
-    that, `reasons` names every precondition that does not hold, asked here
-    whatever the flag says (the registry asks them only under the flag), and
-    what Postgres says of the landing the chain inherits: the history of each
-    of the three tables carried across (`backfilled_at`), and none of their
-    mirrors failing. The error's class only — the endpoint is public. Not a
-    substitute for `scripts/chain_copy_back.py orders --handover`, which is
-    the gate: read this first, then stop web and ask the handover."""
-    if mode() == "postgres":
-        return {"ok": None, "reasons": []}
-    # One entry per precondition, never the joined form split back apart.
-    reasons: List[str] = list(unmet_reasons())
-    try:
-        pool = await _pool()
-        async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
-            rows = await conn.fetch(
-                "SELECT table_name, backfilled_at, failures_since_ok "
-                "FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
-                list(_BACKFILLED))
-        state = {r["table_name"]: r for r in rows}
-        for table in _BACKFILLED:
-            row = state.get(table)
-            if row is None or row["backfilled_at"] is None:
-                reasons.append(f"backfill: {table} has not carried its history "
-                               "across (POST /api/mirror/backfill/orders or /expenses)")
-            elif row["failures_since_ok"]:
-                reasons.append(f"mirror: {table} is failing "
-                               f"({row['failures_since_ok']} in a row)")
-    except Exception as exc:  # noqa: BLE001 — an answer of its own
-        reasons.append(f"postgres: {type(exc).__name__}")
-    return {"ok": not reasons, "reasons": reasons}
+# `writes_postgres` stood here until step 14's S14-11: a constant since
+# S14-00, asked by the store's sync-key getter and setter alone after S14-09,
+# which since S14-11 go to `meta.chain_watermarks` without asking.
 
 
 def _latch() -> str:
@@ -790,8 +665,9 @@ async def record_backfill_misses(misses: Mapping[int, str]) -> int:
 
     `checked_at` is the web process's UTC clock, passed in — the clock
     DuckDB's `CURRENT_TIMESTAMP` was, and the one the copy-back's handover
-    orders the two stores' rows by — never Postgres's `now()`. The statement
-    is spelled here so the latch walk sees a writer."""
+    ordered the two stores' rows by (an image from before step 14 still does;
+    S14-04 deleted this build's) — never Postgres's `now()`. The statement is
+    spelled here so the latch walk sees a writer."""
     if not misses:
         return 0
     checked_at = _now_utc()
@@ -813,12 +689,13 @@ async def record_backfill_misses(misses: Mapping[int, str]) -> int:
 async def restore_manager_comments(comments: Mapping[int, str]) -> List[int]:
     """Fill in `manager_comment` where Postgres holds NULL, from KeyCRM.
 
-    The two comment backfills (`POST /api/traffic/backfill-utm`,
-    `scripts/backfill_utm.py`) under the chain. The rows are read `FOR UPDATE`
-    and written back through `pg_landing._write_order_rows` with the comment
-    filled in, headers only, as `kind='backfill'` (OD-20 (b)) — exactly what
-    `ship_orders_by_id` sends on the DuckDB path, so the chain module spells
-    no UPDATE of its own against the order tables. Returns the ids restored:
+    The two comment backfills' one write (`POST /api/traffic/backfill-utm`,
+    `scripts/backfill_utm.py`) since step 14's S14-09 deleted their DuckDB
+    walk. The rows are read `FOR UPDATE` and written back through
+    `pg_landing._write_order_rows` with the comment filled in, headers only,
+    as `kind='backfill'` (OD-20 (b)) — exactly what `ship_orders_by_id` sent
+    on the DuckDB path until then, so the chain module spells no UPDATE of
+    its own against the order tables. Returns the ids restored:
     an order whose comment is no longer NULL is left alone."""
     from core import pg_landing
     from core.landing_rows import ORDER_COLUMNS

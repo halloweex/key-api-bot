@@ -740,40 +740,28 @@ async def replicate_operational(
             # between — `replicate_sms`' recorded failure, and the reason it stands
             # down as a whole rather than per row.
             #
-            # The set comes from `core.write_chains.stood_down_tables()` rather than
-            # being spelled here — every write chain's `CHAIN_TABLES`, for the chains
-            # whose flag is on — so no writer and the shipper can come to disagree
-            # about which tables have changed hands.
-            from core.write_chains import (
-                WRITE_CHAINS, chain_name, mismatched_chains, stood_down_tables_checked,
-            )
+            # Every registered chain's tables (`write_chains.chain_tables()`):
+            # every chain writes Postgres, a constant since step 14's S14-11.
+            # Until then the set was `stood_down_tables_checked()` — the chains
+            # whose flag or latch said postgres, a flag not understood standing
+            # its chain down too and stamping its tables failing, and a latch
+            # against its flag stamped `owned by Postgres since …`; both went
+            # with the flags.
+            from core.write_chains import WRITE_CHAINS, chain_name, chain_tables
 
-            # A chain whose KS_WRITE_* is not understood stands down with the chains
-            # that write Postgres — shipping could overwrite rows Postgres alone
-            # holds — and its tables are stamped failing, so the watermark says so
-            # rather than aging quietly. Every other table still ships (DN-01).
-            stood_down, chain_errors = stood_down_tables_checked()
+            stood_down = chain_tables()
             # Under KS_DUCKDB=off the history tables too (`DUCKDB_HISTORY_TABLES`).
             stood_down = stood_down | stood_down_under_off()
-            # Before the owner rows are read, the local markers and flags are all
-            # this run has, so a failure this early may stamp a table an owner row
+            # Before the owner rows are read, the chains' tables are all this
+            # run has, so a failure this early may stamp a table an owner row
             # would have held down. It is never written either way.
             shipping = _tables_to_ship(stood_down)
-
-            # A chain that owns its tables in Postgres while its variable says
-            # otherwise (DN-06). It stands down through `stood_down` like any
-            # other Postgres-writing chain — the latch decides, not the flag —
-            # and the disagreement is stamped on its tables so an operator who
-            # flipped the variable back finds out from the store rather than
-            # from a number that stopped moving.
-            mismatches = mismatched_chains()
 
             pool = await get_pool()
             await require_revision()
 
             # The second copy of the latch, asked because this function is
-            # already holding the connection that carries it.
-            # `stood_down_tables_checked()` reads the local markers, and the
+            # already holding the connection that carries it. The local
             # markers live on a bind mount: an older `./data` snapshot, a wrong
             # mount or a rebuilt data directory loses them while Postgres keeps
             # the owner rows and the rows they were taken for. This copy is what
@@ -900,10 +888,6 @@ async def replicate_operational(
             }
             if stood_down:
                 result["stood_down"] = sorted(stood_down)
-            if chain_errors:
-                result["chain_flag_errors"] = chain_errors
-            if mismatches:
-                result["chain_flag_mismatch"] = mismatches
             if marker_lost:
                 result["chain_marker_lost"] = marker_lost
             if unregistered:
@@ -912,26 +896,17 @@ async def replicate_operational(
                     "Operational history: owner rows name %s, which no chain in "
                     "this build declares; not copied out of DuckDB",
                     ", ".join(sorted(unregistered)))
-            # One stamp per table per reason, so a chain that is both latched
-            # and misspelt says both things rather than the first one found. The
-            # flag error is written LAST and so is the one `last_error` keeps:
-            # it is the actionable half — correcting the variable to `postgres`
-            # also ends the mismatch, while releasing the latch would not fix a
-            # typo.
-            stamps = [(name, f"owned by Postgres since {at}; "
-                             "run scripts/chain_copy_back.py")
-                      for name, at in mismatches.items()]
+            # The lever since step 14's S14-04 deleted the copy-back.
+            from core.rollback_lever import ROLLBACK_LEVER
+
             # A chain held down by its owner rows alone is stamped too, because
             # a stand-down that says nothing is a watermark ageing quietly — and
             # this one also means the routing copy is gone, so the writers are
             # following KS_WRITE_* again while this job declines to ship. The
             # daily comparison files `chain_latch_disagrees` for the same state.
-            stamps += [(name, f"owner rows in Postgres since {at} and no local "
-                              "marker: restore data/write-chain-owners or run "
-                              "scripts/chain_copy_back.py")
-                       for name, at in marker_lost.items()]
-            stamps += [(name, f"not shipped: {error}")
-                       for name, error in chain_errors.items()]
+            stamps = [(name, f"owner rows in Postgres since {at} and no local "
+                             f"marker: {ROLLBACK_LEVER}")
+                      for name, at in marker_lost.items()]
             if stamps:
                 from core.pg_landing import _record_failure
 
@@ -942,8 +917,7 @@ async def replicate_operational(
                 # non-empty success resets `failures_since_ok`, so after a
                 # rollback the daily comparison would page `mirror_failing` on
                 # two stores that agree. Those tables carry the disagreement
-                # through `chain_latch_disagrees`, `write_chain_flag_mismatch`
-                # and `write_chain_flag_invalid` instead. Every table of chains
+                # through `chain_latch_disagrees` instead. Every table of chains
                 # 1, 8, 7a and 6a is shipped here, so for them nothing moves.
                 ships = set(_tables_to_ship(frozenset()))
                 for name, note in stamps:

@@ -35,8 +35,10 @@ CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 
 
 def _declares_a_write_chain(path: pathlib.Path) -> bool:
-    """Top-level `CHAIN_TABLES = ...` and `def writes_postgres` — parsed, not
-    imported, so walking the package has no side effects."""
+    """Top-level `CHAIN_TABLES = ...` and `def _latch` — parsed, not
+    imported, so walking the package has no side effects. (`writes_postgres`
+    until step 14's S14-11 deleted it with the flags; every chain still takes
+    its latch on its first write.)"""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names = set()
     for node in tree.body:
@@ -45,7 +47,7 @@ def _declares_a_write_chain(path: pathlib.Path) -> bool:
             names.update(t.id for t in targets if isinstance(t, ast.Name))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             names.add(node.name)
-    return {"CHAIN_TABLES", "writes_postgres"} <= names
+    return {"CHAIN_TABLES", "_latch"} <= names
 
 
 class TestEveryWriteChainIsRegistered:
@@ -121,10 +123,6 @@ _DESTINATION = {
     # journal's own table and has no DuckDB copy either.
     ("core/alert_archive.py", "_write_watch"): (
         "the alert journal lives in Postgres alone; there is no copy", None),
-    # A rollback lever's use (OD-17 (a)), in the same journal and written
-    # inside the release's own transaction.
-    ("core/lever_journal.py", "record"): (
-        "the alert journal lives in Postgres alone; there is no copy", None),
     ("core/ch_history.py", "ship_history"): (
         "writes ClickHouse's history.*, not Postgres", None),
     ("core/pg_silver.py", "rebuild_silver"): (
@@ -140,23 +138,34 @@ _DESTINATION = {
         "moved by its own switch before the registry existed", "user_store_is_postgres"),
     ("core/pg_bot_state.py", "replicate_bot_state"): (
         "moved by its own switch before the registry existed", "ENGINE_ENV"),
-    ("core/chain_transfer.py", "copy_back"): (
-        "DN-08's copy-back writes DuckDB out of Postgres; its one Postgres write "
-        "is `release_chain`'s delete of meta.chain_watermarks — the walk reads "
-        "`_write_duckdb`'s DuckDB statements as its own", None),
 }
 
-# The store helpers that route every statement handed to them by a switch of
-# their own, and so are where the Postgres half of a moved store is written —
-# the destination side, like the replicators above. A writer whose only
-# Postgres calls are to one of these is exempt through it: `{helper: switch}`,
-# and the test checks the helper evaluates the switch and still routes a
-# writer. This is what the walk saw once `_users_run` stopped being invisible.
-_ROUTED_BY_SWITCH = {
-    ("core/repositories/customers.py", "_sms_run"): "sms_store_is_postgres",
-    ("core/repositories/users.py", "_users_run"): "user_store_is_postgres",
-    ("core/repositories/users.py", "_perms_run"): "user_store_is_postgres",
+# The store helpers through which `/sms` and the access lists write — the
+# destination side, like the replicators above: Postgres is where those
+# tables' writer lives, and there is no copy to ship. They routed by a switch
+# of their own (`sms_store_is_postgres`, `user_store_is_postgres`) until step
+# 14's S14-08 took their DuckDB tails away; they run on Postgres alone now.
+# A writer whose only Postgres calls, in its own module, are to these is
+# exempt through them, and the test checks each still executes what it is
+# handed, still carries a writer, and asks no switch.
+#
+# `none`, `many`, `one` and `all` are `_PgTx`'s, the transaction `_sms_tx`
+# yields: the walk reads methods by name, and until S14-08 the first
+# definition of each name in the module was `_DuckTx`'s, which executed
+# nothing asyncpg could see — so the three writers that run inside the
+# transaction (the freeze, the send's record, a delivery report) were exempt
+# by that accident rather than by a rule.
+_POSTGRES_STORE_HELPERS = {
+    ("core/repositories/customers.py", "_sms_run"): "one /sms statement",
+    ("core/repositories/customers.py", "none"): "a statement in _sms_tx's transaction",
+    ("core/repositories/customers.py", "many"): "a statement in _sms_tx's transaction",
+    ("core/repositories/customers.py", "one"): "a statement in _sms_tx's transaction",
+    ("core/repositories/customers.py", "all"): "a statement in _sms_tx's transaction",
+    ("core/repositories/users.py", "_users_run"): "one statement on the user list",
+    ("core/repositories/users.py", "_perms_run"): "one statement on the role matrix",
 }
+# The switches those helpers asked until S14-08. None may come back into one.
+_RETIRED_STORE_SWITCHES = ("sms_store_is_postgres", "user_store_is_postgres")
 
 
 class _Module:
@@ -550,8 +559,11 @@ class _Walk:
         for it (`*stood_down*`), so a wrapper such as
         `pg_landing.tables_stood_down` counts and a caller that merely reaches
         a shipper that asks does not."""
+        # `chain_tables` since step 14's S14-11, when the `stood_down_*`
+        # questions became that constant and went with the flags.
         roots = {key for key in self.fns if key[0] == "core/write_chains.py"
-                 and key[1].startswith("stood_down") and "sync_keys" not in key[1]}
+                 and (key[1].startswith("stood_down") or key[1] == "chain_tables")
+                 and "sync_keys" not in key[1]}
         names = {key[1] for key in roots}
         while True:
             more = {key[1] for key, called in self.calls.items()
@@ -577,9 +589,9 @@ class _Walk:
         return found
 
     def routed(self, key) -> bool:
-        """Its only Postgres calls are to a store helper that routes by a
-        switch of its own (`_ROUTED_BY_SWITCH`)."""
-        helpers = {name for _rel, name in _ROUTED_BY_SWITCH}
+        """Its only Postgres calls are to its own module's store helpers that
+        write Postgres alone (`_POSTGRES_STORE_HELPERS`)."""
+        helpers = {name for rel, name in _POSTGRES_STORE_HELPERS if rel == key[0]}
         _module, fn = self.fns[key]
         reached = _awaited_names(fn) & (_PG_EXECUTE | self.executors)
         return bool(reached) and reached <= helpers
@@ -593,11 +605,25 @@ class _Walk:
         seen = set() if seen is None else seen
         if key in self.consulting or key[0] in _chain_modules():
             return True
+        if key in _DEAD_SHIPPERS and not self.callers.get(key):
+            # Nothing reaches it: no path through it is a path at all.
+            return True
         if key in seen:
             return False
         seen = seen | {key}
         callers = self.callers.get(key, set())
         return bool(callers) and all(self.covered(c, seen) for c in callers)
+
+
+# Shippers whose last caller is gone, kept until the PR that deletes them
+# (rule 14). A dead shipper cannot ask on anybody's behalf, so the walk counts
+# it covered only while nothing calls it — `test_the_dead_shippers_are_dead`
+# fails the moment one is called again.
+_DEAD_SHIPPERS = {
+    ("core/pg_landing.py", "mirror_orders"):
+        "its one caller, DuckDB's `upsert_orders`, went in step 14's S14-09; "
+        "the mirror's half of `pg_landing` goes in S14-13",
+}
 
 
 @pytest.fixture(scope="module")
@@ -612,6 +638,13 @@ def _chain_modules() -> set:
 
 
 class TestEveryPostgresWriterAsksTheRegistry:
+    def test_the_dead_shippers_are_dead(self, walk):
+        """Kills: a dead shipper called again — it asks nobody (its caller
+        did), so it would ship round a chain."""
+        for key in _DEAD_SHIPPERS:
+            assert key in walk.fns, f"{key} is gone: take it off the list"
+            assert not walk.callers.get(key), (key, walk.callers.get(key))
+
     def test_each_one_asks_or_is_reached_only_by_askers(self, walk):
         chains = _chain_modules()
         uncovered = sorted(
@@ -659,7 +692,6 @@ class TestEveryPostgresWriterAsksTheRegistry:
             ("core/pg_replication.py", "replicate_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
             ("core/pg_expense_backfill.py", "hourly_expenses_ids_diff"),
-            ("core/duckdb_store.py", "upsert_orders"),
             ("web/routes/api/admin.py", "backfill_mirror_expenses"),
         } <= walk.consulting
 
@@ -678,17 +710,19 @@ class TestEveryPostgresWriterAsksTheRegistry:
             assert switch in names, f"{key} names {switch} as its reason and never reads it"
 
     def test_the_routed_helpers_are_exactly_what_the_walk_finds(self, walk):
-        """Each routes by the switch it is listed under, is an executor the
-        walk finds, and still carries a writer — so neither a helper that
-        stopped reading its switch nor a stale entry keeps an exemption."""
+        """Each is an executor the walk finds, still carries a writer, and
+        asks no store switch — so neither a helper that grew an engine choice
+        back nor a stale entry keeps an exemption."""
         writers = walk.writers()
-        for key, switch in _ROUTED_BY_SWITCH.items():
+        for key in _POSTGRES_STORE_HELPERS:
             _module, fn = walk.fns[key]
             names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | \
                 _called_names(fn)
-            assert switch in names, f"{key} is listed under {switch} and never reads it"
+            for switch in _RETIRED_STORE_SWITCHES:
+                assert switch not in names, f"{key} asks {switch} again"
             assert key[1] in walk.executors, f"{key} no longer executes what it is handed"
-            assert any(key[1] in _awaited_names(walk.fns[w][1]) and walk.routed(w)
+            assert any(key[0] == w[0] and key[1] in _awaited_names(walk.fns[w][1])
+                       and walk.routed(w)
                        for w in writers), f"nothing writes through {key}"
         # And nothing else is excused by them: a writer that also calls
         # asyncpg itself, or any other executor, is not routed.
@@ -703,10 +737,12 @@ class TestEveryPostgresWriterAsksTheRegistry:
         writing = {key[0] for key in walk.writers()}
         assert chains <= writing, chains - writing
 
-    def test_the_operational_pair_asks_the_checked_form(self):
-        """Since DN-01 the hourly shipper and the daily comparison of the
-        operational tables ask the form that hands a flag typo out to be
-        reported; the other paths ask the narrow one, which logs it."""
+    def test_the_operational_pair_asks_the_registry(self):
+        """The hourly shipper and the daily comparison of the operational
+        tables stand down on every chain's tables (`chain_tables`). Until
+        step 14's S14-11 they asked the form that handed a flag typo out to
+        be reported (`stood_down_tables_checked`, DN-01); no flag is read
+        since."""
         from core import mirror_reconciliation, pg_operational
 
         for fn in (pg_operational.replicate_operational,
@@ -714,7 +750,7 @@ class TestEveryPostgresWriterAsksTheRegistry:
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             calls = {n.func.id for n in ast.walk(tree)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            assert "stood_down_tables_checked" in calls, fn.__name__
+            assert "chain_tables" in calls, fn.__name__
 
     def test_no_asker_spells_a_chain(self, walk):
         """The rule has one home: nothing that ships or compares asks a single
@@ -796,7 +832,7 @@ class TestTheWalkSeesWhatTheReviewFound:
         """`_users_run`'s shape: rendered into a local, handed to a helper that
         hands it to asyncpg. The target is a hole the helper fills, so it
         counts as unknown — which is what makes the store's writers visible
-        and `_ROUTED_BY_SWITCH` necessary. The inner helper is not called
+        and `_POSTGRES_STORE_HELPERS` necessary. The inner helper is not called
         `execute` here, so only the fixed point can reach it."""
         assert _targets_of("""
             async def _send(sql, params):
@@ -850,12 +886,12 @@ _OWNER_READS = {"order_tables_stood_down_or_owned", "tables_stood_down_or_owned"
 # The sync's per-tick mirrors, which keep the local answer alone: the write
 # path, once a minute, where a Postgres read is the one `writes_postgres()`
 # exists to avoid (DN-22a). The daily comparisons page the state they cannot
-# see — `order_owner_row_without_marker`, `owner_row_without_marker`.
+# see — `order_owner_row_without_marker`, `owner_row_without_marker`. The
+# orders mirror in `DuckDBStore.upsert_orders` was the second, until step 14's
+# S14-09 deleted that writer.
 _PER_TICK_MIRRORS = {
     ("core/pg_landing.py", "_mirror"):
         "the catalogue and expense mirror, every sync tick",
-    ("core/duckdb_store.py", "upsert_orders"):
-        "the orders mirror, every sync tick",
 }
 
 
@@ -863,10 +899,10 @@ _SPEC_TYPES = {"MirroredTable", "BucketedTable"}
 # Reading a spec's Postgres copy, or comparing the two: what makes a function
 # a comparison rather than a reader of DuckDB's side.
 _PG_COMPARE = {"fetch_pg_rows", "pg_fingerprints", "_read_pg_bucket",
-               "compare_table", "compare_bucket",
-               # The shadow chains' comparison, facing Postgres→DuckDB
-               # (OD-02 (c)) — a comparison of the same copies all the same.
-               "fetch_pg_rows_with_clock", "compare_shadow"}
+               "compare_table", "compare_bucket"}
+# The shadow chains' comparison, facing Postgres→DuckDB (OD-02 (c) —
+# `fetch_pg_rows_with_clock`, `compare_shadow`), was one more until step
+# 14's S14-10 deleted it with the shadow.
 
 
 def _spec_tables(modules) -> dict:
@@ -1182,17 +1218,13 @@ def _rolled_back(flags) -> None:
         if not {ORDERS, LINES} & set(c.CHAIN_TABLES)))
 
 
-async def _store(tmp_path, ids=()):
-    """A DuckDB holding `ids`, written with the mirror patched out."""
-    from unittest.mock import AsyncMock, patch
-
+async def _store(tmp_path):
+    """An empty DuckDB. It held seeded orders through `upsert_orders`, until
+    step 14's S14-09 deleted that writer; nothing here asked it to any more."""
     from core.duckdb_store import DuckDBStore
 
     store = DuckDBStore(db_path=tmp_path / "dn22a.duckdb")
     await store.connect()
-    if ids:
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders([_order(i) for i in ids])
     return store
 
 
@@ -1207,8 +1239,9 @@ def _chains_splitting_the_order_tables(chains) -> list:
 
 class TestOwnershipOfTheOrderTablesPassesAsAUnit:
     """Why either order table stands both down. Not that they ship together —
-    `write_orders(replace_products=False)` ships headers alone every day, from
-    the 05:15 status refresh and the comment ship — but that whoever takes the
+    `write_orders`' core with `replace_products=False` writes headers alone
+    every day, from the 05:15 status refresh and the comment backfills (the
+    comment ship until step 14's S14-09) — but that whoever takes the
     headers takes their line items: a chain declares both or neither. Walked
     over the real registry, which `TestEveryWriteChainIsRegistered` holds equal
     to every module that declares a chain."""
@@ -1231,57 +1264,12 @@ class TestOwnershipOfTheOrderTablesPassesAsAUnit:
         assert _chains_splitting_the_order_tables((whole,)) == []
 
 
-class TestTheOrderTablesAskOnlyTheirOwnChain:
-
-
-    def test_the_owning_chains_typo_stands_it_down_and_does_not_raise(
-            self, order_chain, caplog):
-        from core.pg_landing import order_tables_stood_down
-
-        def typo():
-            raise RuntimeError("KS_WRITE_ORDERS='postgre' is not understood")
-
-        order_chain(env=typo)
-        with caplog.at_level("ERROR", logger="core.write_chains"):
-            assert order_tables_stood_down() == frozenset({ORDERS, LINES})
-        assert "postgre" in caplog.text
-
-    def test_a_latched_owning_chain_stands_down_whatever_its_flag(self, order_chain):
-        from core import chain_latch
-        from core.pg_landing import order_tables_stood_down
-
-        order_chain(env=lambda: False)
-        chain_latch.MARKER_DIR.mkdir(parents=True, exist_ok=True)
-        chain_latch.marker_path("pg_orders_write").write_text(
-            '{"latched_at": "2026-09-18T12:00:00+00:00"}', encoding="utf-8")
-        chain_latch.load()
-        assert order_tables_stood_down() == frozenset({ORDERS, LINES})
-
-    @pytest.mark.parametrize("config", ["none", "expenses", "inventory", "orders",
-                                        "orders_typo", "orders_off"])
-    def test_it_is_the_shippers_answer_narrowed(self, flags, order_chain, config):
-        """One rule, two doors: the narrow question may never disagree with
-        the whole one about a table they both name."""
-        from core import pg_inventory_write
-        from core.write_chains import stood_down_among, stood_down_tables
-
-        def typo():
-            raise RuntimeError("not understood")
-
-        if config == "expenses":
-            flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        elif config == "inventory":
-            flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        elif config == "orders":
-            order_chain()
-        elif config == "orders_typo":
-            order_chain(env=typo)
-        elif config == "orders_off":
-            order_chain(env=lambda: False)
-
-        for asked in ({ORDERS, LINES}, {"app.manual_expenses", ORDERS},
-                      set(pg_inventory_write.CHAIN_TABLES)):
-            assert stood_down_among(asked) == stood_down_tables() & asked, asked
+# `TestTheOrderTablesAskOnlyTheirOwnChain` stood here until step 14's S14-11:
+# the order tables' stand-down asked only the chains declaring them
+# (`write_chains.stood_down_among`), a typo in the owning chain's flag stood
+# them down and was logged (DN-01), and the narrow question equalled the
+# whole one. Both questions became `chain_tables()`, a constant, and went with
+# the flags.
 
 
 class _NoStore:
@@ -1379,21 +1367,28 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
 
 
 async def _persisted(store, issues):
-    """The run as the 07:30 job writes it, read back the way the digest and
-    `/api/health/data-quality` read it: `(run row, issue rows)`."""
+    """The run as the 07:30 job writes it — the journal's door folds the
+    findings, `run_values` sets the status and the counts, `journal_rows` the
+    rows chain 9 commits — shaped the way the digest and
+    `/api/health/data-quality` shape them: `(run row, issue rows)`. Until
+    step 14's S14-10 this wrote a DuckDB journal and read it back; the
+    columns' round trip through Postgres is `test_dq_journal_pg.py`'s."""
     from datetime import datetime, timezone
 
-    from core.data_quality import fetch_latest_run, fetch_run_issues, persist_run
+    from core.data_quality import issue_dicts, journal_rows, run_values
+    from core.dq_journal import one_finding_per_key
     from core.mirror_reconciliation import MIRROR_LAYER
 
     now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        run_id = persist_run(
-            conn, started_at=now, ended_at=now, as_of=now,
-            window_start=now.date(), window_end=now.date(),
-            layer=MIRROR_LAYER, issues=issues, discrepancies=[],
-        )
-        return fetch_latest_run(conn, MIRROR_LAYER), fetch_run_issues(conn, run_id)
+    issues = one_finding_per_key(issues)
+    values = run_values(
+        started_at=now, ended_at=now, as_of=now,
+        window_start=now.date(), window_end=now.date(),
+        layer=MIRROR_LAYER, issues=issues, discrepancies=[],
+    )
+    rows = journal_rows(1, values, issues, [])
+    run = {"status": values.status, "critical_count": values.critical_count}
+    return run, issue_dicts(r[1:] for r in rows.issues)
 
 
 def _what_a_human_reads(run, rows) -> str:
@@ -1639,13 +1634,16 @@ class TestEveryOrderShipperAsksFirst:
 
     def test_the_walk_is_not_vacuous(self):
         found = {name for _rel, name, _called in self._sites()}
-        assert {"upsert_orders", "backfill_orders", "ship_orders_by_id"} <= found
+        # `upsert_orders`, the sync's per-tick mirror, was the third until
+        # step 14's S14-09 deleted DuckDB's order writer.
+        assert {"backfill_orders", "ship_orders_by_id"} <= found
+        assert "upsert_orders" not in found
 
     def test_one_that_takes_the_pool_asks_the_owner_rows_too(self):
         """DN-06: anything already holding a Postgres connection stands down on
-        either copy of the latch. The sync's mirror in `upsert_orders` takes
+        either copy of the latch. The sync's mirror in `upsert_orders` took
         no pool — the write path, where that read is the one to avoid — and so
-        is not held to it."""
+        was not held to it, until step 14's S14-09 deleted it."""
         holding = [(rel, name, called) for rel, name, called in self._sites()
                    if "get_pool" in called]
         assert {"backfill_orders", "ship_orders_by_id"} <= {n for _r, n, _c in holding}
@@ -2276,7 +2274,11 @@ class TestTheComparisonSaysWhyItStoodDown:
         assert page.table_name == ", ".join(sorted((GENDER, BUYERS, CONTACTS)))
         assert page.count == 3
         assert STAMP in page.description
-        assert "scripts/chain_copy_back.py" in page.description
+        # The lever since step 14's S14-04 deleted the copy-back.
+        from core.rollback_lever import ROLLBACK_LEVER
+
+        assert ROLLBACK_LEVER in page.description
+        assert "chain_copy_back" not in page.description
         assert [i for i in issues if i.table_name == GENDER] == []
         assert _read_a_table(pool, [GENDER]) == [], pool.sql
 
@@ -2308,9 +2310,11 @@ class TestTheComparisonSaysWhyItStoodDown:
         from core.alerting import REGISTRY, Kind
         from core.data_quality import human_check_name, remediation_for
 
+        from core.rollback_lever import ROLLBACK_LEVER
+
         (lever,) = remediation_for(["chain_owner_unregistered"])
-        assert "scripts/chain_copy_back.py" in lever and len(lever) <= 150
-        assert "never re-ship" in lever.lower()
+        assert lever.startswith(ROLLBACK_LEVER) and len(lever) <= 150
+        assert "chain_copy_back" not in lever
         assert "does not know" in human_check_name("chain_owner_unregistered")
         spec = REGISTRY["chain_owner_unregistered"]
         assert spec.kind is Kind.CONDITION

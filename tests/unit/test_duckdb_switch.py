@@ -258,14 +258,15 @@ class TestTheOpener:
         store = DuckDBStore(db_path=tmp_path / "a.duckdb")
 
         async def sync():
-            # A key no chain owns: since S14-00 a chain's own key is asked of
-            # Postgres alone, and only DuckDB's own still reaches the file.
+            # A store method that still reaches the file: since step 14's
+            # S14-11 `get_last_sync_time`, which this used with a key no
+            # chain owned, asks Postgres alone for every key.
             with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
-                await asyncio.ensure_future(store.get_last_sync_time("meilisearch"))
+                await asyncio.ensure_future(store.get_stats())
 
         asyncio.run(sync())
         assert list(duckdb_switch.opened()) == [
-            "core.duckdb_store:get_last_sync_time (task)"]
+            "core.duckdb_store:get_stats (task)"]
 
     def test_an_application_frame_that_turns_the_loop_is_still_the_site(
         self, monkeypatch, tmp_path,
@@ -504,8 +505,8 @@ def driver_references(source: str) -> list:
     or a subprocess — is read the same way, and every reach inside it counts
     where the string stands: it runs in another process, past the switch's
     in-process count, and a read-only open of it changes no byte the file's
-    hash could see (batch-E review; the step-13 rehearsal's D1 DELETE is
-    such a program, and opens through `open_file`). Text that does not parse
+    hash could see (batch-E review; the step-13 rehearsal's D1 DELETE was
+    such a program, until S14-03 deleted the rehearsal). Text that does not parse
     counts once if it imports the driver.
 
     What it cannot read, and does not pretend to: a module named by a value
@@ -674,8 +675,6 @@ HOST_TOOLS = {
     ("scripts/compact_duckdb.py", "phase3_validate"):
         "validates the NEW file the compaction built, never the live one; "
         "unreachable under off (phase 1 is refused first)",
-    ("scripts/weekly_report_preview.py", "live_report"):
-        "an operator's preview on a laptop copy, read-only",
     ("deploy/ark_freeze.py", "freeze"):
         "the Ark is frozen from the file read-only, before the week starts",
     ("deploy/ark_freeze.py", "verify"):
@@ -683,17 +682,10 @@ HOST_TOOLS = {
     ("deploy/ark_freeze.py", "_restored_count"):
         "L2's restore: one in-memory engine per table, fed the Ark's Parquet; "
         "it opens no file at all",
-    ("deploy/dq_history.py", "<module>"):
-        "reads a backup under data/backups, read-only",
     ("deploy/duckdb_table_fates_check.py", "read_catalogue"):
         "the table-fate manifest's check, run by hand: the newest nightly "
         "backup, read-only; it refuses the live file by name, by inode and "
         "with a WAL beside it",
-    ("deploy/step13_rehearsal/probe.py", "duckdb_facts"):
-        "the step-13 rehearsal, run by hand before the warehouse flip: a copy "
-        "of a backup in a throwaway stack, read-only, never the live file. Its "
-        "one read-write open, D1's DELETE, is a program run with `python -c` "
-        "and opens through `open_file`",
 }
 
 

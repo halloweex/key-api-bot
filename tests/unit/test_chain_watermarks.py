@@ -64,7 +64,7 @@ def _moved(now, **overrides):
     """Every watermark a chain has moved to Postgres, fresh — since step 14's
     S14-00 that is every chain's, a constant — with the ones a test is about
     set (or, as None, left out)."""
-    from core.write_chains import stood_down_sync_keys
+    from core.write_chains import sync_keys as stood_down_sync_keys
 
     fresh = (now - timedelta(minutes=20)).isoformat()
     out = {key: fresh for key in stood_down_sync_keys()}
@@ -80,7 +80,7 @@ class TestWhichKeysHaveMoved:
     def test_the_inventory_chain_takes_its_two(self, flags):
         """Since step 14's S14-00 every chain's keys have moved, a constant;
         chain 1's two are among them whatever its flag says."""
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys as stood_down_sync_keys
         assert stood_down_sync_keys() >= frozenset({"last_sync_offers", "last_sync_stocks"})
 
 
@@ -176,23 +176,26 @@ class TestTheWiringHasOneHome:
             inspect.getsource(BackgroundScheduler._run_dq_integrity)))
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
         called = {c.func.id for c in calls if isinstance(c.func, ast.Name)}
-        assert {"stood_down_sync_keys", "read_values_and_stamps"} <= called
+        assert {"sync_keys", "read_values_and_stamps"} <= called
         scan = [c for c in calls if isinstance(c.func, ast.Name)
                 and c.func.id == "check_internal_integrity"]
         assert scan and all(
             any(k.arg == "chain_watermarks" for k in c.keywords) for c in scan)
 
-    def test_the_store_asks_the_registry_on_both_sides(self):
-        """Both ask the registry which chain owns the key — the same question,
-        so they cannot disagree — and never every chain, or a typo in an
-        unrelated KS_WRITE_* stops the orders sync (DN-01)."""
+    def test_the_store_goes_to_postgres_on_both_sides_asking_no_chain(self):
+        """Both go to `meta.chain_watermarks`, so they cannot disagree about
+        where a watermark lives (revision 0032). Since step 14's S14-11
+        neither asks the key's chain where it writes (`writes_postgres`, gone
+        with the flags); the getter asks the registry only whether an absent
+        key inherits DuckDB's frozen stamp."""
+        sides = {"get_last_sync_time": "get_value", "set_last_sync_time": "set_value"}
         for fn in (DuckDBStore.get_last_sync_time, DuckDBStore.set_last_sync_time):
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-            called = {n.func.id for n in ast.walk(tree)
-                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            assert "chain_for_sync_key" in called, fn.__name__
-            assert not called & {"stood_down_sync_keys", "stood_down_tables"}, (
-                f"{fn.__name__} evaluates every chain's flag for one key")
+            called = {getattr(n.func, "id", getattr(n.func, "attr", None))
+                      for n in ast.walk(tree) if isinstance(n, ast.Call)}
+            assert sides[fn.__name__] in called, fn.__name__
+            assert not called & {"writes_postgres", "connection", "chain_modes"}, (
+                f"{fn.__name__} still routes")
 
     def test_nothing_copies_or_compares_the_new_table(self):
         """`meta.chain_watermarks` is safe only because no copy out of DuckDB

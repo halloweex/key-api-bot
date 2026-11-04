@@ -179,7 +179,7 @@ def _history(conn, now):
 def _moved(now, **stamps):
     """Every watermark the write chains keep in Postgres — every chain's
     since step 14's S14-00, a constant — fresh, but for the ones given."""
-    from core.write_chains import stood_down_sync_keys
+    from core.write_chains import sync_keys as stood_down_sync_keys
 
     out = {k: (now - timedelta(minutes=5)).isoformat() for k in stood_down_sync_keys()}
     out.update({f"last_sync_{k}": v.isoformat() for k, v in stamps.items()})

@@ -5,7 +5,8 @@ it proves the statements; this proves the routing around them: that the flag
 off changes nothing, that the flag on hands the writer the rows the shared
 parse produced and never touches DuckDB, that a fault in this chain stops this
 chain and not the full sync it rides in, and that the standing watch, the
-shipper, the comparison and the copy-back all see the chain.
+shipper and the comparison see the chain. (The copy-back saw it too, until
+step 14's S14-04 deleted the copy-back and its tests with it.)
 """
 from __future__ import annotations
 
@@ -76,8 +77,8 @@ class TestTheRegistrySeesIt:
         """Since S14-00 the chain is on Postgres whatever its flag says, and
         its key with it."""
         assert write_chains.chain_for_sync_key("last_sync_expense_types") is chain
-        assert "last_sync_expense_types" in write_chains.stood_down_sync_keys()
-        assert "bronze.expense_types" in write_chains.stood_down_tables()
+        assert "last_sync_expense_types" in write_chains.sync_keys()
+        assert "bronze.expense_types" in write_chains.chain_tables()
 
     def test_the_table_is_one_the_shipper_replaces_and_the_comparison_reads(self):
         """Standing down a table neither touches would be a no-op that reads as
@@ -87,33 +88,6 @@ class TestTheRegistrySeesIt:
 
         assert set(chain.CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
         assert set(chain.CHAIN_TABLES) <= {s.pg_table for s in OPERATIONAL_TABLES}
-
-
-class TestTheCopyBackKnowsIt:
-    def test_one_full_replace_spec_with_no_clock(self):
-        """Derived from the shipper and the comparison, never written out. No
-        shared clock: DuckDB's `synced_at` and Postgres's `mirrored_at` are
-        each store's own bookkeeping, so after the latch a difference is taken
-        as Postgres being newer."""
-        from core import chain_transfer
-
-        (spec,) = chain_transfer.chain_specs(chain)
-        assert (spec.pg_table, spec.dk_table, spec.is_append, spec.clock) == (
-            "bronze.expense_types", "expense_types", False, ())
-        assert chain_transfer.chain_sequences(chain) == ()
-
-    def test_the_operator_types_its_short_name(self):
-        from core.chain_transfer import resolve_chain
-
-        assert resolve_chain("expense_types") is chain
-
-    def test_the_runbook_sends_it_to_its_own_tables_not_inventorys(self):
-        from core.chain_transfer import _runbook
-
-        said = " ".join(_runbook(chain, executed=True, released=True))
-        assert "KS_WRITE_EXPENSE_TYPES=duckdb" in said
-        assert "bronze.expense_types" in said
-        assert "I1" not in said and "E1" not in said
 
 
 # ─── full_sync: a fault in this chain stops this chain ─────────────────────
@@ -299,9 +273,12 @@ class TestItsWatermarkIsNotJudgedAtNinetyMinutes:
 
 class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
     """The key moves on the Sunday full sync, so after a mid-week flip
-    `meta.chain_watermarks` has none for up to a week. It used to read as
-    "entity never synced" on every integrity run until Sunday (review of
-    DN-26); DuckDB's frozen stamp now stands in, at the same 192 h."""
+    `meta.chain_watermarks` had none for up to a week, and it read as "entity
+    never synced" on every integrity run until Sunday (review of DN-26);
+    DuckDB's frozen stamp stood in, at the same 192 h, until step 14's S14-09
+    took the stand-in off: the flip is long past and production holds the
+    key. An absent key is "never synced" again, which is then true
+    (`tests/unit/test_absent_chain_keys.py`)."""
 
     NOW = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)   # a Thursday
 
@@ -333,34 +310,29 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
         from core.data_quality import _freshness_check
 
         fresh = (self.NOW - timedelta(minutes=5)).isoformat()
-        others = {key: fresh for key in write_chains.stood_down_sync_keys()
+        others = {key: fresh for key in write_chains.sync_keys()
                   if key != "last_sync_expense_types"}
         return [(i.check_name, i.severity.value, i.count, i.description)
                 for i in _freshness_check(conn, self.NOW,
                                           chain_watermarks={**others, **marks})]
 
-    def test_the_chain_declares_it_and_chain_1_does_not(self):
+    def test_neither_this_chain_nor_chain_1_declares_it(self):
         from core import pg_inventory_write
 
-        assert chain.CHAIN_WATERMARK_INHERITS_DUCKDB is True
+        assert not hasattr(chain, "CHAIN_WATERMARK_INHERITS_DUCKDB")
         assert not getattr(pg_inventory_write, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
 
-    def test_a_mid_week_flip_is_quiet_about_a_dictionary_synced_on_sunday(self, flags):
-        # 103 h: Sunday 02:00 Kyiv to Thursday 09:00 UTC. `{}` is what
-        # `read_values` returns for a key Postgres does not hold yet.
-        assert self._judge(flags, self._duckdb(103), {}) == []
-
-    def test_the_frozen_stamp_still_pages_at_the_same_threshold(self, flags):
-        """A first sync under the flag that failed must page when a failed
-        DuckDB one would have — the stand-in is not a pass."""
-        (issue,) = self._judge(flags, self._duckdb(200), {})
-        name, severity, count, description = issue
-        assert (name, severity, count) == ("freshness_expense_types", "WARN", 200)
-        assert "threshold 192" in description and "before the switch" in description
+    def test_an_absent_key_is_never_synced_whatever_duckdb_holds(self, flags):
+        """Kills: the stand-in put back — a DuckDB stamp 103 h old would then
+        answer for a key Postgres does not hold, and the run would be quiet."""
+        (issue,) = self._judge(flags, self._duckdb(103), {})
+        name, severity, _count, description = issue
+        assert (name, severity) == ("freshness_expense_types", "WARN")
+        assert "never synced" in description
 
     def test_once_postgres_holds_the_key_it_wins(self, flags):
-        """The stand-in is only for an absent key: a stale Postgres stamp
-        beside a fresh DuckDB one is a stall."""
+        """Postgres's stamp is the one judged: a stale Postgres stamp beside a
+        fresh DuckDB one is a stall."""
         from datetime import timedelta
 
         stale = (self.NOW - timedelta(hours=200)).isoformat()
@@ -375,56 +347,8 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
         assert "never synced" in issue[3]
 
 
-class TestTheCanaryWarnsOnIt:
-    def _block(self, **state):
-        base = {"env": chain.WRITE_ENV, "mode": "duckdb", "error": None,
-                "latched": False, "latched_at": None, "mismatch": False,
-                "unmet_precondition": None}
-        base.update(state)
-        return {"write_chains": {chain.CHAIN: base}}
-
-    def test_held_on_duckdb_is_named_as_held(self):
-        from bot import canary
-
-        (key, message), = canary.check_write_chain_precondition(
-            self._block(unmet_precondition="KS_READ_EXPENSES is not postgres"))
-        assert key == "write_chain_precondition_unmet"
-        assert "held on DuckDB" in message and "KS_READ_EXPENSES" in message
-
-    def test_latched_it_says_the_writes_go_to_postgres(self):
-        from bot import canary
-
-        (_key, message), = canary.check_write_chain_precondition(self._block(
-            mode="postgres", latched=True,
-            unmet_precondition="KS_READ_EXPENSES is not postgres"))
-        assert "writes Postgres" in message
-
-    def test_nothing_unmet_and_an_older_web_are_quiet(self):
-        from bot import canary
-
-        assert canary.check_write_chain_precondition(self._block()) == []
-        assert canary.check_write_chain_precondition({}) == []
-        stale = self._block()
-        del stale["write_chains"][chain.CHAIN]["unmet_precondition"]
-        assert canary.check_write_chain_precondition(stale) == []
-
-    @pytest.mark.asyncio
-    async def test_run_canary_warns_and_names_the_lever(self):
-        import httpx
-        from datetime import timedelta
-
-        from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-
-        payload = _healthy_payload()
-        payload.update(self._block(unmet_precondition="KS_READ_EXPENSES is not postgres"))
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(lambda request: httpx.Response(200, json=payload)) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                result = await canary.run_canary(DASHBOARD, client=client)
-
-        assert result.severity == "warn"
-        assert "write_chain_precondition_unmet" in result.failure_keys
-        assert "read flag" in canary.format_alert(result, DASHBOARD)
-
+# `TestTheCanaryWarnsOnIt` stood here until step 14's S14-11: the canary
+# warning `write_chain_precondition_unmet` on the chain's published
+# precondition (KS_READ_EXPENSES not postgres), held or latched. The
+# precondition, its field on `/api/health` and the canary check went with the
+# flags.

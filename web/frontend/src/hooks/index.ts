@@ -57,6 +57,7 @@ export {
   useTrafficAnalytics,
   useTrafficOrganic,
   useTrafficPixelOnly,
+  useTrafficFunnel,
   useTrafficTrend,
   useTrafficTransactions,
   useTrafficROAS,

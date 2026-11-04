@@ -52,10 +52,10 @@ def _moved(now, **values):
     """Every moved watermark, written 5 min ago with a value 5 min old, but
     for the ones given as `entity=(value, stamp)` — as `{key: value}` and
     `{key: stamp}`."""
-    from core.write_chains import stood_down_sync_keys
+    from core.write_chains import sync_keys
 
     fresh = (now - timedelta(minutes=5)).isoformat()
-    watermarks = {key: fresh for key in stood_down_sync_keys()}
+    watermarks = {key: fresh for key in sync_keys()}
     stamps = dict(watermarks)
     for entity, (value, stamp) in values.items():
         watermarks[f"last_sync_{entity}"] = value.isoformat()

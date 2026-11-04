@@ -47,6 +47,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, FrozenSet, Sequence
 
+# The lever every ownership page names since step 14's S14-04 deleted the way
+# back (`core/rollback_lever.py` says why it reads as it does).
+from core.rollback_lever import ROLLBACK_LEVER
+
 
 class Kind(str, Enum):
     CONDITION = "condition"  # holds and can clear → lifecycle, may escalate
@@ -116,8 +120,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
     # A read this web process answered from DuckDB because its engine failed
     # (OD-07). The counters are per process, so only a restart empties them;
-    # the page stands until then, and the soak before KS_READ_FALLBACK=off
-    # reads it back out of the journal (deploy/stage4_soak/22_f1_*).
+    # the page stands until then. The soak's F1 read it back out of the
+    # journal before KS_READ_FALLBACK=off, until step 14's S14-02 retired it.
     "read_fallback_used": _c("web restarts and answers no read from DuckDB"),
     # A read switch web serves from DuckDB on every request with nothing to
     # count: an engine named without its address, or the cohorts' switch not
@@ -135,10 +139,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
     # A start that would have run as duckdb after a flip — the way back —
     # stayed postgres, because a latched write chain owns a table DuckDB
-    # derives from (`warehouse_cutover`, THE WAY BACK, REFUSED).
+    # derives from (`warehouse_cutover`, THE WAY BACK, REFUSED). Since step
+    # 14 no start takes the way back (S14-00) and nothing copies a chain back
+    # (S14-04), so a step-14 web publishes no refusal and the page resolves.
     "warehouse_way_back_refused": _c(
-        "web restarts with the named write chains copied back to DuckDB, or "
-        "with KS_WRITE_WAREHOUSE=postgres and every precondition met"),
+        "web restarts on a step-14 image, which never takes the way back; "
+        "nothing in this build copies a chain back to DuckDB. " + ROLLBACK_LEVER),
     # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
     # down past the canary's limit: a UTM parse that keeps raising, or no tick
     # after a full one whose parse raised (DN-29).
@@ -159,27 +165,14 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # PR-2, OD-S5-1 (a)). The verdict is the web process's for its life.
     "duckdb_off_held_back": _c(
         "web restarts with every precondition of KS_DUCKDB=off met, or with KS_DUCKDB=on"),
-    # KS_GOALS_HISTORY set to a value web refuses — anything but unset or
-    # silver since chain 7b-4 retired it, `bridge` included: every read of
-    # the calculators' history raises — the goal widget, the calculator GETs
-    # under /goals/, the recalculate POST, the Monday job (7b).
-    "goals_history_mode_invalid": _c("web runs with a valid KS_GOALS_HISTORY"),
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),
-    # A KS_WRITE_* not understood: that chain's writers raise, its tables stand
-    # down. Emitted by the canary and by reconcile_operational (DN-01).
-    "write_chain_flag_invalid": _c("web restarts with a valid KS_WRITE_* value"),
-    # A chain that has already written Postgres while its KS_WRITE_* says
-    # duckdb. The latch wins (OD-19 (a)), so nothing is failing — but a
-    # rollback somebody believes happened has not (DN-06).
-    "write_chain_flag_mismatch": _c(
-        "the variable is set back to postgres, or scripts/chain_copy_back.py "
-        "hands the tables back to DuckDB"),
-    # A chain's own condition for moving is unmet: held on DuckDB against its
-    # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
-    "write_chain_precondition_unmet": _c(
-        "the read flag the chain names is set to postgres and web restarts"),
+    # `write_chain_flag_invalid`, `write_chain_flag_mismatch` and
+    # `write_chain_precondition_unmet` stood here until step 14's S14-11: a
+    # KS_WRITE_* not understood, a latch against its flag (DN-06) and a
+    # chain's own condition for moving unmet (DN-26). No flag is read since,
+    # so none of the three has an emitter.
     # What the host's backup scripts last proved, judged from `/api/health`'s
     # `backups` block at `core/backup_evidence.py`'s limits: a PITR drill or
     # an off-site restore drill older than eight days, an off-site shipment
@@ -266,22 +259,6 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # what matters — a sweep that suddenly takes far more than usual is the
     # one thing this cannot tell apart from a loss.
     "mirror_pruned_rows": _c("the next full replace removes them"),
-    # The shadow chains' comparison (OD-02 (c)): Postgres writes, DuckDB is
-    # handed each row after the commit. Nothing re-ships these tables, so
-    # none clears by a job running again — each clears when the rows on the
-    # two sides agree. A row DuckDB never received is never carried there:
-    # the copy-back would, but it releases the latch and hands the chain's
-    # writes back to DuckDB, so it is a rollback and not a cure — and after
-    # a week under KS_DUCKDB=off these rows stand until the drop, accepted
-    # (OD-S5-3 (a)).
-    "shadow_duckdb_only_rows": _c(
-        "the writer that went round the chain is found and its rows decided "
-        "— a human, not a job"),
-    "shadow_missing_in_duckdb": _c(
-        "the rows age out of Postgres, or DuckDB is dropped — never a "
-        "copy-back, which hands the chain back to DuckDB"),
-    "shadow_row_values": _c("the two stores agree on the row again"),
-    "shadow_pruned_rows": _c("the next shadow prune removes them"),
     # Not a data defect: the writer moved and its watchdog did not. It
     # clears when the check is ported or the flag goes back to duckdb.
     "inventory_continuity_unwatched": _c(
@@ -305,24 +282,28 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # for the buyers and the classification, whose shippers read them too and
     # have stopped: the table is not being damaged, and the latch that is wrong
     # has its own page (chain_latch_disagrees / chain_owner_unregistered).
+    # Since step 14 no flag routes (S14-00) and nothing hands a chain back
+    # (S14-04), so in this build it stands while the chain owns the table.
     "mirror_stood_down": _c(
-        "the chain hands its tables back to DuckDB, or its flag returns "
-        "to duckdb before it ever latched"),
+        "nothing in this build hands a chain's tables back to DuckDB or lets "
+        "its flag move them: it stands while the chain owns them"),
     # The same stand-down seen on the owner rows alone — a lost marker, or an
     # image older than the orders chain — and that is a fault, not a decision:
-    # the sync's mirror asks only the local answer, so it is still writing
-    # DuckDB's copy over the chain's rows every tick. Never clears by itself.
+    # in an image from before step 14 the sync's mirror asked only the local
+    # answer, so it wrote DuckDB's copy over the chain's rows every tick. A
+    # step-14 image has no such mirror (S14-09); the fault is the lost marker a
+    # rollback to such an image would route by. Never clears by itself.
     "order_owner_row_without_marker": _c(
-        "the marker is back, or scripts/chain_copy_back.py releases the owner "
-        "rows — a human, not a job"),
+        "the marker is back — a human, not a job. " + ROLLBACK_LEVER),
     # The same fault on the catalogue and the order-level expenses (DN-22b):
-    # their per-tick mirror asks the local answer alone and so still ships
-    # over the chain's rows. The buyers mirror and the classification copy
+    # in an image from before step 14 their per-tick mirror asked the local
+    # answer alone and so shipped over the chain's rows. Since S14-09
+    # `mirror_expenses` has had no caller, and `_mirror` is reached from the
+    # weekly full sync alone. The buyers mirror and the classification copy
     # read the owner rows too since the DN-22b review, so they file
     # mirror_stood_down instead. Never clears by itself.
     "owner_row_without_marker": _c(
-        "the marker is back, or scripts/chain_copy_back.py releases the owner "
-        "rows — a human, not a job"),
+        "the marker is back — a human, not a job. " + ROLLBACK_LEVER),
     # The ownership latch's two copies, compared daily (DN-06). Neither clears
     # by itself: one is a human putting the missing copy back, the other is a
     # shipment that has already overwritten rows and cannot be un-shipped.
@@ -331,17 +312,18 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # On a table the chain stamps itself and keeps a record of (chain 6's
     # catalogue) it also stops at the chain's next write, which moves the
     # watermark back onto an instant the record carries — the stamp that was
-    # not the chain's is then out of the check's sight, not repaired.
+    # not the chain's is then out of the check's sight, not repaired. Since
+    # step 14 nothing hands a chain back (S14-04), so elsewhere it stands.
     "chain_shipper_overwrote": _c(
-        "nothing repairs the rows it replaced; it stops when the chain is "
-        "handed back with scripts/chain_copy_back.py, which releases the latch, "
-        "or, on a table the chain stamps itself, at the chain's next write"),
+        "nothing repairs the rows it replaced and nothing hands the chain back, "
+        "so a human decides; on a table the chain stamps itself it stops at the "
+        "chain's next write. " + ROLLBACK_LEVER),
     # Owner rows naming a table no chain in the running build declares — an
     # image older than the chain (DN-22b review). The copies stand down on
     # them; the build's own writers do not know the chain, so a human decides.
     "chain_owner_unregistered": _c(
-        "a build that declares the chain runs again, or scripts/chain_copy_back.py "
-        "releases the owner rows — a human, not a job"),
+        "a build that declares the chain runs again — a human, not a job. "
+        + ROLLBACK_LEVER),
     # The standing watch on the tables a chain has taken (DN-07). The hourly
     # shipper and the daily comparison both stand down for them, so these are
     # the only checks those tables have — and none of them clears by itself:
@@ -406,8 +388,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_goal_tables_stale": _c(
         "a seasonality_calc run (the Monday job or its trigger) stores"),
     "chain_forecast_stale": _c("a training stores a retail forecast"),
-    # The shadow chains' standing watch (OD-02 (c)). Chain 9: a finding whose
-    # run is gone stays until a human finds the writer and the rows.
+    # The standing watch of chains 9, 10, 11a and 11b (OD-02 (c)). Chain 9: a
+    # finding whose run is gone stays until a human finds the writer and the
+    # rows.
     "chain_orphan_children": _c(
         "the orphaned findings are corrected or their run restored — a human, not a job"),
     # Chain 10: the next stored sample clears the first; the next prune the

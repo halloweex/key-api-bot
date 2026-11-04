@@ -30,7 +30,6 @@ self-sufficient wherever it runs.
 the production key or hold the real bot token — the autouse guard below stops
 the requests, and this stops the credentials from being there at all.
 """
-import contextlib
 import os
 
 # Credentials of exactly the shape the real ones have, and unmistakably not
@@ -142,23 +141,10 @@ def _never_the_production_database(monkeypatch, tmp_path):
     monkeypatch.setattr("core.duckdb_store._store_instance", None, raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _no_write_chain_flag_from_outside(monkeypatch):
-    """Every registered write chain starts each test with its KS_WRITE_* unset.
-
-    A chain's flag decides where its writers write, and a developer's shell or
-    `.env` may carry one — a test that inherited `KS_WRITE_EXPENSES=postgres`
-    would exercise a different code path than CI does and pass or fail for a
-    reason nobody can see. Thirteen test files cleared the variables of the
-    chains they knew about, by name; this clears the variable of every chain in
-    `WRITE_CHAINS`, so a chain added to the registry is covered the moment it
-    is registered rather than when somebody remembers the fixtures. Tests still
-    set the flag they mean to test, after this has run.
-    """
-    from core.write_chains import WRITE_CHAINS
-
-    for chain in WRITE_CHAINS:
-        monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+# `_no_write_chain_flag_from_outside`, which cleared every chain's KS_WRITE_*
+# before each test, stood here until step 14's S14-11: a flag inherited from a
+# developer's `.env` decided where a chain's writers wrote. Nothing reads one
+# since (`tests/unit/test_write_flags_are_not_read.py`).
 
 
 @pytest.fixture(autouse=True)
@@ -202,20 +188,6 @@ def duckdb_off(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _goals_history_unset(monkeypatch):
-    """Every test starts with KS_GOALS_HISTORY unset — Silver, the only goal
-    history since chain 7b-4 retired the variable.
-
-    A developer's shell or `.env` still carrying `KS_GOALS_HISTORY=bridge`
-    (the default and the rollback before 7b-4) would refuse every goal
-    history read, and a test would fail for a reason CI never sees. Tests
-    that mean a value set it after this ran."""
-    from core import pg_goals_read
-
-    monkeypatch.delenv(pg_goals_read.HISTORY_ENV, raising=False)
-
-
-@pytest.fixture(autouse=True)
 def _never_the_real_chain_latch(monkeypatch, tmp_path):
     """No test may latch a write chain in the real data directory.
 
@@ -223,8 +195,8 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
     that a chain writes Postgres and no `KS_WRITE_*` may move it back
     (`core/chain_latch.py`). A test that wrote one into `data/` would hand that
     decision to whatever runs next on the developer's machine — and the suite
-    reaches the writers through the repository methods, so it is one
-    `KS_WRITE_EXPENSES=postgres` away from doing it.
+    reaches the writers through the repository methods, every one of which
+    writes Postgres and takes the latch on its first write.
 
     Redirected and reset per test, `_never_the_production_database`'s
     arrangement: each test starts with nothing latched, and no test can see
@@ -260,20 +232,6 @@ def _never_the_real_data_directory(monkeypatch, tmp_path):
     test's tmp_path into whichever of them was first imported inside it, for
     the rest of the session."""
     monkeypatch.setattr("core.scheduler.DATA_DIR", tmp_path)
-
-
-@pytest.fixture(autouse=True)
-def _a_fresh_orders_chain_hold(monkeypatch):
-    """Every test starts as a process that has not held chain 3 on DuckDB.
-
-    `core/pg_orders_write.py` remembers, for the life of the process, the first
-    time it found a precondition unmet under `KS_WRITE_ORDERS=postgres`, and
-    holds the chain until the process ends (the chain-3 review: the flip must
-    happen at a start, never mid-day). One test that met an unmet precondition
-    under the flag would otherwise hold the chain for every later test."""
-    from core import pg_orders_write
-
-    monkeypatch.setattr(pg_orders_write, "_held", None)
 
 
 @pytest.fixture(autouse=True)
@@ -324,115 +282,7 @@ def _a_fresh_warehouse_writer(monkeypatch, tmp_path):
     monkeypatch.setattr(wc, "UTM_MARKER", tmp_path / "warehouse-utm-reparsed-at")
 
 
-def route_chains_to_duckdb(monkeypatch, *chains) -> None:
-    """Route the given write chains back to DuckDB inside one test.
-
-    Since step 14's S14-00 every write chain writes Postgres, a constant
-    (`writes_postgres()`, `reads_postgres()`, `mode()`). A test whose subject
-    is a flow that does not depend on where a chain's tables live — a job
-    that reads everything before it stores anything, a door that answers a
-    refusal — and that was written with DuckDB as its store keeps that store
-    with this: the chain modules' own answers are patched back to DuckDB for
-    the test alone. Production never takes these branches; what Postgres
-    does is held by the chains' own tests. The DuckDB branches, and this
-    helper with them, go in S14-09 to S14-11.
-    """
-    for chain in chains:
-        for name, value in (("writes_postgres", False), ("reads_postgres", False),
-                            ("mode", "duckdb")):
-            if hasattr(chain, name):
-                monkeypatch.setattr(chain, name, lambda value=value: value)
-        if hasattr(chain, "_routes_postgres"):
-            monkeypatch.setattr(chain, "_routes_postgres", lambda *, log=False: False)
-
-
-def sms_store_on_duckdb(monkeypatch) -> None:
-    """Route `/sms`'s store back to DuckDB inside one test.
-
-    Since step 14's S14-00 `sms_store_is_postgres()` is True, a constant —
-    production's answer since 2026-09-06. The audience, freeze, results and
-    delivery tests were written against DuckDB, the engine both stores run
-    one rendered body on (`_sms_run`), and they are the bulk of the proof of
-    that body; they keep DuckDB as their engine with this until S14-08, which
-    takes the DuckDB branch away and converts them. Every module that holds
-    the predicate is patched: `core.repositories.customers` imported it by
-    name, the rest ask `core.pg_sms` when they run.
-    """
-    from core import pg_sms
-    from core.repositories import customers
-
-    monkeypatch.setattr(pg_sms, "sms_store_is_postgres", lambda: False)
-    monkeypatch.setattr(customers, "sms_store_is_postgres", lambda: False)
-
-
-def user_store_on_duckdb(monkeypatch) -> None:
-    """Route the dashboard's user list back to DuckDB inside one test.
-
-    Since step 14's S14-00 `user_store_is_postgres()` is True, a constant —
-    production's answer since 2026-09-07. Tests written against the DuckDB
-    user list keep it with this until S14-08 takes that branch away. Every
-    consumer asks `core.pg_dashboard_users` when it runs, so one patch
-    reaches them all.
-    """
-    from core import pg_dashboard_users
-
-    monkeypatch.setattr(pg_dashboard_users, "user_store_is_postgres", lambda: False)
-
-
-def _env_says_postgres(name: str) -> bool:
-    import os
-
-    return os.getenv(name, "duckdb").strip().lower() == "postgres"
-
-
-def sms_store_follows_env(monkeypatch) -> None:
-    """`/sms`'s store chosen by `KS_SMS_STORE` again, inside one test.
-
-    For the two-engine tests (`*_two_engines.py`, the send guards): they run
-    one question twice, flipping the variable between the two runs, and are
-    the proof that Postgres answers as DuckDB did. Since S14-00 the variable
-    decides nothing (`sms_store_is_postgres()` is True), so both runs would
-    ask Postgres and compare it with itself. This puts the variable's old
-    rule back for the test alone — unset or `duckdb` is DuckDB, `postgres`
-    is Postgres — until S14-08 turns the DuckDB half into literals."""
-    from core import pg_sms
-    from core.repositories import customers
-
-    monkeypatch.setattr(pg_sms, "sms_store_is_postgres",
-                        lambda: _env_says_postgres("KS_SMS_STORE"))
-    monkeypatch.setattr(customers, "sms_store_is_postgres",
-                        lambda: _env_says_postgres("KS_SMS_STORE"))
-
-
-def user_store_follows_env(monkeypatch) -> None:
-    """The dashboard's user list chosen by `KS_USER_STORE` again, inside one
-    test — `sms_store_follows_env`'s reason, for the user list's two-engine
-    tests, until S14-08."""
-    from core import pg_dashboard_users
-
-    monkeypatch.setattr(pg_dashboard_users, "user_store_is_postgres",
-                        lambda: _env_says_postgres("KS_USER_STORE"))
-
-
-@contextlib.contextmanager
-def chains_on_duckdb(*chains):
-    """`route_chains_to_duckdb` for a block rather than a whole test.
-
-    For a test that compares the DuckDB branch of a chain's writer with its
-    Postgres branch on the same calls — the proof that the Postgres branch
-    stores what DuckDB did, until the DuckDB branch goes (S14-09 to S14-11) —
-    or that needs DuckDB to hold a stale copy before Postgres is written:
-    inside the block the chains answer DuckDB, after it Postgres again."""
-    from unittest.mock import patch
-
-    with contextlib.ExitStack() as stack:
-        for chain in chains:
-            for name, value in (("writes_postgres", False), ("reads_postgres", False),
-                                ("mode", "duckdb")):
-                if hasattr(chain, name):
-                    stack.enter_context(
-                        patch.object(chain, name, lambda value=value: value))
-            if hasattr(chain, "_routes_postgres"):
-                stack.enter_context(
-                    patch.object(chain, "_routes_postgres", lambda *, log=False: False))
-        yield
+# `route_chains_to_duckdb` and `chains_on_duckdb` stood here until step 14's
+# S14-11: they patched a chain's `writes_postgres()`/`reads_postgres()`/
+# `mode()` back to DuckDB for one test or one block. Those answers went with
+# the flags, and with them the DuckDB branches the helpers reached.

@@ -2,20 +2,15 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timezone
+from datetime import timezone
 from typing import Any, Dict, List, Sequence, Tuple
 
 from core.sql_dialect import (
-    DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect, sku_status_rebuild_select,
+    POSTGRES, TODAY_IN_KYIV, Dialect,
 )
 from core import pg_inventory_write
 from core import read_fallback
-from core.pg_inventory_write import writes_postgres
-from core.landing_rows import (
-    STOCK_MOVEMENT_COLUMNS,
-    offer_rows,
-    plan_stock_movements,
-)
+from core.landing_rows import offer_rows
 
 logger = logging.getLogger(__name__)
 
@@ -42,59 +37,42 @@ def _render(sql: str, dialect: Dialect, **extra: Any) -> str:
 
 class InventoryMixin:
 
-    # ─── Which engine answers /inventory ─────────────────────────────────────
+    # ─── Who answers /inventory: Postgres ────────────────────────────────────
     #
-    # Eight methods, eleven views, one flag. The bodies are shared
+    # Eight methods, eleven views. The bodies are shared
     # (`core.sql_dialect.inventory_view_selects`, migration 0014), so what is
-    # left here is choosing an engine and rendering the table names.
-    #
-    # The choice is made BEFORE any connection is taken — §34's invariant: a
-    # read bound for Postgres must not first queue behind DuckDB's single
-    # writer. Two tests enforce it, one making the lock raise and demanding an
-    # answer anyway, and its mirror so the first cannot pass by being broken in
-    # both directions.
-    #
-    # **Never call these from inside `self.connection()`.** The store lock is
-    # not reentrant, and the deadlock does not raise — the call simply never
-    # returns, which is how the cohort port shipped one that no test called.
-    # `tests/unit/test_inventory_smoke.py` calls every one of the eight.
+    # left here is rendering the table names. Since step 14's S14-07 the
+    # router asks Postgres and nothing else: `KS_READ_INVENTORY` is not read,
+    # and a failure is the 503 naming `inventory` that `fall_back` gave under
+    # `KS_READ_FALLBACK=off`. Nothing here takes the DuckDB store's lock.
 
     async def _inventory_batch(
         self, queries: Sequence[Tuple[str, Sequence[Any]]], **extra: Any
     ) -> List[List[Tuple]]:
-        """Several inventory queries against one connection, either engine.
+        """Several inventory queries against one Postgres connection.
 
         One connection rather than one per query, because `get_inventory_turnover`
         combines five results into one set of KPIs and `get_inventory_summary_v2`
-        four into one summary. DuckDB's `connection()` is a lock, so today those
-        queries cannot have a writer interleaved between them; taking the lock
-        per query would quietly give that up.
+        four into one summary, and taking one per query would let a writer
+        interleave between them.
 
-        A Postgres fault falls back to DuckDB with an ERROR in the log. Nothing
-        diverges between the two — this tab writes nothing, and every view is a
-        projection over tables Postgres receives from DuckDB.
+        One path since step 14's S14-07: the Postgres read, and on any failure
+        a refusal — `read_fallback.refuse`, a 503 naming `inventory`. Without
+        `KS_PG_DSN` the pool raises and that is the refusal.
         """
         from core import pg_inventory_read
 
-        read_fallback.no_address("inventory", pg_inventory_read)
-        if pg_inventory_read.enabled() and pg_inventory_read.available():
-            try:
-                return await pg_inventory_read.fetch_many(
-                    [(_render(sql, POSTGRES, **extra), params) for sql, params in queries]
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("inventory", exc)
-
-        async with self.connection() as conn:
-            return [
-                conn.execute(_render(sql, DUCKDB, **extra), list(params)).fetchall()
-                for sql, params in queries
-            ]
+        try:
+            return await pg_inventory_read.fetch_many(
+                [(_render(sql, POSTGRES, **extra), params) for sql, params in queries]
+            )
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("inventory", exc)
 
     async def _inventory_rows(
         self, sql: str, params: Sequence[Any] = (), **extra: Any
     ) -> List[Tuple]:
-        """One inventory query, from whichever engine answers."""
+        """One inventory query, from Postgres."""
         batch = await self._inventory_batch([(sql, params)], **extra)
         return batch[0]
 
@@ -114,29 +92,7 @@ class InventoryMixin:
             return 0
 
         rows = offer_rows(offers)
-        if writes_postgres():
-            return await pg_inventory_write.upsert_offers(rows)
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO offers (id, product_id, sku, synced_at) "
-                    "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                    [tuple(r) for r in rows],
-                )
-                count = len(rows)
-
-                conn.execute("COMMIT")
-                logger.info(f"Upserted {count} offers to DuckDB")
-                return count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+        return await pg_inventory_write.upsert_offers(rows)
 
     async def upsert_stocks(self, stocks: List[Dict[str, Any]]) -> int:
         """Insert or update offer stocks from KeyCRM API response.
@@ -152,65 +108,8 @@ class InventoryMixin:
         if not stocks:
             return 0
 
-        if writes_postgres():
-            written, _movements = await pg_inventory_write.upsert_stocks(stocks)
-            return written
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                # Fetch current state for delta detection
-                current = {}
-                for r in conn.execute("SELECT id, quantity, reserve FROM offer_stocks").fetchall():
-                    current[r[0]] = (r[1], r[2])
-
-                # Build offer_id → product_id mapping for denormalization
-                product_map = {}
-                for r in conn.execute("SELECT id, product_id FROM offers").fetchall():
-                    product_map[r[0]] = r[1]
-
-                # The classification lives in `core/landing_rows.py`, not here.
-                # A stock movement is recorded once or never — KeyCRM has no
-                # stock history — so a second implementation of this rule would
-                # not fail loudly, it would disagree about the direction of a
-                # change and write the wrong answer into the only record there
-                # will ever be.
-                movements = plan_stock_movements(
-                    stocks, current=current, product_map=product_map,
-                )
-                count = len(stocks)
-
-                conn.executemany("""
-                    INSERT OR REPLACE INTO offer_stocks
-                    (id, sku, price, purchased_price, quantity, reserve, synced_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    (s.get("id"), s.get("sku"), s.get("price"),
-                     s.get("purchased_price"), s.get("quantity", 0),
-                     s.get("reserve", 0))
-                    for s in stocks
-                ])
-
-                if movements:
-                    placeholders = ", ".join("?" * len(STOCK_MOVEMENT_COLUMNS))
-                    conn.executemany(
-                        f"INSERT INTO stock_movements "
-                        f"({', '.join(STOCK_MOVEMENT_COLUMNS)}) "
-                        f"VALUES ({placeholders})",
-                        [tuple(m) for m in movements],
-                    )
-                    logger.info(f"Recorded {len(movements)} stock movements")
-
-                conn.execute("COMMIT")
-                logger.info(f"Upserted {count} offer stocks to DuckDB")
-                return count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+        written, _movements = await pg_inventory_write.upsert_stocks(stocks)
+        return written
 
     async def refresh_sku_inventory_status(self) -> int:
         """Refresh Layer 1: sku_inventory_status from source tables.
@@ -229,86 +128,16 @@ class InventoryMixin:
         # Postgres, the leftover temp table wedged every later call until a
         # restart, and the next boot rebuilt from an empty carry-forward, so
         # every SKU's first-seen date reset to today in both stores at once.
-        if writes_postgres():
-            count = await pg_inventory_write.rebuild_sku_inventory_status()
-            logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
-            return count
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                self._rebuild_sku_inventory_status(conn)
-                count = conn.execute("SELECT COUNT(*) FROM sku_inventory_status").fetchone()[0]
-                conn.execute("COMMIT")
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-            logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
-            return count
-
-    @staticmethod
-    def _rebuild_sku_inventory_status(conn) -> None:
-        """The DELETE + INSERT…SELECT body; the caller owns the transaction."""
-        # Calculate last sale date per product (using offer_id from order_products)
-        # Then merge with stock data
-        # Save first_seen_at before rebuild (self-referencing subquery needs it).
-        # OR REPLACE: a temp table left behind by an interrupted earlier call
-        # must not make every later refresh fail on "already exists".
-        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_first_seen AS SELECT offer_id, first_seen_at FROM sku_inventory_status")
-        conn.execute("DELETE FROM sku_inventory_status")
-        # The INSERT…SELECT is one body for both engines — see
-        # `core.sql_dialect.sku_status_rebuild_select`. It stays out of this
-        # file for the reason `plan_stock_movements` did: stage 4 gives it a
-        # Postgres caller, and six joined tables reimplemented twice is six
-        # chances to disagree about what "last sold" means.
-        #
-        # The three steps around it are NOT shared, because they are where the
-        # engines genuinely differ: DuckDB's `CREATE OR REPLACE TEMP TABLE`
-        # against Postgres' `ON COMMIT DROP`. `OR REPLACE` matters here — a
-        # temp table left behind by an interrupted earlier call must not make
-        # every later refresh fail on "already exists".
-        conn.execute(sku_status_rebuild_select(DUCKDB))
-        conn.execute("DROP TABLE IF EXISTS _tmp_first_seen")
+        count = await pg_inventory_write.rebuild_sku_inventory_status()
+        logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
+        return count
 
     async def record_sku_inventory_snapshot(self) -> bool:
         """Record Layer 2: daily per-SKU snapshot.
 
         Only records one snapshot per day. Returns True if recorded, False if already exists.
         """
-        if writes_postgres():
-            return await pg_inventory_write.record_sku_inventory_snapshot()
-
-        async with self.connection() as conn:
-            today = date.today()
-
-            # Check if already recorded today
-            exists = conn.execute(
-                "SELECT 1 FROM inventory_sku_history WHERE date = ? LIMIT 1", [today]
-            ).fetchone()
-
-            if exists:
-                return False
-
-            # Record snapshot from current sku_inventory_status
-            conn.execute("""
-                INSERT INTO inventory_sku_history (date, offer_id, quantity, reserve, price)
-                SELECT
-                    CURRENT_DATE,
-                    offer_id,
-                    quantity,
-                    reserve,
-                    price
-                FROM sku_inventory_status
-            """)
-
-            count = conn.execute(
-                "SELECT COUNT(*) FROM inventory_sku_history WHERE date = ?", [today]
-            ).fetchone()[0]
-            logger.info(f"Recorded SKU inventory snapshot: {count} SKUs for {today}")
-            return True
+        return await pg_inventory_write.record_sku_inventory_snapshot()
 
     async def get_stock_summary(self, limit: int = 20) -> Dict[str, Any]:
         """The stock cards at the top of `/inventory`, from whichever engine.
@@ -494,37 +323,7 @@ class InventoryMixin:
         Args:
             force: If True, delete existing snapshot and re-record
         """
-        if writes_postgres():
-            return await pg_inventory_write.record_inventory_snapshot(force=force)
-
-        async with self.connection() as conn:
-            today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
-
-            # Check if already recorded today
-            exists = conn.execute(
-                "SELECT 1 FROM inventory_history WHERE date = ?", [today]
-            ).fetchone()
-
-            if exists:
-                if force:
-                    conn.execute("DELETE FROM inventory_history WHERE date = ?", [today])
-                    logger.info(f"Deleted existing inventory snapshot for {today}")
-                else:
-                    return False
-
-            # Record snapshot (using available quantity = quantity - reserve, same as KeyCRM)
-            conn.execute("""
-                INSERT INTO inventory_history (date, total_quantity, total_value, total_reserve, sku_count)
-                SELECT
-                    CURRENT_DATE,
-                    COALESCE(SUM(quantity - reserve), 0),
-                    COALESCE(SUM((quantity - reserve) * price), 0),
-                    COALESCE(SUM(reserve), 0),
-                    COUNT(*)
-                FROM offer_stocks
-            """)
-            logger.info(f"Recorded inventory snapshot for {today}")
-            return True
+        return await pg_inventory_write.record_inventory_snapshot(force=force)
 
     async def get_average_inventory(self, days: int = 30) -> Dict[str, Any]:
         """Calculate average inventory over a period.

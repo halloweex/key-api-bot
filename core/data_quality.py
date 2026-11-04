@@ -35,6 +35,7 @@ from typing import (
 )
 
 from core import duckdb_switch
+from core.rollback_lever import ROLLBACK_LEVER
 
 logger = logging.getLogger(__name__)
 
@@ -514,13 +515,13 @@ def _freshness_check(
     A moved key Postgres does not hold yet is "never synced" — unless its
     chain declares `CHAIN_WATERMARK_INHERITS_DUCKDB`, in which case DuckDB's
     frozen stamp stands in, at the same threshold, until the first sync under
-    the flag writes one. That is for a chain whose sync is rarer than this
+    the flag writes one. That was for a chain whose sync is rarer than this
     check: chain 6a's dictionary moves on the Sunday full sync, so a mid-week
-    flip would otherwise file "never synced" on every run for up to a week
-    about a dictionary the hourly copy shipped until the flip — and DuckDB's
-    stamp is exactly the age of what Postgres then holds. Chain 3 declares it
-    for its sync window, and the store's getter answers the same stand-in
-    (`DuckDBStore.get_last_sync_time`), so this judges what the sync reads.
+    flip would otherwise have filed "never synced" on every run for up to a
+    week; chains 6 and 6a declared it until step 14's S14-09, their flips long
+    past. Chain 3 declares it for its sync window, and the store's getter
+    answers the same stand-in (`DuckDBStore.get_last_sync_time`), so this
+    judges what the sync reads.
 
     `chain_stamps` is `{key: when the row was last written}` out of the same
     table (`read_values_and_stamps`). An entity in `JUDGED_BY_LAST_WRITE`
@@ -569,7 +570,7 @@ def _judge_freshness(
     an entity whose verdict would rest on the copy — a key Postgres does not
     hold, of a chain that inherits, or of one that has not moved — is
     **unwatched** when the copy is unreadable, rather than "never synced"."""
-    from core.write_chains import WRITE_CHAINS, chain_name, stood_down_sync_keys_checked
+    from core.write_chains import WRITE_CHAINS, sync_keys
 
     issues: List[IntegrityIssue] = []
     if now is None:
@@ -582,7 +583,11 @@ def _judge_freshness(
     if not from_the_copy and not seen:
         return []
 
-    moved_keys, chain_errors = stood_down_sync_keys_checked()
+    # Every chain's key lives in `meta.chain_watermarks` — since step 14's
+    # S14-11 asked of nothing (`write_chains.sync_keys()`); until then a key
+    # moved only once its chain wrote Postgres, and a chain whose KS_WRITE_*
+    # was not understood left its keys unjudged.
+    moved_keys = sync_keys()
     moved = {key[len("last_sync_"):] for key in moved_keys}
     # Under `off` the same gate, over everything Postgres holds: the copy read
     # and empty, and no watermark of a moved chain — read and empty too, when
@@ -595,12 +600,8 @@ def _judge_freshness(
                 if getattr(c, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
                 for k in getattr(c, "CHAIN_SYNC_KEYS", ())}
     # Entities whose watermark cannot be judged this run: every moved one when
-    # the caller brought no watermarks, and those of a chain whose KS_WRITE_* is
-    # not understood (DN-01) — nobody knows which store holds theirs.
+    # the caller brought no watermarks.
     blind = set(moved) if chain_watermarks is None else set()
-    for name in chain_errors:
-        chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
-        blind.update(k[len("last_sync_"):] for k in getattr(chain, "CHAIN_SYNC_KEYS", ()))
     # Under `off` with the copy unreadable: every entity whose verdict would
     # rest on the copy. A moved key Postgres holds is judged as it stands, and
     # a moved key of a chain that does not inherit is "never synced" without
@@ -617,12 +618,8 @@ def _judge_freshness(
     # it here would say that a stall of it went unwatched this run.
     blind &= set(FRESHNESS_THRESHOLDS)
     if blind:
-        why = ("; ".join(f"{n}: {e}" for n, e in sorted(chain_errors.items()))
-               if chain_errors else "")
         reasons = []
-        if why:
-            reasons.append(f"Their chain's flag is not understood — {why}.")
-        if blind - copy_blind and not why:
+        if blind - copy_blind:
             reasons.append(
                 "Their chain writes Postgres and this check was called without "
                 "`chain_watermarks=` from core.pg_chain_watermarks.read_values.")
@@ -753,10 +750,10 @@ def _inventory_snapshot_continuity_check(
     today = now.date()
     yesterday = today - timedelta(days=1)
 
-    # This check follows the writer. Under `KS_WRITE_INVENTORY=postgres` the
-    # snapshot is taken into `app.inventory_sku_history`, and reading DuckDB
-    # here would file a finding for every day since the switch — about
-    # snapshots that are being taken correctly, in the other store.
+    # This check follows the writer: the snapshot is taken into
+    # `app.inventory_sku_history` (chain 1; since step 14's S14-11 asked of no
+    # flag), and reading DuckDB here would file a finding for every day since
+    # the switch — about snapshots taken correctly, in the other store.
     #
     # The facts arrive pre-read rather than being fetched here, because this
     # runs inside the **sync** `check_internal_integrity` while a Postgres read
@@ -766,13 +763,11 @@ def _inventory_snapshot_continuity_check(
     # `compare_table`'s arrangement, and the reason there is one body and not
     # two.
     #
-    # The guard stays, narrowed to what it now protects: a caller that has the
-    # flag on and supplied nothing. That is a forgotten call site, not a
+    # The guard stays, narrowed to what it now protects: a caller that
+    # supplied nothing. That is a forgotten call site, not a
     # migration, and it must still be loud — this is the one check standing
     # over the one table that cannot be reconstructed at any price.
-    from core.pg_inventory_write import writes_postgres
-
-    if calendar is None and writes_postgres():
+    if calendar is None:
         return [IntegrityIssue(
             check_name="inventory_continuity_unwatched",
             table_name="inventory_sku_history",
@@ -780,8 +775,8 @@ def _inventory_snapshot_continuity_check(
             count=1,
             sample_ids=(),
             description=(
-                "KS_WRITE_INVENTORY=postgres, so the per-SKU snapshot is "
-                "written to app.inventory_sku_history, and this check was "
+                "The per-SKU snapshot is written to "
+                "app.inventory_sku_history, and this check was "
                 "called without a pre-read calendar — so it is NOT watching "
                 "the only table here that cannot be reconstructed from any "
                 "source. The caller must pass `calendar=` from "
@@ -789,14 +784,7 @@ def _inventory_snapshot_continuity_check(
             ),
         )]
 
-    if calendar is None:
-        row = conn.execute(
-            "SELECT MIN(date), MAX(date) FROM inventory_sku_history"
-        ).fetchone()
-        first_day = row[0] if row else None
-        present: Optional[FrozenSet[date]] = None
-    else:
-        first_day, present = calendar
+    first_day, present = calendar
 
     if first_day is None:
         # No history at all → fresh install, not a stall. Same reasoning as
@@ -807,30 +795,15 @@ def _inventory_snapshot_continuity_check(
     if window_start > yesterday:
         return []
 
-    if present is None:
-        missing = [r[0] for r in conn.execute(
-            """
-            WITH cal AS (
-                SELECT UNNEST(GENERATE_SERIES(?::DATE, ?::DATE, INTERVAL 1 DAY))::DATE AS d
-            )
-            SELECT cal.d
-            FROM cal
-            LEFT JOIN (SELECT DISTINCT date FROM inventory_sku_history) h ON h.date = cal.d
-            WHERE h.date IS NULL
-            ORDER BY cal.d
-            """,
-            [window_start, yesterday],
-        ).fetchall()]
-    else:
-        # The calendar is enumerated here rather than in SQL, so the two
-        # engines cannot disagree about what a day is. `generate_series` exists
-        # in both and spells differently in each; a Python range spells the
-        # same everywhere and is the same arithmetic.
-        span_days = (yesterday - window_start).days
-        missing = [
-            d for d in (window_start + timedelta(days=i) for i in range(span_days + 1))
-            if d not in present
-        ]
+    # The calendar is enumerated here rather than in SQL, so the two
+    # engines cannot disagree about what a day is. `generate_series` exists
+    # in both and spells differently in each; a Python range spells the
+    # same everywhere and is the same arithmetic.
+    span_days = (yesterday - window_start).days
+    missing = [
+        d for d in (window_start + timedelta(days=i) for i in range(span_days + 1))
+        if d not in present
+    ]
 
     if not missing:
         return []
@@ -1472,6 +1445,7 @@ def _silver_arc_check(
     Reconciliation against KeyCRM remains the only check that sees the latter.
     """
     from core.duckdb_store import silver_recompute_ctes
+    from core.sql_dialect import DUCKDB
 
     missing_severity = missing_severity or Severity.CRITICAL
     drift_severity = drift_severity or Severity.WARN
@@ -1557,7 +1531,7 @@ def _silver_arc_check(
              for column, tolerance in _SILVER_ROW_COLUMNS]
 
     rows = conn.execute(f"""
-        WITH {silver_recompute_ctes()}
+        WITH {silver_recompute_ctes(DUCKDB)}
         SELECT r.id,
                {", ".join(f"r.{c} AS r_{c}, s.{c} AS s_{c}" for c, _ in _SILVER_ROW_COLUMNS)}
         FROM recomputed r
@@ -1890,12 +1864,12 @@ def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -
     if "inventory_continuity_unwatched" in found:
         names.add("inventory_snapshot_gaps")
     if "sync_watermarks_unwatched" in found:
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys
 
         # The judged entities only (`_freshness_check`'s `blind`): a moved key
         # with no threshold has no condition to hold.
         names.update(f"freshness_{key[len('last_sync_'):]}"
-                     for key in stood_down_sync_keys()
+                     for key in sync_keys()
                      if key[len("last_sync_"):] in FRESHNESS_THRESHOLDS)
     # What the finding itself names. Under `on` that is a subset of the moved
     # keys above, so nothing changes there; under `off` with
@@ -1924,14 +1898,14 @@ def _status_from_severity(sev: Severity) -> str:
 
 @dataclass(frozen=True)
 class RunValues:
-    """One run row's values, computed once and handed to every store.
+    """One run row's values, computed once.
 
-    Chain 9 (OD-02 (c)) writes the journal to Postgres first and then hands
-    DuckDB the same row, so the status, the counts and the duration must be
-    computed in one place rather than once per store — two computations of
-    `duration_ms` a millisecond apart would be a `shadow_row_values` every
-    morning. `persist_run` computes it here too, so DuckDB's own branch is the
-    same arithmetic it always was.
+    Chain 9 (OD-02 (c)) writes the journal to Postgres; until step 14's S14-10
+    it then handed DuckDB the same row as a shadow, so the status, the counts
+    and the duration were computed in one place rather than once per store —
+    two computations of `duration_ms` a millisecond apart would have been a
+    discrepancy every morning. DuckDB's own writer, `persist_run`, computed
+    them here too, until S14-10 deleted it.
     """
     started_at: datetime
     ended_at: datetime
@@ -1950,7 +1924,7 @@ class RunValues:
 
 
 # The run row's columns in insert order — `RunValues`' fields, which is what
-# `journal_rows` writes and both stores read back.
+# `journal_rows` writes and the readers read back.
 RUN_COLUMNS: Tuple[str, ...] = (
     "started_at", "ended_at", "as_of", "window_start", "window_end",
     "layer", "status",
@@ -1973,7 +1947,7 @@ def run_values(
     api_calls_used: int = 0,
     error_message: Optional[str] = None,
 ) -> RunValues:
-    """The run row `persist_run` writes, as values. Pure."""
+    """The run row chain 9 writes, as values. Pure."""
     issue_sev = summarize_issues(issues)
 
     critical_count = (
@@ -2003,127 +1977,11 @@ def run_values(
     )
 
 
-def persist_run(
-    conn,
-    *,
-    started_at: datetime,
-    ended_at: datetime,
-    as_of: datetime,
-    window_start: date,
-    window_end: date,
-    layer: str,
-    issues: List[IntegrityIssue],
-    discrepancies: List[Discrepancy],
-    api_calls_used: int = 0,
-    error_message: Optional[str] = None,
-) -> int:
-    """Insert one run + its child issues/diffs in a single transaction.
-
-    Returns: the new run_id.
-
-    The transaction is opened and closed here. This docstring used to say the
-    store wrapper handled it; the wrapper only holds a lock, and every
-    statement autocommitted — a kill between the run row and its findings
-    left a run with counts and no children, which the next run's delta then
-    read as "every standing finding is new". A failed statement inside an
-    open DuckDB transaction poisons the shared connection, so the ROLLBACK is
-    not optional.
-
-    DuckDB's writer of the journal while chain 9 is on DuckDB. Reached only
-    through `core.dq_journal.journal_run`, which decides the store
-    (`tests/unit/test_dq_journal.py` walks every caller).
-    """
-    values = run_values(
-        started_at=started_at, ended_at=ended_at, as_of=as_of,
-        window_start=window_start, window_end=window_end, layer=layer,
-        issues=issues, discrepancies=discrepancies,
-        api_calls_used=api_calls_used, error_message=error_message,
-    )
-
-    conn.execute("BEGIN TRANSACTION")
-    try:
-        run_id = _persist_run_rows(
-            conn, started_at=values.started_at, ended_at=values.ended_at,
-            as_of=values.as_of, window_start=values.window_start,
-            window_end=values.window_end, layer=values.layer,
-            status=values.status, issues=issues, discrepancies=discrepancies,
-            critical_count=values.critical_count, warn_count=values.warn_count,
-            api_calls_used=values.api_calls_used,
-            duration_ms=values.duration_ms,
-            error_message=values.error_message,
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
-    return run_id
-
-
-# The two child INSERTs, one spelling each for every DuckDB writer of the
-# journal — today's statement and chain 9's shadow (`insert_journal_rows`).
-_ISSUES_INSERT = """
-            INSERT INTO data_quality_issues
-              (run_id, check_name, table_name, severity, count, sample_ids, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """
-_DIFFS_INSERT = """
-            INSERT INTO data_quality_diffs
-              (run_id, month, source_id, diff_class, field,
-               dk_value, kc_value, severity, order_ids)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-
-
-def _persist_run_rows(
-    conn, *, started_at, ended_at, as_of, window_start, window_end, layer,
-    status, issues, discrepancies, critical_count, warn_count,
-    api_calls_used, duration_ms, error_message,
-) -> int:
-    """The three INSERTs; `persist_run` owns the transaction around them."""
-    row = conn.execute("""
-        INSERT INTO data_quality_runs (
-            started_at, ended_at, as_of, window_start, window_end,
-            layer, status,
-            integrity_issues_count, discrepancies_count,
-            critical_count, warn_count,
-            api_calls_used, duration_ms, error_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING run_id
-    """, [
-        started_at, ended_at, as_of, window_start, window_end,
-        layer, status,
-        len(issues), len(discrepancies),
-        critical_count, warn_count,
-        api_calls_used, duration_ms, error_message,
-    ]).fetchone()
-    run_id = int(row[0])
-
-    if issues:
-        conn.executemany(_ISSUES_INSERT, [
-            (run_id, i.check_name, i.table_name, i.severity.value,
-             i.count, json.dumps(list(i.sample_ids)), i.description)
-            for i in issues
-        ])
-
-    if discrepancies:
-        conn.executemany(_DIFFS_INSERT, [
-            (run_id, d.month, d.source_id, d.diff_class.value, d.field,
-             d.dk_value, d.kc_value, d.severity.value,
-             json.dumps(list(d.order_ids)) if d.order_ids else None)
-            for d in discrepancies
-        ])
-
-    return run_id
-
-
 @dataclass(frozen=True)
 class JournalRows:
-    """One run and its findings as the rows both stores are handed — chain 9's
-    unit of writing (OD-02 (c)): Postgres commits these, then DuckDB is given
-    the very same tuples (`insert_journal_rows`)."""
+    """One run and its findings as the rows chain 9 writes (OD-02 (c)):
+    Postgres commits these in one transaction. (DuckDB's shadow was given the
+    very same tuples, `insert_journal_rows`, until step 14's S14-10.)"""
     run: Tuple[Any, ...]                      # (run_id, *RUN_COLUMNS)
     issues: Tuple[Tuple[Any, ...], ...]       # data_quality_issues' 7 columns
     diffs: Tuple[Tuple[Any, ...], ...]        # data_quality_diffs' 9 columns
@@ -2134,8 +1992,9 @@ class JournalRows:
 
 
 def _require_aware(name: str, value: Any) -> None:
-    """A naive timestamp reads as Kyiv local time in DuckDB and as UTC in
-    asyncpg, so one value handed to both would land three hours apart."""
+    """A naive timestamp reads as UTC in asyncpg, so a Kyiv wall clock
+    would land three hours off (and in DuckDB, while it was the shadow, as
+    Kyiv local time — three hours from Postgres's copy)."""
     if isinstance(value, datetime) and value.tzinfo is None:
         raise ValueError(
             f"{name}={value!r} is naive; the journal's two stores would read "
@@ -2148,13 +2007,12 @@ def journal_rows(
     issues: Sequence[IntegrityIssue],
     discrepancies: Sequence[Discrepancy],
 ) -> JournalRows:
-    """The rows of one run, for both stores. Pure.
+    """The rows of one run, as Postgres is handed them. Pure.
 
-    The same expressions `_persist_run_rows` writes, with two normalisations
-    a second engine needs and DuckDB does not mind: `dk_value`/`kc_value` as
-    `float` (asyncpg's float8 refuses nothing a DOUBLE takes, but a `Decimal`
-    from a rollup would reach one store as a Decimal), and `count` as `int`.
-    Raises on a naive timestamp (`_require_aware`).
+    The expressions DuckDB's `_persist_run_rows` wrote until step 14's S14-10,
+    with two normalisations asyncpg needs: `dk_value`/`kc_value` as `float`
+    (a `Decimal` from a rollup would otherwise reach float8 as a Decimal), and
+    `count` as `int`. Raises on a naive timestamp (`_require_aware`).
     """
     for column in ("started_at", "ended_at", "as_of"):
         _require_aware(column, getattr(values, column))
@@ -2173,27 +2031,6 @@ def journal_rows(
     return JournalRows(run=run, issues=issue_rows, diffs=diff_rows)
 
 
-def insert_journal_rows(conn, rows: JournalRows) -> None:
-    """DuckDB's half of a chain-9 write: the run with the id Postgres issued,
-    and its children through the same child statements as `persist_run`.
-
-    The caller owns the transaction (`core.shadow_writes.into_duckdb`). The
-    explicit `run_id` bypasses `data_quality_run_seq`, which then lags the
-    ids Postgres issued — harmless while Postgres allocates, and floored by
-    `_m0027` on every boot and by the copy-back on the way back.
-    """
-    cols = ", ".join(("run_id",) + RUN_COLUMNS)
-    marks = ", ".join("?" for _ in range(len(RUN_COLUMNS) + 1))
-    conn.execute(
-        f"INSERT INTO data_quality_runs ({cols}) VALUES ({marks})",
-        list(rows.run),
-    )
-    if rows.issues:
-        conn.executemany(_ISSUES_INSERT, [list(r) for r in rows.issues])
-    if rows.diffs:
-        conn.executemany(_DIFFS_INSERT, [list(r) for r in rows.diffs])
-
-
 # `severity` is text, so `ORDER BY severity DESC` ranked WARN, INFO, CRITICAL:
 # the worst finding came last in the digest and was the first to fall past a
 # LIMIT or into "…+N more". Ranked explicitly, as `evidence_for_agent` does.
@@ -2203,27 +2040,24 @@ _WORST_FIRST = (
 )
 
 
-# The journal's three tables, as a hole each reader's text carries, so one
-# statement serves both stores: DuckDB's bare names, or Postgres's `app.*`
-# with `?` numbered (chain 9, OD-02 (c) — the readers follow the writer).
+# The journal's three tables, as a hole each reader's text carries: Postgres's
+# `app.*`, with `?` numbered (chain 9, OD-02 (c) — the readers follow the
+# writer). The same texts served DuckDB's bare names until step 14's S14-10,
+# which is why they keep the hole; only `postgres` renders them now.
 JOURNAL_TABLES = {
-    "duckdb": {"runs": "data_quality_runs", "issues": "data_quality_issues",
-               "diffs": "data_quality_diffs"},
     "postgres": {"runs": "app.data_quality_runs",
                  "issues": "app.data_quality_issues",
                  "diffs": "app.data_quality_diffs"},
 }
 
 
-def journal_sql(sql: str, engine: str = "duckdb") -> str:
-    """A reader's text for one engine: its table holes filled, and `?`
-    numbered for asyncpg when the engine is Postgres."""
-    rendered = sql.format(**JOURNAL_TABLES[engine])
-    if engine == "postgres":
-        from core.sql_dialect import numbered
+def journal_sql(sql: str, engine: str = "postgres") -> str:
+    """A reader's text for Postgres: its table holes filled and `?` numbered
+    for asyncpg. `engine` stays a parameter so the rendering chain 9 runs is
+    byte for byte the one it ran; any other engine is a `KeyError`."""
+    from core.sql_dialect import numbered
 
-        return numbered(rendered)
-    return rendered
+    return numbered(sql.format(**JOURNAL_TABLES[engine]))
 
 
 RUN_DIFFS_SQL = f"""
@@ -2245,7 +2079,7 @@ RUN_ISSUES_SQL = f"""
 
 
 def diff_dicts(rows) -> List[Dict[str, Any]]:
-    """`fetch_run_diffs`' shape, from either store's rows."""
+    """A run's discrepancies, shaped for the health endpoint and the digest."""
     out: List[Dict[str, Any]] = []
     for r in rows:
         out.append({
@@ -2259,7 +2093,7 @@ def diff_dicts(rows) -> List[Dict[str, Any]]:
 
 
 def issue_dicts(rows) -> List[Dict[str, Any]]:
-    """`fetch_run_issues`' shape, from either store's rows."""
+    """A run's findings, shaped for the health endpoint and the digest."""
     out: List[Dict[str, Any]] = []
     for r in rows:
         out.append({
@@ -2269,17 +2103,6 @@ def issue_dicts(rows) -> List[Dict[str, Any]]:
             "description": r[5],
         })
     return out
-
-
-def fetch_run_diffs(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    """Read all discrepancies for a run. For health/UI surface and digest."""
-    rows = conn.execute(journal_sql(RUN_DIFFS_SQL), [run_id, limit]).fetchall()
-    return diff_dicts(rows)
-
-
-def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    rows = conn.execute(journal_sql(RUN_ISSUES_SQL), [run_id, limit]).fetchall()
-    return issue_dicts(rows)
 
 
 # ─── What to do about it ─────────────────────────────────────────────────────
@@ -2309,16 +2132,15 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # the classification, whose latch fault is paged under its own name.
     ("mirror_stood_down",
      "Not a defect: a write chain owns the table. Never backfill it from DuckDB"),
-    # The owner rows alone: the sync's mirror has NOT stopped, and every tick
-    # writes DuckDB's copy over the chain's rows. Two roads, one line each.
-    ("order_owner_row_without_marker",
-     "Sync overwrites chain-owned orders each tick: restore data/write-chain-owners "
-     "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
+    # The owner rows alone: before step 14 the sync's mirror had NOT stopped,
+    # and every tick wrote DuckDB's copy over the chain's rows. A step-14 build
+    # routes by neither copy of the latch (S14-00) and has no way back
+    # (S14-04), so a lost marker matters to the rollback image alone, which
+    # routes by it: the lever every ownership page names (`ROLLBACK_LEVER`).
+    ("order_owner_row_without_marker", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     # The same, for the catalogue and the order-level expenses (DN-22b), whose
-    # per-tick mirror asks the local answer alone.
-    ("owner_row_without_marker",
-     "Sync overwrites chain-owned rows each run: restore data/write-chain-owners "
-     "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
+    # per-tick mirror asked the local answer alone.
+    ("owner_row_without_marker", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
@@ -2328,8 +2150,6 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
     ("integrity_check_raised",
      "A check's table is gone or renamed — find which in the ERROR log; its findings are absent, not clean"),
-    ("write_chain_flag_invalid",
-     "Correct the named KS_WRITE_* in .env (duckdb or postgres) and recreate web; until then that chain's writes fail"),
     # Both halves of the ownership latch. Neither is repairable by a job: the
     # first needs a human to decide which copy is right, the second names rows
     # a shipment has already replaced. The shipment is the symptom: a shipper
@@ -2337,26 +2157,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # lever starts there. The catalogue's mirror carries the same KeyCRM
     # payload the chain writes, so there is nothing to restore — a dump would
     # only roll the chain's own writes back.
-    ("chain_latch_disagrees",
-     "Compare data/write-chain-owners/<chain> with the owner: rows in meta.chain_watermarks; scripts/chain_copy_back.py is the only release"),
+    ("chain_latch_disagrees", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     ("chain_shipper_overwrote",
      "Do not re-run the shipper. Find why it shipped (marker vs owner: rows); restore what it overwrote from the nightly dump, not the catalogue"),
-    # The shadow chains (OD-02 (c)): Postgres is the writer, DuckDB is
-    # handed each row after the commit. Never a re-ship from DuckDB.
-    ("shadow_duckdb_only_rows",
-     "Something wrote DuckDB round the chain: find it in the web log; never re-ship these tables from DuckDB"),
-    # OD-S5-3 (a)'s explicit line: after a week under KS_DUCKDB=off that went
-    # back to on, that week's rows stand here until the drop, accepted. The
-    # finding dates the rows, which is what tells them from a failed shadow
-    # write; the copy-back is never the cure — it releases the latch.
-    ("shadow_missing_in_duckdb",
-     "Rows dated while web ran KS_DUCKDB=off are expected until the drop (OD-S5-3); others: the ERROR log at their dates. Never chain_copy_back.py"),
-    ("shadow_row_values",
-     "Compare the named columns in both stores; Postgres is the writer of record, so suspect DuckDB's statement"),
-    ("shadow_pruned_rows",
-     "Nothing to do: DuckDB's shadow prune lagged Postgres's and the next tick removes them"),
-    ("chain_owner_unregistered",
-     "Redeploy a build that declares the chain, or run scripts/chain_copy_back.py from one; never re-ship these tables from DuckDB"),
+    ("chain_owner_unregistered", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     # The standing watch on a chain's own tables (DN-07). Nothing here is
@@ -2426,8 +2230,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Read seasonality_calc in /api/jobs (skipped? error?), then POST /api/jobs/seasonality_calc/trigger"),
     ("chain_forecast_stale",
      "Read revenue_prediction_train in /api/jobs (rejected? predictions_stored false?), then trigger it again"),
-    # The shadow chains (OD-02 (c)). Chain 9 writes a run and its findings
-    # in one transaction, so an orphan is a write that went round it.
+    # Chains 9, 10, 11a and 11b (OD-02 (c)). Chain 9 writes a run and its
+    # findings in one transaction, so an orphan is a write that went round it.
     ("chain_orphan_children",
      "Find the write that skipped core.dq_journal; never delete the findings to clear it"),
     ("chain_samples_stale",
@@ -2549,13 +2353,8 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_row_values": "rows differ between copies",
     "mirror_retired_rows": "retired in KeyCRM, copy remembers",
     "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
-    "shadow_duckdb_only_rows": "rows written to DuckDB round a write chain",
-    "shadow_missing_in_duckdb": "rows a shadow write never put in DuckDB",
-    "shadow_row_values": "rows differ between the writer and its shadow",
-    "shadow_pruned_rows": "aged out of Postgres, DuckDB's prune lags",
     "inventory_continuity_unwatched": "snapshot gaps no longer watched",
     "sync_watermarks_unwatched": "sync stalls no longer watched",
-    "write_chain_flag_invalid": "a write chain's flag is not understood",
     "chain_latch_disagrees": "the two copies of a chain's latch disagree",
     "chain_shipper_overwrote": "a copy out of DuckDB overwrote a table it no longer owns",
     "chain_owner_unregistered": "a write chain owns tables this build does not know",
@@ -2767,10 +2566,10 @@ _RUN_SELECT = """
                critical_count, warn_count, api_calls_used, duration_ms, error_message
         FROM {runs}"""
 
-# By id, not by `started_at`. `fetch_baseline_run` bounds on `run_id`, and a
-# reconstruction that ranks by one key while its bound uses another is right
-# only while the two never disagree. Verified on all 350 production rows:
-# identical ranking today.
+# By id, not by `started_at`. The baseline (`pg_dq_journal_write.baseline_run`)
+# bounds on `run_id`, and a reconstruction that ranks by one key while its
+# bound uses another is right only while the two never disagree. Verified on
+# all 350 production rows: identical ranking today.
 LATEST_RUN_SQL = _RUN_SELECT + """
         ORDER BY run_id DESC
         LIMIT 1
@@ -2784,7 +2583,7 @@ RUN_BY_ID_SQL = _RUN_SELECT + " WHERE run_id = ?"
 
 
 def run_dict(row) -> Optional[Dict[str, Any]]:
-    """`fetch_latest_run`'s shape, from either store's row."""
+    """One run row, shaped for the health endpoint, the digest and the catch-up."""
     if not row:
         return None
     return {
@@ -2806,22 +2605,14 @@ def run_dict(row) -> Optional[Dict[str, Any]]:
     }
 
 
-def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Read the most recent run row. Used by health endpoint."""
-    if layer is None:
-        row = conn.execute(journal_sql(LATEST_RUN_SQL), []).fetchone()
-    else:
-        row = conn.execute(journal_sql(LATEST_RUN_OF_LAYER_SQL), [layer]).fetchone()
-    return run_dict(row)
-
-
 # Layers a run-age watchdog is expected to see. A layer that never appears
 # here would be watched by nobody.
 # The layers with a cadence, a digest section and an age. `mirror_landing` is
 # step 05's Reconciliation A — landing in Postgres against landing in DuckDB,
 # daily at 07:30 — and it belongs here for three separate reasons: the digest
-# renders one section per layer, `fetch_last_success_ages` reports one age per
-# layer, and the scheduler's catch-up reads those ages to decide what it missed.
+# renders one section per layer, `dq_journal.last_success_ages_pg` reports one
+# age per layer, and the scheduler's catch-up reads those ages to decide what
+# it missed.
 # A layer absent from this tuple has a null age forever, which the catch-up
 # reads as "never succeeded" and re-queues on every single restart.
 #
@@ -2966,60 +2757,6 @@ BASELINE_RUN_ID_SQL = """
             ORDER BY run_id DESC
             LIMIT 1
         """
-
-
-def fetch_previous_run(conn, layer: str, before_run_id: int) -> Optional[Dict[str, Any]]:
-    """The run of `layer` immediately preceding `before_run_id`, if any.
-
-    Used by the digest to say whether a standing problem is growing. Failed
-    runs are skipped: their zero counts would read as "fixed, then broke
-    again" and turn every 429 into a fake recovery.
-    """
-    row = conn.execute(journal_sql(PREVIOUS_RUN_ID_SQL),
-                       [layer, before_run_id]).fetchone()
-    if not row:
-        return None
-    return fetch_latest_run_by_id(conn, int(row[0]))
-
-
-def fetch_baseline_run(conn, layer: str, *, sent_at, before_run_id: int):
-    """The run of `layer` that the last *delivered* digest reported on.
-
-    `fetch_previous_run` answers a different question — the run before this
-    one — and the digest was using it to say "(=)". For a layer that runs four
-    times a day against a digest that goes out once, that compares a six-hour
-    window and prints the answer under a heading the reader takes to mean
-    "since yesterday". A finding that stepped and settled between two digests
-    was marked unchanged in both: `goods_shipped_without_sale` went 809 → 812
-    at the 13:00 Kyiv run on 2026-09-14, and the mornings either side of it
-    both said "=". Nothing ever announced it.
-
-    So the baseline is the newest run that had **finished** when the marker was
-    written — `ended_at <= sent_at`, because a run still in flight cannot have
-    been in a message. Derived from `dq_digest_last_sent`, which already
-    exists, rather than recorded per layer: a stored cursor is a second thing
-    to be wrong, and there is nothing here that recomputing cannot recover.
-
-    Falls back to the previous run — today's behaviour — when there is no
-    marker yet or no run finished before it. That is the first digest after
-    this ships, and a layer younger than the marker; both must read as an
-    ordinary morning rather than marking everything `new`.
-
-    Failed runs are skipped for `fetch_previous_run`'s reason: their zero
-    counts read as "fixed, then broke again".
-    """
-    if sent_at is not None:
-        row = conn.execute(journal_sql(BASELINE_RUN_ID_SQL),
-                           [layer, before_run_id, sent_at]).fetchone()
-        if row:
-            return fetch_latest_run_by_id(conn, int(row[0]))
-    return fetch_previous_run(conn, layer, before_run_id)
-
-
-def fetch_latest_run_by_id(conn, run_id: int) -> Optional[Dict[str, Any]]:
-    """Read one run row by id, in the same shape as `fetch_latest_run`."""
-    row = conn.execute(journal_sql(RUN_BY_ID_SQL), [run_id]).fetchone()
-    return run_dict(row)
 
 
 # ─── Daily digest ─────────────────────────────────────────────────────────────
@@ -3222,27 +2959,9 @@ def build_digest(
     return "\n".join(["📋 <b>Data quality</b>", ""] + body + ["", footer])
 
 
-def fetch_last_success_ages(
-    conn, layers: Tuple[str, ...] = WATCHED_LAYERS,
-) -> Dict[str, Dict[str, Any]]:
-    """Age of the last **successful** run per layer, for the run-age watchdog.
-
-    Keyed on `error_message IS NULL`, not on the mere existence of a row:
-    `persist_run` writes a row on the failure path too, so a plain
-    "when did this job last run" watchdog stayed silent through all 57
-    consecutive `429 Too Many Attempts` failures of the reconciliation job.
-    A run that produced no verdict is not a run.
-
-    Returns one entry per requested layer — a layer that has never succeeded
-    reports `last_success_at=None, age_seconds=None`, so the consumer can
-    tell "never ran" apart from "ran recently" instead of seeing a missing key.
-    """
-    rows = conn.execute(last_success_sql(len(layers)), list(layers)).fetchall()
-    return success_ages(rows, layers)
-
-
-def last_success_sql(n_layers: int, engine: str = "duckdb") -> str:
-    """`fetch_last_success_ages`' statement for `n_layers` layers."""
+def last_success_sql(n_layers: int, engine: str = "postgres") -> str:
+    """The layer ages' statement for `n_layers` layers
+    (`pg_dq_journal_write.last_success_ages`)."""
     placeholders = ", ".join("?" for _ in range(n_layers))
     return journal_sql(f"""
         SELECT layer,
@@ -3257,7 +2976,9 @@ def last_success_sql(n_layers: int, engine: str = "duckdb") -> str:
 
 
 def success_ages(rows, layers: Sequence[str]) -> Dict[str, Dict[str, Any]]:
-    """`fetch_last_success_ages`' shape, from either store's rows."""
+    """`{layer: {last_success_at, age_seconds}}`, one entry per requested
+    layer — a layer that never succeeded reads both None
+    (`dq_journal.last_success_ages_pg` says why)."""
     found = {
         r[0]: {
             "last_success_at": r[1].isoformat() if r[1] else None,

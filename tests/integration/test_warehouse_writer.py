@@ -19,8 +19,9 @@ What is proven, per the plan's DN-29 test list:
 Since step 14's S14-00 the mode is a constant, so the way back under duckdb
 and a missing precondition keeping duckdb — the verdict — went with it.
 
-What is not: a kill in the middle of a rebuild. That is the gate-stack
-rehearsal on the production backups, run on the host, not here.
+What is not: a kill in the middle of a rebuild. That was the gate-stack
+rehearsal's, on the production backups, run on the host before the switch;
+S14-03 deleted it with step 13 a constant.
 """
 from __future__ import annotations
 

@@ -5,9 +5,11 @@
 --   orders_on        1 (latched: chain 3 has written Postgres, whatever
 --                    KS_WRITE_ORDERS says — DN-06), 0 (duckdb or unset and no
 --                    latch marker), pending (the flag says postgres and the chain
---                    has not latched: its preconditions are judged in web, not
---                    here — `pg_orders_write.unmet_precondition`), invalid,
---                    unknown
+--                    has not latched: an image from before step 14 judged its
+--                    preconditions in web, not here, as
+--                    `pg_orders_write.unmet_precondition`; since step 14's
+--                    S14-09 the chain has none and latches on its first
+--                    write), invalid, unknown
 --   orders_flip_at   when the flag was flipped, if the operator gave it
 --                    (SOAK_ORDERS_FLIP_AT), else empty
 --   markers_read_at  when the script began reading the latch markers, UTC to
@@ -28,8 +30,10 @@
 -- The per-tick mirrors are not read here, because nothing here could tell
 -- them apart: the chain's own writer stamps `last_ok_at` on the three bronze
 -- tables with the statement the mirrors used. S0 judges that stamp, O2 the
--- order step. A mirror cannot be reached under the chain in any case: DuckDB's
--- writers raise `ChainOwnsOrders` before it.
+-- order step. Since step 14's S14-09 there is no per-tick orders or expenses
+-- mirror left to reach: DuckDB's order writers (`upsert_orders`,
+-- `upsert_expenses_batch`) went with chain 3's DuckDB half, and until then
+-- they raised `ChainOwnsOrders` under the chain before reaching it.
 --
 -- HOW IT DECIDES
 -- The handover is the chain's own owner rows when they exist (written in the
@@ -51,19 +55,24 @@
 --
 -- With orders_on=0 the owner rows are read too. Rows naming one of chain 3's
 -- tables with no marker and the flag at duckdb are the marker lost, not a
--- chain that never moved: the writes follow the flag back to DuckDB, and the
--- sync's per-tick mirror, which asks only that local answer, ships DuckDB's
--- orders over the chain's on every tick — DN-22a's
--- `order_owner_row_without_marker`, CRITICAL. The four other O-checks stay
--- "not applicable" (no chain writes Postgres for them to judge); this one
--- FAILs.
+-- chain that never moved. A step-14 image writes Postgres whatever the marker
+-- says; an image from before step 14 — the rollback target — routes by it,
+-- and there the writes follow the flag back to DuckDB and the sync's per-tick
+-- mirror, which asks only that local answer, ships DuckDB's orders over the
+-- chain's on every tick — DN-22a's `order_owner_row_without_marker`,
+-- CRITICAL. The four other O-checks stay "not applicable" (no chain writes
+-- Postgres for them to judge); this one FAILs.
 --
 -- And with orders_on=pending: the flag at postgres and no marker is the marker
--- lost too once owner rows stand, not a flip waiting for its first write. A
--- precondition web holds unmet keeps the writes on DuckDB and the mirror
--- shipping, exactly as above; with every one met, the chain's next write
--- takes the marker again. Either way UNKNOWN would send the operator to the
--- preconditions while the lever is the marker, so it FAILs.
+-- lost too once owner rows stand, not a flip waiting for its first write. In
+-- an image from before step 14 a precondition web holds unmet keeps the
+-- writes on DuckDB and the mirror shipping, exactly as above; with every one
+-- met — and always in a step-14 image, which has none since S14-09 — the
+-- chain's next write takes the marker again. Either way UNKNOWN would send
+-- the operator to the preconditions while the lever is the marker, so it
+-- FAILs. The detail's pointer to `unmet_precondition` names what an image
+-- from before step 14 publishes; a step-14 `/api/health` publishes it null.
+-- O1 itself goes in S14-13.
 --
 -- Except owner rows dated after the script read the marker (chain 3's soak
 -- review, 2026-10-10). The script reads the marker, then runs the log check
@@ -78,18 +87,21 @@
 -- the report makes every flag it passed stale, this one no more than the rest.
 --
 -- WHAT A FAIL MEANS
--- - invalid: KS_WRITE_ORDERS is a value no chain understands; the chain is
---   stood down and no order is written anywhere. Fix the .env line.
+-- - invalid: KS_WRITE_ORDERS is a value no chain understands. A step-14
+--   image writes the orders to Postgres whatever it says (S14-00); an image
+--   from before step 14 stands the chain down and writes no order anywhere.
+--   Fix the .env line before any rollback.
 -- - owner rows and orders_on=0, or pending with the rows older than the
 --   script's read of the marker: the marker is lost. Restore
---   data/write-chain-owners/pg_orders_write (or redeploy the chain's build),
---   else scripts/chain_copy_back.py orders — DN-22a's lever for the same
---   state. Not the flag: at duckdb it is the same state.
+--   data/write-chain-owners/pg_orders_write (or redeploy the chain's build)
+--   — DN-22a's lever for the same state. Not the flag: at duckdb it is the
+--   same state. The copy-back went with step 14's S14-04; the detail names
+--   core.rollback_lever's lever.
 -- - the misses written after the handover: the hourly copy put DuckDB's ledger
 --   over the chain's. Failing after it: read the error — `owned by Postgres
 --   since` is the latch with its flag put back, `no local marker` a lost
---   data/write-chain-owners/pg_orders_write; scripts/chain_copy_back.py orders
---   is the way back from either, never the flag.
+--   data/write-chain-owners/pg_orders_write. Never the flag: the way back
+--   from either is the rollback image, after the markers are checked.
 -- - a backfilled_at after the handover: a DuckDB backfill shipped orders or
 --   expenses over the chain's. Read the web log for 'Backfill finished' and
 --   'Expense backfill'.
@@ -171,8 +183,8 @@ SELECT 'O1 orders copies stood down'::text AS "check",
                    'data/write-chain-owners/pg_orders_write is gone with KS_WRITE_ORDERS not '
                    'postgres: the marker is lost, the writes follow the flag back to DuckDB and '
                    'the sync''s mirror ships DuckDB''s orders over the chain''s every tick '
-                   '(order_owner_row_without_marker). Restore the marker, else '
-                   'scripts/chain_copy_back.py orders',
+                   '(order_owner_row_without_marker). Restore the marker. '
+                   'Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'none of the four tables written by a DuckDB copy ' || since.said END
@@ -195,8 +207,8 @@ SELECT 'O1 orders copies stood down'::text AS "check",
                    'the marker is lost. While a precondition is unmet (/api/health '
                    'write_chains.pg_orders_write.unmet_precondition) the writes stay on DuckDB '
                    'and the sync''s mirror ships DuckDB''s orders over the chain''s every tick '
-                   '(order_owner_row_without_marker). Restore the marker, else '
-                   'scripts/chain_copy_back.py orders; taking the flag back changes nothing',
+                   '(order_owner_row_without_marker). Restore the marker; taking the flag '
+                   'back changes nothing. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN 'invalid' THEN
                'KS_WRITE_ORDERS is set to a value no chain understands: chain 3 is stood down'

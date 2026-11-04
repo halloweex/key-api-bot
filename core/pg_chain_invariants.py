@@ -76,7 +76,8 @@ Goals (chain 7a, DN-25):
   write a NULL is a writer that stopped, and before it one the replication
   carried across; the finding says which (`_null_issues`). Each one costs
   something specific: `updated_at` is the clock the copy-back's handover
-  orders two versions of a goal by, so a NULL leaves it nothing to order with;
+  orders two versions of a goal by — an image from before step 14's, since
+  S14-04 deleted this build's — so a NULL leaves it nothing to order with;
   and `get_smart_goals` keeps a stored goal only `if is_custom`, so a NULL
   there silently replaces the number a human typed with the suggestion. No
   allocator and no watermark: the table is keyed on `period_type` and has no
@@ -98,9 +99,10 @@ The expense-type dictionary (chain 6a):
 * **Not its watermark.** `last_sync_expense_types` moves once a week, so the
   90-minute limit above would page every run; the chain declares
   `CHAIN_WATERMARK_MAX_AGE_MIN = None` and `_freshness_check` judges it at
-  192 h from `meta.chain_watermarks`, alone — and from DuckDB's frozen stamp
-  until the first full sync under the flag writes one there
-  (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
+  192 h from `meta.chain_watermarks`, alone — and judged it from DuckDB's
+  frozen stamp until the first full sync under the flag wrote one there
+  (`CHAIN_WATERMARK_INHERITS_DUCKDB`, which the chain declared until step
+  14's S14-09).
 
 The buyers (chain 4):
 
@@ -113,8 +115,9 @@ The buyers (chain 4):
   shipped yet is not a defect — so it is judged from the latch on. Production
   held none of either on 2026-09-30.
 * **`full_name`.** Postgres allows NULL there and DuckDB does not, so a NULL
-  is a buyer `scripts/chain_copy_back.py` refuses to carry back
-  (`handover_rows_unwritable`). The shared parse writes `'Unknown'` for a
+  is a buyer the copy-back refuses to carry back (`handover_rows_unwritable`)
+  — the copy-back of an image from before step 14, since S14-04 deleted this
+  build's. The shared parse writes `'Unknown'` for a
   blank name; a NULL is a write that went round `landing_rows.buyer_row`.
 * **Every buyer's phone and email are in its contact list.** The parse takes
   the buyer's `phone`/`email` columns and its contact rows from the same
@@ -164,8 +167,9 @@ The manager classification (chain 5):
   a human can decide which answer the past should have.
 * **`is_retail` agrees with the latest open interval.** The screen shows one
   and Silver uses the other. WARN.
-* **`set_at`** — the copy-back's handover clock, which the Postgres column has
-  no default for (`chain_required_column_null`).
+* **`set_at`** — the copy-back's handover clock (an image from before step
+  14's, since S14-04 deleted this build's), which the Postgres column has no
+  default for (`chain_required_column_null`).
 * **Not its watermark.** The sync is daily; `_freshness_check` judges
   `last_sync_managers` at 192 h from `meta.chain_watermarks`.
 
@@ -190,24 +194,26 @@ The goal and forecast tables (chain 7b-3):
 * **All WARN.** Every value in the four tables can be computed again —
   `POST /api/goals/recalculate` and a training — so nothing here is worth a
   page at 01:00. An unstamped row is reported inside the staleness it blinds,
-  not as `chain_required_column_null`: these stamps order nothing in the
-  copy-back, which forgives them.
+  not as `chain_required_column_null`: these stamps ordered nothing in the
+  copy-back, which forgave them (and an image from before step 14's still
+  does; S14-04 deleted this build's).
 
-WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
+WHO IS WATCHED: EVERY CHAIN, AND THE HANDOVER IS THE OWNER ROWS'
 
-A chain is watched when `core.write_chains.chain_modes()` says its writes go to
-Postgres — latched (`core/chain_latch.py`) or flagged, in that order of
-authority. Asking the environment here would re-derive a state that already has
-one home, and it would get a latched chain with a flag flipped back exactly
-backwards.
+Every registered chain is watched (`watched_chains`). Until step 14's S14-11 a
+chain was watched when `core.write_chains.chain_modes()` said its writes went
+to Postgres — latched or flagged — and the handover was dated by the local
+marker; since S14-00 every chain writes Postgres, and S14-11 deleted the
+answer with the flags. **The handover is dated by the chain's `owner:` rows**
+in `meta.chain_watermarks` (`chain_latch.claimed_chains`, the earliest), read
+in the same transaction as the facts: they are written inside the first
+writing transaction, and a lost `./data` marker must not make every "since
+the handover" invariant forget the handover.
 
-**With no chain there, nothing is read at all**: `read_facts` returns before
-it asks for a pool, so a system that has moved nothing pays a dictionary lookup
-per integrity run and cannot fail on a store it is not using.
-
-A chain that is **flagged but not yet latched** gets the invariants that are
-true of the Postgres copy whatever wrote it — the allocator, the NULL columns,
-the watermarks. The rest are all "since the handover", and a chain that has
+A chain with **no owner row yet** — production's chains 8 and 7a on
+2026-10-29, which have never written — gets the invariants that are true of
+the Postgres copy whatever wrote it: the allocator, the NULL columns, the
+watermarks. The rest are all "since the handover", and a chain that has
 written nothing has not had one.
 
 **Production today is that second state, not the first** (2026-09-18):
@@ -522,11 +528,11 @@ class Forecast:
 
 @dataclass(frozen=True)
 class Journal:
-    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold. The
-    daily comparison still compares the journal — DuckDB is its shadow — so
-    this is only what a comparison of two copies cannot see: the property a
-    run and its findings land in one transaction, checked where it now
-    lives."""
+    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold — the
+    property a run and its findings land in one transaction, checked where it
+    lives. While DuckDB was the journal's shadow the daily comparison of the
+    two copies watched the rest; since step 14's S14-10 there is one copy,
+    and this is its watch."""
     orphan_issues: int = 0
     orphan_diffs: int = 0
     orphan_sample: Tuple[int, ...] = ()
@@ -668,24 +674,18 @@ def all_conditions() -> FrozenSet[str]:
 
 
 def watched_chains() -> Dict[str, Optional[str]]:
-    """`{chain: latched_at or None}` for every chain whose writes go here.
+    """`{chain: None}` for every registered chain: every chain writes
+    Postgres, so every chain is watched, whatever any `KS_WRITE_*` says.
 
-    `chain_modes()["mode"]` is the one answer the writers, the sync keys, the
-    shipper and the daily comparison all read — latched first, then the flag,
-    and None for a flag nobody could parse. Deriving it again from the
-    environment is how a latched chain with a flipped-back variable would end
-    up unwatched by exactly the check that exists for it.
-
-    Never raises: `chain_modes` carries a flag error out in the mapping rather
-    than throwing, and a chain whose flag is not understood stands down with
-    the Postgres writers — so it is watched here too. `write_chain_flag_invalid`
-    is what says the value is wrong; this still watches its tables.
+    The value is a handover stamp known without Postgres, and it is None:
+    `read_facts` dates each chain's handover by its owner rows instead
+    (module docstring). Until step 14's S14-11 this read
+    `write_chains.chain_modes()` and carried the local marker's stamp. Never
+    raises.
     """
-    from core.write_chains import chain_modes
+    from core.write_chains import WRITE_CHAINS, chain_name
 
-    return {name: (str(state["latched_at"]) if state["latched_at"] else None)
-            for name, state in chain_modes().items()
-            if state["mode"] != "duckdb"}
+    return {chain_name(chain): None for chain in WRITE_CHAINS}
 
 
 def _reader_groups() -> Dict[str, str]:
@@ -1339,12 +1339,10 @@ async def _read_watermarks(conn, watched: Mapping[str, Optional[str]],
 async def read_facts(*, pool=None) -> Facts:
     """Every fact the invariants are judged on. Never raises.
 
-    **It asks Postgres nothing while no chain writes there.** That early return
-    is before the DSN check and before the pool, deliberately: a check that
-    opened a connection to discover it had nothing to look at would put a
-    Postgres failure on the path of a system that is not using Postgres for
-    these tables. It is not production's state — chain 8 is flagged there, so
-    this reads its two facts on every run (module docstring).
+    **It asks Postgres nothing while no chain is watched.** That early return
+    is before the DSN check and before the pool. Since step 14's S14-11 every
+    registered chain is watched, so only a caller narrowing `watched_chains`
+    to nothing takes it.
 
     "Never raises" includes the pool's own timeout. `pool.acquire(timeout=)`
     raises `TimeoutError`, and letting it out handed the scan `None`, which it
@@ -1387,6 +1385,21 @@ async def read_facts(*, pool=None) -> Facts:
                 now = await conn.fetchval("SELECT now()")
                 today = await conn.fetchval(
                     "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
+                # The handover, per chain: its owner rows' earliest stamp
+                # (module docstring), unless the caller's `watched_chains`
+                # brought one. A read that fails blinds the run whole, in the
+                # `except` below — every "since the handover" verdict rests
+                # on it.
+                from core import chain_latch
+
+                owners = {r["key"][len(chain_latch.OWNER_PREFIX):]: r["value"]
+                          for r in await conn.fetch(
+                              "SELECT key, value FROM meta.chain_watermarks "
+                              "WHERE key LIKE $1",
+                              f"{chain_latch.OWNER_PREFIX}%")}
+                handed = chain_latch.claimed_chains(owners)
+                watched = {name: (at or handed.get(name))
+                           for name, at in watched.items()}
                 since = _stamp(watched.get(pg_inventory_write.CHAIN))
                 reader_of = {
                     "expenses": lambda c: _read_expenses(
@@ -1595,10 +1608,10 @@ def _null_issues(nulls: Nulls, chain: str,
                   "time-windowed read of this table, this check's own "
                   "included.")
     if nulls.table == "bronze.buyers":
-        cause += (" DuckDB declares full_name NOT NULL, so "
-                  "scripts/chain_copy_back.py refuses to carry such a buyer "
-                  "back (handover_rows_unwritable) and the chain cannot be "
-                  "rolled back until the row is corrected.")
+        cause += (" DuckDB declares full_name NOT NULL, so the copy-back of "
+                  "an image from before step 14 refuses to carry such a buyer "
+                  "back (handover_rows_unwritable): correct the row before "
+                  "any rollback to rollback-step14.")
         if latched_at is not None:
             cause += (" The shared parse writes 'Unknown' for a blank name, "
                       "so a NULL is a write that went round "
@@ -1743,10 +1756,11 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
                 "deletes a buyer, so these were written round it — or a buyer "
                 "was deleted by hand. The SMS audience joins contacts to "
                 "buyers, so an orphaned phone number is in no audience. "
-                "scripts/chain_copy_back.py does not refuse them: it reads "
-                "contacts through their buyers and leaves an orphaned one "
-                "behind, and carries an orphaned verdict into DuckDB — so "
-                "--handover will not name them. Correct them before a rollback.")))
+                "The copy-back of an image from before step 14 does not "
+                "refuse them: it reads contacts through their buyers and "
+                "leaves an orphaned one behind, and carries an orphaned "
+                "verdict into DuckDB — so its handover will not name them. "
+                "Correct them before any rollback to rollback-step14.")))
     if b.contact_missing:
         shown = ", ".join(str(i) for i in b.contact_missing_sample)
         issues.append(_issue(

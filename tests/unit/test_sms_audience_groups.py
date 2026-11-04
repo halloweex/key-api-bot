@@ -15,9 +15,12 @@ These tests hold four promises:
   nothing else (no returns, no retired sources, the campaign's sales type);
 * one group renders exactly the predicate it rendered before groups existed.
 
-The store runs here on DuckDB. The same expectations against PostgreSQL, and
-the comparison with the query as it stood before groups, are in
-`tests/integration/test_sms_audience_groups_two_engines.py`.
+The store runs here on PostgreSQL, the one store `/sms` has read since step
+14's S14-08 (it ran on DuckDB until then; `tests/integration/pg_sms_seed.py`).
+The comparison with the query as it stood before groups, and the answers
+DuckDB gave on the same fixture, are in
+`tests/integration/test_sms_audience_groups_two_engines.py`. The store tests
+are skipped without `KS_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -26,22 +29,13 @@ from datetime import date
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
 from core.repositories.customers import (
     MAX_AUDIENCE_GROUPS, SmsAudienceFilters, SmsAudienceGroup,
     audience_group_fragments,
 )
 from core.sql_dialect import DUCKDB, TODAY_IN_KYIV, sms_segments_select
 from tests import sms_audience_fixture as fx
-
-
-@pytest.fixture(autouse=True)
-def _sms_on_duckdb(monkeypatch):
-    """This module's engine is DuckDB, as it was before step 14's S14-00 made
-    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)
+from tests.integration import pg_sms_seed
 
 
 def group_a(window: int = 365) -> SmsAudienceGroup:
@@ -281,15 +275,13 @@ class TestTheFragments:
 # ─── On a real store ────────────────────────────────────────────────────────
 
 @pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "groups.duckdb")
-    await s.connect()
-    async with s.connection() as conn:
-        fx.seed_duckdb_conn(conn)
-    try:
-        yield s
-    finally:
-        await s.close()
+async def store(tmp_path, monkeypatch):
+    if not pg_sms_seed.DSN:
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        async with pg_sms_seed.pg_conn() as conn:
+            await fx.seed_postgres(conn)
+        yield pg_sms_seed.store(tmp_path, "groups.duckdb")
 
 
 def _ids(result) -> set:

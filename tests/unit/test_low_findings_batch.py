@@ -1,103 +1,26 @@
 """The last batch of the race audit's LOW findings, each with the guard it got."""
 import asyncio
 import inspect
-from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from core.duckdb_store import DuckDBStore
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. The
-    header-only refresh's deferral is pinned here on DuckDB's order
-    writer, as chain 3's decider is in tests/unit/test_pg_orders_write.py.
-    So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+# `TestAHeaderOnlyRefreshNeverCreatesAnOrder` stood here, pinning the
+# header-only refresh's deferral on DuckDB's order writer (with chain 3 routed
+# back to DuckDB for it). Step 14's S14-09 deleted that writer; the same rule
+# on chain 3's is `tests/integration/test_orders_chain_writer.py`
+# (`test_a_header_only_refresh_never_creates_an_order`), and the decision
+# itself `tests/unit/test_pg_orders_write.py` (`TestTheDecisionIsDuckDBs`).
 
 
-WHEN = "2026-08-20T12:00:00+00:00"
-
-
-def _payload(order_id, products=2):
-    return {
-        "id": order_id, "source_id": 1, "status_id": 12, "status_group_id": 4,
-        "grand_total": "100.00", "ordered_at": WHEN, "created_at": WHEN,
-        "updated_at": WHEN, "buyer": {"id": 500 + order_id},
-        "manager": {"id": 4}, "manager_comment": None, "promocode": None,
-        "products": [
-            {"name": f"Товар {i}", "quantity": 1, "price_sold": "50.00",
-             "offer": {"product_id": 700 + i}}
-            for i in range(products)
-        ],
-    }
-
-
-class TestAHeaderOnlyRefreshNeverCreatesAnOrder:
-    @pytest.mark.asyncio
-    async def test_an_unknown_id_is_left_for_a_full_writer(self, tmp_path):
-        store = DuckDBStore(db_path=tmp_path / "o.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-                first = await store.upsert_orders([_payload(1)], force_update=True, skip_products=True)
-                assert first.deferred_to_full_sync == 1
-                assert first.count == 0 and first.changed_ids == []
-                async with store.connection() as conn:
-                    assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
-                # The full writer creates it, with its line items.
-                second = await store.upsert_orders([_payload(1)])
-                assert second.changed_ids == [1]
-                async with store.connection() as conn:
-                    assert conn.execute("SELECT COUNT(*) FROM order_products").fetchone()[0] == 2
-                # And the header-only refresh still refreshes it afterwards.
-                third = await store.upsert_orders([_payload(1)], force_update=True, skip_products=True)
-                assert third.changed_ids == [1] and third.deferred_to_full_sync == 0
-        finally:
-            await store.close()
-
-
-class TestPersistRunIsOneTransaction:
-    def test_begin_commit_bracket_the_inserts(self):
-        from core.data_quality import persist_run
-
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (7,)
-        now = datetime.now(timezone.utc)
-        run_id = persist_run(
-            conn, started_at=now, ended_at=now, as_of=now,
-            window_start=now.date(), window_end=now.date(), layer="integrity",
-            issues=[], discrepancies=[],
-        )
-        assert run_id == 7
-        sql = [str(c.args[0]).strip() for c in conn.execute.call_args_list]
-        assert sql[0] == "BEGIN TRANSACTION" and sql[-1] == "COMMIT"
-
-    def test_a_failed_insert_rolls_back(self):
-        from core.data_quality import persist_run
-
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (7,)
-        conn.executemany.side_effect = RuntimeError("disk full")
-        now = datetime.now(timezone.utc)
-        from core.data_quality import IntegrityIssue, Severity
-
-        with pytest.raises(RuntimeError):
-            persist_run(
-                conn, started_at=now, ended_at=now, as_of=now,
-                window_start=now.date(), window_end=now.date(), layer="integrity",
-                issues=[IntegrityIssue("x", "t", Severity.WARN, 1)], discrepancies=[],
-            )
-        sql = [str(c.args[0]).strip() for c in conn.execute.call_args_list]
-        assert "ROLLBACK" in sql and "COMMIT" not in sql
+# `TestPersistRunIsOneTransaction` stood here: DuckDB's `persist_run` opened
+# one transaction around the run and its findings and rolled it back on a
+# failed insert. Step 14's S14-10 deleted that writer; the same property of
+# chain 9's, a refused finding leaving no run behind, is
+# `tests/integration/test_dq_journal_pg.py` (`TestOneTransaction`).
 
 
 class TestATimedOutQueryLeavesTheConnectionBeforeTheLockDoes:

@@ -20,18 +20,15 @@ from core.data_quality import IntegrityIssue, Severity
 from core.scheduler import BackgroundScheduler
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is what the reconciliation job sends and keeps; the
-    runs it reads back are written to the quality journal, kept in DuckDB
-    here. So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_dq_journal_write
-    from tests.conftest import route_chains_to_duckdb
+def _journal(persist):
+    """`dq_journal.journal_run`, the arms' one door to the journal, as
+    `persist(**kwargs)` — what the run is written with, and its id back.
+    Until step 14's S14-10 this module routed chain 9 back to DuckDB and
+    patched DuckDB's `persist_run` behind the door instead."""
+    async def journal_run(**kwargs):
+        return persist(**kwargs)
 
-    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
+    return patch("core.dq_journal.journal_run", new=journal_run)
 
 
 AS_OF = datetime(2026, 9, 18, 2, 30, tzinfo=timezone.utc)
@@ -41,19 +38,6 @@ ARMS = [
     ("_persist_postgres_reconciliation", "reconciliation_pg"),
     ("_persist_ch_reconciliation", "reconciliation_ch"),
 ]
-
-
-class _Conn:
-    async def __aenter__(self):
-        return object()
-
-    async def __aexit__(self, *a):
-        return False
-
-
-class _Store:
-    def connection(self):
-        return _Conn()
 
 
 def _critical():
@@ -71,10 +55,8 @@ async def _drive(method, result, *, persist):
     sched = BackgroundScheduler()
     sched._send_dq_alert_throttled = AsyncMock()
     sched._resolve_dq_layer = AsyncMock()
-    with patch("core.data_quality.persist_run", new=persist), \
-         patch("core.data_quality.machine_attempts_note", return_value=None), \
-         patch("core.duckdb_store.get_store",
-               new=AsyncMock(return_value=_Store())):
+    with _journal(persist), \
+         patch("core.data_quality.machine_attempts_note", return_value=None):
         await getattr(sched, method)(
             result, started_at=AS_OF, as_of=AS_OF,
             window_start=START, window_end=END,
@@ -85,7 +67,7 @@ async def _drive(method, result, *, persist):
 @pytest.mark.parametrize("method,layer", ARMS)
 @pytest.mark.asyncio
 async def test_a_critical_is_sent_with_the_run_it_came_from(method, layer):
-    sched = await _drive(method, _critical(), persist=lambda conn, **kw: 4242)
+    sched = await _drive(method, _critical(), persist=lambda **kw: 4242)
 
     sched._send_dq_alert_throttled.assert_awaited_once()
     args, kwargs = sched._send_dq_alert_throttled.await_args
@@ -100,10 +82,10 @@ async def test_a_critical_is_sent_with_the_run_it_came_from(method, layer):
 @pytest.mark.parametrize("method,layer", ARMS)
 @pytest.mark.asyncio
 async def test_a_failed_persist_still_pages(method, layer):
-    """The ledger is the less important half: a DuckDB write that throws
+    """The ledger is the less important half: a journal write that throws
     costs the pointer, never the alert."""
-    def _boom(conn, **kw):
-        raise RuntimeError("duckdb is locked")
+    def _boom(**kw):
+        raise RuntimeError("Postgres refused the run")
 
     sched = await _drive(method, _critical(), persist=_boom)
 
@@ -122,14 +104,12 @@ async def test_a_critical_on_postgres_does_not_cost_the_clickhouse_verdict():
     sched._resolve_dq_layer = AsyncMock()
     layers = []
 
-    def _persist(conn, **kw):
+    def _persist(**kw):
         layers.append(kw["layer"])
         return len(layers)
 
-    with patch("core.data_quality.persist_run", new=_persist), \
-         patch("core.data_quality.machine_attempts_note", return_value=None), \
-         patch("core.duckdb_store.get_store",
-               new=AsyncMock(return_value=_Store())):
+    with _journal(_persist), \
+         patch("core.data_quality.machine_attempts_note", return_value=None):
         for method, _ in ARMS:
             await getattr(sched, method)(
                 _critical(), started_at=AS_OF, as_of=AS_OF,

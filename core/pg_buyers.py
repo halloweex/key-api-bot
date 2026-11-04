@@ -129,7 +129,8 @@ async def mirror_buyers(buyers: Sequence[Any]) -> Dict[str, Any]:
     costs nothing — the owner rows, after `require_revision()`, in the same
     guard as the write. A lost marker would otherwise put DuckDB's copy over
     the chain's buyers on the next sync that fetched one; the per-tick
-    exemption `_mirror` and the orders mirror take does not fit a path that
+    exemption `_mirror` takes (and the orders mirror took, until step 14's
+    S14-09 deleted its caller) does not fit a path that
     runs for the ~19 new buyers a day and is about to hold the pool anyway.
     An owner row that cannot be read ships nothing and is recorded like any
     other failure here.

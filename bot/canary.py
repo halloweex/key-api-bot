@@ -27,6 +27,10 @@ from urllib.parse import urlparse
 
 import httpx
 
+# The ownership lever since step 14's S14-04 (a module with no imports of its
+# own: this one must not import the latch module, `test_chain_latch.py`).
+from core.rollback_lever import ROLLBACK_LEVER
+
 logger = logging.getLogger(__name__)
 
 # ─── Tunables ───────────────────────────────────────────────────────────────
@@ -448,81 +452,13 @@ def check_alerting_health(
     return []
 
 
-def check_write_chains(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `write_chains` block: a KS_WRITE_* value web did not understand.
-
-    Critical, unlike the derivation mode: that chain's writers raise on every
-    call — an expense typed on the form fails, a stock sync stops — and its
-    tables are neither shipped nor compared until the value is fixed. An absent
-    block is not a failure; an older web publishes none.
-    """
-    block = (payload or {}).get("write_chains")
-    if not isinstance(block, dict):
-        return []
-    bad = {name: state.get("error") for name, state in block.items()
-           if isinstance(state, dict) and state.get("error")}
-    if not bad:
-        return []
-    return [("write_chain_flag_invalid",
-             "write chains: " + "; ".join(f"{n}: {e}" for n, e in sorted(bad.items())))]
-
-
-def check_write_chain_latch(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the latch against the flag: a chain that already writes Postgres
-    while its KS_WRITE_* says otherwise (DN-06, owner decision OD-19 (a)).
-
-    Warn, not critical: nothing is failing. The writes go where the rows are,
-    which is the safe answer and the deliberate one — but somebody has edited
-    a variable expecting a rollback that did not happen, and the shipper is
-    stamping those tables failing meanwhile. The only way back is
-    `scripts/chain_copy_back.py`.
-
-    Judged from the published block alone, and not from the marker files —
-    which this container *can* see, since `docker-compose.yml` mounts the same
-    `./data` into both. It must not: the question is where **web's** writes are
-    going, web is the process that answers it, and a bot reading the directory
-    itself would be a second opinion about a decision it never takes part in.
-    Nothing under `bot/` may import `core.pg*` either, so the Postgres copy is
-    out of reach here in any case.
-    """
-    block = (payload or {}).get("write_chains")
-    if not isinstance(block, dict):
-        return []
-    owned = {name: state.get("latched_at") or "an unknown time"
-             for name, state in block.items()
-             if isinstance(state, dict) and state.get("mismatch")}
-    if not owned:
-        return []
-    return [("write_chain_flag_mismatch",
-             "write chains own Postgres against their flag: "
-             + "; ".join(f"{n} since {t}" for n, t in sorted(owned.items())))]
-
-
-def check_write_chain_precondition(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge each chain's own condition for moving (`unmet_precondition`).
-
-    Two states, one warning. Unlatched, the chain is HELD on DuckDB although
-    its KS_WRITE_* says postgres: safe — every consumer reads the same
-    "duckdb" — but somebody believes the chain moved. Latched, it keeps
-    writing Postgres (OD-19 (a)) while the condition that made that readable
-    has gone, so what it writes is not what the page shows. Warn, not page:
-    nothing is lost in either, and the lever is one variable. Judged from the
-    published block alone, `check_write_chain_latch`'s reason.
-    """
-    block = (payload or {}).get("write_chains")
-    if not isinstance(block, dict):
-        return []
-    parts = []
-    for name, state in sorted(block.items()):
-        if not isinstance(state, dict) or not state.get("unmet_precondition"):
-            continue
-        env = state.get("env") or "its KS_WRITE_*"
-        where = (f"{name} writes Postgres" if state.get("mode") == "postgres"
-                 else f"{name} held on DuckDB despite {env}=postgres")
-        parts.append(f"{where}: {state['unmet_precondition']}")
-    if not parts:
-        return []
-    return [("write_chain_precondition_unmet", "write chains: " + "; ".join(parts))]
+# `check_write_chains`, `check_write_chain_latch` and
+# `check_write_chain_precondition` stood here until step 14's S14-11: a
+# KS_WRITE_* web did not understand (`write_chain_flag_invalid`, CRITICAL), a
+# chain latched against its flag (`write_chain_flag_mismatch`, WARN) and a
+# chain's own condition for moving unmet (`write_chain_precondition_unmet`,
+# WARN). Web reads no KS_WRITE_* since, and its `write_chains` block publishes
+# no `error`, `mismatch` or `unmet_precondition` to judge.
 
 
 def check_report_ledger_pending(payload: Optional[dict]) -> "list[tuple[str, str]]":
@@ -565,10 +501,9 @@ BUYER_SYNC_FAILURES = 3
 # mirror behind it, no second writer, and the SMS audience and the search
 # index read what it writes. Three hours is two missed hourly runs past the
 # WARN above — long enough that a KeyCRM hiccup has had its retries, short
-# enough that a day's ~19 new buyers are not a morning's surprise. Spelled
-# rather than imported: nothing under `bot/` may import `core.pg*`, and a test
-# pins the name to the chain's.
-BUYER_CHAIN = "pg_buyers_write"
+# enough that a day's ~19 new buyers are not a morning's surprise.
+# (`BUYER_CHAIN`, the chain's `write_chains` entry this was gated on, went in
+# step 14's S14-11: the chain writes Postgres, a constant.)
 BUYER_SYNC_CHAIN_STALE_S = 3 * 60 * 60
 
 
@@ -610,10 +545,11 @@ def check_buyer_sync(payload: Optional[dict]) -> "list[tuple[str, str]]":
 def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the buyers step as the ONLY writer of buyers: CRITICAL.
 
-    Only when the same payload says chain 4 writes Postgres — the registry's
-    `mode`, which a latch sets whatever the flag says — so a web still on
-    DuckDB, or one publishing no chain block, is judged by `check_buyer_sync`
-    alone.
+    Unconditional since step 14's S14-11: chain 4 writes Postgres, a constant,
+    so whenever the probe read a `buyer_sync` block it is judged here. Until
+    then only when the same payload said the chain wrote Postgres (the
+    registry's `mode` under `write_chains.pg_buyers_write`); a web on DuckDB,
+    or one publishing no chain entry, was judged by `check_buyer_sync` alone.
 
     The age is the OLDER of two clocks. `last_ok_age_s` is the process's own
     and is floored at web's start, so on its own every recreate reset a stall
@@ -623,10 +559,7 @@ def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
     when it cannot be read the local clock is all there is (review of PR-3).
     """
     block = (payload or {}).get("buyer_sync")
-    chain = ((payload or {}).get("write_chains") or {}).get(BUYER_CHAIN)
-    if not isinstance(block, dict) or not isinstance(chain, dict):
-        return []
-    if chain.get("mode") != "postgres":
+    if not isinstance(block, dict):
         return []
     ages = [a for a in (_number(block.get("watermark_age_s")),
                         _number(block.get("last_ok_age_s"))) if a is not None]
@@ -650,8 +583,8 @@ def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
 # Chain 3 writes the orders in Postgres alone (`core/pg_orders_write.py`,
 # OD-13 (a)): an order step that fails is orders landing nowhere, with no
 # DuckDB copy behind it. Web publishes the step's own state under the chain's
-# `write_chains` entry as `sync_step`; judged only when the same payload says
-# the chain writes Postgres. Three failures in a row, no success for 15
+# `write_chains` entry as `sync_step`, judged whenever it is there (until step
+# 14's S14-11 only when the same payload said the chain wrote Postgres). Three failures in a row, no success for 15
 # minutes, or no attempt for 20 (the tick never reached the step) page: the
 # incremental tick runs at most five minutes apart, so each bound is past
 # anything the adaptive backoff can produce. Spelled rather than imported —
@@ -674,11 +607,14 @@ ORDERS_SYNC_LOCK_WAIT_MAX_S = 90 * 60
 def check_orders_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the order step as the only writer of orders: CRITICAL.
 
-    The class of the last error, never its text — the block is public. A web
-    still on DuckDB, or one publishing no step for the chain, is not judged:
-    its orders land in DuckDB and the mirror's own watch covers them."""
+    The class of the last error, never its text — the block is public.
+    Unconditional since step 14's S14-11: a web publishing a step for the
+    chain is judged whatever else its entry says. One publishing none is not
+    judged here — `unjudged_keys` holds the page instead. Until then an entry
+    whose `mode` was not postgres was not judged: its orders landed in DuckDB
+    and the mirror's own watch covered them."""
     chain = ((payload or {}).get("write_chains") or {}).get(ORDERS_CHAIN)
-    if not isinstance(chain, dict) or chain.get("mode") != "postgres":
+    if not isinstance(chain, dict):
         return []
     step = chain.get("sync_step")
     if not isinstance(step, dict):
@@ -823,9 +759,9 @@ def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
 # `duckdb` those page too, as `read_routed_to_duckdb`, and the watch reads them
 # as not clean.
 
-# The first words of the pages' lines. The soak check (deploy/stage4_soak/
-# 22_f1_read_fallbacks.sql) reads the line back out of a page by the words the
-# two share; a test holds the two equal.
+# The first words of the pages' lines, which a reader greps the journal by.
+# The soak's F1 read the line back out of a page by the words the two share,
+# until step 14's S14-02 retired it with the week it licensed.
 READ_FALLBACK_LINE = "reads served from DuckDB: "
 READ_ROUTED_LINE = "reads served from DuckDB uncounted: "
 READ_REFUSED_LINE = "reads refused with a 503: "
@@ -998,18 +934,20 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     (`duckdb_off_held_back`, the web process's for its life): every other
     payload-derived key keeps today's behaviour.
 
-    The buyers step's two keys are held the same way: both when the probe read
-    no `buyer_sync` block, and chain 4's CRITICAL when it read no entry for the
-    chain either. Under chain 4 that step is the only writer of buyers, and a
-    stall outlives the 05:15 freeze and every deploy recreate. Read blind, the
-    page was announced resolved and paged again as a new incident each time —
+    The buyers step's two keys are held the same way, when the probe read no
+    `buyer_sync` block: that step is the only writer of buyers, and a stall
+    outlives the 05:15 freeze and every deploy recreate. Read blind, the page
+    was announced resolved and paged again as a new incident each time —
     through the WARN beside it as much as through the CRITICAL, since both
-    fire for one stall (review of chain 4's merge with OD-07).
+    fire for one stall (review of chain 4's merge with OD-07). Until step
+    14's S14-11 chain 4's CRITICAL was also held when the probe read no
+    `write_chains` entry for the chain, which gated it.
 
     Chain 3's `orders_sync_failing` the same way, when the probe read no
-    entry for the chain, or read it on Postgres with no step to judge: under
-    chain 3 the order step is the only writer of orders, and the Postgres
-    hang that fails it hangs this endpoint too (batch-E review).
+    `sync_step` under the chain's entry: the order step is the only writer of
+    orders, and the Postgres hang that fails it hangs this endpoint too
+    (batch-E review). Until S14-11 an entry whose `mode` said duckdb was
+    judged, and cleared it; no entry says a mode since.
 
     And `backup_evidence_stale` (step 14's S14-00) when the probe read no
     `backups` block: a stale drill stands until the next weekly run."""
@@ -1022,8 +960,6 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     chains = payload.get("write_chains")
     if not isinstance(payload.get("buyer_sync"), dict):
         keys += ["buyer_sync_stalled", "buyer_sync_stalled_chain"]
-    elif not (isinstance(chains, dict) and isinstance(chains.get(BUYER_CHAIN), dict)):
-        keys.append("buyer_sync_stalled_chain")
     # The week of silence's page stands, like `read_fallback_used`, until web
     # restarts; a probe that read no switch block cannot say it cleared.
     if not isinstance(payload.get("duckdb_switch"), dict):
@@ -1031,16 +967,14 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
         # Off's verdict is the web process's for its life, so a probe that
         # read no switch block cannot say a held-back web was replaced.
         keys.append("duckdb_off_held_back")
-    # Chain 3's CRITICAL, held the way chain 4's is: under chain 3 the order
-    # step is the only writer of orders, and a hung Postgres — the likeliest
-    # cause of the page — hangs /api/health too, which is exactly a blind
-    # probe. Held when the probe read no entry for the chain, or read the
-    # chain on Postgres with no step to judge; an entry that says duckdb is
-    # judged, and clears it (batch-E review).
+    # Chain 3's CRITICAL, held the way chain 4's is: the order step is the
+    # only writer of orders, and a hung Postgres — the likeliest cause of the
+    # page — hangs /api/health too, which is exactly a blind probe. Held
+    # whenever the probe read no step to judge (batch-E review; by `sync_step`
+    # alone since step 14's S14-11).
     orders = chains.get(ORDERS_CHAIN) if isinstance(chains, dict) else None
-    if not isinstance(orders, dict) or (
-            orders.get("mode") == "postgres"
-            and not isinstance(orders.get("sync_step"), dict)):
+    if not (isinstance(orders, dict)
+            and isinstance(orders.get("sync_step"), dict)):
         keys.append("orders_sync_failing")
     # The backup evidence (S14-00): the drills run weekly, so a stale marker
     # stands for days, and a probe that read no `backups` block cannot say a
@@ -1168,7 +1102,9 @@ def check_warehouse_way_back_refused(payload: Optional[dict]) -> "list[tuple[str
 
     Pages: either somebody asked for the way back and did not get it, or a
     start with a precondition unmet took it on its own; both need a person,
-    and the lever is not the way back's — the chains are copied back first.
+    and the lever is not the way back's. It was to copy the chains back
+    first; since step 14's S14-04 nothing does, and the action names
+    `core.rollback_lever.ROLLBACK_LEVER`.
     Web serves. Postgres derives only on its own signal: under any other
     KS_PG_DERIVE its rebuild rides the DuckDB tick, which a `postgres` start
     does not run, so then NOTHING derives and the message says so — read
@@ -1258,8 +1194,8 @@ def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
 # `off`, so a web running `on`, today, writes no row at all.
 
 # The first words of the page's line: what a reader greps the journal by. The
-# week-of-silence soak check (deploy/stage4_soak/53_p4_week_of_silence.sql)
-# judges the page by its key and the watch below, never by these words.
+# week-of-silence soak check (P4, retired at step 14's S14-02 once the owner
+# closed the week) judged the page by its key and the watch below.
 DUCKDB_OPENED_LINE = "DuckDB opened while KS_DUCKDB=off: "
 
 # The watch row in `app.alert_series` (`core.alert_archive.record_watch`), and
@@ -1342,28 +1278,6 @@ def duckdb_silent(payload: Optional[dict]) -> Optional[bool]:
     if not isinstance(block, dict) or block.get("mode") != "off":
         return None
     return not block.get("opened_while_off")
-
-
-def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `goals_history` block: a KS_GOALS_HISTORY web refuses
-    (chain 7b). Since chain 7b-4 the variable is retired — unset and `silver`
-    both read Silver — so this is anything else, `bridge` included.
-
-    Critical, unlike the siblings above, and for `write_chain_flag_invalid`'s
-    reason: those run as duckdb and nothing fails, while this one raises at
-    every goal history read on purpose — a value naming a history that does
-    not exist must not be answered in silence — so the dashboard's goal
-    widget (`/goals/smart`), the other calculator pages under `/goals/` and
-    `POST /goals/recalculate` answer 500 and the Monday job fails, and none
-    of those pages anybody by itself (`GET /goals`, `/goals/history` and
-    setting a goal never read that history, and answer). An absent block is
-    not a failure; an older web publishes none.
-    """
-    block = (payload or {}).get("goals_history")
-    if isinstance(block, dict) and block.get("error"):
-        return [("goals_history_mode_invalid",
-                 f"goal history: {block['error']}")]
-    return []
 
 
 # `(field of /api/health's backups block, what it proves, the script that
@@ -1625,15 +1539,6 @@ async def run_canary(
         if held_back:
             severity = "critical"
 
-        # A KS_GOALS_HISTORY web refuses (anything but unset or silver since
-        # chain 7b-4): every goal history read raises, so this pages rather
-        # than warns.
-        goals_history_failures = check_goals_history_mode(payload)
-        for key, message in goals_history_failures:
-            fail(key, message)
-        if goals_history_failures:
-            severity = "critical"
-
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
         marks_failures = check_derivation_marks(payload)
@@ -1642,30 +1547,6 @@ async def run_canary(
         if marks_failures and severity == "ok":
             severity = "warn"
 
-        # A write chain's flag web did not understand: that chain's writers
-        # raise on every call, so this pages rather than warns.
-        chain_failures = check_write_chains(payload)
-        for key, message in chain_failures:
-            fail(key, message)
-        if chain_failures:
-            severity = "critical"
-
-        # A chain that has already written Postgres against a flag that says
-        # otherwise. Warn: the writes are going to the right store, and what
-        # is wrong is that somebody believes they are not.
-        latch_failures = check_write_chain_latch(payload)
-        for key, message in latch_failures:
-            fail(key, message)
-        if latch_failures and severity == "ok":
-            severity = "warn"
-
-        # A chain's own condition for moving that does not hold — held on
-        # DuckDB against its flag, or latched while its readers are not.
-        precondition_failures = check_write_chain_precondition(payload)
-        for key, message in precondition_failures:
-            fail(key, message)
-        if precondition_failures and severity == "ok":
-            severity = "warn"
         # A backup marker past its limit: warn. The drills prove Postgres can
         # be got back, and nothing else watches the two of them (S14-00).
         backup_failures = check_backup_evidence(payload)
@@ -1748,8 +1629,9 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
     ("warehouse_preconditions_unmet",
      "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
-    ("warehouse_way_back_refused",
-     "Copy the named chains back first (scripts/chain_copy_back.py, chain 5 before chain 3), then recreate web for the way back; nothing derives meanwhile unless KS_PG_DERIVE=own"),
+    # Since step 14 nothing copies a chain back (S14-04): the way back from
+    # step 13 is an image from before step 14, and only after its checks.
+    ("warehouse_way_back_refused", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     # After step 13's: when it is held, `warehouse_postgres` is its symptom.
     # The host's sidecars read `.env`, not the verdict, so a hold also stops
     # the nightly snapshot and the Sunday compaction of the file web writes
@@ -1767,16 +1649,12 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Chain 4: nothing else writes buyers. 'step not reached' means the tick stops first: grep 'Incremental sync'; else buyer_sync names the error class, grep 'Buyer'"),
     ("buyer_sync_",
      "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
-    ("write_chain_flag_mismatch",
-     "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
     ("read_fallback_mode_invalid",
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
     ("warehouse_mode_invalid",
      "Set KS_WRITE_WAREHOUSE to duckdb or postgres in .env, then recreate web"),
     ("warehouse_hold_stuck",
      "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
-    ("write_chain_precondition_unmet",
-     "Set the read flag the message names to postgres, then docker compose up -d web"),
     ("backup_evidence_stale",
      "On the host, run the script the line names; it writes its marker in data/ "
      "on success only, and the next probe clears this"),
@@ -1786,8 +1664,6 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     ("duckdb_mode_invalid",
      "Set KS_DUCKDB to on or off in .env, then recreate web"),
-    ("goals_history_mode_invalid",
-     "Set KS_GOALS_HISTORY=silver in .env and keep the line (an image from before 7b-4 reads it unset as the bridge), then recreate web; the calculators, smart goal and Monday job fail until then"),
     # Last: when an engine is down its own key names the cause, and a fallback
     # or a refusal is what that cause cost the pages. A route is a cause of
     # its own, and its lever is `.env`, so it goes first of the three.

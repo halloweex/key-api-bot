@@ -30,12 +30,6 @@ class TestAFailedSelectionIsContained:
         assert await SyncService(store=store).sync_missing_buyers() == 0
         store.set_last_sync_time.assert_awaited_once_with("buyers")
 
-    def test_an_unknown_engine_raises(self, monkeypatch):
-        from core import pg_buyer_sync_read
-        monkeypatch.setenv("KS_READ_BUYER_SYNC", "postgre")
-        with pytest.raises(ValueError):
-            pg_buyer_sync_read.enabled()
-
 
 class TestTheTiebreak:
     def test_the_order_ends_on_the_id(self):

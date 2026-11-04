@@ -9,17 +9,24 @@ bloggers' stories and ChatGPT answers. One number on a card said none of that.
 
 The rule is `core.utm_classify.organic_channel`, read from the stored tags at
 query time. Every case below is a tag production actually carries; the
-two-engine half is `tests/integration/test_traffic_two_engines.py`.
+literal half is `tests/integration/test_traffic_two_engines.py`. Since step
+14's S14-05 the tab reads Postgres alone, so the repository's Silver rows go
+into Postgres where they used to go into DuckDB; those tests skip without
+`KS_PG_DSN`.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Optional
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
+)
 from core.utm_classify import (
     ORGANIC_CHANNELS,
     classify_traffic,
@@ -143,15 +150,21 @@ class TestTheRowInsideAChannel:
                               utm_campaign=None, utm_content=None) == ("", "", "", "")
 
 
-# ─── The repository, on DuckDB ────────────────────────────────────────────────
+# ─── The repository, on Postgres (DuckDB until step 14's S14-05) ─────────────
 
-async def _store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "organic.duckdb")
-    await s.connect()
-    return s
+async def _nothing(conn, pool):
+    """Each test writes the Silver rows it is about."""
 
 
-async def _order(store: DuckDBStore, order_id: int, *, total: float = 100.0,
+@pytest_asyncio.fixture
+async def tab(tmp_path, monkeypatch):
+    """`(store, pool)`: the tab's store, which can only answer from Postgres,
+    and the pool the rows go in through."""
+    async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _nothing) as pool:
+        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "/traffic"), pool
+
+
+async def _order(pool, order_id: int, *, total: float = 100.0,
                  source_id: int = 4, day: date = DAY, buyer_id: Optional[int] = None,
                  new: bool = False, utm: Optional[dict] = None,
                  sales_type: str = "retail") -> None:
@@ -159,31 +172,31 @@ async def _order(store: DuckDBStore, order_id: int, *, total: float = 100.0,
     have written for those tags — verdict included, through the real
     classifier."""
     buyer = order_id if buyer_id is None else buyer_id
-    async with store.connection() as conn:
-        conn.execute(
+    async with pool.acquire() as conn:
+        await conn.execute(
             """
-            INSERT INTO silver_orders (
+            INSERT INTO silver.orders (
                 id, source_id, status_id, grand_total, ordered_at, buyer_id,
                 manager_id, order_date, is_return, sales_type, is_active_source,
                 source_name, is_new_customer, buyer_first_order_date, promocode
-            ) VALUES (?, ?, 12, ?, NULL, ?, NULL, ?, FALSE, ?, TRUE, 'x', ?, ?, NULL)
+            ) VALUES ($1, $2, 12, $3, NULL, $4, NULL, $5, FALSE, $6, TRUE, 'x', $7, $8, NULL)
             """,
-            [order_id, source_id, total, buyer, day, sales_type, new,
-             day if new else day - timedelta(days=90)],
+            order_id, source_id, total, buyer, day, sales_type, new,
+            day if new else day - timedelta(days=90),
         )
         if utm is not None:
             traffic_type, platform = classify_traffic(utm)
-            conn.execute(
-                "INSERT INTO silver_order_utm (order_id, utm_source, utm_medium,"
+            await conn.execute(
+                "INSERT INTO silver.order_utm (order_id, utm_source, utm_medium,"
                 " utm_campaign, utm_content, traffic_type, platform, parsed_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-                [order_id, utm.get("utm_source"), utm.get("utm_medium"),
-                 utm.get("utm_campaign"), utm.get("utm_content"),
-                 traffic_type, platform],
+                " VALUES ($1, $2, $3, $4, $5, $6, $7, now())",
+                order_id, utm.get("utm_source"), utm.get("utm_medium"),
+                utm.get("utm_campaign"), utm.get("utm_content"),
+                traffic_type, platform,
             )
 
 
-async def _organic(store: DuckDBStore, **kwargs) -> dict:
+async def _organic(store, **kwargs) -> dict:
     return await store.get_traffic_organic(*WINDOW, **kwargs)
 
 
@@ -199,22 +212,20 @@ NEWSLETTER = {"utm_source": "klaviyo", "utm_medium": "klaviyo",
 PAID = {"utm_source": "fbads", "utm_medium": "paid", "utm_campaign": "spring"}
 
 
+@needs_postgres
 class TestTheBreakdown:
 
     @pytest.mark.asyncio
-    async def test_each_order_is_counted_in_its_channel_and_paid_is_not(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            await _order(store, 1, total=3000, source_id=1)
-            await _order(store, 2, total=2000, source_id=1)
-            await _order(store, 3, total=500, source_id=2)
-            await _order(store, 4, total=1200, utm=BIO)
-            await _order(store, 5, total=800, utm=WELCOME)
-            await _order(store, 6, total=400, utm=NEWSLETTER)
-            await _order(store, 7, total=9999, utm=PAID)
-            out = await _organic(store)
-        finally:
-            await store.close()
+    async def test_each_order_is_counted_in_its_channel_and_paid_is_not(self, tab):
+        store, pool = tab
+        await _order(pool, 1, total=3000, source_id=1)
+        await _order(pool, 2, total=2000, source_id=1)
+        await _order(pool, 3, total=500, source_id=2)
+        await _order(pool, 4, total=1200, utm=BIO)
+        await _order(pool, 5, total=800, utm=WELCOME)
+        await _order(pool, 6, total=400, utm=NEWSLETTER)
+        await _order(pool, 7, total=9999, utm=PAID)
+        out = await _organic(store)
 
         channels = _by_channel(out)
         assert [c["channel"] for c in out["channels"]] == [
@@ -228,39 +239,33 @@ class TestTheBreakdown:
         assert out["totals"]["revenue"] == 7900.0
 
     @pytest.mark.asyncio
-    async def test_the_total_is_the_organic_card(self, tmp_path):
+    async def test_the_total_is_the_organic_card(self, tab):
         """The breakdown is of the card above it: the same orders, so the
         same sums — or a reader adding the rows gets a number the card does
         not show."""
-        store = await _store(tmp_path)
-        try:
-            await _order(store, 1, total=3000, source_id=1)
-            await _order(store, 2, total=500, source_id=2)
-            await _order(store, 3, total=1200, utm=BIO)
-            await _order(store, 4, total=777, source_id=4)  # unknown, no tag
-            await _order(store, 5, total=9999, utm=PAID)
-            organic = await _organic(store, sales_type="retail")
-            card = (await store.get_traffic_analytics(
-                *WINDOW, sales_type="retail"))["summary"]["organic"]
-        finally:
-            await store.close()
+        store, pool = tab
+        await _order(pool, 1, total=3000, source_id=1)
+        await _order(pool, 2, total=500, source_id=2)
+        await _order(pool, 3, total=1200, utm=BIO)
+        await _order(pool, 4, total=777, source_id=4)  # unknown, no tag
+        await _order(pool, 5, total=9999, utm=PAID)
+        organic = await _organic(store, sales_type="retail")
+        card = (await store.get_traffic_analytics(
+            *WINDOW, sales_type="retail"))["summary"]["organic"]
 
         assert {k: organic["totals"][k] for k in ("orders", "revenue")} == card
 
     @pytest.mark.asyncio
-    async def test_the_previous_period_is_the_same_length_just_before(self, tmp_path):
+    async def test_the_previous_period_is_the_same_length_just_before(self, tab):
         """A channel that sold last period and nothing this one is the row an
         analyst most needs, so it is listed, with zeros where it stopped."""
-        store = await _store(tmp_path)
-        try:
-            await _order(store, 1, total=3000, source_id=1)
-            await _order(store, 2, total=1000, source_id=1, day=BEFORE)
-            await _order(store, 3, total=600, day=BEFORE, utm=NEWSLETTER)
-            await _order(store, 4, total=50, day=WINDOW[0] - timedelta(days=4),
-                         utm=NEWSLETTER)  # a day before the previous window
-            out = await _organic(store)
-        finally:
-            await store.close()
+        store, pool = tab
+        await _order(pool, 1, total=3000, source_id=1)
+        await _order(pool, 2, total=1000, source_id=1, day=BEFORE)
+        await _order(pool, 3, total=600, day=BEFORE, utm=NEWSLETTER)
+        await _order(pool, 4, total=50, day=WINDOW[0] - timedelta(days=4),
+                     utm=NEWSLETTER)  # a day before the previous window
+        out = await _organic(store)
 
         assert out["previous_period"] == {
             "start": (WINDOW[0] - timedelta(days=3)).isoformat(),
@@ -275,18 +280,15 @@ class TestTheBreakdown:
         assert out["previous_totals"] == {"orders": 2, "revenue": 1600.0}
 
     @pytest.mark.asyncio
-    async def test_new_buyers_are_people_and_do_not_add_up(self, tmp_path):
+    async def test_new_buyers_are_people_and_do_not_add_up(self, tab):
         """Buyer 50's first day carried a Direct order and a welcome-letter
         order: new on both rows, one person in the total. Buyer 51 is not
         new at all."""
-        store = await _store(tmp_path)
-        try:
-            await _order(store, 1, source_id=1, buyer_id=50, new=True)
-            await _order(store, 2, buyer_id=50, new=True, utm=WELCOME)
-            await _order(store, 3, source_id=1, buyer_id=51, new=False)
-            out = await _organic(store)
-        finally:
-            await store.close()
+        store, pool = tab
+        await _order(pool, 1, source_id=1, buyer_id=50, new=True)
+        await _order(pool, 2, buyer_id=50, new=True, utm=WELCOME)
+        await _order(pool, 3, source_id=1, buyer_id=51, new=False)
+        out = await _organic(store)
 
         channels = _by_channel(out)
         assert channels["instagram_direct"]["new_customers"] == 1
@@ -295,21 +297,18 @@ class TestTheBreakdown:
 
     @pytest.mark.asyncio
     async def test_the_rows_inside_a_channel_are_ranked_and_capped(
-        self, tmp_path, monkeypatch,
+        self, tab, monkeypatch,
     ):
         monkeypatch.setattr(DuckDBStore, "ORGANIC_DETAIL_LIMIT", 2)
-        store = await _store(tmp_path)
-        try:
-            for i, (name, total) in enumerate(
-                    [("Welcome", 100), ("Cart", 300), ("Winback", 200),
-                     ("Cart", 50)], start=1):
-                await _order(store, i, total=total, utm={
-                    "utm_source": "klaviyo", "utm_medium": "email",
-                    "utm_campaign": name})
-            await _order(store, 9, total=999, source_id=1)
-            out = await _organic(store)
-        finally:
-            await store.close()
+        store, pool = tab
+        for i, (name, total) in enumerate(
+                [("Welcome", 100), ("Cart", 300), ("Winback", 200),
+                 ("Cart", 50)], start=1):
+            await _order(pool, i, total=total, utm={
+                "utm_source": "klaviyo", "utm_medium": "email",
+                "utm_campaign": name})
+        await _order(pool, 9, total=999, source_id=1)
+        out = await _organic(store)
 
         channels = _by_channel(out)
 
@@ -325,28 +324,22 @@ class TestTheBreakdown:
         assert channels["instagram_direct"]["details_total"] == 1
 
     @pytest.mark.asyncio
-    async def test_the_filters_are_the_tabs(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            await _order(store, 1, total=3000, source_id=1)
-            await _order(store, 2, total=1200, utm=BIO)
-            await _order(store, 3, total=700, source_id=1, sales_type="b2b")
-            retail_shopify = await _organic(store, sales_type="retail", source_id=4)
-            everyone = await _organic(store, sales_type="all")
-        finally:
-            await store.close()
+    async def test_the_filters_are_the_tabs(self, tab):
+        store, pool = tab
+        await _order(pool, 1, total=3000, source_id=1)
+        await _order(pool, 2, total=1200, utm=BIO)
+        await _order(pool, 3, total=700, source_id=1, sales_type="b2b")
+        retail_shopify = await _organic(store, sales_type="retail", source_id=4)
+        everyone = await _organic(store, sales_type="all")
 
         assert [c["channel"] for c in retail_shopify["channels"]] == ["instagram_site"]
         assert everyone["totals"] == {"orders": 3, "revenue": 4900.0,
                                       "new_customers": 0}
 
     @pytest.mark.asyncio
-    async def test_an_empty_window_is_an_empty_breakdown(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            out = await _organic(store)
-        finally:
-            await store.close()
+    async def test_an_empty_window_is_an_empty_breakdown(self, tab):
+        store, pool = tab
+        out = await _organic(store)
 
         assert out["channels"] == []
         assert out["totals"] == {"orders": 0, "revenue": 0.0, "new_customers": 0}

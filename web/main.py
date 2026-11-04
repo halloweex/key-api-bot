@@ -15,7 +15,9 @@ from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
 from web.ratelimit import limiter
 from web.routes import api, pages, auth, chat, websocket
 from web.routes.auth import api_gate, require_admin
-from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
+from web.middleware import (
+    RejectNulMiddleware, RequestLoggingMiddleware, RequestTimeoutMiddleware,
+)
 from bot.database import init_database
 from core import duckdb_switch
 from core.duckdb_store import get_store, close_store
@@ -148,6 +150,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
+# Refuse a NUL in an /api/ path or query string before routing (400). Added
+# first, so it sits innermost and the logging middleware still records it.
+app.add_middleware(RejectNulMiddleware)
+
 # Add request logging middleware (adds correlation IDs and timing)
 app.add_middleware(RequestLoggingMiddleware)
 
@@ -244,8 +250,9 @@ async def startup_event():
             )
     except duckdb_switch.DuckDBOpenedWhileOff:
         # KS_DUCKDB=off, and something on the boot sync's path still reached
-        # for the file — orders held in DuckDB because chain 3 is not on, or
-        # a path stage 5 has not decoupled yet. Web must not die of it: the
+        # for the file — a path stage 5 has not decoupled yet (orders held in
+        # DuckDB with chain 3 not on was one, until step 14's S14-09 removed
+        # chain 3's DuckDB half). Web must not die of it: the
         # refusal is already counted, and only a web that answers /api/health
         # lets the canary page it (`duckdb_opened_while_off`). The store is
         # the unconnected one `get_store()` publishes under off, so what goes
@@ -280,21 +287,17 @@ async def startup_event():
             logger.warning("Serving with the boot sync failed under "
                            "KS_DUCKDB=off — the scheduler retries the sync")
         else:
-            stats = await store.get_stats()
-            # Under chain 3 the orders are written to Postgres, so DuckDB's
-            # count says nothing about whether there is history to serve: a
-            # Postgres that failed this boot's sync is retried by the
-            # scheduler, and web — the only syncer — must not crash-loop over
-            # it (`pg_orders_write`).
-            from core import pg_orders_write
-
-            if pg_orders_write.mode() != "duckdb":
-                logger.warning("Serving with the boot sync failed under chain 3 — "
-                               "the scheduler retries the order step")
-            elif stats.get("orders", 0) == 0:
-                raise  # Fail fast only if DuckDB has no data at all
-            else:
-                logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
+            # The store's second, complete attempt at its connect (above); a
+            # failure here still ends the startup. Its counts are not read:
+            # the orders are chain 3's, in Postgres, so DuckDB's count says
+            # nothing about whether there is history to serve, and a Postgres
+            # that failed this boot's sync is retried by the scheduler — web,
+            # the only syncer, must not crash-loop over it
+            # (`pg_orders_write`). Until step 14's S14-09 a chain 3 on DuckDB
+            # with no orders there ended the startup here instead.
+            await store.get_stats()
+            logger.warning("Serving with the boot sync failed under chain 3 — "
+                           "the scheduler retries the order step")
 
     # Migrate users from SQLite to DuckDB (one-time, idempotent)
 
@@ -309,8 +312,8 @@ async def startup_event():
     #
     # The write fills NULLs only, so this is a no-op on every boot after the
     # first, and it can never overwrite a campaign the app recorded itself.
-    # Through the SMS router (`_sms_run`), so under KS_SMS_STORE=postgres it
-    # writes Postgres whatever KS_DUCKDB says; the store is only its host.
+    # Through the SMS router (`_sms_run`), so it writes Postgres whatever
+    # KS_DUCKDB says; the store is only its host.
     if store is not None:
         try:
             restored = await store.backfill_sms_campaign_record(

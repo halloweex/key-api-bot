@@ -251,22 +251,30 @@ async def _record_failure(table: str, error: str) -> bool:
 def tables_stood_down(unit: Sequence[str]) -> FrozenSet[str]:
     """Which of `unit` a write chain has taken — the local answer. Never raises.
 
-    The marker and the flag, asked of only the chains that declare one of these
-    tables (`write_chains.stood_down_among`): with none declaring them — every
-    table here today — nothing is evaluated at all, so the per-tick mirrors
-    that ask this read no variable and open no file.
+    Every table of `unit` a registered chain declares, a constant since step
+    14's S14-11: every chain writes Postgres, so every declared table is
+    held. Until then it asked the marker and the flag of only the chains that
+    declared one of these tables (`write_chains.stood_down_among`, deleted
+    with the flags). Since #280 registered chains 3, 5 and 6 a chain declares
+    each of them. Last consumers: the mirrors, backfills and copies of
+    `pg_landing`, `pg_buyers`, `pg_replication`, `pg_backfill` and
+    `pg_expense_backfill`, and the daily comparisons — they go in S14-12 and
+    S14-13.
 
-    This is the only answer the **per-tick sync mirrors** take — `_mirror`
-    (the catalogue and the order-level expenses) and the orders mirror in
-    `DuckDBStore.upsert_orders` — because they are the write path, once a
-    minute, and a Postgres read there is the one `writes_postgres()` exists
-    to avoid. Everything else that is about to hold a pool asks this first and
+    This is the only answer the **sync's mirrors** take — `_mirror` and,
+    until step 14's S14-09, the orders mirror in DuckDB's `upsert_orders` —
+    because they were the write path, once a minute, and a Postgres read there
+    is the one `writes_postgres()` exists to avoid. Since S14-09 DuckDB's
+    order writer is gone, `mirror_expenses` has no caller, and `_mirror` is
+    reached from the weekly full sync alone (`mirror_categories`,
+    `mirror_products`); the mirror's half of this module goes in S14-13.
+    Everything else that is about to hold a pool asks this first and
     `tables_stood_down_or_owned` next, the buyers mirror and the
     classification copy included (`sync_reads_the_owner_rows`).
     """
-    from core.write_chains import stood_down_among
+    from core.write_chains import chain_tables
 
-    return stood_down_among(unit)
+    return chain_tables() & frozenset(unit)
 
 
 def sync_reads_the_owner_rows(unit: Sequence[str]) -> bool:
@@ -277,8 +285,9 @@ def sync_reads_the_owner_rows(unit: Sequence[str]) -> bool:
     answer since the DN-22b review: the classification copy is a full replace
     run a few times a day, and on the local answer alone a lost marker let it
     delete a human's interval in Postgres the first time it ran. False for
-    everything `_mirror` ships and for the order tables, whose per-tick
-    mirrors keep the local answer alone.
+    everything `_mirror` ships, which keeps the local answer alone, and for
+    the order tables, whose per-tick mirror kept it alone until step 14's
+    S14-09 deleted that mirror's caller.
 
     The comparisons read this to say which of the two is true when only the
     owner rows name a unit — a shipper that has stopped (INFO; the latch
@@ -365,7 +374,8 @@ async def _mirror(table: str, columns: Sequence[str], rows: List[tuple]) -> Mirr
     # rows in Postgres DuckDB never sees, and this upsert would write DuckDB's
     # copy over them. Skipped rather than failed — nothing is recorded against
     # the watermark, because nothing went wrong — and asked on the local answer
-    # alone, since this runs on the sync's own tick.
+    # alone, since this ran on the sync's own tick (since step 14's S14-09 it is
+    # reached from the weekly full sync alone).
     moved = tables_stood_down((table,))
     if moved:
         out.skipped = stood_down_reason(moved)
@@ -586,9 +596,10 @@ async def carry_retired_catalogue(store, *, dry_run: bool = True) -> Dict[str, D
 #
 # 1. `manager_comment` IS NOT OVERWRITTEN WITH NULL.
 #
-#    `DuckDBStore.upsert_orders` updates it as
-#    `COALESCE(?, manager_comment)` — a payload that omits the field keeps
-#    whatever is stored — because that column carries UTM attribution that a
+#    `DuckDBStore.upsert_orders` updated it as `COALESCE(?, manager_comment)`
+#    until step 14's S14-09 deleted it, so a payload that omits the field
+#    keeps whatever is stored, and this does the same, for chain 3's writer
+#    too (it runs `_write_order_rows`). That column carries UTM attribution a
 #    backfill restored and the Silver UTM layer parses out of it. 14,179 of
 #    46,446 orders have it NULL today, so a plain `EXCLUDED.manager_comment`
 #    here would not be a subtle divergence: it would erase attribution on one
@@ -621,9 +632,10 @@ def order_tables_stood_down() -> FrozenSet[str]:
     """Which of the two order tables a write chain has taken. Never raises.
 
     Every path that ships orders out of DuckDB asks this first (DN-22a): the
-    sync's mirror in `DuckDBStore.upsert_orders`, the ids-diff and header-only
-    repair in `core/pg_backfill.py`, the hourly diff, the admin backfill, and
-    the daily bucket comparison. None of them asked before, so a chain that
+    ids-diff and header-only repair in `core/pg_backfill.py`, the hourly diff,
+    the admin backfill, and the daily bucket comparison — and the sync's
+    mirror in `DuckDBStore.upsert_orders`, until step 14's S14-09 deleted that
+    writer. None of them asked before, so a chain that
     registered `bronze.orders` would have had DuckDB overwriting the rows its
     new writer put there — and, worse, `write_orders` archiving each overwrite
     in `app.order_versions` as a change that never happened, in the one table
@@ -634,9 +646,11 @@ def order_tables_stood_down() -> FrozenSet[str]:
     items with it, so a chain declaring either table declares both — a
     registry invariant `tests/unit/test_write_chains.py` walks `WRITE_CHAINS`
     for. Standing both down on either is that invariant held defensively, and
-    not a property of the shipping: the two tables do ship apart, since
-    `write_orders(replace_products=False)` ships headers alone every day, from
-    the 05:15 status refresh and from `ship_orders_by_id`.
+    not a property of the shipping: the two tables are written apart, since
+    `write_orders`' core with `replace_products=False` writes headers alone
+    every day — from the 05:15 status refresh, through chain 3's writer, and
+    from the comment backfills' `pg_orders_write.restore_manager_comments`
+    (through `ship_orders_by_id` until step 14's S14-09).
 
     Asked BEFORE `write_orders` and never inside it. The capture's contract is
     that the version and the row it describes land together or neither does
@@ -651,8 +665,9 @@ async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
     """`order_tables_stood_down()`, and what the owner rows in Postgres say.
 
     For the order paths that already hold a pool: the ids-diff and its
-    header-only repair, the hourly diff, the comment ship and the bucket
-    comparison. The local answer reads the markers, and the markers live on a
+    header-only repair, the hourly diff, the comment ship (`ship_orders_by_id`,
+    with no caller since step 14's S14-09) and the bucket comparison. The
+    local answer reads the markers, and the markers live on a
     bind mount — an older `./data` snapshot or a rebuilt data directory loses
     them while Postgres keeps the owner rows and the rows they were taken for.
     The flag then routes to DuckDB again, the local answer says nothing has
@@ -662,9 +677,10 @@ async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
     connection stands down on either copy — the union `replicate_operational`
     and `reconcile_operational` already take, out of the same query.
 
-    The sync's mirror in `DuckDBStore.upsert_orders` keeps the local answer
-    alone. That is the write path, once a minute, and a Postgres read there is
-    the one `writes_postgres()` exists to avoid.
+    The sync's mirror in `DuckDBStore.upsert_orders` kept the local answer
+    alone — the write path, once a minute, where a Postgres read is the one
+    `writes_postgres()` exists to avoid — until step 14's S14-09 deleted that
+    writer.
 
     Asked after `require_revision()`, as those two ask it: the owner rows live
     in `meta.chain_watermarks` (revision 0032), so a database behind the code
@@ -764,8 +780,9 @@ async def write_orders(
     """Headers, line items and both watermarks, in one transaction.
 
     Public and **raises** — the opposite contract to `mirror_orders`, which
-    wraps this and never does. The sync path must not be broken by Postgres;
-    the backfill has nothing to protect and every reason to stop loudly.
+    wraps this and never does: the sync path, which ran through it until step
+    14's S14-09, must not be broken by Postgres; the backfill has nothing to
+    protect and every reason to stop loudly.
 
     One transaction across both tables because a half-applied order — header
     updated, line items still the old ones — is the exact state the
@@ -773,8 +790,10 @@ async def write_orders(
 
     `version_kind` labels what the archive calls a header that moved. It
     defaults to the sync's `'change'`, so every caller that existed before
-    OD-20 writes exactly what it wrote before; `core/pg_backfill.py` passes
-    `'backfill'` for the two `manager_comment` repairs.
+    OD-20 writes exactly what it wrote before; `core/pg_backfill.py` passed
+    `'backfill'` for the two `manager_comment` repairs until step 14's S14-09,
+    and `pg_orders_write.restore_manager_comments` passes it to the core
+    since.
 
     The statements themselves are `_write_order_rows`, which runs on the
     caller's transaction; this is the acquire and the transaction around them
@@ -785,8 +804,9 @@ async def write_orders(
     # Validated here, before the pool is acquired, rather than inside the
     # capture. A typo could only come from code, but a raise from inside the
     # transaction would roll back the header upsert as well — and on the sync
-    # path `mirror_orders` would swallow it, so the order would be lost to
-    # Postgres over a misspelt constant. Refusing early costs nothing.
+    # path, until step 14's S14-09, `mirror_orders` would have swallowed it, so
+    # the order would be lost to Postgres over a misspelt constant. Refusing
+    # early costs nothing.
     check_version_kind(version_kind)
 
     pool = await get_pool()
@@ -906,14 +926,18 @@ async def mirror_orders(
 ) -> List[MirrorOutcome]:
     """Mirror order headers and their line items. Never raises.
 
-    Takes rows, not payloads: `DuckDBStore.upsert_orders` has already parsed
-    them through `core.landing_rows` and — more importantly — has already
-    decided which ones it wrote. The mirror ships that decision rather than
-    making its own, so the two stores cannot disagree about what a sync did.
+    Takes rows, not payloads: its caller, `DuckDBStore.upsert_orders`, had
+    already parsed them through `core.landing_rows` and — more importantly —
+    had already decided which ones it wrote. The mirror shipped that decision
+    rather than making its own, so the two stores could not disagree about
+    what a sync did.
 
-    It does not ask `order_tables_stood_down()`; its one caller does, before
+    It does not ask `order_tables_stood_down()`; its one caller did, before
     calling it, and `tests/unit/test_write_chains.py` walks for any new caller
-    that does not.
+    that does not. **Since step 14's S14-09 nothing calls it**: that caller,
+    `DuckDBStore.upsert_orders`, went with chain 3's DuckDB half, and this
+    goes with the mirror's half of this module in S14-13 (the walk holds it
+    to having no caller until then).
     """
     tables = [ORDERS_TABLE] + ([ORDER_PRODUCTS_TABLE] if replace_products else [])
     counts = {ORDERS_TABLE: len(orders), ORDER_PRODUCTS_TABLE: len(products)}

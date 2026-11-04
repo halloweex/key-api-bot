@@ -221,9 +221,14 @@ async def tune_revenue_forecast(
 async def evaluate_revenue_forecast(
     request: Request,
     sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
-    _gate=Depends(require_permission("dashboard")),
+    admin: dict = Depends(require_admin),
 ):
-    """Run walk-forward cross-validation to evaluate the model."""
+    """Run walk-forward cross-validation to evaluate the model. Requires admin.
+
+    It holds the single ML thread for as long as train and tune do, and was
+    gated on the dashboard tab until 2026-11-04, so any viewer could start
+    one five times an hour. The page never calls it.
+    """
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:

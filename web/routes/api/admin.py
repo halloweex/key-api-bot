@@ -11,7 +11,7 @@ from typing import Optional
 from core import read_fallback
 from web.routes.auth import require_admin
 from web.schemas import JobsResponse
-from ._deps import limiter, get_store
+from ._deps import limiter, get_store, validate_db_int
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -116,10 +116,11 @@ async def backfill_mirror_orders(
 ):
     """Ship the orders Postgres is missing. Idempotent; safe to re-run.
 
-    Step 05. The sync mirrors only what it writes, so Postgres starts at the
-    last few minutes of activity with 46,446 orders of history behind it. This
-    closes that gap, computing the difference fresh on every call rather than
-    remembering a cursor — interrupt it and the next run resumes by definition.
+    Step 05. The sync mirrored only what it wrote (DuckDB's order writer,
+    deleted in step 14's S14-09), so Postgres started at the last few minutes
+    of activity with 46,446 orders of history behind it. This closes that gap,
+    computing the difference fresh on every call rather than remembering a
+    cursor — interrupt it and the next run resumes by definition.
 
     Foreground for a capped run you want to watch; background for the whole
     thing, which takes minutes and would otherwise sit on an HTTP request.
@@ -226,9 +227,10 @@ async def backfill_mirror_expenses(
 ):
     """Ship the order-level expenses Postgres is missing. Idempotent.
 
-    Revision 0020. `mirror_expenses` ships what a sync fetched, so after the
-    first deploy Postgres holds the last few days against DuckDB's 15,020 rows
-    — and until this has run, `reconcile_expenses` reports one
+    Revision 0020. `mirror_expenses` shipped what a sync fetched (nothing has
+    called it since step 14's S14-09), so after the first deploy Postgres held
+    the last few days against DuckDB's 15,020 rows — and until this has run,
+    `reconcile_expenses` reports one
     `mirror_backfill_pending` and suppresses the row-level comparison, because
     before it every expense older than the mirror looks exactly like a lost
     one.
@@ -340,9 +342,9 @@ async def backfill_mirror_catalogue(
             status_code=409,
             detail=(
                 f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped by the mirror; a row only DuckDB holds is the copy-back "
-                "handover's to decide now (scripts/chain_copy_back.py catalogue "
-                "--handover)."
+                "shipped by the mirror; a row only DuckDB holds stays there, "
+                "since nothing in a step-14 image carries it (the copy-back "
+                "and its handover went with S14-04)."
             ),
         )
 
@@ -673,6 +675,7 @@ async def rebuild_silver_from_scratch(
     from core.duckdb_store import (
         SILVER_ORDERS_DDL, silver_select_sql, silver_pass2_sql,
     )
+    from core.sql_dialect import DUCKDB
 
     if not warehouse_cutover.duckdb_derives():
         # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB's Silver is frozen on
@@ -686,8 +689,9 @@ async def rebuild_silver_from_scratch(
         async with store.connection() as conn:
             conn.execute("DROP TABLE IF EXISTS silver_orders")
             conn.execute(SILVER_ORDERS_DDL)
-            conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
-            conn.execute(silver_pass2_sql())
+            conn.execute(
+                f"INSERT INTO silver_orders SELECT {silver_select_sql(DUCKDB)} FROM orders o")
+            conn.execute(silver_pass2_sql(dialect=DUCKDB))
             count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
 
@@ -772,19 +776,14 @@ async def _sync_all_buyers(store) -> dict:
     `SYNC_ALL_LOCK_WAIT_S` stops the run; what was written stays written — each
     portion is a complete, mirrored upsert — and a rerun writes it again.
     """
-    from core import pg_buyer_sync_read, pg_buyers_write
+    from core import pg_buyer_sync_read
     from core.keycrm import KeyCRMClient
 
-    # Under chain 4 the portions below land in Postgres alone, so DuckDB's
-    # count stands still and "new buyers" would always read zero. Read once:
-    # the first portion may latch the chain, which only confirms "postgres".
-    in_postgres = pg_buyers_write.mode() == "postgres"
-
+    # The portions below land in Postgres alone (chain 4), so the count is
+    # Postgres's: DuckDB's stands still. Until step 14's S14-11 DuckDB's was
+    # read when the chain's flag said duckdb.
     async def count() -> int:
-        if in_postgres:
-            return await pg_buyer_sync_read.count_buyers()
-        async with store.connection() as conn:
-            return conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+        return await pg_buyer_sync_read.count_buyers()
 
     before = await count()
     async with KeyCRMClient() as client:
@@ -803,18 +802,10 @@ async def _sync_all_buyers(store) -> dict:
             "before_count": before, "after_count": after, "new_buyers": after - before}
 
 
-def _refuse_unreadable_buyers_chain() -> None:
-    """409 when `KS_WRITE_BUYERS` is not understood and no latch overrides it:
-    the buyers have nowhere known to be written, and the step would fetch from
-    KeyCRM first. Asked before anything starts, by both doors into the write."""
-    from core import pg_buyers_write
-
-    if pg_buyers_write.mode() is None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{pg_buyers_write.WRITE_ENV} is not understood, so the buyers "
-                   "have nowhere known to be written; correct it, or remove it for "
-                   "DuckDB, and retry")
+# `_refuse_unreadable_buyers_chain` stood here until step 14's S14-11: a 409
+# when `KS_WRITE_BUYERS` was not understood, asked by both doors into the
+# write before anything started. The flag is not read any more; the buyers
+# are written to Postgres whatever it says.
 
 
 @router.post("/duckdb/sync-buyers")
@@ -826,7 +817,6 @@ async def sync_buyers(
     """Manually sync missing buyers from KeyCRM. (Admin enforced at router level.)"""
     from core.sync_service import get_sync_service
 
-    _refuse_unreadable_buyers_chain()
     async with _heavy_lock_or_409("Buyer sync"):
         try:
             sync_service = await get_sync_service()
@@ -872,8 +862,6 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
     """
     if any(t.get_name() == "sync_all_buyers" and not t.done() for t in _BACKGROUND_TASKS):
         raise HTTPException(status_code=409, detail="A full buyer sync is already running")
-    # Before "started", not in the log afterwards: every portion would raise.
-    _refuse_unreadable_buyers_chain()
 
     store = await get_store()
 
@@ -1022,7 +1010,7 @@ async def list_managers(request: Request, admin: dict = Depends(require_admin)):
     # is FALSE for them, which is not the same as unclassified — and labelled
     # ₴15.5M of wholesale as `other` on the very screen meant to tell the two
     # apart. There is one CASE for this, it lives in Silver, and this reports
-    # its output — from whichever Silver `KS_READ_SILVER` names.
+    # its output, from Postgres's Silver.
     rows = await store.get_manager_sales_365d()
 
     revenue: dict = {}
@@ -1075,18 +1063,12 @@ async def set_manager_retail_status(
     year's reports on the next refresh. Backdating is still available, but it
     is now something you ask for.
     """
-    # Chain 5 (`core/pg_managers_write.py`). A `KS_WRITE_MANAGERS` nobody can
-    # read writes neither store — the writer refuses and the replica stands
-    # down — so it is refused here before anything is read: 409, the variable
-    # is the thing to fix. Off DuckDB, a Postgres failure is a 503 rather than
-    # a 500: the decision was not stored, and nothing fell back to DuckDB.
+    validate_db_int(manager_id, "manager_id", allow_none=False)
+    # Chain 5 (`core/pg_managers_write.py`): a Postgres failure is a 503 rather
+    # than a 500 — the decision was not stored, and nothing fell back to
+    # DuckDB. Until step 14's S14-11 a `KS_WRITE_MANAGERS` nobody could read
+    # was a 409 here, and a chain on DuckDB let the error through as a 500.
     from core import pg_managers_write
-
-    chain_mode = pg_managers_write.mode()
-    if chain_mode is None:
-        raise HTTPException(status_code=409, detail=(
-            f"{pg_managers_write.WRITE_ENV} is not understood, so the "
-            "classification cannot be stored in either store; fix the variable"))
 
     store = await get_store()
     try:
@@ -1116,8 +1098,6 @@ async def set_manager_retail_status(
         # field and the kind of value, never the value.
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
-        if chain_mode == "duckdb":
-            raise
         logger.error("Manager %s not classified: Postgres failed under %s: %s",
                      manager_id, pg_managers_write.WRITE_ENV, type(exc).__name__,
                      exc_info=True)

@@ -13,14 +13,16 @@
 -- whatever was passed: the copy stands down on those rows too (a lost marker).
 --
 -- WHY IT EXISTS
--- Under OD-02 (c) these chains write Postgres first and hand DuckDB the same
--- row after the commit, so DuckDB is still a whole copy and the daily
--- comparison keeps comparing (`compare_shadow`). The hourly
--- `replicate_operational` must not: its shape for every one of these tables is
--- DELETE plus INSERT out of DuckDB, and a row whose shadow write failed exists
--- in Postgres alone — a quality run, a sample, a delivered week. If the
--- stand-down lapses, the copy deletes those rows once an hour, looking healthy
--- in between, and for a send ledger the next tick sends that week again.
+-- Under OD-02 (c) these chains wrote Postgres first and handed DuckDB the same
+-- row after the commit, so DuckDB stayed a whole copy and the daily
+-- comparison compared the two (`compare_shadow`) — until step 14's S14-10
+-- deleted that copy and its comparison (H2 went with it). The hourly
+-- `replicate_operational` must not copy either way: its shape for every one of
+-- these tables is DELETE plus INSERT out of DuckDB, and a row DuckDB never
+-- received exists in Postgres alone — a quality run, a sample, a delivered
+-- week; since S14-10, every row. If the stand-down lapses, the copy deletes
+-- those rows once an hour, looking healthy in between, and for a send ledger
+-- the next tick sends that week again.
 --
 -- HOW IT DECIDES
 -- Per chain that is on: the handover is the chain's own owner rows (written in
@@ -43,8 +45,9 @@
 --   DuckDB's rows over the chain's. Stop it before the next hour: put the
 --   flag of a chain that never latched back, or read the web log for
 --   "replicate_operational". A failure that reads "owned by Postgres since"
---   is the latch with its flag put back — not a rollback; the way back is
---   scripts/chain_copy_back.py.
+--   is the latch with its flag put back — not a rollback. The way back was
+--   scripts/chain_copy_back.py; step 14's S14-04 deleted it, and the lever is
+--   core.rollback_lever.ROLLBACK_LEVER since.
 -- - invalid: a KS_WRITE_* value no chain understands; that chain writes
 --   nowhere (OD-18 (a)). Fix the .env line.
 WITH clock AS (

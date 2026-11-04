@@ -1,22 +1,25 @@
-"""`/marketing` means the same thing in DuckDB and Postgres.
+"""`/marketing` answers in Postgres what DuckDB answered.
 
-`tests/unit/test_pg_marketing_read.py` proves the wiring and the shape of the
-two renderings. This proves they produce the same numbers, on real engines,
-which matters more here than on any tab ported so far — because two of the
-three parts are not a table rename:
+Two of the three parts of this tab were not a table rename when they moved:
 
-  * the channel figures come from **columns** in one engine and from a
-    `source_id` **dimension** in the other, with the five scalars read from the
+  * the channel figures come from **columns** in DuckDB's Gold and from a
+    `source_id` **dimension** in Postgres', with the five scalars read from the
     roll-up rows only, since three of them are `COUNT(DISTINCT buyer_id)` and
     distinct counts do not add up;
   * the brand table used to read `gold_daily_products`, which exists only in
     DuckDB, and now reads the order-line level — reproducing that table's grain
     so `SUM(order_count)` keeps meaning what the report has always shown.
 
-The Postgres Gold is built by `core.pg_gold.rebuild_gold`, the production path,
-rather than copied from DuckDB's. Copying would compare the report against
-itself; deriving is what makes the two shapes independent enough for the
-comparison to say anything.
+ONE ENGINE SINCE STEP 14 (S14-05)
+
+The tab reads Postgres and nothing else — the goals included, whose read used
+to follow chain 7a on a branch of its own. Every call is compared with a
+literal (`tests/integration/golden/marketing.json`): DuckDB's answer on this
+fixture, from its own Gold of columns, recorded while this file still asserted
+Postgres answered the same from its Gold of rows (rule 9 of the step-14 plan).
+Postgres derives Silver and Gold from the seeded Bronze — `rebuild_gold`, the
+production path (`tests/integration/pg_tab_seed.py`) — and the store's DuckDB
+connection is a trap.
 
 Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
 """
@@ -27,10 +30,12 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
 
 from core.duckdb_constants import B2B_MANAGER_ID
 from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    call_key, comparable, derive, golden, seed, tab_in_postgres,
+)
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -39,7 +44,10 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Pinned (step 14, S14-05): the answers are literals taken from DuckDB on
+# this fixture, so the calendar under them cannot move with the run.
+TODAY = date(2026, 9, 15)
+NOW = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)   # midday Kyiv
 WINDOW = (TODAY - timedelta(days=25), TODAY)
 
 CATEGORIES = [(1, "Care", None), (2, "Serums", 1), (3, "Makeup", None)]
@@ -78,134 +86,47 @@ LINES = [
 GOALS = [("monthly", 5000000.00, True, 4800000.00, 1.10)]
 
 
-async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        conn.executemany("INSERT INTO categories (id,name,parent_id) VALUES (?,?,?)",
-                         CATEGORIES)
-        conn.executemany(
-            "INSERT INTO products (id,name,category_id,brand,sku,price)"
-            " VALUES (?,?,?,?,?,?)", PRODUCTS)
-        for oid, src, total, days, is_ret, manager, buyer in ORDERS:
-            conn.execute(
-                "INSERT INTO orders (id,source_id,status_id,grand_total,ordered_at,"
-                "buyer_id,manager_id) VALUES (?,?,?,?,?,?,?)",
-                [oid, src, 19 if is_ret else 1, total,
-                 now - timedelta(days=days), buyer, manager])
-        conn.executemany(
-            "INSERT INTO order_products (id,order_id,product_id,name,quantity,"
-            "price_sold) VALUES (?,?,?,?,?,?)",
-            [(lid, oid, pid, name, qty, price)
-             for lid, oid, pid, qty, price, name in LINES])
-        conn.executemany(
-            "INSERT INTO revenue_goals (period_type,goal_amount,is_custom,"
-            "calculated_goal,growth_factor) VALUES (?,?,?,?,?)", GOALS)
-    await store.refresh_warehouse_layers(trigger="manual")
-
-
-async def _seed_postgres(conn, store, pool):
-    for table in ("gold.daily_revenue", "silver.orders", "bronze.order_products",
-                  "bronze.products", "bronze.categories", "app.revenue_goals"):
-        await conn.execute(f"DELETE FROM {table}")
-
-    async with store.connection() as duck:
-        silver = duck.execute(
-            "SELECT id, source_id, status_id, grand_total, ordered_at, buyer_id,"
-            " manager_id, order_date, is_return, sales_type, is_active_source,"
-            " source_name, is_new_customer, buyer_first_order_date, promocode"
-            " FROM silver_orders ORDER BY id").fetchall()
-        lines = duck.execute(
-            "SELECT id, order_id, product_id, name, quantity, price_sold"
-            " FROM order_products ORDER BY id").fetchall()
-
-    await conn.executemany(
-        "INSERT INTO bronze.categories (id,name,parent_id) VALUES ($1,$2,$3)",
-        CATEGORIES)
-    await conn.executemany(
-        "INSERT INTO bronze.products (id,name,category_id,brand,sku,price)"
-        " VALUES ($1,$2,$3,$4,$5,$6)", PRODUCTS)
-    await conn.executemany(
-        "INSERT INTO bronze.order_products (id,order_id,product_id,name,quantity,"
-        "price_sold) VALUES ($1,$2,$3,$4,$5,$6)", [tuple(r) for r in lines])
-    await conn.executemany(
-        "INSERT INTO silver.orders (id,source_id,status_id,grand_total,ordered_at,"
-        "buyer_id,manager_id,order_date,is_return,sales_type,is_active_source,"
-        "source_name,is_new_customer,buyer_first_order_date,promocode)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-        [tuple(r) for r in silver])
+async def _populate(conn, pool):
+    await seed(
+        conn, categories=CATEGORIES, products=PRODUCTS,
+        orders=[(oid, src, 19 if is_ret else 1, total, NOW - timedelta(days=days),
+                 buyer, manager, None)
+                for oid, src, total, days, is_ret, manager, buyer in ORDERS],
+        lines=[(lid, oid, pid, name, qty, price)
+               for lid, oid, pid, qty, price, name in LINES])
+    await derive(pool)
     await conn.executemany(
         "INSERT INTO app.revenue_goals (period_type,goal_amount,is_custom,"
         "calculated_goal,growth_factor,updated_at) VALUES ($1,$2,$3,$4,$5,now())",
         GOALS)
 
-    # Derived, not copied: the production path, and the only way the two Gold
-    # shapes stay independent enough for the comparison to mean anything.
-    from core.pg_gold import rebuild_gold
-
-    with patch("core.pg.require_revision", new=AsyncMock()):
-        await rebuild_gold(pool=pool)
-
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
-    monkeypatch.setenv("KS_PG_DSN", DSN)
+async def in_postgres(tmp_path, monkeypatch):
+    """The tab's store, never connected: its DuckDB connection is a trap, so
+    an answer below can only be Postgres's."""
     store = DuckDBStore(db_path=tmp_path / "marketing.duckdb")
-    await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
-    try:
-        await _seed_duckdb(store)
-        async with pool.acquire() as conn:
-            await _seed_postgres(conn, store, pool)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            yield store
-    finally:
-        async with pool.acquire() as conn:
-            for table in ("gold.daily_revenue", "silver.orders",
-                          "bronze.order_products", "bronze.products",
-                          "bronze.categories", "app.revenue_goals"):
-                await conn.execute(f"DELETE FROM {table}")
-        await pool.close()
-        await store.close()
 
-
-async def _both(store, monkeypatch, name, kwargs):
-    """Each engine once — and the Postgres leg with DuckDB made fatal.
-
-    These tabs fall back to DuckDB when Postgres raises, so a comparison that
-    merely calls the method twice can pass while Postgres never answers: the
-    second call falls back and the two "engines" agree because they were the
-    same engine. `get_margin_trend` shipped that way — `strftime` is DuckDB's
-    alone — and the gate was green.
-    """
-    monkeypatch.delenv("KS_READ_MARKETING", raising=False)
-    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
-    duck = await getattr(store, name)(*WINDOW, **kwargs)
-    monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-    # A category filter resolves its tree through the filter bar's flag.
-    monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
     def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            f"{name} fell back to DuckDB — Postgres did not answer, so the "
-            f"comparison would have compared DuckDB with itself"
-        )
+        raise AssertionError("the marketing tab reached for DuckDB")
 
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres = await getattr(store, name)(*WINDOW, **kwargs)
-    monkeypatch.delenv("KS_READ_MARKETING", raising=False)
-    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
-    return duck, postgres
+    monkeypatch.setattr(type(store), "connection", _no_duckdb)
+    async with tab_in_postgres(DSN, monkeypatch, _populate):
+        yield store
 
 
-def _comparable(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, dict):
-        return {k: _comparable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_comparable(v) for v in value]
-    if hasattr(value, "as_tuple") or isinstance(value, float):
-        return round(float(value), 6)
-    return value
+async def _answer(store, name, kwargs):
+    return await getattr(store, name)(*WINDOW, **kwargs)
+
+
+GOLDEN = golden("marketing")
+
+
+def _the_month():
+    from calendar import monthrange
+
+    return TODAY.replace(day=1), TODAY.replace(
+        day=monthrange(TODAY.year, TODAY.month)[1])
 
 
 CALLS = (
@@ -226,80 +147,67 @@ CALLS = (
     "name,kwargs", CALLS,
     ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
 )
-async def test_both_engines_return_the_same_answer(
-    both_engines, monkeypatch, name, kwargs,
-):
-    duck, postgres = await _both(both_engines, monkeypatch, name, kwargs)
-    assert _comparable(postgres) == _comparable(duck)
+async def test_postgres_answers_what_duckdb_answered(in_postgres, name, kwargs):
+    assert comparable(await _answer(in_postgres, name, kwargs)) == \
+        GOLDEN[call_key(name, kwargs)]
+
+
+def test_every_literal_is_a_call_and_every_call_has_one():
+    assert set(GOLDEN) == {call_key(n, k) for n, k in CALLS}
 
 
 @pytest.mark.asyncio
-async def test_the_channel_split_agrees_across_two_shapes(both_engines, monkeypatch):
-    """Columns on one side, a `source_id` dimension on the other."""
-    duck, postgres = await _both(
-        both_engines, monkeypatch, "get_marketing_report_by_dates", {})
-    by_name = {s["source_name"]: s for s in duck["sources"]}
+async def test_the_channel_split_comes_from_the_source_dimension(in_postgres):
+    """A `source_id` dimension in Postgres, where DuckDB wrote a column per
+    channel: the literal above is DuckDB's answer from the columns."""
+    out = await _answer(in_postgres, "get_marketing_report_by_dates", {})
+    by_name = {s["source_name"]: s for s in out["sources"]}
     assert by_name["Instagram"]["revenue"] == 1200.0
     assert by_name["Telegram"]["revenue"] == 600.0
     assert by_name["Сайт"]["revenue"] == 900.0 + 850.0
-    assert duck["sources"] == postgres["sources"]
 
 
 @pytest.mark.asyncio
-async def test_a_buyer_on_two_channels_is_counted_once(both_engines, monkeypatch):
+async def test_a_buyer_on_two_channels_is_counted_once(in_postgres):
     """Buyer 7 bought on Instagram and Telegram the same day. Folding the
     per-source rows would count them twice — the reason the Postgres rendering
     reads `unique_customers` from the roll-up row only. This is the assertion
     that fails if that filter is ever dropped."""
-    duck, postgres = await _both(
-        both_engines, monkeypatch, "get_marketing_report_by_dates", {})
+    out = await _answer(in_postgres, "get_marketing_report_by_dates", {})
     retail_buyers = {o[6] for o in ORDERS
                      if not o[4] and o[5] is None and o[1] != 3}
-    assert duck["general_sales"]["current"]["customers"] == len(retail_buyers)
-    assert postgres["general_sales"]["current"]["customers"] == len(retail_buyers)
+    assert out["general_sales"]["current"]["customers"] == len(retail_buyers)
     # …and the naive fold would have been larger.
     assert len(retail_buyers) < len([o for o in ORDERS
                                      if not o[4] and o[5] is None and o[1] != 3])
 
 
 @pytest.mark.asyncio
-async def test_the_brand_table_reproduces_the_gold_grain(both_engines, monkeypatch):
+async def test_the_brand_table_reproduces_the_gold_grain(in_postgres):
     """One product twice on one order under two names-as-sold is two rows in
     `gold_daily_products`, and the report sums their `order_count`. The
     rewritten query must reproduce that, not improve on it."""
-    duck, postgres = await _both(
-        both_engines, monkeypatch, "get_marketing_report_by_dates", {})
-    brands = {b["brand"]: b for b in duck["brands"]}
+    out = await _answer(in_postgres, "get_marketing_report_by_dates", {})
+    brands = {b["brand"]: b for b in out["brands"]}
     assert set(brands) == {"BrandA", "BrandB", "Unknown"}, brands
     # Order 1 carries Serum twice under two names, so BrandA's summed
     # order_count is 2 for that day plus 1 for order 2 — not the 2 a plain
     # COUNT(DISTINCT order_id) would give.
     assert brands["BrandA"]["orders"] == 3, brands["BrandA"]
-    assert duck["brands"] == postgres["brands"]
 
 
 @pytest.mark.asyncio
-async def test_the_goal_comes_from_the_replica(both_engines, monkeypatch):
-    """A full calendar month is the only shape that shows it."""
-    store = both_engines
-    first = TODAY.replace(day=1)
-    from calendar import monthrange
-    last = TODAY.replace(day=monthrange(TODAY.year, TODAY.month)[1])
-
-    monkeypatch.delenv("KS_READ_MARKETING", raising=False)
-    duck = await store.get_marketing_report_by_dates(first, last)
-    monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-    postgres = await store.get_marketing_report_by_dates(first, last)
-    monkeypatch.delenv("KS_READ_MARKETING", raising=False)
-
-    assert duck["general_sales"]["monthly_goal"] == float(GOALS[0][1])
-    assert postgres["general_sales"]["monthly_goal"] == duck["general_sales"]["monthly_goal"]
+async def test_the_goal_is_read_where_it_is_written(in_postgres):
+    """A full calendar month is the only shape that shows it, and the goal is
+    `app.revenue_goals` — chain 7a's table, read on the router's one path."""
+    first, last = _the_month()
+    out = await in_postgres.get_marketing_report_by_dates(first, last)
+    assert out["general_sales"]["monthly_goal"] == float(GOALS[0][1])
 
 
 @pytest.mark.asyncio
-async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
-    report, _ = await _both(
-        both_engines, monkeypatch, "get_marketing_report_by_dates", {})
+async def test_the_fixture_is_not_empty(in_postgres):
+    report = await _answer(in_postgres, "get_marketing_report_by_dates", {})
     assert report["general_sales"]["current"]["revenue"] > 0
     assert report["brands"], "no brands"
     assert len(report["sources"]) == 3
@@ -308,49 +216,41 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_brand_narrows_every_section_to_its_lines(both_engines, monkeypatch):
+async def test_a_brand_narrows_every_section_to_its_lines(in_postgres):
     """BrandA is Serum: order 1 on Instagram (2×500 + 1×500 under a second
     name-as-sold) and order 2 on Telegram (1×500), both buyer 7 on one day.
     Revenue is the lines, never the baskets' ₴1 800 of grand totals."""
-    duck, postgres = await _both(
-        both_engines, monkeypatch, "get_marketing_report_by_dates",
-        {"brand": "BrandA"})
-    for report in (duck, postgres):
-        cur = report["general_sales"]["current"]
-        assert cur["revenue"] == 2000.0, cur
-        assert cur["orders"] == 2
-        # One buyer on one day: Gold's grain counts them once.
-        assert cur["customers"] == 1
-        assert [b["brand"] for b in report["brands"]] == ["BrandA"]
-        by_name = {s["source_name"]: s for s in report["sources"]}
-        assert by_name["Instagram"]["revenue"] == 1500.0
-        assert by_name["Telegram"]["revenue"] == 500.0
-        assert by_name["Сайт"]["revenue"] == 0
-        assert report["product_filter"] == {"category_id": None, "brand": "BrandA"}
+    report = await _answer(in_postgres, "get_marketing_report_by_dates",
+                           {"brand": "BrandA"})
+    cur = report["general_sales"]["current"]
+    assert cur["revenue"] == 2000.0, cur
+    assert cur["orders"] == 2
+    # One buyer on one day: Gold's grain counts them once.
+    assert cur["customers"] == 1
+    assert [b["brand"] for b in report["brands"]] == ["BrandA"]
+    by_name = {s["source_name"]: s for s in report["sources"]}
+    assert by_name["Instagram"]["revenue"] == 1500.0
+    assert by_name["Telegram"]["revenue"] == 500.0
+    assert by_name["Сайт"]["revenue"] == 0
+    assert report["product_filter"] == {"category_id": None, "brand": "BrandA"}
 
 
 @pytest.mark.asyncio
-async def test_a_parent_category_takes_its_children(both_engines, monkeypatch):
+async def test_a_parent_category_takes_its_children(in_postgres):
     """Serum hangs off Serums (2), a child of Care (1). Choosing Care and
     getting nothing is the empty result nobody debugs."""
-    duck, postgres = await _both(
-        both_engines, monkeypatch, "get_marketing_report_by_dates",
-        {"category_id": 1})
-    for report in (duck, postgres):
-        assert report["general_sales"]["current"]["revenue"] == 2000.0
-        assert [b["brand"] for b in report["brands"]] == ["BrandA"]
+    report = await _answer(in_postgres, "get_marketing_report_by_dates",
+                           {"category_id": 1})
+    assert report["general_sales"]["current"]["revenue"] == 2000.0
+    assert [b["brand"] for b in report["brands"]] == ["BrandA"]
 
 
 @pytest.mark.asyncio
-async def test_a_filtered_full_month_hides_the_shop_goal(both_engines, monkeypatch):
+async def test_a_filtered_full_month_hides_the_shop_goal(in_postgres):
     """The goal is the whole shop's; beside one brand it would read as that
     brand's target."""
-    store = both_engines
-    first = TODAY.replace(day=1)
-    from calendar import monthrange
-    last = TODAY.replace(day=monthrange(TODAY.year, TODAY.month)[1])
-    monkeypatch.delenv("KS_READ_MARKETING", raising=False)
-    report = await store.get_marketing_report_by_dates(first, last, brand="BrandA")
+    first, last = _the_month()
+    report = await in_postgres.get_marketing_report_by_dates(first, last, brand="BrandA")
     assert report["general_sales"]["monthly_goal"] is None
-    unfiltered = await store.get_marketing_report_by_dates(first, last)
+    unfiltered = await in_postgres.get_marketing_report_by_dates(first, last)
     assert unfiltered["product_filter"] is None

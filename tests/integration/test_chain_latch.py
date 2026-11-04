@@ -147,10 +147,14 @@ class TestChain8AfterTheFlagGoesBack:
         assert [r["id"] for r in await _expense_rows(pool)] == [typed["id"]]
 
     @pytest.mark.asyncio
-    async def test_the_shipper_stamps_the_disagreement_on_the_table(self, stores):
-        """An operator who flipped the variable back finds out from the store,
-        not from a number that stopped moving."""
+    async def test_the_flag_put_back_is_read_by_nothing(self, stores):
+        """Since step 14's S14-11 no flag is read: the copy stamps no
+        disagreement on the table (until then `chain_flag_mismatch` and
+        "owned by Postgres since …", so an operator who flipped the variable
+        back found out from the store), it ships nothing over it, and
+        `/api/health` publishes nothing of the flag."""
         from core.pg_operational import replicate_operational
+        from web.routes.api.health import _write_chains
 
         store, pool, env = stores
         env.setenv("KS_WRITE_EXPENSES", "postgres")
@@ -159,29 +163,15 @@ class TestChain8AfterTheFlagGoesBack:
 
         result = await replicate_operational(store)
 
-        assert result["chain_flag_mismatch"] == {
-            "pg_expenses_write": chain_latch.latched_at("pg_expenses_write")}
+        assert "chain_flag_mismatch" not in result
+        assert EXPENSES in result["stood_down"]
         async with pool.acquire() as conn:
             state = await conn.fetchrow(
-                "SELECT failures_since_ok, last_error, last_ok_at FROM meta.mirror_state "
+                "SELECT failures_since_ok, last_ok_at FROM meta.mirror_state "
                 "WHERE table_name = $1", EXPENSES)
-        assert state["failures_since_ok"] >= 1
-        assert "owned by Postgres since" in state["last_error"]
-        assert "chain_copy_back" in state["last_error"]
-        assert state["last_ok_at"] is None, "a stand-down must not look like a shipment"
-
-    @pytest.mark.asyncio
-    async def test_health_says_the_flag_and_the_latch_disagree(self, stores):
-        from web.routes.api.health import _write_chains
-
-        store, _pool, env = stores
-        env.setenv("KS_WRITE_EXPENSES", "postgres")
-        await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 4200)
-        env.setenv("KS_WRITE_EXPENSES", "duckdb")
-
-        block = _write_chains()["pg_expenses_write"]
-        assert block["mode"] == "postgres" and block["mismatch"] is True
-        assert block["latched_at"] == chain_latch.latched_at("pg_expenses_write")
+        assert state is None or (not state["failures_since_ok"]
+                                 and state["last_ok_at"] is None), dict(state or {})
+        assert _write_chains()["pg_expenses_write"] == {}
 
 
 class TestChain1AfterTheFlagGoesBack:
@@ -248,8 +238,7 @@ class TestChain1AfterTheFlagGoesBack:
         result = await replicate_operational(store)
         assert "error" not in result, result
         assert set(CHAIN_TABLES) <= set(result["stood_down"])
-        assert result["chain_flag_mismatch"] == {
-            "pg_inventory_write": chain_latch.latched_at("pg_inventory_write")}
+        assert "chain_flag_mismatch" not in result      # no flag read since S14-11
 
 
 class TestWhenTheFirstWriteFails:
@@ -345,6 +334,9 @@ class TestWhenTheFirstWriteFails:
                 "WHERE table_name = $1", EXPENSES)
         assert state["failures_since_ok"] >= 1
         assert "no local marker" in state["last_error"]
+        from core.rollback_lever import ROLLBACK_LEVER
+
+        assert ROLLBACK_LEVER in state["last_error"]
 
     @pytest.mark.asyncio
     async def test_the_comparison_stands_down_on_it_too(self, stores):

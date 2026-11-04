@@ -9,54 +9,31 @@ The repair used to live inside the reconciliation job, which failed 57 runs out
 of 68 and died at ~120 s before reaching it. Nothing about this scan needs the
 comparison, or its 90-day window; most of these orders are older than it.
 """
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
 from core.scheduler import BackgroundScheduler
+from tests.pg_orders_seed import insert_orders, needs_pg, pg_orders  # noqa: F401 — the fixture
+
+# Proved on Postgres since step 14's S14-09, which deleted the DuckDB
+# selection these tests used to pin: `find_halfwritten_orders` and
+# `halfwritten_among` are `pg_orders_read`'s, and the misses chain 3's
+# (`tests/pg_orders_seed.py`).
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. The
-    half-written selection's and repair's semantics are pinned here on
-    DuckDB's implementation; S14-09 decides what of this to carry to the
-    Postgres one. So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+async def _line_item(pool, oid: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.order_products (id, order_id, product_id, name, "
+            "quantity, price_sold) VALUES ($1, $2, 1, 'x', 1, 100.0)", oid * 1000, oid)
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    return store
-
-
-def _insert_order(conn, oid: int, grand_total: str = "1000.00"):
-    conn.execute(
-        """
-        INSERT INTO orders (
-            id, source_id, status_id, grand_total, ordered_at, created_at,
-            updated_at, buyer_id, manager_id, manager_comment, promocode
-        ) VALUES (?, 4, 1, ?, ?, ?, ?, 10, NULL, NULL, NULL)
-        """,
-        [oid, grand_total] + ["2026-08-01T10:00:00+03:00"] * 3,
-    )
-
-
-def _insert_line_item(conn, oid: int):
-    conn.execute(
-        "INSERT INTO order_products (id, order_id, product_id, name, quantity, "
-        "price_sold) VALUES (?, ?, 1, 'x', 1, 100.0)",
-        [oid * 1000, oid],
-    )
+async def _recorded(pool):
+    async with pool.acquire() as conn:
+        return [r["order_id"] for r in await conn.fetch(
+            "SELECT order_id FROM app.order_backfill_misses ORDER BY order_id")]
 
 
 @pytest.fixture
@@ -77,126 +54,98 @@ def _wire(monkeypatch, store, repair_mock):
     monkeypatch.setattr("core.sync_service.get_sync_service", _get_sync_service)
 
 
+@needs_pg
 class TestHalfWrittenRepair:
     @pytest.mark.asyncio
     async def test_only_orders_missing_line_items_are_fetched(
-        self, tmp_path, monkeypatch, scheduler,
+        self, pg_orders, monkeypatch, scheduler,
     ):
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert_order(conn, 1, "5000.00")     # empty, biggest
-                _insert_order(conn, 2, "900.00")      # empty
-                _insert_order(conn, 3, "7000.00")     # complete
-                _insert_line_item(conn, 3)
-                _insert_order(conn, 4, "0.00")        # no revenue → not our problem
+        store, pool = pg_orders
+        await insert_orders(pool, 1, total=5000.0)            # empty, biggest
+        await insert_orders(pool, 2, total=900.0)             # empty
+        await insert_orders(pool, 3, total=7000.0, lines=1)   # complete
+        await insert_orders(pool, 4, total=0.0)               # no revenue → not our problem
 
-            repair = AsyncMock(return_value={"repaired": 2, "failed": 0})
-            _wire(monkeypatch, store, repair)
+        repair = AsyncMock(return_value={"repaired": 2, "failed": 0})
+        _wire(monkeypatch, store, repair)
 
-            out = await scheduler._run_halfwritten_repair()
+        out = await scheduler._run_halfwritten_repair()
 
-            assert repair.await_args.args[0] == [1, 2], "biggest money first"
-            assert out["candidates"] == 2
-        finally:
-            await store.close()
+        assert repair.await_args.args[0] == [1, 2], "biggest money first"
+        assert out["candidates"] == 2
 
     @pytest.mark.asyncio
     async def test_an_order_keycrm_serves_empty_is_not_asked_again(
-        self, tmp_path, monkeypatch, scheduler,
+        self, pg_orders, monkeypatch, scheduler,
     ):
         """Otherwise the same 200 ids burn 200 API calls every two hours,
         forever — and 429s are what started this whole investigation."""
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert_order(conn, 1)
-                _insert_order(conn, 2)
+        store, pool = pg_orders
+        await insert_orders(pool, 1, 2, total=1000.0)
 
-            # The repair "succeeds" but the orders come back with no line items.
-            repair = AsyncMock(return_value={"repaired": 2, "failed": 0})
-            _wire(monkeypatch, store, repair)
+        # The repair "succeeds" but the orders come back with no line items.
+        repair = AsyncMock(return_value={"repaired": 2, "failed": 0})
+        _wire(monkeypatch, store, repair)
 
-            first = await scheduler._run_halfwritten_repair()
-            assert first["still_empty"] == 2
+        first = await scheduler._run_halfwritten_repair()
+        assert first["still_empty"] == 2
 
-            second = await scheduler._run_halfwritten_repair()
-            assert second["candidates"] == 0
-            assert repair.await_count == 1, "asked KeyCRM twice about the same ids"
-        finally:
-            await store.close()
+        second = await scheduler._run_halfwritten_repair()
+        assert second["candidates"] == 0
+        assert repair.await_count == 1, "asked KeyCRM twice about the same ids"
 
     @pytest.mark.asyncio
     async def test_a_repaired_order_is_not_recorded_as_a_miss(
-        self, tmp_path, monkeypatch, scheduler,
+        self, pg_orders, monkeypatch, scheduler,
     ):
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert_order(conn, 1)
-                _insert_order(conn, 2)
+        store, pool = pg_orders
+        await insert_orders(pool, 1, 2, total=1000.0)
 
-            async def repair_and_fill(ids, **kwargs):
-                async with store.connection() as conn:
-                    _insert_line_item(conn, 1)
-                return {"repaired": 1, "failed": 0}
+        async def repair_and_fill(ids, **kwargs):
+            await _line_item(pool, 1)
+            return {"repaired": 1, "failed": 0}
 
-            _wire(monkeypatch, store, repair_and_fill)
+        _wire(monkeypatch, store, repair_and_fill)
 
-            out = await scheduler._run_halfwritten_repair()
+        out = await scheduler._run_halfwritten_repair()
 
-            assert out["still_empty"] == 1  # only order 2
-            async with store.connection() as conn:
-                recorded = [r[0] for r in conn.execute(
-                    "SELECT order_id FROM order_backfill_misses"
-                ).fetchall()]
-            assert recorded == [2]
-        finally:
-            await store.close()
+        assert out["still_empty"] == 1  # only order 2
+        assert await _recorded(pool) == [2]
 
     @pytest.mark.asyncio
     async def test_a_stale_record_comes_back_up_for_another_try(
-        self, tmp_path, monkeypatch, scheduler,
+        self, pg_orders, monkeypatch, scheduler,
     ):
         """Line items someone fixes upstream must not be invisible forever."""
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert_order(conn, 1)
-                conn.execute(
-                    "INSERT INTO order_backfill_misses (order_id, checked_at, reason) "
-                    "VALUES (1, ?, 'old attempt')",
-                    [datetime.now(timezone.utc) - timedelta(days=31)],
-                )
+        store, pool = pg_orders
+        await insert_orders(pool, 1, total=1000.0)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app.order_backfill_misses (order_id, checked_at, reason) "
+                "VALUES (1, $1, 'old attempt')",
+                datetime.now(timezone.utc) - timedelta(days=31))
 
-            repair = AsyncMock(return_value={"repaired": 0, "failed": 0})
-            _wire(monkeypatch, store, repair)
+        repair = AsyncMock(return_value={"repaired": 0, "failed": 0})
+        _wire(monkeypatch, store, repair)
 
-            out = await scheduler._run_halfwritten_repair()
+        out = await scheduler._run_halfwritten_repair()
 
-            assert out["candidates"] == 1
-        finally:
-            await store.close()
+        assert out["candidates"] == 1
 
     @pytest.mark.asyncio
     async def test_an_idle_run_costs_no_api_calls(
-        self, tmp_path, monkeypatch, scheduler,
+        self, pg_orders, monkeypatch, scheduler,
     ):
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert_order(conn, 1)
-                _insert_line_item(conn, 1)
+        store, pool = pg_orders
+        await insert_orders(pool, 1, total=1000.0, lines=1)
 
-            repair = AsyncMock(return_value={"repaired": 0, "failed": 0})
-            _wire(monkeypatch, store, repair)
+        repair = AsyncMock(return_value={"repaired": 0, "failed": 0})
+        _wire(monkeypatch, store, repair)
 
-            out = await scheduler._run_halfwritten_repair()
+        out = await scheduler._run_halfwritten_repair()
 
-            assert out == {"candidates": 0, "repaired": 0, "still_empty": 0}
-            repair.assert_not_awaited()
-        finally:
-            await store.close()
+        assert out == {"candidates": 0, "repaired": 0, "still_empty": 0}
+        repair.assert_not_awaited()
 
 
 class TestReconciliationNoLongerCarriesIt:

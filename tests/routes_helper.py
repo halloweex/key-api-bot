@@ -137,6 +137,22 @@ def route_dependencies(app: Any, path: str, method: Optional[str] = None) -> Tup
     return found.dependencies if found else ()
 
 
+def query_param_names(endpoint: Endpoint) -> frozenset:
+    """Every query parameter an endpoint declares, its sub-dependencies'
+    included — what `fastapi.dependencies.utils.get_flat_dependant` gave,
+    which fastapi 0.141 no longer exports. The alias, as a request names it."""
+    names = set()
+
+    def walk(node) -> None:
+        for param in getattr(node, "query_params", ()) or ():
+            names.add(getattr(param, "alias", None) or param.name)
+        for dep in getattr(node, "dependencies", ()) or ():
+            walk(dep)
+
+    walk(getattr(endpoint.route, "dependant", None))
+    return frozenset(names)
+
+
 def is_required(param: Any) -> bool:
     """Whether a route parameter (a `dependant.query_params` entry) must be
     sent. `ModelField.required` is gone in fastapi 0.141; the pydantic

@@ -1,11 +1,12 @@
-"""Chain 4's switch: what `KS_WRITE_BUYERS` decides, and what it cannot.
+"""Chain 4: its shape, and what is refused before the latch.
 
 The writers themselves are exercised against a live Postgres in
 `tests/integration/test_buyers_chain_writer.py` and, for the latch, in
-`tests/integration/test_latch_waits_for_a_connection.py`. This file pins the
-decision every consumer reads — since step 14's S14-00 a constant, Postgres,
-whatever the flag, the latch or the readers say — and what is refused before
-the latch.
+`tests/integration/test_latch_waits_for_a_connection.py`. Until step 14's
+S14-11 this file also pinned the decision every consumer read (`mode()`,
+`writes_postgres()`), a constant since S14-00; S14-11 deleted it with
+`KS_WRITE_BUYERS`, and `tests/unit/test_write_flags_are_not_read.py` holds
+that nothing reads the flag.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from core import chain_latch, pg_buyers_write as chain, write_chains
+from core import chain_latch, pg_buyers_write as chain
 from core import pg_chain_invariants as inv
 
 @pytest.fixture
@@ -23,10 +24,6 @@ def flags(monkeypatch):
     """No flag of this chain's, so a test moves exactly what it means to."""
     monkeypatch.delenv(chain.WRITE_ENV, raising=False)
     return monkeypatch
-
-
-def _mode() -> str:
-    return write_chains.chain_modes()[chain.CHAIN]["mode"]
 
 
 class TestTheShape:
@@ -66,26 +63,6 @@ class TestTheShape:
         assert "gender IN ('f', 'm')" in text and GENDERS == ("f", "m")
         assert ("confidence IN ('certain', 'high', 'medium')" in text
                 and CONFIDENCE_LADDER == ("certain", "high", "medium"))
-
-
-class TestTheConstant:
-    """Since step 14's S14-00 the chain writes Postgres whatever its flag, its
-    latch or the buyers' readers say — production's answer on 2026-10-21. The
-    tests of the flag, the latch outranking it and the readers' precondition
-    went with that routing."""
-
-    @pytest.mark.parametrize("write", [None, "duckdb", "postgres", "postgre"])
-    @pytest.mark.parametrize("latched", [False, True])
-    def test_postgres_in_every_state(self, flags, write, latched):
-        if write is not None:
-            flags.setenv(chain.WRITE_ENV, write)
-        flags.setenv("KS_SMS_STORE", "duckdb")
-        if latched:
-            chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.writes_postgres() is True
-        assert chain.mode() == "postgres" == _mode()
-        assert chain.unmet_precondition() is None
-        assert not hasattr(chain, "READERS")
 
 
 def _row(**kw):
@@ -228,7 +205,7 @@ class TestTheHealthBlockCarriesAClockThatSurvivesARestart:
         from core import pg_buyer_sync_read
         from web.routes.api import health
 
-        flags.setenv(chain.WRITE_ENV, "postgres")
+        flags.setenv(chain.WRITE_ENV, "junk-s14-11")    # read by nothing
         monkeypatch.setattr(health, "_buyer_sync", lambda: {"last_ok_age_s": 60})
         monkeypatch.setattr(health, "_buyer_watermark_cache", {"age": None, "expires_at": 0.0})
         monkeypatch.setattr(pg_buyer_sync_read, "watermark_age_s", AsyncMock(return_value=12_000))
@@ -264,9 +241,9 @@ class TestTheHealthBlockCarriesAClockThatSurvivesARestart:
 
 
 class TestTheHourlyRiderDerivesWhereTheChainWrites:
-    """`_run_replicate_operational` chooses the derivation by `mode()`. The
-    structural test in test_gender.py sees both calls in the source; this
-    runs them, so swapping the two branches fails (review of PR-3)."""
+    """`_run_replicate_operational` derives in Postgres, always: until step
+    14's S14-11 it chose by `mode()`, and DuckDB's `derive_gender` went with
+    the flag. This runs it (review of PR-3)."""
 
     async def _run(self):
         from unittest.mock import AsyncMock, patch
@@ -274,25 +251,24 @@ class TestTheHourlyRiderDerivesWhereTheChainWrites:
         from core.scheduler import BackgroundScheduler
 
         store = object()
-        duck = AsyncMock(return_value={"written": 0})
         pg = AsyncMock(return_value={"written": 0})
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
-             patch("core.gender_backfill.derive_gender", new=duck), \
              patch("core.pg_buyers_write.derive_gender_pg", new=pg), \
              patch("core.pg_operational.replicate_operational",
                    new=AsyncMock(return_value={})), \
              patch("core.pg_bot_state.replicate_bot_state",
                    new=AsyncMock(return_value={})):
             await BackgroundScheduler()._run_replicate_operational()
-        return store, duck, pg
+        return store, pg
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("write", [None, "duckdb", "postgres"])
+    @pytest.mark.parametrize("write", [None, "duckdb", "postgres", "junk-s14-11"])
     async def test_it_derives_in_postgres_whatever_the_flag(self, flags, write):
-        """Since S14-00 the chain is Postgres, a constant: the rider never
-        derives in DuckDB any more."""
+        """The chain is Postgres, a constant: the rider calls
+        `derive_gender_pg` every tick, or new buyers' verdicts stop.
+        Mutation: route by the flag, or skip the call on a value nobody can
+        read."""
         if write is not None:
             flags.setenv(chain.WRITE_ENV, write)
-        _store, duck, pg = await self._run()
+        _store, pg = await self._run()
         pg.assert_awaited_once_with()
-        duck.assert_not_awaited()

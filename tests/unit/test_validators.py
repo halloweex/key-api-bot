@@ -12,6 +12,9 @@ from core.validators import (
     validate_brand_name,
     validate_category_id,
     validate_period,
+    validate_db_int,
+    INT32_MAX,
+    INT64_MAX,
 )
 from core.exceptions import ValidationError
 
@@ -235,3 +238,29 @@ class TestValidateCategoryId:
         """Negative should raise ValidationError."""
         with pytest.raises(ValidationError):
             validate_category_id(-1)
+
+    def test_past_the_integer_column_invalid(self):
+        """bronze.categories.id is an integer: one past it is refused, not
+        handed to the driver."""
+        assert validate_category_id(INT32_MAX) == INT32_MAX
+        with pytest.raises(ValidationError, match="category_id: Must be at most 2147483647"):
+            validate_category_id(INT32_MAX + 1)
+
+
+class TestValidateDbInt:
+    """Tests for validate_db_int function."""
+
+    @pytest.mark.parametrize("bits, high", [(32, INT32_MAX), (64, INT64_MAX)])
+    def test_the_column_width_is_the_bound(self, bits, high):
+        """Both ends of the column fit; one past either end is refused."""
+        assert validate_db_int(high, "x", bits=bits) == high
+        assert validate_db_int(-high - 1, "x", bits=bits) == -high - 1
+        for outside in (high + 1, -high - 2):
+            with pytest.raises(ValidationError, match="x: Must be between"):
+                validate_db_int(outside, "x", bits=bits)
+
+    def test_none_allowed_only_when_asked(self):
+        """None passes by default and is refused when the value is required."""
+        assert validate_db_int(None, "x") is None
+        with pytest.raises(ValidationError, match="x: Is required"):
+            validate_db_int(None, "x", allow_none=False)

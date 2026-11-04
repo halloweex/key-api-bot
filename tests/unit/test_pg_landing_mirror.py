@@ -118,12 +118,16 @@ class TestFailuresAreVisible:
 
 
 class TestTheSyncCallsIt:
-    def test_all_three_catalogue_sites_mirror(self):
+    def test_both_catalogue_sites_mirror(self):
+        """The full sync's two. The hourly incremental's DuckDB products path
+        mirrored too, until step 14's S14-09 deleted it: chain 6's products
+        step ships nothing out of DuckDB (`_mirror` stands down for the
+        catalogue in any case)."""
         import inspect
         from core import sync_service
 
         src = inspect.getsource(sync_service)
         assert src.count("await mirror_categories(") == 1
-        assert src.count("await mirror_products(") == 2, (
-            "full sync and the hourly incremental both write products"
+        assert src.count("await mirror_products(") == 1, (
+            "full sync writes products and mirrors them"
         )

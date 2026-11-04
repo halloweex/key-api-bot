@@ -1,36 +1,37 @@
 """Tests for get_sms_segments: tier assignment, eligibility filters, holdout split.
 
-Builds a small DuckDB instance, writes `silver_orders` + `buyers` directly so
-recency/frequency/LTV are exact, then asserts the segmentation output.
+Writes Silver's orders and the buyers directly into Postgres, the store `/sms`
+reads (`tests/integration/pg_sms_seed.py`), so recency/frequency/LTV are
+exact, then asserts the segmentation output. These ran on DuckDB until step
+14's S14-08 took the DuckDB branch of the audience away; the assertions are
+the ones they always were. Skipped without `KS_PG_DSN`.
 """
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import insert, needs_postgres, order_row, pg_conn
+
+pytestmark = needs_postgres
 
 
-@pytest.fixture(autouse=True)
-def _sms_on_duckdb(monkeypatch):
-    """This module's engine is DuckDB, as it was before step 14's S14-00 made
-    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(monkeypatch):
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        yield
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    return store
+    return pg_sms_seed.store(tmp_path, "test.duckdb")
 
 
-def _add_buyer(conn, buyer_id: int, phone: str | None, name: str = "Buyer") -> None:
-    conn.execute(
-        "INSERT INTO buyers (id, full_name, phone, city) VALUES (?, ?, ?, ?)",
-        [buyer_id, f"{name} {buyer_id}", phone, "Kyiv"],
-    )
+async def _add_buyer(conn, buyer_id: int, phone: str | None, name: str = "Buyer") -> None:
+    await insert(conn, "bronze.buyers", [dict(
+        id=buyer_id, full_name=f"{name} {buyer_id}", phone=phone, city="Kyiv")])
 
 
 # Two catalogue products: one at 40% margin, one at 80%. Costs live in
@@ -40,22 +41,20 @@ PRODUCT_HIGH_MARGIN = 102  # sells 1000, costs 200
 PRODUCT_NO_COST = 103      # no cost on file
 
 
-def _seed_catalogue(conn) -> None:
-    for pid, sku in (
-        (PRODUCT_LOW_MARGIN, "SKU-LOW"),
-        (PRODUCT_HIGH_MARGIN, "SKU-HIGH"),
-        (PRODUCT_NO_COST, "SKU-NOCOST"),
-    ):
-        conn.execute(
-            "INSERT INTO products (id, name, sku, price) VALUES (?, ?, ?, 1000)",
-            [pid, f"Product {pid}", sku],
+async def _seed_catalogue(conn) -> None:
+    await insert(conn, "bronze.products", [
+        dict(id=pid, name=f"Product {pid}", sku=sku, price=1000)
+        for pid, sku in (
+            (PRODUCT_LOW_MARGIN, "SKU-LOW"),
+            (PRODUCT_HIGH_MARGIN, "SKU-HIGH"),
+            (PRODUCT_NO_COST, "SKU-NOCOST"),
         )
-    for offer_id, (sku, cost) in enumerate((("SKU-LOW", 600), ("SKU-HIGH", 200)), start=1):
-        conn.execute(
-            "INSERT INTO offer_stocks (id, sku, price, purchased_price, quantity)"
-            " VALUES (?, ?, 1000, ?, 10)",
-            [offer_id, sku, cost],
-        )
+    ])
+    await insert(conn, "bronze.offer_stocks", [
+        dict(id=offer_id, sku=sku, price=1000, purchased_price=cost, quantity=10)
+        for offer_id, (sku, cost) in enumerate(
+            (("SKU-LOW", 600), ("SKU-HIGH", 200)), start=1)
+    ])
 
 
 def _today() -> date:
@@ -77,7 +76,7 @@ def _today() -> date:
     return datetime.now(ZoneInfo("Europe/Kyiv")).date()
 
 
-def _add_order(
+async def _add_order(
     conn,
     *,
     oid: int,
@@ -97,69 +96,58 @@ def _add_order(
     a higher value to model an order-level discount.
     """
     order_date = _today() - timedelta(days=days_ago)
-    conn.execute(
-        """
-        INSERT INTO silver_orders (
-            id, source_id, status_id, grand_total, ordered_at, buyer_id,
-            manager_id, order_date, is_return, sales_type, is_active_source,
-            source_name, is_new_customer
-        ) VALUES (?, 4, 1, ?, ?, ?, NULL, ?, ?, ?, ?, 'Shopify', FALSE)
-        """,
-        [oid, total, order_date, buyer_id, order_date, is_return, sales_type,
-         is_active_source],
-    )
-    conn.execute(
-        """
-        INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        [oid, oid, product_id, f"Product {product_id}", quantity,
-         line_price if line_price is not None else total],
-    )
+    await insert(conn, "silver.orders", [order_row(
+        oid=oid, buyer_id=buyer_id, day=order_date, total=total,
+        is_return=is_return, sales_type=sales_type,
+        is_active_source=is_active_source)])
+    await insert(conn, "bronze.order_products", [dict(
+        id=oid, order_id=oid, product_id=product_id, name=f"Product {product_id}",
+        quantity=quantity,
+        price_sold=line_price if line_price is not None else total)])
 
 
 async def _seed(store: DuckDBStore) -> None:
     """Seed one buyer per intended outcome."""
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
         # 1 — VIP: LTV 30k, well inside the window
-        _add_buyer(conn, 1, "+38 (096) 111-11-11")
+        await _add_buyer(conn, 1, "+38 (096) 111-11-11")
         for i in range(3):
-            _add_order(conn, oid=100 + i, buyer_id=1, days_ago=10 + i, total="10000.00")
+            await _add_order(conn, oid=100 + i, buyer_id=1, days_ago=10 + i, total="10000.00")
 
         # 2 — CORE by order count: 2 orders, small LTV
-        _add_buyer(conn, 2, "380962222222")
-        _add_order(conn, oid=200, buyer_id=2, days_ago=20, total="500.00")
-        _add_order(conn, oid=201, buyer_id=2, days_ago=40, total="500.00")
+        await _add_buyer(conn, 2, "380962222222")
+        await _add_order(conn, oid=200, buyer_id=2, days_ago=20, total="500.00")
+        await _add_order(conn, oid=201, buyer_id=2, days_ago=40, total="500.00")
 
         # 3 — CORE by LTV: single big order
-        _add_buyer(conn, 3, "380963333333")
-        _add_order(conn, oid=300, buyer_id=3, days_ago=30, total="6000.00")
+        await _add_buyer(conn, 3, "380963333333")
+        await _add_order(conn, oid=300, buyer_id=3, days_ago=30, total="6000.00")
 
         # 4 — REACTIVATION: one order, inside the reactivation window
-        _add_buyer(conn, 4, "380964444444")
-        _add_order(conn, oid=400, buyer_id=4, days_ago=60, total="1000.00")
+        await _add_buyer(conn, 4, "380964444444")
+        await _add_order(conn, oid=400, buyer_id=4, days_ago=60, total="1000.00")
 
         # 5 — dropped: one order, past the reactivation window but inside overall
-        _add_buyer(conn, 5, "380965555555")
-        _add_order(conn, oid=500, buyer_id=5, days_ago=200, total="1000.00")
+        await _add_buyer(conn, 5, "380965555555")
+        await _add_order(conn, oid=500, buyer_id=5, days_ago=200, total="1000.00")
 
         # 6 — dropped: repeat buyer, but past max_recency_days
-        _add_buyer(conn, 6, "380966666666")
-        _add_order(conn, oid=600, buyer_id=6, days_ago=400, total="1000.00")
-        _add_order(conn, oid=601, buyer_id=6, days_ago=420, total="1000.00")
+        await _add_buyer(conn, 6, "380966666666")
+        await _add_order(conn, oid=600, buyer_id=6, days_ago=400, total="1000.00")
+        await _add_order(conn, oid=601, buyer_id=6, days_ago=420, total="1000.00")
 
         # 7 — dropped: no phone
-        _add_buyer(conn, 7, None)
-        _add_order(conn, oid=700, buyer_id=7, days_ago=10, total="9000.00")
+        await _add_buyer(conn, 7, None)
+        await _add_order(conn, oid=700, buyer_id=7, days_ago=10, total="9000.00")
 
         # 8 — dropped: unusable phone fragment
-        _add_buyer(conn, 8, "0966")
-        _add_order(conn, oid=800, buyer_id=8, days_ago=10, total="9000.00")
+        await _add_buyer(conn, 8, "0966")
+        await _add_order(conn, oid=800, buyer_id=8, days_ago=10, total="9000.00")
 
         # 9 — dropped: b2b, not retail
-        _add_buyer(conn, 9, "380969999999")
-        _add_order(conn, oid=900, buyer_id=9, days_ago=10, total="9000.00", sales_type="b2b")
+        await _add_buyer(conn, 9, "380969999999")
+        await _add_order(conn, oid=900, buyer_id=9, days_ago=10, total="9000.00", sales_type="b2b")
 
 
 def _by_id(result: dict) -> dict:
@@ -203,16 +191,16 @@ async def test_deprecated_sources_excluded(tmp_path):
     or recency, or a long-dead customer can be scored as active.
     """
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="6000.00",
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="6000.00",
                    is_active_source=False)
-        _add_order(conn, oid=2, buyer_id=1, days_ago=30, total="1000.00")
+        await _add_order(conn, oid=2, buyer_id=1, days_ago=30, total="1000.00")
 
         # Only ever bought through a retired source — not a contactable customer
-        _add_buyer(conn, 2, "380962222222")
-        _add_order(conn, oid=3, buyer_id=2, days_ago=10, total="9000.00",
+        await _add_buyer(conn, 2, "380962222222")
+        await _add_order(conn, oid=3, buyer_id=2, days_ago=10, total="9000.00",
                    is_active_source=False)
 
     result = await store.get_sms_segments(include_customers=True, holdout_pct=0)
@@ -229,11 +217,11 @@ async def test_deprecated_sources_excluded(tmp_path):
 @pytest.mark.asyncio
 async def test_returns_excluded_from_ltv(tmp_path):
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="6000.00")
-        _add_order(conn, oid=2, buyer_id=1, days_ago=5, total="5000.00", is_return=True)
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="6000.00")
+        await _add_order(conn, oid=2, buyer_id=1, days_ago=5, total="5000.00", is_return=True)
 
     result = await store.get_sms_segments(include_customers=True, holdout_pct=0)
     customer = _by_id(result)[1]
@@ -248,13 +236,13 @@ async def test_returns_excluded_from_ltv(tmp_path):
 @pytest.mark.asyncio
 async def test_duplicate_phones_collapse_to_highest_ltv(tmp_path):
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="1000.00")
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="1000.00")
         # Same household/number under a second buyer record
-        _add_buyer(conn, 2, "+380961111111")
-        _add_order(conn, oid=2, buyer_id=2, days_ago=10, total="8000.00")
+        await _add_buyer(conn, 2, "+380961111111")
+        await _add_order(conn, oid=2, buyer_id=2, days_ago=10, total="8000.00")
 
     result = await store.get_sms_segments(include_customers=True, holdout_pct=0)
 
@@ -267,11 +255,11 @@ async def test_duplicate_phones_collapse_to_highest_ltv(tmp_path):
 @pytest.mark.asyncio
 async def test_holdout_is_deterministic_per_campaign(tmp_path):
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
         for i in range(1, 301):
-            _add_buyer(conn, i, f"3809{i:08d}")
-            _add_order(conn, oid=i, buyer_id=i, days_ago=10, total="6000.00")
+            await _add_buyer(conn, i, f"3809{i:08d}")
+            await _add_order(conn, oid=i, buyer_id=i, days_ago=10, total="6000.00")
 
     first = await store.get_sms_segments(
         include_customers=True, holdout_pct=20, campaign="aug-promo",
@@ -299,11 +287,11 @@ async def test_holdout_is_deterministic_per_campaign(tmp_path):
 @pytest.mark.asyncio
 async def test_holdout_zero_targets_everyone(tmp_path):
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
         for i in range(1, 51):
-            _add_buyer(conn, i, f"3809{i:08d}")
-            _add_order(conn, oid=i, buyer_id=i, days_ago=10, total="6000.00")
+            await _add_buyer(conn, i, f"3809{i:08d}")
+            await _add_order(conn, oid=i, buyer_id=i, days_ago=10, total="6000.00")
 
     result = await store.get_sms_segments(holdout_pct=0)
 
@@ -362,10 +350,10 @@ async def test_funnel_accounts_for_every_dropped_customer(tmp_path):
 async def test_funnel_survives_an_empty_segmentation(tmp_path):
     """Nothing eligible is exactly when the funnel has to explain itself."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=500, total="1000.00")
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=500, total="1000.00")
 
     result = await store.get_sms_segments()
 
@@ -440,12 +428,12 @@ async def test_limit_truncates_rows_but_not_summary(tmp_path):
 async def test_last_order_is_the_most_recent_one(tmp_path):
     """The message is written around what they bought last, not first."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=10, buyer_id=1, days_ago=90, total="1000.00",
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=10, buyer_id=1, days_ago=90, total="1000.00",
                    product_id=PRODUCT_LOW_MARGIN)
-        _add_order(conn, oid=11, buyer_id=1, days_ago=15, total="4000.00",
+        await _add_order(conn, oid=11, buyer_id=1, days_ago=15, total="4000.00",
                    product_id=PRODUCT_HIGH_MARGIN, quantity=4, line_price="1000.00")
 
     customer = _by_id(await store.get_sms_segments(
@@ -465,23 +453,19 @@ async def test_last_order_is_the_most_recent_one(tmp_path):
 async def test_last_order_lists_items_and_counts_the_rest(tmp_path):
     """Three names at most; anything beyond is summarised, not dropped silently."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
         # Five extra catalogue lines so the last order has 5 items
-        for pid in range(201, 206):
-            conn.execute(
-                "INSERT INTO products (id, name, sku, price) VALUES (?, ?, ?, 1000)",
-                [pid, f"Item {pid}", f"SKU-{pid}"],
-            )
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="5000.00",
+        await insert(conn, "bronze.products", [
+            dict(id=pid, name=f"Item {pid}", sku=f"SKU-{pid}", price=1000)
+            for pid in range(201, 206)])
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="5000.00",
                    product_id=201, quantity=5, line_price="1000.00")
-        for i, pid in enumerate(range(202, 206), start=1):
-            conn.execute(
-                "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
-                " price_sold) VALUES (?, 1, ?, ?, ?, 0)",
-                [100 + i, pid, f"Item {pid}", 5 - i],
-            )
+        await insert(conn, "bronze.order_products", [
+            dict(id=100 + i, order_id=1, product_id=pid, name=f"Item {pid}",
+                 quantity=5 - i, price_sold=0)
+            for i, pid in enumerate(range(202, 206), start=1)])
 
     customer = _by_id(await store.get_sms_segments(
         include_customers=True, holdout_pct=0,
@@ -501,15 +485,14 @@ async def test_long_product_names_are_truncated(tmp_path):
     """Real names run to hundreds of characters and would wreck the spreadsheet."""
     store = await _make_store(tmp_path)
     long_name = "GROWUS Damage Therapy Perfume Hand Cream, Sea Salt - " + "х" * 120
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        conn.execute(
-            "INSERT INTO products (id, name, sku, price) VALUES (301, ?, 'SKU-LONG', 1000)",
-            [long_name],
-        )
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="1000.00", product_id=301)
-        conn.execute("UPDATE order_products SET name = ? WHERE order_id = 1", [long_name])
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await insert(conn, "bronze.products", [
+            dict(id=301, name=long_name, sku="SKU-LONG", price=1000)])
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="1000.00", product_id=301)
+        await conn.execute(
+            "UPDATE bronze.order_products SET name = $1 WHERE order_id = 1", long_name)
 
     items = _by_id(await store.get_sms_segments(
         include_customers=True, holdout_pct=0,
@@ -526,13 +509,13 @@ async def test_long_product_names_are_truncated(tmp_path):
 async def test_last_order_ignores_returns_and_dead_sources(tmp_path):
     """A returned order is not what they last bought."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=30, total="6000.00",
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=30, total="6000.00",
                    product_id=PRODUCT_HIGH_MARGIN)
-        _add_order(conn, oid=2, buyer_id=1, days_ago=5, total="900.00", is_return=True)
-        _add_order(conn, oid=3, buyer_id=1, days_ago=2, total="800.00",
+        await _add_order(conn, oid=2, buyer_id=1, days_ago=5, total="900.00", is_return=True)
+        await _add_order(conn, oid=3, buyer_id=1, days_ago=2, total="800.00",
                    is_active_source=False)
 
     customer = _by_id(await store.get_sms_segments(
@@ -553,13 +536,13 @@ async def test_margin_basis_reranks_customers(tmp_path):
     40%-margin one. On revenue they are interchangeable; on margin they are not.
     """
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="8000.00",
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="8000.00",
                    product_id=PRODUCT_HIGH_MARGIN, quantity=8, line_price="1000.00")
-        _add_buyer(conn, 2, "380962222222")
-        _add_order(conn, oid=2, buyer_id=2, days_ago=10, total="8000.00",
+        await _add_buyer(conn, 2, "380962222222")
+        await _add_order(conn, oid=2, buyer_id=2, days_ago=10, total="8000.00",
                    product_id=PRODUCT_LOW_MARGIN, quantity=8, line_price="1000.00")
 
     by_revenue = _by_id(await store.get_sms_segments(
@@ -593,11 +576,11 @@ async def test_order_discount_is_charged_to_margin(tmp_path):
     only ever buys at a discount is genuinely worth less.
     """
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
         # Lines total 10000, customer actually paid 8000 → 20% order discount
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="8000.00",
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="8000.00",
                    product_id=PRODUCT_HIGH_MARGIN, quantity=10, line_price="1000.00")
 
     customer = _by_id(await store.get_sms_segments(
@@ -616,12 +599,12 @@ async def test_order_discount_is_charged_to_margin(tmp_path):
 async def test_uncosted_lines_reported_via_coverage(tmp_path):
     """A SKU with no cost leaves margin, stays in revenue, and shows up in coverage."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="1000.00",
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="1000.00",
                    product_id=PRODUCT_HIGH_MARGIN)
-        _add_order(conn, oid=2, buyer_id=1, days_ago=20, total="1000.00",
+        await _add_order(conn, oid=2, buyer_id=1, days_ago=20, total="1000.00",
                    product_id=PRODUCT_NO_COST)
 
     customer = _by_id(await store.get_sms_segments(
@@ -639,11 +622,11 @@ async def test_uncosted_lines_reported_via_coverage(tmp_path):
 async def test_below_cost_sales_yield_negative_margin(tmp_path):
     """Selling under cost is value destruction and must not be clipped to zero."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
         # Pays 400 for goods that cost 600
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="400.00",
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="400.00",
                    product_id=PRODUCT_LOW_MARGIN, quantity=1, line_price="400.00")
 
     customer = _by_id(await store.get_sms_segments(
@@ -684,10 +667,10 @@ async def test_basis_defaults_and_validation(tmp_path):
 @pytest.mark.asyncio
 async def test_summary_reports_both_bases(tmp_path):
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
-        _add_buyer(conn, 1, "380961111111")
-        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="10000.00",
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
+        await _add_buyer(conn, 1, "380961111111")
+        await _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="10000.00",
                    product_id=PRODUCT_HIGH_MARGIN, quantity=10, line_price="1000.00")
 
     segment = (await store.get_sms_segments(holdout_pct=0))["segments"][0]
@@ -766,14 +749,14 @@ async def test_tier_subset_does_not_change_who_wins_a_shared_phone(tmp_path):
     """De-duplication runs before the filter, so asking for one tier cannot
     promote a buyer the full roster would have dropped."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        _seed_catalogue(conn)
+    async with pg_conn() as conn:
+        await _seed_catalogue(conn)
         # Same number on two buyers: a VIP and a single-order Reactivation.
-        _add_buyer(conn, 1, "380961111111")
+        await _add_buyer(conn, 1, "380961111111")
         for i in range(3):
-            _add_order(conn, oid=10 + i, buyer_id=1, days_ago=10, total="10000.00")
-        _add_buyer(conn, 2, "380961111111")
-        _add_order(conn, oid=20, buyer_id=2, days_ago=30, total="1000.00")
+            await _add_order(conn, oid=10 + i, buyer_id=1, days_ago=10, total="10000.00")
+        await _add_buyer(conn, 2, "380961111111")
+        await _add_order(conn, oid=20, buyer_id=2, days_ago=30, total="1000.00")
 
     everyone = await store.get_sms_segments(include_customers=True, holdout_pct=0)
     assert set(_by_id(everyone)) == {1}, "the VIP wins the number"
@@ -842,8 +825,8 @@ async def test_a_number_rejected_in_two_campaigns_is_left_out(tmp_path):
     assert funnel["reachable"] == 3
     assert funnel["uniquePhone"] == 3
     # Nothing was written to say so.
-    async with store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM marketing_optouts").fetchone()[0] == 0
+    async with pg_conn() as conn:
+        assert await conn.fetchval("SELECT COUNT(*) FROM app.marketing_optouts") == 0
 
     await store.close()
 

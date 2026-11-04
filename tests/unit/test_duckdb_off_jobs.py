@@ -56,7 +56,16 @@ def _owned_by_chains() -> frozenset:
 
 
 def _every_owner_row() -> dict:
-    """Production's owner rows once every chain is latched: one per table."""
+    """Production's owner rows once every chain is latched: one per table —
+    with each chain's local marker beside them, as production's are. Since
+    step 14's S14-11 the sweep's target state latches nothing, so the marker
+    half is written here: owner rows with no marker are the copy's
+    `chain_marker_lost` stamp, a different state."""
+    from core import chain_latch
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    for chain in WRITE_CHAINS:
+        chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
     return {table: STAMP for table in _owned_by_chains()}
 
 
@@ -281,7 +290,7 @@ class TestTheIntegrityJobUnderOff:
             return_value=pg_chain_invariants.Facts.blind((), "not read in this test")))
         journalled = []
 
-        async def journal_run(store, **kwargs):
+        async def journal_run(**kwargs):
             journalled.append(kwargs)
             return 11
 
@@ -473,11 +482,9 @@ class TestTheHistoryTables:
             self, target_state):  # noqa: F811
         """The design's proof: `_tables_to_ship` over what the copy stands
         down — every chain's tables and the history — is empty."""
-        from core.write_chains import stood_down_tables_checked
+        from core.write_chains import chain_tables
 
-        stood_down, errors = stood_down_tables_checked()
-        assert errors == {}
-        assert _tables_to_ship(stood_down | stood_down_under_off()) == ()
+        assert _tables_to_ship(chain_tables() | stood_down_under_off()) == ()
 
 
 class TestTheOperationalCopyUnderOff:
@@ -558,28 +565,28 @@ class TestTheOperationalComparisonUnderOff:
     @pytest.mark.asyncio
     async def test_the_history_is_not_compared_under_off(
             self, target_state, postgres, duckdb_reads):  # noqa: F811
-        """What DuckDB is still asked for in the target state is the shadow
-        chains' tables, compared facing the other way — PR-4's to stand down
-        under off — and never the history. Mutation: drop
+        """Never the history. (What DuckDB was still asked for in the target
+        state was the shadow chains' tables, compared facing the other way —
+        PR-4's to stand down under off — until step 14's S14-10 deleted that
+        comparison; nothing is read since.) Mutation: drop
         `stood_down_under_off()` from the comparison."""
         from core.mirror_reconciliation import reconcile_operational
-        from core.write_chains import compared_in_shadow
 
         postgres(_Pool(_every_owner_row()))
         issues = await reconcile_operational(_Store())
         assert not set(DUCKDB_HISTORY_TABLES) & set(duckdb_reads)
-        assert set(duckdb_reads) <= compared_in_shadow()
+        assert duckdb_reads == []
         assert not [i for i in issues if i.table_name in DUCKDB_HISTORY_TABLES]
 
     @pytest.mark.asyncio
     async def test_with_nothing_left_to_read_duckdb_is_not_opened(
             self, target_state, postgres, duckdb_reads, monkeypatch):  # noqa: F811
-        """Once no shadow table is compared either — PR-4's answer under off,
-        given here — the store is not opened at all. Mutation: open it for an
-        empty read, as under on."""
+        """With no shadow table compared — PR-4's answer under off, and
+        every answer since step 14's S14-10 deleted the comparison — the store
+        is not opened at all. Mutation: open it for an empty read, as under
+        on."""
         from core.mirror_reconciliation import reconcile_operational
 
-        monkeypatch.setattr("core.write_chains.compared_in_shadow", lambda: frozenset())
         postgres(_Pool(_every_owner_row()))
         store = _Store()
         await reconcile_operational(store)

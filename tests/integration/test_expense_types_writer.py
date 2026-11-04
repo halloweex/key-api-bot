@@ -20,7 +20,6 @@ import pytest_asyncio
 
 from core import chain_latch, pg_expense_types_write as chain
 from core import write_chains
-from tests.conftest import chains_on_duckdb
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -135,25 +134,54 @@ class TestTheWriter:
                 f"SELECT mirrored_at FROM {TABLE} WHERE id = 1") > first
 
 
+# What DuckDB's own writer stored for `_payload()` — `(id, name, alias,
+# is_active)` — recorded on the commit before step 14's S14-09 (d544144c),
+# which deleted that writer. In that run Postgres stored the same rows
+# (rule 9: the literal is DuckDB's answer, proved equal to Postgres's).
+DUCKDB_ANSWERED = [
+    [1, 'Витрата 1', 'cost_1', True],
+    [2, 'Alias For 2', 'alias_for_2', True],
+    [3, 'Bare Kind 3', None, True],
+    [4, 'Витрата 4', 'cost_4', True],
+    [5, 'Alias For 5', 'alias_for_5', False],
+    [6, 'Bare Kind 6', None, True],
+    [7, 'Витрата 7', 'cost_7', True],
+    [8, 'Alias For 8', 'alias_for_8', True],
+    [9, 'Bare Kind 9', None, True],
+    [10, 'Витрата 10', 'cost_10', False],
+    [11, 'Alias For 11', 'alias_for_11', True],
+    [12, 'Bare Kind 12', None, True],
+    [13, 'Витрата 13', 'cost_13', True],
+    [14, 'Alias For 14', 'alias_for_14', True],
+    [15, 'Bare Kind 15', None, False],
+    [16, 'Витрата 16', 'cost_16', True],
+    [17, 'Alias For 17', 'alias_for_17', True],
+    [18, 'Bare Kind 18', None, True],
+    [19, 'Витрата 19', 'cost_19', True],
+    [20, 'Alias For 20', 'alias_for_20', False],
+    [21, 'Bare Kind 21', None, True],
+    [22, 'Витрата 22', 'cost_22', True],
+    [23, 'Alias For 23', 'alias_for_23', True],
+    [24, 'Bare Kind 24', None, True],
+    [25, 'Витрата 25', 'cost_25', False],
+    [26, 'Alias For 26', 'alias_for_26', True],
+    [27, 'Bare Kind 27', None, True]
+]
+
+
 class TestTheNamesAreTheDuckDBPaths:
     @pytest.mark.asyncio
     async def test_on_the_27_row_fixture_every_path_names_every_type_alike(self, stores):
-        """Two writes of one payload — DuckDB's own and this chain's direct
-        write — must agree on every name, alias and flag. The parse runs once,
-        before the routing; this is what a second copy of it would break.
-        (The hourly copy of DuckDB's rows was a third until S14-00, which
-        stands it down for every chain's tables.)"""
+        """This chain's write must name every type, alias and flag as DuckDB's
+        own write of the same payload did. The parse runs once, before the
+        writer; this is what a second copy of it would break. Until S14-09
+        the two writes ran side by side here; DuckDB's is a literal since."""
         store, pool, env = stores
-        # The DuckDB branch, kept for this comparison until it goes (S14-09).
-        with chains_on_duckdb(chain):
-            await store.upsert_expense_types(_payload())
-        duck = await _duck_rows(store)
-        assert await _pg_rows(pool) == []
         await store.upsert_expense_types(_payload())               # Postgres
         direct = await _pg_rows(pool)
 
-        assert len(duck) == 27
-        assert direct == duck
+        assert len(DUCKDB_ANSWERED) == 27
+        assert [list(r) for r in direct] == DUCKDB_ANSWERED
         names = {r[0]: r[1] for r in direct}
         assert names[1] == "Витрата 1"
         assert names[2] == "Alias For 2"                  # a key with an alias
@@ -223,35 +251,6 @@ class TestTheFullSyncAndTheHourlyReplace:
         assert TABLE in result.get("stood_down", []), result
         assert TABLE not in result["replaced"], result
         assert len(await _pg_rows(pool)) == 27, "the hourly replace rolled it back"
-
-
-# ─── the way back ────────────────────────────────────────────────────────────
-
-
-class TestCopyBack:
-    @pytest.mark.asyncio
-    async def test_a_type_only_duckdb_holds_is_refused_before_anything_is_written(
-        self, stores,
-    ):
-        """A full replace would delete it, and a comparison run afterwards
-        could not see what the copy destroyed — so the handover asks first."""
-        from core.chain_transfer import CopyBackRefused, copy_back
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        await store.upsert_expense_types(_payload())
-        assert "error" not in await replicate_operational(store)
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await store.upsert_expense_types(_payload(renamed={4: "Реклама"}))
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO expense_types (id, name) VALUES (99, 'only here')")
-        before = await _duck_rows(store)
-
-        with pytest.raises(CopyBackRefused):
-            await copy_back(store, chain, dry_run=False)
-
-        assert await _duck_rows(store) == before
-        assert chain_latch.latched(chain.CHAIN)
 
 
 # ─── the standing watch, on the real table ───────────────────────────────────

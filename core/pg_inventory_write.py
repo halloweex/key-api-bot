@@ -57,13 +57,17 @@ lose it inside an hour.
 
 "EXACTLY ONE" IS A LATCH, NOT A VARIABLE
 
-`KS_WRITE_INVENTORY` decides which store writes until the first movement lands
-here; after that the latch does (`core/chain_latch.py`, OD-19 (a)). Setting the
+Since step 14's S14-11 no variable decides anything: this build writes
+Postgres, and `KS_WRITE_INVENTORY` is a name only (revision 0035's comments
+and an image from before step 14 read it). Until then it decided which store
+wrote until the first movement landed here; after that the latch did (`core/chain_latch.py`, OD-19 (a)). Setting the
 flag back would otherwise let DuckDB's `seq_stock_movements_id` reissue ids the
 Postgres sequence has already handed out — one movement with two names, which
 is the rule revision 0030 restated. Every writer below latches once a
 connection is out of the pool and before its first write, and
-`scripts/chain_copy_back.py` is the only way back.
+`scripts/chain_copy_back.py` was the only way back (deleted in step 14's
+S14-04; the way back since is an image from before step 14,
+`core.rollback_lever`).
 
 FAILURE POLICY: THIS ONE RAISES
 
@@ -77,11 +81,9 @@ these functions propagate, and the caller decides.
 from __future__ import annotations
 
 import logging
-import os
-import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from typing import (
-    Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+    Any, Dict, FrozenSet, List, Optional, Sequence, Tuple,
 )
 
 from core import chain_latch
@@ -89,7 +91,6 @@ from core.landing_rows import (
     OFFER_COLUMNS,
     STOCK_MOVEMENT_COLUMNS,
     OfferRow,
-    StockMovement,
     plan_stock_movements,
 )
 from core.sql_dialect import POSTGRES, sku_status_rebuild_select
@@ -143,34 +144,6 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_offers", "last_sync_stocks")
 # guard before either has committed. Held for the transaction and released by
 # COMMIT or ROLLBACK, so a writer that dies cannot leave it behind.
 CHAIN_LOCK_KEY = 0x6B73_0000_0000_0001
-
-
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_INVENTORY` alone says.
-
-    An unrecognised value raises, `KS_BOT_STORE`'s rule: a typo in the one
-    variable that decides which store owns the only record of a stock change
-    must stop the process, not quietly pick the other one. Since DN-01 it stops
-    this chain and nothing else.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. The chain has been latched in
-    production since 2026-09-30; neither the flag nor the latch routes any
-    more, and the first write in a process still takes the latch (decision
-    3). Last consumers: the repository's inventory writers, the sync's stock
-    step and the registry — they go in S14-11.
-    """
-    return True
 
 
 def _latch() -> str:
@@ -515,254 +488,14 @@ async def read_snapshot_calendar(
     return first_day, frozenset(r["date"] for r in rows)
 
 
-# ─── Before the flip (DN-24) ─────────────────────────────────────────────────
+# ─── Before the flip (DN-24) — until step 14's S14-11 ───────────────────────
 #
-# Three things have to be true on the day `KS_WRITE_INVENTORY` is switched on,
-# and each used to be a query somebody had to remember to run by hand. They are
-# asked here, together, and published on /api/health as
-# `write_chains.pg_inventory_write.preflight`, so the answer is one look away
-# from the person about to recreate web.
-
-# The six tables' last hourly copy must be younger than this. The flip is a
-# recreate of web, and the margin to the hour is the time it is given to land
-# in before the next stock sync writes DuckDB behind the copy — a row that
-# `scripts/chain_copy_back.py --handover` would then refuse the flip on.
-PREFLIGHT_REPLICATED_WITHIN = timedelta(minutes=50)
-
-# The findings are read out of Postgres' copy of the quality journal, which is
-# itself shipped hourly, and a copy that stopped would keep showing yesterday's
-# clean run for as long as anybody looked. DN-03's limit for that copy, and the
-# same row it reads.
-PREFLIGHT_JOURNAL_COPY_WITHIN = timedelta(minutes=75)
-JOURNAL_COPY = "app.data_quality_runs"
-
-# The comparison whose findings count: `reconcile_operational`, inside the
-# daily `mirror_landing` run. A verdict older than the canary's own limit for
-# that layer is not a verdict about today — `tests/unit/test_inventory_preflip.py`
-# pins the two together.
-OPERATIONAL_LAYER = "mirror_landing"
-PREFLIGHT_VERDICT_WITHIN = timedelta(hours=30)
-
-# Which failures of that run leave chain 1 uncompared. The run holds every
-# comparison of the layer, each in its own try, and when any raises
-# `_run_dq_mirror_landing` sets `error_message` — after every other check has
-# compared and filed — to
-#
-#     "<n> check(s) raised — <check>: <Class>: <text> | <check>: ..."
-#
-# with `setup` as the check for an exception between checks, which skips every
-# check after it. So a failed run is not an uncompared chain: only its own
-# comparison raising, or `setup`, is. `tests/unit/test_inventory_preflip.py`
-# drives the real job, so a renamed check or a reworded message fails there.
-OPERATIONAL_CHECK = "reconcile_operational"
-_RAISED_HEAD = re.compile(r"(\d+) check\(s\) raised — ")
-# The trailing space is looked at, not taken: an exception's text ending in
-# "x: Y:" would otherwise eat the space of the " | " that starts the next entry.
-_RAISED_ENTRY = re.compile(r"(?:^| \| )([a-z_]+): [A-Za-z_]\w*:(?= |$)")
-
-# How many open findings the published answer names. The rest are counted.
-_PREFLIGHT_NAMED = 5
-
-
-def _minutes(delta: timedelta) -> int:
-    return int(delta.total_seconds() // 60)
-
-
-def _raised_checks(error_message: str) -> Optional[List[str]]:
-    """The checks a failed `mirror_landing` run names as raised, in order, or
-    None when its message is not in the job's format.
-
-    It can only err towards blocking. An exception's own text holding
-    " | name: Class:" adds a name that did not raise; a real entry cannot go
-    missing, because the job itself starts each one after "— " or " | ". A
-    message naming fewer entries than its count is not trusted at all.
-    """
-    head = _RAISED_HEAD.match(error_message)
-    if head is None:
-        return None
-    names = [m.group(1) for m in _RAISED_ENTRY.finditer(error_message[head.end():])]
-    if len(names) < int(head.group(1)):
-        return None
-    return list(dict.fromkeys(names))
-
-
-def _uncompared_reason(run_id: int, raised: Optional[List[str]]) -> Optional[str]:
-    """Why a failed run leaves chain 1 uncompared, or None when it does not."""
-    run = f"the latest {OPERATIONAL_LAYER} run ({run_id})"
-    if raised is None:
-        return (f"{run} failed, and its error does not say which check raised, "
-                "so chain 1's tables may not have been compared")
-    if OPERATIONAL_CHECK in raised:
-        return (f"{run} failed in {OPERATIONAL_CHECK}, so chain 1's tables "
-                "were not compared")
-    if "setup" in raised:
-        return (f"{run} failed between its checks, so chain 1's tables may not "
-                "have been compared")
-    return None
-
-
-async def preflight(
-    pool=None, *, now: Optional[datetime] = None,
-) -> Dict[str, Any]:
-    """Whether chain 1 may be switched to Postgres now, and why not. Never raises.
-
-    `ok` is True only when all three hold:
-
-    * the writing role may create a temporary table — without it every status
-      rebuild raises (`rebuild_sku_inventory_status`), and it is granted by
-      initdb only on a cluster new enough to have the line;
-    * each of the six tables was copied by `replicate_operational` within
-      `PREFLIGHT_REPLICATED_WITHIN`, with no failure since;
-    * the latest `mirror_landing` run — from a journal copy that is itself
-      fresh — is recent, compared chain 1 (it may have failed elsewhere: a
-      check that raised in another store is a `note`, not a reason), and
-      filed nothing against the six tables or the chain.
-
-    `ok` is None once the chain already writes Postgres: this is the question
-    before the flip, and afterwards the copy it asks about stands down by
-    design. A value of `KS_WRITE_INVENTORY` nobody understands is not "writes
-    Postgres" — the chain is stood down, and the checks below say what that
-    costs.
-
-    `reasons` are sentences of this module's own; a Postgres error is named by
-    its class only, because /api/health is public and a driver's message is
-    not.
-    """
-    try:
-        moved = writes_postgres()
-    except RuntimeError:
-        moved = False
-    if moved:
-        return {"ok": None, "reasons": [
-            "chain 1 already writes Postgres; the preflight is the question "
-            "asked before the flip"]}
-
-    now = now or datetime.now(timezone.utc)
-    reasons: List[str] = []
-    notes: List[str] = []
-    out: Dict[str, Any] = {
-        "ok": False, "temporary": None, "replicated": {},
-        "journal_copy_age_s": None, "operational_run": None, "reasons": reasons,
-        "notes": notes,
-    }
-    try:
-        if pool is None:
-            from core.pg import get_pool, require_revision
-
-            pool = await get_pool()
-            await require_revision()
-        async with pool.acquire() as conn:
-            role, database, temporary = await conn.fetchrow(
-                "SELECT current_user, current_database(), "
-                "has_database_privilege(current_database(), 'TEMPORARY')")
-            marks = {r["table_name"]: r for r in await conn.fetch(
-                "SELECT table_name, last_ok_at, failures_since_ok "
-                "FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
-                [*CHAIN_TABLES, JOURNAL_COPY])}
-            run = await conn.fetchrow(
-                "SELECT run_id, started_at, error_message "
-                "FROM app.data_quality_runs WHERE layer = $1 "
-                "ORDER BY run_id DESC LIMIT 1",
-                OPERATIONAL_LAYER)
-            findings = [] if run is None else await conn.fetch(
-                "SELECT check_name, table_name FROM app.data_quality_issues "
-                "WHERE run_id = $1 AND table_name = ANY($2::text[]) "
-                "ORDER BY check_name, table_name",
-                run["run_id"], [*CHAIN_TABLES, CHAIN])
-    except Exception as exc:  # noqa: BLE001 — named by class, never raised
-        reasons.append(f"Postgres could not be read ({type(exc).__name__})")
-        return out
-
-    # ── the temporary table the status rebuild needs ──
-    out["temporary"] = bool(temporary)
-    if not temporary:
-        reasons.append(
-            f"{role} cannot create a temporary table in {database}, so every "
-            f"status rebuild would raise; as a superuser: "
-            f"GRANT TEMPORARY ON DATABASE {database} TO {role}")
-
-    # ── the six tables' last copy ──
-    limit = _minutes(PREFLIGHT_REPLICATED_WITHIN)
-    for table in CHAIN_TABLES:
-        mark = marks.get(table)
-        ok_at = mark["last_ok_at"] if mark else None
-        failures = int(mark["failures_since_ok"]) if mark else 0
-        age = now - ok_at if ok_at else None
-        out["replicated"][table] = {
-            "age_s": int(age.total_seconds()) if age is not None else None,
-            "failures_since_ok": failures,
-        }
-        if ok_at is None:
-            reasons.append(f"{table} has never been copied into Postgres")
-        elif failures:
-            reasons.append(f"the copy of {table} is failing ({failures} in a row)")
-        elif age >= PREFLIGHT_REPLICATED_WITHIN:
-            reasons.append(
-                f"{table} was last copied {_minutes(age)} min ago (limit {limit})")
-
-    # ── the journal copy the findings are read from ──
-    # Unless chain 9 writes the journal in Postgres (OD-02 (c)): the findings
-    # are then read from the writer itself, the hourly copy has stood down,
-    # and its frozen `last_ok_at` would refuse the flip for ever. The verdict's
-    # age and its findings below are still asked.
-    from core import pg_dq_journal_write
-
-    journal = marks.get(JOURNAL_COPY)
-    journal_ok_at = journal["last_ok_at"] if journal else None
-    if journal_ok_at is not None:
-        out["journal_copy_age_s"] = int((now - journal_ok_at).total_seconds())
-    if pg_dq_journal_write.reads_postgres():
-        out["journal_copy_age_s"] = None
-    elif journal_ok_at is None:
-        reasons.append(
-            "the quality journal has never been copied into Postgres, so open "
-            "findings cannot be read")
-    elif journal["failures_since_ok"]:
-        reasons.append(
-            f"the copy of the quality journal is failing "
-            f"({int(journal['failures_since_ok'])} in a row)")
-    elif now - journal_ok_at >= PREFLIGHT_JOURNAL_COPY_WITHIN:
-        reasons.append(
-            f"the copy of the quality journal is {_minutes(now - journal_ok_at)} "
-            f"min old (limit {_minutes(PREFLIGHT_JOURNAL_COPY_WITHIN)})")
-
-    # ── the latest operational comparison ──
-    if run is None:
-        reasons.append(f"no {OPERATIONAL_LAYER} run in the quality journal")
-    else:
-        age = now - run["started_at"]
-        failed = run["error_message"] is not None
-        # Check names only: the text after them is a driver's message.
-        raised = _raised_checks(run["error_message"]) if failed else []
-        out["operational_run"] = {
-            "run_id": int(run["run_id"]),
-            "age_s": int(age.total_seconds()),
-            "failed": failed,
-            "raised": raised,
-            "findings": len(findings),
-        }
-        if age >= PREFLIGHT_VERDICT_WITHIN:
-            reasons.append(
-                f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) is "
-                f"{int(age.total_seconds() // 3600)} h old (limit "
-                f"{int(PREFLIGHT_VERDICT_WITHIN.total_seconds() // 3600)})")
-        if failed:
-            reason = _uncompared_reason(run["run_id"], raised)
-            if reason is not None:
-                reasons.append(reason)
-            else:
-                notes.append(
-                    f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) failed "
-                    f"in {', '.join(raised)}; chain 1's own comparison "
-                    f"({OPERATIONAL_CHECK}) completed, so that does not count here")
-        if findings:
-            named = ", ".join(f"{f['check_name']} on {f['table_name']}"
-                              for f in findings[:_PREFLIGHT_NAMED])
-            more = len(findings) - _PREFLIGHT_NAMED
-            reasons.append(
-                f"{len(findings)} open finding(s) on chain 1 in "
-                f"{OPERATIONAL_LAYER} run {run['run_id']}: {named}"
-                + (f" and {more} more" if more > 0 else ""))
-
-    out["ok"] = not reasons
-    return out
+# `preflight()` asked, on every `/api/health`, the three questions somebody
+# had to answer before `KS_WRITE_INVENTORY` was switched on — the TEMPORARY
+# grant the status rebuild needs, the six tables' last hourly copy, the latest
+# `mirror_landing` verdict on them — and answered `ok: null` once the chain
+# wrote Postgres. Production latched the chain on 2026-09-30, and since
+# S14-00 it writes Postgres whatever the flag says, so the answer had been
+# `null` on every probe; S14-11 deleted it with the flag. The advisory lock
+# above (DN-24's other half) stays: the 01:00 snapshot and the stock step
+# still race without it.

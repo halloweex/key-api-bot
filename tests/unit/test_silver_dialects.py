@@ -14,6 +14,8 @@ touching only one branch, fails here and nowhere else.
 """
 from __future__ import annotations
 
+import pytest
+
 from core.duckdb_constants import DISPLAY_TIMEZONE, _date_in_kyiv
 from core.sql_dialect import DUCKDB, POSTGRES
 from core.warehouse_sql import silver_sales_type_case, silver_select_sql
@@ -52,9 +54,14 @@ class TestNothingChangedForDuckDB:
     """Stored Silver is rebuilt from this text every two minutes. A change to
     the default rendering is a change to production data."""
 
-    def test_the_default_is_duckdb(self):
-        assert silver_select_sql() == silver_select_sql(DUCKDB)
-        assert silver_sales_type_case() == silver_sales_type_case(DUCKDB)
+    def test_there_is_no_default_any_more(self):
+        """The default was DuckDB until step 14's S14-07: the rebuild names
+        `DUCKDB` itself now (`tests/unit/test_warehouse_sql.py` holds every
+        builder to it)."""
+        with pytest.raises(TypeError):
+            silver_select_sql()
+        with pytest.raises(TypeError):
+            silver_sales_type_case()
 
     def test_the_date_expression_is_byte_for_byte_what_it_was(self):
         assert DUCKDB.kyiv_date("o.ordered_at") == _date_in_kyiv("o.ordered_at")

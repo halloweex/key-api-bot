@@ -37,7 +37,7 @@ def _buyers(n, *, base=1, name="Покупець"):
 
 
 class TestTheMirrorHasOneCallSite:
-    def test_only_upsert_buyers_calls_mirror_buyers(self):
+    def test_nothing_calls_mirror_buyers_any_more(self):
         """Walks the tree rather than naming files: a second call site added
         anywhere is the regression, wherever it is added."""
         sites = set()
@@ -57,7 +57,10 @@ class TestTheMirrorHasOneCallSite:
                     if name == "mirror_buyers":
                         rel = path.relative_to(ROOT).as_posix()
                         sites.add((rel, owner.get(id(node))))
-        assert sites == {("core/duckdb_store.py", "upsert_buyers")}, sites
+        # None since step 14's S14-11: DuckDB's `upsert_buyers` mirrored each
+        # portion it wrote, and its DuckDB tail went with `KS_WRITE_BUYERS`.
+        # `mirror_buyers` itself goes with the mirrors in S14-13.
+        assert sites == set(), sites
 
 
 class TestPortions:

@@ -6,8 +6,9 @@ that the flag off changes nothing, that the flag on hands the writer the rows
 the shared parse produced and never touches DuckDB, that the chain is held on
 DuckDB until its readers have moved, that a fault in it costs the catalogue
 and not the tick or the full sync it rides in, that only the two
-full-catalogue sync sites reach the writer, and that the standing watch, the
-registry and the copy-back all see it.
+full-catalogue sync sites reach the writer, and that the standing watch and
+the registry see it. (The copy-back saw it too, until step 14's S14-04
+deleted the copy-back and its tests with it.)
 
 Since step 14's S14-00 the chain writes Postgres whatever its flag says and
 asks no precondition, so the tests of the flag off, of a typo and of the
@@ -19,7 +20,7 @@ import ast
 import pathlib
 import time
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -51,7 +52,6 @@ def flags(monkeypatch):
     for name in warehouse_cutover.WAREHOUSE_READERS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(read_fallback, "_mode", "duckdb")
-    chain._unmet_warned.clear()
     return monkeypatch
 
 
@@ -74,19 +74,12 @@ def flagged(met):
 
 @pytest.fixture
 def flagged_alone(flags):
-    """The flag on and its precondition taken as met, with every other chain
-    and reader as it is today — so the tick's other steps keep their own
-    paths and only the catalogue's moves."""
+    """The flag on, with every other chain and reader as it is today — so
+    the tick's other steps keep their own paths. Since step 14's S14-09 the
+    catalogue's step has no other path, and the flag routes nothing."""
     flags.setenv(chain.WRITE_ENV, "postgres")
-    flags.setattr(chain, "unmet_precondition", lambda: None)
-    # Since step 14's S14-00 every chain writes Postgres, a constant; the
-    # tick's other steps are faked here, and keep the DuckDB paths the store
-    # under the test answers.
-    from core import pg_buyers_write, pg_inventory_write, pg_managers_write, pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(flags, pg_orders_write, pg_managers_write, pg_buyers_write,
-                           pg_inventory_write)
+    # The tick's other steps are faked in `_tick` (every chain writes
+    # Postgres, and none of them is this test's subject).
     return flags
 
 
@@ -161,18 +154,17 @@ class TestTheRepositoryRoutes:
 
 
 class TestTheFlag:
+    """Since step 14's S14-00 the flag routes nothing, and S14-09 deleted the
+    answers that stood in for it: `mode()`, the precondition and its warning,
+    the lock-out and the stand-in for an absent key."""
 
-
-    def test_the_latch_outranks_it(self, flags):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, "duckdb")
-        assert chain.writes_postgres() is True
-        assert chain.mode() == "postgres"
-
-    def test_the_latch_outranks_a_value_nobody_can_read(self, flags):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, "yes")
-        assert chain.writes_postgres() is True
+    @pytest.mark.parametrize("name", [
+        "mode", "unmet_precondition", "_warn_unmet", "UNMET_WARN_EVERY_S",
+        "_unmet_warned", "LOCKOUT_REVISION", "CHAIN_WATERMARK_INHERITS_DUCKDB",
+        # S14-11, with the flag.
+        "writes_postgres", "env_writes_postgres"])
+    def test_the_answers_that_routed_it_are_gone(self, name):
+        assert not hasattr(chain, name)
 
 
 # ─── the precondition (T-3) ──────────────────────────────────────────────────
@@ -192,8 +184,7 @@ class TestTheRegistrySeesIt:
     def test_the_watermarks_are_this_chains_and_move_with_it(self, met):
         for key in chain.CHAIN_SYNC_KEYS:
             assert write_chains.chain_for_sync_key(key) is chain
-        met.setenv(chain.WRITE_ENV, "postgres")
-        assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.stood_down_sync_keys()
+        assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.sync_keys()
 
 
     def test_each_table_is_a_unit_of_its_own(self):
@@ -321,16 +312,6 @@ class TestTheRecordOfTheChainsWrites:
         assert not keys & {chain_latch.owner_key(t) for t in chain.CHAIN_TABLES}
         assert not keys & set(chain.CHAIN_SYNC_KEYS)
 
-    def test_the_copy_back_releases_it_with_the_latch(self):
-        assert set(chain.CHAIN_RELEASED_KEYS) == {
-            chain.record_key(t) for t in chain.CHAIN_TABLES}
-
-    def test_the_copy_back_reads_it_for_both_tables_and_the_buyers_do_not(self):
-        from core import chain_transfer
-
-        assert chain_transfer._RECORDED_CLOCKS == frozenset(chain.CHAIN_TABLES)
-        assert chain_transfer._REWRITE_CLOCK_TABLE not in chain_transfer._RECORDED_CLOCKS
-
 
 # ─── only the two full-catalogue sync sites reach the writer (T-6) ──────────
 
@@ -378,8 +359,9 @@ class TestTheFullCatalogueContract:
             ("core/duckdb_store.py", attr)}
 
     @pytest.mark.parametrize("attr,sites", [
+        # `incremental_sync` wrote the products itself on DuckDB's path, until
+        # step 14's S14-09 deleted it; the hourly step is chain 6's alone.
         ("upsert_products", {("core/sync_service.py", "full_sync"),
-                             ("core/sync_service.py", "incremental_sync"),
                              ("core/sync_service.py", "_catalogue_step_postgres")}),
         ("upsert_categories", {("core/sync_service.py", "full_sync")}),
     ])
@@ -528,15 +510,29 @@ def _tick(monkeypatch, store, *, upsert_products=None):
     monkeypatch.setattr(store, "record_inventory_snapshot", AsyncMock())
     writer = upsert_products or AsyncMock(return_value=2)
     monkeypatch.setattr(chain, "upsert_products", writer)
+    # The other chains' steps, each the one entry the tick reaches it by
+    # since step 14's S14-11 (every chain writes Postgres, asking nothing).
+    # Their watermarks are not the catalogue's, so they never read the
+    # `get_value` a test breaks: only `products` and `categories` go through.
+    real_get = store.get_last_sync_time
+
+    async def get_last_sync_time(key="orders"):
+        if key in ("products", "categories"):
+            return await real_get(key)
+        return None
+
+    monkeypatch.setattr(store, "get_last_sync_time", get_last_sync_time)
+    svc._orders_step = AsyncMock(return_value=[])
+    svc._managers_step_postgres = AsyncMock(return_value=0)
+    svc._inventory_step_postgres = AsyncMock()
     return svc, endpoints, writer
 
 
 def _rest_of_the_tick_ran(svc):
-    svc._fetch_orders_with_date_filter.assert_awaited()
-    svc.sync_managers.assert_awaited()
+    svc._orders_step.assert_awaited()
+    svc._managers_step_postgres.assert_awaited()
     svc.sync_missing_buyers.assert_awaited()
-    svc.sync_offers.assert_awaited()
-    svc.sync_stocks.assert_awaited()
+    svc._inventory_step_postgres.assert_awaited()
 
 
 class TestTheTickSurvivesTheChain:
@@ -620,7 +616,7 @@ class TestTheTickSurvivesTheChain:
             await svc.incremental_sync()
         assert getter.await_count == 1, "the retry window let the watermark read through"
         assert "products" not in endpoints
-        assert svc.sync_offers.await_count == 2      # the rest of each tick ran
+        assert svc._inventory_step_postgres.await_count == 2   # the rest of each tick ran
 
     @pytest.mark.asyncio
     async def test_after_the_window_a_success_writes_stamps_and_closes_it(
@@ -818,170 +814,20 @@ class TestTheStandingWatch:
         assert all(c.startswith(inv.PREFIX) for c in mine)
 
     def test_its_watermarks_are_left_to_the_freshness_check(self):
+        """With no stand-in since S14-09 (`tests/unit/test_absent_chain_keys.py`)."""
         assert inv.watermark_limit_min(chain) is None
-        assert chain.CHAIN_WATERMARK_INHERITS_DUCKDB is True
-
-
-# ─── the copy-back (T-11) ────────────────────────────────────────────────────
-
-
-class TestTheCopyBackKnowsIt:
-    def test_two_mirrored_specs_each_its_own_clock_compared_whole(self):
-        from core import chain_transfer
-
-        specs = chain_transfer.chain_specs(chain)
-        assert [s.pg_table for s in specs] == ["bronze.products", "bronze.categories"]
-        for spec in specs:
-            assert spec.is_mirrored and not spec.is_append
-            assert spec.clock == ()
-            # Each table its own clock and its own stamp: what
-            # `_handover_issues` reads the chain's recorded instants by.
-            assert spec.rewrite_clock == spec.pg_table
-            assert spec.rewrite_stamp == (spec.pg_table, "id")
-            assert spec.rewritten_by == "id"
-            assert spec.texts is not None
-            # A key on one side only is a failed copy in this direction,
-            # whatever the daily spec forgives as retired.
-            assert spec.compare.full_replace is True
-            assert spec.compare.synced_column is None
-        assert chain_transfer.chain_sequences(chain) == ()
-
-    def test_the_buyers_keep_their_clock_and_texts(self):
-        from core import chain_transfer, pg_buyers_write
-
-        for spec in chain_transfer.chain_specs(pg_buyers_write):
-            if spec.is_mirrored:
-                assert spec.texts is None
-                assert spec.rewrite_clock == "bronze.buyers"
-                assert spec.rewrite_stamp == ("bronze.buyers", "id")
-
-    def test_the_operator_types_its_short_name(self):
-        from core.chain_transfer import resolve_chain
-
-        assert resolve_chain("catalogue") is chain
-
-    def test_the_runbook_sends_it_to_its_own_sync_not_another_chains(self):
-        from core.chain_transfer import _marker_steps, _runbook
-
-        said = " ".join(_runbook(chain, executed=True, released=True))
-        assert "KS_WRITE_CATALOGUE=duckdb" in said
-        assert "bronze.products" in said and "bronze.categories" in said
-        assert "hourly products sync" in said and "full_sync_weekly" in said
-        for elsewhere in ("replicate_operational", "backfill/buyers", "buyers mirror", "I1"):
-            assert elsewhere not in said, elsewhere
-        steps = " ".join(_marker_steps(chain, chain.CHAIN))
-        assert "backfill/buyers" not in steps and "hourly products sync" in steps
-
-    @pytest.mark.asyncio
-    async def test_an_unknown_rewrite_clock_is_refused(self):
-        from core import chain_transfer
-
-        with pytest.raises(LookupError):
-            await chain_transfer._rewritten_since_latch(object(), "app.manual_expenses")
-
-
-def _spec(table="bronze.products"):
-    from core import chain_transfer
-
-    return {s.pg_table: s for s in chain_transfer.chain_specs(chain)}[table]
-
-
-def _row(spec, **values):
-    return tuple(values.get(c) for c in spec.compare.columns)
-
-
-def _classify(spec, dk, pg, *, moved_on, rewritten=None):
-    from core.chain_transfer import classify_handover
-
-    return classify_handover(spec, dk, pg, moved_on=moved_on, rewritten=rewritten)
-
-
-class TestTheHandoverOfTheCatalogue:
-    """The texts and the rule for a catalogue table, both sides already read."""
-
-    def _p(self, pid, name="x"):
-        spec = _spec()
-        return pid, _row(spec, id=pid, name=name)
-
-    def test_before_the_flip_a_product_only_duckdb_holds_names_the_carry(self):
-        spec = _spec()
-        k, r = self._p(1055)
-        (issue,) = _classify(spec, {k: r}, {}, moved_on=False)
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_missing", "CRITICAL")
-        assert "/api/mirror/backfill/catalogue" in issue.description
-        assert "backfill/buyers" not in issue.description
-
-    def test_before_the_flip_a_differing_product_names_the_hourly_sync(self):
-        spec = _spec()
-        k, r = self._p(1)
-        _, r2 = self._p(1, "other")
-        (issue,) = _classify(spec, {k: r}, {k: r2}, moved_on=False)
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_differ", "CRITICAL")
-        assert "hourly products sync" in issue.description
-        assert "backfill/buyers" not in issue.description
-
-    def test_before_the_flip_a_category_only_postgres_holds_names_the_full_sync(self):
-        spec = _spec("bronze.categories")
-        row = _row(spec, id=9, name="x")
-        (issue,) = _classify(spec, {}, {9: row}, moved_on=False)
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_ahead", "CRITICAL")
-        assert "full_sync_weekly" in issue.description
-
-    def test_after_the_latch_a_re_stamped_difference_is_the_copys_work(self):
-        spec = _spec()
-        k, r = self._p(1)
-        _, r2 = self._p(1, "renamed")
-        (issue,) = _classify(spec, {k: r}, {k: r2}, moved_on=True, rewritten=frozenset({1}))
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_differ", "INFO")
-
-    def test_after_the_latch_a_retired_row_that_differs_is_critical(self):
-        spec = _spec()
-        k, r = self._p(1055)
-        _, r2 = self._p(1055, "edited")
-        (issue,) = _classify(spec, {k: r}, {k: r2}, moved_on=True, rewritten=frozenset({1}))
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_differ", "CRITICAL")
-        assert "retired" in issue.description
-
-    def test_after_the_latch_a_product_only_duckdb_holds_always_refuses(self):
-        spec = _spec()
-        k, r = self._p(77)
-        (issue,) = _classify(spec, {k: r}, {}, moved_on=True, rewritten=frozenset({77}))
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_missing", "CRITICAL")
-        assert "never deletes" in issue.description
-
-    def test_after_the_latch_a_new_product_is_the_copys_work_and_an_old_one_is_not(self):
-        spec = _spec()
-        new, old = self._p(2001), self._p(3)
-        issues = _classify(spec, {}, dict([new, old]), moved_on=True,
-                           rewritten=frozenset({2001}))
-        assert {(i.check_name, i.severity.value, i.sample_ids) for i in issues} == {
-            ("handover_rows_ahead", "INFO", (2001,)),
-            ("handover_rows_ahead", "CRITICAL", (3,)),
-        }
-
-    def test_equal_stores_say_nothing(self):
-        spec = _spec()
-        k, r = self._p(1)
-        assert _classify(spec, {k: r}, {k: r}, moved_on=False) == []
-        assert _classify(spec, {k: r}, {k: r}, moved_on=True, rewritten=frozenset()) == []
+        assert not hasattr(chain, "CHAIN_WATERMARK_INHERITS_DUCKDB")
 
 
 # ─── /api/health publishes the step (§3.11) ──────────────────────────────────
 
 @pytest.fixture
 def health(flags):
-    """The health module with chain 1's preflight answered locally, so the
-    block is the registry's state and the two steps' recorders alone."""
-    from core import pg_inventory_write
+    """The health module: since step 14's S14-11 its `write_chains` block is
+    the steps' recorders and the spools alone, asking no Postgres."""
     from web.routes.api import health as module
 
-    async def preflight(*a, **kw):
-        return {"ok": False, "reasons": ["not asked here"]}
-
-    module._preflight_cache.update(data=None, expires_at=0)
-    flags.setattr(pg_inventory_write, "preflight", preflight)
-    yield module
-    module._preflight_cache.update(data=None, expires_at=0)
+    return module
 
 
 class TestHealthPublishesTheStep:
@@ -1007,9 +853,8 @@ class TestHealthPublishesTheStep:
         assert "password" not in str(block)                 # the class, never the text
         # Each chain reads its own recorder: chain 1's stays clean.
         assert block["pg_inventory_write"]["sync_step"]["failures_since_ok"] == 0
-        # The registry's half is untouched: the canary reads `mode` and `error` there.
-        assert block[chain.CHAIN]["mode"] == "postgres"          # S14-00
-        assert "preflight" not in block[chain.CHAIN]
+        # No flag field beside it since S14-11.
+        assert set(block[chain.CHAIN]) == {"sync_step"}
 
     @pytest.mark.asyncio
     async def test_no_sync_service_is_null_not_empty(self, health, monkeypatch):

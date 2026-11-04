@@ -1,5 +1,5 @@
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import { useQueryParams, useFilterStore } from '../store/filterStore'
 import type { FilterStore } from '../types/filters'
 
@@ -42,6 +42,7 @@ import type {
   TrafficAnalyticsResponse,
   TrafficOrganicResponse,
   TrafficPixelOnlyResponse,
+  TrafficFunnelResponse,
   UtmCampaignsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
@@ -133,6 +134,7 @@ export const queryKeys = {
   trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
   trafficOrganic: (params: string) => ['trafficOrganic', params] as const,
   trafficPixelOnly: (params: string) => ['trafficPixelOnly', params] as const,
+  trafficFunnel: (params: string) => ['trafficFunnel', params] as const,
   trafficTrend: (params: string) => ['trafficTrend', params] as const,
   trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
   trafficROAS: (params: string) => ['trafficROAS', params] as const,
@@ -652,6 +654,22 @@ export function useTrafficPixelOnly() {
     queryKey: queryKeys.trafficPixelOnly(queryParams),
     queryFn: () => api.getTrafficPixelOnly(queryParams),
     staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+/**
+ * The site's purchase funnel from GA4. A 503 means GA4 is not connected or
+ * not answering, which a retry a second later does not change, so it is shown
+ * at once rather than asked again.
+ */
+export function useTrafficFunnel() {
+  const queryParams = useQueryParams()
+
+  return useQuery<TrafficFunnelResponse>({
+    queryKey: queryKeys.trafficFunnel(queryParams),
+    queryFn: () => api.getTrafficFunnel(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+    retry: (count, error) => !(error instanceof ApiError && error.status === 503) && count < 2,
   })
 }
 

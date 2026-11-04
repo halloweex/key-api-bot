@@ -91,7 +91,7 @@ class TestTheOrderStepIsJudgedByItsOwnWrite:
     async def test_the_same_value_written_again_moves_the_stamp(self, pg_only):
         from core.data_quality import _judge_freshness
         from core.pg_chain_watermarks import read_values_and_stamps
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys
 
         store, pool, _env = pg_only
         evening = datetime.now(timezone.utc) - timedelta(hours=8, minutes=36)
@@ -105,7 +105,7 @@ class TestTheOrderStepIsJudgedByItsOwnWrite:
 
         # ...and writes it again now: a tick on a night nobody ordered.
         await store.set_last_sync_time("orders", evening)
-        values, stamps = await read_values_and_stamps(stood_down_sync_keys())
+        values, stamps = await read_values_and_stamps(sync_keys())
 
         assert values["last_sync_orders"] == evening.isoformat()
         written = datetime.fromisoformat(stamps["last_sync_orders"])
@@ -155,22 +155,23 @@ class TestTheHourlyReplaceCannotRollItBack:
         from core.data_quality import _freshness_check
         from core.pg_chain_watermarks import read_values
         from core.pg_operational import replicate_operational
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys as stood_down_sync_keys
 
         store, pool, env = both_stores
         now = datetime.now(timezone.utc)
         frozen = now - timedelta(hours=60)
         fresh = now - timedelta(minutes=10)
 
-        # Before the switch: DuckDB owns both keys, and they stop here. Since
-        # S14-00 the chain writes Postgres whatever its flag says, so DuckDB's
-        # frozen stamps are written there on purpose.
-        from core import pg_inventory_write
-        from tests.conftest import chains_on_duckdb
-
-        with chains_on_duckdb(pg_inventory_write):
-            await store.set_last_sync_time("offers", frozen)
-            await store.set_last_sync_time("stocks", frozen)
+        # Before the switch: DuckDB owned both keys, and they stopped there.
+        # The store's setter writes Postgres alone since step 14's S14-11, so
+        # DuckDB's frozen stamps are written into its `sync_metadata` here, as
+        # the setter wrote them before the switch.
+        async with store.connection() as conn:
+            for key in ("offers", "stocks"):
+                conn.execute(
+                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    [f"last_sync_{key}", frozen.isoformat()])
 
         env.setenv("KS_WRITE_INVENTORY", "postgres")
         await store.set_last_sync_time("offers", fresh)

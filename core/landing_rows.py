@@ -502,15 +502,17 @@ def landed_orders(
     """Parse a page of KeyCRM orders into rows for both stores.
 
     **An order with no `ordered_at` is dropped, header and line items alike.**
-    That is the existing rule in `DuckDBStore.upsert_orders` and it is preserved
-    exactly, including the part that matters here: the header is skipped and its
-    products are skipped with it, so a store can never end up holding line items
-    whose order it refused. Production has 0 such orders today, which is why the
-    rule has never been visible.
+    That was the rule in `DuckDBStore.upsert_orders` (deleted in step 14's
+    S14-09) and it is preserved exactly, including the part that matters here:
+    the header is skipped and its products are skipped with it, so a store can
+    never end up holding line items whose order it refused. Production has 0
+    such orders today, which is why the rule has never been visible.
 
-    Duplicates are NOT removed here. `upsert_orders` drops them keeping the
-    last, and doing it twice — once per store, from a different code path —
-    would be a second home for a rule about which copy of a repeated order wins.
+    Duplicates are NOT removed here. The writer drops them keeping the last
+    (chain 3's `upsert_orders_with_expenses`, as DuckDB's `upsert_orders` did
+    until S14-09), and doing it twice — once per store, from a different code
+    path — would be a second home for a rule about which copy of a repeated
+    order wins.
     """
     from core.models import Order
 
