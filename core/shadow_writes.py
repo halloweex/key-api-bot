@@ -41,8 +41,9 @@ logged at ERROR. The consequence is named rather than discovered (OD-S5-3
 (a)): after a week under `off` the DuckDB copies lack that week's rows, and a
 way back to `on` reads them as `shadow_missing_in_duckdb` (WARN, the digest)
 until DuckDB is dropped. The finding dates its rows on Postgres's clock and
-its `REMEDIATION` line says rows dated while web ran `off` are expected and
-that `scripts/chain_copy_back.py` is never the cure (it releases the latch);
+its `REMEDIATION` line says rows dated while web ran `off` are expected
+(`scripts/chain_copy_back.py`, which it used to name as never the cure, went
+with step 14's S14-04);
 the soak's H2 counts the finding as accepted, not failed, once a week under
 `off` has run. `write_chains.compared_in_shadow()` is empty under
 `off` for the same reason, so the daily comparison does not read those
@@ -153,7 +154,7 @@ async def into_duckdb(store, chain: str, write: Callable[[Any], Any]) -> bool:
         _record(chain, exc)
         logger.error(
             "shadow write failed: %s: %s. Postgres, the writer of record, holds "
-            "the row; DuckDB does not until the copy-back carries it, and the "
+            "the row; DuckDB does not, nothing carries it there, and the "
             "07:30 comparison will report it as shadow_missing_in_duckdb.",
             chain, type(exc).__name__, exc_info=True,
         )

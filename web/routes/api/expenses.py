@@ -7,7 +7,7 @@ from web.services import dashboard_service
 from web.routes.auth import require_permission
 from ._deps import (
     limiter, get_store,
-    validate_period, validate_source_id, validate_sales_type,
+    validate_period, validate_source_id, validate_sales_type, validate_db_int,
     ValidationError,
 )
 
@@ -50,6 +50,7 @@ async def get_expense_summary(
     try:
         validate_period(period)
         validate_source_id(source_id)
+        validate_db_int(expense_type_id, "expense_type_id")
         sales_type = validate_sales_type(sales_type)
         start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
@@ -171,6 +172,7 @@ async def delete_expense(
     _=Depends(require_permission("expenses", "delete")),
 ):
     """Delete a manual expense. Requires expenses:delete permission."""
+    validate_db_int(expense_id, "expense_id", allow_none=False)
     store = await get_store()
     deleted = await store.delete_expense(expense_id)
     if not deleted:
