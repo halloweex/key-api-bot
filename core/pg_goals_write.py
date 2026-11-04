@@ -23,7 +23,7 @@ AND THE READS OF THE TABLE FOLLOW IT
 Every read of `app.revenue_goals` — `get_goals`, `get_smart_goals`, the
 /marketing target line — goes to Postgres while this chain does, whatever
 `KS_READ_GOALS` or `KS_READ_MARKETING` say, and never falls back to DuckDB
-(`reads_the_chain` below). The first version left them on those two flags,
+(`reads_the_chain`, until step 14's S14-11). The first version left them on those two flags,
 chain 8's arrangement, and made "both at `postgres`" a precondition of the
 flip that only whoever flipped it could check. That precondition does not
 hold for long: putting a read flag back is the documented rollback of every
@@ -42,7 +42,8 @@ where it can be seen instead of showing a goal nobody typed last.
 `reads_the_chain`.** `_marketing_run` has one path, Postgres, whatever
 `KS_READ_MARKETING` says, and a failure there is the page's counted refusal
 (`read_fallback.refuse("marketing", exc)`, a 503 naming `marketing`) rather
-than a raw raise. `get_goals` and `get_smart_goals` still ask it.
+than a raw raise. `get_goals` and `get_smart_goals` asked it until S14-07
+made `_goals_run` Postgres alone, and S14-11 deleted it.
 
 THE ONE WRITER EVERY CALLER GOES THROUGH
 
@@ -51,14 +52,16 @@ THE ONE WRITER EVERY CALLER GOES THROUGH
 routing therefore lives inside `GoalsMixin.set_goal`, where both arrive —
 chain 8's reason for putting it in the repository rather than the route.
 
-THE FLAG GATES BOTH ENDS
+THE FLAG GATED BOTH ENDS — UNTIL STEP 14
 
-Under the flag the write comes here AND the hourly `replicate_operational`
-stands down for `app.revenue_goals`, and the daily comparison with it. The
+Under the flag the write came here AND the hourly `replicate_operational`
+stood down for `app.revenue_goals`, and the daily comparison with it. The
 replica is a full replace out of DuckDB, so a write here without the
 stand-down would be rolled back within the hour, out of a DuckDB that never
-saw it, looking healthy in between. Both ask
-`core.write_chains.stood_down_tables()`, so they cannot disagree.
+saw it, looking healthy in between. Both asked
+`core.write_chains.stood_down_tables()`, so they could not disagree; since
+step 14's S14-11 both stand down on every chain's tables
+(`write_chains.chain_tables()`), no flag read.
 
 AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
@@ -85,7 +88,6 @@ that.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 from typing import Any, Optional, Tuple
 
@@ -112,55 +114,19 @@ PERIOD_TYPES: Tuple[str, ...] = ("daily", "weekly", "monthly")
 
 # The hole every shared statement that reads this chain's table carries —
 # `core.sql_dialect.render_tables` fills it with `revenue_goals` or
-# `app.revenue_goals`. `reads_the_chain` recognises a goal read by it.
+# `app.revenue_goals`. `tests/unit/test_goals_reads_follow_chain.py` walks
+# every statement carrying it to a router that reads Postgres alone
+# (`reads_the_chain` recognised a goal read by it until step 14's S14-11).
 TABLE_HOLE = "{revenue_goals}"
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_GOALS` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule, and chain 8's: a
-    typo in the variable deciding which store holds a number nobody else can
-    reconstruct must not quietly pick the other store. Since DN-01 it stops
-    this chain and nothing else.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. Neither the flag nor the latch
-    routes any more; the chain has not written yet in production, and its
-    first write still takes the latch (decision 3), which the images before
-    step 14 route by. Last consumers: `set_goal` and the registry — S14-11.
-    """
-    return True
-
-
-def reads_postgres() -> bool:
-    """Whether a read of this chain's table must ask Postgres, whatever the
-    page's own read flag says: True, a constant since S14-00."""
-    return True
-
-
-def reads_the_chain(sql: str) -> bool:
-    """Whether this statement reads the chain's table while the chain owns it.
-
-    Decided from the body, `_expenses_run`'s arrangement for `{expenses}`: a
-    router asks this of every statement it is handed, so a query that starts
-    reading `{revenue_goals}` tomorrow follows the chain the day it does,
-    through whichever router carries it. `tests/unit/test_goals_reads_follow_chain.py`
-    walks `core/` for every such statement and fails if its router does not
-    ask — unless the router has no DuckDB tail to leave the chain by and
-    refuses a failure (`_marketing_run`, since step 14's S14-05).
-    """
-    return TABLE_HOLE in sql and reads_postgres()
+# `env_writes_postgres`, `writes_postgres`, `reads_postgres` and
+# `reads_the_chain` stood here until step 14's S14-11. S14-00 made the three
+# answers constants — every goal is written and read in Postgres whatever
+# `KS_WRITE_GOALS` says — S14-07 left no router that asked `reads_the_chain`,
+# and S14-11 deleted them with the flag: `set_goal` writes here and asks
+# nothing. `WRITE_ENV` stays a name (revision 0034's comments and an image
+# from before step 14 read it), and the latch with it (decision 3).
 
 
 # `NUMERIC(precision, scale)` of the columns a caller's number lands in —

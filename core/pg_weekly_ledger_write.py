@@ -26,7 +26,6 @@ the way back since is an image from before step 14, `core.rollback_lever`).
 """
 from __future__ import annotations
 
-import os
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
@@ -36,13 +35,7 @@ from core import chain_latch
 WRITE_ENV = "KS_WRITE_WEEKLY_LEDGER"
 CHAIN = "pg_weekly_ledger_write"
 CHAIN_TABLES: Tuple[str, ...] = ("app.weekly_report_sends",)
-# The shape the registry publishes as `shadow` in `/api/health` until S14-11
-# reshapes the block. Nothing feeds DuckDB since S14-10.
-CHAIN_SHADOW = True
 
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
 TABLE = CHAIN_TABLES[0]
 
 
@@ -59,35 +52,14 @@ def first_week():
     return None
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_WEEKLY_LEDGER` alone says; an unknown value raises
-    (OD-18 (a)) — the gate then refuses, and nothing is sent."""
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and the lock-out it waited on is not asked any
-    more — production requires 0035 and has latched the chain. Kept for the
-    registry's `unmet_precondition` field until S14-11."""
-    return None
-
-
-def writes_postgres() -> bool:
-    """True, a constant since step 14's S14-00: neither the flag, nor the
-    latch, nor the lock-out routes any more; the first write in a process
-    still takes the latch (decision 3). Its last production consumer, the
-    report ledger's gate, stopped asking in S14-10; the registry's walk
-    (`tests/unit/test_write_chains.py`, a chain is a module declaring
-    `CHAIN_TABLES` and this) and the routing tests read it until S14-11
-    reshapes the registry."""
-    return True
+# `env_writes_postgres`, `unmet_precondition` and `writes_postgres` stood
+# here until step 14's S14-11, with `CHAIN_SHADOW` (the shape the registry
+# published as `shadow` after S14-10 deleted the shadow itself) and
+# `LOCKOUT_REVISION` (the revision a flip waited for — 0035, which
+# `tests/unit/test_chain_lockout.py` keeps as a literal). S14-00 made the
+# answers constants and S14-11 deleted them with the flag: the chain writes
+# Postgres, a constant. `WRITE_ENV` stays a name (revision 0035's comments and
+# an image from before step 14 read it).
 
 
 def pending() -> Dict[str, Any]:

@@ -1,30 +1,31 @@
-"""Which tables have changed hands — the one answer the shipper and the
-comparison both ask.
+"""The write chains — the modules that write Postgres's tables in DuckDB's
+place — and what each one declares.
 
-Stage 4 moves WRITES chain by chain. When a chain writes Postgres, two things
-must stop touching its tables, and they must stop together:
+Stage 4 moved WRITES chain by chain, and while a chain could still be routed
+back to DuckDB this module was the one answer every consumer asked: where a
+chain's writes went (`chain_modes`), which of its tables the hourly copy and
+the daily comparison stood down on (`stood_down_*`), which flags disagreed
+with the latch (`mismatched_chains`). Step 14's S14-00 made every answer a
+constant — every chain writes Postgres — and S14-11 deleted the answers with
+the flags: no `KS_WRITE_*` is read by this build.
 
-- the hourly `replicate_operational`, whose full replace out of a frozen DuckDB
-  would roll back every row written since the switch, once an hour, looking
-  healthy in between;
-- the daily `reconcile_operational`, which would otherwise report every new
-  row as a discrepancy the check itself created.
+What is left is the list and what each module declares on it:
 
-Chain 1 answered that with its own `CHAIN_TABLES` read at both sites. Chain 8 is
-the second writer, and that is the moment the answer needs one home: spelled at
-two sites per chain, the shipper and the comparison would come to disagree the
-first time a chain was added to one list and not the other. So both sites call
-`stood_down_tables()`, and `WRITE_CHAINS` is the list.
+- `CHAIN` — the name of the chain's latch marker and of its `/api/health`
+  entry;
+- `CHAIN_TABLES` — the tables it writes, which nothing else here may ship;
+- `CHAIN_SYNC_KEYS` — the `last_sync_*` watermarks it stamps, which the
+  store's getter and setter keep in `meta.chain_watermarks`
+  (`chain_for_sync_key`).
 
 `tests/unit/test_write_chains.py` walks `core/` for every module that declares
-both `CHAIN_TABLES` and `writes_postgres`, and fails if one is not registered
-here — so a new chain cannot be written and forgotten.
+`CHAIN_TABLES` and a latch, and fails if one is not registered here — so a new
+chain cannot be written and forgotten.
 """
 from __future__ import annotations
 
-import logging
 from types import ModuleType
-from typing import Dict, FrozenSet, Iterable, Optional, Tuple
+from typing import FrozenSet, Optional
 
 from core import (
     pg_buyers_write, pg_expense_types_write, pg_expenses_write, pg_goals_write,
@@ -32,206 +33,25 @@ from core import (
 )
 from core import pg_catalogue_write
 from core import pg_forecast_write
-
-logger = logging.getLogger(__name__)
-
-# Chain 7a (`pg_goals_write`, DN-25) is the third: `app.revenue_goals`, the
-# three goal amounts a human types. Chain 6a (`pg_expense_types_write`, DN-26)
-# is the fourth: `bronze.expense_types`, the dictionary /expenses names its
-# costs by. Both flags are off by default, so until `KS_WRITE_GOALS` or
-# `KS_WRITE_EXPENSE_TYPES` says postgres each stands down nothing and only adds
-# a row to the `/api/health` block.
-#
-# Chain 4 (`pg_buyers_write`) is the fifth: `bronze.buyers`,
-# `bronze.buyer_contacts` and `app.buyer_gender`, off by default, and held on
-# DuckDB until every reader of the buyers reads Postgres
-# (`unmet_precondition`).
-#
-# Chain 3 (`pg_orders_write`) is the sixth: the orders, their line items, their
-# expenses and the backfill-miss ledger, off by default (`KS_WRITE_ORDERS`),
-# and held on DuckDB until step 13 and chain 1 are in force and the backups
-# have proved themselves (`unmet_precondition`, OD-13 (a); the goal bridge it
-# also waited on went in chain 7b-4). Registered with the flag off, it stands nothing down: the order
-# shippers ask `stood_down_among`, which evaluates it and finds duckdb.
-#
-# Chain 5 (`pg_managers_write`) is the seventh: `bronze.managers` and
-# `app.manager_classifications`, off by default (`KS_WRITE_MANAGERS`), and held
-# on DuckDB until step 13 and chain 3 are in force and `KS_READ_FALLBACK=off`
-# (`unmet_precondition`; the goal bridge it also waited on went in 7b-4).
-# Registered with the flag off, it stands nothing down.
-WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
-                pg_expense_types_write, pg_buyers_write, pg_orders_write,
-                pg_managers_write)
-# Chain 6 (`pg_catalogue_write`) is the eighth: `bronze.products` and
-# `bronze.categories`, off by default, and held on DuckDB until chain 1, the
-# read fallback and every warehouse reader have moved (`unmet_precondition`).
-WRITE_CHAINS += (pg_catalogue_write,)
-# Chain 7b-3 (`pg_forecast_write`) is the ninth: the four goal and forecast
-# tables — `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`,
-# `app.revenue_predictions` — off by default, and held on DuckDB until the
-# calculators' inputs are Postgres (`unmet_precondition`).
-WRITE_CHAINS += (pg_forecast_write,)
-
-# A KS_WRITE_* value no chain understands must stop that chain and nothing
-# else. The registry used to evaluate every chain's flag for every question, so
-# a typo in KS_WRITE_EXPENSES raised inside `get_last_sync_time("orders")` — the
-# first thing the incremental sync asks — and order intake stopped silently for
-# the eight hours the canary allows the orders mirror. Found planning stage 4's
-# remaining work (DN-01), 2026-09-17; the policy question is the owner's OD-18.
-#
-# The rule now:
-# - a sync key consults only the chain that declares it;
-# - a chain whose flag is not understood is STOOD DOWN — its tables are neither
-#   shipped nor compared, because shipping could overwrite rows Postgres alone
-#   holds — and the error is carried out to be seen, never swallowed;
-# - the chain's own writers still raise on their own typo.
-#
-# And since DN-06 the flag is not the last word. A chain that has already
-# written Postgres is LATCHED (`core/chain_latch.py`, owner decision OD-19 (a)),
-# and `writes_postgres()` answers True whatever the variable says — including a
-# value nobody can read, because routing a latched chain back to DuckDB would
-# start a second writer beside the first. Everything here reads that one answer,
-# so the writers, the sync keys, the shipper and the comparison move together.
-
-
-# Chains 9, 10, 11a and 11b — the shadow chains (owner decision OD-02 (c),
-# 2026-10-01): Postgres writes, and DuckDB was handed every row after the
-# commit until step 14's S14-10 (below), so the hourly copy stands down for
-# their tables like any moved chain's. Appended in a block of their own rather
-# than folded into the tuple above, so the lanes that added chains there and
-# this one did not edit the same lines.
-from core import (  # noqa: E402 — appended, see above
+from core import (
     pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
     pg_weekly_ledger_write,
 )
 
-WRITE_CHAINS = WRITE_CHAINS + (pg_dq_journal_write, pg_watchdog_write,
-                               pg_weekly_ledger_write, pg_traffic_ledger_write)
+# In the order they were registered: chain 1 (inventory), 8 (manual
+# expenses), 7a (goals), 6a (expense types), 4 (buyers), 3 (orders), 5
+# (managers), 6 (catalogue), 7b-3 (goal tables and forecast), then the four
+# that shadowed DuckDB until step 14's S14-10 — 9 (quality journal), 10
+# (watchdog samples), 11a and 11b (the two report ledgers).
+WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
+                pg_expense_types_write, pg_buyers_write, pg_orders_write,
+                pg_managers_write, pg_catalogue_write, pg_forecast_write,
+                pg_dq_journal_write, pg_watchdog_write,
+                pg_weekly_ledger_write, pg_traffic_ledger_write)
 
-# Every chain from #280 on — the eight above from 3 to 11b, and any registered
-# after them — names the revision that refuses the images built before it
-# (`LOCKOUT_REVISION`), and until step 14's S14-00 counted it among its
-# preconditions (`chain_latch.lockout_unmet`): its flag moved nothing in a
-# build that did not require that revision. #280's own build did not, and
-# nothing but the operator kept its flips after 0035 (batch-E lock review).
-# Chains 3 and 6 lost the attribute with their routing in S14-09; their
-# lock-out is the literal `LOCKOUT_RETIRED` in `tests/unit/test_chain_lockout.py`,
-# which still holds every chain to a revision that knows its tables. Chains 1,
-# 4, 6a, 7a and 8 predate the rule; 0034 holds them.
 
 def chain_name(chain: ModuleType) -> str:
     return chain.__name__.rsplit(".", 1)[-1]
-
-
-def _chain_state(chain: ModuleType) -> Dict[str, Optional[object]]:
-    """One chain's entry in `chain_modes()`. Never raises.
-
-    **Since step 14's S14-00 `mode` is "postgres" and `unmet_precondition`
-    None for every chain**, whatever its flag says: every chain writes
-    Postgres, and nothing routes by the flag, the latch or a precondition.
-    `env`, `error`, `latched`, `latched_at` and `mismatch` are published as
-    before — they now say whether a rollback to an image from before step
-    14, which still routes by them, would find the chain where it is; the canary's
-    `write_chain_flag_*` keys keep judging them until S14-11."""
-    from core import chain_latch
-
-    name = chain_name(chain)
-    # The environment on its own, so the published error survives.
-    try:
-        env_mode, error = (
-            "postgres" if chain.env_writes_postgres() else "duckdb"), None
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        env_mode, error = None, str(exc)
-    since = chain_latch.latched_at(name)
-    return {
-        "env": chain.WRITE_ENV,
-        "mode": "postgres",
-        "error": error,
-        "latched": since is not None,
-        "latched_at": since,
-        "mismatch": since is not None and env_mode != "postgres",
-        "unmet_precondition": None,
-        "shadow": is_shadow(chain),
-    }
-
-
-def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
-    """`{chain: {"env", "mode", "error", "latched", "latched_at", "mismatch",
-    "unmet_precondition", "shadow"}}`.
-
-    `shadow` is the chain's shape, not its state: True for chains 9, 10,
-    11a and 11b, which fed DuckDB after they moved (OD-02 (c), `is_shadow`)
-    until step 14's S14-10 — published unchanged until S14-11 reshapes the
-    block.
-
-    `mode` is where the chain's writes actually go — "postgres" for every
-    chain since step 14's S14-00 — and `unmet_precondition` None
-    (`_chain_state`). Until then `mode` was "postgres", "duckdb", or None for
-    a flag nobody could read, and an unmet precondition held an unlatched
-    chain on DuckDB.
-    `mismatch` is the state DN-06 exists to make visible: the chain has already
-    written Postgres, so it keeps writing Postgres (OD-19 (a)), while its
-    variable says something else. Both halves are published, because a latched
-    chain with an unreadable flag is two problems and reporting one would hide
-    the other. Never raises.
-
-    **`mismatch` is latch against environment, and never latch against owner
-    row.** The other disagreement — a marker whose first Postgres write failed,
-    or an owner row whose marker was lost — needs the copy that lives in
-    Postgres, and this block is read from the local marker cache precisely so
-    it still answers while Postgres is down. A query here would make the one
-    place that can say "the writes are going to a store you cannot reach" fail
-    with that store. So the two copies are compared where both are already in
-    hand: the daily `reconcile_operational`, which files
-    `chain_latch_disagrees` (CRITICAL) either way and reaches a human through
-    the 09:00 digest. The cost is named rather than discovered: a failed first
-    write is invisible until the next morning, and `latched: true` with
-    `mismatch: false` is what it looks like here in the meantime.
-    """
-    return {chain_name(chain): _chain_state(chain) for chain in WRITE_CHAINS}
-
-
-# ─── The third state, until S14-10: copy stops, comparison continues ────────
-#
-# A chain moves its writes in one of two shapes. Chains 1, 6a, 7a and 8 FREEZE
-# DuckDB: once the chain writes Postgres, DuckDB stops receiving its rows, so
-# the hourly copy and the daily comparison stand down together — every answer
-# above reads one `mode`.
-#
-# Chains 9, 10 and 11 SHADOWED it (owner decision OD-02 (c), 2026-10-01):
-# Postgres became the writer and DuckDB still received each row, after the
-# Postgres commit, from the same values (`core/shadow_writes.py`). The hourly
-# copy stood down for their tables exactly like a frozen chain's — a full
-# replace out of DuckDB would have deleted from Postgres every row whose
-# shadow write failed, for a send ledger a delivered week — while the daily
-# comparison kept comparing them facing Postgres→DuckDB (`compare_shadow`,
-# fed by `compared_in_shadow()`). Since S14-00 web ran `KS_DUCKDB=off`, where
-# the shadow stood down and the comparison compared nothing; step 14's S14-10
-# deleted the shadow, the comparison and `compared_in_shadow`, and the four
-# chains are frozen chains like the rest.
-#
-# A chain still declares the shape with `CHAIN_SHADOW = True`: the registry
-# publishes it as `shadow` in `/api/health`, which S14-11 reshapes.
-
-
-def is_shadow(chain: ModuleType) -> bool:
-    """Was this one of the shadow chains (9, 10, 11a, 11b)? Never raises.
-    Last consumer: `_chain_state`'s published `shadow` — S14-11."""
-    return bool(getattr(chain, "CHAIN_SHADOW", False))
-
-
-def mismatched_chains() -> Dict[str, str]:
-    """`{chain: latched_at}` for chains that own their tables in Postgres while
-    their variable says otherwise.
-
-    The shipper stamps these tables failing and the canary pages WARN on them.
-    Neither may repair it. The way back was `scripts/chain_copy_back.py`, which
-    copied the rows to DuckDB, compared them at zero and released both copies
-    of the latch; step 14's S14-04 deleted it, and the lever is
-    `core.rollback_lever` since.
-    """
-    return {name: str(state["latched_at"])
-            for name, state in chain_modes().items() if state["mismatch"]}
 
 
 def chain_for_sync_key(key: str) -> Optional[ModuleType]:
@@ -242,77 +62,18 @@ def chain_for_sync_key(key: str) -> Optional[ModuleType]:
     return None
 
 
-def stood_down_tables_checked() -> Tuple[FrozenSet[str], Dict[str, str]]:
-    """`(tables, {chain: error})`. A chain whose flag is not understood stands
-    down with the chains that write Postgres."""
-    tables, errors = set(), {}
-    for name, state in chain_modes().items():
-        chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
-        if state["mode"] != "duckdb":
-            tables.update(chain.CHAIN_TABLES)
-        if state["error"]:
-            errors[name] = state["error"]
-    if errors:
-        logger.error("write chain flag(s) not understood, stood down: %s", errors)
-    return frozenset(tables), errors
+def chain_tables() -> FrozenSet[str]:
+    """Every table a registered chain writes. Pure.
+
+    Since step 14's S14-11 this is what `stood_down_tables()` answered for
+    every state production could be in: every chain writes Postgres, so every
+    chain's tables are held from the hourly copy and the daily comparison out
+    of DuckDB."""
+    return frozenset(t for chain in WRITE_CHAINS for t in chain.CHAIN_TABLES)
 
 
-def stood_down_sync_keys_checked() -> Tuple[FrozenSet[str], Dict[str, str]]:
-    """`(keys, {chain: error})`, the same rule for `last_sync_*` keys."""
-    keys, errors = set(), {}
-    for name, state in chain_modes().items():
-        chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
-        if state["mode"] != "duckdb":
-            keys.update(getattr(chain, "CHAIN_SYNC_KEYS", ()))
-        if state["error"]:
-            errors[name] = state["error"]
-    return frozenset(keys), errors
-
-
-def stood_down_tables() -> FrozenSet[str]:
-    """Every table whose chain writes Postgres, or whose flag is not understood.
-    Never raises — see `stood_down_tables_checked` for the errors."""
-    return stood_down_tables_checked()[0]
-
-
-def stood_down_among(tables: Iterable[str]) -> FrozenSet[str]:
-    """Which of `tables` have changed hands, asking only the chains that
-    declare one of them. Never raises.
-
-    Always `stood_down_tables() & tables` — the same `_chain_state` verdict,
-    so a flag error or a latch stands a table down here exactly as it does
-    for the shipper. What differs is who is asked, and that is DN-01's rule
-    carried from sync keys to tables: the order sync asked this on every
-    write until step 14's S14-09 deleted DuckDB's order writer, and
-    evaluating every chain there would have logged an unrelated
-    `KS_WRITE_*` typo once a minute from the one path that must stay quiet
-    about other chains' business. With no chain declaring a table nothing is
-    evaluated at all: no variable read, no marker file opened (no order
-    table has been in that case since #280 registered chain 3).
-    """
-    wanted = frozenset(tables)
-    moved: set = set()
-    errors: Dict[str, str] = {}
-    for chain in WRITE_CHAINS:
-        mine = wanted.intersection(chain.CHAIN_TABLES)
-        if not mine:
-            continue
-        state = _chain_state(chain)
-        if state["mode"] != "duckdb":
-            moved |= mine
-        if state["error"]:
-            errors[chain_name(chain)] = str(state["error"])
-    if errors:
-        logger.error("write chain flag(s) not understood, stood down: %s", errors)
-    return frozenset(moved)
-
-
-def stood_down_sync_keys() -> FrozenSet[str]:
-    """Every `last_sync_*` key whose chain writes Postgres, or whose flag is not
-    understood. Never raises.
-
-    The freshness check asks this; the store's getter and setter ask
-    `chain_for_sync_key` instead, so a key no chain declares evaluates no flag
-    at all. A chain with no sync keys — chain 8 — contributes none.
-    """
-    return stood_down_sync_keys_checked()[0]
+def sync_keys() -> FrozenSet[str]:
+    """Every `last_sync_*` key a registered chain stamps. Pure — what
+    `stood_down_sync_keys()` answered since S14-00."""
+    return frozenset(k for chain in WRITE_CHAINS
+                     for k in getattr(chain, "CHAIN_SYNC_KEYS", ()))

@@ -23,8 +23,9 @@ rollback that looks healthy in between (`replicate_sms`' recorded failure).
 THE ANSWER THE OWNER CHOSE (OD-19 (a), 2026-09-17): THE LATCH WINS
 
 The first Postgres write a chain performs *latches* it. From then on
-`writes_postgres()` answers True whatever the environment says, every consumer
-reads that one answer, and the only way back was `scripts/chain_copy_back.py`
+`writes_postgres()` answered True whatever the environment said, every
+consumer read that one answer (until step 14's S14-11 deleted it with the
+flags: a step-14 image writes Postgres, a constant), and the only way back was `scripts/chain_copy_back.py`
 (DN-08), which copied the rows to DuckDB, compared them at zero and then
 released both copies of the latch. Step 14 deleted it (S14-04): a step-14 image
 routes by neither copy (S14-00) and has no way back but an image from before
@@ -96,7 +97,8 @@ MARKER_DIR: Path = DATA_DIR / "write-chain-owners"
 OWNER_PREFIX = "owner:"
 
 # `{chain: latched_at}` — loaded from the markers once and cached, because
-# `writes_postgres()` is asked on every write and every stand-down question.
+# `latch()` is asked on every write (and until step 14's S14-11 every
+# chain's `writes_postgres()` and every stand-down question asked it too).
 # None means "not loaded yet", which is different from "nothing is latched".
 _latched: Optional[Dict[str, str]] = None
 
@@ -270,8 +272,9 @@ def claimed_chains(owners: Mapping[str, str]) -> Dict[str, str]:
     well, and stands down on either copy. It costs one query per run of the
     hourly and daily jobs that ask it — the operational pair here, the order
     paths through `pg_landing.order_tables_stood_down_or_owned` (DN-22a) — and
-    it cannot be done on the write path itself: that is the read
-    `writes_postgres()` exists to avoid.
+    it cannot be done on the write path itself: that is the read the
+    chains' `writes_postgres()` existed to avoid (step 14's S14-11 deleted it
+    with the flags).
 
     A chain, not a table: ownership passes for a chain as a unit, so one owner
     row holds all of its tables down. DN-08's copy-back deleted both copies,
@@ -370,66 +373,14 @@ class MirrorStamp:
     unreadable: Optional[str] = None
 
 
-# ─── The lock-out a flip waits for ──────────────────────────────────────────
+# ─── The lock-out a flip waited for — until step 14's S14-11 ──────────────────
 #
-# Once a chain has latched, an image built before the chain must not run
-# against its tables: it would write DuckDB, and ship round the chain through
-# every path that never asks who owns a table, without knowing the chain
-# exists. What refuses such an image is a revision `REQUIRED_REVISION` moved to
-# after the chain was registered — 0034 for chain 4, 0035 for the eight chains
-# #280 registered — so every gated path of the older image refuses the
-# database. That holds only if the build that flips the chain already requires
-# that revision. #280's build did not: images 3.0.271 and 3.0.272 carry the
-# eight chains and require 0034, so a flag set there latched a chain with every
-# older image still admitted, and nothing but the order of an operator's steps
-# stood in the way (reproduced 2026-10-09 against a 0034 database: chain 11a
-# latched, owner row and ledger row written, no revision consulted).
-#
-# So a chain registered from #280 on names its lock-out (`LOCKOUT_REVISION`),
-# and its flag moves the writes only in a build whose `REQUIRED_REVISION` is
-# that revision or a later one — an unmet precondition like any other: the
-# chain runs as duckdb, `/api/health` publishes the reason and the canary warns
-# `write_chain_precondition_unmet`. Its writers ask `require_revision()` before
-# the latch, so the database is then at that revision as well: the flip waits
-# for the lock-out at runtime, in every build that carries this rule. A chain
-# that names none is unmet. A latched chain is not held (OD-19 (a)). Since
-# step 14's S14-00 no flag moves anything; chains 3 and 6 lost
-# `LOCKOUT_REVISION` with their routing in S14-09, and their lock-out is the
-# literal `LOCKOUT_RETIRED` in `tests/unit/test_chain_lockout.py`.
-#
-# "Or later" is read off the four digits every revision id starts with: the
-# migrations are one line numbered in order, which
-# `tests/unit/test_chain_lockout.py` holds, so the number is the ancestry. That
-# needs neither the migrations directory, which the web and bot images do not
-# carry, nor Postgres, which `/api/health` must answer without.
-
-LOCKOUT_KEY = "lockout"
-
-
-def _revision_number(revision: str) -> int:
-    head = revision.split("_", 1)[0]
-    if len(head) != 4 or not head.isdigit():
-        raise ValueError(f"{revision!r} is not a revision id")
-    return int(head)
-
-
-def lockout_unmet(lockout_revision: Optional[str]) -> Optional[str]:
-    """Why a chain whose lock-out is `lockout_revision` may not move its writes
-    in this build, or None when this build requires that revision or a later
-    one. Never raises and never asks Postgres; names revisions only."""
-    from core import pg
-
-    if not lockout_revision:
-        return (f"{LOCKOUT_KEY}: no revision refuses the images built before "
-                "this chain, so one of them still starts against its tables "
-                "after the flip; ship one (revision 0035's shape) and name it "
-                "in the chain's LOCKOUT_REVISION first")
-    try:
-        if _revision_number(lockout_revision) <= _revision_number(pg.REQUIRED_REVISION):
-            return None
-    except Exception as exc:  # noqa: BLE001 — unreadable is unmet
-        return f"{LOCKOUT_KEY}: the revisions could not be compared ({exc})"
-    return (f"{LOCKOUT_KEY}: this build requires {pg.REQUIRED_REVISION}, not "
-            f"{lockout_revision}, so an image built before this chain still "
-            "starts against its tables after the flip; deploy the build that "
-            f"requires {lockout_revision} first")
+# Every chain registered from #280 on named the revision that refuses the
+# images built before it (`LOCKOUT_REVISION`, 0035 for the eight #280
+# registered), and its flag moved the writes only in a build that required
+# that revision or a later one (`lockout_unmet`, read off the four digits
+# every revision id starts with). Since S14-00 no flag moves anything, and
+# S14-11 deleted the constants and `lockout_unmet` with the flags; which
+# revision knows each chain's tables is the literal `LOCKOUT` in
+# `tests/unit/test_chain_lockout.py`, which still holds every chain to a
+# revision that comments its tables.
