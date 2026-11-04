@@ -191,7 +191,8 @@ class ReadUnavailable(Exception):
 
     Raised by `fall_back`, `no_address` and `no_engine` under
     `KS_READ_FALLBACK=off`, and — under either mode — by the read of a table a
-    write chain owns, through `chain_refusal`; by nothing else. `web/main.py`
+    write chain owns, through `chain_refusal`, and by the routers with no
+    DuckDB tail left, through `refuse` (step 14, S14-05); by nothing else. `web/main.py`
     maps it to a 503 carrying `surface`, so a
     handler between a route and a router must let it through — the walk in
     `tests/unit/test_read_fallback_sites.py` requires every handler around a
@@ -345,8 +346,12 @@ def _tally(table: Dict[str, Dict[str, object]], surface: str) -> int:
         return int(entry["count"])
 
 
-def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
-    """Count one refusal on `surface`, say why, and raise `ReadUnavailable`.
+def _refusal(surface: str, why: str,
+             exc: Optional[BaseException]) -> "ReadUnavailable":
+    """Count one refusal on `surface`, say why, and build the
+    `ReadUnavailable` for it, caused by `exc` — what `raise
+    ReadUnavailable(surface) from exc` makes: setting the cause suppresses
+    the context, as `from` does.
 
     The line deliberately does not say "falling back to DuckDB": nothing
     fell back, and that phrase is what a fallback is grepped by.
@@ -358,7 +363,14 @@ def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
         f": {exc}" if exc is not None else "",
         exc_info=exc if isinstance(exc, BaseException) else None,
     )
-    raise ReadUnavailable(surface) from exc
+    refusal = ReadUnavailable(surface)
+    refusal.__cause__ = exc
+    return refusal
+
+
+def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
+    """Count one refusal on `surface`, say why, and raise `ReadUnavailable`."""
+    raise _refusal(surface, why, exc)
 
 
 def fall_back(surface: str, exc: Optional[BaseException] = None) -> None:
@@ -381,6 +393,24 @@ def fall_back(surface: str, exc: Optional[BaseException] = None) -> None:
         "start): %s", surface, count, exc,
         exc_info=exc if isinstance(exc, BaseException) else None,
     )
+
+
+def refuse(surface: str, exc: BaseException) -> ReadUnavailable:
+    """A read on `surface` failed in its one engine: count it, say so, and
+    hand back the `ReadUnavailable` the caller raises (step 14, S14-05).
+
+    The routers with no DuckDB tail left call this from the handler around
+    their one Postgres read, as `raise read_fallback.refuse(surface, exc)`.
+    It is what `fall_back` did for them under `off` — production's mode since
+    2026-10-09 and, since S14-00, the only one — by the same body
+    (`_refusal`): counted with the refusals (`read_fallback_mode.refused` on
+    `/api/health`), logged at ERROR with the same line and the cause beside
+    it, and caused by `exc`, so `web/main.py` answers the 503 naming the
+    surface. Returned rather than raised for `chain_refusal`'s reason: the
+    handler says `raise` itself, which is what the walks in
+    `tests/unit/test_read_fallback_sites.py` read as a decision.
+    """
+    return _refusal(surface, "its engine failed", exc)
 
 
 def no_engine(surface: str, why: str) -> None:

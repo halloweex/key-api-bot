@@ -109,6 +109,18 @@ REFUSERS = {"fall_back", "no_address", "no_engine"}
 # A read of a table a write chain owns refuses its Postgres failure under
 # either mode (chain 7b-3's reads; `read_fallback.chain_refusal`).
 REFUSERS |= {"chain_refusal"}
+# A router with no DuckDB tail refuses its one engine's failure (step 14,
+# S14-05). Qualified, because a route's own validation helper is called
+# `refuse` too (`web/routes/api/customers.py`) and refuses nothing.
+QUALIFIED_REFUSERS = {("read_fallback", "refuse")}
+
+
+def _names_a_refusal(call: ast.Call) -> bool:
+    f = call.func
+    if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+            and (f.value.id, f.attr) in QUALIFIED_REFUSERS):
+        return True
+    return (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)) in REFUSERS
 # A receiver the store is reached through: `store`, `self.store`,
 # `self._store`, `get_store()`, `(await get_store())`.
 STORE_RECEIVER = re.compile(r"(^|[._])store$|get_store\(\)")
@@ -532,11 +544,8 @@ def build_graph(tops=WALKED) -> Graph:
         if fn.rel == "core/read_fallback.py":
             return False
         for n in _own(fn.node):
-            if isinstance(n, ast.Call):
-                name = (n.func.attr if isinstance(n.func, ast.Attribute)
-                        else getattr(n.func, "id", None))
-                if name in REFUSERS:
-                    return True
+            if isinstance(n, ast.Call) and _names_a_refusal(n):
+                return True
         return False
 
     reaching = {fn for fn in functions if refuses(fn)}
@@ -717,8 +726,7 @@ def _stopped_by(tries) -> Optional[str]:
 
 
 def _is_refusal(call: ast.Call) -> bool:
-    f = call.func
-    return (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)) in REFUSERS
+    return _names_a_refusal(call)
 
 
 @dataclass

@@ -22,13 +22,18 @@ statement while still returning three bound parameters.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_constants import EXHIBITION_SOURCE_ID
 from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
+)
 
 WINDOW = (date.today() - timedelta(days=30), date.today())
 
@@ -77,6 +82,32 @@ async def _seed(store):
     await store.refresh_warehouse_layers(trigger="manual")
 
 
+async def _populate(conn, pool):
+    """`_seed`'s rows, in Postgres' Bronze, derived by Postgres."""
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    await seed(
+        conn,
+        categories=[(1, "Care", None)],
+        products=[(100, "Serum", 1, "BrandA", "SKU-A", 500.0)],
+        orders=[(oid, src, 1, total, now - timedelta(days=days), 10 + oid, None, promo)
+                for oid, total, days, src, promo in (
+                    (1, 1000.0, 1, 4, None), (2, 1000.0, 2, 4, "SAVE"),
+                    (3, 200.0, 3, 4, None))],
+        lines=[(lid, oid, 100, "Serum", 2, 500.0) for lid, oid in ((1, 1), (2, 2), (3, 3))])
+    await derive(pool)
+
+
+@pytest_asyncio.fixture
+async def in_postgres(tmp_path, monkeypatch):
+    """The trend as production reads it — Silver in Postgres — for the one
+    filter whose category tree is the filter bar's, which is Postgres's alone
+    since step 14's S14-05. The rest of this module stays on DuckDB's tail
+    until S14-06 removes it."""
+    monkeypatch.setenv("KS_READ_SILVER", "postgres")
+    async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _populate):
+        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the trend")
+
+
 def _total(result) -> float:
     return round(sum(result["revenue"]), 2)
 
@@ -105,16 +136,12 @@ class TestTheMeasureIsDeclared:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_a_category_filter_is_the_value_of_the_goods(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            r = await store.get_revenue_trend(*WINDOW, sales_type="retail", category_id=1)
-            assert r["measure"] == "goods_value"
-            assert _total(r) == 3000.00
-        finally:
-            await store.close()
+    async def test_a_category_filter_is_the_value_of_the_goods(self, in_postgres):
+        r = await in_postgres.get_revenue_trend(*WINDOW, sales_type="retail", category_id=1)
+        assert r["measure"] == "goods_value"
+        assert _total(r) == 3000.00
 
     @pytest.mark.asyncio
     async def test_the_two_measures_genuinely_differ_here(self, tmp_path):
