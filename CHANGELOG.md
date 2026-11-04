@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.314
+
+- The margin fingerprint check reads the per-SKU cost #346 introduced
+- WIP: S14-10 review — health's comment says where data_quality comes from now
+- WIP: S14-10 review — the beat's H6 note claims only what H6 read
+- WIP: S14-10 review — the ledger's three tries take ~12 s in all, not apart
+- WIP: S14-10 — three walks count the doors the journal no longer opens
+- WIP: S14-10 — CLAUDE.md says the shadow went
+- WIP: S14-10 — the integration journals are read from Postgres
+- WIP: S14-10 — the jobs' tests stop routing the journal back to DuckDB
+- WIP: S14-10 — the journal's statements are proved on Postgres
+- WIP: S14-10 — the four doors' tests follow them to Postgres
+- WIP: S14-10 — chains 9, 10, 11a, 11b write Postgres alone; the shadow goes
+- WIP: S14-10 — the digest's run labels are pinned before the zone collapses
+
+
 ## 3.0.313
 
 - The funnel asks GA4 only for the days it holds
