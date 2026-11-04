@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.318
+
+- WIP: S14-12 review — an unreadable marker directory is blindness, and the markers are read from disk
+
+
 ## 3.0.317
 
 - WIP: S14-12 — the baseline shrinks with the deleted comparisons
