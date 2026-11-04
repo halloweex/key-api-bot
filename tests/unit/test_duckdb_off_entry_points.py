@@ -82,9 +82,6 @@ HOST_ENTRIES: Dict[str, str] = {
     "scripts/backfill_utm.py:backfill_utm": (
         "re-parses in Postgres alone under step 13 (PR-6); the store is "
         "unconnected under off"),
-    "scripts/chain_copy_back.py:main": (
-        "the way back; refused under off, exit 2 (PR-0) — `-e KS_DUCKDB=on` "
-        "is the decision to restart both clocks"),
     "scripts/check_date.py:main": (
         "compares DuckDB's counts with KeyCRM's; refused under off (PR-10)"),
     "scripts/compact_duckdb.py:main": (
@@ -319,11 +316,14 @@ class TestEveryWayIn:
         count = defaultdict(int)
         for kind in kinds.values():
             count[kind] += 1
-        # 135 doors until step 14's S14-08, which took the seventeen /sms and
-        # access routes below off the file (118 after it). Each step-14 PR
-        # that removes a DuckDB branch shrinks this; the floor is only that
-        # the walk still finds the ways in, not a count to keep.
-        assert count["door"] >= 100, dict(count)
+        # 135 doors until step 14's S14-07 and S14-08. S14-07's routes and
+        # jobs over `/expenses`, `/inventory`, `/goals`, the cohorts, the
+        # assistant and the index stopped reaching the file (112 after it
+        # alone), and S14-08 took the seventeen /sms and access routes below
+        # off it (118 after it alone): 95 with both. Each step-14 PR that
+        # removes a DuckDB branch shrinks this; the floor is only that the
+        # walk still finds the ways in, not a count to keep.
+        assert count["door"] >= 95, dict(count)
         assert count["held"] >= 10, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
         assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_digest"] == "door"

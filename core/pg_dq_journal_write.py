@@ -19,7 +19,9 @@ DuckDB would delete each run whose shadow failed. `CHAIN_SHADOW` says so to
 Everything else is the frozen chains' machinery unchanged. The first Postgres
 write latches the chain (OD-19 (a)), because a run whose shadow failed exists
 in Postgres alone and the flag is then no more a rollback than chain 8's; the
-way back is `scripts/chain_copy_back.py dq_journal`.
+way back was `scripts/chain_copy_back.py dq_journal` (deleted in step 14's
+S14-04; the way back since is an image from before step 14,
+`core.rollback_lever`).
 
 THE ALLOCATOR: MAX + 1 UNDER AN ADVISORY LOCK, NO REVISION
 
@@ -30,8 +32,8 @@ scoped advisory lock serialises the allocators, READ COMMITTED's next
 statement after the lock sees the previous holder's commit, nothing deletes
 from these tables in Postgres once the copy stands down, and the rate is ~10
 runs a day. A revision with a sequence is the alternative the design names;
-`core.chain_transfer` already derives that sequence's name and would floor
-from it.
+`core.chain_transfer` derived that sequence's name and would have floored
+from it (deleted in S14-04).
 
 THE DIGEST'S BEAT
 
@@ -81,8 +83,15 @@ CHAIN_SHADOW = True
 LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # Not a sync watermark — `_freshness_check` would judge a `last_sync_*` key as
-# a stalled sync — but kept in `meta.chain_watermarks` for the same reason,
-# and carried back by the copy-back with the chain (`_carried_keys`).
+# a stalled sync — but kept in `meta.chain_watermarks` for the same reason.
+# `CHAIN_MARKER_KEYS` declares it chain 9's. No production code reads the
+# declaration since step 14's S14-04: its one reader was the copy-back
+# (`chain_transfer._carried_keys`, which carried the key back with the chain;
+# an image from before step 14 reads its own copy of this module). What reads
+# it here: the week-of-silence runbook's test, which names chain 9 among the
+# chains that keep a value in DuckDB's `sync_metadata` from it
+# (`tests/unit/test_week_of_silence_host.py`), the one-spelling test in
+# `tests/unit/test_dq_journal.py`, and `duckdb_table_fates`' text.
 DIGEST_MARKER_KEY = "dq_digest_last_sent"
 CHAIN_MARKER_KEYS: Tuple[str, ...] = (DIGEST_MARKER_KEY,)
 

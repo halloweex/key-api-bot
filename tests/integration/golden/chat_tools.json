@@ -1,0 +1,253 @@
+{
+ "answers": {
+  "_compare_date_ranges[\"2026-08-16\", \"2026-08-31\", \"2026-09-01\", \"2026-09-15\"]": {
+   "current": {
+    "avg_order_value": 0.0,
+    "end_date": "2026-08-31",
+    "returns_count": 0,
+    "returns_revenue": 0.0,
+    "start_date": "2026-08-16",
+    "total_orders": 0,
+    "total_revenue": 0.0
+   },
+   "current_range": {
+    "end": "2026-08-31",
+    "start": "2026-08-16"
+   },
+   "orders_change": -3,
+   "previous": {
+    "avg_order_value": 510.0,
+    "end_date": "2026-09-15",
+    "returns_count": 1,
+    "returns_revenue": 400.0,
+    "start_date": "2026-09-01",
+    "total_orders": 3,
+    "total_revenue": 2550.0
+   },
+   "previous_range": {
+    "end": "2026-09-15",
+    "start": "2026-09-01"
+   },
+   "revenue_change": -2550.0,
+   "revenue_change_percent": -100.0
+  },
+  "_get_customer_insights[\"month\"]": {
+   "avg_order_value": 510.0,
+   "new_customers": 1,
+   "period": "month",
+   "repeat_rate": 66.7,
+   "returning_customers": 2,
+   "total_customers": 3
+  },
+  "_get_revenue_by_dates[\"2026-08-16\", \"2026-09-15\", \"all\"]": {
+   "avg_order_value": 407.142857,
+   "end_date": "2026-09-15",
+   "returns_count": 2,
+   "returns_revenue": 900.0,
+   "start_date": "2026-08-16",
+   "total_orders": 4,
+   "total_revenue": 2850.0
+  },
+  "_get_revenue_by_dates[\"2026-08-16\", \"2026-09-15\", \"b2b\"]": {
+   "avg_order_value": 150.0,
+   "end_date": "2026-09-15",
+   "returns_count": 1,
+   "returns_revenue": 500.0,
+   "start_date": "2026-08-16",
+   "total_orders": 1,
+   "total_revenue": 300.0
+  },
+  "_get_revenue_by_dates[\"2026-08-16\", \"2026-09-15\", \"retail\"]": {
+   "avg_order_value": 510.0,
+   "end_date": "2026-09-15",
+   "returns_count": 1,
+   "returns_revenue": 400.0,
+   "start_date": "2026-08-16",
+   "total_orders": 3,
+   "total_revenue": 2550.0
+  },
+  "_get_revenue_summary[\"month\", \"all\"]": {
+   "avg_order_value": 407.142857,
+   "end_date": "2026-09-15",
+   "period": "month",
+   "returns_count": 2,
+   "returns_revenue": 900.0,
+   "start_date": "2026-08-16",
+   "total_orders": 4,
+   "total_revenue": 2850.0
+  },
+  "_get_revenue_summary[\"month\", \"b2b\"]": {
+   "avg_order_value": 150.0,
+   "end_date": "2026-09-15",
+   "period": "month",
+   "returns_count": 1,
+   "returns_revenue": 500.0,
+   "start_date": "2026-08-16",
+   "total_orders": 1,
+   "total_revenue": 300.0
+  },
+  "_get_revenue_summary[\"month\", \"retail\"]": {
+   "avg_order_value": 510.0,
+   "end_date": "2026-09-15",
+   "period": "month",
+   "returns_count": 1,
+   "returns_revenue": 400.0,
+   "start_date": "2026-08-16",
+   "total_orders": 3,
+   "total_revenue": 2550.0
+  },
+  "_get_source_breakdown[\"month\"]": {
+   "period": "month",
+   "sources": [
+    {
+     "name": "Instagram",
+     "orders": 1,
+     "revenue": 1200.0
+    },
+    {
+     "name": "Telegram",
+     "orders": 1,
+     "revenue": 600.0
+    },
+    {
+     "name": "Shopify",
+     "orders": 1,
+     "revenue": 750.0
+    }
+   ]
+  },
+  "_get_top_products[\"month\", \"quantity\", 10]": {
+   "period": "month",
+   "products": [
+    {
+     "brand": null,
+     "name": "Lipstick",
+     "quantity": 4,
+     "revenue": 1000.0
+    },
+    {
+     "brand": "BrandA",
+     "name": "Serum",
+     "quantity": 3,
+     "revenue": 1500.0
+    },
+    {
+     "brand": "BrandB",
+     "name": "Ampoule",
+     "quantity": 2,
+     "revenue": 200.0
+    },
+    {
+     "brand": "BrandA",
+     "name": "Toner",
+     "quantity": 1,
+     "revenue": 200.0
+    }
+   ],
+   "sorted_by": "quantity"
+  },
+  "_get_top_products[\"month\", \"quantity\", 1]": {
+   "period": "month",
+   "products": [
+    {
+     "brand": null,
+     "name": "Lipstick",
+     "quantity": 4,
+     "revenue": 1000.0
+    }
+   ],
+   "sorted_by": "quantity"
+  },
+  "_get_top_products[\"month\", \"quantity\", 3]": {
+   "period": "month",
+   "products": [
+    {
+     "brand": null,
+     "name": "Lipstick",
+     "quantity": 4,
+     "revenue": 1000.0
+    },
+    {
+     "brand": "BrandA",
+     "name": "Serum",
+     "quantity": 3,
+     "revenue": 1500.0
+    },
+    {
+     "brand": "BrandB",
+     "name": "Ampoule",
+     "quantity": 2,
+     "revenue": 200.0
+    }
+   ],
+   "sorted_by": "quantity"
+  },
+  "_get_top_products[\"month\", \"revenue\", 10]": {
+   "period": "month",
+   "products": [
+    {
+     "brand": "BrandA",
+     "name": "Serum",
+     "quantity": 3,
+     "revenue": 1500.0
+    },
+    {
+     "brand": null,
+     "name": "Lipstick",
+     "quantity": 4,
+     "revenue": 1000.0
+    },
+    {
+     "brand": "BrandB",
+     "name": "Ampoule",
+     "quantity": 2,
+     "revenue": 200.0
+    },
+    {
+     "brand": "BrandA",
+     "name": "Toner",
+     "quantity": 1,
+     "revenue": 200.0
+    }
+   ],
+   "sorted_by": "revenue"
+  },
+  "_get_top_products[\"month\", \"revenue\", 1]": {
+   "period": "month",
+   "products": [
+    {
+     "brand": "BrandA",
+     "name": "Serum",
+     "quantity": 3,
+     "revenue": 1500.0
+    }
+   ],
+   "sorted_by": "revenue"
+  },
+  "_get_top_products[\"month\", \"revenue\", 3]": {
+   "period": "month",
+   "products": [
+    {
+     "brand": "BrandA",
+     "name": "Serum",
+     "quantity": 3,
+     "revenue": 1500.0
+    },
+    {
+     "brand": null,
+     "name": "Lipstick",
+     "quantity": 4,
+     "revenue": 1000.0
+    },
+    {
+     "brand": "BrandB",
+     "name": "Ampoule",
+     "quantity": 2,
+     "revenue": 200.0
+    }
+   ],
+   "sorted_by": "revenue"
+  }
+ },
+ "source": "DuckDB's answer to every two-engine call of tests/integration/test_chat_tools_two_engines.py on that file's fixture, recorded at step 14's S14-07 on the code before it (67e8e733) while the same run asserted Postgres answered each one equally. The fixture is pinned to 2026-09-15. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it."
+}

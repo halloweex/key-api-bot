@@ -84,8 +84,8 @@ _ALLOWED = {"core/report_ledger.py", "core/weekly_report.py", "core/traffic_repo
             "core/pg_weekly_ledger_write.py", "core/pg_traffic_ledger_write.py"}
 _SQL_ALLOWED = _ALLOWED | {
     "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
-    "core/chain_transfer.py", "core/pg_chain_invariants.py",
-    "core/snapshot_validation.py", "core/duckdb_store.py",
+    "core/pg_chain_invariants.py", "core/snapshot_validation.py",
+    "core/duckdb_store.py",
 }
 _LEDGER_SQL = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|FROM|INTO)\b[\s\S]*\b"
                          r"(weekly_report_sends|traffic_report_sends)\b", re.IGNORECASE)
@@ -262,12 +262,30 @@ class TestUnderPostgres:
         assert not chain.chain_latch.marker_path(chain.CHAIN).exists()
 
 
+@pytest_asyncio.fixture
+async def warehouse(monkeypatch):
+    """Postgres' Gold and Silver, emptied, for the report's reads — Postgres'
+    alone since step 14's S14-07 — while the ledger under test is faked."""
+    import os
+
+    from tests.integration.pg_tab_seed import tab_in_postgres
+
+    if not os.getenv("KS_PG_DSN"):
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+
+    async def _nothing(conn, pool):
+        pass
+
+    async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _nothing) as pool:
+        yield pool
+
+
 class TestTheJobSendsOnce:
     """Through the job the scheduler runs, with the sales report's own wiring."""
 
     @pytest.mark.asyncio
     async def test_postgres_refusing_after_delivery_never_sends_twice(
-            self, flags, tmp_path, monkeypatch):
+            self, flags, warehouse, tmp_path, monkeypatch):
         from tests.unit.test_weekly_report import TestSchedulerJob, _store
 
         chain = pg_weekly_ledger_write
@@ -277,7 +295,7 @@ class TestTheJobSendsOnce:
         store = await _store(tmp_path)
         try:
             job = TestSchedulerJob()
-            week_start = await job._seed(store, complete=True)
+            week_start = await job._seed(warehouse, complete=True)
             sent = []
             scheduler = job._wire(monkeypatch, store, sent, tmp_path)
             first = await scheduler._run_weekly_report()
@@ -292,7 +310,7 @@ class TestTheJobSendsOnce:
 
     @pytest.mark.asyncio
     async def test_the_traffic_floor_is_asked_before_the_ledger(
-            self, flags, tmp_path, monkeypatch):
+            self, flags, warehouse, tmp_path, monkeypatch):
         """A week before `KS_TRAFFIC_REPORT_FIRST_WEEK` is skipped without
         asking the ledger, so a Postgres that is down cannot turn "not this
         week" into a failed job. Mutation: move the floor after the gate —
@@ -471,7 +489,8 @@ class TestASpoolOutlivesItsFlag:
                                    "unreadable": ["2026-09-21__retail"]}
 
     @pytest.mark.asyncio
-    async def test_through_the_job_the_week_goes_out_once(self, flags, tmp_path, monkeypatch):
+    async def test_through_the_job_the_week_goes_out_once(
+            self, flags, warehouse, tmp_path, monkeypatch):
         """End to end with the sales report's own wiring: delivered under
         `postgres`, record spooled, flag put back, the next tick. Mutation:
         drop the spool branch from the `duckdb` gate — `sent` holds two."""
@@ -484,7 +503,7 @@ class TestASpoolOutlivesItsFlag:
         store = await _store(tmp_path)
         try:
             job = TestSchedulerJob()
-            week_start = await job._seed(store, complete=True)
+            week_start = await job._seed(warehouse, complete=True)
             sent = []
             scheduler = job._wire(monkeypatch, store, sent, tmp_path)
             first = await scheduler._run_weekly_report()
@@ -496,40 +515,3 @@ class TestASpoolOutlivesItsFlag:
             assert len(sent) == 1
         finally:
             await store.close()
-
-
-class TestTheWayBackSeesTheSpool:
-    def test_every_chain_that_can_spool_declares_both_hooks(self):
-        """The chains whose records `report_ledger` spools are read off its own
-        `LEDGERS`, and each must carry `pending()` and `land_pending()` — the
-        two hooks the handover and the copy-back look for. Mutation: drop
-        `land_pending` from one chain — its copy-back would release the chain
-        with the delivered weeks still in the file."""
-        from core import write_chains
-
-        spoolers = {ledger.chain().CHAIN for ledger in report_ledger.LEDGERS}
-        hooked = {c.CHAIN for c in write_chains.WRITE_CHAINS
-                  if callable(getattr(c, "pending", None))
-                  and callable(getattr(c, "land_pending", None))}
-        assert spoolers == hooked
-
-    def test_the_handover_reports_the_spool(self, flags):
-        """Mutation: drop `_spool_issues` — `--handover` would print "every row
-        DuckDB holds is in Postgres" over a week neither store holds."""
-        from core.chain_transfer import _spool_issues
-        from core.data_quality import Severity
-
-        chain = pg_weekly_ledger_write
-        assert _spool_issues(chain) == []
-        report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1,
-                            datetime.now(timezone.utc))
-        bad = report_ledger._spool_path(chain.CHAIN, WEEK - timedelta(days=7), "retail")
-        bad.write_text("{", encoding="utf-8")
-        issues = {i.check_name: i for i in _spool_issues(chain)}
-        assert issues["handover_ledger_spooled"].severity is Severity.INFO
-        assert "2026-09-21__retail" in issues["handover_ledger_spooled"].description
-        assert issues["handover_ledger_spool_unreadable"].severity is Severity.CRITICAL
-        assert "2026-09-14__retail" in issues["handover_ledger_spool_unreadable"].description
-        from core import pg_expenses_write
-
-        assert _spool_issues(pg_expenses_write) == []

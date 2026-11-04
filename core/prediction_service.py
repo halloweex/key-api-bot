@@ -1579,76 +1579,34 @@ class PredictionService:
         today = _today_kyiv()
         start_date = today - timedelta(days=days_back)
 
-        # `KS_READ_FORECAST_INPUT` — see `core/pg_forecast_read.py` for why this
-        # is two queries and not one body, and why the frame has to come back
-        # identical down to its dtypes. There is deliberately NO fallback:
-        # training on a store that has stopped being written is a wrong model
-        # rather than an error, and both callers already degrade — `/trend`
-        # drops the forecast and returns the chart, `_train_impl` returns
-        # `status: error` and keeps the previous model.
-        from core import pg_forecast_read, read_fallback
+        # Postgres' Gold, and nowhere else (step 14, S14-07): see
+        # `core/pg_forecast_read.py` for why the frame has to come back
+        # identical down to its dtypes. There is deliberately NO fallback, and
+        # there never was: training on a store that has stopped being written
+        # is a wrong model rather than an error, and both callers already
+        # degrade — `/trend` drops the forecast and returns the chart,
+        # `_train_impl` returns `status: error` and keeps the previous model.
+        # `store` is not asked; DuckDB's Gold, which `KS_READ_FORECAST_INPUT`
+        # chose before S14-07, is not read.
+        from core import pg_forecast_read
 
-        read_fallback.no_address("forecast", pg_forecast_read)
-        if pg_forecast_read.enabled() and pg_forecast_read.available():
-            return await pg_forecast_read.fetch_frame(
-                start_date, today, sales_type, exclude_today)
-
-        sales_filter = "sales_type = ?" if sales_type != "all" else "1=1"
-        date_upper = "AND date < ?" if exclude_today else ""
-        params: list = [start_date]
-        if exclude_today:
-            params.append(today)
-        if sales_type != "all":
-            params.append(sales_type)
-
-        async with store.connection() as conn:
-            result = conn.execute(f"""
-                SELECT
-                    date,
-                    revenue,
-                    instagram_revenue,
-                    telegram_revenue,
-                    shopify_revenue,
-                    orders_count,
-                    unique_customers,
-                    new_customers,
-                    returning_customers,
-                    returns_count,
-                    returns_revenue,
-                    instagram_orders,
-                    telegram_orders,
-                    shopify_orders,
-                    avg_order_value
-                FROM gold_daily_revenue
-                WHERE date >= ?
-                  {date_upper}
-                  AND {sales_filter}
-                ORDER BY date
-            """, params).fetchdf()
-
-        return result
+        return await pg_forecast_read.fetch_frame(
+            start_date, today, sales_type, exclude_today)
 
     async def _get_actual_month_revenue(
         self, store: Any, sales_type: str, month_start: date, up_to: date
     ) -> float:
-        """Actual revenue from month start to `up_to`, from whichever engine
-        `KS_READ_GOALS` names.
+        """Actual revenue from month start to `up_to`, from Postgres' Gold.
 
-        **Why that flag, and not one of its own.** `get_forecast` returns
-        `predicted_total = actual_to_date + predicted_remaining`, and
-        `predicted_remaining` comes from `store.get_predictions`, which has
-        ridden `KS_READ_GOALS` since #183. This read did not, so with that flag
-        on — as it is in production — one sum took one term from Postgres and
-        the other from DuckDB. The two halves of a sum have to come from one
-        engine, and giving this read a separate flag would only rebuild the
-        mixed state for as long as the two flags disagreed.
+        Through `store._goals_run`, the goal router, because `get_forecast`
+        returns `predicted_total = actual_to_date + predicted_remaining` and
+        `predicted_remaining` comes from `store.get_predictions` through the
+        same router: the two halves of a sum come from one engine. Until step
+        14's S14-07 that engine was `KS_READ_GOALS`'; it is Postgres alone
+        now, and a failure is the refusal naming `goals`.
 
         `{gold_revenue_rollup}` is not optional: Postgres' Gold holds both
         grains, so a bare `SUM(revenue)` there counts every order twice.
-
-        `store._goals_run` takes the store lock itself on the DuckDB path and
-        the lock is not reentrant; the one caller, `get_forecast`, does not
-        hold it.
         """
         sales_filter = "sales_type = ?" if sales_type != "all" else "1=1"
         params = [month_start, up_to]

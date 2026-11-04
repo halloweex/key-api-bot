@@ -396,9 +396,11 @@ class TestTheStandingWatchReadsTheShape:
 class TestTheReadsFollow:
     @pytest.mark.asyncio
     async def test_the_dashboard_names_the_manager_postgres_holds(self, stores):
-        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: under the
-        chain the join reads Postgres. Mutation: drop `reads_the_chain` in
-        `_dashboard_run`."""
+        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: the join
+        reads Postgres, whatever that switch says. It took a branch on
+        `reads_the_chain` until step 14's S14-06 gave `_dashboard_run` one
+        path, Postgres. Mutation: give `_dashboard_run` back a DuckDB tail
+        routed by the switch."""
         from core.repositories.revenue import _RETURN_ORDERS_SQL
 
         store, pool, env = stores
@@ -521,11 +523,13 @@ class TestTheReviewAgainstARealPostgres:
             (BASELINE, clock), (date(2026, 6, 1), clock)]
 
     @pytest.mark.asyncio
-    async def test_the_route_answers_422_for_a_refusal_postgres_never_saw(
+    async def test_a_note_carrying_nul_is_refused_before_postgres_is_asked(
             self, stores, monkeypatch):
         """A note carrying NUL is refused before Postgres is asked; the review
         reproduced a 503 "Postgres did not answer" for it. Nothing stored.
-        Mutation: drop the route's `ClassificationRefused` mapping."""
+        Through the app the edge refuses it first (`RejectNulMiddleware`,
+        400); the writer's own refusal and the route's 422 for it are
+        tests/unit/test_managers_chain.py's."""
         import time as _time
 
         import httpx
@@ -556,8 +560,8 @@ class TestTheReviewAgainstARealPostgres:
                                         "&effective_from=2026-10-07&note=a%00b")
         finally:
             limiter.reset()
-        assert res.status_code == 422, res.text
-        assert "note carries NUL" in res.json()["detail"]
+        assert res.status_code == 400, res.text
+        assert res.json()["detail"] == "query: Must not contain a NUL character"
         assert await _pg_intervals(pool) == before
 
     @pytest.mark.asyncio
