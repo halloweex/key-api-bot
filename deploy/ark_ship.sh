@@ -8,10 +8,10 @@
 # after the code that wrote it is gone: the byte copy, Parquet for every table
 # and view, schema.sql, manifest.json and RESTORE.md. The first was taken on
 # 2026-08-23, before Postgres held a landing row, and went off-site by hand
-# (deploy/step05-preflight-runbook.md, B4). The second is the last picture of
-# DuckDB anybody will take: web and the bot stopped, the file static, and
-# KS_DUCKDB about to go `off` — step 3 of the week's order in the stage-5
-# plan, as one command.
+# (the step-05 preflight runbook's B4; S14-03 deleted the runbook, git keeps
+# it). The second is the last picture of DuckDB anybody will take: web and the
+# bot stopped, the file static, and KS_DUCKDB about to go `off` — step 3 of the
+# week's order in the stage-5 plan, as one command.
 #
 # OD-S5-6, the owner's decision of 10.10.2026: the same Storage Box as the
 # Postgres dumps, gpg with the same escrowed passphrase file — mandatory, the

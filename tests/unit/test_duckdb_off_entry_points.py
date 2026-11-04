@@ -73,24 +73,14 @@ OPENERS = {"connection", "connect"}
 # runs (`test_duckdb_switch.py` pins their opener use; PR-10 their early
 # exits and messages).
 HOST_ENTRIES: Dict[str, str] = {
-    "deploy/measure_dlr_throughput.py:main": (
-        "a one-off measurement of the DLR path; retired with PR-10"),
-    "deploy/measure_dlr_throughput.py:rebuild_like": (
-        "the same one-off's rebuild; retired with PR-10"),
     "scripts/backfill_gender.py:main": (
         "`--duckdb` reads the file; refused under off by the switch"),
     "scripts/backfill_utm.py:backfill_utm": (
         "re-parses in Postgres alone under step 13 (PR-6); the store is "
         "unconnected under off"),
-    "scripts/check_date.py:main": (
-        "compares DuckDB's counts with KeyCRM's; refused under off (PR-10)"),
     "scripts/compact_duckdb.py:main": (
         "the Sunday compaction's sidecar; refused under off before the "
         "driver runs, its cron line retired at the start of the week"),
-    "scripts/force_resync.py:main": (
-        "rebuilds DuckDB from KeyCRM; refused under off (PR-10)"),
-    "scripts/weekly_report_preview.py:main": (
-        "a preview on a laptop; reads through the report's own readers"),
 }
 
 # Entries no production code calls. Kept, not deleted: OD-11 forbids
