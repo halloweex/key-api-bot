@@ -326,6 +326,9 @@ class TestThePostIsRetailOnly:
 # in `tests/integration/test_forecast_writer.py`.
 
 
+# ─── What is stored is what is computed ───────────────────────────────────
+
+@needs_postgres
 class TestWhatIsStored:
     @pytest.mark.asyncio
     async def test_the_rows_are_the_calculators_answers(self, history):

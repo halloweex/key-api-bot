@@ -1232,37 +1232,11 @@ class TestTheInstruments:
         with pytest.raises(AssertionError, match="j3"):
             _judge_the_jobs({"jobs": jobs, "steps": ran})
 
-    def test_a_watermark_inherited_from_duckdb_is_named_with_its_key(
-        self, monkeypatch, duckdb_off,
-    ):
-        """The order step and the catalogue step each read their watermark in
-        a task of its own, and both refusals are the same site — one row
-        stood for two reaches, and fixing one key's inheritance would have
-        left it matched (review of PR-1). Mutation: drop the key from
-        `name_the_key`'s site."""
-        from core.duckdb_store import DuckDBStore
-
-        name_the_key(monkeypatch)
-        store = DuckDBStore()
-
-        # Two keys no write chain owns: since step 14's S14-00 every chain's
-        # keys are read from Postgres, a constant, so only a key nobody
-        # declared still reaches for DuckDB's `sync_metadata`.
-        async def tick():
-            for key in ("meilisearch", "unclaimed"):
-                with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
-                    await asyncio.ensure_future(store.get_last_sync_time(key))
-            async with store.connection():  # no watermark in hand: unnamed
-                pass
-
-        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
-            asyncio.run(tick())
-        assert sorted(duckdb_switch.opened()) == [
-            "core.duckdb_store:get_last_sync_time (task) [last_sync_meilisearch]",
-            "core.duckdb_store:get_last_sync_time (task) [last_sync_unclaimed]",
-            f"{__name__}:tick",
-        ]
-        assert not duckdb_off.exists()
+    # `test_a_watermark_inherited_from_duckdb_is_named_with_its_key` stood
+    # here until step 14's S14-11: a refused watermark read was named with its
+    # key (`name_the_key`). The store's getter reads `meta.chain_watermarks`
+    # for every key since, and reaches DuckDB for none, so the instrument has
+    # nothing left to name.
 
     def test_the_world_serves_each_window_what_it_holds(self):
         """KeyCRM's filters are applied, so a window decides what a path is
