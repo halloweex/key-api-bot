@@ -3362,17 +3362,10 @@ class DuckDBStore(
             min_date = conn.execute("SELECT MIN(DATE(ordered_at)) FROM orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(DATE(ordered_at)) FROM orders").fetchone()[0]
 
-            # Age of the last successful data-quality run per layer. Computed
-            # here, inside the connection we already hold, so the health
-            # endpoint's 60s cache covers it and the watchdog costs no extra
-            # store-lock traffic. The verdict lives in bot/canary.py.
-            try:
-                from core.data_quality import fetch_last_success_ages
-                data_quality = fetch_last_success_ages(conn)
-            except Exception as e:
-                # Never let the watchdog's own query break /api/health.
-                logger.warning(f"data-quality freshness query failed: {e}")
-                data_quality = None
+            # The age of the last successful data-quality run per layer used
+            # to ride here, read out of DuckDB's journal inside this
+            # connection; `/api/health` replaced it with Postgres's since
+            # chain 9 moved, and step 14's S14-10 deleted DuckDB's reader.
 
             return {
                 "orders": orders_count,
@@ -3386,7 +3379,6 @@ class DuckDBStore(
                     "max": max_date.isoformat() if max_date else None
                 },
                 "db_size_mb": round(self.db_path.stat().st_size / 1024 / 1024, 2) if self.db_path.exists() else 0,
-                "data_quality": data_quality,
             }
 
 

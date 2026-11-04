@@ -518,61 +518,6 @@ async def build_report(
     )
 
 
-# ─── Send ledger ────────────────────────────────────────────────────────────
-
-def already_sent(conn, week_start: date, sales_type: str) -> bool:
-    """Has this week already gone out?
-
-    The job runs daily and reports the last *complete* week, so six of seven
-    firings find their week already sent and go quiet. That is the design: a
-    weekly CronTrigger that misses its instant does not run late, it does not
-    run at all — the next fire is computed a week out, and misfire grace has
-    nothing to forgive. A daily tick plus this ledger turns a missed Monday
-    into a Tuesday delivery instead of a silent gap.
-    """
-    row = conn.execute("""
-        SELECT 1 FROM weekly_report_sends
-        WHERE week_start = ? AND sales_type = ?
-    """, [week_start, sales_type]).fetchone()
-    return row is not None
-
-
-def mark_sent(
-    conn, week_start: date, sales_type: str, revenue: float, orders: int,
-    *, sent_at=None,
-) -> None:
-    """Record the delivery, with the numbers as sent.
-
-    `sent_at` is given only by the shadow of chain 11 (`core/report_ledger.py`,
-    OD-02 (c)): the moment the message went out, which Postgres was handed
-    first. Without it the row is stamped `CURRENT_TIMESTAMP`, as always."""
-    if sent_at is not None:
-        conn.execute("""
-            INSERT OR REPLACE INTO weekly_report_sends
-                (week_start, sales_type, revenue, orders, sent_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, [week_start, sales_type, revenue, orders, sent_at])
-        return
-    conn.execute("""
-        INSERT OR REPLACE INTO weekly_report_sends
-            (week_start, sales_type, revenue, orders, sent_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """, [week_start, sales_type, revenue, orders])
-
-
-def fetch_sent(conn, week_start: date, sales_type: str):
-    """DuckDB's row for the week, or None — the gate's second opinion once
-    chain 11 writes Postgres (`core.report_ledger.already_sent`)."""
-    row = conn.execute("""
-        SELECT week_start, sales_type, revenue, orders, sent_at
-        FROM weekly_report_sends
-        WHERE week_start = ? AND sales_type = ?
-    """, [week_start, sales_type]).fetchone()
-    if row is None:
-        return None
-    return dict(zip(("week_start", "sales_type", "revenue", "orders", "sent_at"), row))
-
-
 # ─── Rendering ──────────────────────────────────────────────────────────────
 
 

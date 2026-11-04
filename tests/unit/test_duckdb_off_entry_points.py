@@ -310,13 +310,14 @@ class TestEveryWayIn:
         # jobs over `/expenses`, `/inventory`, `/goals`, the cohorts, the
         # assistant and the index stopped reaching the file (112 after it
         # alone), and S14-08 took the seventeen /sms and access routes below
-        # off it (118 after it alone): 95 with both. Each step-14 PR that
-        # removes a DuckDB branch shrinks this; the floor is only that the
-        # walk still finds the ways in, not a count to keep.
-        assert count["door"] >= 95, dict(count)
+        # off it (118 after it alone): 95 with both, and S14-10 three more
+        # (92). Each step-14 PR that removes a DuckDB branch shrinks this; the
+        # floor is only that the walk still finds the ways in, not a count to
+        # keep.
+        assert count["door"] >= 92, dict(count)
         assert count["held"] >= 10, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
-        assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_digest"] == "door"
+        assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_integrity"] == "door"
         assert kinds["web/routes/websocket.py:dashboard_websocket"] == "door"
         assert kinds["web/routes/auth.py:require_admin"] == "door"
         assert kinds["core/mirror_reconciliation.py:reconcile_operational"] == "held"
@@ -339,6 +340,19 @@ class TestEveryWayIn:
                 "approve_access_request", "get_user", "list_users",
                 "update_user_features", "update_user_role", "update_user_status")
         } | {"web/routes/api/webhooks.py:turbosms_delivery_report"}
+        still = sorted(gone & set(kinds))
+        assert not still, f"these reach the DuckDB file again: {still}"
+
+    def test_the_journal_and_the_samples_reach_no_file(self, kinds):
+        """Step 14's S14-10: the quality journal's door, the samples' and the
+        ledgers' lost their DuckDB branches and the `store` they took, so the
+        digest, the memory watchdog and `/api/health/data-quality` no longer
+        reach the file, not even by a branch a mode never takes (95 doors
+        before, 92 after). The integrity job, the disk watchdog and the two
+        reports still do, through what they read beside the journal."""
+        gone = {"core/scheduler.py:BackgroundScheduler._run_dq_digest",
+                "core/scheduler.py:BackgroundScheduler._run_memory_monitor",
+                "web/routes/api/health.py:get_data_quality_health"}
         still = sorted(gone & set(kinds))
         assert not still, f"these reach the DuckDB file again: {still}"
 

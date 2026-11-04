@@ -54,8 +54,10 @@ CLEARS_REWRITTEN = ("write_chain_flag_mismatch", "order_owner_row_without_marker
                     "chain_owner_unregistered", "warehouse_way_back_refused")
 CANARY_REWRITTEN = ("warehouse_way_back_refused", "write_chain_flag_mismatch")
 # Rewritten too, to say what is true without the copy-back, with no lever of
-# their own about a chain's ownership.
-TOUCHED_ONLY = ("shadow_missing_in_duckdb",)
+# their own about a chain's ownership. `shadow_missing_in_duckdb` was the one
+# until step 14's S14-10 deleted it with `compare_shadow`, its emitter
+# (rule 15's literal in `test_rollback_condition_names.py` keeps the name).
+TOUCHED_ONLY: tuple = ()
 # Its `clears` said the chain handing its tables back to DuckDB clears it.
 # Rewritten without a lever: an INFO, a decision rather than a fault, with no
 # REMEDIATION entry (the S14-04 review).
@@ -179,20 +181,11 @@ class TestTheWayBackIsGone:
             ) if hasattr(module, name)]
         assert not leftovers, leftovers
 
-    def test_a_spooled_week_still_counts_as_sent_without_the_landing(self):
-        """The `duckdb` branch of the gate lost its landing, not its answer:
-        a spooled week is a delivery that happened. Read from the source, as
-        the branch is unreachable since S14-00. Mutation: drop the
-        `is_spooled` check with the landing."""
-        import inspect
-
-        from core import report_ledger
-
-        src = inspect.getsource(report_ledger.already_sent)
-        branch = src.split("if not chain.writes_postgres():", 1)[1].split(
-            "await drain(", 1)[0]
-        assert "is_spooled(chain.CHAIN, week_start, sales_type)" in branch
-        assert "return True" in branch
+    # `test_a_spooled_week_still_counts_as_sent_without_the_landing` read the
+    # gate's `duckdb` branch for its spool check after S14-04 took the
+    # landing; S14-10 deleted the branch. The gate's one path counts a spooled
+    # week as sent under every flag: `test_report_ledger.py`,
+    # `TestASpoolOutlivesItsFlag`.
 
 
 # ─── nothing a person reads names it ─────────────────────────────────────────

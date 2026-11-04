@@ -107,20 +107,19 @@ class TestWeeklyReport:
         scheduler = harness._wire(monkeypatch, store, sent, tmp_path)
         return store, week_start, sent, scheduler
 
-    @staticmethod
-    async def _ledger(store, week_start) -> bool:
-        from core.weekly_report import already_sent
-
-        async with store.connection() as conn:
-            return already_sent(conn, week_start, "retail")
-
     @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_writes_no_ledger_row(
         self, stores, monkeypatch, tmp_path,
     ):
         """No fallback here to refuse: the pool's own error ends the tick,
-        as it always has, and the ledger is untouched for tomorrow."""
-        store, week_start, sent, scheduler = await self._job(monkeypatch, tmp_path)
+        as it always has — at the ledger's gate, which asks Postgres first —
+        and nothing is recorded for tomorrow. (Until step 14's S14-10 the
+        DuckDB ledger was asked as well, and found empty.)"""
+        from core import pg_weekly_ledger_write
+
+        store, _week_start, sent, scheduler = await self._job(monkeypatch, tmp_path)
+        marked = AsyncMock()
+        monkeypatch.setattr(pg_weekly_ledger_write, "mark_sent", marked)
         try:
             monkeypatch.setenv("KS_READ_WEEKLY", "postgres")
             _mode(monkeypatch, "off")
@@ -129,7 +128,7 @@ class TestWeeklyReport:
                 await scheduler._run_weekly_report()
 
             assert sent == []
-            assert not await self._ledger(store, week_start)
+            marked.assert_not_awaited()
             assert read_fallback.counts() == {}
         finally:
             await store.close()
@@ -172,13 +171,6 @@ class TestTrafficReport:
         monkeypatch.setattr("core.telegram_alerts.send_rich_message_http", _rich)
         monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _text)
         return BackgroundScheduler(), sent
-
-    @staticmethod
-    async def _ledger(store, week_start) -> bool:
-        from core.traffic_report import already_sent
-
-        async with store.connection() as conn:
-            return already_sent(conn, week_start, "retail")
 
     @staticmethod
     def _the_warehouse_is_ready(monkeypatch):

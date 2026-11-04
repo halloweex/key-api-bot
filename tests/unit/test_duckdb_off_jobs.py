@@ -275,7 +275,7 @@ class TestTheIntegrityJobUnderOff:
             return_value=pg_chain_invariants.Facts.blind((), "not read in this test")))
         journalled = []
 
-        async def journal_run(store, **kwargs):
+        async def journal_run(**kwargs):
             journalled.append(kwargs)
             return 11
 
@@ -552,28 +552,28 @@ class TestTheOperationalComparisonUnderOff:
     @pytest.mark.asyncio
     async def test_the_history_is_not_compared_under_off(
             self, target_state, postgres, duckdb_reads):  # noqa: F811
-        """What DuckDB is still asked for in the target state is the shadow
-        chains' tables, compared facing the other way — PR-4's to stand down
-        under off — and never the history. Mutation: drop
+        """Never the history. (What DuckDB was still asked for in the target
+        state was the shadow chains' tables, compared facing the other way —
+        PR-4's to stand down under off — until step 14's S14-10 deleted that
+        comparison; nothing is read since.) Mutation: drop
         `stood_down_under_off()` from the comparison."""
         from core.mirror_reconciliation import reconcile_operational
-        from core.write_chains import compared_in_shadow
 
         postgres(_Pool(_every_owner_row()))
         issues = await reconcile_operational(_Store())
         assert not set(DUCKDB_HISTORY_TABLES) & set(duckdb_reads)
-        assert set(duckdb_reads) <= compared_in_shadow()
+        assert duckdb_reads == []
         assert not [i for i in issues if i.table_name in DUCKDB_HISTORY_TABLES]
 
     @pytest.mark.asyncio
     async def test_with_nothing_left_to_read_duckdb_is_not_opened(
             self, target_state, postgres, duckdb_reads, monkeypatch):  # noqa: F811
-        """Once no shadow table is compared either — PR-4's answer under off,
-        given here — the store is not opened at all. Mutation: open it for an
-        empty read, as under on."""
+        """With no shadow table compared — PR-4's answer under off, and
+        every answer since step 14's S14-10 deleted the comparison — the store
+        is not opened at all. Mutation: open it for an empty read, as under
+        on."""
         from core.mirror_reconciliation import reconcile_operational
 
-        monkeypatch.setattr("core.write_chains.compared_in_shadow", lambda: frozenset())
         postgres(_Pool(_every_owner_row()))
         store = _Store()
         await reconcile_operational(store)

@@ -42,9 +42,9 @@ Postgres refuses or answers:
   the file?
 - `live`: an empty Postgres at head — the one CI starts, or any throwaway at
   `KS_PG_DSN`. It reaches what only a Postgres that answers reaches: the
-  shadow writes into DuckDB after a Postgres write, the watermarks inherited
-  from DuckDB when Postgres holds no key yet, the copies of what only DuckDB
-  holds. The database is emptied first (`meta.alembic_version` kept), so the
+  writes after a Postgres write (the shadow into DuckDB until step 14's
+  S14-10), the watermarks inherited from DuckDB when Postgres holds no key
+  yet, the copies of what only DuckDB holds. The database is emptied first (`meta.alembic_version` kept), so the
   sweep meets one state wherever it runs, and put back row for row after,
   checked by hash. Skipped without `KS_PG_DSN`; CI fails a run in which it
   skipped.
@@ -966,16 +966,25 @@ class TestTheSweepUnderALivePostgres:
         Mutation: drop the fresh sync service in the runner's job loop."""
         _judge_the_order_tick(run[PROCESS])
 
-    def test_the_shadow_writes_were_reached_and_stood_down(self, run):
-        """PR-4's rows left the list because the DuckDB half stands down,
-        not because nothing reached it: with Postgres answering, the journal
-        (chain 9) and the samples (chain 10) wrote Postgres and stood their
-        shadow down, and no shadow failed. Mutation: drop the `off` return in
-        `into_duckdb` — the four rows come back, and the failures with them."""
-        result = run[PROCESS]
-        assert {"pg_dq_journal_write", "pg_watchdog_write"} <= set(
-            result["shadow_stood_down"]), result["shadow_stood_down"]
-        assert result["shadow_failures"] == []
+    # The jobs that write chain 9's journal and chain 10's samples, with a
+    # table each must have written to Postgres in the run. PR-4's rows left
+    # the list because the shadow's DuckDB half stood down, and this test
+    # proved the half was reached; step 14's S14-10 deleted the shadow, and
+    # what is left to prove is that the writers ran.
+    SHADOW_CHAIN_JOBS = {
+        "job:dq_integrity_check": "app.data_quality_runs",
+        "job:disk_watchdog": "app.disk_samples",
+    }
+
+    def test_the_journal_and_the_samples_were_written_to_postgres(self, run):
+        """With Postgres answering, the integrity scan journaled a run and the
+        disk watchdog stored a sample — the writers of chains 9 and 10 were
+        reached, and no reach for the file came with them (the sweep's own
+        judgement). Mutation: let either job stop before its door — the row
+        is missing from `landed`."""
+        steps = run[PROCESS]["steps"]
+        for step, table in self.SHADOW_CHAIN_JOBS.items():
+            assert (steps[step].get("landed") or {}).get(table), (step, steps[step])
 
     def test_the_seeded_history_was_derived_and_read(self, run):
         """The derivation ran in each HTTP sweep before its first request,

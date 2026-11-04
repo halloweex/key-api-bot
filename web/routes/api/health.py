@@ -220,27 +220,23 @@ def _read_fallback_mode() -> dict:
     return block
 
 
-# The layer ages, out of Postgres while chain 9 writes the journal there
-# (OD-02 (c)). DuckDB's ages ride in the cached stats; these replace them, on
-# the same TTL, and only a successful read is cached — an error is answered
-# again on the next probe rather than remembered for a minute.
+# The layer ages, out of Postgres, where chain 9 writes the journal (OD-02
+# (c)), on the stats' TTL; only a successful read is cached — an error is
+# answered again on the next probe rather than remembered for a minute.
 _journal_ages_cache: dict = {"data": None, "expires_at": 0}
 _journal_ages_lock = asyncio.Lock()
 _JOURNAL_AGES_TIMEOUT_S = 5
 
 
-async def _journal_ages(from_duckdb):
-    """`data_quality` for the canary, from the store that writes the journal.
-
-    Under `KS_WRITE_DQ_JOURNAL=duckdb` (or unset) it is DuckDB's answer,
-    untouched. Under `postgres` it is Postgres's, or None when Postgres
-    cannot answer — never DuckDB's: a fallback would read "journal fine" to
-    the canary at the moment the journal's writer is what failed, and a
-    missing block is what the canary pages (`dq_block_missing`)."""
+async def _journal_ages():
+    """`data_quality` for the canary: Postgres's layer ages, or None when
+    Postgres cannot answer — never DuckDB's: a fallback would read "journal
+    fine" to the canary at the moment the journal's writer is what failed,
+    and a missing block is what the canary pages (`dq_block_missing`).
+    (Until step 14's S14-10 a chain left at `duckdb` answered DuckDB's ages
+    here, handed in by the caller out of the store's stats.)"""
     from core import dq_journal
 
-    if not dq_journal.reads_postgres():
-        return from_duckdb
     now = time.time()
     async with _journal_ages_lock:
         if _journal_ages_cache["data"] is not None and now < _journal_ages_cache["expires_at"]:
@@ -427,7 +423,7 @@ async def _write_chains_block() -> dict:
     entry = block.get(pg_catalogue_write.CHAIN)
     if isinstance(entry, dict):
         entry["sync_step"] = await _catalogue_sync_step()
-    _shadow_entries(block)
+    _pending_entries(block)
     return block
 
 
@@ -435,34 +431,25 @@ async def _nothing() -> None:
     return None
 
 
-def _shadow_entries(block: dict) -> None:
-    """Under every shadow chain's entry (OD-02 (c)), `shadow_failures`: the
-    DuckDB halves of its writes that failed since this process started —
-    count, when, and the error class, never the text (this endpoint is
-    public). Postgres held each of those rows; the daily comparison finds
-    them as `shadow_missing_in_duckdb`, and this says when to look in the
-    log. A chain that declares `pending()` — the report ledgers' spool —
-    also publishes what is waiting to be recorded. Under KS_DUCKDB=off, also
-    `shadow_stood_down`: the DuckDB halves not attempted because the file is
-    switched off (stage 5, PR-4) — not failures, so apart from them, and
-    absent under on, where nothing stands down. Local state, no I/O."""
-    from core import duckdb_switch, shadow_writes
-    from core.write_chains import WRITE_CHAINS, chain_name, is_shadow
+def _pending_entries(block: dict) -> None:
+    """Under a chain that declares `pending()` — the report ledgers' spool,
+    chains 11a and 11b — what is waiting to be recorded: the delivered weeks
+    whose row is still spooled, which the canary pages as
+    `report_ledger_pending`. Local files, no I/O beyond the directory. Until
+    step 14's S14-10 every shadow chain's entry also carried
+    `shadow_failures` (and, under KS_DUCKDB=off, `shadow_stood_down`); the
+    shadow went, and both with it."""
+    from core.write_chains import WRITE_CHAINS, chain_name
 
-    duckdb_off = duckdb_switch.is_off()
     for chain in WRITE_CHAINS:
         entry = block.get(chain_name(chain))
-        if not isinstance(entry, dict) or not is_shadow(chain):
-            continue
-        entry["shadow_failures"] = shadow_writes.failures_of(chain_name(chain))
-        if duckdb_off:
-            entry["shadow_stood_down"] = shadow_writes.stood_down_of(chain_name(chain))
         pending = getattr(chain, "pending", None)
-        if callable(pending):
-            try:
-                entry["pending"] = pending()
-            except Exception as exc:  # noqa: BLE001 — published by class
-                entry["pending"] = {"error_class": type(exc).__name__}
+        if not isinstance(entry, dict) or not callable(pending):
+            continue
+        try:
+            entry["pending"] = pending()
+        except Exception as exc:  # noqa: BLE001 — published by class
+            entry["pending"] = {"error_class": type(exc).__name__}
 
 
 async def _catalogue_sync_step() -> "dict | None":
@@ -703,19 +690,20 @@ async def health_check(request: Request):
 
     from core.config import config as app_config
 
-    # Data-quality freshness rides along in the cached stats; lift it to the
-    # top level so the canary reads it without parsing the duckdb block.
-    # Its absence is meaningful (bot/canary.py treats a missing block as a
-    # failure), so never substitute an empty dict for "we could not tell".
+    # The DuckDB block's counts as the store last handed them; none under
+    # KS_DUCKDB=off.
     stats = dict(duckdb_stats or {})
-    data_quality = stats.pop("data_quality", None)
-    # Chain 9: from the store that writes the journal (`_journal_ages`).
-    data_quality = await _journal_ages(data_quality)
-    # Chain 3: the layers it stood down marked, on whichever store answered —
-    # per response, after the journal's own cache. Never before
-    # `_journal_ages`: under chain 9 it answers Postgres's block and drops the
-    # one it was handed, mark included, and the canary then pages the
-    # stood-down layer's age every day (`test_orders_chain_reconciliation.py`,
+    # `data_quality` is Postgres's layer ages, from `_journal_ages()` (chain 9
+    # writes the journal there), published at the top level for the canary.
+    # None when Postgres cannot answer, and that absence is meaningful: the
+    # canary pages `dq_block_missing` on a missing block, so never substitute
+    # an empty dict for "we could not tell".
+    data_quality = await _journal_ages()
+    # Chain 3: the layers it stood down marked — per response, after the
+    # journal's own cache, which holds Postgres's block unmarked; marked
+    # before it, the mark was dropped with the block DuckDB's stats handed in,
+    # and the canary paged the stood-down layer's age every day
+    # (`test_orders_chain_reconciliation.py`,
     # `test_the_endpoint_marks_the_block_chain_9_answers`).
     data_quality = _mark_stood_down(data_quality)
 
@@ -951,11 +939,8 @@ async def get_data_quality_health(request: Request):
     from core import dq_journal
 
     try:
-        store = await get_store()
-        # The block that stood here, moved to `core.dq_journal` so it reads
-        # whichever store writes the journal (chain 9) — DuckDB's one
-        # connection by default, Postgres with no fallback once it moves.
-        return await dq_journal.health_runs(store)
+        # From Postgres, which writes the journal (chain 9), with no fallback.
+        return await dq_journal.health_runs()
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 

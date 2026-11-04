@@ -1,20 +1,22 @@
-"""Chain 9: the data-quality journal, written to Postgres and shadowed in DuckDB.
+"""Chain 9: the data-quality journal, written to Postgres.
 
 `data_quality_runs` and its two children are the record every check leaves
 behind — what the 09:00 digest reads, what `/api/health` turns into the layer
 ages the canary pages on, and what `/api/health/data-quality` publishes.
 Nothing re-derives a run: it is what a check found at the moment it ran.
 
-THE SHAPE: SHADOW, NOT FROZEN (owner decision OD-02 (c), 2026-10-01)
+THE SHAPE: SHADOW, UNTIL STEP 14'S S14-10 (owner decision OD-02 (c), 2026-10-01)
 
-Chains 1, 6a, 7a and 8 freeze DuckDB when they move. This chain does not:
-under `KS_WRITE_DQ_JOURNAL=postgres` a run is committed to Postgres first and
-DuckDB is handed the very same rows right after (`core/shadow_writes.py`), so
-DuckDB's journal stays whole and the daily comparison keeps comparing the two
-— facing Postgres→DuckDB (`core.mirror_reconciliation.compare_shadow`). The
-hourly copy stands down, as for every moved chain: its full replace out of
-DuckDB would delete each run whose shadow failed. `CHAIN_SHADOW` says so to
-`core.write_chains`.
+Chains 1, 6a, 7a and 8 freeze DuckDB when they move. This chain did not:
+under `KS_WRITE_DQ_JOURNAL=postgres` a run was committed to Postgres first
+and DuckDB was handed the very same rows right after (`core/shadow_writes.py`),
+so DuckDB's journal stayed whole and the daily comparison compared the two,
+facing Postgres→DuckDB (`compare_shadow`). Since S14-00 the shadow stood down
+in web, which runs `KS_DUCKDB=off`, and the comparison compared nothing; S14-10
+deleted both, and the journal is Postgres's alone. The hourly copy stands
+down, as for every moved chain: its full replace out of DuckDB would delete
+each run DuckDB never received. `CHAIN_SHADOW` still says the shape to
+`core.write_chains`, which publishes it until S14-11.
 
 Everything else is the frozen chains' machinery unchanged. The first Postgres
 write latches the chain (OD-19 (a)), because a run whose shadow failed exists
@@ -26,30 +28,33 @@ S14-04; the way back since is an image from before step 14,
 THE ALLOCATOR: MAX + 1 UNDER AN ADVISORY LOCK, NO REVISION
 
 `app.data_quality_runs.run_id` has no sequence (revision 0028 carried
-DuckDB's values). Under this chain Postgres issues the id and DuckDB is handed
-it. `MAX(run_id) + 1` is safe here and only here because the transaction-
-scoped advisory lock serialises the allocators, READ COMMITTED's next
-statement after the lock sees the previous holder's commit, nothing deletes
-from these tables in Postgres once the copy stands down, and the rate is ~10
-runs a day. A revision with a sequence is the alternative the design names;
+DuckDB's values). Under this chain Postgres issues the id (and handed it to
+DuckDB's shadow until S14-10). `MAX(run_id) + 1` is safe here and only here
+because the transaction-scoped advisory lock serialises the allocators,
+READ COMMITTED's next statement after the lock sees the previous holder's
+commit, nothing deletes from these tables in Postgres once the copy stands
+down, and the rate is ~10 runs a day. A revision with a sequence is the alternative the design names;
 `core.chain_transfer` derived that sequence's name and would have floored
 from it (deleted in S14-04).
 
 THE DIGEST'S BEAT
 
-`dq_digest_last_sent` moves with the chain (`CHAIN_MARKER_KEYS`): under
-Postgres it lives in `meta.chain_watermarks`, which nothing copies out of
-DuckDB — the hourly full replace of `app.sync_metadata` would wipe it.
-`core.dq_journal` reads it there first and inherits DuckDB's value while the
-key is absent, so the first digest after a flip does not restate everything.
+`dq_digest_last_sent` moves with the chain (`CHAIN_MARKER_KEYS`): it lives in
+`meta.chain_watermarks`, which nothing copies out of DuckDB — the hourly full
+replace of `app.sync_metadata` would wipe it. `core.dq_journal` reads it there
+first and, while the key is absent, inherits it from `app.sync_metadata`
+(DuckDB's value as the hourly copy last shipped it), so a first digest after
+a flip does not restate everything. Production holds the key in
+`meta.chain_watermarks` (H6, 2026-10-29), so there the inheritance answers
+nothing.
 
 READS FOLLOW THE WRITER
 
-While this chain writes Postgres (`reads_postgres`), every reader of the
-journal — the digest, the layer ages, the data-quality endpoint, the startup
-catch-up — reads Postgres, through `core.dq_journal`, and never falls back to
-DuckDB: a fallback would make an unreachable Postgres read as "journal fine"
-at the moment the journal's writer is the thing that failed.
+Every reader of the journal — the digest, the layer ages, the data-quality
+endpoint, the startup catch-up — reads Postgres, through `core.dq_journal`,
+and never falls back to DuckDB: a fallback would make an unreachable Postgres
+read as "journal fine" at the moment the journal's writer is the thing that
+failed.
 """
 from __future__ import annotations
 
@@ -74,8 +79,9 @@ CHAIN_TABLES: Tuple[str, ...] = (
     "app.data_quality_runs", "app.data_quality_issues", "app.data_quality_diffs",
 )
 
-# The third registry state (`core.write_chains.is_shadow`): DuckDB still
-# receives every row after the Postgres commit.
+# The third registry state (`core.write_chains.is_shadow`): DuckDB received
+# every row after the Postgres commit until S14-10. Kept for the `shadow` field
+# the registry publishes in `/api/health` until S14-11 reshapes the block.
 CHAIN_SHADOW = True
 
 # The revision that refuses every image built before this chain; the flag
@@ -125,14 +131,19 @@ def unmet_precondition() -> Optional[str]:
 def writes_postgres() -> bool:
     """True, a constant since step 14's S14-00: neither the flag, nor the
     latch, nor the lock-out routes any more; the first write in a process
-    still takes the latch (decision 3). Last consumers: the journal's door,
-    the digest's beat and the registry — S14-10."""
+    still takes the latch (decision 3). Its last production consumer, the
+    journal's door, stopped asking in S14-10; the registry's walk
+    (`tests/unit/test_write_chains.py`) and the routing tests read it until
+    S14-11 reshapes the registry."""
     return True
 
 
 def reads_postgres() -> bool:
     """Whether a read of the journal asks Postgres: True, a constant since
-    S14-00 — the readers follow the writer, with no fallback."""
+    S14-00 — the readers follow the writer, with no fallback. Last consumer:
+    chain 1's preflight (`pg_inventory_write.preflight`), which drops its
+    gate on the journal's hourly copy while this is True — S14-11, with the
+    preflight. The journal's own door stopped asking in S14-10."""
     return True
 
 
@@ -157,10 +168,11 @@ async def persist_run(values, issues: Sequence[Any], discrepancies: Sequence[Any
     """Write one run and its findings; returns the `JournalRows` committed.
 
     Every row is built — and a naive timestamp refused — before the pool is
-    asked for anything, so an input Postgres or DuckDB would read two ways
+    asked for anything, so an input Postgres would read as another instant
     never latches the chain (chain 7a's `_fits` reason). Inside the one
     transaction: the owner rows, the allocator's lock, the id, then the three
-    INSERTs. The caller hands the same rows to DuckDB after this returns.
+    INSERTs. (Until S14-10 the caller handed the same rows to DuckDB after
+    this returned.)
     """
     from core.data_quality import journal_rows
 
@@ -228,9 +240,10 @@ async def set_digest_marker(value: str) -> None:
 #
 # `reading()` is the one that takes a connection (named a reader in
 # `tests/unit/test_chain_latch.py._READERS` and held there to writing
-# nothing). The rest are handed that connection and run the journal's shared
-# statements (`core.data_quality.journal_sql`), shaped by the same functions
-# DuckDB's readers use — so one reader cannot drift from the other.
+# nothing). The rest are handed that connection and run the journal's
+# statements (`core.data_quality.journal_sql`), shaped by `core.data_quality`'s
+# functions — DuckDB's readers used the same ones until S14-10, which is what
+# kept the digest's text unchanged when the journal moved.
 
 
 @asynccontextmanager
@@ -244,42 +257,29 @@ async def reading() -> AsyncIterator[Any]:
 _ZONE: Optional[Any] = None
 
 
-def _duckdb_zone():
-    """The zone DuckDB renders a TIMESTAMPTZ in — its session `TimeZone`,
-    which it takes from the process's at start and never sets here. Read once
-    from an in-memory connection rather than assumed to be the libc zone:
-    the two part company in a process whose `TZ` changed after DuckDB loaded,
-    and the point of converting is to render exactly as DuckDB would.
+def _zone():
+    """The zone every Postgres row of the journal is rendered in: the host's
+    (`_host_zone`), read once per process.
 
-    The connection is the application's one opener (`duckdb_switch.open_file`)
-    — the only reach for the driver the week of silence allows — and under
-    `KS_DUCKDB=off` it is not asked at all: it would refuse, and a refusal is
-    counted and paged as the file opened while off, on every read of the
-    journal, which is Postgres's by then. With no DuckDB in the process
-    there is nothing to part company with, so the zone is the one DuckDB
-    would take at start, read from where it reads it (`_host_zone`)."""
+    It used to be DuckDB's session `TimeZone`, asked of an in-memory DuckDB
+    through the one opener (`_duckdb_zone`), whenever the process ran
+    `KS_DUCKDB=on` — the two stores' renderings were compared, so Postgres's
+    had to print what DuckDB printed. Under `off` the host's zone was read
+    without DuckDB, and web has run `off` since 2026-10-16. Step 14's S14-10
+    collapsed the two into the second: for a process started with `TZ` set
+    they are one zone, which `tests/unit/test_dq_digest_zone.py` pins on
+    the digest's labels, taken on the base where DuckDB was asked."""
     global _ZONE
     if _ZONE is None:
-        from zoneinfo import ZoneInfo
-
-        from core import duckdb_switch
-
-        if duckdb_switch.is_off():
-            _ZONE = _host_zone()
-            return _ZONE
-        probe = duckdb_switch.open_file(":memory:")
-        try:
-            name = probe.execute("SELECT current_setting('TimeZone')").fetchone()[0]
-        finally:
-            probe.close()
-        _ZONE = ZoneInfo(name)
+        _ZONE = _host_zone()
     return _ZONE
 
 
 def _host_zone():
-    """The zone DuckDB would take as its session `TimeZone`, read without
-    DuckDB: `TZ` as the process has it, else the host's `/etc/localtime`,
-    else UTC — the order ICU, which DuckDB asks, reads them in."""
+    """The process's zone: `TZ` as the process has it, else the host's
+    `/etc/localtime`, else UTC — the order ICU reads them in, which is how
+    DuckDB took its session `TimeZone` (S14-10 kept the order so the digest
+    prints what it printed)."""
     from zoneinfo import ZoneInfo
 
     name = (os.environ.get("TZ") or "").strip().lstrip(":")
@@ -296,16 +296,15 @@ def _host_zone():
 
 
 def _local(row) -> Optional[Tuple[Any, ...]]:
-    """A Postgres row with every timestamp in DuckDB's rendering zone.
+    """A Postgres row with every timestamp in the process's zone (`_zone`).
 
-    asyncpg hands back UTC; DuckDB hands back its session's zone. The shapers
-    render `isoformat()` and the digest prints the first sixteen characters,
-    so an unconverted Postgres branch would date every run three hours early
-    in Kyiv.
+    asyncpg hands back UTC. The shapers render `isoformat()` and the digest
+    prints the first sixteen characters, so an unconverted row would date
+    every run three hours early in Kyiv.
     """
     if row is None:
         return None
-    zone = _duckdb_zone()
+    zone = _zone()
     return tuple(v.astimezone(zone) if isinstance(v, datetime) and v.tzinfo else v
                  for v in row)
 
@@ -331,6 +330,11 @@ async def run_by_id(conn, run_id: int) -> Optional[Dict[str, Any]]:
 
 
 async def previous_run(conn, layer: str, before_run_id: int) -> Optional[Dict[str, Any]]:
+    """The run of `layer` immediately preceding `before_run_id`, if any.
+
+    Used by the digest to say whether a standing problem is growing. Failed
+    runs are skipped: their zero counts would read as "fixed, then broke
+    again" and turn every 429 into a fake recovery."""
     from core.data_quality import PREVIOUS_RUN_ID_SQL, journal_sql
 
     found = await conn.fetchval(
@@ -339,7 +343,30 @@ async def previous_run(conn, layer: str, before_run_id: int) -> Optional[Dict[st
 
 
 async def baseline_run(conn, layer: str, *, sent_at, before_run_id: int):
-    """`core.data_quality.fetch_baseline_run`, against Postgres."""
+    """The run of `layer` that the last *delivered* digest reported on.
+
+    `previous_run` answers a different question — the run before this one —
+    and the digest was using it to say "(=)". For a layer that runs four
+    times a day against a digest that goes out once, that compares a
+    six-hour window and prints the answer under a heading the reader takes
+    to mean "since yesterday". A finding that stepped and settled between
+    two digests was marked unchanged in both: `goods_shipped_without_sale`
+    went 809 → 812 at the 13:00 Kyiv run on 2026-09-14, and the mornings
+    either side of it both said "=". Nothing ever announced it.
+
+    So the baseline is the newest run that had **finished** when the marker
+    was written — `ended_at <= sent_at`, because a run still in flight
+    cannot have been in a message. Derived from `dq_digest_last_sent`, which
+    already exists, rather than recorded per layer: a stored cursor is a
+    second thing to be wrong, and there is nothing here that recomputing
+    cannot recover.
+
+    Falls back to the previous run when there is no marker yet or no run
+    finished before it — a first digest, and a layer younger than the
+    marker; both must read as an ordinary morning rather than marking
+    everything `new`. Failed runs are skipped for `previous_run`'s reason.
+    (DuckDB's twin, `data_quality.fetch_baseline_run`, carried this
+    reasoning until step 14's S14-10 deleted it.)"""
     from core.data_quality import BASELINE_RUN_ID_SQL, journal_sql
 
     if sent_at is not None:

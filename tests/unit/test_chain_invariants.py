@@ -949,15 +949,14 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def job(self, tmp_path, monkeypatch):
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
-
-        from core import pg_dq_journal_write
-        from tests.conftest import route_chains_to_duckdb
+        from tests.journal_fake import install_journal
 
         for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_DQ_PG_WAREHOUSE"):
             monkeypatch.delenv(env, raising=False)
-        # The job's flow is the subject; the journal it persists to is read
-        # back from this DuckDB, chain 9's store until S14-10.
-        route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
+        # The job's flow is the subject; the journal it persists to goes
+        # through chain 9's door into a list (`tests/journal_fake.py`). Until
+        # S14-10 it was read back from this DuckDB, the chain routed to it.
+        journal = install_journal(monkeypatch)
         store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
         await store.connect()
         scheduler = BackgroundScheduler()
@@ -966,7 +965,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
         resolve = AsyncMock(return_value=0)
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.alerting.resolve_group", resolve):
-            yield scheduler, store, sent, resolve
+            yield scheduler, journal, sent, resolve
         await store.close()
 
     @staticmethod
@@ -981,11 +980,8 @@ class TestTheJobWhenTheDuckDBHalfFails:
             return await scheduler._run_dq_integrity()
 
     @staticmethod
-    async def _persisted(store, run_id):
-        from core.data_quality import fetch_run_issues
-
-        async with store.connection() as conn:
-            return {r["check_name"]: r for r in fetch_run_issues(conn, run_id)}
+    async def _persisted(journal, run_id):
+        return {r["check_name"]: r for r in journal.issues(run_id)}
 
     @staticmethod
     def _chain_resolves(resolve):
@@ -994,12 +990,12 @@ class TestTheJobWhenTheDuckDBHalfFails:
 
     @pytest.mark.asyncio
     async def test_a_chain_critical_is_persisted_and_pages(self, job):
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         result = await self._run(scheduler, _expenses(next_id=2, max_id=2),
                                  duckdb_raises=True)
 
         assert "DuckDB file will not open" in result["error"]
-        persisted = await self._persisted(store, result["run_id"])
+        persisted = await self._persisted(journal, result["run_id"])
         assert persisted[inv.SEQUENCE_BEHIND]["severity"] == "CRITICAL"
         assert persisted[inv.SEQUENCE_BEHIND]["table_name"] == "app.manual_expenses"
         assert sent.await_count == 1
@@ -1011,11 +1007,11 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def test_a_chain_that_could_not_be_read_pages_nobody_and_clears_nothing(
         self, job,
     ):
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         blind = inv.Facts.blind(("pg_expenses_write",), "Postgres is unreachable")
         result = await self._run(scheduler, blind, duckdb_raises=True)
 
-        assert inv.UNWATCHED in await self._persisted(store, result["run_id"])
+        assert inv.UNWATCHED in await self._persisted(journal, result["run_id"])
         assert sent.await_count == 0
         (call,) = self._chain_resolves(resolve)
         assert set(inv.CONDITIONS) <= set(call.kwargs["still_firing"])
@@ -1024,7 +1020,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def test_with_no_chain_watched_nothing_of_theirs_is_announced(self, job):
         """Nothing looked at the chains this run; a page left over from one that
         has stood down clears on the next run whose DuckDB half finishes."""
-        scheduler, _store, sent, resolve = job
+        scheduler, _journal, sent, resolve = job
         await self._run(scheduler, inv.Facts(), duckdb_raises=True)
         assert sent.await_count == 0
         assert not self._chain_resolves(resolve)
@@ -1033,12 +1029,12 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def test_with_the_duckdb_half_healthy_the_chain_critical_pages_and_is_not_held(
         self, job,
     ):
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         result = await self._run(scheduler, _expenses(next_id=2, max_id=2),
                                  duckdb_raises=False)
 
         assert result["error"] is None
-        assert inv.SEQUENCE_BEHIND in await self._persisted(store, result["run_id"])
+        assert inv.SEQUENCE_BEHIND in await self._persisted(journal, result["run_id"])
         assert sent.await_count == 1
         assert inv.SEQUENCE_BEHIND in sent.await_args.kwargs["conditions"]
         (layer,) = [c for c in resolve.await_args_list if not c.kwargs.get("only_prefix")]
@@ -1052,7 +1048,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
     ):
         """The layer's own resolution must hold them too: `data_quality`'s
         `unverified_conditions` no longer knows these conditions exist."""
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         blind = inv.Facts.blind(("pg_expenses_write",), "Postgres is unreachable")
         result = await self._run(scheduler, blind, duckdb_raises=False)
 

@@ -82,12 +82,11 @@ def _scheduler_with(
         return _Store()
 
     monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
-    monkeypatch.setattr(
-        "core.data_quality.fetch_last_success_ages", lambda conn, *a, **k: ages,
-    )
     # Since step 14's S14-00 the journal's and the snapshot's chains (9 and 1)
     # write Postgres, a constant, so the catch-up reads both facts there: the
-    # same ages, and today's snapshot — a Postgres fault reads as taken.
+    # same ages, and today's snapshot — a Postgres fault reads as taken. Since
+    # S14-10 the ages are read nowhere else (DuckDB's reader,
+    # `data_quality.fetch_last_success_ages`, is gone).
     async def _ages_pg(*a, **k):
         return ages
 

@@ -2655,7 +2655,9 @@ class TestO5OrdersIntegrity:
             f"{{{orphans['sample'][0]}}}), {nulls['checked_at']} ledger row(s)"), detail
 
 
-# ── H1/H2: the shadow chains (OD-02 (c)) ──────────────────────────────────────
+# ── H1: the shadow chains (OD-02 (c)) ─────────────────────────────────────────
+# H2, the 07:30 comparison of a shadow chain's two copies, went with that
+# comparison in step 14's S14-10, and its tests with it.
 
 SHADOW_TABLES = ("app.data_quality_runs", "app.data_quality_issues",
                  "app.data_quality_diffs", "app.disk_samples", "app.data_dir_samples",
@@ -2667,23 +2669,14 @@ SHADOW_OFF = {"dq_journal_direct": "0", "watchdogs_on": "0", "weekly_ledger_on":
 
 async def clean_shadow(conn):
     """No owner row and no copy stamp for any shadow chain's table, and no week
-    under KS_DUCKDB=off behind it (the canary's tripwire watch) — inside the
-    scenario's transaction, so whatever another test left is only hidden."""
+    under KS_DUCKDB=off behind it (the canary's tripwire watch, which H2 read
+    until S14-10) — inside the scenario's transaction, so whatever another
+    test left is only hidden."""
     await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
     await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
                        list(SHADOW_TABLES))
     await conn.execute(
         "DELETE FROM app.alert_series WHERE condition_key = 'watch:duckdb_switch'")
-
-
-async def off_week_ran(conn):
-    """The canary's tripwire watch: written only while web runs KS_DUCKDB=off,
-    so its row is the trace that a week of silence has run (stage 5)."""
-    await conn.execute(
-        "INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at, "
-        "last_fired_at, fired_count, instance) "
-        "VALUES ('watch:duckdb_switch', 'event', 'event', $1, $2, 500, 'bot')",
-        ago(days=9), ago(days=2))
 
 
 async def shadow_owner(conn, table, at):
@@ -2795,111 +2788,6 @@ class TestH1ShadowCopiesStoodDown:
             v, detail = await verdict(conn, self.FILE,
                                       **{**SHADOW_OFF, "weekly_ledger_on": "unknown"})
         assert v == "UNKNOWN" and "could not read KS_WRITE_WEEKLY_LEDGER" in detail, detail
-
-
-async def shadow_issue(conn, run_id, check_name, table, severity):
-    await conn.execute(
-        "INSERT INTO app.data_quality_issues (run_id, check_name, table_name, severity, count) "
-        "VALUES ($1, $2, $3, $4, 1)", run_id, check_name, table, severity)
-
-
-@needs_pg
-class TestH2ShadowComparison:
-    """The runbook's soak criterion for the shadow chains: zero `shadow_*`
-    findings from the 07:30 comparison, read the way D8 reads its own."""
-
-    FILE = "29_h2_shadow_comparison.sql"
-    TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
-    ON = {**SHADOW_OFF, "dq_journal_direct": "1", "watchdogs_on": "1"}
-
-    @pytest.mark.asyncio
-    async def test_no_shadow_chain_on_is_not_applicable(self, pool):
-        async with scenario(pool) as conn:
-            await clean_shadow(conn)
-            v, detail = await verdict(conn, self.FILE, **SHADOW_OFF)
-        assert v == "PASS" and detail.startswith("not applicable"), detail
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("check", ["shadow_missing_in_duckdb", "shadow_duckdb_only_rows",
-                                       "shadow_row_values"])
-    async def test_a_shadow_finding_fails_naming_it(self, pool, check):
-        """Mutation: drop a severity from the filter, or the LIKE — each of
-        the three counted findings must fail the soak."""
-        async with scenario(pool) as conn:
-            await clean_shadow(conn)
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
-            severity = "WARN" if check == "shadow_missing_in_duckdb" else "CRITICAL"
-            await shadow_issue(conn, DQ_RUN_IDS[0], check, "app.memory_samples", severity)
-            v, detail = await verdict(conn, self.FILE, **self.ON)
-        assert v == "FAIL" and check in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_after_a_week_under_off_a_missing_row_is_accepted(self, pool):
-        """OD-S5-3 (a): a way back from KS_DUCKDB=off reads that week's rows as
-        shadow_missing_in_duckdb every morning until the drop, and the owner
-        accepted it — so it is listed, and the soak does not fail on it.
-        Mutation: drop `off_ran` — H2 fails every day until the drop."""
-        async with scenario(pool) as conn:
-            await clean_shadow(conn)
-            await off_week_ran(conn)
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
-            await shadow_issue(conn, DQ_RUN_IDS[0], "shadow_missing_in_duckdb",
-                               "app.memory_samples", "WARN")
-            v, detail = await verdict(conn, self.FILE, **self.ON)
-        assert v == "PASS", detail
-        assert "zero shadow findings" in detail, detail
-        assert ("accepted after the week under KS_DUCKDB=off (OD-S5-3 (a)): "
-                "shadow_missing_in_duckdb on app.memory_samples (1)") in detail, detail
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("check", ["shadow_duckdb_only_rows", "shadow_row_values"])
-    async def test_after_a_week_under_off_the_criticals_still_fail(self, pool, check):
-        """Only the WARN the owner accepted is accepted: a row written round
-        the chain, or two stores disagreeing, is no consequence of a week
-        under off. Mutation: accept every shadow finding once off has run."""
-        async with scenario(pool) as conn:
-            await clean_shadow(conn)
-            await off_week_ran(conn)
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
-            await shadow_issue(conn, DQ_RUN_IDS[0], "shadow_missing_in_duckdb",
-                               "app.memory_samples", "WARN")
-            await shadow_issue(conn, DQ_RUN_IDS[0], check, "app.disk_samples", "CRITICAL")
-            v, detail = await verdict(conn, self.FILE, **self.ON)
-        assert v == "FAIL" and check in detail, detail
-        assert "shadow_missing_in_duckdb" not in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_a_lagging_prune_and_other_findings_are_not_this_checks(self, pool):
-        """INFO `shadow_pruned_rows` is DuckDB's prune behind Postgres's by a
-        tick, and a non-shadow finding is D8's or the digest's. Mutation:
-        count INFO — every edge sample would fail the soak."""
-        async with scenario(pool) as conn:
-            await clean_shadow(conn)
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
-            await shadow_issue(conn, DQ_RUN_IDS[0], "shadow_pruned_rows", "app.disk_samples", "INFO")
-            await shadow_issue(conn, DQ_RUN_IDS[0], "mirror_row_values", "bronze.products", "CRITICAL")
-            v, detail = await verdict(conn, self.FILE, **self.ON)
-        assert v == "PASS" and "zero shadow findings for chain 10, chain 9" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_no_run_is_d8s_fail_and_unknown_here(self, pool):
-        async with scenario(pool) as conn:
-            await clean_shadow(conn)
-            await conn.execute("DELETE FROM app.data_quality_runs WHERE layer = 'mirror_landing'")
-            v, detail = await verdict(conn, self.FILE, **self.ON)
-        assert v == "UNKNOWN" and "D8 says why" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_a_frozen_copy_of_the_journal_is_unknown(self, pool):
-        """Chain 9 still at duckdb: the journal is a copy, and a copy that
-        stopped shows yesterday's clean run. Mutation: drop the gate."""
-        async with scenario(pool) as conn:
-            await clean_shadow(conn)
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(hours=3))
-            v, detail = await verdict(conn, self.FILE,
-                                      **{**SHADOW_OFF, "weekly_ledger_on": "1"})
-        assert v == "UNKNOWN" and "min old" in detail, detail
 
 
 # ── the owner rows date the handover before the flip time does ───────────────

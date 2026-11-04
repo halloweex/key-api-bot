@@ -95,11 +95,11 @@ WRITE_CHAINS += (pg_forecast_write,)
 
 
 # Chains 9, 10, 11a and 11b — the shadow chains (owner decision OD-02 (c),
-# 2026-10-01): Postgres writes first and DuckDB is still handed every row, so
-# the hourly copy stands down for their tables while the daily comparison
-# keeps comparing them (`compared_in_shadow` below). Appended in a block of
-# their own rather than folded into the tuple above, so the lanes that add
-# chains there and this one do not edit the same lines.
+# 2026-10-01): Postgres writes, and DuckDB was handed every row after the
+# commit until step 14's S14-10 (below), so the hourly copy stands down for
+# their tables like any moved chain's. Appended in a block of their own rather
+# than folded into the tuple above, so the lanes that added chains there and
+# this one did not edit the same lines.
 from core import (  # noqa: E402 — appended, see above
     pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
     pg_weekly_ledger_write,
@@ -159,9 +159,10 @@ def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
     """`{chain: {"env", "mode", "error", "latched", "latched_at", "mismatch",
     "unmet_precondition", "shadow"}}`.
 
-    `shadow` is the chain's shape, not its state: True for a chain that keeps
-    feeding DuckDB after it moves (OD-02 (c), `is_shadow`), whatever `mode`
-    says.
+    `shadow` is the chain's shape, not its state: True for chains 9, 10,
+    11a and 11b, which fed DuckDB after they moved (OD-02 (c), `is_shadow`)
+    until step 14's S14-10 — published unchanged until S14-11 reshapes the
+    block.
 
     `mode` is where the chain's writes actually go — "postgres" for every
     chain since step 14's S14-00 — and `unmet_precondition` None
@@ -190,55 +191,33 @@ def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
     return {chain_name(chain): _chain_state(chain) for chain in WRITE_CHAINS}
 
 
-# ─── The third state: copy stops, comparison continues (OD-02 (c)) ──────────
+# ─── The third state, until S14-10: copy stops, comparison continues ────────
 #
 # A chain moves its writes in one of two shapes. Chains 1, 6a, 7a and 8 FREEZE
 # DuckDB: once the chain writes Postgres, DuckDB stops receiving its rows, so
 # the hourly copy and the daily comparison stand down together — every answer
 # above reads one `mode`.
 #
-# Chains 9, 10 and 11 SHADOW it (owner decision OD-02 (c), 2026-10-01):
-# Postgres becomes the writer and DuckDB still receives each row, after the
-# Postgres commit, from the same values (`core/shadow_writes.py`). That splits
-# the one answer in two:
+# Chains 9, 10 and 11 SHADOWED it (owner decision OD-02 (c), 2026-10-01):
+# Postgres became the writer and DuckDB still received each row, after the
+# Postgres commit, from the same values (`core/shadow_writes.py`). The hourly
+# copy stood down for their tables exactly like a frozen chain's — a full
+# replace out of DuckDB would have deleted from Postgres every row whose
+# shadow write failed, for a send ledger a delivered week — while the daily
+# comparison kept comparing them facing Postgres→DuckDB (`compare_shadow`,
+# fed by `compared_in_shadow()`). Since S14-00 web ran `KS_DUCKDB=off`, where
+# the shadow stood down and the comparison compared nothing; step 14's S14-10
+# deleted the shadow, the comparison and `compared_in_shadow`, and the four
+# chains are frozen chains like the rest.
 #
-# - the hourly copy still stands down. It must: a full replace out of DuckDB
-#   would delete from Postgres every row whose shadow write failed — for a
-#   send ledger, a delivered week — once an hour, looking healthy. So a shadow
-#   chain's tables stay in `stood_down_tables()` exactly like a frozen chain's,
-#   and the shipper needs no change;
-# - the daily comparison keeps comparing, because DuckDB is still a copy — fed
-#   from the other side. `compared_in_shadow()` is that set, and
-#   `reconcile_operational` subtracts it from what it stands down and compares
-#   those tables facing Postgres→DuckDB (`compare_shadow`).
-#
-# A chain declares the shape with `CHAIN_SHADOW = True`. Everything else about
-# it — the latch, the owner rows, the flag's typo rule, and the copy-back until
-# step 14's S14-04 deleted it — is the frozen chains' machinery unchanged: a
-# shadow chain is latched by its first Postgres write like any other, because
-# a row whose shadow failed exists in Postgres alone, and the flag is then no
-# more a rollback than chain 8's.
+# A chain still declares the shape with `CHAIN_SHADOW = True`: the registry
+# publishes it as `shadow` in `/api/health`, which S14-11 reshapes.
 
 
 def is_shadow(chain: ModuleType) -> bool:
-    """Does this chain keep feeding DuckDB after it moves? Never raises."""
+    """Was this one of the shadow chains (9, 10, 11a, 11b)? Never raises.
+    Last consumer: `_chain_state`'s published `shadow` — S14-11."""
     return bool(getattr(chain, "CHAIN_SHADOW", False))
-
-
-def shadow_chains() -> Tuple[ModuleType, ...]:
-    """The registered chains that shadow DuckDB, in registry order."""
-    return tuple(chain for chain in WRITE_CHAINS if is_shadow(chain))
-
-
-def compared_in_shadow() -> FrozenSet[str]:
-    """Tables of shadow chains the daily comparison still compares facing
-    Postgres→DuckDB: none, a constant since step 14's S14-00. Under
-    `KS_DUCKDB=off` — production since 2026-10-16, and web always since
-    S14-00 — the shadow write stands down, so DuckDB is no longer a copy of
-    anything and the comparison does not open the file to read them. Last
-    consumers: `reconcile_operational` and the table-fates manifest — S14-10.
-    """
-    return frozenset()
 
 
 def mismatched_chains() -> Dict[str, str]:
