@@ -119,7 +119,7 @@ _EXEMPT_CALLS: set = set()
 # chain. Chain 7b's goals dry run was the second, and was retired with the
 # bridge it measured (chain 7b-4).
 _SQL_ALLOWED = _ROUTER | {
-    "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
+    "core/migrations.py", "core/mirror_reconciliation.py",
     "core/snapshot_validation.py",
     "core/pg_inventory_write.py", "core/pg_chain_invariants.py",
 }

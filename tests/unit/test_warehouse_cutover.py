@@ -608,7 +608,8 @@ class TestGatheringTheFacts:
                 if u.key == "expenses_backfilled"]
         assert "backfilled_at is NULL for bronze.expenses" in u.detail
         assert "KS_READ_EXPENSES" in u.detail
-        assert "/api/mirror/backfill/expenses" in u.detail
+        assert "nightly Postgres dump" in u.detail
+        assert "/api/mirror/backfill" not in u.detail
 
     def test_no_row_at_all_is_the_same_verdict_and_says_so(self):
         """The read gate treats a missing row as no history, and so does the
@@ -621,7 +622,8 @@ class TestGatheringTheFacts:
                 if u.key == "expenses_backfilled"]
         assert "no row for bronze.expenses" in u.detail
         assert "is NULL" not in u.detail
-        assert "/api/mirror/backfill/expenses" in u.detail
+        assert "nightly Postgres dump" in u.detail
+        assert "/api/mirror/backfill" not in u.detail
 
     def test_a_postgres_that_did_not_say_its_revision_is_not_asked(self):
         """That is `pg_revision`'s, and names it alone."""

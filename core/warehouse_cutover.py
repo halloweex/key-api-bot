@@ -547,10 +547,10 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
                  f"{found}. Until its backfill completes, the /expenses summary "
                  "and the profit analysis read DuckDB's Silver whatever "
                  "KS_READ_EXPENSES says — frozen after the switch, empty after "
-                 "a compaction, and never counted as a fallback. POST "
-                 "/api/mirror/backfill/expenses (it writes the row), or let the "
-                 "hourly ids-diff finish it (it runs while "
-                 f"{MIRROR_LANDING} is on).")
+                 "a compaction, and never counted as a fallback. Restore "
+                 f"{EXPENSES_HISTORY} from the nightly Postgres dump, which "
+                 "carries the row (the backfill and the hourly ids-diff that "
+                 "wrote it went in step 14's S14-13).")
 
     need("mirror_landing", mirror_on(env.get(MIRROR_LANDING)),
          f"{MIRROR_LANDING} is {env.get(MIRROR_LANDING)!r}: the landing mirror "
