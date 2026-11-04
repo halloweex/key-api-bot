@@ -17,31 +17,18 @@ is only correct while that holds.
 from __future__ import annotations
 
 import ast
-import dataclasses
 import inspect
 import re
 import textwrap
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.duckdb_store import DuckDBStore
-from core.mirror_reconciliation import (
-    APPEND_ONLY_TABLES,
-    OPERATIONAL_GRACE_MINUTES,
-    OPERATIONAL_TABLES,
-    _as_sample_id,
-    _row_key,
-    fingerprints,
-)
-from core.landing_rows import EXPENSE_TYPE_COLUMNS
 from core.pg_operational import (
-    BUYER_GENDER_COLUMNS,
-    GOAL_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
-    MANUAL_EXPENSE_COLUMNS,
     MISS_COLUMNS,
     MOVEMENTS_TABLE,
     MOVEMENT_COLUMNS,
@@ -171,6 +158,7 @@ class TestTheWriterAndTheMigrationAgree:
         ("inventory_sku_history", SKU_HISTORY_COLUMNS),
         ("stock_movements", MOVEMENT_COLUMNS),
     ])
+
     def test_every_shipped_column_exists_in_the_table(self, table, columns):
         declared = _migration_columns(table)
         assert declared, f"parsed no columns out of app.{table}"
@@ -232,8 +220,6 @@ class TestTheInventoryChainStandsDown:
     """
 
     def test_the_shipper_and_the_comparison_read_one_list(self):
-        import inspect
-
         # Both sites now ask `core.write_chains.chain_tables()`, which is
         # pinned — by walking `core/`, not by a list — in test_write_chains.py.
         # What stays here is chain 1's own contribution to that answer.
@@ -620,151 +606,6 @@ class TestOneCopyAtATime:
         assert "reached Postgres" in result["error"], result
 
 
-class TestBothComparisonsAskTheSameQuestion:
-    """The WARN rule is carried by a keyword at two call sites.
-
-    `compare_table` (the tables read whole) and `reconcile_operational`'s
-    fingerprinted branch (the append-only ones) each call
-    `_watermark_findings`, and only the second is exercised by the real-Postgres
-    test. Dropping the keyword there would leave the four appended tables paging
-    CRITICAL on a single failed hour while `pytest -q` stayed green, so the
-    keyword is checked structurally, in the source, for every call site.
-    """
-
-    def test_both_operational_comparisons_pass_the_spec_s_own_rule(self):
-        import ast
-        import inspect
-
-        from core import mirror_reconciliation
-
-        tree = ast.parse(inspect.getsource(mirror_reconciliation))
-        # Only these two judge the replicated operational tables. The Silver,
-        # Gold and landing call sites keep every failure CRITICAL on purpose:
-        # their copies do not run hourly, so there is no next run to repair it.
-        wanted = {"compare_table", "reconcile_operational"}
-        seen = set()
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name not in wanted:
-                continue
-            calls = [n for n in ast.walk(node)
-                     if isinstance(n, ast.Call)
-                     and getattr(n.func, "id", None) == "_watermark_findings"]
-            assert calls, f"{node.name} no longer asks the watermark anything"
-            for call in calls:
-                seen.add(node.name)
-                passed = {kw.arg: kw.value for kw in call.keywords}
-                assert "one_failure_warns_within" in passed, (
-                    f"{node.name}, line {call.lineno}: every failed hour would page "
-                    "CRITICAL on tables whose next run repairs them")
-                rendered = ast.dump(passed["one_failure_warns_within"])
-                assert "one_failure_warns" in rendered, (
-                    f"{node.name}, line {call.lineno}: the grace is not read from the "
-                    "spec, so a table that may warn and one that may not are judged alike")
-        assert seen == wanted, f"call sites not found: {sorted(wanted - seen)}"
-
-
-class TestOneFailedHourIsNotAPage:
-    """A failed copy stamps every table it was copying, and the next hourly
-    run usually repairs it. One failure with a recent success is WARN; the
-    second in a row, or a success older than the grace, is CRITICAL.
-    `tests/integration/test_operational_failure_watermark.py` runs the same
-    through `reconcile_operational` against a real Postgres."""
-
-    NOW = datetime(2026, 9, 21, 4, 30, tzinfo=timezone.utc)   # 07:30 Kyiv
-
-    @staticmethod
-    def _failing(failures: int, minutes_since_ok: int) -> dict:
-        return {
-            "last_ok_at": TestOneFailedHourIsNotAPage.NOW - timedelta(minutes=minutes_since_ok),
-            "failures_since_ok": failures,
-            "last_error": "UniqueViolationError: duplicate key value",
-        }
-
-    def _severity(self, spec, watermark, **kwargs):
-        from core.mirror_reconciliation import compare_table
-
-        kwargs.setdefault("grace_minutes", OPERATIONAL_GRACE_MINUTES)
-        found = [i for i in compare_table(spec, {}, {}, {}, watermark, now=self.NOW, **kwargs)
-                 if i.check_name == "mirror_failing"]
-        assert len(found) == 1, found
-        return found[0]
-
-    @pytest.mark.parametrize("spec", OPERATIONAL_TABLES, ids=lambda s: s.pg_table)
-    def test_one_failure_inside_the_grace_is_a_warning(self, spec):
-        from core.data_quality import Severity
-
-        issue = self._severity(spec, self._failing(1, OPERATIONAL_GRACE_MINUTES))
-        assert issue.severity is Severity.WARN
-        assert "UniqueViolationError" in issue.description
-
-    def test_one_failure_past_the_grace_is_critical(self):
-        from core.data_quality import Severity
-
-        spec = OPERATIONAL_TABLES[0]
-        issue = self._severity(spec, self._failing(1, OPERATIONAL_GRACE_MINUTES + 1))
-        assert issue.severity is Severity.CRITICAL
-
-    def test_the_second_failure_in_a_row_is_critical_however_recent(self):
-        """The shape of a failure that repeats every hour, the duplicate id
-        among them: two runs, two stamps, CRITICAL."""
-        from core.data_quality import Severity
-
-        spec = OPERATIONAL_TABLES[0]
-        issue = self._severity(spec, self._failing(2, 5))
-        assert issue.severity is Severity.CRITICAL
-        assert issue.count == 2
-
-    def test_a_table_never_shipped_is_critical_on_its_first_failure(self):
-        from core.data_quality import Severity
-
-        spec = OPERATIONAL_TABLES[0]
-        watermark = {"last_ok_at": None, "failures_since_ok": 1, "last_error": "boom"}
-        assert self._severity(spec, watermark).severity is Severity.CRITICAL
-
-    def test_a_landing_mirror_keeps_every_failure_critical(self):
-        from core.data_quality import Severity
-        from core.mirror_reconciliation import MIRRORED_TABLES
-
-        issue = self._severity(MIRRORED_TABLES[0], self._failing(1, 5))
-        assert issue.severity is Severity.CRITICAL
-
-    def test_the_flag_is_on_exactly_the_tables_this_copy_ships(self):
-        from core.pg_operational import _APPEND_ABOVE, _FULL_REPLACE
-
-        shipped = {t for t, _d, _c, _o in _FULL_REPLACE} | {s.pg_table for s in _APPEND_ABOVE}
-        flagged = {s.pg_table for s in (*OPERATIONAL_TABLES, *APPEND_ONLY_TABLES)
-                   if s.one_failure_warns}
-        assert flagged == shipped
-
-    def test_no_other_spec_in_the_module_sets_it(self):
-        """Walked over every spec the module constructs — in the tuples, in
-        the spec helpers and inside the functions — because a guard that names
-        its subjects only guards the ones already thought of."""
-        from core import mirror_reconciliation
-
-        tree = ast.parse(inspect.getsource(mirror_reconciliation))
-        allowed = set()
-        for node in tree.body:
-            if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-                    and node.target.id in ("OPERATIONAL_TABLES", "APPEND_ONLY_TABLES")):
-                allowed |= {id(call) for call in ast.walk(node.value)}
-
-        constructions = [
-            call for call in ast.walk(tree)
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-            and call.func.id in ("MirroredTable", "BucketedTable")
-        ]
-        assert len(constructions) > len(OPERATIONAL_TABLES) + len(APPEND_ONLY_TABLES)
-        stray = [
-            call.lineno for call in constructions
-            if id(call) not in allowed
-            and any(k.arg == "one_failure_warns" for k in call.keywords)
-        ]
-        assert stray == []
-
-
 # ── the sixth table, and why it is here ──────────────────────────────────────
 
 
@@ -794,18 +635,11 @@ class TestOfferStocksSurvivesTheSmsSwitch:
         assert entry[1] == "offer_stocks"
         assert entry[2] == OFFER_STOCK_COLUMNS
 
-    def test_it_is_compared_by_the_operational_reconciliation(self):
-        spec = next(
-            s for s in OPERATIONAL_TABLES if s.pg_table == OFFER_STOCKS_TABLE
-        )
-        assert spec.full_replace and spec.synced_column == "synced_at"
-        # The money columns are DECIMAL on one side and NUMERIC on the other.
-        assert set(spec.numeric) == {"price", "purchased_price"}
-
     def test_this_path_has_no_writer_switch_to_stand_down_on(self):
         """The actual defect was a guard with a wider blast radius than its
-        premise, so what is asserted is the *absence* of that check from these
-        two functions.
+        premise, so what is asserted is the *absence* of that check from the
+        replicator (and from `reconcile_operational`, until step 14's S14-12
+        deleted it).
 
         Over the code, never over the text: the first version of this test read
         the raw source and failed on the paragraph above explaining the move —
@@ -814,9 +648,8 @@ class TestOfferStocksSurvivesTheSmsSwitch:
         what is left is what runs.
         """
         from core import pg_operational
-        from core.mirror_reconciliation import reconcile_operational
 
-        for obj in (pg_operational, reconcile_operational):
+        for obj in (pg_operational,):
             code = _code_only(obj)
             assert "KS_SMS_STORE" not in code
             assert "sms_store_is_postgres" not in code
@@ -863,120 +696,6 @@ class TestOfferStocksSurvivesTheSmsSwitch:
 # ── the comparison ───────────────────────────────────────────────────────────
 
 
-class TestTheComparisonSpecs:
-    def test_all_five_whole_tables_are_full_replace(self):
-        """The replicator writes every row it holds, so "in DuckDB and not in
-        Postgres" has one meaning: lost. There is no retired category to excuse
-        it with."""
-        assert all(spec.full_replace for spec in OPERATIONAL_TABLES)
-
-    def test_each_whole_table_has_a_clock(self):
-        """Without one, `compare_table` cannot tell a row in flight from a row
-        that was dropped, and every recently-written row is a CRITICAL."""
-        assert all(spec.synced_column for spec in OPERATIONAL_TABLES)
-
-    def test_a_finding_says_these_are_copies_not_a_shared_parse(self):
-        """The default sentence is landing's and is true only of landing."""
-        for spec in OPERATIONAL_TABLES:
-            assert "copied out of DuckDB" in spec.origin_note
-            assert "same parsed tuple" not in spec.origin_note
-
-    def test_the_compared_columns_are_the_shipped_columns(self):
-        """Two lists a file apart. If the shipper gains a column the comparison
-        does not read, the column is copied and never checked.
-
-        Derived from `_FULL_REPLACE`, not restated. It used to carry its own
-        dictionary of eight tables — a *third* list, which then had to be
-        edited every time either of the other two grew, and which failed with
-        a `KeyError` rather than a sentence when revision 0025 added four
-        tables to both. A test that restates the thing it checks is a thing to
-        maintain, not a guard.
-        """
-        from core.pg_operational import _FULL_REPLACE
-
-        shipped = {entry[0]: set(entry[2]) for entry in _FULL_REPLACE}
-        for spec in OPERATIONAL_TABLES:
-            assert spec.pg_table in shipped, (
-                f"{spec.pg_table} is compared and never shipped"
-            )
-            assert set(spec.columns) == shipped[spec.pg_table], spec.pg_table
-
-    def test_the_fingerprinted_tables_check_what_they_ship(self):
-        """`recorded_at` is the one deliberate exclusion: it is the clock the
-        grace window reads, and a value that is also the clock can never be
-        forgiven by itself."""
-        compared = {s.pg_table: set(s.columns) for s in APPEND_ONLY_TABLES}
-        assert compared[SKU_HISTORY_TABLE] == set(SKU_HISTORY_COLUMNS)
-        assert compared[MOVEMENTS_TABLE] == set(MOVEMENT_COLUMNS) - {"recorded_at"}
-
-    def test_the_grace_window_is_sized_to_the_replication_interval(self):
-        """One hour plus half of it again — the rule SILVER_GRACE_MINUTES
-        follows against KS_PG_SILVER_INTERVAL_S. Raise the job's interval and
-        this must move with it."""
-        from core.scheduler import BackgroundScheduler
-
-        source = inspect.getsource(BackgroundScheduler._register_jobs)
-        block = source[source.index('job_id="replicate_operational"'):]
-        assert "IntervalTrigger(hours=1)" in block[:400]
-        assert OPERATIONAL_GRACE_MINUTES == 90
-
-    def test_the_day_bucket_means_the_same_number_in_both_engines(self):
-        """20692 for 2026-08-27, checked against DuckDB here and against
-        PostgreSQL 17.2 on the runtime. Two expressions that must agree, and
-        nothing in the type system says so."""
-        import duckdb
-
-        from core.mirror_reconciliation import _DAY_BUCKET_DK, _DAY_BUCKET_PG
-
-        conn = duckdb.connect()
-        conn.execute("CREATE TABLE t(date DATE)")
-        conn.execute("INSERT INTO t VALUES (DATE '2026-08-27')")
-        got = conn.execute(f"SELECT {_DAY_BUCKET_DK} FROM t").fetchone()[0]
-        assert got == 20692
-        # The Postgres half is plain date arithmetic and is asserted as text,
-        # because there is no PostgreSQL in this suite to run it against.
-        assert _DAY_BUCKET_PG == "(date - DATE '1970-01-01')"
-
-    @pytest.mark.asyncio
-    async def test_a_days_snapshot_is_one_bucket(self, tmp_path):
-        """Bucketing `inventory_sku_history` by an id would put all 143,274
-        rows in one bucket — there are only ~900 offers — and the drill-down
-        would read the table to find one row."""
-        store = await _store(tmp_path)
-        try:
-            await _seed(store)
-            spec = next(
-                s for s in APPEND_ONLY_TABLES if s.pg_table == SKU_HISTORY_TABLE
-            )
-            async with store.connection() as conn:
-                prints = fingerprints(conn, spec)
-            assert len(prints) == 3               # three days, three buckets
-            assert all(int(v[0]) == 2 for v in prints.values())
-        finally:
-            await store.close()
-
-
-class TestARowKeyThatIsNotANumber:
-    """`app.inventory_history` is keyed by the day. `_row_key` coerced to int
-    unconditionally, which was right for every table that existed when it was
-    written and a TypeError for the first one that was not."""
-
-    def test_a_date_key_survives(self):
-        spec = next(
-            s for s in OPERATIONAL_TABLES if s.pg_table == "app.inventory_history"
-        )
-        row = [date(2026, 8, 27), 1, 2, 3, 4, None]
-        assert _row_key(spec, row) == date(2026, 8, 27)
-
-    def test_a_date_is_reported_as_a_day_a_human_reads(self):
-        assert _as_sample_id(date(2026, 8, 27)) == 20260827
-        assert _as_sample_id(datetime(2026, 8, 27, 12, tzinfo=timezone.utc)) == 20260827
-
-    def test_a_key_with_no_integer_form_is_dropped_rather_than_forced(self):
-        """A sample id nobody can look anything up with is worse than none."""
-        assert _as_sample_id("SKU-11") is None
-
-
 class TestTheJob:
     def test_there_is_exactly_one_call_site(self):
         """Five code paths write these tables. Hooking each is how the sixth
@@ -991,17 +710,6 @@ class TestTheJob:
                 for m in re.finditer(r"await replicate_operational\(", text)
             ]
         assert len(callers) == 1, callers
-
-    def test_the_reconciliation_runs_after_gold(self):
-        """A Silver or Gold finding is almost always the better explanation of
-        an operational one, so it should be read first."""
-        from core.scheduler import BackgroundScheduler
-
-        # Parsed, not grepped — the function's comments name every check.
-        from tests.unit.test_mirror_landing_isolation import check_order
-
-        order = check_order()
-        assert order.index("reconcile_gold") < order.index("reconcile_operational")
 
     @pytest.mark.asyncio
     async def test_the_job_returns_both_copies(self):
@@ -1038,40 +746,6 @@ class TestBuyerGenderIsShippedAndCompared:
         assert entry[1] == "buyer_gender"
         assert entry[2] == BUYER_GENDER_COLUMNS
 
-    def test_it_is_compared_by_the_operational_reconciliation(self):
-        from core.pg_operational import BUYER_GENDER_COLUMNS, BUYER_GENDER_TABLE
-
-        spec = next(
-            s for s in OPERATIONAL_TABLES if s.pg_table == BUYER_GENDER_TABLE
-        )
-        assert spec.dk_table == "buyer_gender"
-        assert spec.columns == BUYER_GENDER_COLUMNS
-        assert spec.key_columns == ("buyer_id",)
-        # Full replace, so a row missing from Postgres was LOST and is reported
-        # CRITICAL — there is no retired category for a table whose writer
-        # rewrites it whole.
-        assert spec.full_replace
-
-    def test_the_stamp_is_shipped_compared_and_the_grace_clock(self):
-        """Compared since chain 4 (decision 7). The hourly derive restamps
-        only the verdicts it writes and the copy ships the value as it stands,
-        so a `decided_at` that differs is the copy having drifted — and it is
-        the clock chain 4's copy-back hands over on. Still the grace clock, so
-        a verdict re-derived minutes before the check is forgiven until the
-        next hourly copy lands it.
-        """
-        from core.pg_operational import BUYER_GENDER_TABLE
-
-        spec = next(
-            s for s in OPERATIONAL_TABLES if s.pg_table == BUYER_GENDER_TABLE
-        )
-        assert spec.synced_column == "decided_at"
-        assert spec.ignore_columns == ()
-        assert spec.stamp_is_per_row
-        for column in ("decided_at", "gender", "method", "confidence",
-                       "override_by_human"):
-            assert column in spec.columns, column
-
     def test_the_schema_revision_carries_the_table(self):
         """migrate must be rebuilt alongside web, or every read raises."""
         from core.pg import REQUIRED_REVISION
@@ -1106,41 +780,6 @@ class TestTheForecastGroup:
         shipped = {entry[0] for entry in _FULL_REPLACE}
         for table in self.FORECAST:
             assert table in shipped, f"{table} is not replicated"
-
-    def test_all_four_are_compared(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        compared = {spec.pg_table for spec in OPERATIONAL_TABLES}
-        for table in self.FORECAST:
-            assert table in compared, (
-                f"{table} is shipped and never compared — a copy nobody checks"
-            )
-
-    def test_the_two_lists_agree_on_every_table(self):
-        """Not just the four: the whole of both lists. Adding to one and
-        forgetting the other is the failure this pins, and it does not care
-        which table it happens to."""
-        from core.pg_operational import _FULL_REPLACE
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        shipped = {entry[0] for entry in _FULL_REPLACE}
-        compared = {spec.pg_table for spec in OPERATIONAL_TABLES}
-        assert shipped == compared, (
-            f"only shipped: {sorted(shipped - compared)}\n"
-            f"only compared: {sorted(compared - shipped)}"
-        )
-
-    def test_the_column_tuples_are_the_shipped_ones(self):
-        """The reconciliation imports them rather than restating them, which is
-        what stops the comparison quietly checking a different set of columns
-        from the set being written. Asserted rather than trusted."""
-        from core.pg_operational import _FULL_REPLACE
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        by_table = {e[0]: e[2] for e in _FULL_REPLACE}
-        for spec in OPERATIONAL_TABLES:
-            if spec.pg_table in self.FORECAST:
-                assert tuple(spec.columns) == tuple(by_table[spec.pg_table]), spec.pg_table
 
     def test_the_migration_creates_what_is_shipped(self):
         """The third list. A column in the tuple and not in the DDL fails at
@@ -1194,73 +833,6 @@ class TestTheWatchdogsAndLedgers:
     @property
     def all_five(self):
         return self.WATCHDOGS + self.LEDGERS
-
-    def _spec(self, table):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        return next(s for s in OPERATIONAL_TABLES if s.pg_table == table)
-
-    def test_all_five_are_shipped_and_compared(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-        from core.pg_operational import _FULL_REPLACE
-
-        shipped = {entry[0] for entry in _FULL_REPLACE}
-        compared = {spec.pg_table for spec in OPERATIONAL_TABLES}
-        for table in self.all_five:
-            assert table in shipped, f"{table} is not replicated"
-            assert table in compared, f"{table} is shipped and never compared"
-
-    def test_no_watchdog_measure_is_declared_numeric(self):
-        """The absence is the decision, so it is asserted rather than assumed.
-
-        Every measure on these three is DOUBLE in DuckDB and DOUBLE PRECISION
-        in Postgres, so both sides hand back a Python float. Listing one in
-        `numeric=` coerces that side to `Decimal`, and `_normalise_row` then
-        finds 1.0 != Decimal('1.0') on every row of every sample, for ever, at
-        a tolerance of zero. It is an attractive mistake because the columns
-        are measurements and measurements usually want NUMERIC.
-        """
-        for table in self.WATCHDOGS:
-            assert self._spec(table).numeric == (), (
-                f"{table} declares a numeric column; its measures are floats "
-                f"on both sides and coercing one of them manufactures a "
-                f"difference on every row"
-            )
-
-    def test_both_ledgers_declare_their_money(self):
-        """The mirror image of the rule above, and the same rule: follow the
-        source type. `revenue` is DECIMAL(14, 2) in DuckDB and NUMERIC(14, 2)
-        here, a Decimal on both sides, so it is listed."""
-        for table in self.LEDGERS:
-            assert self._spec(table).numeric == ("revenue",), table
-
-    def test_every_clock_here_is_per_row_and_stays_compared(self):
-        """These are the first specs in a while with an empty `ignore_columns`,
-        and that is the point rather than an oversight.
-
-        The four forecast specs above all hide their stamp, because one
-        re-derivation writes one value to every row and comparing it would ask
-        the two copies to have been taken at the same instant. A sample is the
-        opposite: one reading at one moment, and a ledger row is one delivery
-        at one moment. Hiding those stamps would throw away the only column
-        that can catch a sample copied with the wrong timestamp.
-        """
-        for table in self.all_five:
-            spec = self._spec(table)
-            assert spec.ignore_columns == (), (
-                f"{table} hides a column; its clock dates the row it sits on"
-            )
-            assert spec.stamp_is_per_row, table
-            assert spec.synced_column in spec.columns, (
-                f"{table}'s clock is not among the shipped columns"
-            )
-
-    def test_the_seven_path_groups_need_the_composite_key(self):
-        """One sweep writes one row per path group, all sharing a `sampled_at`
-        — seven of them in production. Keyed on the timestamp alone, six would
-        collide and a healthy sweep would read as six lost rows."""
-        assert self._spec("app.data_dir_samples").key_columns == (
-            "sampled_at", "path_group")
 
     def test_the_ledgers_are_two_tables_and_not_one(self):
         """`weekly_report_sends.sales_type` means a sales type, and "traffic"
@@ -1324,141 +896,6 @@ class TestTheWatchdogsAndLedgers:
         for other in ("working_set_mb", "page_cache_mb", "oom_kills"):
             line = next(l for l in block.splitlines() if other in l)
             assert "NOT NULL" in line, line
-
-
-class TestRetentionIsNotLoss:
-    """The one new idea in revision 0026, and the only thing in it that could
-    make the daily comparison lie.
-
-    `full_replace` ends every run with the two copies identical, so an orphan
-    can only be a row that left DuckDB *after* the copy. On twelve of the
-    fourteen tables that is a defect. On the three watchdog samples it is the
-    retention sweep: `DELETE FROM <t> WHERE sampled_at < <cutoff>`, the memory
-    one every thirty minutes, against an hourly replication and a 07:30 check.
-    Left as plain orphans it would have been a WARN a day, for ever, invented
-    entirely by the migration that created the copy.
-    """
-
-    from datetime import datetime, timedelta, timezone as _tz
-
-    @staticmethod
-    def _spec(table):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        return next(s for s in OPERATIONAL_TABLES if s.pg_table == table)
-
-    @staticmethod
-    def _sample_rows(stamps):
-        """`{key: row}` and `{key: clock}` for `app.memory_samples`, keyed on
-        `sampled_at` — which is both the key and the first column."""
-        rows = {s: (s, 100.0, 10.0, 7000.0, 0) for s in stamps}
-        return rows, {s: s for s in stamps}
-
-    def test_the_three_watchdogs_declare_it_and_nothing_else_does(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        sweeping = {s.pg_table for s in OPERATIONAL_TABLES if s.prunes_by_age}
-        assert sweeping == {
-            "app.disk_samples", "app.data_dir_samples", "app.memory_samples",
-        }, (
-            "only the tables whose DuckDB writer deletes by age may claim this; "
-            "on every other table an orphan below the floor is a lost row"
-        )
-
-    def test_a_row_older_than_everything_duckdb_holds_is_a_sweep(self):
-        from core.mirror_reconciliation import compare_table
-
-        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
-        kept = [now - self.timedelta(hours=n) for n in (1, 2, 3)]
-        aged = now - self.timedelta(days=14, hours=1)
-
-        dk_rows, dk_synced = self._sample_rows(kept)
-        pg_rows, _ = self._sample_rows(kept + [aged])
-
-        issues = compare_table(
-            self._spec("app.memory_samples"), dk_rows, dk_synced, pg_rows,
-            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 3},
-            now=now,
-        )
-        names = {i.check_name for i in issues}
-        assert "mirror_pruned_rows" in names, names
-        assert "mirror_orphan_rows" not in names, (
-            "the aged row was reported as an orphan; this is the daily WARN "
-            "the mechanism exists to prevent"
-        )
-        pruned = next(i for i in issues if i.check_name == "mirror_pruned_rows")
-        assert pruned.count == 1
-        assert pruned.severity.name == "INFO"
-
-    def test_a_row_inside_the_window_is_still_an_orphan(self):
-        """The half that keeps it a check. A row Postgres holds that is *newer*
-        than DuckDB's oldest cannot have aged out — nothing else deletes from
-        these tables, so something is wrong."""
-        from core.mirror_reconciliation import compare_table
-
-        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
-        kept = [now - self.timedelta(hours=n) for n in (1, 3, 5)]
-        intruder = now - self.timedelta(hours=2)   # between the oldest and newest
-
-        dk_rows, dk_synced = self._sample_rows(kept)
-        pg_rows, _ = self._sample_rows(kept + [intruder])
-
-        issues = compare_table(
-            self._spec("app.memory_samples"), dk_rows, dk_synced, pg_rows,
-            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 3},
-            now=now,
-        )
-        names = {i.check_name for i in issues}
-        assert "mirror_orphan_rows" in names, names
-        assert "mirror_pruned_rows" not in names, names
-
-    def test_a_table_that_does_not_sweep_reports_the_same_row_as_an_orphan(self):
-        """The flag is the whole difference, and it is asserted rather than
-        described: an `app.revenue_goals` row older than anything DuckDB holds
-        is a row DuckDB lost."""
-        from core.mirror_reconciliation import compare_table
-
-        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
-        spec = self._spec("app.memory_samples")
-        not_sweeping = dataclasses.replace(spec, prunes_by_age=False)
-
-        kept = [now - self.timedelta(hours=n) for n in (1, 2, 3)]
-        aged = now - self.timedelta(days=14, hours=1)
-        dk_rows, dk_synced = self._sample_rows(kept)
-        pg_rows, _ = self._sample_rows(kept + [aged])
-
-        issues = compare_table(
-            not_sweeping, dk_rows, dk_synced, pg_rows,
-            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 3},
-            now=now,
-        )
-        assert "mirror_orphan_rows" in {i.check_name for i in issues}
-
-    def test_an_empty_duckdb_side_forgives_nothing(self):
-        """No floor exists, and an empty source is a far larger finding than a
-        sweep. Every orphan stands."""
-        from core.mirror_reconciliation import compare_table
-
-        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
-        aged = now - self.timedelta(days=14, hours=1)
-        pg_rows, _ = self._sample_rows([aged])
-
-        issues = compare_table(
-            self._spec("app.memory_samples"), {}, {}, pg_rows,
-            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 0},
-            now=now,
-        )
-        names = {i.check_name for i in issues}
-        assert "mirror_pruned_rows" not in names, names
-
-    def test_the_finding_is_registered_and_has_a_human_name(self):
-        """An unregistered check name is a finding that cannot become an alert
-        — `core/alerting.py`'s registry is exact-match."""
-        from core.alerting import REGISTRY
-        from core.data_quality import HUMAN_CHECK_NAMES
-
-        assert "mirror_pruned_rows" in REGISTRY
-        assert "mirror_pruned_rows" in HUMAN_CHECK_NAMES
 
 
 class TestTheAppendListIsNowDeclared:
@@ -1554,21 +991,6 @@ class TestTheAppendListIsNowDeclared:
         assert "app.warehouse_refreshes" in tables
         assert "app.reconciliation_log" in tables
 
-    def test_they_are_compared_and_the_columns_match_what_is_shipped(self):
-        """The three-list invariant, for the append shape. A column shipped and
-        not compared is a column copied and never checked."""
-        from core.mirror_reconciliation import APPEND_ONLY_TABLES
-        from core.pg_operational import _APPEND_ABOVE
-
-        shipped = {s.pg_table: set(s.columns) for s in _APPEND_ABOVE}
-        compared = {s.pg_table: set(s.columns) for s in APPEND_ONLY_TABLES}
-        assert set(shipped) == set(compared), (
-            f"only shipped: {sorted(set(shipped) - set(compared))}\n"
-            f"only compared: {sorted(set(compared) - set(shipped))}"
-        )
-        for table in ("app.warehouse_refreshes", "app.reconciliation_log"):
-            assert shipped[table] == compared[table], table
-
     def test_silver_mode_is_shipped_despite_not_being_in_the_create_table(self):
         """It arrives by ALTER TABLE in DuckDB migration 0005. A twin built by
         reading the CREATE TABLE alone is one column short, and the shipper
@@ -1644,22 +1066,6 @@ class TestTheQualityJournal:
     JOURNAL = ("app.data_quality_runs", "app.data_quality_issues",
                "app.data_quality_diffs")
 
-    @staticmethod
-    def _spec(table):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        return next(s for s in OPERATIONAL_TABLES if s.pg_table == table)
-
-    def test_all_three_are_shipped_and_compared(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-        from core.pg_operational import _FULL_REPLACE
-
-        shipped = {e[0] for e in _FULL_REPLACE}
-        compared = {s.pg_table for s in OPERATIONAL_TABLES}
-        for table in self.JOURNAL:
-            assert table in shipped, table
-            assert table in compared, table
-
     def test_the_parent_ships_before_its_children(self):
         """One transaction, and the order inside it still matters: it must
         never hold findings without the run they belong to, even for a
@@ -1670,38 +1076,6 @@ class TestTheQualityJournal:
         parent = order.index("app.data_quality_runs")
         for child in ("app.data_quality_issues", "app.data_quality_diffs"):
             assert parent < order.index(child), child
-
-    def test_each_child_borrows_the_runs_clock(self):
-        """And borrows it from the run table by name, not from a column of its
-        own that does not exist."""
-        for child in ("app.data_quality_issues", "app.data_quality_diffs"):
-            clock = self._spec(child).synced_column
-            assert clock, child
-            assert "data_quality_runs" in clock, clock
-            assert "started_at" in clock, clock
-
-    def test_the_borrowed_clock_is_not_a_compared_column(self):
-        """It is an expression, not a column the table has — so it can never
-        appear in `columns`, and `stamp_is_per_row` must still hold because
-        each run has its own moment."""
-        for child in ("app.data_quality_issues", "app.data_quality_diffs"):
-            spec = self._spec(child)
-            assert spec.synced_column not in spec.columns
-            assert spec.ignore_columns == ()
-            assert spec.stamp_is_per_row
-
-    def test_the_diff_values_are_not_declared_numeric(self):
-        """They look like money and are DOUBLE on both sides. Declaring them
-        coerces one side to Decimal and reports every row as differing — the
-        same trap as the watchdog measures, arrived at from the opposite
-        direction because these ones really are quantities of hryvnia."""
-        assert self._spec("app.data_quality_diffs").numeric == ()
-
-    def test_the_natural_keys_are_the_measured_ones(self):
-        assert self._spec("app.data_quality_issues").key_columns == (
-            "run_id", "check_name", "table_name")
-        assert self._spec("app.data_quality_diffs").key_columns == (
-            "run_id", "month", "source_id", "diff_class", "field")
 
     def test_no_foreign_key_is_declared(self):
         """DuckDB has none, the three ship in one transaction in parent-first
@@ -1769,20 +1143,6 @@ class TestOffersTravelWithTheirStocks:
         tables = [e[0] for e in _FULL_REPLACE]
         assert "bronze.offers" in tables
         assert "bronze.offer_stocks" in tables
-
-    def test_offers_is_not_in_the_landing_mirror(self):
-        """Two shippers for one table is two clocks for one table."""
-        from core.mirror_reconciliation import MIRRORED_TABLES
-
-        assert "bronze.offers" not in {s.pg_table for s in MIRRORED_TABLES}
-
-    def test_the_stamp_is_hidden_because_one_sync_writes_it_to_every_row(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-
-        spec = next(s for s in OPERATIONAL_TABLES if s.pg_table == "bronze.offers")
-        assert spec.ignore_columns == ("synced_at",)
-        assert not spec.stamp_is_per_row
-
 
 class TestTheSyncWatermarksAreAProjection:
     """Ten of the eleven `sync_metadata` keys cross. One does not, and the
@@ -1853,16 +1213,6 @@ class TestTheSyncWatermarksAreAProjection:
 
         assert "warehouse_catalog_dirty" in TRANSIENT_SYNC_KEYS
 
-    def test_the_shipper_and_the_comparison_read_the_same_source(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-        from core.pg_operational import _FULL_REPLACE, SYNC_METADATA_SOURCE
-
-        shipped = next(e for e in _FULL_REPLACE if e[0] == "app.sync_metadata")
-        compared = next(s for s in OPERATIONAL_TABLES
-                        if s.pg_table == "app.sync_metadata")
-        assert shipped[1] == SYNC_METADATA_SOURCE
-        assert compared.dk_table == SYNC_METADATA_SOURCE
-
     def test_the_derived_table_is_aliased(self):
         """DuckDB refuses an unnamed derived table, and this one is
         interpolated straight after `FROM`. Found by a real defect in the
@@ -1930,16 +1280,6 @@ class TestStageThreeIsComplete:
                    | {s.pg_table for s in _APPEND_ABOVE})
         missing = sorted(set(self.STAGE_THREE) - shipped)
         assert missing == [], f"shipped by nothing: {missing}"
-
-    def test_all_sixteen_are_compared(self):
-        from core.mirror_reconciliation import (
-            APPEND_ONLY_TABLES, OPERATIONAL_TABLES,
-        )
-
-        compared = ({s.pg_table for s in OPERATIONAL_TABLES}
-                    | {s.pg_table for s in APPEND_ONLY_TABLES})
-        missing = sorted(set(self.STAGE_THREE) - compared)
-        assert missing == [], f"copied and never checked: {missing}"
 
     def test_every_one_has_ddl_in_some_revision(self):
         """The third list. A table shipped with no DDL fails at the first

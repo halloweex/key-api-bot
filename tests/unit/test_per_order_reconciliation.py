@@ -4,15 +4,13 @@ A rollup nets out anything that offsets — a status wrong on one order and righ
 on another, a line item lost here and gained there, a manager reassigned. The
 monthly comparison can be perfectly green while individual orders disagree.
 """
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
-import duckdb
 import pytest
 
 from core.data_quality import DiscrepancyClass, Severity, classify_order_discrepancies
 from core.reconciliation_io import (
     _process_batch,
-    duckdb_orders_in_window,
     rollup_from_orders,
 )
 
@@ -149,55 +147,10 @@ class TestClassifyOrderDiscrepancies:
         assert len(out[0].order_ids) == 10
 
 
-class TestDuckDbExtractor:
-    @pytest.fixture
-    def conn(self):
-        c = duckdb.connect(":memory:")
-        c.execute("""
-            CREATE TABLE orders (id BIGINT, source_id INTEGER, status_id INTEGER,
-                                 manager_id INTEGER, buyer_id INTEGER,
-                                 grand_total DECIMAL(12,2), ordered_at TIMESTAMPTZ,
-                                 updated_at TIMESTAMPTZ);
-            CREATE TABLE order_products (order_id BIGINT, price_sold DECIMAL(12,2),
-                                         quantity INTEGER);
-            INSERT INTO orders VALUES
-              (1, 1, 12, 4, 900, 100.00, '2026-06-10 09:00:00+00', '2026-06-10 09:00:00+00'),
-              (2, 2, 19, 15, 901, 50.00, '2026-06-11 09:00:00+00', '2026-06-11 09:00:00+00');
-            INSERT INTO order_products VALUES (1, 50.00, 2), (2, 25.00, 2);
-        """)
-        yield c
-        c.close()
-
-    def test_extracts_the_compared_fields(self, conn):
-        out = duckdb_orders_in_window(conn, WINDOW_START, WINDOW_END, watermark=WATERMARK)
-
-        assert out[1] == {
-            "status_id": 12, "source_id": 1, "manager_id": 4, "buyer_id": 900,
-            "grand_total": 100.0, "order_date": date(2026, 6, 10),
-            "n_lines": 1, "qty": 2, "line_amount": 100.0,
-        }
-        assert out[2]["status_id"] == 19
-
-    def test_an_order_with_no_line_items_still_appears(self, conn):
-        conn.execute("""INSERT INTO orders VALUES
-            (3, 1, 12, 4, 902, 30.00, '2026-06-12 09:00:00+00', '2026-06-12 09:00:00+00')""")
-        out = duckdb_orders_in_window(conn, WINDOW_START, WINDOW_END, watermark=WATERMARK)
-
-        assert out[3]["n_lines"] == 0
-        assert out[3]["qty"] == 0
-        assert out[3]["line_amount"] == 0.0
-
-    def test_excluded_ids_are_dropped(self, conn):
-        out = duckdb_orders_in_window(conn, WINDOW_START, WINDOW_END,
-                                      watermark=WATERMARK, exclude_ids={2})
-
-        assert set(out) == {1}
-
-    def test_watermark_holds_back_recent_updates(self, conn):
-        out = duckdb_orders_in_window(conn, WINDOW_START, WINDOW_END,
-                                      watermark=datetime(2026, 6, 10, 12,
-                                                         tzinfo=timezone.utc))
-        assert set(out) == {1}
+# `TestDuckDbExtractor` ran DuckDB's extractor until step 14's S14-12 deleted
+# it with the job's DuckDB arm; its four cases and their expected facts are
+# asked of `postgres_orders_in_window` now
+# (`tests/integration/test_postgres_orders_in_window.py`).
 
 
 class TestKeyCrmExtractor:

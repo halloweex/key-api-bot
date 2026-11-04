@@ -23,10 +23,15 @@ from core.data_quality import (
     remediation_for,
 )
 from core.mirror_reconciliation import (
-    ORDER_UTM_TABLE,
-    SILVER_GRACE_MINUTES,
+    ORDER_UTM_PG_TABLE,
     order_utm_completeness_findings,
 )
+
+# The grace at the default floor (`pg_warehouse_dq.silver_grace_minutes()`,
+# 600 s + the twins' ten minutes) — the number the Silver comparison fixed as
+# `mirror_reconciliation.SILVER_GRACE_MINUTES` until step 14's S14-12 deleted
+# it with that comparison.
+SILVER_GRACE_MINUTES = 20
 
 NAMES = ("pg_order_utm_missing", "pg_order_utm_stale", "pg_order_utm_in_flight")
 SINCE = datetime(2030, 6, 5, 4, 9, tzinfo=timezone.utc)
@@ -70,7 +75,7 @@ class TestEachCountMeansOneThing:
         assert issue.check_name == "pg_order_utm_missing"
         assert issue.severity is Severity.CRITICAL
         assert (issue.count, issue.sample_ids) == (3, (7, 8, 9))
-        assert issue.table_name == ORDER_UTM_TABLE.pg_table
+        assert issue.table_name == ORDER_UTM_PG_TABLE
         # The oldest arrival is what tells a stalled ship from one late tick.
         assert SINCE.isoformat() in issue.description
         assert f"{SILVER_GRACE_MINUTES} minutes" in issue.description

@@ -239,7 +239,7 @@ async def postgres_orders_in_window(
     }
 
 
-# ─── DuckDB rollup ────────────────────────────────────────────────────────────
+# ─── KeyCRM months ───────────────────────────────────────────────────────────
 
 
 def _enumerate_months(start: date, end: date) -> list[str]:

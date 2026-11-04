@@ -1,4 +1,11 @@
-"""Reconciliation A: Postgres landing against DuckDB landing.
+"""`compare_table`, the comparison the `mirror_landing` layer still runs.
+
+It was Reconciliation A's — Postgres landing against DuckDB landing — and
+step 14's S14-12 deleted those comparisons; `reconcile_bot_state` (SQLite
+against `app.*`) still runs it, so its rules are pinned here on the catalogue's
+specs, which `core.pg_landing.carry_retired_catalogue` still reads.
+
+What follows is the rule as it was written for the landing mirror.
 
 The check exists because step 05 closes on it — zero findings, tolerance zero
 — and the hard part was never the comparison. It was telling the one
@@ -20,33 +27,25 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 from core.data_quality import (
     DIGEST_MAX_AGE_HOURS,
     WATCHED_LAYERS,
     Severity,
 )
-from core.duckdb_store import DuckDBStore
 from core.mirror_reconciliation import (
+    CATEGORIES_SPEC,
     MIRROR_LAYER,
-    MIRRORED_TABLES,
-    MirroredTable,
+    PRODUCTS_SPEC,
     compare_table,
     configured,
-    fetch_duckdb_rows,
-    read_duckdb_side,
-    reconcile_mirror,
 )
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 LAST_OK = NOW - timedelta(hours=4)
 
-PRODUCTS = MIRRORED_TABLES[0]
-CATEGORIES = MIRRORED_TABLES[1]
+PRODUCTS = PRODUCTS_SPEC
+CATEGORIES = CATEGORIES_SPEC
 
 
 def _watermark(last_ok_at=LAST_OK, failures=0, last_error=None):
@@ -253,62 +252,11 @@ class TestTheWatermarkItself:
 
 
 class TestTheKillSwitch:
-    @pytest.mark.asyncio
-    async def test_mirror_off_reports_that_and_compares_nothing(self):
-        """"1,004 rows missing" would be true and useless."""
-        with patch("core.pg_landing.enabled", return_value=False):
-            issues = await reconcile_mirror({})
-        assert _names(issues) == {"mirror_disabled"}
-        assert issues[0].severity is Severity.WARN
-
     def test_configured_is_false_without_a_dsn(self, monkeypatch):
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         assert configured() is False
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
         assert configured() is True
-
-
-class TestAgainstARealDuckDB:
-    """The read half, against the schema it actually runs on."""
-
-    async def _store(self, tmp_path: Path) -> DuckDBStore:
-        store = DuckDBStore(db_path=tmp_path / "mirror.duckdb")
-        await store.connect()
-        return store
-
-    @pytest.mark.asyncio
-    async def test_reads_the_shared_contract_and_synced_at(self, tmp_path):
-        store = await self._store(tmp_path)
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO products (id, name, category_id, brand, sku, price) "
-                "VALUES (7, 'Тонер', 11, 'Wellage', '1678', 700.00)"
-            )
-            conn.execute(
-                "INSERT INTO categories (id, name, parent_id) VALUES (11, 'Face', NULL)"
-            )
-            rows, synced = fetch_duckdb_rows(conn, PRODUCTS)
-            side = read_duckdb_side(conn)
-
-        assert rows == {7: (7, "Тонер", 11, "Wellage", "1678", Decimal("700.00"))}
-        assert synced[7] is not None
-        assert {"bronze.products", "bronze.categories"} <= set(side)
-        assert side["bronze.categories"][0] == {11: (11, "Face", None)}
-
-    @pytest.mark.asyncio
-    async def test_a_real_read_compares_clean_against_an_identical_mirror(self, tmp_path):
-        """End to end over the read path, with Postgres played by a dict."""
-        store = await self._store(tmp_path)
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO products (id, name, category_id, brand, sku, price) "
-                "VALUES (7, 'Тонер', 11, NULL, '1678', 0.00)"
-            )
-            dk_rows, synced = fetch_duckdb_rows(conn, PRODUCTS)
-
-        assert compare_table(
-            PRODUCTS, dk_rows, synced, dict(dk_rows), _watermark(), now=NOW,
-        ) == []
 
 
 class TestWiring:
@@ -321,35 +269,6 @@ class TestWiring:
         from core.scheduler import CATCHUP_CHECKS
 
         assert CATCHUP_CHECKS["dq_mirror_landing"][0] == MIRROR_LAYER
-
-    def test_every_pulled_whole_table_is_covered(self):
-        assert {s.pg_table for s in MIRRORED_TABLES} == {
-            "bronze.products", "bronze.categories",
-            "bronze.managers", "app.manager_classifications",
-        }
-        for spec in MIRRORED_TABLES:
-            assert isinstance(spec, MirroredTable)
-            # Every key column is a real column, or `_row_key` indexes into
-            # nothing and the comparison keys on garbage.
-            for column in spec.key_columns:
-                assert column in spec.columns
-
-    def test_the_replicated_tables_have_no_retired_category(self):
-        """A full replace writes every row it holds, so a row missing from
-        Postgres cannot mean 'KeyCRM retired it' — that reading belongs to the
-        payload-fed mirrors and would excuse a real loss here."""
-        replicated = {"bronze.managers", "app.manager_classifications"}
-        for spec in MIRRORED_TABLES:
-            assert spec.full_replace is (spec.pg_table in replicated)
-
-    def test_the_effective_dated_table_is_keyed_on_its_interval(self):
-        spec = next(
-            s for s in MIRRORED_TABLES
-            if s.pg_table == "app.manager_classifications"
-        )
-        assert spec.key_columns == ("manager_id", "valid_from")
-        assert spec.synced_column == "set_at"
-
 
 class TestIgnoredBookkeepingColumns:
     """A column that records when the copy was taken, not what it holds.
@@ -414,18 +333,6 @@ class TestIgnoredBookkeepingColumns:
         assert _row_key(spec, row) == 7
         assert spec.sample_index == 0
 
-    def test_the_live_spec_ignores_the_stamp_and_nothing_else(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-        by_table = {s.pg_table: s for s in OPERATIONAL_TABLES}
-        sku = by_table["app.sku_inventory_status"]
-        assert sku.ignore_columns == ("updated_at",)
-        assert "updated_at" in sku.columns, "still shipped and still the clock"
-        assert sku.synced_column == "updated_at"
-        # checked_at is deliberately both clock and compared value.
-        assert by_table["app.order_backfill_misses"].ignore_columns == ()
-        assert by_table["app.inventory_history"].ignore_columns == ()
-
-
 class TestSyncedColumnDualRole:
     """A stamp may be both the clock and a compared value — on one condition.
 
@@ -452,89 +359,21 @@ class TestSyncedColumnDualRole:
     kind it is, instead of finding out in production.
     """
 
-    # Reviewed 2026-09-03, and again 2026-09-07 for `app.revenue_goals`.
-    # Adding a spec here is a claim that its writer stamps one row at a time;
-    # if it rewrites the table, it belongs in `ignore_columns` instead.
+    # Reviewed 2026-09-03, 2026-09-07 and 2026-09-11. Adding a spec here is a
+    # claim that its writer stamps one row at a time; if it rewrites the
+    # table, it belongs in `ignore_columns` instead. Step 14's S14-12 deleted
+    # the comparisons against DuckDB and their specs, so only the bot state's
+    # three dual-role stamps are left to classify — all event times written
+    # when that row's event happened, so each dates its own row.
     PER_ROW_STAMPS = {
-        "app.manager_classifications": "set_at",
-        "app.order_backfill_misses": "checked_at",
-        "app.inventory_history": "recorded_at",
-        # `set_goal` writes one `period_type` under `ON CONFLICT (period_type)`
-        # and stamps `updated_at` from Python, so the value dates that goal's
-        # own change. Three rows at most, each with its own history.
-        "app.revenue_goals": "updated_at",
-        # Added 2026-09-11 with the widened scan below. All seven are event times
-        # written when that row's event happened, so each dates its own row.
         "app.celebrated_milestones": "celebrated_at",
-        "app.marketing_optouts": "opted_out_at",
         "app.report_history": "created_at",
-        "app.sms_dlr_events": "first_seen_at",
         "app.user_preferences": "updated_at",
-        # `parsed_at` is a column DEFAULT, so only the rows a reparse rewrites
-        # take a new value. This is the one that fired while the test was green.
-        "silver.order_utm": "parsed_at",
-        # The watchdog samples and the send ledgers (revision 0026). The most
-        # clear-cut per-row stamps on this list: a sample IS a reading taken at
-        # one moment, and a ledger row IS one delivery at one moment — the
-        # column is not metadata about the row, it is most of what the row
-        # says. Each writer inserts exactly one row per event.
-        #
-        # `data_dir_samples` is the one worth a sentence, because one sweep
-        # writes seven rows carrying an identical `sampled_at` and that looks
-        # like a whole-table stamp. It is not: the key is
-        # `(sampled_at, path_group)`, so the seven are seven distinct rows of
-        # one event rather than one row restamped seven times, and the next
-        # sweep writes seven new rows rather than rewriting these. The grace
-        # window still asks "was this row in flight" and still gets a per-row
-        # answer.
-        "app.disk_samples": "sampled_at",
-        "app.data_dir_samples": "sampled_at",
-        "app.memory_samples": "sampled_at",
-        "app.weekly_report_sends": "sent_at",
-        "app.traffic_report_sends": "sent_at",
-        # The data-quality journal (revision 0028). `persist_run` inserts one
-        # row per run and stamps it with that run's own start, so this is a
-        # per-row clock in the plainest sense. Its two children are not on this
-        # list at all and cannot be: their clock is a correlated subquery over
-        # the parent, so it is not one of their columns and there is no dual
-        # role to classify.
-        "app.data_quality_runs": "started_at",
-        # `app.sync_metadata` (revision 0029). Per row, and provably so: no
-        # statement anywhere touches more than one key. Each writer sets its
-        # own `last_sync_<entity>` and stamps that row at that moment, so the
-        # value dates the row it sits on and nothing else.
-        "app.sync_metadata": "updated_at",
-        # Moved here from WHOLE_TABLE_STAMPS by chain 4 (decision 7). The
-        # hourly derive restamps only the verdicts it writes — buyers that had
-        # none — and the copy ships the value as it stands, so it dates its own
-        # row. A whole-table re-derive (`backfill_gender.py --all`, a
-        # RULES_VERSION bump) is the rare exception, and the per-row grace
-        # covers it until the next hourly copy.
-        "app.buyer_gender": "decided_at",
     }
-    WHOLE_TABLE_STAMPS = {
-        "app.sku_inventory_status": "updated_at",
-        # `bronze.offers` (revision 0029). A loop of single-row
-        # `INSERT OR REPLACE ... CURRENT_TIMESTAMP` inside ONE DuckDB
-        # transaction, where `CURRENT_TIMESTAMP` is transaction-stable — so
-        # every row a sync touches is restamped together and the grace stops
-        # being per row. Measured: 1 055 of 1 057 carry the last sync's value,
-        # and two are frozen months back because KeyCRM stopped serving them.
-        # `bronze.offer_stocks`, which travels in the same call, is the same
-        # case — and the pair is why both are replicated rather than mirrored.
-        "bronze.offers": "synced_at",
-        # The forecast group (revision 0025). Every one of the four is written
-        # whole by its producer in a single statement — the daily retrain
-        # DELETEs and re-INSERTs the forecast, and the three seasonality
-        # tables upsert their entire fixed key space at once — so all rows
-        # carry one stamp from one run. A re-derivation between the copy and
-        # the comparison would make every row differ on the clock alone while
-        # the values it guards are identical.
-        "app.revenue_predictions": "created_at",
-        "app.seasonal_indices": "updated_at",
-        "app.weekly_patterns": "updated_at",
-        "app.growth_metrics": "updated_at",
-    }
+    # None left: `app.sku_inventory_status`, `bronze.offers` and the forecast
+    # group, whose stamps were whole-table, were specs of the deleted
+    # comparisons.
+    WHOLE_TABLE_STAMPS: dict = {}
 
     def _dual_role(self):
         """Every spec in the module, not the two tuples this first scanned.
@@ -670,79 +509,29 @@ class TestGraceOnDifferingValues:
         dk, synced, pg = self._sides(4, 7, naive)
         assert compare_table(spec, dk, synced, pg, _watermark(), now=NOW) == []
 
-    def test_the_two_paths_now_agree(self):
-        """`compare_bucket` and `compare_table` answered the same
-        question differently, and that disagreement was the defect."""
-        import inspect
-        from core.mirror_reconciliation import compare_bucket, compare_table
-        for fn in (compare_bucket, compare_table):
-            src = inspect.getsource(fn)
-            body = src.split("dk_rows.keys() & pg_rows.keys()")[1]
-            assert "in_flight" in body, f"{fn.__name__} skips the grace window"
-
-
-class TestBuyerGenderDecidedAtIsCompared:
-    """Chain 4, decision 7: `app.buyer_gender.decided_at` is a fact of the row
-    and the copy-back's handover clock, so the daily check compares it — on the
-    real spec, not a stand-in, so that restoring the ignore fails here."""
-
-    def _spec(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-        return next(s for s in OPERATIONAL_TABLES
-                    if s.pg_table == "app.buyer_gender")
-
-    def _row(self, decided_at):
-        """A row as both readers hand it to `compare_table`: through
-        `_normalise_row` with the spec's own ignore list, which is where an
-        ignored column becomes a sentinel — a raw tuple would be compared on
-        every column whatever the spec says."""
-        from core.mirror_reconciliation import _normalise_row
-        spec = self._spec()
-        # BUYER_GENDER_COLUMNS: buyer_id, gender, method, confidence,
-        # decided_from, rules_version, override_by_human, decided_at
-        raw = (41, "f", "dictionary", "high", "given", 1, False, decided_at)
-        return _normalise_row(raw, spec.columns, spec.numeric, spec.ignore_columns)
-
-    def test_a_drifted_stamp_on_a_settled_row_is_reported(self):
-        """The DuckDB stamp is six hours old, so no copy is in flight: the only
-        thing that differs is the clock, and that is now a finding."""
-        from core.mirror_reconciliation import (
-            OPERATIONAL_GRACE_MINUTES, compare_table,
-        )
-        stamp = NOW - timedelta(hours=6)
-        dk = {41: self._row(stamp)}
-        pg = {41: self._row(stamp + timedelta(microseconds=1))}
-        issues = compare_table(self._spec(), dk, {41: stamp}, pg, _watermark(),
-                               now=NOW, grace_minutes=OPERATIONAL_GRACE_MINUTES)
-        assert _names(issues) == {"mirror_row_values"}
-        assert _by_name(issues, "mirror_row_values").sample_ids == (41,)
-
-    def test_a_verdict_re_derived_minutes_ago_is_forgiven(self):
-        """The control: the stamp is per row now, so a verdict the hourly job
-        rewrote before its copy landed is in flight, not drifted."""
-        from core.mirror_reconciliation import (
-            OPERATIONAL_GRACE_MINUTES, compare_table,
-        )
-        fresh = NOW - timedelta(minutes=20)
-        dk = {41: self._row(fresh)}
-        pg = {41: self._row(NOW - timedelta(hours=6))}
-        issues = compare_table(self._spec(), dk, {41: fresh}, pg, _watermark(),
-                               now=NOW, grace_minutes=OPERATIONAL_GRACE_MINUTES)
-        assert issues == []
-
-
 class TestStampIsPerRow:
+    """Spelled with specs of their own since step 14's S14-12 deleted the
+    comparisons whose specs these read (`app.sku_inventory_status`,
+    `app.order_backfill_misses`, `app.sms_campaign_members`)."""
+
     def test_it_is_derived_from_ignore_columns_not_declared_twice(self):
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
-        by_table = {s.pg_table: s for s in OPERATIONAL_TABLES}
-        assert by_table["app.sku_inventory_status"].stamp_is_per_row is False
-        assert by_table["app.order_backfill_misses"].stamp_is_per_row is True
+        from core.mirror_reconciliation import MirroredTable
+        whole = MirroredTable(
+            pg_table="app.sku_inventory_status", dk_table="sku_inventory_status",
+            columns=("offer_id", "updated_at"), key_columns=("offer_id",),
+            synced_column="updated_at", ignore_columns=("updated_at",))
+        per_row = MirroredTable(
+            pg_table="app.order_backfill_misses", dk_table="order_backfill_misses",
+            columns=("id", "checked_at"), synced_column="checked_at")
+        assert whole.stamp_is_per_row is False
+        assert per_row.stamp_is_per_row is True
 
     def test_an_expression_stamp_is_per_row(self):
         """`COALESCE(delivered_at, ...)` is still a function of the row."""
-        from core.mirror_reconciliation import SMS_TABLES
-        members = next(s for s in SMS_TABLES
-                       if s.pg_table == "app.sms_campaign_members")
+        from core.mirror_reconciliation import MirroredTable
+        members = MirroredTable(
+            pg_table="app.sms_campaign_members", dk_table="sms_campaign_members",
+            columns=("id",), synced_column="COALESCE(delivered_at, sent_at)")
         assert members.synced_column.startswith("COALESCE")
         assert members.stamp_is_per_row is True
 
