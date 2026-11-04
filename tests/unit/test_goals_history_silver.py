@@ -4,39 +4,34 @@ From DN-12 the calculators read DuckDB `orders` through a bridge that renders
 `silver_sales_type_case` over DuckDB's `managers` and
 `manager_classifications`; step 13 freezes all three. Chain 7b-2 read the same
 history from `{silver_orders}` through the goal router under
-`KS_GOALS_HISTORY=silver` — the engine is `KS_READ_GOALS`', and DN-20's
-counting and refusal cover it — and production has read it since
-2026-10-07 08:20 UTC. Chain 7b-4 deleted the bridge and retired the variable.
+`KS_GOALS_HISTORY=silver`, and production has read it since 2026-10-07 08:20
+UTC. Chain 7b-4 deleted the bridge and retired the variable; step 14's S14-00
+stopped it deciding anything, and S14-07 stopped anything reading it.
 
-What is proved here, without a database server (the two-engine half is in
-`tests/integration/test_goals_history_two_engines.py`):
+ONE ENGINE SINCE STEP 14 (S14-07). Every goal read is Postgres'
+(`GoalsMixin._goals_run`), so what is proved here runs against Postgres —
+Bronze seeded, Silver derived from it by Postgres itself, the production path
+(`tests.integration.pg_tab_seed`) — and asks a store whose DuckDB connection
+is a trap. Skipped without `KS_PG_DSN`, which CI supplies; the walks of the
+module and of the tree need no server. The literal half is
+`tests/integration/test_goals_history_two_engines.py`.
 
   * **the orders Silver selects** (T9) — on every branch of the sales-type
     CASE, for every sales type, the order ids written out here: KeyCRM's
     status group decides a return before the status list, and a source-3
     order — the 2024 website — is counted;
   * **met by construction** (T10) — no statement any calculator, the smart
-    goal or the Monday job runs names DuckDB `orders`, `managers` or
-    `manager_classifications`;
+    goal or the Monday job sends Postgres names `bronze.orders`,
+    `bronze.managers` or `app.manager_classifications`, the tables the
+    deleted bridge read in DuckDB;
   * **the window** (T12) — no Silver body bounds a window with the server's
     clock, none filters `is_active_source`, none names a bridge table — read
     off the module, never listed;
-  * **the retired switch** (T13) — unset and `silver` read Silver; `bridge`
-    and a typo raise at every history read, with nothing written, and at
-    none of the imports; under Silver the engine flag's typo stops them too;
-  * **the refusal is seen** — `/api/health` publishes it and the canary pages,
-    and both, like the refusal itself, say "set it to `silver`", never
-    "remove it": an image from before 7b-4 reads unset as the bridge;
-  * **what a refusal stops** — route by route, read off the app: the six
-    that read the calculators' history answer 500, the four that never did
-    answer.
+  * **the retired switch** (T13) — nothing in the code reads
+    `KS_GOALS_HISTORY`, any value imports and answers alike, and its
+    condition `goals_history_mode_invalid` stays retired (step 14's rule 15).
 
 Each guard names the mutation that bites it.
-
-Since step 14's S14-00 `KS_GOALS_HISTORY` is read for nothing: every value
-reads Silver, nothing refuses and nothing is published as its error. The
-tests of the retired switch's refusal, of its being seen and of what it
-stopped went with it (T13 keeps only that unset and `silver` read Silver).
 """
 from __future__ import annotations
 
@@ -46,51 +41,46 @@ import os
 import re
 import subprocess
 import sys
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 
 from core import pg_goals_read
 from core.duckdb_constants import KNOWN_SALES_TYPES
 from core.models import OrderStatus
 from core.repositories import goals as goals_module
-from tests.unit.test_goals_off_duckdb_silver import (  # noqa: F401 — fixture
+from tests.integration.pg_tab_seed import (
+    derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
+)
+from tests.unit.test_goals_off_duckdb_silver import (
     ALL_IDS,
+    DSN,
     EXPECTED,
     INTERVALS,
     MANAGERS,
     ORDERS,
     TIMEOUT_S,
     _calculators,
-    _seed_history,
-    store,
+    _seed_history_pg,
 )
 
 REPO = Path(__file__).resolve().parents[2]
 GOALS = REPO / "core" / "repositories" / "goals.py"
 
-# The three tables the deleted DN-12 bridge read out of DuckDB, as SQL names.
+# The three tables the deleted DN-12 bridge read out of DuckDB, as SQL names,
+# and their Postgres homes: a goal read naming any of them is reading the
+# orders or the classification around Silver.
 BRIDGE_TABLES = ("orders", "managers", "manager_classifications")
 _BRIDGE_TABLE = re.compile(
     r"(?<![\w.])(" + "|".join(BRIDGE_TABLES) + r")(?![\w])", re.IGNORECASE)
-
-
-def _history(monkeypatch, mode):
-    if mode is None:
-        monkeypatch.delenv(pg_goals_read.HISTORY_ENV, raising=False)
-    else:
-        monkeypatch.setenv(pg_goals_read.HISTORY_ENV, mode)
-
-
-@pytest.fixture(autouse=True)
-def _duckdb_engine(monkeypatch):
-    """The engine flag at its default: Silver here is DuckDB's, so this file
-    needs no server. The engine half is the integration test's."""
-    monkeypatch.delenv("KS_READ_GOALS", raising=False)
-    monkeypatch.delenv("KS_PG_DSN", raising=False)
+PG_BRIDGE_TABLES = ("bronze.orders", "bronze.managers", "app.manager_classifications")
+_PG_BRIDGE_TABLE = re.compile(
+    r"(?<![\w.])(" + "|".join(re.escape(t) for t in PG_BRIDGE_TABLES) + r")(?![\w])",
+    re.IGNORECASE)
 
 
 # ─── T9: the orders Silver selects ─────────────────────────────────────────
@@ -121,36 +111,49 @@ def _expected_silver(scenario: str, sales_type: str) -> set:
     return (set(base) - {LISTED_RETURN}) | extra
 
 
-async def _seed_equivalence_and_more(store, scenario: str) -> None:
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM manager_classifications")
-        conn.execute("DELETE FROM managers")
+def _equivalence_and_more(scenario: str):
+    """`populate` for `tab_in_postgres`: the equivalence fixture and the three
+    extra orders in Bronze, the managers and their intervals as the scenario
+    has them, and Silver derived by Postgres."""
+
+    async def populate(conn, pool):
         if scenario != "nothing_synced":
-            conn.executemany(
-                "INSERT INTO managers (id, name, is_retail) VALUES (?, 'm', ?)",
+            await conn.executemany(
+                "INSERT INTO bronze.managers (id, name, is_retail) VALUES ($1, 'm', $2)",
                 MANAGERS)
         if scenario == "classified":
-            conn.executemany(
-                "INSERT INTO manager_classifications "
-                "(manager_id, is_retail, valid_from, valid_to) VALUES (?, ?, ?, ?)",
+            await conn.executemany(
+                "INSERT INTO app.manager_classifications "
+                "(manager_id, is_retail, valid_from, valid_to) VALUES ($1, $2, $3, $4)",
                 INTERVALS)
-        conn.executemany(
-            "INSERT INTO orders (id, source_id, status_id, grand_total, "
-            "ordered_at, buyer_id, manager_id) VALUES (?, ?, ?, 1000.0, ?, 1, ?)",
-            [(oid, src, st, when, mgr) for oid, src, st, mgr, when in ORDERS])
-        conn.executemany(
-            "INSERT INTO orders (id, source_id, status_id, status_group_id, "
+        await seed(conn, orders=[
+            (oid, src, st, 1000.0, when, 1, mgr, None) for oid, src, st, mgr, when in ORDERS])
+        await conn.executemany(
+            "INSERT INTO bronze.orders (id, source_id, status_id, status_group_id, "
             "grand_total, ordered_at, buyer_id, manager_id) "
-            "VALUES (?, ?, ?, ?, 1000.0, ?, 1, ?)",
-            [(oid, src, st, grp, when, mgr)
-             for oid, src, st, grp, mgr, when in EXTRA_ORDERS])
-    await store.refresh_warehouse_layers(trigger="manual")
+            "VALUES ($1, $2, $3, $4, 1000.0, $5, 1, $6)",
+            [(oid, src, st, grp, when, mgr) for oid, src, st, grp, mgr, when in EXTRA_ORDERS])
+        await derive(pool)
+
+    return populate
 
 
-def _silver_ids(conn, sales_type):
+async def _silver_ids(pool, sales_type):
+    from core.sql_dialect import numbered
+
     clause, params = goals_module._silver_history_where(sales_type)
-    return {r[0] for r in conn.execute(
-        f"SELECT s.id FROM silver_orders s WHERE {clause}", params).fetchall()}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            numbered(f"SELECT s.id FROM silver.orders s WHERE {clause}"), *params)
+    return {r[0] for r in rows}
+
+
+@pytest_asyncio.fixture
+async def history_pg(tmp_path, monkeypatch):
+    """The three-year history in Postgres and a store that never reaches
+    DuckDB: `(store, pool)`."""
+    async with tab_in_postgres(DSN, monkeypatch, _seed_history_pg) as pool:
+        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the goal history"), pool
 
 
 class TestTheOrdersSilverSelects:
@@ -161,26 +164,27 @@ class TestTheOrdersSilverSelects:
     `is_return`, and 102 is counted while 103 is not; a sales-type rule
     changed in Silver's CASE moves an id between the written-out sets."""
 
+    @needs_postgres
     @pytest.mark.asyncio
     @pytest.mark.parametrize("scenario", sorted(EXPECTED))
-    async def test_every_sales_type_on_every_branch(self, store, scenario):
-        await _seed_equivalence_and_more(store, scenario)
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0] \
-                == len(ORDERS) + len(EXTRA_ORDERS), "Silver was not built"
+    async def test_every_sales_type_on_every_branch(self, monkeypatch, scenario):
+        async with tab_in_postgres(DSN, monkeypatch, _equivalence_and_more(scenario)) as pool:
+            async with pool.acquire() as conn:
+                assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") \
+                    == len(ORDERS) + len(EXTRA_ORDERS), "Silver was not built"
             for sales_type in (*KNOWN_SALES_TYPES, "all"):
-                got = _silver_ids(conn, sales_type)
+                got = await _silver_ids(pool, sales_type)
                 want = _expected_silver(scenario, sales_type)
                 assert got == want, (scenario, sales_type, sorted(got ^ want))
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_the_partition_is_whole(self, store):
+    async def test_the_partition_is_whole(self, monkeypatch):
         """Every order that is not a return lands in exactly one sales type,
         so no branch is empty by accident."""
-        await _seed_equivalence_and_more(store, "classified")
-        async with store.connection() as conn:
-            seen = [_silver_ids(conn, t) for t in KNOWN_SALES_TYPES]
-            everything = _silver_ids(conn, "all")
+        async with tab_in_postgres(DSN, monkeypatch, _equivalence_and_more("classified")) as pool:
+            seen = [await _silver_ids(pool, t) for t in KNOWN_SALES_TYPES]
+            everything = await _silver_ids(pool, "all")
         assert set().union(*seen) == everything
         assert sum(len(s) for s in seen) == len(everything)
         assert all(seen), "a sales type selected nothing — the fixture lost a branch"
@@ -202,8 +206,9 @@ class TestTheBounds:
     """`growth_metrics.period_start`/`period_end`, as the Monday job and the
     POST store them."""
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_the_bounds_read_every_order_every_status(self, store, monkeypatch):
+    async def test_the_bounds_read_every_order_every_status(self, tmp_path, monkeypatch):
         """`growth_metrics.period_start`/`period_end` are the first and last
         order of the whole history — a return, a b2b order and a source that
         is not a revenue source included. The history's own extremes are
@@ -222,49 +227,45 @@ class TestTheBounds:
 
         first = HISTORY_START - timedelta(days=40)
         last = HISTORY_END + timedelta(days=40)
-        await _seed_history(store)
-        async with store.connection() as conn:
-            conn.executemany(
-                "INSERT INTO orders (id, source_id, status_id, grand_total, "
-                "ordered_at, buyer_id, manager_id) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                [
-                    # A retail return: status 19 is on the list.
-                    (990_001, 1, 19, 400.0, _kyiv_noon(first), None),
-                    # A b2b order on Opencart, which is not a revenue source.
-                    (990_002, 3, 1, 600.0, _kyiv_noon(last), B2B_MANAGER_ID),
-                ])
-        await store.refresh_warehouse_layers(trigger="manual")
-        async with store.connection() as conn:
-            row = conn.execute(
-                "SELECT is_return, sales_type, is_active_source FROM silver_orders "
-                "WHERE id IN (990001, 990002) ORDER BY id").fetchall()
-        assert row == [(True, "retail", True), (False, "b2b", False)], row
 
-        for mode in (None, "silver"):
-            _history(monkeypatch, mode)
-            assert await store._history_bounds() == (first, last), mode
+        async def populate(conn, pool):
+            await seed(conn, orders=[
+                # A retail return: status 19 is on the list.
+                (990_001, 1, 19, 400.0, _kyiv_noon(first), 1, None, None),
+                # A b2b order on Opencart, which is not a revenue source.
+                (990_002, 3, 1, 600.0, _kyiv_noon(last), 1, B2B_MANAGER_ID, None),
+            ])
+            await _seed_history_pg(conn, pool)
+
+        async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT is_return, sales_type, is_active_source FROM silver.orders "
+                    "WHERE id IN (990001, 990002) ORDER BY id")
+            assert [tuple(r) for r in rows] == [
+                (True, "retail", True), (False, "b2b", False)], rows
+
+            store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the bounds")
+            assert await store._history_bounds() == (first, last)
             tables = await store._compute_goal_tables(include_weekly=False)
-            assert tables["history_bounds"] == (first, last), mode
+            assert tables["history_bounds"] == (first, last)
 
 
 class TestSilverIsWhatIsRead:
-    """Not vacuous: the history really comes out of Silver. Emptied, DuckDB's
-    Silver answers nothing — which is why step 13 needs
-    `KS_READ_GOALS=postgres`, and the readiness asks for it. Mutation: read
-    any calculator from anything but `{silver_orders}` (the deleted bridge's
-    DuckDB `orders` among them), and it still answers here."""
+    """Not vacuous: the history really comes out of Silver. Emptied,
+    Postgres' Silver answers nothing while Bronze still holds every order.
+    Mutation: read any calculator from anything but `{silver_orders}` —
+    `bronze.orders`, the deleted bridge's table — and it still answers here."""
 
+    @needs_postgres
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", [None, "silver"])
-    async def test_an_emptied_duckdb_silver_empties_the_answer(
-        self, store, monkeypatch, mode,
-    ):
-        await _seed_history(store)
-        _history(monkeypatch, mode)
+    async def test_an_emptied_silver_empties_the_answer(self, history_pg):
+        store, pool = history_pg
         seasonality, yoy, _weekly, _caps = await _calculators(store, "retail")
         assert len(seasonality) == 12 and yoy["sample_size"] >= 1
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_orders")
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM silver.orders")
+            assert await conn.fetchval("SELECT COUNT(*) FROM bronze.orders") > 1500
         seasonality, yoy, _weekly, caps = await _calculators(store, "retail")
         assert seasonality == {} and yoy["sample_size"] == 0
         assert caps == [0.35] * 12
@@ -272,76 +273,40 @@ class TestSilverIsWhatIsRead:
 
 # ─── T10: met by construction ──────────────────────────────────────────────
 
-class _NoBridgeTables:
-    """The store's connection, refusing any statement that names a table
-    the deleted bridge read — and counting the Silver ones, so a run that
-    read nothing cannot pass."""
-
-    def __init__(self, conn, seen):
-        self._conn, self._seen = conn, seen
-
-    def _check(self, sql):
-        found = _BRIDGE_TABLE.search(sql)
-        if found:
-            raise AssertionError(
-                f"a goal read named DuckDB {found.group(1)!r}: "
-                f"{' '.join(sql.split())[:200]}")
-        if "silver_orders" in sql:
-            self._seen.append(sql)
-
-    def execute(self, sql, *args, **kwargs):
-        self._check(sql)
-        return self._conn.execute(sql, *args, **kwargs)
-
-    def executemany(self, sql, *args, **kwargs):
-        self._check(sql)
-        return self._conn.executemany(sql, *args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-
-@asynccontextmanager
-async def _bridge_tables_refused(store):
-    """Every statement on the store's connection from here on is checked;
-    yields the Silver statements seen."""
-    real = type(store).connection
+@contextmanager
+def _bridge_tables_refused():
+    """Every statement a goal read sends Postgres from here on is checked —
+    refused if it names a table the deleted bridge read, counted if it reads
+    Silver, so a run that read nothing cannot pass. Yields the Silver
+    statements seen."""
+    real = pg_goals_read.fetch
     seen: list = []
 
-    @asynccontextmanager
-    async def guarded(self):
-        async with real(self) as conn:
-            yield _NoBridgeTables(conn, seen)
+    async def guarded(sql, params=()):
+        found = _PG_BRIDGE_TABLE.search(sql)
+        if found:
+            raise AssertionError(
+                f"a goal read named {found.group(1)!r}: {' '.join(sql.split())[:200]}")
+        if "silver.orders" in sql:
+            seen.append(sql)
+        return await real(sql, params)
 
-    with patch.object(type(store), "connection", guarded):
+    with patch.object(pg_goals_read, "fetch", guarded):
         yield seen
 
 
 class TestNoGoalReadNamesABridgeTable:
-    """Everything that computes a goal runs with DuckDB's `orders`, `managers`
-    and `manager_classifications` refused at the statement, under both values
-    that read. Mutation M13: put the last-year read (or any one history read)
-    back on `orders o`, and it raises here, named."""
+    """Everything that computes a goal runs with `bronze.orders`,
+    `bronze.managers` and `app.manager_classifications` refused at the
+    statement. Mutation M13: put the last-year read (or any one history read)
+    back on `{orders} o`, and it raises here, named."""
 
-    @pytest.fixture(autouse=True)
-    def _goal_tables_in_the_store(self, monkeypatch):
-        """The property is the statements', not the goal tables' store: since
-        step 14's S14-00 chains 7a and 7b-3 write Postgres, a constant, and
-        here their tables stay in the DuckDB store under the test."""
-        from core import pg_forecast_write, pg_goals_write
-        from tests.conftest import route_chains_to_duckdb
-
-        route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_forecast_write)
-
+    @needs_postgres
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", [None, "silver"])
     @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
-    async def test_the_calculators_and_the_smart_goal(
-        self, store, monkeypatch, sales_type, mode,
-    ):
-        await _seed_history(store)
-        _history(monkeypatch, mode)
-        async with _bridge_tables_refused(store) as seen:
+    async def test_the_calculators_and_the_smart_goal(self, history_pg, sales_type):
+        store, _pool = history_pg
+        with _bridge_tables_refused() as seen:
             await store.calculate_seasonality_indices(sales_type)
             await store.calculate_yoy_growth(sales_type)
             await store.calculate_weekly_patterns(sales_type)
@@ -354,32 +319,31 @@ class TestNoGoalReadNamesABridgeTable:
             await store.get_goals(sales_type)
         assert len(seen) >= 20, "the guard saw no Silver read — nothing was proved"
 
+    @needs_postgres
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", [None, "silver"])
-    async def test_the_monday_job(self, store, monkeypatch, mode):
+    async def test_the_monday_job(self, history_pg, monkeypatch):
         from core.scheduler import BackgroundScheduler
 
-        await _seed_history(store)
-        _history(monkeypatch, mode)
+        store, _pool = history_pg
 
         async def _get_store():
             return store
 
         monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
-        async with _bridge_tables_refused(store) as seen:
+        with _bridge_tables_refused() as seen:
             result = await BackgroundScheduler()._run_seasonality_calc()
         assert result["retail_months"] == 12
         assert seen, "the job read no Silver"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("table", BRIDGE_TABLES)
-    async def test_the_guard_bites_each_table(self, store, table):
-        """Not vacuous: a statement naming any of the three is refused —
-        what the deleted bridge's reads were, and why this guard stays."""
-        async with _bridge_tables_refused(store):
-            async with store.connection() as conn:
-                with pytest.raises(AssertionError, match=f"named DuckDB {table!r}"):
-                    conn.execute(f"SELECT COUNT(*) FROM {table}")
+    @pytest.mark.parametrize("table", PG_BRIDGE_TABLES)
+    async def test_the_guard_bites_each_table(self, table):
+        """Not vacuous: a statement naming any of the three is refused before
+        it reaches a server — what the deleted bridge's reads were, and why
+        this guard stays."""
+        with _bridge_tables_refused():
+            with pytest.raises(AssertionError, match=f"named {table!r}"):
+                await pg_goals_read.fetch(f"SELECT COUNT(*) FROM {table}")
 
 
 # ─── T12: the window and the row set, read off the module ─────────────────
@@ -433,160 +397,97 @@ class TestTheBodies:
 
 # ─── T13: the retired switch ───────────────────────────────────────────────
 
-class TestTheSwitch:
-    @pytest.mark.parametrize("raw", [None, "", "  ", "silver", " Silver ", "SILVER"])
-    def test_unset_and_silver_read_silver(self, monkeypatch, raw):
-        _history(monkeypatch, raw)
-        assert pg_goals_read.history_mode() == "silver"
+def _string_constants(path: Path):
+    """Every string constant in a module, docstrings and comments left out
+    — a name in prose is history, a name in code is a read."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                docstrings.add(id(first.value))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings):
+            yield node.value
 
+
+class TestTheSwitch:
+    def test_nothing_in_the_code_reads_it(self):
+        """Since step 14's S14-07 no module of web or the bot names
+        `KS_GOALS_HISTORY` in code — the refusal, its health block and its
+        canary check went. Mutation: read it again, for a decision or to
+        publish it."""
+        readers = sorted(
+            str(path.relative_to(REPO))
+            for tree in ("core", "web", "bot")
+            for path in (REPO / tree).rglob("*.py")
+            if any("KS_GOALS_HISTORY" in value for value in _string_constants(path)))
+        assert readers == [], readers
 
     def test_nothing_but_silver_is_a_history(self):
-        """The bridge's name survives only as the refusal's: no mode answers
-        anything but `silver`, and the bridge's code path is gone. Mutation:
-        restore any of `history_from_silver`, `_orders_sales_type_predicate`
-        or `_bridge_rows` — it is named here."""
-        assert pg_goals_read.history_mode_of(None) == pg_goals_read.SILVER == "silver"
+        """The bridge's code path is gone, and so are the switch's names.
+        Mutation: restore any of `history_from_silver`,
+        `_orders_sales_type_predicate`, `_bridge_rows` or `HISTORY_ENV`."""
         assert not hasattr(pg_goals_read, "history_from_silver")
+        assert not hasattr(pg_goals_read, "HISTORY_ENV")
+        assert not hasattr(pg_goals_read, "history_mode")
         assert not hasattr(goals_module, "_orders_sales_type_predicate")
+        assert not hasattr(goals_module, "_refuse_a_retired_history")
         assert not hasattr(goals_module.GoalsMixin, "_bridge_rows")
 
-    def test_it_is_not_an_engine_switch(self):
-        """The step-13 readiness reads every `KS_READ_*` name as an engine
-        that must equal `postgres`; this one's values never were engines."""
-        assert not pg_goals_read.HISTORY_ENV.startswith("KS_READ_")
-        assert pg_goals_read.HISTORY_ENV != pg_goals_read.ENV
-
     @pytest.mark.parametrize("value", ["silvr", "bridge"])
-    def test_nothing_raises_at_import(self, value):
-        """Web is the only syncer: a refused value must stop goal reads, never
-        the process. Imported fresh, with the value set."""
-        env = {**os.environ, "KS_GOALS_HISTORY": value}
+    def test_nothing_raises_at_import(self, value, tmp_path):
+        """Rule 3: any value in a variable nothing reads imports and starts.
+        Imported fresh, with the value set, away from any `.env`."""
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
+               "PYTHONPATH": str(REPO), "TZ": "UTC", "KS_GOALS_HISTORY": value,
+               "DASHBOARD_SECRET_KEY": "test-only-signing-key"}
         done = subprocess.run(
             [sys.executable, "-c",
              "import core.pg_goals_read, core.repositories.goals, "
              "core.warehouse_cutover, core.scheduler, web.main"],
-            cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
         assert done.returncode == 0, done.stderr[-2000:]
 
-
-# Every read the history switch decides, and the Monday job's writer.
-HISTORY_CALLS = (
-    ("calculate_seasonality_indices", ("retail",), {}),
-    ("calculate_yoy_growth", ("retail",), {}),
-    ("calculate_weekly_patterns", ("retail",), {}),
-    ("_dynamic_growth_cap", (10, "retail"), {}),
-    ("_last_year_month_revenue", (2026, 10, "retail"), {}),
-    ("_recent_three_month_average", ("retail",), {}),
-    ("_history_bounds", (), {}),
-    ("generate_smart_goals", (2026, 10), {}),
-    ("get_smart_goals", (), {}),
-    ("recalculate_goal_tables", (), {"include_weekly": True}),
-)
-
-
-async def _tables(store):
-    async with store.connection() as conn:
-        return {t: sorted(repr(r) for r in conn.execute(f"SELECT * FROM {t}").fetchall())
-                for t in ("seasonal_indices", "growth_metrics", "weekly_patterns")}
-
-
-class TestARefusalIsSeen:
-    """The raise is where it belongs — at the read — but on its own it reached
-    nobody: a 500 on the goal widget and the other calculator routes
-    (`TestWhatARefusalStops` names them), and a Monday job error in a log
-    (review of 7b). `/api/health` publishes it and the canary pages
-    it, the way `KS_READ_FALLBACK`, `KS_UTM_PARSE` and `KS_WRITE_WAREHOUSE`
-    are seen — `bridge` included since chain 7b-4.
-
-    Mutations: drop `goals_history` from `HealthResponse` (the public
-    endpoint loses it); `check_goals_history_mode` returning [] (the canary
-    is quiet); the wiring left at `warn` (no page).
-    """
-
-    TYPO = {"mode": None,
-            "error": "KS_GOALS_HISTORY='bridge' — the DN-12 bridge was deleted "
-                     "(chain 7b-4) and the goal calculators read Silver only."}
-
-    @pytest.mark.parametrize("raw", [None, "silver"])
-    def test_health_publishes_the_mode(self, monkeypatch, raw):
-        from web.routes.api.health import _goals_history
-
-        _history(monkeypatch, raw)
-        assert _goals_history() == {"mode": "silver", "error": None}
-
-
-    def test_the_canary_pages_an_error_and_is_quiet_otherwise(self):
-        from bot.canary import check_goals_history_mode
-
-        assert [k for k, _ in check_goals_history_mode(
-            {"goals_history": self.TYPO})] == ["goals_history_mode_invalid"]
-        assert check_goals_history_mode({}) == []
-        assert check_goals_history_mode(
-            {"goals_history": {"mode": "silver", "error": None}}) == []
-
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_the_wiring_pages_and_names_its_lever(self):
-        from datetime import datetime, timedelta, timezone
+    @pytest.mark.parametrize("value", ["bridge", "silvr"])
+    async def test_any_value_answers_as_unset_does(self, history_pg, monkeypatch, value):
+        """`bridge` refused every history read until S14-07; now it is
+        nothing. Mutation: refuse it again."""
+        store, _pool = history_pg
+        monkeypatch.delenv("KS_GOALS_HISTORY", raising=False)
+        unset = await _calculators(store, "retail")
+        monkeypatch.setenv("KS_GOALS_HISTORY", value)
+        assert await _calculators(store, "retail") == unset
 
-        import httpx
 
+class TestTheConditionStaysRetired:
+    """`goals_history_mode_invalid` paged a refused `KS_GOALS_HISTORY` until
+    S14-07. Its name is not reused (step 14's rule 15), and nothing emits it
+    or publishes the block it judged. Mutation: register it again, give the
+    canary a lever for it, or put `goals_history` back on `HealthResponse`."""
+
+    NAME = "goals_history_mode_invalid"
+
+    def test_it_is_not_a_condition_any_more(self):
+        from core.alerting import REGISTRY
+
+        assert self.NAME not in REGISTRY
+
+    def test_the_canary_neither_judges_nor_levers_it(self):
         from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
 
-        payload = _healthy_payload()
-        payload["goals_history"] = self.TYPO
+        assert not hasattr(canary, "check_goals_history_mode")
+        assert self.NAME not in dict(canary._ACTIONS)
+        canary_source = (REPO / "bot" / "canary.py").read_text(encoding="utf-8")
+        assert self.NAME not in canary_source
 
-        def handler(request):
-            return httpx.Response(200, json=payload)
+    def test_health_publishes_no_goals_history(self):
+        from web.schemas import HealthResponse
 
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(handler) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                result = await canary.run_canary(DASHBOARD, client=client)
-        assert result.severity == "critical"
-        assert result.failure_keys == ["goals_history_mode_invalid"]
-        lever = canary._what_to_do(result)
-        # The lever names the way out, and never the deleted history as one.
-        # Nor removing the line: an image from before 7b-4 reads unset as the
-        # bridge, so the way out is the one value every image reads as Silver.
-        assert "KS_GOALS_HISTORY=silver" in lever and "to bridge" not in lever
-        assert "remove" not in lever.lower(), lever
-
-    def test_it_is_a_registered_condition(self):
-        from core.alerting import Kind, spec_for
-
-        assert spec_for("goals_history_mode_invalid").kind is Kind.CONDITION
-
-
-# ─── What a refusal stops, route by route ─────────────────────────────────
-
-# What reads the calculators' history, and so answers 500 under a refused
-# value; and what never read it — a recent window of Silver, with
-# `is_active_source` — and answers as before.
-REFUSED_ROUTES = frozenset({
-    ("GET", "/api/goals/smart"), ("GET", "/api/goals/seasonality"),
-    ("GET", "/api/goals/growth"), ("GET", "/api/goals/weekly-patterns"),
-    ("GET", "/api/goals/forecast"), ("POST", "/api/goals/recalculate"),
-})
-ANSWERED_ROUTES = frozenset({
-    ("GET", "/api/goals"), ("GET", "/api/goals/history"),
-    ("POST", "/api/goals"), ("DELETE", "/api/goals/{period_type}"),
-})
-_ROUTE_REQUESTS = {
-    "/api/goals/history": ("/api/goals/history", {"period_type": "monthly"}),
-    "/api/goals/forecast": ("/api/goals/forecast", {"year": 2026, "month": 10}),
-    "/api/goals/{period_type}": ("/api/goals/monthly", {}),
-}
-_ROUTE_PARAMS = {("POST", "/api/goals"): {"period_type": "monthly", "amount": 1000}}
-
-
-def _goal_routes():
-    from tests.routes_helper import iter_endpoints
-    from web.main import app
-
-    return {(method, e.path) for e in iter_endpoints(app)
-            if e.path == "/api/goals" or e.path.startswith("/api/goals/")
-            for method in e.methods if method not in ("HEAD", "OPTIONS")}
-
-
+        assert "goals_history" not in HealthResponse.model_fields

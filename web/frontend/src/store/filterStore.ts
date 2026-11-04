@@ -43,6 +43,23 @@ export const useFilterStore = create<FilterStore>((set) => ({
     set(initialState),
 }))
 
+// The period as every dashboard API reads it: a shortcut, or a custom range as
+// its two dates, and nothing until both are picked. Shared with the requests
+// that build their own query string, which sent `period=custom` and no dates.
+export function setPeriodParams(
+  params: URLSearchParams,
+  period: Period,
+  startDate: string | null,
+  endDate: string | null,
+): void {
+  if (period !== 'custom') {
+    params.set('period', period)
+  } else if (startDate && endDate) {
+    params.set('start_date', startDate)
+    params.set('end_date', endDate)
+  }
+}
+
 // Selector to build query string from filter state (memoized to prevent re-renders)
 export const useQueryParams = () => {
   const { period, startDate, endDate, salesType, sourceId, categoryId, brand, promocode } =
@@ -58,12 +75,7 @@ export const useQueryParams = () => {
     const applies = filtersForPath(path)
     const params = new URLSearchParams()
 
-    if (period !== 'custom') {
-      params.set('period', period)
-    } else if (startDate && endDate) {
-      params.set('start_date', startDate)
-      params.set('end_date', endDate)
-    }
+    setPeriodParams(params, period, startDate, endDate)
 
     params.set('sales_type', salesType)
 

@@ -1442,6 +1442,7 @@ def _silver_arc_check(
     Reconciliation against KeyCRM remains the only check that sees the latter.
     """
     from core.duckdb_store import silver_recompute_ctes
+    from core.sql_dialect import DUCKDB
 
     missing_severity = missing_severity or Severity.CRITICAL
     drift_severity = drift_severity or Severity.WARN
@@ -1527,7 +1528,7 @@ def _silver_arc_check(
              for column, tolerance in _SILVER_ROW_COLUMNS]
 
     rows = conn.execute(f"""
-        WITH {silver_recompute_ctes()}
+        WITH {silver_recompute_ctes(DUCKDB)}
         SELECT r.id,
                {", ".join(f"r.{c} AS r_{c}, s.{c} AS s_{c}" for c, _ in _SILVER_ROW_COLUMNS)}
         FROM recomputed r

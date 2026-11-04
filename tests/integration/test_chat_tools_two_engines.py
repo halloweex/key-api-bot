@@ -1,15 +1,17 @@
-"""The chat assistant's five numeric tools mean the same thing in both engines.
+"""The chat assistant's five numeric tools answer in Postgres what DuckDB did.
 
-Reuses the dashboard's two-engine catalogue — orders across three sources, a
+Reuses the dashboard's original catalogue — orders across three sources, a
 retired source, returns, b2b, line items under two names — because these tools
-ask the dashboard's questions in a different voice. Postgres Gold is derived by
-the production path there, roll-up and fine rows both, which is what makes the
-trap real: a bare `SUM(revenue)` over it counts every order twice.
+ask the dashboard's questions in a different voice. Postgres derives Silver and
+Gold from it, roll-up and fine rows both, which is what makes the trap real: a
+bare `SUM(revenue)` over that Gold counts every order twice.
 
-The Postgres leg runs with `DuckDBStore.connection` fatal. There is no fallback
-in `_chat_run`, so this is belt and braces — it stays because the day somebody
-adds one, a comparison that silently compared DuckDB with itself is exactly what
-would ship.
+ONE ENGINE SINCE STEP 14 (S14-07). The tools read Postgres alone
+(`core.chat_tools._chat_run`). Each call is compared with a literal
+(`tests/integration/golden/chat_tools.json`): DuckDB's answer on this
+fixture, pinned to 2026-09-15, recorded while the same run asserted Postgres
+answered each one equally (rule 9 of the step-14 plan). The store is never
+connected and its DuckDB connection is a trap.
 """
 from __future__ import annotations
 
@@ -18,104 +20,103 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from tests.integration.pg_tab_seed import call_key, golden
 from tests.integration.test_dashboard_two_engines import (  # noqa: F401 — fixture
-    DSN, WINDOW, _comparable, both_engines,
+    DSN, WINDOW, _comparable, original_in_postgres,
 )
 
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
+GOLDEN = golden("chat_tools")
 
-async def _both(store, monkeypatch, tool, *args):
+
+def _iso(args):
+    return [a.isoformat() if hasattr(a, "isoformat") else a for a in args]
+
+
+async def _answer(store, tool, *args):
+    """One tool's answer, on the pinned window, and its literal."""
     from core import chat_tools
-    from core.duckdb_store import DuckDBStore
 
     fn = getattr(chat_tools, tool)
     with patch.object(chat_tools, "get_store", new=AsyncMock(return_value=store)), \
          patch.object(chat_tools, "_get_date_range", return_value=WINDOW):
-        monkeypatch.delenv("KS_READ_CHAT", raising=False)
-        duck = await fn(*args)
-
-        monkeypatch.setenv("KS_READ_CHAT", "postgres")
-
-        def _no_duckdb(*_a, **_k):
-            raise AssertionError(f"{tool} reached DuckDB under KS_READ_CHAT=postgres")
-
-        with patch.object(DuckDBStore, "connection", _no_duckdb):
-            postgres = await fn(*args)
-        monkeypatch.delenv("KS_READ_CHAT", raising=False)
-    return duck, postgres
+        answer = await fn(*args)
+    return answer, GOLDEN[call_key(tool, _iso(args))]
 
 
-class TestTheTotalsAgree:
+class TestTheTotals:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
-    async def test_the_period_summary(self, both_engines, monkeypatch, sales_type):
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "_get_revenue_summary", "month", sales_type)
-        assert duck["total_revenue"] > 0, "nothing in the window — the comparison is empty"
-        assert _comparable(duck) == _comparable(postgres)
+    async def test_the_period_summary(self, original_in_postgres, sales_type):
+        answer, recorded = await _answer(
+            original_in_postgres, "_get_revenue_summary", "month", sales_type)
+        assert answer["total_revenue"] > 0, "nothing in the window — the literal pins nothing"
+        assert _comparable(answer) == recorded
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
-    async def test_the_dated_summary(self, both_engines, monkeypatch, sales_type):
+    async def test_the_dated_summary(self, original_in_postgres, sales_type):
         start, end = (d.isoformat() for d in WINDOW)
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "_get_revenue_by_dates", start, end, sales_type)
-        assert duck["total_orders"] > 0
-        assert _comparable(duck) == _comparable(postgres)
+        answer, recorded = await _answer(
+            original_in_postgres, "_get_revenue_by_dates", start, end, sales_type)
+        assert answer["total_orders"] > 0
+        assert _comparable(answer) == recorded
 
     @pytest.mark.asyncio
-    async def test_the_roll_up_is_not_counted_twice(self, both_engines, monkeypatch):
+    async def test_the_roll_up_is_not_counted_twice(self, original_in_postgres):
         """Stated outright rather than left inside an equality: the number is
-        the retail revenue the catalogue actually holds, in both engines."""
-        _duck, postgres = await _both(
-            both_engines, monkeypatch, "_get_revenue_summary", "month", "retail")
+        the retail revenue the catalogue actually holds."""
+        answer, _ = await _answer(
+            original_in_postgres, "_get_revenue_summary", "month", "retail")
         # Retail, not returned, active source: orders 1 (₴1200), 2 (₴600), 5 (₴750).
-        assert postgres["total_revenue"] == 2550.0
-        assert postgres["total_orders"] == 3
+        assert answer["total_revenue"] == 2550.0
+        assert answer["total_orders"] == 3
 
     @pytest.mark.asyncio
-    async def test_the_date_range_comparison(self, both_engines, monkeypatch):
+    async def test_the_date_range_comparison(self, original_in_postgres):
         start, end = WINDOW
         mid = start + (end - start) / 2
         args = (start.isoformat(), mid.isoformat(),
                 (mid + timedelta(days=1)).isoformat(), end.isoformat())
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "_compare_date_ranges", *args)
-        assert _comparable(duck) == _comparable(postgres)
+        answer, recorded = await _answer(original_in_postgres, "_compare_date_ranges", *args)
+        assert _comparable(answer) == recorded
 
 
-class TestTheBreakdownsAgree:
+class TestTheBreakdowns:
     @pytest.mark.asyncio
-    async def test_the_channels(self, both_engines, monkeypatch):
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "_get_source_breakdown", "month")
-        assert [s["name"] for s in duck["sources"]] == ["Instagram", "Telegram", "Shopify"]
-        assert any(s["revenue"] for s in duck["sources"])
-        assert _comparable(duck) == _comparable(postgres)
+    async def test_the_channels(self, original_in_postgres):
+        answer, recorded = await _answer(original_in_postgres, "_get_source_breakdown", "month")
+        assert [s["name"] for s in answer["sources"]] == ["Instagram", "Telegram", "Shopify"]
+        assert any(s["revenue"] for s in answer["sources"])
+        assert _comparable(answer) == recorded
 
     @pytest.mark.asyncio
-    async def test_the_customers(self, both_engines, monkeypatch):
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "_get_customer_insights", "month")
-        assert duck["total_customers"] > 0
-        assert _comparable(duck) == _comparable(postgres)
+    async def test_the_customers(self, original_in_postgres):
+        answer, recorded = await _answer(original_in_postgres, "_get_customer_insights", "month")
+        assert answer["total_customers"] > 0
+        assert _comparable(answer) == recorded
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("by", ["revenue", "quantity"])
     @pytest.mark.parametrize("limit", [1, 3, 10])
-    async def test_the_top_products(self, both_engines, monkeypatch, by, limit):
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "_get_top_products", "month", by, limit)
-        assert duck["products"]
-        assert _comparable(duck) == _comparable(postgres)
+    async def test_the_top_products(self, original_in_postgres, by, limit):
+        answer, recorded = await _answer(
+            original_in_postgres, "_get_top_products", "month", by, limit)
+        assert answer["products"]
+        assert _comparable(answer) == recorded
 
     @pytest.mark.asyncio
-    async def test_a_tie_at_the_limit_is_broken_the_same_way(self, both_engines, monkeypatch):
+    async def test_a_tie_at_the_limit_is_broken_on_the_product(self, original_in_postgres):
         """Ampoule and Toner both took ₴200. Third place is one of them, and
         before the tiebreak which one was up to the engine."""
-        duck, postgres = await _both(
-            both_engines, monkeypatch, "_get_top_products", "month", "revenue", 3)
-        names = [p["name"] for p in postgres["products"]]
-        assert names == [p["name"] for p in duck["products"]]
-        assert names[2] == "Ampoule"
+        answer, _ = await _answer(
+            original_in_postgres, "_get_top_products", "month", "revenue", 3)
+        assert [p["name"] for p in answer["products"]][2] == "Ampoule"
+
+
+def test_every_literal_is_asked():
+    asked = {k.split("[", 1)[0] for k in GOLDEN}
+    assert asked == {"_get_revenue_summary", "_get_revenue_by_dates",
+                     "_compare_date_ranges", "_get_source_breakdown",
+                     "_get_customer_insights", "_get_top_products"}

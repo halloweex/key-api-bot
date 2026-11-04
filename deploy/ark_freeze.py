@@ -12,7 +12,9 @@ on a schedule:
 
   1. before the first landing write to Postgres — after that moment DuckDB
      stops being the only writer of truth, and "what was in DuckDB" stops
-     being reproducible (2026-08-23, deploy/step05-preflight-runbook.md).
+     being reproducible (2026-08-23; the step-05 preflight runbook that
+     recorded it went in step 14's S14-03 — `git log --all --
+     deploy/step05-preflight-runbook.md` finds it).
      Nothing prunes it, on this disk or off it;
   2. at the start of the week of silence, from the file once nothing writes
      it any more — web stopped, KS_DUCKDB about to go `off`. That one is
@@ -78,6 +80,9 @@ USAGE
 
 On the host the image is what has `duckdb`, and deploy/ark_ship.sh runs both
 in it, with the file and the Ark mounted — prefer that to calling this by hand.
+Since step 14 (S14-02) that image is the pinned one, BACKUP_ARK_IMAGE in
+deploy/backup.env — `keycrm-web:rollback-step14`, DuckDB 1.5.5 — never
+`:latest`, which loses DuckDB at S14-19.
 
 WHERE AN ARK GOES. `--out` defaults to /root/ark/key-api-bot, outside ./data:
 the disk watchdog books growth under ./data as `other` and pages at +0.75 GB
@@ -105,8 +110,9 @@ from pathlib import Path
 try:
     import duckdb
 except ImportError:  # pragma: no cover - environment problem, not logic
-    print("ark: duckdb is not importable; run inside the app image or a venv "
-          "that has it", file=sys.stderr)
+    print("ark: duckdb is not importable; run inside the pinned image "
+          "(keycrm-web:rollback-step14) or a venv that has duckdb 1.5.5",
+          file=sys.stderr)
     raise SystemExit(2)
 
 CHUNK = 1024 * 1024

@@ -10,65 +10,32 @@ built from another campaign's:
   arm, accepted by the gateway, less anyone opted out since. No control of
   its own; X's control is never in it.
 
-Run against DuckDB always and against PostgreSQL wherever `KS_PG_DSN` names
-one, through the real `_sms_run` / `_sms_tx` switch (`KS_SMS_STORE`), because
-production SMS is Postgres and the two engines are one SQL text here.
+Run against PostgreSQL, through the real `_sms_run` / `_sms_tx`: production
+SMS has been Postgres since 2026-09-06, and since step 14's S14-08 it is the
+only engine those two know. They ran against DuckDB as well until then, one
+SQL text on both (`tests/integration/pg_sms_seed.py`).
 """
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import needs_postgres
+
+pytestmark = needs_postgres
 
 
-@pytest.fixture(autouse=True)
-def _sms_store_follows_env(monkeypatch):
-    """Since step 14's S14-00 the store switch decides nothing; this module's
-    two engines are chosen as before it (`tests.conftest.sms_store_follows_env`)."""
-    from tests.conftest import sms_store_follows_env
-
-    sms_store_follows_env(monkeypatch)
-
-
-DSN = os.getenv("KS_PG_DSN")
-
-
-@pytest_asyncio.fixture(params=["duckdb", "postgres"])
-async def store(request, tmp_path, monkeypatch):
-    """A store whose SMS statements run on one engine or the other."""
-    duck = DuckDBStore(db_path=tmp_path / "guards.duckdb")
-    await duck.connect()
-    try:
-        if request.param == "duckdb":
-            monkeypatch.delenv("KS_SMS_STORE", raising=False)
-            yield duck
-            return
-
-        if not DSN:
-            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
-        asyncpg = pytest.importorskip("asyncpg")
-        # A real pool, not one connection: the concurrency test claims two
-        # campaigns at once, and one connection would serialise them.
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "TRUNCATE app.sms_campaigns, app.sms_campaign_members,"
-                    " app.marketing_optouts, app.sms_dlr_events")
-            monkeypatch.setenv("KS_SMS_STORE", "postgres")
-            with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
-                 patch("core.pg.require_revision", new=AsyncMock()):
-                yield duck
-        finally:
-            await pool.close()
-    finally:
-        await duck.close()
+@pytest_asyncio.fixture
+async def store(tmp_path, monkeypatch):
+    """The repository, its SMS statements on Postgres and its DuckDB
+    connection a trap. A real pool, not one connection: the concurrency test
+    claims two campaigns at once, and one connection would serialise them."""
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        yield pg_sms_seed.store(tmp_path, "guards.duckdb")
 
 
 def _phone(buyer_id: int) -> str:

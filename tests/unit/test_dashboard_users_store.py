@@ -246,29 +246,30 @@ class TestOneBodyTwoEngines:
 
 class TestNothingGoesRoundTheRouter:
     def test_no_access_method_opens_the_store_itself(self):
-        """A method left on `self.connection()` keeps working on DuckDB and
-        silently ignores the switch — the half-migrated state that makes an
+        """A method on `self.connection()` reads DuckDB — a list nobody has
+        written since 2026-09-07 — the half-migrated state that makes an
         authorisation bug invisible.
 
         The four matrix methods were the standing exception until 2026-09-08,
         excused because they are cached per role. Per-user tabs put a
         permission dependency on ~120 of the 140 endpoints, so every cache
-        miss took the store lock on an authorisation path. The exception is
-        gone and this list is now just the two routers."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        allowed = {"_users_run", "_perms_run"}
-        offenders = []
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name in allowed:
-                continue
-            body = ast.get_source_segment(source, node) or ""
-            if "self.connection()" in body:
-                offenders.append(node.name)
+        miss took the store lock on an authorisation path. The two routers
+        were the last to hold a DuckDB tail, and step 14's S14-08 took it
+        away: nothing in the file may reach the file now, routers included —
+        not by `connection()`, not by a helper over it (`_fetch_one`,
+        `_fetch_all`, `_offload`), not by the opener, read off the syntax
+        (`tests/store_reach.py`). Mutation (the review's, on 4cceda69):
+        `await self._fetch_all(sql.format(users="users", self="users"),
+        params)` in `_users_run` — it passed, because only the text
+        `self.connection()` was looked for."""
+        from tests import store_reach
+
+        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
+        offenders = [f"{fn.name}: {found}"
+                     for fn in store_reach.functions(tree)
+                     for found in store_reach.reaches(fn)]
         assert not offenders, (
-            f"{offenders} open DuckDB directly. Nothing in the access path may: "
+            f"{offenders} reach DuckDB directly. Nothing in the access path may: "
             f"the store lock is held by a warehouse rebuild every two minutes, "
             f"and an authorisation check that can queue behind a rebuild is the "
             f"one read that must not. Route it through _users_run/_perms_run."
@@ -357,6 +358,47 @@ class TestTheTwoListsAreNotConfusedForEachOther:
 # ─── the matrix followed the list ────────────────────────────────────────────
 
 
+def _format_hole_node(fn: ast.AST, hole: str) -> ast.AST:
+    """The value of `hole=` in the router's one `sql.format(...)` call."""
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "format" and isinstance(n.func.value, ast.Name)
+             and n.func.value.id == "sql"]
+    assert len(calls) == 1, f"expected one sql.format(...), found {len(calls)}"
+    values = [kw.value for kw in calls[0].keywords if kw.arg == hole]
+    assert len(values) == 1, f"sql.format(...) has no {hole}= hole"
+    return values[0]
+
+
+def _format_hole(fn: ast.AST, hole: str):
+    node = _format_hole_node(fn, hole)
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _bindings(fn: ast.AST, name: str) -> list:
+    """Every place inside `fn` that binds `name`: an import as
+    `(module, imported name)`, anything else by its kind and line."""
+    found: list = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.ImportFrom):
+            found += [(node.module, a.name) if a.asname is None
+                      else (node.module, f"{a.name} as {a.asname}")
+                      for a in node.names if (a.asname or a.name) == name]
+        elif isinstance(node, ast.Import):
+            found += [f"import {a.name} at line {node.lineno}"
+                      for a in node.names
+                      if (a.asname or a.name.split(".")[0]) == name]
+        elif (isinstance(node, ast.Name) and node.id == name
+                and isinstance(node.ctx, (ast.Store, ast.Del))):
+            found.append(f"assigned at line {node.lineno}")
+        elif isinstance(node, ast.arg) and node.arg == name:
+            found.append(f"a parameter at line {node.lineno}")
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            found.append(f"declared {type(node).__name__.lower()} "
+                         f"at line {node.lineno}")
+    return found
+
+
 class TestTheRoleMatrixLeftDuckDB:
     """`KS_USER_STORE` decides where *all* of access lives, not half of it.
 
@@ -407,20 +449,57 @@ class TestTheRoleMatrixLeftDuckDB:
         assert seen, "nothing reached Postgres"
         assert all("app.role_permissions" in sql for sql in seen), seen
 
-    def test_the_two_tables_move_together(self):
-        """One variable answers "where does access live". Splitting them would
-        let an approval and the permissions behind it disagree about which
-        database is authoritative."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for name in ("_users_run", "_perms_run"):
-            body = ast.get_source_segment(source, next(
-                n for n in ast.walk(tree)
-                if isinstance(n, ast.AsyncFunctionDef) and n.name == name
-            )) or ""
-            assert "user_store_is_postgres" in body, (
-                f"{name} chooses its engine some other way"
-            )
+    def test_the_two_tables_live_in_postgres_together(self):
+        """"Where does access live" has one answer: both routers render into
+        `app.*` and ask nothing. `KS_USER_STORE` chose for both until step
+        14 (a constant since S14-00); a router that asked again, or kept a
+        branch of its own, would let an approval and the permissions behind
+        it disagree about which database is authoritative. Held to the
+        router's rule (`tests/store_reach.py`): no `self` beyond the
+        signature, no `super`, nothing of the store or its file. Mutations:
+        `user_store_is_postgres()` back, under any spelling; `await
+        self._fetch_all(…)` or `self.connection()` in either.
+
+        "Renders into `app.*`" is read off the `sql.format(...)` call itself:
+        its `users=` / `perms=` hole must be the bare name `TABLE` /
+        `PERMISSIONS_TABLE`, bound only where it should be, to a value that is
+        an `app.` table. `store_reach.names` would not do for this — it counts
+        the name as spelled when it is merely imported. Mutation (the review
+        of S14-08's fix): `sql.format(users="dashboard_users", self=…)` with
+        the import of `TABLE` kept, which resolves to the schema-less name.
+        It passed every test in this module; only the live-Postgres access
+        tests elsewhere still failed on it."""
+        from tests import store_reach
+
+        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
+        module_constants = {
+            target.id: node.value.value
+            for node in tree.body if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            for target in node.targets if isinstance(target, ast.Name)}
+        for name, table, hole, binding, value in (
+                ("_users_run", "TABLE", "users",
+                 [("core.pg_dashboard_users", "TABLE")], duf.TABLE),
+                ("_perms_run", "PERMISSIONS_TABLE", "perms",
+                 [], module_constants.get("PERMISSIONS_TABLE"))):
+            fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+            spelled = store_reach.names(fn)
+            assert "user_store_is_postgres" not in spelled, (
+                f"{name} chooses its engine again")
+            found = store_reach.reaches(
+                fn, self_attrs=frozenset(), reach=store_reach.ROUTER_REACHES,
+                modules=store_reach.ROUTER_MODULES)
+            assert not found, (
+                f"{name} reaches the DuckDB store: there is one store to run on "
+                f"({found})")
+            assert _format_hole(fn, hole) == table, (
+                f"{name} no longer renders {table}: the {hole}= hole of its "
+                f"sql.format(...) is {ast.dump(_format_hole_node(fn, hole))}")
+            assert _bindings(fn, table) == binding, (
+                f"{name} binds {table} somewhere else: {_bindings(fn, table)}")
+            assert isinstance(value, str) and value.startswith("app."), (
+                f"{name} renders {table} = {value!r}, not an app.* table")
 
     @pytest.mark.asyncio
     async def test_seeding_is_one_statement(self, tmp_path, monkeypatch):
@@ -430,16 +509,17 @@ class TestTheRoleMatrixLeftDuckDB:
         A statement per row meant 48 acquisitions of DuckDB's store lock where
         the single-connection version it replaced took one — and under Postgres
         48 × (require_revision + insert). Measured with two concurrent callers
-        on a cold table before this was fixed: 93 statements for 48 rows.
+        on a cold table before this was fixed: 93 statements for 48 rows. On
+        Postgres, the matrix's only store since step 14's S14-08 (this ran on
+        DuckDB until then); skipped without `KS_PG_DSN`.
         """
-        # DuckDB is the engine here; the count is the statement's, not the
-        # store's (since step 14's S14-00 the user list's store is Postgres).
-        from tests.conftest import user_store_on_duckdb
+        from tests.integration import pg_sms_seed
 
-        user_store_on_duckdb(monkeypatch)
-        store = DuckDBStore(db_path=tmp_path / "seed.duckdb")
-        await store.connect()
-        try:
+        if not pg_sms_seed.DSN:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+        async with pg_sms_seed.on_postgres(
+                monkeypatch, pg_sms_seed.ACCESS_TABLES, what="the access path"):
+            store = pg_sms_seed.store(tmp_path, "seed.duckdb")
             calls = []
             original = store._perms_run
 
@@ -464,8 +544,6 @@ class TestTheRoleMatrixLeftDuckDB:
             calls.clear()
             await store.seed_default_permissions()
             assert not [sql for sql in calls if "INSERT" in sql.upper()]
-        finally:
-            await store.close()
 
     def test_the_migration_and_the_code_agree_on_the_table(self):
         migration = (MIGRATION.parent / "0022_role_permissions.py").read_text(

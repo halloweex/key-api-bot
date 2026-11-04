@@ -1,9 +1,13 @@
-"""Steps 1 and 2 of «Одна бронза»: the read switch and the buyer landing.
+"""Steps 1 and 2 of «Одна бронза»: the Gold reader and the buyer landing.
 
-Step 1 is a switch, so the tests are about what a switch must guarantee: off
-by default, loud on a typo, intercepting exactly the requests DuckDB's own
-Gold would have answered, and falling back visibly instead of taking the
-dashboard down.
+Step 1 was a switch (`KS_READ_GOLD`), and its tests were about what a switch
+must guarantee: off by default, loud on a typo, intercepting exactly the
+requests DuckDB's own Gold would have answered, and falling back visibly
+instead of taking the dashboard down. Since step 14's S14-06 there is no
+switch and no DuckDB to fall back to: what stays is the reader's predicate,
+the routing that still keeps sources 3 and 5 away from it (the owner's
+decision 5), the shape of the card row and the chart, and that neither ever
+reaches for the DuckDB store.
 
 Step 2's units are the conversions — the places where a Buyer model becomes
 two stores' rows — and the one-body-two-engines contract for the order-lines
@@ -40,26 +44,7 @@ class _Buyer:
         self.__dict__.update(defaults)
 
 
-class TestTheReadSwitch:
-    def test_off_by_default(self, monkeypatch):
-        monkeypatch.delenv(pg_gold_read.ENV, raising=False)
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
-        assert pg_gold_read.enabled() is False
-
-    def test_needs_both_the_flag_and_a_dsn(self, monkeypatch):
-        monkeypatch.setenv(pg_gold_read.ENV, "postgres")
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        assert pg_gold_read.enabled() is False
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
-        assert pg_gold_read.enabled() is True
-
-    def test_a_typo_raises_rather_than_serving_the_old_store(self, monkeypatch):
-        # KS_BOT_STORE's rule: the variable that decides where revenue comes
-        # from must stop loudly on an unknown value.
-        monkeypatch.setenv(pg_gold_read.ENV, "postgress")
-        with pytest.raises(ValueError):
-            pg_gold_read.enabled()
-
+class TestTheGoldReader:
     def test_rollup_predicate_for_all_sources(self):
         params = [date(2026, 8, 1), date(2026, 8, 27)]
         where = pg_gold_read._predicate("retail", None, params)
@@ -74,23 +59,43 @@ class TestTheReadSwitch:
         assert "sales_type" not in where  # 'all' spans the types
 
     @pytest.mark.asyncio
-    async def test_interception_mirrors_duckdb_routing(self, monkeypatch):
-        # A source DuckDB's Gold cannot answer (no channel column) must not
-        # reach Postgres either — flipping the flag changes the engine and
-        # nothing else.
+    @pytest.mark.parametrize("source", [3, 5])
+    async def test_a_source_gold_is_not_asked_about_never_reaches_it(
+        self, monkeypatch, source,
+    ):
+        """A source DuckDB's Gold had no column for is not asked of
+        Postgres's Gold either, which could answer it: `/api/summary`
+        answers zeros, the owner's decision 5 for step 14. Mutation: route
+        3 or 5 to `_pg_gold_summary` — the fetch is awaited and the zeros
+        become the source's money."""
         from core.duckdb_store import DuckDBStore
 
-        monkeypatch.setenv(pg_gold_read.ENV, "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
-        fetch = AsyncMock()
+        fetch = AsyncMock(return_value=(9, 900.0, 1, 10.0))
         monkeypatch.setattr(pg_gold_read, "fetch_summary", fetch)
 
         mixin = DuckDBStore.__new__(DuckDBStore)
-        out = await mixin._pg_gold_summary(
-            date(2026, 8, 1), date(2026, 8, 27), "retail", 5,
+        out = await mixin.get_summary_stats(
+            date(2026, 8, 1), date(2026, 8, 27), source_id=source,
         )
-        assert out is None
+        assert (out["totalOrders"], out["totalRevenue"], out["avgCheck"],
+                out["totalReturns"], out["returnsRevenue"]) == (0, 0, 0, 0, 0)
         fetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", [None, 1, 2, 4])
+    async def test_every_other_source_is_asked_of_gold(self, monkeypatch, source):
+        from core.duckdb_store import DuckDBStore
+
+        fetch = AsyncMock(return_value=(2, 300.0, 0, 0.0))
+        monkeypatch.setattr(pg_gold_read, "fetch_summary", fetch)
+
+        mixin = DuckDBStore.__new__(DuckDBStore)
+        out = await mixin.get_summary_stats(
+            date(2026, 8, 1), date(2026, 8, 27), source_id=source, sales_type="b2b",
+        )
+        assert out["totalRevenue"] == 300.0 and out["avgCheck"] == 150.0
+        fetch.assert_awaited_once_with(
+            date(2026, 8, 1), date(2026, 8, 27), "b2b", source)
 
 
 class TestTheBuyerConversions:
@@ -151,16 +156,15 @@ class TestOneBodyTwoEngines:
 class TestTheLockIsNeverHeldAcrossTheNetwork:
     """The review's sharpest live finding: the Postgres read used to happen
     inside `self.connection()` — the asyncio lock that serialises every DuckDB
-    access — so a hung Postgres would have held the whole dashboard. Now the
-    Gold-only branch answered from Postgres must never touch the store at all."""
+    access — so a hung Postgres would have held the whole dashboard. Since
+    step 14's S14-06 the dashboard has no DuckDB tail at all, and neither the
+    summary nor the trend may touch the store."""
 
     @pytest.mark.asyncio
     async def test_summary_from_pg_never_touches_the_store(self, monkeypatch):
         from core import pg_gold_read
         from core.duckdb_store import DuckDBStore
 
-        monkeypatch.setenv(pg_gold_read.ENV, "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
         monkeypatch.setattr(
             pg_gold_read, "fetch_summary",
             AsyncMock(return_value=(10, 1000.0, 1, 50.0)),
@@ -188,8 +192,6 @@ class TestTheLockIsNeverHeldAcrossTheNetwork:
         from core import pg_gold_read
         from core.duckdb_store import DuckDBStore
 
-        monkeypatch.setenv(pg_gold_read.ENV, "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
         calls: list = []
 
         async def fake_series(lo, hi, st, src):

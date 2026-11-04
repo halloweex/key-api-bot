@@ -120,8 +120,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
     # A read this web process answered from DuckDB because its engine failed
     # (OD-07). The counters are per process, so only a restart empties them;
-    # the page stands until then, and the soak before KS_READ_FALLBACK=off
-    # reads it back out of the journal (deploy/stage4_soak/22_f1_*).
+    # the page stands until then. The soak's F1 read it back out of the
+    # journal before KS_READ_FALLBACK=off, until step 14's S14-02 retired it.
     "read_fallback_used": _c("web restarts and answers no read from DuckDB"),
     # A read switch web serves from DuckDB on every request with nothing to
     # count: an engine named without its address, or the cohorts' switch not
@@ -165,11 +165,6 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # PR-2, OD-S5-1 (a)). The verdict is the web process's for its life.
     "duckdb_off_held_back": _c(
         "web restarts with every precondition of KS_DUCKDB=off met, or with KS_DUCKDB=on"),
-    # KS_GOALS_HISTORY set to a value web refuses — anything but unset or
-    # silver since chain 7b-4 retired it, `bridge` included: every read of
-    # the calculators' history raises — the goal widget, the calculator GETs
-    # under /goals/, the recalculate POST, the Monday job (7b).
-    "goals_history_mode_invalid": _c("web runs with a valid KS_GOALS_HISTORY"),
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),

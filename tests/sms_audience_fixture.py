@@ -198,7 +198,7 @@ def range_to() -> date:
 
 # The period's shapes, its bounds and the widest window, one group each:
 # (label, window, the group's filter fields, the oracle's terms, the answer by
-# hand). Shared by the DuckDB tests and the two-engine ones so both ask the
+# hand). Shared by the store tests and the two-engine ones so both ask the
 # same questions. Dates are the oracle's own, so a case cannot drift from it.
 # The fields are a function, called when the test runs: pytest builds this
 # table at collection, and a date in it would be the collection's.
@@ -244,37 +244,6 @@ PERIOD_CASES = [
     # All time and no condition: everyone reachable, 15 included.
     ("all time", 3650, lambda: {}, {}, {1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15}),
 ]
-
-
-def seed_duckdb_conn(conn) -> None:
-    for pid, brand, sku, cat in PRODUCTS:
-        conn.execute("INSERT INTO products (id, name, brand, sku, category_id)"
-                     " VALUES (?,?,?,?,?)", [pid, f"p{pid}", brand, sku, cat])
-    for cid, name, parent in CATEGORIES:
-        conn.execute("INSERT INTO categories (id, name, parent_id) VALUES (?,?,?)",
-                     [cid, name, parent])
-    for oid, sku, cost in STOCKS:
-        conn.execute("INSERT INTO offer_stocks (id, sku, purchased_price)"
-                     " VALUES (?,?,?)", [oid, sku, cost])
-    for bid, name, city, phone in BUYERS:
-        conn.execute("INSERT INTO buyers (id, full_name, city, phone)"
-                     " VALUES (?,?,?,?)", [bid, name, city, phone])
-    for bid, channel, phone in OPTOUTS:
-        conn.execute("INSERT INTO marketing_optouts (buyer_id, channel, phone)"
-                     " VALUES (?,?,?)", [bid, channel, phone])
-    for oid, buyer, days, total, stype, ret, active, src, promo in ORDERS:
-        day = ago(days)
-        conn.execute(
-            "INSERT INTO silver_orders (id, source_id, status_id, grand_total,"
-            " ordered_at, buyer_id, manager_id, order_date, is_return,"
-            " sales_type, is_active_source, source_name, is_new_customer,"
-            " buyer_first_order_date, promocode)"
-            " VALUES (?,?,1,?,?,?,NULL,?,?,?,?,?,FALSE,?,?)",
-            [oid, src, total, f"{day.isoformat()} 10:00:00+00", buyer, day, ret,
-             stype, active, f"src{src}", day, promo])
-    for line in _lines():
-        conn.execute("INSERT INTO order_products (id, order_id, product_id, name,"
-                     " quantity, price_sold) VALUES (?,?,?,?,?,?)", list(line))
 
 
 async def seed_postgres(conn) -> None:

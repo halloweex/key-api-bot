@@ -1,4 +1,4 @@
-"""The `/inventory` tab means the same thing in DuckDB and Postgres.
+"""The `/inventory` tab answers in Postgres what DuckDB answered.
 
 `tests/unit/test_inventory_views_dialect.py` proves the eleven views are *one
 text*. Necessary and not sufficient: identical SQL still means different things
@@ -6,12 +6,20 @@ where the engines' semantics differ — integer against decimal division, what
 `ROUND` returns, how `PERCENTILE_CONT` interpolates, where NULLs sort, which
 rows a `LIMIT` keeps when the sort has ties.
 
-So this runs the real thing. The same synthetic catalogue goes into a DuckDB
-store and a live PostgreSQL, and all eight methods are called twice — once with
-`KS_READ_INVENTORY` unset and once with it set to `postgres` — and the **whole
-result** of each is compared, not a summary of it. Skipped without
-`KS_PG_DSN`, the contract every Postgres-touching test here has;
-`deploy/gate_with_stores.sh` supplies one.
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+`/inventory` reads Postgres and nothing else. The synthetic catalogue goes into
+a live PostgreSQL and every method's **whole result** is compared with a
+literal (`tests/integration/golden/inventory.json`): DuckDB's answer on this
+fixture, recorded while the same run asserted Postgres answered each one
+equally (rule 9 of the step-14 plan; all fifteen agreed). The views count from
+the server's own Kyiv day, which a test cannot pin, so every date in an answer
+is written as days before that day (`_relative`), the unit the fixture is
+built in. The monthly trend buckets by the calendar, so its answer moves with
+the day the suite runs: it is computed here instead (`_monthly_truth`), from
+the history the fixture writes, by the method's own rule. The store's DuckDB
+connection is a trap. Skipped without `KS_PG_DSN`, the contract every
+Postgres-touching test here has; `deploy/gate_with_stores.sh` supplies one.
 
 THE FIXTURE IS DELIBERATELY AWKWARD
 
@@ -26,21 +34,23 @@ every column the three `ORDER BY … LIMIT` reads sort on.
 AND THE GOLD FIXTURE CARRIES BOTH GRAINS ON PURPOSE
 
 `gold.daily_revenue` in Postgres is grained by source as well, with
-`source_id IS NULL` as the roll-up; DuckDB's is not. Seeding only roll-up rows
-would let a missing `source_id IS NULL` filter pass this test while doubling
-the revenue in production, so the per-source rows are here to make that
-failure visible.
+`source_id IS NULL` as the roll-up. Seeding only roll-up rows would let a
+missing `source_id IS NULL` filter pass this test while doubling the revenue
+in production, so the per-source rows are here to make that failure visible.
 """
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
-from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import call_key, golden
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -49,7 +59,11 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Kyiv's day, the one the views count from (`TODAY_IN_KYIV`): the views take
+# their "today" from the server's clock, so it cannot be pinned, and the
+# answers are recorded relative to it: a date as how many days before today.
+# `date.today()` was the runner's day, which is not Kyiv's from 21:00 UTC.
+TODAY = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Kyiv")).date()
 
 
 def _d(days_ago: int) -> date:
@@ -156,54 +170,6 @@ CALLS = (
 )
 
 
-async def _seed_duckdb(store):
-    async with store.connection() as conn:
-        for cid, name, parent in CATEGORIES:
-            conn.execute("INSERT INTO categories (id, name, parent_id)"
-                         " VALUES (?,?,?)", [cid, name, parent])
-        for pid_row in SKUS:
-            (oid, pid, sku, name, brand, cat, qty, res,
-             price, cost, last_sale, first_seen) = pid_row
-            conn.execute(
-                "INSERT INTO products (id, name, brand, sku, category_id)"
-                " VALUES (?,?,?,?,?)", [pid, name, brand, sku, cat])
-            conn.execute(
-                "INSERT INTO offer_stocks (id, sku, price, purchased_price,"
-                " quantity, reserve) VALUES (?,?,?,?,?,?)",
-                [oid, sku, price, cost, qty, res])
-            conn.execute(
-                "INSERT INTO sku_inventory_status (offer_id, product_id, sku,"
-                " name, brand, category_id, quantity, reserve, price,"
-                " purchased_price, last_sale_date, first_seen_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [oid, pid, sku, name, brand, cat, qty, res, price, cost,
-                 last_sale, first_seen, SNAPSHOT_AT])
-        for oid, day, stype, ret, active, src in ORDERS:
-            conn.execute(
-                "INSERT INTO silver_orders (id, source_id, status_id,"
-                " grand_total, ordered_at, buyer_id, manager_id, order_date,"
-                " is_return, sales_type, is_active_source, source_name,"
-                " is_new_customer, buyer_first_order_date, promocode)"
-                " VALUES (?,?,1,0,?,1,NULL,?,?,?,?,?,FALSE,?,NULL)",
-                [oid, src, f"{day} 10:00:00+00", day, ret, stype, active,
-                 f"src{src}", day])
-        for lid, oid, pid, qty, price in LINES:
-            conn.execute(
-                "INSERT INTO order_products (id, order_id, product_id, name,"
-                " quantity, price_sold) VALUES (?,?,?,?,?,?)",
-                [lid, oid, pid, f"line{lid}", qty, price])
-        for day, stype, src, revenue in GOLD:
-            if src is None:      # DuckDB's Gold has no source grain at all
-                conn.execute(
-                    "INSERT INTO gold_daily_revenue (date, sales_type, revenue)"
-                    " VALUES (?,?,?)", [day, stype, revenue])
-        for day, qty, value, reserve, skus in HISTORY:
-            conn.execute(
-                "INSERT INTO inventory_history (date, total_quantity,"
-                " total_value, total_reserve, sku_count) VALUES (?,?,?,?,?)",
-                [day, qty, value, reserve, skus])
-
-
 async def _seed_postgres(conn):
     await conn.execute(
         "TRUNCATE gold.daily_revenue, silver.orders, bronze.order_products,"
@@ -253,93 +219,125 @@ async def _seed_postgres(conn):
 
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
-    """A DuckDB store and a Postgres holding the identical catalogue.
+async def in_postgres(tmp_path, monkeypatch):
+    """A Postgres holding the catalogue, and a store that is never connected:
+    its DuckDB connection is a trap, so an answer below can only be
+    Postgres's.
 
     The pool is built here and `core.pg.get_pool` patched to hand it over,
     rather than letting the module-level pool open itself: that one is a
     global bound to whichever event loop first asked for it, and closing it
     in a teardown after pytest-asyncio has retired that loop raises.
-    `test_sms_segments_two_engines` takes the same route.
     """
+    from tests.integration.pg_tab_seed import store_that_never_reaches_duckdb
+
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore(db_path=tmp_path / "inventory.duckdb")
-    await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     try:
         async with pool.acquire() as conn:
             await _seed_postgres(conn)
-        await _seed_duckdb(store)
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            yield store
+            yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "/inventory")
     finally:
         await pool.close()
-        await store.close()
-
-
-async def _both(store, monkeypatch, name, kwargs):
-    """Each engine once — and the Postgres leg with DuckDB made fatal.
-
-    This tab falls back to DuckDB when Postgres raises, so a comparison that
-    merely calls the method twice can pass while Postgres never answers: the
-    second call falls back and the two "engines" agree because they were the
-    same engine. `/margin`'s trend shipped exactly that way — `strftime` is
-    DuckDB's alone — and its gate run was green.
-    """
-    monkeypatch.delenv("KS_READ_INVENTORY", raising=False)
-    duckdb_result = await getattr(store, name)(**kwargs)
-
-    monkeypatch.setenv("KS_READ_INVENTORY", "postgres")
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            f"{name} fell back to DuckDB — Postgres did not answer, so the "
-            f"comparison would have compared DuckDB with itself"
-        )
-
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres_result = await getattr(store, name)(**kwargs)
-    monkeypatch.delenv("KS_READ_INVENTORY", raising=False)
-    return duckdb_result, postgres_result
 
 
 def _comparable(value):
-    """Money and ratios to six places; everything else as it stands.
+    """Money and ratios to six places, dates as ISO text — the form the
+    literals were recorded in (`tests.integration.pg_tab_seed.comparable`)."""
+    from tests.integration.pg_tab_seed import comparable
 
-    DuckDB divides a DECIMAL into a DOUBLE and Postgres into a NUMERIC, so the
-    engines legitimately disagree in the last bits of a float. Six places is
-    far tighter than any figure this tab renders and far looser than the noise.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, dict):
-        return {k: _comparable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_comparable(v) for v in value]
-    if hasattr(value, "as_tuple") or isinstance(value, float):
-        return round(float(value), 6)
-    return value
+    return comparable(value)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "name,kwargs", CALLS,
-    ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
-)
-async def test_both_engines_return_the_same_answer(
-    both_engines, monkeypatch, name, kwargs,
-):
-    duckdb_result, postgres_result = await _both(
-        both_engines, monkeypatch, name, kwargs,
+def _relative(value):
+    """Every date in an answer as days before `TODAY`: an ISO date within
+    1 000 days, and a daily trend label (`%d %b`) within 300, become `T-n`.
+    The literals were written so; everything else stands as it is."""
+    dates = {}
+    for n in range(1000):
+        dates.setdefault((TODAY - timedelta(days=n)).isoformat(), f"T-{n}")
+    labels = {}
+    for n in range(300):
+        labels.setdefault((TODAY - timedelta(days=n)).strftime("%d %b"), f"T-{n}")
+
+    def walk(v):
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, str):
+            if v in dates:
+                return dates[v]
+            if re.fullmatch(r"\d{2} [A-Z][a-z]{2}", v) and v in labels:
+                return labels[v]
+        return v
+
+    return walk(value)
+
+
+def _monthly_truth(days: int) -> dict:
+    """`get_inventory_trend(days, "monthly")` as the method's rule computes it
+    from `HISTORY`: the snapshots on or after `TODAY - days`, by calendar
+    month, each month's average quantity and reserve rounded to a unit and
+    its average value to the kopeck, labelled `%b %Y`."""
+    months: dict = {}
+    for day, qty, value, reserve, _skus in HISTORY:
+        if day >= TODAY - timedelta(days=days):
+            months.setdefault(date(day.year, day.month, 1), []).append(
+                (qty, value, reserve))
+    rows = [(month, months[month]) for month in sorted(months)]
+
+    def avg(points, i):
+        return Decimal(sum(p[i] for p in points)) / Decimal(len(points))
+
+    return {
+        "labels": [month.strftime("%b %Y") for month, _ in rows],
+        "quantity": [round(avg(points, 0)) for _, points in rows],
+        "value": [round(float(avg(points, 1)), 2) for _, points in rows],
+        "reserve": [round(avg(points, 2)) for _, points in rows],
+        "granularity": "monthly",
+        "periodDays": days,
+        "dataPoints": len(rows),
+    }
+
+
+GOLDEN = golden("inventory")
+LITERAL_CALLS = tuple(
+    (n, k) for n, k in CALLS if not (n == "get_inventory_trend"
+                                     and k.get("granularity") == "monthly"))
+
+
+class TestPostgresAnswersWhatDuckDBAnswered:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "name,kwargs", LITERAL_CALLS,
+        ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in LITERAL_CALLS],
     )
-    assert _comparable(postgres_result) == _comparable(duckdb_result)
+    async def test_the_whole_result_is_the_literal(self, in_postgres, name, kwargs):
+        answer = await getattr(in_postgres, name)(**kwargs)
+        assert _relative(_comparable(answer)) == GOLDEN[call_key(name, kwargs)], (
+            f"{name}{kwargs}: {answer!r}")
+
+    def test_every_literal_is_a_call_and_every_call_has_one(self):
+        assert set(GOLDEN) == {call_key(n, k) for n, k in LITERAL_CALLS}
+
+    @pytest.mark.asyncio
+    async def test_the_monthly_trend_is_the_rule_on_the_fixture(self, in_postgres):
+        """The one call whose answer moves with the calendar: the months the
+        history falls in depend on the day the suite runs."""
+        answer = await in_postgres.get_inventory_trend(days=90, granularity="monthly")
+        assert _comparable(answer) == _comparable(_monthly_truth(90))
+        assert answer["dataPoints"] >= 2, (
+            "the monthly buckets must span more than one month or the grouping "
+            "is not being compared at all")
 
 
 @pytest.mark.asyncio
-async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
-    """A comparison of two empty answers agrees about nothing. Every method
-    has to return something, and the awkward rows have to be reachable."""
-    summary, _ = await _both(both_engines, monkeypatch, "get_inventory_summary_v2", {})
+async def test_the_fixture_is_not_empty(in_postgres):
+    """A literal of an empty answer pins nothing. Every method has to return
+    something, and the awkward rows have to be reachable."""
+    summary = await in_postgres.get_inventory_summary_v2()
     statuses = {k: v["skuCount"] for k, v in summary["summary"].items()
                 if k != "total"}
     assert summary["summary"]["total"]["skuCount"] > 0
@@ -347,46 +345,37 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
     assert statuses["deadStock"] >= 1, "no dead stock: the thresholds are not biting"
     assert summary["categoryThresholds"], "v_category_velocity produced no rows"
 
-    deep, _ = await _both(both_engines, monkeypatch, "get_dead_stock_deep", {"limit": 5})
+    deep = await in_postgres.get_dead_stock_deep(limit=5)
     assert deep["items"], "no dead-stock items"
-    qualities = {i["costQuality"] for i in (await _both(
-        both_engines, monkeypatch, "get_all_skus_deep", {}))[0]}
+    qualities = {i["costQuality"] for i in (await in_postgres.get_all_skus_deep())}
     assert qualities == {"actual", "fallback"}, (
         f"both cost paths must be exercised, saw {qualities}")
 
-    turnover, _ = await _both(
-        both_engines, monkeypatch, "get_inventory_turnover", {"days": 30})
+    turnover = await in_postgres.get_inventory_turnover(days=30)
     assert turnover["turnover"]["totalRevenue"] > 0
     assert turnover["currentStock"]["valueSale"] > 0
 
-    trend, _ = await _both(
-        both_engines, monkeypatch, "get_inventory_trend",
-        {"days": 90, "granularity": "monthly"})
+    trend = await in_postgres.get_inventory_trend(days=90, granularity="monthly")
     assert len(trend["labels"]) >= 2, (
         "the monthly buckets must span more than one month or the grouping "
         "is not being compared at all")
-    daily, _ = await _both(
-        both_engines, monkeypatch, "get_inventory_trend",
-        {"days": 90, "granularity": "daily"})
+    daily = await in_postgres.get_inventory_trend(days=90, granularity="daily")
     assert len(daily["labels"]) == len(HISTORY)
 
-    average, _ = await _both(
-        both_engines, monkeypatch, "get_average_inventory", {"days": 90})
+    average = await in_postgres.get_average_inventory(days=90)
     assert average["dataPoints"] == len(HISTORY)
     assert "message" not in average, "the no-history branch is not what ran"
 
 
 @pytest.mark.asyncio
-async def test_the_summary_exercises_what_it_was_ported_for(both_engines, monkeypatch):
+async def test_the_summary_exercises_what_it_was_ported_for(in_postgres):
     """The three things `get_stock_summary` gained on the way to Postgres.
 
-    Comparing two engines proves they agree; it does not prove they agree
-    about anything interesting. These are the parts of the answer that were
-    new or changed, asserted on the DuckDB side and compared on both by the
-    parametrised test above.
+    A literal proves the answer is what it was; it does not prove the answer
+    says anything interesting. These are the parts of it that were new or
+    changed, asserted outright.
     """
-    summary, _ = await _both(
-        both_engines, monkeypatch, "get_stock_summary", {"limit": 5})
+    summary = await in_postgres.get_stock_summary(limit=5)
 
     # 1. The out-of-stock SKU reaches the count. It is the row that
     #    `gold.v_sku_status` would have silently dropped — that view is
@@ -400,23 +389,20 @@ async def test_the_summary_exercises_what_it_was_ported_for(both_engines, monkey
     #    that Postgres does not have.
     assert all(i["name"] for i in summary["topByQuantity"])
 
-    # 3. `lastSync` is the snapshot the rows were built in — the same instant
-    #    in both stores, because the replication carries the column rather
-    #    than restamping it. It used to read a `sync_metadata` key nothing has
+    # 3. `lastSync` is the snapshot the rows were built in — the instant the
+    #    rebuild stamped, carried rather than restamped. It used to read a `sync_metadata` key nothing has
     #    ever written, so it was NULL for the life of the feature.
     assert summary["lastSync"] == SNAPSHOT_AT.isoformat()
 
     # 4. The tie the fixture plants: S-11 and S-12 are both 3 units at 500, so
-    #    the low-stock list's ORDER BY has to break it on `offer_id` or the two
-    #    engines are free to disagree about which one a LIMIT keeps.
+    #    the low-stock list's ORDER BY has to break it on `offer_id` or the
+    #    engine is free to choose which one a LIMIT keeps.
     tied = [i["sku"] for i in summary["lowStock"] if i["sku"] in ("S-11", "S-12")]
     assert tied == ["S-11", "S-12"], tied
 
 
 @pytest.mark.asyncio
-async def test_postgres_answers_in_kyivs_day_whatever_its_session_says(
-    both_engines, monkeypatch,
-):
+async def test_postgres_answers_in_kyivs_day_whatever_its_session_says(in_postgres):
     """The bug this test exists for could not be caught by comparing engines.
 
     Under the gate both run in the same timezone, so both were right together.
@@ -461,15 +447,16 @@ async def test_postgres_answers_in_kyivs_day_whatever_its_session_says(
 
 
 @pytest.mark.asyncio
-async def test_the_gold_rollup_filter_is_load_bearing(both_engines, monkeypatch):
+async def test_the_gold_rollup_filter_is_load_bearing(in_postgres):
     """The fixture's Gold carries per-source rows as well as roll-ups, so a
     Postgres reader that forgot `source_id IS NULL` would double the revenue.
     Measured on production over 30 days before this hole existed: 11,107,040.50
-    against a true 5,553,520.25."""
-    duckdb_result, postgres_result = await _both(
-        both_engines, monkeypatch, "get_inventory_turnover", {"days": 30})
-    assert (postgres_result["turnover"]["totalRevenue"]
-            == duckdb_result["turnover"]["totalRevenue"])
+    against a true 5,553,520.25. The literal is DuckDB's, whose Gold had one
+    grain and could not double it."""
+    answer = await in_postgres.get_inventory_turnover(days=30)
+    recorded = GOLDEN[call_key("get_inventory_turnover", {"days": 30})]
+    assert (_comparable(answer["turnover"]["totalRevenue"])
+            == recorded["turnover"]["totalRevenue"])
     # And the fine rows really are there to be double-counted.
     from core import pg
 

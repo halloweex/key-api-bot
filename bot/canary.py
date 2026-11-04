@@ -828,9 +828,9 @@ def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
 # `duckdb` those page too, as `read_routed_to_duckdb`, and the watch reads them
 # as not clean.
 
-# The first words of the pages' lines. The soak check (deploy/stage4_soak/
-# 22_f1_read_fallbacks.sql) reads the line back out of a page by the words the
-# two share; a test holds the two equal.
+# The first words of the pages' lines, which a reader greps the journal by.
+# The soak's F1 read the line back out of a page by the words the two share,
+# until step 14's S14-02 retired it with the week it licensed.
 READ_FALLBACK_LINE = "reads served from DuckDB: "
 READ_ROUTED_LINE = "reads served from DuckDB uncounted: "
 READ_REFUSED_LINE = "reads refused with a 503: "
@@ -1265,8 +1265,8 @@ def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
 # `off`, so a web running `on`, today, writes no row at all.
 
 # The first words of the page's line: what a reader greps the journal by. The
-# week-of-silence soak check (deploy/stage4_soak/53_p4_week_of_silence.sql)
-# judges the page by its key and the watch below, never by these words.
+# week-of-silence soak check (P4, retired at step 14's S14-02 once the owner
+# closed the week) judged the page by its key and the watch below.
 DUCKDB_OPENED_LINE = "DuckDB opened while KS_DUCKDB=off: "
 
 # The watch row in `app.alert_series` (`core.alert_archive.record_watch`), and
@@ -1349,28 +1349,6 @@ def duckdb_silent(payload: Optional[dict]) -> Optional[bool]:
     if not isinstance(block, dict) or block.get("mode") != "off":
         return None
     return not block.get("opened_while_off")
-
-
-def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `goals_history` block: a KS_GOALS_HISTORY web refuses
-    (chain 7b). Since chain 7b-4 the variable is retired — unset and `silver`
-    both read Silver — so this is anything else, `bridge` included.
-
-    Critical, unlike the siblings above, and for `write_chain_flag_invalid`'s
-    reason: those run as duckdb and nothing fails, while this one raises at
-    every goal history read on purpose — a value naming a history that does
-    not exist must not be answered in silence — so the dashboard's goal
-    widget (`/goals/smart`), the other calculator pages under `/goals/` and
-    `POST /goals/recalculate` answer 500 and the Monday job fails, and none
-    of those pages anybody by itself (`GET /goals`, `/goals/history` and
-    setting a goal never read that history, and answer). An absent block is
-    not a failure; an older web publishes none.
-    """
-    block = (payload or {}).get("goals_history")
-    if isinstance(block, dict) and block.get("error"):
-        return [("goals_history_mode_invalid",
-                 f"goal history: {block['error']}")]
-    return []
 
 
 # `(field of /api/health's backups block, what it proves, the script that
@@ -1632,15 +1610,6 @@ async def run_canary(
         if held_back:
             severity = "critical"
 
-        # A KS_GOALS_HISTORY web refuses (anything but unset or silver since
-        # chain 7b-4): every goal history read raises, so this pages rather
-        # than warns.
-        goals_history_failures = check_goals_history_mode(payload)
-        for key, message in goals_history_failures:
-            fail(key, message)
-        if goals_history_failures:
-            severity = "critical"
-
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
         marks_failures = check_derivation_marks(payload)
@@ -1794,8 +1763,6 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     ("duckdb_mode_invalid",
      "Set KS_DUCKDB to on or off in .env, then recreate web"),
-    ("goals_history_mode_invalid",
-     "Set KS_GOALS_HISTORY=silver in .env and keep the line (an image from before 7b-4 reads it unset as the bridge), then recreate web; the calculators, smart goal and Monday job fail until then"),
     # Last: when an engine is down its own key names the cause, and a fallback
     # or a refusal is what that cause cost the pages. A route is a cause of
     # its own, and its lever is `.env`, so it goes first of the three.

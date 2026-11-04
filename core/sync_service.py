@@ -1190,12 +1190,12 @@ class SyncService:
         Meili sync are pushed — a no-op tick costs one MAX() query, not a full
         37K re-index. First run (no watermark) falls back to a full sync.
 
-        `KS_READ_SEARCH_INDEX` decides which store the index is built from.
-        Postgres keeps a watermark key of its own, because its stamp is
-        `mirrored_at` on a later clock than DuckDB's `synced_at` — see
-        `core/pg_search_index_read.py`. Everything downstream of the frames
-        (the `isoformat` calls, `to_dict`, the sanitiser, the index) is the same
-        code for both engines, which is what keeps the documents identical.
+        Built from Postgres, under its own watermark key
+        (`pg_search_index_read.WATERMARK_KEY`, `mirrored_at`'s clock) — see
+        `core/pg_search_index_read.py`. One engine since step 14's S14-07:
+        `KS_READ_SEARCH_INDEX` chose DuckDB's frames and its `meilisearch`
+        key before, and both went with S14-07; the documents are the ones
+        both engines rendered alike.
 
         Returns:
             Dict with counts for each synced entity
@@ -1208,22 +1208,14 @@ class SyncService:
         try:
             meili = get_meili_client()
 
-            # The engine is chosen once: the watermark belongs to it. Only what
-            # the index READS moves — the watermark is still `sync_metadata`
-            # bookkeeping, written by DuckDB until chain 3 writes Postgres,
-            # which takes the Postgres one with it (OD-15; the store's getter
-            # and setter route it, `pg_orders_write.CHAIN_SYNC_KEYS`).
-            # Under KS_READ_FALLBACK=off a switch with no address is refused
-            # rather than read from DuckDB, before anything is indexed or the
-            # watermark is touched; the handlers below say who answers it.
-            read_fallback.no_address("search_index", pg_index)
-            use_pg = pg_index.enabled() and pg_index.available()
-            watermark_key = pg_index.WATERMARK_KEY if use_pg else "meilisearch"
+            # The watermark is chain 3's sync key since OD-15
+            # (`pg_orders_write.CHAIN_SYNC_KEYS`): the store's getter and
+            # setter keep it in `meta.chain_watermarks`.
+            watermark_key = pg_index.WATERMARK_KEY
             last_sync = await self.store.get_last_sync_time(watermark_key)
 
             # If nothing has been stamped since the watermark, skip entirely.
-            high_watermark = (await pg_index.high_watermark() if use_pg
-                              else await self._meili_high_watermark())
+            high_watermark = await pg_index.high_watermark()
             if last_sync and high_watermark and high_watermark <= last_sync:
                 logger.debug("Meilisearch sync: no changes since %s, skipping", last_sync)
                 return stats
@@ -1233,14 +1225,13 @@ class SyncService:
             logger.info(
                 "Syncing data to Meilisearch... (%s, from %s)",
                 "full" if full_sync else f"incremental since {last_sync.isoformat()}",
-                "postgres" if use_pg else "duckdb",
+                "postgres",
             )
 
             # ── Buyers ─────────────────────────────────────────────────────
             # Incremental: only buyers whose row was re-synced (profile edit)
             # OR whose order activity was re-synced (order_count changed).
-            buyers_df = (await pg_index.buyers_frame(since) if use_pg
-                         else await self._meili_buyers_frame(since))
+            buyers_df = await pg_index.buyers_frame(since)
             if not buyers_df.empty:
                 if 'created_at' in buyers_df.columns:
                     buyers_df['created_at'] = buyers_df['created_at'].apply(
@@ -1252,9 +1243,7 @@ class SyncService:
             MEILI_CHUNK = 10_000
             offset = 0
             while True:
-                orders_df = (
-                    await pg_index.orders_frame(since, MEILI_CHUNK, offset) if use_pg
-                    else await self._meili_orders_frame(since, MEILI_CHUNK, offset))
+                orders_df = await pg_index.orders_frame(since, MEILI_CHUNK, offset)
 
                 if orders_df.empty:
                     break
@@ -1274,8 +1263,7 @@ class SyncService:
                     break
 
             # ── Products ───────────────────────────────────────────────────
-            products_df = (await pg_index.products_frame(since) if use_pg
-                           else await self._meili_products_frame(since))
+            products_df = await pg_index.products_frame(since)
             if not products_df.empty:
                 stats["products"] = await meili.index_products(products_df.to_dict('records'))
 
@@ -1296,100 +1284,6 @@ class SyncService:
         except Exception as e:
             logger.error(f"Meilisearch sync error: {e}")
             return stats
-
-    # ── The DuckDB reads behind the Meilisearch index ────────────────────────
-    # Moved here verbatim — the SQL is copied, not retyped — so that the index
-    # method can choose an engine in one line per entity and the processing
-    # after it stays identical for both. Their Postgres twins, and the reasons
-    # the frames must match down to the dtype, are in
-    # `core/pg_search_index_read.py`.
-
-    async def _meili_high_watermark(self):
-        async with self.store.connection() as conn:
-            hw_row = conn.execute("""
-                    SELECT MAX(ts) FROM (
-                        SELECT MAX(synced_at) AS ts FROM orders
-                        UNION ALL SELECT MAX(synced_at) FROM buyers
-                        UNION ALL SELECT MAX(synced_at) FROM products
-                    )
-                """).fetchone()
-        return hw_row[0] if hw_row else None
-
-    async def _meili_buyers_frame(self, since):
-        async with self.store.connection() as conn:
-            if since is None:
-                return conn.execute("""
-                        SELECT
-                            b.id, b.full_name, b.phone, b.email, b.city, b.note,
-                            b.manager_id, b.created_at,
-                            COUNT(DISTINCT o.id) as order_count
-                        FROM buyers b
-                        LEFT JOIN silver_orders o ON b.id = o.buyer_id AND NOT o.is_return
-                        GROUP BY b.id, b.full_name, b.phone, b.email, b.city,
-                                 b.note, b.manager_id, b.created_at
-                    """).fetchdf()
-            return conn.execute("""
-                        WITH touched AS (
-                            SELECT id FROM buyers WHERE synced_at > ?
-                            UNION
-                            SELECT DISTINCT buyer_id AS id FROM orders
-                            WHERE synced_at > ? AND buyer_id IS NOT NULL
-                        )
-                        SELECT
-                            b.id, b.full_name, b.phone, b.email, b.city, b.note,
-                            b.manager_id, b.created_at,
-                            COUNT(DISTINCT o.id) as order_count
-                        FROM buyers b
-                        JOIN touched t ON t.id = b.id
-                        LEFT JOIN silver_orders o ON b.id = o.buyer_id AND NOT o.is_return
-                        GROUP BY b.id, b.full_name, b.phone, b.email, b.city,
-                                 b.note, b.manager_id, b.created_at
-                    """, [since, since]).fetchdf()
-
-    async def _meili_orders_frame(self, since, limit: int, offset: int):
-        async with self.store.connection() as conn:
-            if since is None:
-                return conn.execute("""
-                            SELECT
-                                o.id, o.grand_total, o.ordered_at, o.status_id,
-                                o.source_name, o.buyer_id, o.order_date,
-                                b.full_name as buyer_name
-                            FROM silver_orders o
-                            LEFT JOIN buyers b ON o.buyer_id = b.id
-                            ORDER BY o.ordered_at DESC
-                            LIMIT ? OFFSET ?
-                        """, [limit, offset]).fetchdf()
-            return conn.execute("""
-                            SELECT
-                                o.id, o.grand_total, o.ordered_at, o.status_id,
-                                o.source_name, o.buyer_id, o.order_date,
-                                b.full_name as buyer_name
-                            FROM silver_orders o
-                            LEFT JOIN orders src ON src.id = o.id
-                            LEFT JOIN buyers b ON o.buyer_id = b.id
-                            WHERE src.synced_at > ? OR b.synced_at > ?
-                            ORDER BY o.ordered_at DESC
-                            LIMIT ? OFFSET ?
-                        """, [since, since, limit, offset]).fetchdf()
-
-    async def _meili_products_frame(self, since):
-        async with self.store.connection() as conn:
-            if since is None:
-                return conn.execute("""
-                        SELECT
-                            p.id, p.name, p.sku, p.brand, p.price, p.category_id,
-                            c.name as category_name
-                        FROM products p
-                        LEFT JOIN categories c ON p.category_id = c.id
-                    """).fetchdf()
-            return conn.execute("""
-                        SELECT
-                            p.id, p.name, p.sku, p.brand, p.price, p.category_id,
-                            c.name as category_name
-                        FROM products p
-                        LEFT JOIN categories c ON p.category_id = c.id
-                        WHERE p.synced_at > ?
-                    """, [since]).fetchdf()
 
     async def _catalogue_full_sync_failed(
             self, stats: Dict[str, Any], entity: str, exc: BaseException) -> None:
