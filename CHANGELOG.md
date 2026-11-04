@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.308
+
+- WIP: S14-07 merge review — CLAUDE.md says what the writer allowance covers
+- WIP: S14-07 merge review — the writer allowance is judged per function, not per module
+- WIP: S14-07 merge review — CLAUDE.md's guard sentence reads as four short ones
+- WIP: S14-07 merge — CLAUDE.md's new sentence names its subject
+- WIP: S14-07 merge — the sweep's docstring names the third set
+- WIP: S14-07 merge — CLAUDE.md says what holds S14-07's readers to their routers
+- WIP: S14-07 merge — a clean helper's ClickHouse calls are allowed; the sweep names a mutation it sees
+- WIP: S14-07 merge — the round-the-router walk holds S14-07's files; its pins read the tree
+- WIP: S14-07 merge — the base's guards read ClickHouse and hold S14-07's routes
+- WIP: S14-07 review 2: misconfigured is no longer said to be what is refused
+- WIP: S14-07 review 2: chain 3's paragraph keeps its last_sync_meilisearch sentence
+- WIP: S14-07 review: texts the removed routing left behind say what is true
+- WIP: S14-07 review: chain 7a's failed read is pinned as a counted 503 and a page
+- S14-07 CLAUDE.md says what a lost DSN line is for the readers with no fallback
+- WIP: S14-07 the no-DSN HTTP case starts from an unasked expenses latch
+- WIP: S14-07 the typecheck baseline shrinks with the DuckDB tails (1090 -> 1084)
+- WIP: S14-07 CLAUDE.md says the third set reads one engine
+- WIP: S14-07 the dialects lose what has no user left
+- WIP: S14-07 the goal tests' DuckDB history seed goes with its last user
+- WIP: S14-07 the walks over switches, goal reads and ways in
+- WIP: S14-07 the date-params sweep reads /expenses from Postgres
+- WIP: S14-07 the consumers walk derives the two left
+- WIP: S14-07 the fallback walks know no switch is left
+- WIP: S14-07 the consumers of a refusal meet the routers that refuse
+- WIP: S14-07 the readers' tests follow one engine
+- WIP: S14-07 the routers' unit tests hold one engine
+- WIP: S14-07 the report tests seed Postgres' Gold and Silver
+- WIP: S14-07 two-engine tests become literals; the goal tests seed Postgres
+- WIP: S14-07 the third set of read routers reads one engine
+- WIP: S14-07 golden literals recorded on the base
+
+
 ## 3.0.307
 
 - WIP: S14-06 merge review — rule 5's engine names are a required argument
