@@ -3,6 +3,7 @@ from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 
+from core.filters import parse_period
 from web.services import dashboard_service
 from web.routes.auth import require_permission
 from ._deps import (
@@ -91,45 +92,37 @@ async def get_profit_analysis(
 async def get_expenses(
     request: Request,
     period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     _=Depends(require_permission("expenses", "view")),
 ):
-    """Get manual expenses list with optional filters. Requires expenses:view."""
-    from datetime import date, timedelta, datetime
-    from zoneinfo import ZoneInfo
+    """Get manual expenses list with optional filters. Requires expenses:view.
+
+    The window is `parse_period`'s, as on every other route. This route
+    carried a copy of its own that knew six of the eight periods and took no
+    dates, so `last_7_days`, `last_28_days` and a custom range listed, and
+    summed, every expense ever typed. With no period and no pair of dates it
+    is the whole list, as it always was. `custom` is what a page loaded
+    before this fix sends for a custom range: the dates decide, and without
+    them it is the whole list too.
+    """
+    shortcut = None if period == "custom" else period
+    start = end = None
+    if shortcut or (start_date and end_date):
+        try:
+            validate_period(shortcut)
+            window = parse_period(shortcut, start_date, end_date)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        start, end = window.start, window.end
 
     store = await get_store()
-
-    start_date = None
-    end_date = None
-
-    if period:
-        tz = ZoneInfo("Europe/Kyiv")
-        today = datetime.now(tz).date()
-
-        if period == "today":
-            start_date = end_date = today
-        elif period == "yesterday":
-            start_date = end_date = today - timedelta(days=1)
-        elif period == "week":
-            start_date = today - timedelta(days=today.weekday())
-            end_date = today
-        elif period == "last_week":
-            end_date = today - timedelta(days=today.weekday() + 1)
-            start_date = end_date - timedelta(days=6)
-        elif period == "month":
-            start_date = today.replace(day=1)
-            end_date = today
-        elif period == "last_month":
-            first_of_month = today.replace(day=1)
-            end_date = first_of_month - timedelta(days=1)
-            start_date = end_date.replace(day=1)
-
     expenses = await store.list_expenses(
-        start_date=start_date, end_date=end_date, category=category, limit=limit,
+        start_date=start, end_date=end, category=category, limit=limit,
     )
-    summary = await store.get_expenses_summary(start_date=start_date, end_date=end_date)
+    summary = await store.get_expenses_summary(start_date=start, end_date=end)
 
     return {"expenses": expenses, "summary": summary, "period": period, "category": category}
 
