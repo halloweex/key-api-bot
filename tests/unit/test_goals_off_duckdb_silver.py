@@ -23,15 +23,24 @@ stays here proves the Silver history and what never depended on the bridge:
     Python. The last replaces the comparison with the bridge's own bodies,
     which was the only independent answer the Silver bodies had.
 
-`tests/unit/test_goals_history_silver.py` holds the Silver selection and the
-retired switch; the two-engine half is in
-`tests/integration/test_goals_history_two_engines.py`.
+ONE ENGINE SINCE STEP 14 (S14-07). Every goal read is Postgres'
+(`GoalsMixin._goals_run`), so every test here that computes a goal seeds the
+history in Postgres — Bronze, from which Postgres derives Silver and Gold, the
+production path (`_seed_history_pg`) — and asks a store whose DuckDB
+connection is a trap. The stored goal tables are Postgres' too
+(`app.growth_metrics`, chain 7b-3's writer). The arithmetic written out in
+Python below is unchanged: it was, and is, the one independent answer the
+Silver bodies have. Skipped without `KS_PG_DSN`, which CI supplies.
+
+`tests/unit/test_goals_history_silver.py` holds the Silver selection; the
+literal half is in `tests/integration/test_goals_history_two_engines.py`.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
+import os
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
@@ -48,22 +57,15 @@ from core.duckdb_constants import (
     KNOWN_SALES_TYPES,
     RETAIL_MANAGER_IDS,
 )
-from core.duckdb_store import DuckDBStore
 from core.models import OrderStatus
+from tests.integration.pg_tab_seed import (
+    derive, seed, store_that_never_reaches_duckdb, tab_in_postgres,
+)
 
-
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the goal calculators over Silver, not where the
-    goal and forecast tables live, and it was written against DuckDB. So
-    this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_goals_write, pg_forecast_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_forecast_write)
+DSN = os.getenv("KS_PG_DSN")
+# The skip CI's last step greps for: it fails the job if any test takes it.
+needs_postgres = pytest.mark.skipif(
+    not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -156,16 +158,6 @@ EXPECTED = {
 }
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "goals.duckdb")
-    await s.connect()
-    try:
-        yield s
-    finally:
-        await s.close()
-
-
 # ─── Three years of history, for the calculators ───────────────────────────
 
 # Production's shape: the first order is 2023-12-02, so there are two full
@@ -198,25 +190,50 @@ def _history_rows():
     return rows
 
 
-async def _seed_history(store) -> None:
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM manager_classifications")
-        conn.execute("DELETE FROM managers")
-        conn.executemany(
-            "INSERT INTO managers (id, name, is_retail) VALUES (?, 'm', ?)",
-            [(RETAIL, True), (B2B_MANAGER_ID, False)])
-        conn.executemany(
-            "INSERT INTO manager_classifications "
-            "(manager_id, is_retail, valid_from, valid_to) VALUES (?, ?, ?, NULL)",
-            [(RETAIL, True, date(1970, 1, 1)), (B2B_MANAGER_ID, False, date(1970, 1, 1))])
-        conn.executemany(
-            "INSERT INTO orders (id, source_id, status_id, grand_total, "
-            "ordered_at, buyer_id, manager_id) VALUES (?, ?, ?, ?, ?, 1, ?)",
-            _history_rows())
-        conn.execute("DELETE FROM seasonal_indices")
-        conn.execute("DELETE FROM weekly_patterns")
-        conn.execute("DELETE FROM growth_metrics")
-    await store.refresh_warehouse_layers(trigger="manual")
+async def _seed_history_pg(conn, pool) -> None:
+    """The history in Postgres, as the sync lands it: Bronze orders, the
+    two managers and their classification — Postgres derives Silver and Gold
+    itself (`tests.integration.pg_tab_seed.derive`), the production path."""
+    await conn.execute("DELETE FROM app.manager_classifications")
+    await conn.execute("DELETE FROM bronze.managers")
+    await conn.executemany(
+        "INSERT INTO bronze.managers (id, name, is_retail) VALUES ($1, 'm', $2)",
+        [(RETAIL, True), (B2B_MANAGER_ID, False)])
+    await conn.executemany(
+        "INSERT INTO app.manager_classifications "
+        "(manager_id, is_retail, valid_from, valid_to) VALUES ($1, $2, $3, NULL)",
+        [(RETAIL, True, date(1970, 1, 1)), (B2B_MANAGER_ID, False, date(1970, 1, 1))])
+    await seed(conn, orders=[
+        (oid, src, status, total, when, 1, mgr, None)
+        for oid, src, status, total, when, mgr in _history_rows()])
+    for table in ("app.seasonal_indices", "app.weekly_patterns", "app.growth_metrics"):
+        await conn.execute(f"DELETE FROM {table}")
+    await derive(pool)
+
+
+async def _nothing(conn, pool) -> None:
+    """No history at all: every table `tab_in_postgres` clears, left empty."""
+
+
+@pytest_asyncio.fixture
+async def empty_pg(tmp_path, monkeypatch):
+    """An empty Postgres, and a store whose DuckDB connection is a trap:
+    `(store, pool)`."""
+    async with tab_in_postgres(DSN, monkeypatch, _nothing) as pool:
+        yield store_that_never_reaches_duckdb(
+            tmp_path, monkeypatch, "the goal calculators"), pool
+
+
+@pytest_asyncio.fixture
+async def history_pg(tmp_path, monkeypatch):
+    """The three-year history in Postgres, Silver and Gold derived from it,
+    and a store whose DuckDB connection is a trap: `(store, pool)`."""
+    async with tab_in_postgres(DSN, monkeypatch, _seed_history_pg) as pool:
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") > 1500, (
+                "the history did not derive into Silver")
+        yield store_that_never_reaches_duckdb(
+            tmp_path, monkeypatch, "the goal calculators"), pool
 
 
 def _settled(value):
@@ -259,52 +276,54 @@ async def _smart(store, sales_type):
         store.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
 
 
+@needs_postgres
 class TestAnEmptyHistoryLeavesTheStoredRateAlone:
     STORED = 0.2345
 
-    async def _stored_yoy(self, store):
-        async with store.connection() as conn:
-            row = conn.execute(
-                "SELECT value, sample_size FROM growth_metrics "
-                "WHERE metric_type = 'yoy_overall'").fetchone()
+    async def _stored_yoy(self, pool):
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value, sample_size FROM app.growth_metrics "
+                "WHERE metric_type = 'yoy_overall'")
         return None if row is None else (float(row[0]), row[1])
+
+    async def _store_a_measured_rate(self, pool):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM app.growth_metrics WHERE metric_type = 'yoy_overall'")
+            await conn.execute(
+                "INSERT INTO app.growth_metrics (metric_type, value, sample_size, "
+                "updated_at) VALUES ('yoy_overall', $1, 3, now())", self.STORED)
 
     # Through `recalculate_goal_tables`, the one writer since chain 7b-1: the
     # calculator itself stores nothing any more, so asking it would pass the
     # first of these by writing nothing at all.
 
     @pytest.mark.asyncio
-    async def test_the_placeholder_does_not_overwrite_a_measured_rate(self, store):
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM growth_metrics")
-            conn.execute(
-                "INSERT INTO growth_metrics (metric_type, value, sample_size) "
-                "VALUES ('yoy_overall', ?, 3)", [self.STORED])
+    async def test_the_placeholder_does_not_overwrite_a_measured_rate(self, empty_pg):
+        store, pool = empty_pg
+        await self._store_a_measured_rate(pool)
 
         tables = await store.recalculate_goal_tables(include_weekly=False)
         result = tables["yoy"]
 
         assert result["sample_size"] == 0 and result["overall_yoy"] == 0.10, (
             "the returned value is unchanged — only what is persisted is")
-        assert await self._stored_yoy(store) == (self.STORED, 3)
+        assert await self._stored_yoy(pool) == (self.STORED, 3)
 
     @pytest.mark.asyncio
-    async def test_a_first_run_still_writes_the_placeholder(self, store):
+    async def test_a_first_run_still_writes_the_placeholder(self, empty_pg):
         """Nothing better to keep: behaviour before DN-12, unchanged."""
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM growth_metrics")
+        store, pool = empty_pg
         await store.recalculate_goal_tables(include_weekly=False)
-        assert await self._stored_yoy(store) == (0.10, 0)
+        assert await self._stored_yoy(pool) == (0.10, 0)
 
     @pytest.mark.asyncio
-    async def test_a_real_history_still_overwrites(self, store):
-        await _seed_history(store)
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO growth_metrics (metric_type, value, sample_size) "
-                "VALUES ('yoy_overall', ?, 3)", [self.STORED])
+    async def test_a_real_history_still_overwrites(self, history_pg):
+        store, pool = history_pg
+        await self._store_a_measured_rate(pool)
         result = (await store.recalculate_goal_tables(include_weekly=False))["yoy"]
-        stored = await self._stored_yoy(store)
+        stored = await self._stored_yoy(pool)
         assert result["sample_size"] >= 1
         assert stored[0] == pytest.approx(float(result["overall_yoy"]), abs=1e-4)
         assert stored[0] != self.STORED
@@ -351,35 +370,39 @@ EXPECTED_SIGNAL = {
 }
 
 
-async def _seed_forecast(store) -> None:
-    async with store.connection() as conn:
-        conn.executemany(
-            "INSERT INTO orders (id, source_id, status_id, grand_total, "
-            "ordered_at, buyer_id, manager_id) VALUES (?, 1, 1, ?, ?, 1, ?)",
-            [(oid, total, _kyiv_noon(day), mgr)
-             for oid, total, day, mgr in FORECAST_ORDERS])
-        conn.executemany(
-            "INSERT INTO revenue_predictions (prediction_date, sales_type, "
-            "predicted_revenue, model_mae, model_mape, model_wape) "
-            "VALUES (?, ?, ?, 1, 1, 1)", FORECAST_PREDICTIONS)
-    await store.refresh_warehouse_layers(trigger="manual")
-    async with store.connection() as conn:
-        gold = conn.execute(
-            "SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue "
-            "WHERE date BETWEEN '2025-03-01' AND '2025-03-31'").fetchone()[0]
+async def _seed_forecast(conn, pool) -> None:
+    """The orders landed in Bronze — Postgres derives Gold from them — and the
+    stored forecast in `app.revenue_predictions`."""
+    await seed(conn, orders=[
+        (oid, 1, 1, total, _kyiv_noon(day), 1, mgr, None)
+        for oid, total, day, mgr in FORECAST_ORDERS])
+    await derive(pool)
+    await conn.executemany(
+        "INSERT INTO app.revenue_predictions (prediction_date, sales_type, "
+        "predicted_revenue, model_mae, model_mape, model_wape) "
+        "VALUES ($1, $2, $3, 1, 1, 1)", FORECAST_PREDICTIONS)
+    gold = await conn.fetchval(
+        "SELECT COALESCE(SUM(revenue), 0) FROM gold.daily_revenue "
+        "WHERE source_id IS NULL AND date BETWEEN '2025-03-01' AND '2025-03-31'")
     assert float(gold) == 6500.0, "Gold was not built from the seed — nothing is measured"
 
 
+@pytest_asyncio.fixture
+async def forecast_pg(tmp_path, monkeypatch):
+    async with tab_in_postgres(DSN, monkeypatch, _seed_forecast):
+        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the forecast signal")
+
+
 class TestTheForecastSignal:
+    @needs_postgres
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", sorted(EXPECTED_SIGNAL))
     async def test_gold_through_yesterday_plus_predictions_from_today(
-        self, store, monkeypatch, sales_type,
+        self, forecast_pg, sales_type,
     ):
         """Today's order belongs to the predicted half and the 10th's
         prediction to the actual one — each counted once, in its own half."""
-        monkeypatch.delenv("KS_READ_GOALS", raising=False)
-        await _seed_forecast(store)
+        store = forecast_pg
         with patch("core.repositories.goals.datetime", _FrozenClock):
             got = await store._get_ml_forecast_total(
                 FORECAST_TODAY.year, FORECAST_TODAY.month, sales_type)
@@ -387,20 +410,20 @@ class TestTheForecastSignal:
 
     @pytest.mark.asyncio
     async def test_a_read_that_fails_is_left_out_and_said_at_warning(
-        self, store, monkeypatch, caplog,
+        self, tmp_path, monkeypatch, caplog,
     ):
         """The goal is then computed from the other two signals. At DEBUG
         nothing said so; that is a different goal nobody was told about."""
-        monkeypatch.delenv("KS_READ_GOALS", raising=False)
+        store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the forecast signal")
         caplog.set_level(logging.DEBUG, logger="core.repositories.goals")
         with patch.object(type(store), "_goals_run",
-                          new=AsyncMock(side_effect=RuntimeError("duckdb is gone"))):
+                          new=AsyncMock(side_effect=RuntimeError("postgres is gone"))):
             got = await store._get_ml_forecast_total(2025, 3, "retail")
         assert got == 0.0
         warned = [r for r in caplog.records
                   if r.name == "core.repositories.goals"
                   and r.levelno == logging.WARNING]
-        assert warned and "duckdb is gone" in warned[0].getMessage()
+        assert warned and "postgres is gone" in warned[0].getMessage()
 
 
 # ─── What the smart goal narrows to, in written-out numbers ─────────────────
@@ -485,14 +508,15 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
         assert 0.10 < _expected_cap("retail", month) < 0.50, (
             "a clamped cap cannot show a filter being lost")
 
+    @needs_postgres
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
     async def test_last_year_the_recent_months_and_the_cap(
-        self, store, sales_type,
+        self, history_pg, sales_type,
     ):
         """Numbers written out here, so a Silver body that lost its filter
         fails as a bridge one did (mutations x1, x2 and cap)."""
-        await _seed_history(store)
+        store, _pool = history_pg
         monthly = (await _smart(store, sales_type))["monthly"]
         year, month = self.TARGET
         assert monthly["lastYearRevenue"] == pytest.approx(
@@ -502,11 +526,12 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
         assert monthly["growthCap"] == pytest.approx(
             _expected_cap(sales_type, month), abs=1e-4)
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_the_cap_for_every_month(self, store):
+    async def test_the_cap_for_every_month(self, history_pg):
         """December has three years in the fixture and so two pairs — the one
         month where the standard deviation is not zero."""
-        await _seed_history(store)
+        store, _pool = history_pg
         caps = [await store._dynamic_growth_cap(m, "retail")
                 for m in range(1, 13)]
         assert caps == pytest.approx(
@@ -659,10 +684,11 @@ class TestEveryCalculatorInWrittenOutNumbers:
                       if m == 12 and n >= 25) == [2023, 2024, 2025]
         assert _expected_seasonality("internal") == {}, "no internal orders"
 
+    @needs_postgres
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", [*KNOWN_SALES_TYPES, "all"])
-    async def test_the_calculators(self, store, sales_type):
-        await _seed_history(store)
+    async def test_the_calculators(self, history_pg, sales_type):
+        store, _pool = history_pg
         seasonal = await store.calculate_seasonality_indices(sales_type)
         yoy = await store.calculate_yoy_growth(sales_type)
         weekly = await store.calculate_weekly_patterns(sales_type)

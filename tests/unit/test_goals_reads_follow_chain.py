@@ -1,4 +1,5 @@
-"""Chain 7a's reads follow the chain, not the page's read flag (DN-25 review).
+"""Chain 7a's reads follow the chain, not the page's read flag (DN-25 review)
+— and since step 14's S14-07, every goal read goes to Postgres.
 
 The first version of the goals writer moved the write and left every read of
 `app.revenue_goals` on `KS_READ_GOALS` and `KS_READ_MARKETING`, with "both at
@@ -309,14 +310,20 @@ class TestEveryGoalReadIsHandedToARouterThatAsks:
         _routers, _sites, stray = _walk(chain)
         assert not stray, f"{CHAINS[chain][0]} used where the walk cannot follow it: {stray}"
 
-    def test_a_router_asking_only_the_other_chain_does_not_pass(self):
-        """`_goal_tables_run` asks 7b-3's question and still has a DuckDB
-        tail. Were a goal read handed to it, 7a's walk must name it — the
-        qualification is the point. (`_marketing_run` asked 7a's alone until
-        step 14's S14-05 took its tail; a router with none passes for every
-        chain, below.)"""
-        routers, _sites, _stray = _walk("pg_goals_write")
-        assert "_goal_tables_run" not in routers
+    @pytest.mark.parametrize("chain", sorted(CHAINS))
+    def test_every_goal_read_goes_to_postgres(self, chain):
+        """Since step 14's S14-07 every router a goal statement is handed to
+        has no DuckDB tail and refuses a failure — `_goals_run`,
+        `_goal_tables_run`, `_marketing_run` — so every read of chain 7a's
+        and 7b-3's tables goes to Postgres whatever any flag or chain says.
+        Until then `_goal_tables_run` asked 7b-3's question and kept a
+        DuckDB tail, and the test of that qualification went with it.
+        Mutation: give any of them a DuckDB tail again."""
+        _routers, sites, _stray = _walk(chain)
+        postgres_only = _postgres_only_routers()
+        tailed = [(rel, line, name) for rel, line, name in sites
+                  if name not in postgres_only]
+        assert sites and not tailed, tailed
 
     def test_a_router_passes_without_asking_only_when_nothing_reaches_duckdb(self):
         """The exemption bites: the same body with a DuckDB tail is not one."""

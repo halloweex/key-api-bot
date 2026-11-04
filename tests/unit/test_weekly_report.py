@@ -5,16 +5,28 @@ the delivery window has to be the same all week or a missed Monday drops the
 week entirely; the decomposition has to be exact or the two effects will not
 add up to the headline; and product names carrying a bare `&` have to be
 escaped or Telegram rejects the whole message as unparseable entities.
+
+ONE ENGINE SINCE STEP 14 (S14-07). The report reads Postgres' Gold and
+Silver and nothing else (`core.weekly_report._weekly_run`), so the tests that
+seed a warehouse seed Postgres — `gold.daily_revenue` roll-up rows,
+`silver.orders`, `bronze.order_products` under `silver.order_lines` — and are
+skipped without `KS_PG_DSN`, which CI supplies. The send ledger stays in the
+DuckDB store under the test (`_chains_on_duckdb`) until its DuckDB branch
+goes.
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+import os
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from contextlib import asynccontextmanager
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
+)
 from core.weekly_report import (
     MIN_BASELINE_WEEKS,
     ProductMove,
@@ -242,52 +254,62 @@ class TestFormatting:
 
 # ─── The reads ──────────────────────────────────────────────────────────────
 
-class _Held:
-    """A `store` that hands back a connection the test already holds.
+DSN = os.getenv("KS_PG_DSN")
 
-    The reads take a store and open their own connection now, because
-    `KS_READ_WEEKLY` routes them. These tests seed and assert inside one
-    `async with store.connection()` block, and the store lock is not
-    reentrant — passing the real store from in there would hang rather than
-    fail. This yields the open connection instead, so the block keeps its
-    shape and the test still exercises the real DuckDB body.
-    """
 
-    def __init__(self, conn):
-        self._conn = conn
+async def _nothing(conn, pool) -> None:
+    """An empty warehouse: every table `tab_in_postgres` clears, left so."""
 
-    @asynccontextmanager
-    async def connection(self):
-        yield self._conn
+
+@pytest_asyncio.fixture
+async def pg(monkeypatch):
+    """A Postgres warehouse, emptied, that `core.pg.get_pool` answers with."""
+    async with tab_in_postgres(DSN, monkeypatch, _nothing) as pool:
+        yield pool
+
+
+@pytest.fixture
+def reads(tmp_path, monkeypatch):
+    """The `store` a read is handed: never connected, its DuckDB connection a
+    trap — the report's reads ask Postgres and nothing else."""
+    return store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the weekly report")
 
 
 async def _store(tmp_path: Path) -> DuckDBStore:
+    """The DuckDB store the send ledger lives in (`_chains_on_duckdb`)."""
     s = DuckDBStore(db_path=tmp_path / "weekly.duckdb")
     await s.connect()
     return s
 
 
-def _gold_day(conn, day: date, revenue: float, orders: int, sales_type="retail"):
-    conn.execute(
-        "INSERT OR REPLACE INTO gold_daily_revenue "
-        "(date, sales_type, revenue, orders_count) VALUES (?, ?, ?, ?)",
-        [day, sales_type, revenue, orders],
-    )
+async def _gold_day(conn, day: date, revenue: float, orders: int, sales_type="retail"):
+    """One roll-up cell of Postgres' Gold (`source_id IS NULL`)."""
+    await conn.execute(
+        "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+        " orders_count, unique_customers, new_customers, returning_customers,"
+        " returns_count, returns_revenue, avg_order_value)"
+        " VALUES ($1, $2, NULL, $3, $4, 0, 0, 0, 0, 0, 0)"
+        " ON CONFLICT ON CONSTRAINT gold_daily_revenue_cell DO UPDATE"
+        " SET revenue = EXCLUDED.revenue, orders_count = EXCLUDED.orders_count",
+        day, sales_type, revenue, orders)
 
 
-def _silver_order(conn, oid: int, day: date, total: float, is_new: bool,
-                  sales_type="retail", is_return=False):
-    conn.execute(
-        "INSERT OR REPLACE INTO silver_orders "
-        "(id, source_id, status_id, grand_total, order_date, is_return, "
-        " sales_type, is_active_source, source_name, is_new_customer) "
-        "VALUES (?, 1, 1, ?, ?, ?, ?, TRUE, 'Instagram', ?)",
-        [oid, total, day, is_return, sales_type, is_new],
-    )
+async def _silver_order(conn, oid: int, day: date, total: float, is_new: bool,
+                        sales_type="retail", is_return=False):
+    await conn.execute(
+        "INSERT INTO silver.orders (id, source_id, status_id, grand_total,"
+        " ordered_at, order_date, is_return, sales_type, is_active_source,"
+        " source_name, is_new_customer)"
+        " VALUES ($1, 1, 1, $2, $3, $4, $5, $6, TRUE, 'Instagram', $7)"
+        " ON CONFLICT (id) DO UPDATE SET grand_total = EXCLUDED.grand_total,"
+        " order_date = EXCLUDED.order_date, is_return = EXCLUDED.is_return,"
+        " sales_type = EXCLUDED.sales_type, is_new_customer = EXCLUDED.is_new_customer",
+        oid, total, datetime(day.year, day.month, day.day, 9, tzinfo=timezone.utc),
+        day, is_return, sales_type, is_new)
 
 
-def _gold_product(conn, day: date, pid: int, name: str, revenue: float,
-                  sales_type="retail"):
+async def _gold_product(conn, day: date, pid: int, name: str, revenue: float,
+                        sales_type="retail"):
     """A product's revenue on a day, seeded at the order-lines level.
 
     It seeded `gold_daily_products` until that layer was retired; the report
@@ -299,155 +321,131 @@ def _gold_product(conn, day: date, pid: int, name: str, revenue: float,
     through to this one. That is deliberate: it exercises the fallback that
     covers the 8.2 % of production lines with no `product_id`.
     """
-    conn.execute(
-        "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,"
-        " buyer_id) VALUES (?, 1, 1, ?, ?, 9)",
-        [900_000 + pid * 100 + day.toordinal() % 100, revenue, day],
-    )
     oid = 900_000 + pid * 100 + day.toordinal() % 100
-    conn.execute(
-        "INSERT INTO silver_orders (id, source_id, status_id, grand_total,"
+    await conn.execute(
+        "INSERT INTO silver.orders (id, source_id, status_id, grand_total,"
         " ordered_at, order_date, is_return, sales_type, is_active_source,"
-        " source_name, is_new_customer) "
-        "VALUES (?, 1, 1, ?, ?, ?, FALSE, ?, TRUE, 'Instagram', FALSE)",
-        [oid, revenue, day, day, sales_type],
-    )
-    conn.execute(
-        "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
-        " price_sold) VALUES (?, ?, ?, ?, 1, ?)",
-        [oid, oid, pid, name, revenue],
-    )
+        " source_name, is_new_customer)"
+        " VALUES ($1, 1, 1, $2, $3, $4, FALSE, $5, TRUE, 'Instagram', FALSE)",
+        oid, revenue, datetime(day.year, day.month, day.day, 9, tzinfo=timezone.utc),
+        day, sales_type)
+    await conn.execute(
+        "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
+        " price_sold) VALUES ($1, $2, $3, $4, 1, $5)",
+        oid, oid, pid, name, revenue)
 
 
 class TestWeekTotals:
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_orders_split_exactly_into_new_and_repeat(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _gold_day(conn, date(2026, 5, 18), 3_000, 3)
-                _silver_order(conn, 1, date(2026, 5, 18), 1_000, is_new=True)
-                _silver_order(conn, 2, date(2026, 5, 19), 1_000, is_new=False)
-                _silver_order(conn, 3, date(2026, 5, 20), 1_000, is_new=False)
-                # Outside the window, and a return inside it — neither counts.
-                _silver_order(conn, 4, date(2026, 5, 26), 9_000, is_new=True)
-                _silver_order(conn, 5, date(2026, 5, 21), 9_000, is_new=True,
-                              is_return=True)
+    async def test_orders_split_exactly_into_new_and_repeat(self, pg, reads):
+        async with pg.acquire() as conn:
+            await _gold_day(conn, date(2026, 5, 18), 3_000, 3)
+            await _silver_order(conn, 1, date(2026, 5, 18), 1_000, is_new=True)
+            await _silver_order(conn, 2, date(2026, 5, 19), 1_000, is_new=False)
+            await _silver_order(conn, 3, date(2026, 5, 20), 1_000, is_new=False)
+            # Outside the window, and a return inside it — neither counts.
+            await _silver_order(conn, 4, date(2026, 5, 26), 9_000, is_new=True)
+            await _silver_order(conn, 5, date(2026, 5, 21), 9_000, is_new=True,
+                                is_return=True)
 
-                totals = await fetch_week_totals(
-                    _Held(conn), date(2026, 5, 18), date(2026, 5, 24), "retail",
-                )
-            assert totals.new_customer_orders == 1
-            assert totals.repeat_orders == 2
-            assert (totals.new_customer_orders + totals.repeat_orders
-                    == totals.orders == 3)
-        finally:
-            await store.close()
+        totals = await fetch_week_totals(
+            reads, date(2026, 5, 18), date(2026, 5, 24), "retail",
+        )
+        assert totals.new_customer_orders == 1
+        assert totals.repeat_orders == 2
+        assert (totals.new_customer_orders + totals.repeat_orders
+                == totals.orders == 3)
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_revenue_comes_from_gold_so_it_matches_the_dashboard(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _gold_day(conn, date(2026, 5, 18), 100_000, 40)
-                _gold_day(conn, date(2026, 5, 19), 50_000, 10)
-                _gold_day(conn, date(2026, 5, 26), 999_999, 1)   # next week
-                _gold_day(conn, date(2026, 5, 20), 777_777, 7, sales_type="b2b")
+    async def test_revenue_comes_from_gold_so_it_matches_the_dashboard(self, pg, reads):
+        async with pg.acquire() as conn:
+            await _gold_day(conn, date(2026, 5, 18), 100_000, 40)
+            await _gold_day(conn, date(2026, 5, 19), 50_000, 10)
+            await _gold_day(conn, date(2026, 5, 26), 999_999, 1)   # next week
+            await _gold_day(conn, date(2026, 5, 20), 777_777, 7, sales_type="b2b")
 
-                totals = await fetch_week_totals(
-                    _Held(conn), date(2026, 5, 18), date(2026, 5, 24), "retail",
-                )
-            assert totals.revenue == 150_000
-            assert totals.orders == 50
-            assert totals.avg_check == 3_000
-        finally:
-            await store.close()
+        totals = await fetch_week_totals(
+            reads, date(2026, 5, 18), date(2026, 5, 24), "retail",
+        )
+        assert totals.revenue == 150_000
+        assert totals.orders == 50
+        assert totals.avg_check == 3_000
 
 
 class TestProductMoves:
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_ranked_by_hryvnia_not_percent(self, tmp_path):
+    async def test_ranked_by_hryvnia_not_percent(self, pg, reads):
         """The design decision the whole block rests on.
 
         Percent ranking floats ₴500 → ₴2,500 (+400%) to the top and buries
         ₴101,885 → ₴19,966, which by itself was a quarter of that week's
         entire decline.
         """
-        store = await _store(tmp_path)
-        try:
-            cur, prev = date(2026, 5, 18), date(2026, 5, 11)
-            async with store.connection() as conn:
-                _gold_product(conn, prev, 1, "Small but exciting", 500)
-                _gold_product(conn, cur, 1, "Small but exciting", 2_500)
-                _gold_product(conn, prev, 2, "The one that mattered", 101_885)
-                _gold_product(conn, cur, 2, "The one that mattered", 19_966)
+        cur, prev = date(2026, 5, 18), date(2026, 5, 11)
+        async with pg.acquire() as conn:
+            await _gold_product(conn, prev, 1, "Small but exciting", 500)
+            await _gold_product(conn, cur, 1, "Small but exciting", 2_500)
+            await _gold_product(conn, prev, 2, "The one that mattered", 101_885)
+            await _gold_product(conn, cur, 2, "The one that mattered", 19_966)
 
-                moves, total = await fetch_product_moves(
-                    _Held(conn), cur, cur + timedelta(days=6),
-                    prev, prev + timedelta(days=6),
-                    "retail",
-                )
-            assert moves[0].name == "The one that mattered"
-            assert moves[0].delta == pytest.approx(-81_919)
-            assert total == pytest.approx(-79_919)
-        finally:
-            await store.close()
+        moves, total = await fetch_product_moves(
+            reads, cur, cur + timedelta(days=6),
+            prev, prev + timedelta(days=6),
+            "retail",
+        )
+        assert moves[0].name == "The one that mattered"
+        assert moves[0].delta == pytest.approx(-81_919)
+        assert total == pytest.approx(-79_919)
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_a_product_that_only_sold_in_one_week_still_appears(self, tmp_path):
+    async def test_a_product_that_only_sold_in_one_week_still_appears(self, pg, reads):
         """A launch and a stockout are both a full-value move, not a missing row."""
-        store = await _store(tmp_path)
-        try:
-            cur, prev = date(2026, 5, 18), date(2026, 5, 11)
-            async with store.connection() as conn:
-                _gold_product(conn, cur, 1, "Launched this week", 11_130)
-                _gold_product(conn, prev, 2, "Sold out", 8_000)
+        cur, prev = date(2026, 5, 18), date(2026, 5, 11)
+        async with pg.acquire() as conn:
+            await _gold_product(conn, cur, 1, "Launched this week", 11_130)
+            await _gold_product(conn, prev, 2, "Sold out", 8_000)
 
-                moves, _ = await fetch_product_moves(
-                    _Held(conn), cur, cur + timedelta(days=6),
-                    prev, prev + timedelta(days=6),
-                    "retail",
-                )
-            by_name = {m.name: m.delta for m in moves}
-            assert by_name["Launched this week"] == pytest.approx(11_130)
-            assert by_name["Sold out"] == pytest.approx(-8_000)
-        finally:
-            await store.close()
+        moves, _ = await fetch_product_moves(
+            reads, cur, cur + timedelta(days=6),
+            prev, prev + timedelta(days=6),
+            "retail",
+        )
+        by_name = {m.name: m.delta for m in moves}
+        assert by_name["Launched this week"] == pytest.approx(11_130)
+        assert by_name["Sold out"] == pytest.approx(-8_000)
 
 
 class TestBaselineSeries:
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_a_dead_week_inside_the_record_counts_as_zero(self, tmp_path):
+    async def test_a_dead_week_inside_the_record_counts_as_zero(self, pg, reads):
         """Dropping it would flatter the average and hide the drought."""
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                for week in range(4):
-                    day = date(2026, 4, 20) + timedelta(days=7 * week)
-                    if week == 2:
-                        continue  # no orders at all that week
-                    _gold_day(conn, day, 100_000, 40)
+        async with pg.acquire() as conn:
+            for week in range(4):
+                day = date(2026, 4, 20) + timedelta(days=7 * week)
+                if week == 2:
+                    continue  # no orders at all that week
+                await _gold_day(conn, day, 100_000, 40)
 
-                series = await fetch_weekly_series(
-                    _Held(conn), date(2026, 5, 18), "retail", weeks=4,
-                )
-            assert series == [100_000, 100_000, 0.0, 100_000]
-        finally:
-            await store.close()
+        series = await fetch_weekly_series(
+            reads, date(2026, 5, 18), "retail", weeks=4,
+        )
+        assert series == [100_000, 100_000, 0.0, 100_000]
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_weeks_before_the_first_record_are_not_invented(self, tmp_path):
+    async def test_weeks_before_the_first_record_are_not_invented(self, pg, reads):
         """History that predates the data is not a run of zero-revenue weeks."""
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _gold_day(conn, date(2026, 5, 11), 100_000, 40)
-                series = await fetch_weekly_series(
-                    _Held(conn), date(2026, 5, 18), "retail", weeks=12,
-                )
-            assert series == [100_000]
-        finally:
-            await store.close()
+        async with pg.acquire() as conn:
+            await _gold_day(conn, date(2026, 5, 11), 100_000, 40)
+        series = await fetch_weekly_series(
+            reads, date(2026, 5, 18), "retail", weeks=12,
+        )
+        assert series == [100_000]
 
 
 class TestSendLedger:
@@ -483,9 +481,10 @@ class TestSendLedger:
 
 
 class TestReadinessGate:
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_the_gate_is_the_warehouse_date_not_this_type_s_row_count(
-        self, tmp_path,
+        self, pg, reads,
     ):
         """b2b runs nine orders a week and legitimately has empty days.
 
@@ -493,38 +492,34 @@ class TestReadinessGate:
         forever; asking whether the warehouse has moved past the week end is
         the same question without that trap.
         """
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                assert await warehouse_max_date(_Held(conn)) is None
-                _gold_day(conn, date(2026, 5, 20), 50_000, 2, sales_type="b2b")
-                _gold_day(conn, date(2026, 5, 24), 60_000, 3, sales_type="retail")
-                assert await warehouse_max_date(_Held(conn)) == date(2026, 5, 24)
-        finally:
-            await store.close()
+        assert await warehouse_max_date(reads) is None
+        async with pg.acquire() as conn:
+            await _gold_day(conn, date(2026, 5, 20), 50_000, 2, sales_type="b2b")
+            await _gold_day(conn, date(2026, 5, 24), 60_000, 3, sales_type="retail")
+        assert await warehouse_max_date(reads) == date(2026, 5, 24)
 
 
 class TestSchedulerJob:
     """The three gates, exercised through the job the scheduler actually runs."""
 
-    async def _seed(self, store, *, complete: bool):
-        """A full baseline plus the reported week, from the real clock's view."""
-        from datetime import datetime
+    async def _seed(self, pool, *, complete: bool):
+        """A full baseline plus the reported week, from the real clock's view,
+        in Postgres' Gold and Silver."""
         from core.scheduler import SCHEDULER_TIMEZONE
 
         today = datetime.now(SCHEDULER_TIMEZONE).date()
         start, end = last_complete_week(today)
         last_day = end if complete else end - timedelta(days=3)
 
-        async with store.connection() as conn:
+        async with pool.acquire() as conn:
             for n in range(70):
                 day = start - timedelta(days=70 - n)
-                _gold_day(conn, day, 10_000 + (n % 5) * 500, 4)
+                await _gold_day(conn, day, 10_000 + (n % 5) * 500, 4)
             day = start
             while day <= last_day:
-                _gold_day(conn, day, 5_000, 2)
-                _silver_order(conn, 900 + day.toordinal() % 1000, day, 2_500,
-                              is_new=True)
+                await _gold_day(conn, day, 5_000, 2)
+                await _silver_order(conn, 900 + day.toordinal() % 1000, day, 2_500,
+                                    is_new=True)
                 day += timedelta(days=1)
         return start
 
@@ -574,12 +569,15 @@ class TestSchedulerJob:
         monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _send_text)
         return BackgroundScheduler()
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_it_waits_while_the_warehouse_is_behind(self, tmp_path, monkeypatch):
+    async def test_it_waits_while_the_warehouse_is_behind(
+        self, pg, tmp_path, monkeypatch,
+    ):
         """Numbers rendered mid-rebuild would understate revenue with confidence."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=False)
+            await self._seed(pg, complete=False)
             sent = []
             result = await self._wire(monkeypatch, store, sent, tmp_path)._run_weekly_report()
 
@@ -589,12 +587,15 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_it_delivers_once_and_then_stays_quiet(self, tmp_path, monkeypatch):
+    async def test_it_delivers_once_and_then_stays_quiet(
+        self, pg, tmp_path, monkeypatch,
+    ):
         """Six of seven daily firings must say nothing."""
         store = await _store(tmp_path)
         try:
-            week_start = await self._seed(store, complete=True)
+            week_start = await self._seed(pg, complete=True)
             sent = []
             scheduler = self._wire(monkeypatch, store, sent, tmp_path)
 
@@ -613,14 +614,15 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_it_prefers_the_card_with_the_report_as_its_caption(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """One message carrying both, not a picture and then a wall of text."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             text_sends = []
             scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
 
@@ -644,14 +646,15 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_each_admin_is_written_to_in_their_own_language(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """Two languages among the admins means two renders, not one guess."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             scheduler = self._wire(monkeypatch, store, [], tmp_path,
                                    languages={111: "uk", 222: "en"})
 
@@ -671,14 +674,15 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_it_reaches_staff_in_ukrainian_and_admins_in_english(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """The default policy, end to end, plus a stored choice overriding it."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             scheduler = self._wire(
                 monkeypatch, store, [], tmp_path,
                 approved=[301, 302, 303],
@@ -705,16 +709,17 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_someone_who_muted_notifications_is_not_written_to(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """A toggle some messages ignore is worse than no toggle at all."""
         import sqlite3
 
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             scheduler = self._wire(monkeypatch, store, [], tmp_path,
                                    approved=[301, 302])
             with sqlite3.connect(tmp_path / "prefs.db") as conn:
@@ -735,9 +740,10 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_an_unreadable_preferences_db_still_delivers_in_english(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """The bot's SQLite may be locked, missing, or one deploy behind.
 
@@ -745,7 +751,7 @@ class TestSchedulerJob:
         """
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             sent = []
             scheduler = self._wire(monkeypatch, store, sent, tmp_path)
 
@@ -763,14 +769,15 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_a_card_that_will_not_send_falls_back_to_text(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """A missing font must cost the picture and never the numbers."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             text_sends = []
             scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
             monkeypatch.setattr("core.weekly_report_image._font_file",
@@ -785,12 +792,15 @@ class TestSchedulerJob:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_a_failed_send_leaves_the_week_pending(self, tmp_path, monkeypatch):
+    async def test_a_failed_send_leaves_the_week_pending(
+        self, pg, tmp_path, monkeypatch,
+    ):
         """Marking a week delivered that never left the host would drop it."""
         store = await _store(tmp_path)
         try:
-            week_start = await self._seed(store, complete=True)
+            week_start = await self._seed(pg, complete=True)
             scheduler = self._wire(monkeypatch, store, [], tmp_path)
 
             async def _reaches_nobody(*args, **kwargs):
@@ -902,20 +912,25 @@ class TestTheRichFormIsWhatTheJobSends:
     _seed = TestSchedulerJob._seed
 
     @staticmethod
-    async def _seed_channels(store):
+    async def _seed_channels(pool):
         """Give the seeded weeks a channel split.
 
-        `_seed` writes revenue and orders only, and every channel column stays
-        zero — which `fetch_channels` correctly drops, so without this the
+        `_seed` writes the roll-up rows only, and no source row stands under
+        them — which `fetch_channels` correctly drops, so without this the
         channel chart is legitimately absent and the test would be asserting
-        the wrong thing.
+        the wrong thing. Postgres' Gold carries a channel as `source_id`: the
+        fine rows under each retail roll-up, Instagram 40% and Shopify 60%.
         """
-        async with store.connection() as conn:
-            conn.execute(
-                "UPDATE gold_daily_revenue SET instagram_revenue = revenue * 0.4, "
-                "instagram_orders = 1, shopify_revenue = revenue * 0.6, "
-                "shopify_orders = 1 WHERE sales_type = 'retail'"
-            )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+                " orders_count, unique_customers, new_customers, returning_customers,"
+                " returns_count, returns_revenue, avg_order_value)"
+                " SELECT date, sales_type, s.source_id, revenue * s.share, 1,"
+                " 0, 0, 0, 0, 0, 0"
+                " FROM gold.daily_revenue,"
+                " (VALUES (1, 0.4), (4, 0.6)) AS s(source_id, share)"
+                " WHERE gold.daily_revenue.source_id IS NULL AND sales_type = 'retail'")
 
     @staticmethod
     def _capture_rich(monkeypatch, delivered=2):
@@ -940,14 +955,15 @@ class TestTheRichFormIsWhatTheJobSends:
         monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
         return calls
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_it_sends_the_rich_form_with_the_card_and_the_charts(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
-            await self._seed_channels(store)
+            await self._seed(pg, complete=True)
+            await self._seed_channels(pg)
             text_sends = []
             scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
             rich = self._capture_rich(monkeypatch)
@@ -970,14 +986,15 @@ class TestTheRichFormIsWhatTheJobSends:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_a_rejected_rich_message_falls_back_to_the_card(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """An unsupported tag is a 400, which the transport reports as 0."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             text_sends = []
             scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
             rich = self._capture_rich(monkeypatch, delivered=0)
@@ -993,16 +1010,17 @@ class TestTheRichFormIsWhatTheJobSends:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_the_flag_turns_it_off_without_a_deploy(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """`KS_WEEKLY_REPORT_RICH=0` is the rollback, and it must not even
         reach the transport — a rollback that still spends the call is not
         one."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             monkeypatch.setenv("KS_WEEKLY_REPORT_RICH", "0")
             text_sends = []
             scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
@@ -1017,14 +1035,15 @@ class TestTheRichFormIsWhatTheJobSends:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_with_both_pictures_gone_the_text_still_goes_out(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """The bottom rung. Numbers are the deliverable; pictures are not."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             text_sends = []
             scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
             self._capture_rich(monkeypatch, delivered=0)
@@ -1038,15 +1057,16 @@ class TestTheRichFormIsWhatTheJobSends:
         finally:
             await store.close()
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_one_rich_render_per_language_and_nobody_gets_another(
-        self, tmp_path, monkeypatch,
+        self, pg, tmp_path, monkeypatch,
     ):
         """The pictures carry translated labels, so they are drawn per
         language too — not once and reused."""
         store = await _store(tmp_path)
         try:
-            await self._seed(store, complete=True)
+            await self._seed(pg, complete=True)
             text_sends = []
             scheduler = self._wire(
                 monkeypatch, store, text_sends, tmp_path,
@@ -1069,39 +1089,36 @@ class TestTheRichFormIsWhatTheJobSends:
 
 
 class TestBuildReport:
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_end_to_end_on_a_small_warehouse(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                # Eight baseline weeks at ₴70K, two of them off by ±₴14K so the
-                # spread is real — an unvarying history has no σ and the gate
-                # would correctly decline to judge.
-                for n in range(56):
-                    day = date(2026, 3, 23) + timedelta(days=n)
-                    week = n // 7
-                    daily = {0: 12_000, 1: 8_000}.get(week, 10_000)
-                    _gold_day(conn, day, daily, 2)
-                # The reported week: half the revenue at an unchanged ₴5,000
-                # basket, so the whole move has to land on order count.
-                for n in range(7):
-                    day = date(2026, 5, 18) + timedelta(days=n)
-                    _gold_day(conn, day, 5_000, 1)
-                    _silver_order(conn, 100 + n, day, 5_000, is_new=(n < 3))
+    async def test_end_to_end_on_a_small_warehouse(self, pg, reads):
+        async with pg.acquire() as conn:
+            # Eight baseline weeks at ₴70K, two of them off by ±₴14K so the
+            # spread is real — an unvarying history has no σ and the gate
+            # would correctly decline to judge.
+            for n in range(56):
+                day = date(2026, 3, 23) + timedelta(days=n)
+                week = n // 7
+                daily = {0: 12_000, 1: 8_000}.get(week, 10_000)
+                await _gold_day(conn, day, daily, 2)
+            # The reported week: half the revenue at an unchanged ₴5,000
+            # basket, so the whole move has to land on order count.
+            for n in range(7):
+                day = date(2026, 5, 18) + timedelta(days=n)
+                await _gold_day(conn, day, 5_000, 1)
+                await _silver_order(conn, 100 + n, day, 5_000, is_new=(n < 3))
 
-                report = await build_report(_Held(conn), date(2026, 5, 25), "retail")
+        report = await build_report(reads, date(2026, 5, 25), "retail")
 
-            assert (report.start, report.end) == (date(2026, 5, 18), date(2026, 5, 24))
-            assert (report.current.revenue, report.current.orders) == (35_000, 7)
-            assert (report.previous.revenue, report.previous.orders) == (70_000, 14)
-            assert report.current.new_customer_orders == 3
-            assert report.current.repeat_orders == 4
-            assert report.baseline_weeks == 8
-            assert report.z is not None and report.z < -1.5
+        assert (report.start, report.end) == (date(2026, 5, 18), date(2026, 5, 24))
+        assert (report.current.revenue, report.current.orders) == (35_000, 7)
+        assert (report.previous.revenue, report.previous.orders) == (70_000, 14)
+        assert report.current.new_customer_orders == 3
+        assert report.current.repeat_orders == 4
+        assert report.baseline_weeks == 8
+        assert report.z is not None and report.z < -1.5
 
-            text = format_report(report)
-            assert "▼ 50.0%" in text
-            assert "Unusually low" in text
-            assert "order count, not basket size" in text
-        finally:
-            await store.close()
+        text = format_report(report)
+        assert "▼ 50.0%" in text
+        assert "Unusually low" in text
+        assert "order count, not basket size" in text

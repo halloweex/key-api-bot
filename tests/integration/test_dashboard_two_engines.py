@@ -35,13 +35,14 @@ an order whose buyer is in neither store and one with a NULL manager so both
 LEFT JOINs have a miss to survive, and a category two deep so the filter has
 descendants to walk.
 
-THE SEARCH INDEX, BELOW, STILL COMPARES TWO ENGINES
+THE SEARCH INDEX, BELOW, ON THE ORIGINAL FIXTURE
 
-`sync_to_meilisearch` reads under `KS_READ_SEARCH_INDEX`, which step 14 takes
-in S14-07; until then its tests keep the two-engine fixture (`both_engines`),
-which seeds this file's original dashboard fixture into both stores — and so
-does `tests/integration/test_chat_tools_two_engines.py`, which imports it with
-`_comparable`, `WINDOW` and `DSN`.
+`sync_to_meilisearch` reads Postgres alone since step 14's S14-07. Its tests,
+and `tests/integration/test_chat_tools_two_engines.py`'s, which imports the
+fixture with `_comparable`, `WINDOW` and `DSN`, run on this file's original
+seven orders (`original_in_postgres`), pinned to the same day, and compare
+with literals recorded while both engines answered on it
+(`tests/integration/golden/search_index.json` and `chat_tools.json`).
 
 Skipped without `KS_PG_DSN`; CI and `deploy/gate_with_stores.sh` supply one.
 """
@@ -52,10 +53,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from core.duckdb_constants import B2B_MANAGER_ID
-from core.duckdb_store import DuckDBStore
 from tests.integration.pg_tab_seed import (
     call_key, comparable, derive, golden, seed, store_that_never_reaches_duckdb,
     tab_in_postgres,
@@ -68,7 +68,9 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Pinned (step 14, S14-07) for the search index and the assistant's tools,
+# whose answers are recorded as literals from DuckDB on `both_engines`.
+TODAY = date(2026, 9, 15)
 WINDOW = (TODAY - timedelta(days=30), TODAY)
 
 CATEGORIES = [(1, "Care", None), (2, "Serums", 1), (3, "Ampoules", 1), (4, "Makeup", None)]
@@ -125,96 +127,26 @@ LINES = [
     (8, 7, 100, 1, 500.0, "Serum"),
 ]
 
-PG_TABLES = ("gold.daily_revenue", "silver.orders", "bronze.order_products",
-             "bronze.products", "bronze.categories", "bronze.buyers",
-             "bronze.managers")
-
-
-async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        conn.executemany(
-            "INSERT INTO categories (id, name, parent_id) VALUES (?,?,?)", CATEGORIES)
-        conn.executemany(
-            "INSERT INTO products (id, name, category_id, brand, sku, price)"
-            " VALUES (?,?,?,?,?,?)", PRODUCTS)
-        conn.executemany(
-            "INSERT INTO buyers (id, full_name, phone) VALUES (?,?,?)", BUYERS)
-        conn.executemany(
-            "INSERT INTO managers (id, name) VALUES (?,?)", MANAGERS)
-        for oid, src, total, days, is_ret, manager, buyer in ORDERS:
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id, manager_id) VALUES (?,?,?,?,?,?,?)",
-                [oid, src, 19 if is_ret else 1, total,
-                 now - timedelta(days=days), buyer, manager])
-        conn.executemany(
-            "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
-            " price_sold) VALUES (?,?,?,?,?,?)",
-            [(lid, oid, pid, sold, qty, price)
-             for lid, oid, pid, qty, price, sold in LINES])
-    await store.refresh_warehouse_layers(trigger="manual")
-
-
-async def _seed_postgres(conn, store, pool):
-    for table in PG_TABLES:
-        await conn.execute(f"DELETE FROM {table}")
-
-    async with store.connection() as duck:
-        silver = duck.execute(
-            "SELECT id, source_id, status_id, grand_total, ordered_at, buyer_id,"
-            " manager_id, order_date, is_return, sales_type, is_active_source,"
-            " source_name, is_new_customer, buyer_first_order_date, promocode"
-            " FROM silver_orders ORDER BY id").fetchall()
-        lines = duck.execute(
-            "SELECT id, order_id, product_id, name, quantity, price_sold"
-            " FROM order_products ORDER BY id").fetchall()
-
-    await conn.executemany(
-        "INSERT INTO bronze.categories (id,name,parent_id) VALUES ($1,$2,$3)",
-        CATEGORIES)
-    await conn.executemany(
-        "INSERT INTO bronze.products (id,name,category_id,brand,sku,price)"
-        " VALUES ($1,$2,$3,$4,$5,$6)", PRODUCTS)
-    await conn.executemany(
-        "INSERT INTO bronze.buyers (id,full_name,phone) VALUES ($1,$2,$3)", BUYERS)
-    await conn.executemany(
-        "INSERT INTO bronze.managers (id,name) VALUES ($1,$2)", MANAGERS)
-    await conn.executemany(
-        "INSERT INTO bronze.order_products (id,order_id,product_id,name,quantity,"
-        "price_sold) VALUES ($1,$2,$3,$4,$5,$6)", [tuple(r) for r in lines])
-    await conn.executemany(
-        "INSERT INTO silver.orders (id,source_id,status_id,grand_total,ordered_at,"
-        "buyer_id,manager_id,order_date,is_return,sales_type,is_active_source,"
-        "source_name,is_new_customer,buyer_first_order_date,promocode)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-        [tuple(r) for r in silver])
-
-    # Derived, not copied — the production path.
-    from core.pg_gold import rebuild_gold
-
-    with patch("core.pg.require_revision", new=AsyncMock()):
-        await rebuild_gold(pool=pool)
+async def _populate_original(conn, pool):
+    """The original seven orders, as KeyCRM lands them, derived by Postgres."""
+    await seed(
+        conn, categories=CATEGORIES, products=PRODUCTS, buyers=BUYERS,
+        managers=MANAGERS,
+        orders=[(oid, src, 19 if is_ret else 1, total, NOW - timedelta(days=days),
+                 buyer, manager, None)
+                for oid, src, total, days, is_ret, manager, buyer in ORDERS],
+        lines=[(lid, oid, pid, sold, qty, price)
+               for lid, oid, pid, qty, price, sold in LINES])
+    await derive(pool)
 
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
-    monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore(db_path=tmp_path / "dashboard.duckdb")
-    await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
-    try:
-        await _seed_duckdb(store)
-        async with pool.acquire() as conn:
-            await _seed_postgres(conn, store, pool)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            yield store
-    finally:
-        async with pool.acquire() as conn:
-            for table in PG_TABLES:
-                await conn.execute(f"DELETE FROM {table}")
-        await pool.close()
-        await store.close()
+async def original_in_postgres(tmp_path, monkeypatch):
+    """The original fixture's store, never connected: its DuckDB connection is
+    a trap, so an answer can only be Postgres's. The search index and the
+    assistant's tools read it (step 14, S14-07)."""
+    async with tab_in_postgres(DSN, monkeypatch, _populate_original):
+        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the index")
 
 
 def _comparable(value):
@@ -222,9 +154,8 @@ def _comparable(value):
     Postgres into a NUMERIC, so the two legitimately differ in the last bits —
     far below anything this tab renders, far above the noise.
 
-    No test here compares two engines any more; kept, with `both_engines`,
-    for `tests/integration/test_chat_tools_two_engines.py`, which imports
-    both (step 14's S14-07 takes the assistant's tools off DuckDB)."""
+    No test compares two engines any more; kept for
+    `tests/integration/test_chat_tools_two_engines.py`, which imports it."""
     if isinstance(value, bool):
         return value
     if isinstance(value, dict):
@@ -580,13 +511,13 @@ class _CaptureMeili:
         return await self._take("products", docs)
 
 
-async def _index_once(store, monkeypatch, engine):
-    """Run `sync_to_meilisearch` once, as a first (full) sync, on one engine.
+async def _index_once(store):
+    """Run `sync_to_meilisearch` once, as a first (full) sync.
 
-    Returns the captured documents and the watermark keys it read and wrote.
-    On the Postgres leg DuckDB's connection is fatal. The watermark primitives
-    are stubbed on both legs: they are `sync_metadata` bookkeeping that stays on
-    DuckDB, and the question here is what the index is built from.
+    Returns the captured documents, the watermark keys it read and wrote, and
+    its stats. The store is never connected and its DuckDB connection is a
+    trap. The watermark primitives are stubbed: the question here is what the
+    index is built from.
     """
     from core.sync_service import SyncService
 
@@ -599,68 +530,54 @@ async def _index_once(store, monkeypatch, engine):
     async def set_last(key="orders", timestamp=None):
         keys["written"].append(key)
 
-    if engine == "postgres":
-        monkeypatch.setenv("KS_READ_SEARCH_INDEX", "postgres")
-    else:
-        monkeypatch.delenv("KS_READ_SEARCH_INDEX", raising=False)
-
     svc = SyncService.__new__(SyncService)
     svc.store = store
-    patches = [
-        patch("core.sync_service.get_meili_client", return_value=capture),
-        patch.object(store, "get_last_sync_time", side_effect=get_last),
-        patch.object(store, "set_last_sync_time", side_effect=set_last),
-    ]
-    if engine == "postgres":
-        def _no_duckdb(*_a, **_k):
-            raise AssertionError("the index read DuckDB with KS_READ_SEARCH_INDEX=postgres")
-        patches.append(patch.object(type(store), "connection", _no_duckdb))
-
-    for p_ in patches:
-        p_.start()
-    try:
+    with patch("core.sync_service.get_meili_client", return_value=capture), \
+         patch.object(store, "get_last_sync_time", side_effect=get_last), \
+         patch.object(store, "set_last_sync_time", side_effect=set_last):
         stats = await svc.sync_to_meilisearch()
-    finally:
-        for p_ in reversed(patches):
-            p_.stop()
-        monkeypatch.delenv("KS_READ_SEARCH_INDEX", raising=False)
     return capture.docs, keys, stats
 
 
-class TestTheSearchIndexDocumentsAgree:
-    @pytest.mark.asyncio
-    async def test_every_document_is_identical_including_its_rendered_dates(
-        self, both_engines, monkeypatch,
-    ):
-        duck, _, duck_stats = await _index_once(both_engines, monkeypatch, "duckdb")
-        pg, _, pg_stats = await _index_once(both_engines, monkeypatch, "postgres")
+SEARCH_INDEX = golden("search_index")
 
+
+def _as_recorded(docs, stats):
+    """The documents and stats in the form the literal was recorded in."""
+    return comparable({"docs": {kind: {str(i): d for i, d in sorted(v.items())}
+                                for kind, v in docs.items()},
+                       "stats": stats})
+
+
+class TestTheSearchIndexDocumentsAreTheLiteral:
+    @pytest.mark.asyncio
+    async def test_every_document_including_its_rendered_dates(
+        self, original_in_postgres, monkeypatch,
+    ):
+        """Under the suite's `TZ=UTC`: DuckDB's documents, recorded while
+        Postgres built the same ones."""
+        monkeypatch.setenv("TZ", "UTC")
+        docs, _, stats = await _index_once(original_in_postgres)
         for kind in ("buyers", "orders", "products"):
-            assert duck[kind], f"no {kind} indexed — the comparison would prove nothing"
-            assert duck[kind] == pg[kind], kind
-        assert duck_stats == pg_stats
+            assert docs[kind], f"no {kind} indexed — the literal would pin nothing"
+        assert _as_recorded(docs, stats) == SEARCH_INDEX[
+            call_key("sync_to_meilisearch", ["UTC"])]
 
     @pytest.mark.asyncio
-    async def test_ordered_at_is_rendered_in_the_zone_duckdb_uses(
-        self, both_engines, monkeypatch,
+    async def test_ordered_at_is_rendered_in_the_local_zone(
+        self, original_in_postgres, monkeypatch,
     ):
-        """The trap this port exists to avoid. DuckDB renders TIMESTAMPTZ in the
-        session's zone — Kyiv in production, `Etc/UTC` in this image — and
-        asyncpg returns UTC whatever the zone. The contract is not "Kyiv": it is
-        "the same offset DuckDB would have indexed", in whichever environment."""
-        from datetime import datetime
+        """The trap this port exists to avoid. DuckDB rendered TIMESTAMPTZ in
+        the session's zone — Kyiv in production, `Etc/UTC` in this image — and
+        asyncpg returns UTC whatever the zone. The contract is not "Kyiv": it
+        is "the offset DuckDB would have indexed", in whichever environment."""
         from zoneinfo import ZoneInfo
         from core.pg_search_index_read import local_zone
 
-        duck, _, _ = await _index_once(both_engines, monkeypatch, "duckdb")
-        pg, _, _ = await _index_once(both_engines, monkeypatch, "postgres")
-
-        duck_off = {i: d["ordered_at"][-6:] for i, d in duck["orders"].items() if d["ordered_at"]}
-        pg_off = {i: d["ordered_at"][-6:] for i, d in pg["orders"].items() if d["ordered_at"]}
-        assert duck_off and duck_off == pg_off
-
-        # And it is the local zone's offset for that instant, DST included.
-        for i, d in pg["orders"].items():
+        monkeypatch.setenv("TZ", "UTC")
+        docs, _, _ = await _index_once(original_in_postgres)
+        assert any(d["ordered_at"] for d in docs["orders"].values())
+        for i, d in docs["orders"].items():
             if d["ordered_at"]:
                 instant = datetime.fromisoformat(d["ordered_at"])
                 expected = instant.astimezone(ZoneInfo(local_zone())).isoformat()[-6:]
@@ -668,50 +585,39 @@ class TestTheSearchIndexDocumentsAgree:
 
 
 class TestTheSearchIndexUnderANonUtcZone:
-    """The same comparison, with the trap made visible.
+    """The same literal, with the trap made visible.
 
-    The gate and CI run with `TZ` unset, so DuckDB renders UTC — and UTC is the
-    one zone in which "forgot to convert asyncpg's UTC" and "converted
-    correctly" produce the same string. A mutation that left every timestamp in
-    UTC passed `TestTheSearchIndexDocumentsAgree` in this image, which is how
-    this class came to exist. Production runs `TZ=Europe/Kyiv`, where the defect
-    would show a UTC time on every search result.
-
-    So both sides are put in Kyiv here, and only here: `TZ` for `local_zone()`,
-    and `SET TimeZone` on DuckDB's own session. The suite's zone is left alone,
-    because other two-engine tests compare rendered timestamps and pass in UTC.
+    UTC is the one zone in which "forgot to convert asyncpg's UTC" and
+    "converted correctly" produce the same string. A mutation that left every
+    timestamp in UTC passed the UTC test, which is how this class came to
+    exist. Production runs `TZ=Europe/Kyiv`, where the defect would show a UTC
+    time on every search result. So the index is built under Kyiv here, and
+    compared with DuckDB's documents rendered in Kyiv on the same fixture.
     """
 
     @pytest.mark.asyncio
-    async def test_both_engines_index_kyiv_offsets_across_dst(self, both_engines, monkeypatch):
+    async def test_kyiv_offsets_across_dst(self, original_in_postgres, monkeypatch):
         monkeypatch.setenv("TZ", "Europe/Kyiv")
-        async with both_engines.connection() as conn:
-            conn.execute("SET TimeZone = 'Europe/Kyiv'")
-
-        duck, _, _ = await _index_once(both_engines, monkeypatch, "duckdb")
-        monkeypatch.setenv("TZ", "Europe/Kyiv")      # _index_once cleans env on exit
-        pg, _, _ = await _index_once(both_engines, monkeypatch, "postgres")
-
-        duck_off = {i: d["ordered_at"][-6:] for i, d in duck["orders"].items() if d["ordered_at"]}
-        pg_off = {i: d["ordered_at"][-6:] for i, d in pg["orders"].items() if d["ordered_at"]}
-        assert duck_off, "no orders with ordered_at — the comparison proves nothing"
-        assert set(duck_off.values()) <= {"+02:00", "+03:00"}, (
-            f"DuckDB is not rendering Kyiv here, so this test is not testing the trap: "
-            f"{set(duck_off.values())}")
-        assert pg_off == duck_off
+        docs, _, stats = await _index_once(original_in_postgres)
+        offsets = {d["ordered_at"][-6:] for d in docs["orders"].values() if d["ordered_at"]}
+        assert offsets and offsets <= {"+02:00", "+03:00"}, offsets
+        assert _as_recorded(docs, stats) == SEARCH_INDEX[
+            call_key("sync_to_meilisearch", ["Europe/Kyiv"])]
 
 
-class TestTheSearchIndexKeepsAWatermarkPerEngine:
-    """Each engine's watermark is a timestamp on its own clock — `synced_at` in
-    DuckDB, `mirrored_at` in Postgres. Sharing one key works forward and fails
-    on rollback, silently skipping every row stamped between the two clocks."""
+class TestTheSearchIndexKeepsOneWatermark:
+    """Postgres' watermark is `mirrored_at`'s clock, under its own key. The
+    DuckDB index's key, `meilisearch` (`synced_at`'s clock), went with the
+    DuckDB frames in S14-07: it is neither read nor written."""
 
     @pytest.mark.asyncio
-    async def test_the_keys_never_meet(self, both_engines, monkeypatch):
-        _, duck_keys, _ = await _index_once(both_engines, monkeypatch, "duckdb")
-        _, pg_keys, _ = await _index_once(both_engines, monkeypatch, "postgres")
-        assert duck_keys == {"read": ["meilisearch"], "written": ["meilisearch"]}
-        assert pg_keys == {"read": ["meilisearch_pg"], "written": ["meilisearch_pg"]}
+    async def test_the_key_is_postgres_alone(self, original_in_postgres):
+        _, keys, _ = await _index_once(original_in_postgres)
+        assert keys == {"read": ["meilisearch_pg"], "written": ["meilisearch_pg"]}
+
+    def test_the_literal_holds_the_two_zones_and_nothing_else(self):
+        assert set(SEARCH_INDEX) == {call_key("sync_to_meilisearch", [z])
+                                     for z in ("UTC", "Europe/Kyiv")}
 
 
 class TestTheZoneIsResolvedTheWayDuckDBResolvesIt:

@@ -80,7 +80,9 @@ TAB_MODULES = [
     ("core/repositories/products_intel.py", "_intel_run"),
 ]
 OLD_SHAPE = {"fall_back", "no_address", "no_engine", "enabled", "available"}
-ENGINE_MODULES = ("core.pg", "asyncpg")
+# Postgres (`core.pg`, `core.pg_*`), the driver, and — since step 14's S14-07,
+# whose cohorts read ClickHouse alone — ClickHouse's modules (`core.ch_*`).
+ENGINE_MODULES = ("core.pg", "core.ch_", "asyncpg")
 
 
 def _dotted(node) -> str:
@@ -97,8 +99,9 @@ def _what_reaches_round_the_router(source: str):
     """`(routers, reaches)` for one module: the `_*_run` functions — rule 5
     of `test_read_fallback_sites.py` judges those — and, for every other
     function, what it reaches that only a router may: an engine (a function
-    of a `core.pg*` module, by the module or imported by name; `get_pool`;
-    an import of `core.pg*` or `asyncpg` of its own), the old shape's
+    of a `core.pg*` module — or, since step 14's S14-07, of a `core.ch_*`
+    one — by the module or imported by name; `get_pool`; an import of
+    `core.pg*`, `core.ch_*` or `asyncpg` of its own), the old shape's
     machinery (`fall_back`, `no_address`, `no_engine`, `enabled`,
     `available`), or the environment (`os.getenv`, `os.environ`, a
     `KS_READ_*` name outside a docstring)."""
@@ -108,7 +111,7 @@ def _what_reaches_round_the_router(source: str):
         if isinstance(n, ast.ImportFrom) and n.module:
             if n.module == "core":
                 modules |= {a.asname or a.name for a in n.names
-                            if a.name.startswith("pg")}
+                            if a.name.startswith(("pg", "ch_"))}
             elif n.module.startswith(ENGINE_MODULES):
                 functions |= {a.asname or a.name for a in n.names}
         elif isinstance(n, ast.Import):
@@ -401,6 +404,13 @@ class TestNothingGoesRoundTheRouter:
          "    pool = await get_pool()\n", "engine"),
         ("async def get_x(self):\n"
          "    import asyncpg\n", "engine"),
+        # ClickHouse, the cohorts' one engine since step 14's S14-07.
+        ("from core import ch_cohorts\n"
+         "async def get_x(self):\n"
+         "    return await ch_cohorts.fetch('q', [], ())\n", "engine"),
+        ("async def get_x(self):\n"
+         "    from core.ch_cohorts import fetch\n"
+         "    return await fetch('q', [], ())\n", "engine"),
         ("async def get_x(self):\n"
          "    read_fallback.no_address('traffic', None)\n", "old shape"),
         ("async def get_x(self):\n"
@@ -415,7 +425,8 @@ class TestNothingGoesRoundTheRouter:
         ("async def get_x(self):\n"
          "    return 'KS_READ_TRAFFIC'\n", "environment"),
     ], ids=["module", "module-alias", "imported-name", "dotted-module", "get_pool",
-            "asyncpg", "no_address", "enabled-available", "getenv", "environ",
+            "asyncpg", "clickhouse-module", "clickhouse-imported-name",
+            "no_address", "enabled-available", "getenv", "environ",
             "switch-name"])
     def test_the_walk_bites(self, body, kind):
         source = ("class T:\n"

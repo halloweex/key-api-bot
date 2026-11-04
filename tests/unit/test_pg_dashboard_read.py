@@ -203,14 +203,10 @@ class TestTheChannelShapeHasOneHome:
         tg_rev, sh_orders, sh_rev. Getting the pairs the wrong way round
         produces numbers that are merely wrong, on a chart nobody would
         immediately disbelieve."""
-        from core.sql_dialect import DUCKDB, POSTGRES, channel_measures
+        from core.sql_dialect import POSTGRES, channel_measures
 
-        duck = [i.strip() for i in channel_measures(DUCKDB).split(",\n")]
-        assert len(duck) == 6
-        for i, name in enumerate(("instagram", "telegram", "shopify")):
-            assert f"{name}_orders" in duck[i * 2], duck[i * 2]
-            assert f"{name}_revenue" in duck[i * 2 + 1], duck[i * 2 + 1]
-
+        # DuckDB's rendering, a column per channel, went with step 14's
+        # S14-07; Postgres' is the one shape.
         pg = [i.strip() for i in channel_measures(POSTGRES).split(",\n")]
         assert len(pg) == 6
         for i, sid in enumerate((1, 2, 4)):
@@ -228,10 +224,10 @@ class TestTheChannelShapeHasOneHome:
 
     def test_the_marketing_measures_render_the_channels_from_the_same_place(self):
         """Two callers, one home. A fourth channel column must be added once."""
-        from core.sql_dialect import DUCKDB, POSTGRES, marketing_period_measures
+        from core.sql_dialect import POSTGRES, marketing_period_measures
         from core.sql_dialect import _channel_items
 
-        for dialect in (DUCKDB, POSTGRES):
+        for dialect in (POSTGRES,):
             eleven = marketing_period_measures(dialect)
             for item in _channel_items(dialect):
                 assert item in eleven, (

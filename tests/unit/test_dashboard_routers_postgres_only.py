@@ -538,21 +538,24 @@ def _judged_by_rule_5(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[s
     returns, and every import in `fn` binding what those calls are read by —
     a module by its alias (`from core import pg_x`, `import core.pg_x as y`),
     spelled out (`import core.pg_x`), or a function by its name (`from
-    core.pg_x import y`). `fn`'s own nodes only, as rule 5 reads it."""
-    from tests.unit.test_read_fallback_sites import _engine_calls, _own_nodes
+    core.pg_x import y`) — and the same of a `core.ch_*` module, which rule 5
+    reads since step 14's S14-07. `fn`'s own nodes only, as rule 5 reads
+    it."""
+    from tests.unit.test_read_fallback_sites import (
+        ENGINE_PREFIXES, _engine_calls, _is_engine_module, _own_nodes,
+    )
     from tests.unit.test_read_routers_postgres_only import _dotted
 
     judged = [f"engine: {_dotted(c.func)}()" for c in _engine_calls(fn, aliases, names)]
     for n in _own_nodes(fn):
         if isinstance(n, ast.ImportFrom) and n.module == "core":
             judged += [f"engine: imports core.{a.name}" for a in n.names
-                       if a.name.startswith("pg_")]
-        elif isinstance(n, ast.ImportFrom) and n.module and (
-                n.module == "core.pg" or n.module.startswith("core.pg_")):
+                       if a.name.startswith(ENGINE_PREFIXES)]
+        elif isinstance(n, ast.ImportFrom) and n.module and _is_engine_module(n.module):
             judged.append(f"engine: imports {n.module}")
         elif isinstance(n, ast.Import):
             judged += [f"engine: imports {a.name}" for a in n.names
-                       if a.name.startswith("core.pg_")]
+                       if _is_engine_module(a.name)]
     return judged
 
 
@@ -678,7 +681,18 @@ class TestNothingGoesRoundARefusal:
                        "        import core.pg_gold_read\n"
                        "        try:\n"
                        "            await core.pg_gold_read.fetch_series(1)\n"),
-    ], ids=["module", "imported_name", "spelled_out"])
+        # ClickHouse's modules, which rule 5 reads since step 14's S14-07:
+        # by the module, and by a name imported from it.
+        HELPER.replace("        try:\n",
+                       "        from core import ch_cohorts\n"
+                       "        try:\n"
+                       "            await ch_cohorts.fetch('q', [], ())\n"),
+        HELPER.replace("        try:\n",
+                       "        from core.ch_cohorts import fetch\n"
+                       "        try:\n"
+                       "            await fetch('q', [], ())\n"),
+    ], ids=["module", "imported_name", "spelled_out", "clickhouse_module",
+            "clickhouse_imported_name"])
     def test_a_clean_helper_passes(self, helper):
         assert round_a_refusal(self.ROUTER + helper, REVENUE) == []
 

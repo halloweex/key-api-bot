@@ -150,10 +150,10 @@ _SHARED_GOAL_TABLES_SQL = """
 # three, and step 13 freezes them. Chain 7b-2 added the Silver history beside
 # it under `KS_GOALS_HISTORY`; production read Silver from 2026-10-07 08:20
 # UTC, after a dry run that found 0 differences; 7b-4 deleted the bridge.
-# `KS_GOALS_HISTORY` is retired: unset and `silver` both mean Silver, and any
-# other value — `bridge` included — refuses every history read
-# (`core/pg_goals_read.py`), so a value naming the deleted history is never
-# answered from Silver in silence.
+# `KS_GOALS_HISTORY` is retired: from 7b-4 any value but unset and `silver`
+# refused every history read, and since step 14's S14-07 nothing reads it at
+# all — production keeps the line `KS_GOALS_HISTORY=silver` for the images
+# before 7b-4, which read it unset as the bridge.
 #
 # The bridge was guarded from three sides while it lived, and each guard went
 # with it: step 13's `goals_bridge` precondition and its registry walk
@@ -162,17 +162,18 @@ _SHARED_GOAL_TABLES_SQL = """
 # `app.manager_classifications` on DuckDB while this file rendered
 # `silver_sales_type_case(DUCKDB)`, and the CI tripwire that required them to.
 # Nothing here reads those three tables any more, so a chain moving them
-# changes no goal: what makes the goal history Postgres' is step 13's
-# `reader:KS_READ_GOALS` and `read_fallback_off`.
+# changes no goal. Since step 14's S14-07 every history read is Postgres'
+# (`_goals_run`), whatever `KS_READ_GOALS` says.
 
 
 # ─── The history, from Silver (chain 7b-2; the only one since 7b-4) ─────────
 #
-# Every calculator reads `{silver_orders}` through `_goals_run`, so the engine
-# is `KS_READ_GOALS`' — Postgres Silver keeps deriving after step 13, from
-# whichever store holds the classification — and a read DuckDB answers is
-# counted (DN-20a), or refused under `KS_READ_FALLBACK=off` (DN-20b). Nothing
-# below names DuckDB's `orders`, `managers` or `manager_classifications`.
+# Every calculator reads `{silver_orders}` through `_goals_run`: Postgres
+# Silver, which Postgres derives itself after step 13, and a failure is the
+# refusal naming `goals` (step 14, S14-07). Until then the engine was
+# `KS_READ_GOALS`', and a read DuckDB answered was counted (DN-20a), or
+# refused under `KS_READ_FALLBACK=off` (DN-20b). Nothing below names DuckDB's
+# `orders`, `managers` or `manager_classifications`.
 #
 # Silver's columns select what the deleted bridge selected: `is_return`
 # (KeyCRM's status group first, the status list for rows synced before it) for
@@ -364,16 +365,6 @@ def _silver_history_where(sales_type: str) -> tuple[str, List[Any]]:
     return "NOT s.is_return AND s.sales_type = ?", [sales_type]
 
 
-def _refuse_a_retired_history() -> None:
-    """`KS_GOALS_HISTORY`, asked at every history read: unset or `silver`
-    reads Silver, and anything else raises — `bridge` included, since chain
-    7b-4 deleted it (`core/pg_goals_read.py`). Asked first, so a refused value
-    reads nothing and writes nothing."""
-    from core import pg_goals_read
-
-    pg_goals_read.history_mode()
-
-
 def _first_of_next_month(d: date) -> date:
     return date(d.year + (d.month == 12), d.month % 12 + 1, 1)
 
@@ -551,83 +542,53 @@ def _growth_cap(row) -> float:
 class GoalsMixin:
 
     async def _goals_run(self, sql: str, params=None):
-        """Run one goal query against whichever engine the flag names.
+        """Run one goal query against Postgres.
 
-        `/goals` keeps its own switch for every other tab's reason, sharpened:
-        this is the one tab that writes from the interface, and
-        `app.revenue_goals` is an hourly read replica. Reading it from Postgres
-        is safe; writing there through this router would land in a copy. The
-        write moves only as chain 7a (`KS_WRITE_GOALS`, `set_goal` below),
-        which stands the replica down for that table.
+        One path since step 14's S14-07: the Postgres read, and on any failure
+        a refusal — `read_fallback.refuse`, a 503 naming `goals`. Every goal
+        read goes there: the calculators' Silver history, the stored goals
+        (`{revenue_goals}`, chain 7a's table) and the forecast
+        (`{revenue_predictions}`, chain 7b-3's). `KS_READ_GOALS` is not read,
+        and nothing here reaches for DuckDB; without `KS_PG_DSN` the pool
+        raises and that is the refusal.
 
-        So a statement reading `{revenue_goals}` goes where the chain writes,
-        whatever this flag says, and does not fall back: once the chain writes
-        Postgres, DuckDB's copy is frozen, and a fallback would show the goal
-        from before the flip as if it were current. `core/pg_goals_write.py`
-        has the reasoning; every other statement here keeps the flag.
-
-        Chain 7b-3 (`KS_WRITE_FORECAST`) does the same for a statement
-        reading `{revenue_predictions}` — the forecast a smart goal and
-        `/api/revenue/forecast` read: Postgres, with no fallback, while that
-        chain writes there, and this flag as before while it does not. A
-        failure there is a counted refusal (`read_fallback.chain_refusal`),
-        what the same failure was before the flip under the chain's `off`:
-        raw, it reached `get_forecast_data` and `_get_ml_forecast_total`,
-        which let `ReadUnavailable` through and contain everything else, so
-        the forecast read "not available yet" and the goal lost its ML signal
-        with nothing counted.
+        Until S14-07 a statement reading `{revenue_goals}` went to Postgres
+        raw, uncounted, while chain 7a wrote there; one reading
+        `{revenue_predictions}` was refused through `chain_refusal`; and the
+        rest followed `KS_READ_GOALS` and refused through `fall_back` under
+        `KS_READ_FALLBACK=off`. Production answered all three from Postgres;
+        a failure of any of them is now the same counted 503.
         """
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
-
-        from core import pg_goals_read, pg_goals_write
-        from core import pg_forecast_write
-
-        params = list(params or [])
-        if pg_goals_write.reads_the_chain(sql):
-            return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
-        if pg_forecast_write.reads_the_chain(sql):
-            try:
-                return await pg_goals_read.fetch(
-                    render_tables(sql, POSTGRES), params)
-            except Exception as exc:  # noqa: BLE001 — refused, never DuckDB
-                raise read_fallback.chain_refusal("goals", exc) from exc
-        read_fallback.no_address("goals", pg_goals_read)
-        if pg_goals_read.enabled() and pg_goals_read.available():
-            try:
-                return await pg_goals_read.fetch(
-                    render_tables(sql, POSTGRES), params)
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("goals", exc)
-
-        async with self.connection() as conn:
-            return conn.execute(render_tables(sql, DUCKDB), params).fetchall()
-
-    async def _goal_tables_run(self, sql: str, params=None):
-        """Read the three shared goal tables from whichever store writes them.
-
-        Not `_goals_run`, on purpose. While chain 7b-3 writes DuckDB these
-        tables are read in DuckDB, where they are written, whatever
-        `KS_READ_GOALS` says: that flag is `postgres` in production, and
-        following it would read the hourly replica and show a POSTed
-        recalculation up to an hour late. While the chain writes Postgres they
-        are read there with no fallback — DuckDB's copy is then frozen, not
-        older (`core/pg_forecast_write.py`) — and a failure is a counted
-        refusal, a 503 naming `goals`, as in `_goals_run`.
-        """
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        from core.sql_dialect import POSTGRES, render_tables
 
         from core import pg_goals_read
-        from core import pg_forecast_write
 
         params = list(params or [])
-        if pg_forecast_write.reads_the_chain(sql):
-            try:
-                return await pg_goals_read.fetch(
-                    render_tables(sql, POSTGRES), params)
-            except Exception as exc:  # noqa: BLE001 — refused, never DuckDB
-                raise read_fallback.chain_refusal("goals", exc) from exc
-        async with self.connection() as conn:
-            return conn.execute(render_tables(sql, DUCKDB), params).fetchall()
+        try:
+            return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("goals", exc)
+
+    async def _goal_tables_run(self, sql: str, params=None):
+        """Read the three shared goal tables from Postgres, where chain 7b-3
+        writes them (`core/pg_forecast_write.py`).
+
+        Not `_goals_run`'s path historically: while chain 7b-3 wrote DuckDB
+        these tables were read in DuckDB, where they were written, whatever
+        `KS_READ_GOALS` said, and while it wrote Postgres they were read there
+        with no fallback. Since S14-00 the chain writes Postgres, a constant,
+        and since S14-07 this is the one path: the Postgres read, and on any
+        failure the refusal naming `goals`.
+        """
+        from core.sql_dialect import POSTGRES, render_tables
+
+        from core import pg_goals_read
+
+        params = list(params or [])
+        try:
+            return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("goals", exc)
 
     async def get_historical_revenue(
         self,
@@ -904,11 +865,11 @@ class GoalsMixin:
     # autocommitted upserts, so a crash or a refused read between them left
     # this week's indices beside last week's `yoy_growth` and `growth_metrics`.
     #
-    # Every history read below reads Silver through `_goals_run`, after
-    # `_refuse_a_retired_history()`; the body each hands its reader is a
-    # module constant a walk can read. Until chain 7b-4 each had a second
-    # body — the DN-12 bridge over DuckDB `orders` — chosen by
-    # `KS_GOALS_HISTORY`.
+    # Every history read below reads Silver through `_goals_run`; the body
+    # each hands its reader is a module constant a walk can read. Until chain
+    # 7b-4 each had a second body — the DN-12 bridge over DuckDB `orders` —
+    # chosen by `KS_GOALS_HISTORY`, and until step 14's S14-07 each asked that
+    # variable first, to refuse any value but unset and `silver`.
 
     async def calculate_seasonality_indices(
         self, sales_type: str = "retail",
@@ -925,7 +886,6 @@ class GoalsMixin:
         Returns:
             Dictionary mapping month (1-12) to seasonality data
         """
-        _refuse_a_retired_history()
         where, params = _silver_history_where(sales_type)
         return _seasonality_answer(await self._goals_run(
             _SILVER_SEASONALITY_SQL.replace("{where}", where), params))
@@ -956,7 +916,6 @@ class GoalsMixin:
         # would have failed from 2026-11-02, and `GET /goals/growth` with it.
         this_year = date(datetime.now(DEFAULT_TZ).year, 1, 1)
 
-        _refuse_a_retired_history()
         where, params = _silver_history_where(sales_type)
         yearly = await self._goals_run(
             _SILVER_YEARLY_SQL.replace("{where}", where), params + [this_year])
@@ -967,7 +926,6 @@ class GoalsMixin:
     async def _history_bounds(self) -> Tuple[Optional[date], Optional[date]]:
         """The first and last Kyiv order date anywhere in the history —
         `growth_metrics.period_start`/`period_end`."""
-        _refuse_a_retired_history()
         rows = await self._goals_run(_SILVER_BOUNDS_SQL)
         return (rows[0][0], rows[0][1]) if rows else (None, None)
 
@@ -991,7 +949,6 @@ class GoalsMixin:
     async def _weekly_patterns(self, sales_type: str):
         """`(patterns, rows)` — `rows` are `[month, week, weight, sample_size]`
         as stored: the measured weeks only, the weight unrounded."""
-        _refuse_a_retired_history()
         where, params = _silver_history_where(sales_type)
         return _weekly_answer(await self._goals_run(
             _SILVER_WEEKLY_SQL.replace("{where}", where), params))
@@ -1127,31 +1084,19 @@ class GoalsMixin:
         For past days (before today): actual revenue from Gold.
         For today and future days: ML predictions from revenue_predictions.
         Returns 0 if no predictions are available for the future portion, or
-        if a read fails on the engine that finally answers it — the signal is
-        then absent from the blend. A Postgres failure alone does not return
-        0: that read falls back to DuckDB, and the sum may then take its two
-        halves from two engines (see `_FORECAST_ACTUAL_SQL`). An unknown
-        `KS_READ_GOALS` raises, as it does for every goal read. Under chain
-        7b-3 the forecast half has no fallback, and its failure is a refusal
-        that passes through like any other (`_goals_run`), never a 0.
+        if a read fails with anything but a refusal — the signal is then
+        absent from the blend. Since step 14's S14-07 both halves read
+        Postgres alone (`_goals_run`), and a failure there is a refusal
+        (`read_fallback.ReadUnavailable`) that passes through like any other,
+        never a 0.
 
-        **Called without the store lock.** Both halves go through `_goals_run`,
-        which takes that lock itself on the DuckDB path and the lock is not
-        reentrant — so `generate_smart_goals` asks for this before it opens its
-        own connection. It used to take that connection as an argument and read
-        DuckDB Gold on it, which after step 13 would have been a frozen Gold.
+        It used to take `generate_smart_goals`' DuckDB connection as an
+        argument and read DuckDB Gold on it, which after step 13 would have
+        been a frozen Gold.
         """
-        from core import pg_goals_read
-
         first_day = date(target_year, target_month, 1)
         last_day = date(target_year, target_month, calendar.monthrange(target_year, target_month)[1])
         today = datetime.now(DEFAULT_TZ).date()
-
-        # Asked here, outside the `try`, and only for its refusal: an unknown
-        # `KS_READ_GOALS` raises, and every other goal read lets that stop it.
-        # Inside the `try` the refusal became a missing signal, and
-        # `/api/goals/forecast` answered 200 with a different goal.
-        pg_goals_read.enabled()
 
         try:
             # Get actual revenue for past days of the month
@@ -1199,13 +1144,10 @@ class GoalsMixin:
         Returns max(0.10, min(0.50, avg_yoy + 1.5 * stddev_yoy)).
         Falls back to 0.35 if insufficient data.
 
-        **Called without the store lock**, like `_get_ml_forecast_total`: it
-        reads through `_goals_run`, which takes the lock itself on the DuckDB
-        path, and that lock is not reentrant — so `generate_smart_goals` asks
-        for it before it opens its own. It used to take that connection as an
+        It reads through `_goals_run`, Postgres alone since step 14's S14-07.
+        It used to take `generate_smart_goals`' DuckDB connection as an
         argument.
         """
-        _refuse_a_retired_history()
         where, params = _silver_history_where(sales_type)
         rows = await self._goals_run(
             _SILVER_GROWTH_CAP_SQL.replace("{where}", where),
@@ -1216,7 +1158,6 @@ class GoalsMixin:
         self, target_year: int, target_month: int, sales_type: str,
     ) -> float:
         """The target month a year earlier — signal 1's baseline."""
-        _refuse_a_retired_history()
         where, params = _silver_history_where(sales_type)
         first = date(target_year - 1, target_month, 1)
         rows = await self._goals_run(
@@ -1238,7 +1179,6 @@ class GoalsMixin:
         production.
         """
         month_start = datetime.now(DEFAULT_TZ).date().replace(day=1)
-        _refuse_a_retired_history()
         where, params = _silver_history_where(sales_type)
         rows = await self._goals_run(
             _SILVER_RECENT_MONTHS_SQL.replace("{where}", where),
@@ -1278,9 +1218,8 @@ class GoalsMixin:
         Returns:
             Smart goals with monthly total and weekly breakdown
         """
-        # ── The revenue history, each read before the connection below: they
-        # take the store lock themselves (or go through `_goals_run`, which
-        # does on the DuckDB path), and it is not reentrant.
+        # ── The revenue history, through `_goals_run`: Postgres alone since
+        # step 14's S14-07, so no store lock is taken here.
         ml_forecast_goal = await self._get_ml_forecast_total(
             target_year, target_month, sales_type)
         dynamic_cap = await self._dynamic_growth_cap(target_month, sales_type)
@@ -1290,9 +1229,7 @@ class GoalsMixin:
 
         # ── The three shared tables, in one statement: their writer stores
         # them in one transaction, so this reads one set of them, from
-        # whichever store chain 7b-3 says writes them. Asked after the
-        # history reads above, which take DuckDB's store lock themselves on
-        # their DuckDB path — and so does this one; it is not reentrant.
+        # Postgres, where chain 7b-3 writes them.
         shared = await self._goal_tables_run(
             _SHARED_GOAL_TABLES_SQL, [target_month, target_month])
         seasonality_result = next(
@@ -1593,10 +1530,9 @@ class GoalsMixin:
         gave `revenue_predictions` a Postgres home. `generate_smart_goals`,
         which the audit filed beside it, was not a read at all until chain
         7b-1: it recomputed the three seasonality tables in DuckDB and read
-        them back. It reads only now, through `_goal_tables_run`, from the
-        store chain 7b-3 says writes them. This read follows the same chain
-        through `_goals_run`: Postgres with no fallback while it writes there,
-        `KS_READ_GOALS` while it does not.
+        them back. It reads only now, through `_goal_tables_run`, from
+        Postgres, where chain 7b-3 writes them. This read goes through
+        `_goals_run`: Postgres alone since step 14's S14-07.
         """
         rows = await self._goals_run(
             _PREDICTIONS_SQL, [sales_type, start_date, end_date])
@@ -1629,11 +1565,10 @@ class GoalsMixin:
         # coerces a string to a DATE without being asked; asyncpg encodes by
         # the type Postgres inferred and raises `invalid input for query
         # argument … 'str' object has no attribute 'toordinal'`. Under the
-        # flag that fault is not visible: the read falls back to DuckDB, logs
-        # an ERROR, and the method goes on answering — so the tab looks
-        # switched and is not. Found by the differential test, which is the
-        # only kind that can see it: a unit test mocks `fetch` and never meets
-        # the driver.
+        # flag, before step 14, that fault was not visible: the read fell back
+        # to DuckDB, logged an ERROR, and the method went on answering. Found
+        # by the differential test, which is the only kind that can see it: a
+        # unit test mocks `fetch` and never meets the driver.
         params: List[Any] = [
             d.date() if isinstance(d, datetime) else d for d in dates
         ]

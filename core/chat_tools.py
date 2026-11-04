@@ -398,28 +398,21 @@ def _get_date_range(period: str) -> tuple[date, date]:
 
 
 async def _chat_run(sql: str, params, *, mode: str = "all"):
-    """Run one tool query against whichever engine `KS_READ_CHAT` names.
+    """Run one tool query against Postgres.
 
     The bodies carry `{gold_daily_revenue}`, `{order_lines}` and
-    `{gold_revenue_rollup}` holes, filled **here** for the engine about to
-    answer, never at the call site. `{gold_revenue_rollup}` is the one that
-    bites: Postgres' Gold holds a roll-up row and a row per `source_id`, so a
-    bare `SUM(revenue)` there counts every order twice. No fallback — see
-    `core/pg_chat_read.py`.
+    `{gold_revenue_rollup}` holes, filled **here**, never at the call site.
+    `{gold_revenue_rollup}` is the one that bites: Postgres' Gold holds a
+    roll-up row and a row per `source_id`, so a bare `SUM(revenue)` there
+    counts every order twice. No fallback — see `core/pg_chat_read.py` — and
+    one engine since step 14's S14-07: `KS_READ_CHAT` is not read, and the
+    DuckDB store is not asked.
     """
-    from core import pg_chat_read, read_fallback
-    from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+    from core import pg_chat_read
+    from core.sql_dialect import POSTGRES, render_tables
 
-    params = list(params)
-    read_fallback.no_address("assistant", pg_chat_read)
-    if pg_chat_read.enabled() and pg_chat_read.available():
-        rows = await pg_chat_read.fetch(render_tables(sql, POSTGRES), params)
-        return (rows[0] if rows else None) if mode == "one" else rows
-
-    store = await get_store()
-    async with store.connection() as conn:
-        cur = conn.execute(render_tables(sql, DUCKDB), params)
-        return cur.fetchone() if mode == "one" else cur.fetchall()
+    rows = await pg_chat_read.fetch(render_tables(sql, POSTGRES), list(params))
+    return (rows[0] if rows else None) if mode == "one" else rows
 
 
 def _revenue_totals_sql(sales_type: str) -> str:
@@ -631,21 +624,15 @@ async def _get_top_products(period: str, by: str, limit: int) -> Dict[str, Any]:
 
 async def _get_source_breakdown(period: str) -> Dict[str, Any]:
     """Get sales breakdown by source."""
-    from core import pg_chat_read, read_fallback
-    from core.sql_dialect import DUCKDB, POSTGRES, channel_totals_items
+    from core.sql_dialect import POSTGRES, channel_totals_items
 
     start_date, end_date = _get_date_range(period)
 
     # Deliberately NO `{gold_revenue_rollup}`: Postgres spells a channel as
     # `SUM(...) FILTER (WHERE source_id = n)`, which reads the fine rows, and
-    # the roll-up row has no source_id. The expressions differ by engine, so
-    # the dialect is chosen here — the same compromise as the weekly report's
-    # `fetch_channels`, and safe for the same reason: there is no fallback to
-    # carry one engine's spelling into the other.
-    read_fallback.no_address("assistant", pg_chat_read)
-    dialect = (POSTGRES if (pg_chat_read.enabled() and pg_chat_read.available())
-               else DUCKDB)
-    channels = channel_totals_items(dialect)
+    # the roll-up row has no source_id — the same as the weekly report's
+    # `fetch_channels`.
+    channels = channel_totals_items(POSTGRES)
     cols = ", ".join(f"{rev}, {orders}" for _name, rev, orders in channels)
     result = await _chat_run(
         f"SELECT {cols} FROM {{gold_daily_revenue}} "

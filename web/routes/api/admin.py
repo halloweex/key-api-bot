@@ -673,6 +673,7 @@ async def rebuild_silver_from_scratch(
     from core.duckdb_store import (
         SILVER_ORDERS_DDL, silver_select_sql, silver_pass2_sql,
     )
+    from core.sql_dialect import DUCKDB
 
     if not warehouse_cutover.duckdb_derives():
         # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB's Silver is frozen on
@@ -686,8 +687,9 @@ async def rebuild_silver_from_scratch(
         async with store.connection() as conn:
             conn.execute("DROP TABLE IF EXISTS silver_orders")
             conn.execute(SILVER_ORDERS_DDL)
-            conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
-            conn.execute(silver_pass2_sql())
+            conn.execute(
+                f"INSERT INTO silver_orders SELECT {silver_select_sql(DUCKDB)} FROM orders o")
+            conn.execute(silver_pass2_sql(dialect=DUCKDB))
             count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
 

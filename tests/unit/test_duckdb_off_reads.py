@@ -14,7 +14,9 @@ read path is four places that let DuckDB answer by routing, not by failure
   holds the same rows (OD-S5-4), or says `off` and the error's class.
 - the expenses' history gate: a Postgres holding no history of
   `bronze.expenses` let DuckDB answer, uncounted and unrefused even under
-  `KS_READ_FALLBACK=off`. Under `KS_DUCKDB=off` it is refused (`no_engine`).
+  `KS_READ_FALLBACK=off`. Under `KS_DUCKDB=off` it is refused (`no_engine`),
+  and since step 14's S14-07 always — its `on` twin, DuckDB answering, went
+  with the DuckDB path.
 - a read switch left at `duckdb` (or unset) was a routing decision `off`
   never refused. Under `KS_DUCKDB=off` it is refused before the gate, and a
   failed engine is refused whatever `KS_READ_FALLBACK` says.
@@ -372,68 +374,53 @@ class TestTheExpensesHistoryGate:
         assert "no backfilled history" in caplog.text
         assert "serving from DuckDB" not in caplog.text
 
-    def test_under_on_no_history_is_still_answered_by_duckdb(
-        self, admin_client, no_history, monkeypatch, caplog,
-    ):
-        """`on` is untouched — the gap step 13's `expenses_backfilled`
-        precondition closes, served from DuckDB, nothing counted or refused
-        even under KS_READ_FALLBACK=off."""
-        monkeypatch.setenv("KS_READ_FALLBACK", "off")
-        read_fallback.configure_mode()
-        with caplog.at_level(logging.WARNING):
-            response = admin_client.get("/api/expenses/summary", params=WINDOW)
-        assert response.status_code == 200, response.text
-        assert read_fallback.refusals() == {} and read_fallback.counts() == {}
-        assert "serving from DuckDB" in caplog.text
-
 
 # ─── read_fallback itself ──────────────────────────────────────────────────
 
 class TestTheRule:
-    # Shown on `/inventory`'s switch, one still read: `/traffic`'s, the
-    # example until step 14's S14-05, is read no longer, and its router asks
-    # `no_address` nothing (tests/unit/test_read_routers_postgres_only.py).
+    """`no_address` on a read switch. Since step 14's S14-07 no reader
+    module carries one — `/traffic`'s was the example until S14-05,
+    `/inventory`'s until S14-07 — and nothing calls `no_address` any more;
+    it goes in S14-16. Until then its rule is held on a stand-in switch, so
+    the function cannot drift while it stands."""
+
+    SWITCH = type("Switch", (), {"ENV": "KS_READ_STANDIN"})
+
     @pytest.mark.parametrize("value", [None, "duckdb", " DuckDB "],
                              ids=["unset", "duckdb", "spaced"])
     def test_under_off_a_switch_left_at_duckdb_is_refused_by_name(
         self, value, fresh_read_fallback, duckdb_off, monkeypatch, caplog,  # noqa: F811
     ):
-        from core import pg_inventory_read
-
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         if value is None:
-            monkeypatch.delenv(pg_inventory_read.ENV, raising=False)
+            monkeypatch.delenv(self.SWITCH.ENV, raising=False)
         else:
-            monkeypatch.setenv(pg_inventory_read.ENV, value)
+            monkeypatch.setenv(self.SWITCH.ENV, value)
         read_fallback.configure_mode()
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"), \
                 pytest.raises(read_fallback.ReadUnavailable) as raised:
-            read_fallback.no_address("inventory", pg_inventory_read)
-        assert raised.value.surface == "inventory"
-        assert "KS_READ_INVENTORY=duckdb while KS_DUCKDB=off" in caplog.text
+            read_fallback.no_address("standin", self.SWITCH)
+        assert raised.value.surface == "standin"
+        assert "KS_READ_STANDIN=duckdb while KS_DUCKDB=off" in caplog.text
         assert "falling back to DuckDB" not in caplog.text
 
     def test_under_off_a_switch_on_its_engine_passes(
         self, fresh_read_fallback, duckdb_off, monkeypatch,  # noqa: F811
     ):
-        from core import pg_inventory_read
-
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        monkeypatch.setenv(pg_inventory_read.ENV, "postgres")
+        monkeypatch.setenv(self.SWITCH.ENV, "postgres")
         read_fallback.configure_mode()
-        read_fallback.no_address("inventory", pg_inventory_read)
+        read_fallback.no_address("standin", self.SWITCH)
         assert read_fallback.refusals() == {}
 
     @pytest.mark.parametrize("fallback", ["duckdb", "off"])
     def test_under_on_a_switch_left_at_duckdb_is_routing(
         self, fallback, fresh_read_fallback, monkeypatch,  # noqa: F811
     ):
-        from core import pg_inventory_read
-
         monkeypatch.setenv("KS_READ_FALLBACK", fallback)
-        monkeypatch.setenv(pg_inventory_read.ENV, "duckdb")
+        monkeypatch.setenv(self.SWITCH.ENV, "duckdb")
         read_fallback.configure_mode()
-        read_fallback.no_address("inventory", pg_inventory_read)
+        read_fallback.no_address("standin", self.SWITCH)
         assert read_fallback.refusals() == {}
 
 
@@ -465,16 +452,20 @@ class TestTheCanaryJudgesWhatWebActsOn:
         watch False."""
         from bot import canary
 
+        # A route left with no engine: a switch naming Postgres without a
+        # DSN, published as `misconfigured`. Until step 14's S14-07 this was
+        # the cohorts' switch left at `duckdb` (`no_engine`), which routes
+        # nothing now.
         monkeypatch.setenv("KS_READ_FALLBACK", "duckdb")
-        monkeypatch.setenv("KS_READ_COHORTS", "duckdb")
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
         read_fallback.configure_mode()
-        with pytest.raises(read_fallback.ReadUnavailable):
-            read_fallback.no_engine("cohorts", "KS_READ_COHORTS=duckdb")
+        read_fallback.refuse("expenses", RuntimeError("KS_PG_DSN is not set"))
         payload = _health_blocks()
         # `off` whatever was configured, a constant since step 14's S14-00.
         assert payload["read_fallback_mode"]["mode"] == "off"
-        assert payload["read_fallback_mode"]["no_engine"], "still published"
-        assert payload["read_fallback_mode"]["refused"]["cohorts"]["count"] == 1
+        assert payload["read_fallback_mode"]["misconfigured"], "still published"
+        assert payload["read_fallback_mode"]["refused"]["expenses"]["count"] == 1
         assert canary.check_read_routes(payload) == []
         assert canary.read_fallbacks_clean(payload) is True
         assert [key for key, _ in canary.check_read_refusals(payload)] == ["read_refused"]
@@ -493,9 +484,11 @@ class TestTheCanaryJudgesWhatWebActsOn:
         monkeypatch.setenv(duckdb_switch.ENV, switch)
         duckdb_switch.configure_mode()
         monkeypatch.setenv("KS_READ_FALLBACK", fallback)
-        monkeypatch.setenv("KS_READ_COHORTS", "duckdb")
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
         read_fallback.configure_mode()
         payload = _health_blocks()
+        assert payload["read_fallback_mode"]["misconfigured"], "a route to page"
         paged = [key for key, _ in canary.check_read_routes(payload)]
         assert paged == ([] if read_fallback.refusing() else ["read_routed_to_duckdb"])
         assert canary.read_fallbacks_clean(payload) is read_fallback.refusing()
