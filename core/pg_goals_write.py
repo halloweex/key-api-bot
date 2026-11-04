@@ -59,15 +59,18 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
 connection has come out of the pool and before the transaction opens. From
 the first goal typed here the flag cannot move the writes back to DuckDB; only
-`scripts/chain_copy_back.py goals` can, and it carries the three rows back and
-compares them at zero before it releases anything.
+`scripts/chain_copy_back.py goals` could, carrying the three rows back and
+comparing them at zero before it released anything (deleted in step 14's
+S14-04; the way back since is an image from before step 14,
+`core.rollback_lever`).
 
 ONE CLOCK FOR BOTH STORES
 
 `updated_at` is supplied by the caller — the web container's clock, the same
 `datetime.now(DEFAULT_TZ)` DuckDB's branch stamps — never Postgres' `now()`.
 It is the column the copy-back's handover orders two versions of one goal by
-(`chain_transfer._shared_clock`), and a version DuckDB stamped against one
+(`chain_transfer._shared_clock`; an image from before step 14 still orders
+by it, since S14-04 deleted this build's), and a version DuckDB stamped against one
 written here must be compared on one clock, not on two machines' idea of it.
 The Postgres column has no default, so a writer that forgot it would leave
 the handover nothing to order by; `core/pg_chain_invariants.py` watches for
@@ -92,7 +95,8 @@ WRITE_ENV = "KS_WRITE_GOALS"
 CHAIN = "pg_goals_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper, the daily comparison and the copy-back.
+# the hourly shipper and the daily comparison (and the copy-back, until step
+# 14's S14-04 deleted it).
 CHAIN_TABLES: Tuple[str, ...] = ("app.revenue_goals",)
 
 # The period types `set_goal` accepts. The repository refuses anything else

@@ -59,8 +59,9 @@
 --   stood down and nothing is written anywhere. Fix the .env line.
 -- - owner rows and buyers_on=0 or held: the marker is lost. Restore
 --   data/write-chain-owners/pg_buyers_write (and, when held, set the named
---   reader to postgres: the latched chain writes Postgres whatever it reads),
---   else scripts/chain_copy_back.py buyers.
+--   reader to postgres: the latched chain writes Postgres whatever it reads).
+--   The copy-back went with step 14's S14-04; the detail names
+--   core.rollback_lever's lever.
 -- - a table written or failing after the handover: a shipper is writing
 --   DuckDB's copy over the chain's. Read B5, then the web log.
 WITH clock AS (
@@ -131,7 +132,7 @@ SELECT 'B1 buyers copies stood down'::text AS "check",
                    'postgres: the marker is lost, the buyers step writes DuckDB again and '
                    'nothing ships it — the mirror and the hourly copy stand down on the owner '
                    'rows — so the buyers in Postgres stop moving (chain_latch_disagrees). '
-                   'Restore the marker, else scripts/chain_copy_back.py buyers',
+                   'Restore the marker. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'none of the three tables written by a copy ' || since.said END
@@ -146,8 +147,8 @@ SELECT 'B1 buyers copies stood down'::text AS "check",
                    'and %s not postgres: the marker is lost, the buyers step writes DuckDB again '
                    'and nothing ships it — the mirror and the hourly copy stand down on the owner '
                    'rows — so the buyers in Postgres stop moving (chain_latch_disagrees). Restore '
-                   'the marker and set %s to postgres, else scripts/chain_copy_back.py buyers; '
-                   'taking the flag back changes nothing',
+                   'the marker and set %s to postgres; taking the flag back changes nothing. '
+                   'Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
                    COALESCE(flag.held_by, 'a buyer reader'),
                    COALESCE(flag.held_by, 'the reader')) END
