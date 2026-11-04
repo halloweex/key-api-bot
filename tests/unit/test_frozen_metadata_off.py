@@ -1,7 +1,7 @@
 """Stage 5, PR-5: under `KS_DUCKDB=off`, what was inherited from DuckDB's
 `sync_metadata` is read from its Postgres copy, and the file is not opened.
 
-Four places read DuckDB for a key Postgres does not hold yet (the design's
+Four places read DuckDB for a key Postgres did not hold yet (the design's
 2.5): the sync window a chain inherits (`get_last_sync_time`), the freshness
 check's stand-in and its bootstrap gate, the digest's beat, and the report
 ledger's adoption of a week delivered before the flip. Under `off` the first
@@ -10,8 +10,11 @@ three read `app.sync_metadata` — the hourly copy of the same table
 
 Each class holds one consumer: under `off` the copy answers and DuckDB is
 never asked (`duckdb_switch.opened() == {}`, and the store's directory never
-made); under `on` the answer is DuckDB's, as before. The round trip against a
-real `app.sync_metadata` is at the end, skipped without `KS_PG_DSN`.
+made); under `on` the first two answer DuckDB's, as before. Step 14's S14-10
+deleted the journal's and the ledgers' DuckDB halves, so the digest's beat
+reads the copy under `on` too, and the ledger adopts nothing in either mode.
+The round trip against a real `app.sync_metadata` is at the end, skipped
+without `KS_PG_DSN`.
 
 Every guard names, in its docstring, the mutation it catches.
 """
@@ -28,7 +31,7 @@ import pytest_asyncio
 from core import (
     chain_latch, data_quality as dq, dq_journal, duckdb_switch,
     pg_chain_watermarks, pg_frozen_metadata, pg_traffic_ledger_write,
-    pg_weekly_ledger_write, report_ledger, shadow_writes,
+    pg_weekly_ledger_write, report_ledger,
 )
 from core.duckdb_store import DuckDBStore
 
@@ -44,9 +47,7 @@ def flags(monkeypatch):
 
     for chain in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(chain.WRITE_ENV, raising=False)
-    shadow_writes.reset()
     yield monkeypatch
-    shadow_writes.reset()
 
 
 class Copy:
@@ -354,13 +355,15 @@ def pg_beat(monkeypatch):
     return state
 
 
-class _Refused:
-    """A store whose file may not be reached."""
+@pytest.fixture
+def no_duckdb(monkeypatch):
+    """A store whose file may not be reached, wherever the code looks for it."""
+    from core import duckdb_store
 
-    @asynccontextmanager
-    async def connection(self):
-        raise AssertionError("the digest reached DuckDB")
-        yield  # pragma: no cover
+    def connection(self):
+        raise AssertionError("reached DuckDB")
+
+    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
 
 
 class TestTheDigestBeat:
@@ -370,7 +373,7 @@ class TestTheDigestBeat:
         every standing finding as new, or the read would reach the file."""
         beat = "2026-10-09T06:00:00+00:00"
         copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: beat})
-        last, _ = await dq_journal.digest_inputs(_Refused(), ("integrity",), NOW)
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime.fromisoformat(beat)
         assert copy.asked == [dq_journal.DIGEST_MARKER_KEY]
         _untouched(duckdb_off)
@@ -379,34 +382,29 @@ class TestTheDigestBeat:
     async def test_under_off_postgres_s_beat_wins(self, flags, duckdb_off, pg_beat):
         pg_beat["marker"] = "2026-10-10T06:00:00+00:00"
         copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-01-01T06:00:00+00:00"})
-        last, _ = await dq_journal.digest_inputs(_Refused(), ("integrity",), NOW)
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime.fromisoformat(pg_beat["marker"])
         assert copy.asked == []
 
     @pytest.mark.asyncio
     async def test_under_off_no_beat_anywhere_is_none(self, flags, duckdb_off, pg_beat):
         Copy(flags)
-        last, _ = await dq_journal.digest_inputs(_Refused(), ("integrity",), NOW)
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last is None
         _untouched(duckdb_off)
 
     @pytest.mark.asyncio
-    async def test_under_on_the_beat_is_inherited_from_duckdb(self, flags, tmp_path,
-                                                              pg_beat):
-        """The control."""
-        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value, "
-                             "updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                             [dq_journal.DIGEST_MARKER_KEY, "2026-09-29T06:00:00+00:00"])
-            copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-01-01T06:00:00+00:00"})
-            last, _ = await dq_journal.digest_inputs(store, ("integrity",), NOW)
-            assert last == datetime(2026, 9, 29, 6, tzinfo=UTC)
-            assert copy.asked == []
-        finally:
-            await store.close()
+    async def test_under_on_the_beat_is_the_copys_too(self, flags, no_duckdb, pg_beat,
+                                                      monkeypatch):
+        """Until S14-10 a process on `KS_DUCKDB=on` inherited the beat from
+        DuckDB's own `sync_metadata`; the journal's DuckDB half went, and the
+        copy answers in either mode. Mutation: inherit only under off."""
+        monkeypatch.setenv(duckdb_switch.ENV, "on")
+        duckdb_switch.configure_mode()
+        copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-09-29T06:00:00+00:00"})
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
+        assert last == datetime(2026, 9, 29, 6, tzinfo=UTC)
+        assert copy.asked == [dq_journal.DIGEST_MARKER_KEY]
 
 
 # ─── 4. The report ledgers' adoption ─────────────────────────────────────────
@@ -423,31 +421,24 @@ class TestTheLedgerAdoptsNothingUnderOff:
         before every report (the sweep's `already_sent` rows)."""
         flags.setenv(chain.WRITE_ENV, "postgres")
         flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
-        assert await report_ledger.already_sent(_Refused(), ledger, WEEK, "retail") is False
+        assert await report_ledger.already_sent(ledger, WEEK, "retail") is False
         flags.setattr(chain, "find_sent", AsyncMock(return_value={"week_start": WEEK}))
-        assert await report_ledger.already_sent(_Refused(), ledger, WEEK, "retail") is True
+        assert await report_ledger.already_sent(ledger, WEEK, "retail") is True
         _untouched(duckdb_off)
 
     @pytest.mark.asyncio
-    async def test_under_on_a_row_only_duckdb_holds_is_still_adopted(self, flags, tmp_path):
-        """The control (`test_report_ledger.py` holds the rest of it)."""
-        from core.weekly_report import mark_sent as dk_mark
-
+    async def test_under_on_nothing_is_adopted_either(self, flags, no_duckdb, monkeypatch):
+        """Until S14-10 a process on `KS_DUCKDB=on` adopted a week only DuckDB
+        held; the adoption went with the ledgers' DuckDB half, and Postgres
+        alone answers in either mode. Mutation: put the adoption back."""
+        monkeypatch.setenv(duckdb_switch.ENV, "on")
+        duckdb_switch.configure_mode()
         chain = pg_weekly_ledger_write
-        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
-        await store.connect()
-        try:
-            flags.setenv(chain.WRITE_ENV, "postgres")
-            flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
-            adopted = AsyncMock()
-            flags.setattr(chain, "mark_sent", adopted)
-            async with store.connection() as conn:
-                dk_mark(conn, WEEK, "retail", 12.5, 4)
-            assert await report_ledger.already_sent(store, report_ledger.WEEKLY,
-                                                    WEEK, "retail") is True
-            assert adopted.await_count == 1
-        finally:
-            await store.close()
+        flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
+        adopted = AsyncMock()
+        flags.setattr(chain, "mark_sent", adopted)
+        assert await report_ledger.already_sent(report_ledger.WEEKLY, WEEK, "retail") is False
+        assert adopted.await_count == 0
 
 
 # ─── The module ──────────────────────────────────────────────────────────────

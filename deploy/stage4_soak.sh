@@ -223,9 +223,9 @@ fi
 
 # The other three shadow chains (OD-02 (c)): chain 10's samples and the two
 # report ledgers, 11a and 11b. Read as chain 9 is — the flag, outranked by the
-# latch — and judged by H1 (the hourly copy stood down for their tables) and
-# H2 (the 07:30 comparison of the two copies found nothing), which take chain
-# 9's state from DQ_JOURNAL_DIRECT.
+# latch — and judged by H1 (the hourly copy stood down for their tables), which
+# takes chain 9's state from DQ_JOURNAL_DIRECT. H2, the 07:30 comparison of
+# the two copies, went with the DuckDB copy in step 14's S14-10.
 shadow_state() {
     local state
     state="$(flag_state "$1" postgres duckdb)"

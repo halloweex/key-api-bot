@@ -379,50 +379,10 @@ def _first_of_next_month(d: date) -> date:
 # is a migration, and out of chain 7b's scope.
 GOAL_TABLES_SALES_TYPE = "retail"
 
-# The statements `_persist_goal_tables` runs, in its one transaction. The same
-# texts the calculators ran when they stored for themselves.
-_SEASONAL_UPSERT_SQL = """
-    INSERT INTO seasonal_indices
-    (month, seasonality_index, sample_size, avg_revenue, min_revenue, max_revenue, confidence, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (month) DO UPDATE SET
-        seasonality_index = excluded.seasonality_index,
-        sample_size = excluded.sample_size,
-        avg_revenue = excluded.avg_revenue,
-        min_revenue = excluded.min_revenue,
-        max_revenue = excluded.max_revenue,
-        confidence = excluded.confidence,
-        updated_at = excluded.updated_at
-"""
-
-_YOY_OVERALL_EXISTS_SQL = (
-    "SELECT 1 FROM growth_metrics WHERE metric_type = 'yoy_overall'")
-
-_YOY_OVERALL_UPSERT_SQL = """
-    INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
-    VALUES ('yoy_overall', ?, ?, ?, ?, ?)
-    ON CONFLICT (metric_type) DO UPDATE SET
-        value = excluded.value,
-        period_start = excluded.period_start,
-        period_end = excluded.period_end,
-        sample_size = excluded.sample_size,
-        updated_at = excluded.updated_at
-"""
-
-_MONTHLY_YOY_UPDATE_SQL = """
-    UPDATE seasonal_indices
-    SET yoy_growth = ?, updated_at = ?
-    WHERE month = ?
-"""
-
-_WEEKLY_UPSERT_SQL = """
-    INSERT INTO weekly_patterns (month, week_of_month, weight, sample_size, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT (month, week_of_month) DO UPDATE SET
-        weight = excluded.weight,
-        sample_size = excluded.sample_size,
-        updated_at = excluded.updated_at
-"""
+# The five DuckDB statements `_persist_goal_tables` ran in its one DuckDB
+# transaction (`_SEASONAL_UPSERT_SQL` and its siblings) stood here until step
+# 14's S14-11; chain 7b-3's writer carries the same SET lists in Postgres
+# (`pg_forecast_write.persist_goal_tables`).
 
 # Default: slightly more revenue in weeks 1-4, less in week 5.
 _DEFAULT_WEEKLY_WEIGHTS = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
@@ -791,29 +751,15 @@ class GoalsMixin:
         suggestions = await self.calculate_suggested_goals()
         calculated = suggestions[period_type]["suggested"]
 
-        # Chain 7a: `KS_WRITE_GOALS` decides which store holds the number a
-        # human typed. Routed here and not in the route, because
-        # `reset_goal_to_auto` writes through this method too. See
-        # `core/pg_goals_write.py`.
+        # Chain 7a: the number a human typed, written to Postgres. Called here
+        # and not in the route, because `reset_goal_to_auto` writes through
+        # this method too. See `core/pg_goals_write.py`; DuckDB's branch went
+        # with `KS_WRITE_GOALS` in step 14's S14-11.
         from core import pg_goals_write
 
-        if pg_goals_write.writes_postgres():
-            await pg_goals_write.set_goal(
-                period_type, amount, is_custom, calculated, growth_factor,
-                datetime.now(DEFAULT_TZ))
-        else:
-            async with self.connection() as conn:
-                now = datetime.now(DEFAULT_TZ)
-                conn.execute("""
-                    INSERT INTO revenue_goals (period_type, goal_amount, is_custom, calculated_goal, growth_factor, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (period_type) DO UPDATE SET
-                        goal_amount = excluded.goal_amount,
-                        is_custom = excluded.is_custom,
-                        calculated_goal = excluded.calculated_goal,
-                        growth_factor = excluded.growth_factor,
-                        updated_at = excluded.updated_at
-                """, [period_type, amount, is_custom, calculated, growth_factor, now])
+        await pg_goals_write.set_goal(
+            period_type, amount, is_custom, calculated, growth_factor,
+            datetime.now(DEFAULT_TZ))
 
         return {
             "periodType": period_type,
@@ -998,51 +944,20 @@ class GoalsMixin:
         ]
         weekly_rows = [list(row) + [now] for row in (tables.get("weekly_rows") or [])]
 
-        # Chain 7b-3 (`KS_WRITE_FORECAST`): the same rows, the same statements
-        # and the same placeholder rule, in one Postgres transaction. Routed
-        # here, where the Monday job and the POST both arrive, rather than in
-        # either of them. Asked after everything is computed, so a flag nobody
-        # can read raises with nothing written in either store.
+        # Chain 7b-3: the same rows, the same statements and the same
+        # placeholder rule, in one Postgres transaction
+        # (`core/pg_forecast_write.py`). Called here, where the Monday job and
+        # the POST both arrive, rather than in either of them. DuckDB's branch
+        # — one DuckDB transaction over the same texts — went with
+        # `KS_WRITE_FORECAST` in step 14's S14-11.
         from core import pg_forecast_write
 
-        if pg_forecast_write.writes_postgres():
-            await pg_forecast_write.persist_goal_tables(
-                [row[:7] for row in seasonal_rows],
-                (tables["yoy_overall"], start, end, yoy["sample_size"]),
-                yoy["monthly_yoy"],
-                [row[:4] for row in weekly_rows],
-                now)
-            return
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                if seasonal_rows:
-                    conn.executemany(_SEASONAL_UPSERT_SQL, seasonal_rows)
-
-                has_row = conn.execute(_YOY_OVERALL_EXISTS_SQL).fetchone() is not None
-                if yoy["sample_size"] or not has_row:
-                    conn.execute(_YOY_OVERALL_UPSERT_SQL, [
-                        tables["yoy_overall"], start, end, yoy["sample_size"], now])
-                else:
-                    logger.warning(
-                        "YoY: no pair of full years in the %s history; keeping "
-                        "the stored yoy_overall rather than overwriting it with "
-                        "the %.2f fallback", GOAL_TABLES_SALES_TYPE,
-                        tables["yoy_overall"],
-                    )
-                for month, value in yoy["monthly_yoy"].items():
-                    conn.execute(_MONTHLY_YOY_UPDATE_SQL, [value, now, month])
-
-                if weekly_rows:
-                    conn.executemany(_WEEKLY_UPSERT_SQL, weekly_rows)
-                conn.execute("COMMIT")
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+        await pg_forecast_write.persist_goal_tables(
+            [row[:7] for row in seasonal_rows],
+            (tables["yoy_overall"], start, end, yoy["sample_size"]),
+            yoy["monthly_yoy"],
+            [row[:4] for row in weekly_rows],
+            now)
 
     async def recalculate_goal_tables(self, *, include_weekly: bool) -> Dict[str, Any]:
         """Recompute the shared goal tables and store them — the one writer.
@@ -1455,11 +1370,10 @@ class GoalsMixin:
         sales_type: str = "retail",
         metrics: Optional[Dict[str, float]] = None,
     ) -> int:
-        """Store revenue predictions where chain 7b-3 says they are written.
-
-        DuckDB, or under `KS_WRITE_FORECAST` (`core/pg_forecast_write.py`)
-        Postgres: the same DELETE over the range and INSERT, in one
-        transaction, stamped with this call's clock.
+        """Store revenue predictions where chain 7b-3 writes them: Postgres
+        (`core/pg_forecast_write.py`) — the DELETE over the range and the
+        INSERT, in one transaction, stamped with this call's clock. DuckDB's
+        branch went with `KS_WRITE_FORECAST` in step 14's S14-11.
 
         Args:
             predictions: List of dicts with 'date' and 'predicted_revenue' keys.
@@ -1472,51 +1386,12 @@ class GoalsMixin:
         if not predictions:
             return 0
 
+        from datetime import timezone
+
         from core import pg_forecast_write
 
-        if pg_forecast_write.writes_postgres():
-            from datetime import timezone
-
-            return await pg_forecast_write.store_predictions(
-                predictions, sales_type, metrics, datetime.now(timezone.utc))
-
-        mae = metrics.get('mae', 0) if metrics else 0
-        mape = metrics.get('mape', 0) if metrics else 0
-        wape = metrics.get('wape', 0) if metrics else 0
-
-        async with self.connection() as conn:
-            dates = [p['date'] for p in predictions]
-            min_date = min(dates)
-            max_date = max(dates)
-
-            # One transaction: as two autocommit statements, a kill between the
-            # DELETE and the INSERT — at peak memory, right after training —
-            # left the range empty, the month view lost its forecast, and boot
-            # did not repair it because the model file was still there.
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                conn.execute(
-                    """DELETE FROM revenue_predictions
-                       WHERE sales_type = ? AND prediction_date >= ? AND prediction_date <= ?""",
-                    [sales_type, min_date, max_date]
-                )
-                conn.executemany(
-                    """INSERT INTO revenue_predictions
-                       (prediction_date, sales_type, predicted_revenue, model_mae, model_mape, model_wape)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    [[pred['date'], sales_type, pred['predicted_revenue'], mae, mape, wape]
-                     for pred in predictions]
-                )
-                conn.execute("COMMIT")
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-
-            logger.info(f"Stored {len(predictions)} predictions for {sales_type}")
-            return len(predictions)
+        return await pg_forecast_write.store_predictions(
+            predictions, sales_type, metrics, datetime.now(timezone.utc))
 
     async def get_predictions(
         self,

@@ -363,14 +363,18 @@ def test_the_insights_are_live_because_they_answer_all_time_figures():
 
 
 def test_every_margin_route_is_live_while_margin_costs_at_todays_price():
-    """Every /api/margin route the table asks joins the window's lines to
-    `{offer_stocks}` by SKU — today's `purchased_price`, which chain 1's
-    hourly stock step upserts — so a price change between two runs moves an
-    August margin. Read from the repository, so a margin route added to the
-    table is held too. Mutation: mark one absolute, or add a seventh margin
-    route as absolute."""
+    """Every /api/margin route the table asks joins the window's lines by SKU
+    to the per-SKU cost read out of `{offer_stocks}` (`_SKU_COST`, since #346)
+    — today's `purchased_price`, which chain 1's hourly stock step upserts —
+    so a price change between two runs moves an August margin. Read from the
+    repository, so a margin route added to the table is held too. Mutation:
+    mark one absolute, or add a seventh margin route as absolute."""
+    from core.repositories import margin as margin_repo
+
+    cost = margin_repo._SKU_COST
+    assert "FROM {offer_stocks}" in cost and "purchased_price" in cost, cost
     text = (REPO / "core" / "repositories" / "margin.py").read_text()
-    assert "LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku" in text
+    assert "LEFT JOIN {_SKU_COST} os ON l.sku = os.sku" in text
     upsert = (REPO / "core" / "pg_inventory_write.py").read_text()
     assert '"bronze.offer_stocks"' in upsert and '"purchased_price"' in upsert
     margin = [r for r in fp.routes(date(2026, 8, 1), date(2026, 8, 31))

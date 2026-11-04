@@ -73,21 +73,6 @@ INVENTORY_RETRY_AFTER_S = 600
 INVENTORY_STEP_EVERY_S = 3600
 
 
-def _inventory_writes_postgres() -> bool:
-    """Whether chain 1's half of the tick takes the Postgres path.
-
-    A `KS_WRITE_INVENTORY` nobody understands is not Postgres: it takes the
-    path it always took, where the chain's own watermark read raises on it
-    (DN-01) — a typo in that variable must still stop that chain loudly.
-    """
-    from core.pg_inventory_write import writes_postgres
-
-    try:
-        return writes_postgres()
-    except RuntimeError:
-        return False
-
-
 class InventoryStepState:
     """What chain 1's half of the tick last did on the Postgres path.
 
@@ -595,13 +580,13 @@ class SyncService:
             Number of managers synced
         """
         logger.info("Syncing managers...")
-        # Chain 5: off DuckDB — or a flag nobody can read — every failure is
-        # recorded, the watermark held and the step retried after
-        # `MANAGERS_RETRY_AFTER_S`, and nothing escapes into the tick or the
-        # full sync. On DuckDB this method is what it always was.
+        # Chain 5: every failure is recorded, the watermark held and the step
+        # retried after `MANAGERS_RETRY_AFTER_S`, and nothing escapes into the
+        # tick or the full sync. Until step 14's S14-11 that held only while
+        # the chain was off DuckDB (`pg_managers_write.mode()`), and on DuckDB
+        # this method raised as it always had.
         from core import pg_managers_write
 
-        moved = pg_managers_write.mode() != "duckdb"
         try:
             client = await get_async_client()
             managers = []
@@ -616,27 +601,21 @@ class SyncService:
             await self.store.set_last_sync_time("managers")
 
             logger.info(f"Synced {count} managers from KeyCRM")
-            if moved:
-                self.managers_step.succeeded()
+            self.managers_step.succeeded()
             return count
         except KeyCRMConnectionError as e:
             logger.warning(f"Manager sync connection error (will retry): {e}")
-            if moved:
-                self._managers_step_failed(e)
+            self._managers_step_failed(e)
             return 0
         except KeyCRMAPIError as e:
             logger.error(f"Manager sync API error: {e}")
-            if moved:
-                self._managers_step_failed(e)
+            self._managers_step_failed(e)
             return 0
         except KeyCRMError as e:
             logger.error(f"Manager sync error: {e}")
-            if moved:
-                self._managers_step_failed(e)
+            self._managers_step_failed(e)
             return 0
-        except Exception as e:  # noqa: BLE001 — contained under chain 5 only
-            if not moved:
-                raise
+        except Exception as e:  # noqa: BLE001 — contained: chain 5 writes Postgres
             logger.error(
                 "Manager sync failed under %s; last_sync_managers not moved, "
                 "next attempt in %ss: %s: %s", pg_managers_write.WRITE_ENV,
@@ -704,21 +683,13 @@ class SyncService:
         Returns:
             Number of buyers synced — 0 on any failure
         """
-        from core import pg_buyers_write
         from core.landing_rows import birthday_is_unreadable
 
         state = self.buyer_sync_state
         state.last_attempt_at = datetime.now(DEFAULT_TZ)
-        # A KS_WRITE_BUYERS nobody can read has nowhere known to write to, and
-        # the write would raise only after KeyCRM had been asked for up to 500
-        # buyers. The tick's watermark getter stops first today; this is for
-        # the doors that call the step directly (`POST /duckdb/sync-buyers`).
-        if pg_buyers_write.mode() is None:
-            exc = RuntimeError(f"{pg_buyers_write.WRITE_ENV} is not understood; "
-                               "the buyers step fetches nothing until it is")
-            logger.error(str(exc))
-            self._buyer_step_failed(exc)
-            return 0
+        # Until step 14's S14-11 a KS_WRITE_BUYERS nobody could read stopped
+        # the step here, before KeyCRM was asked (`pg_buyers_write.mode()`
+        # None). The flag is read by nothing now: the buyers go to Postgres.
         logger.info("Syncing missing buyers...")
         try:
             # Get buyer IDs from orders that don't have buyer records.
@@ -1492,17 +1463,10 @@ class SyncService:
             # tick's end.
             await self._catalogue_step_postgres(client, stats)
 
-            # Sync managers daily (86400 seconds = 24 hours)
-            from core import pg_managers_write
-
-            if pg_managers_write.mode() == "duckdb":
-                last_managers_sync = await self.store.get_last_sync_time("managers")
-                if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
-                    stats["managers"] = await self.sync_managers()
-            else:
-                # Chain 5 off DuckDB, or its flag unreadable: contained, so the
-                # buyers, offers and stocks below run whatever happens here.
-                stats["managers"] = await self._managers_step_postgres()
+            # Sync managers daily. Chain 5's step is contained, so the buyers,
+            # offers and stocks below run whatever happens here (until step
+            # 14's S14-11 only while the chain was off DuckDB).
+            stats["managers"] = await self._managers_step_postgres()
 
             # Sync missing buyers (fetch buyer details for orders that don't have them)
             #
@@ -1545,32 +1509,10 @@ class SyncService:
                         exc_info=True)
                     self._buyer_step_failed(e)
 
-            if _inventory_writes_postgres():
-                # Chain 1 writes Postgres: a failure there is recorded and the
-                # tick goes on (DN-24). See `INVENTORY_RETRY_AFTER_S`.
-                await self._inventory_step_postgres(stats)
-            else:
-                # Sync offers hourly (needed for proper stock-to-product linking)
-                last_offers_sync = await self.store.get_last_sync_time("offers")
-                if not last_offers_sync or (datetime.now(DEFAULT_TZ) - last_offers_sync).total_seconds() > 3600:
-                    stats["offers"] = await self.sync_offers()
-
-                # Sync stocks hourly (same frequency as products)
-                last_stocks_sync = await self.store.get_last_sync_time("stocks")
-                if not last_stocks_sync or (datetime.now(DEFAULT_TZ) - last_stocks_sync).total_seconds() > 3600:
-                    stats["stocks"] = await self.sync_stocks()
-
-                    # Refresh Layer 1: sku_inventory_status (denormalized current state)
-                    await self.store.refresh_sku_inventory_status()
-
-                    # Record Layer 2: daily per-SKU snapshot
-                    await self.store.record_sku_inventory_snapshot()
-
-                    # Legacy: Record aggregated inventory snapshot
-                    await self.store.record_inventory_snapshot()
-
-                    # Emit inventory updated event
-                    await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
+            # Chain 1 writes Postgres: a failure there is recorded and the
+            # tick goes on (DN-24). See `INVENTORY_RETRY_AFTER_S`. Until step
+            # 14's S14-11 a chain on DuckDB took the uncontained path here.
+            await self._inventory_step_postgres(stats)
 
             # Silver reads only `orders`, but Gold joins products and categories,
             # THE CATALOGUE NO LONGER HAS TO ASK FOR ITSELF

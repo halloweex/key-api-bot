@@ -776,19 +776,14 @@ async def _sync_all_buyers(store) -> dict:
     `SYNC_ALL_LOCK_WAIT_S` stops the run; what was written stays written — each
     portion is a complete, mirrored upsert — and a rerun writes it again.
     """
-    from core import pg_buyer_sync_read, pg_buyers_write
+    from core import pg_buyer_sync_read
     from core.keycrm import KeyCRMClient
 
-    # Under chain 4 the portions below land in Postgres alone, so DuckDB's
-    # count stands still and "new buyers" would always read zero. Read once:
-    # the first portion may latch the chain, which only confirms "postgres".
-    in_postgres = pg_buyers_write.mode() == "postgres"
-
+    # The portions below land in Postgres alone (chain 4), so the count is
+    # Postgres's: DuckDB's stands still. Until step 14's S14-11 DuckDB's was
+    # read when the chain's flag said duckdb.
     async def count() -> int:
-        if in_postgres:
-            return await pg_buyer_sync_read.count_buyers()
-        async with store.connection() as conn:
-            return conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+        return await pg_buyer_sync_read.count_buyers()
 
     before = await count()
     async with KeyCRMClient() as client:
@@ -807,18 +802,10 @@ async def _sync_all_buyers(store) -> dict:
             "before_count": before, "after_count": after, "new_buyers": after - before}
 
 
-def _refuse_unreadable_buyers_chain() -> None:
-    """409 when `KS_WRITE_BUYERS` is not understood and no latch overrides it:
-    the buyers have nowhere known to be written, and the step would fetch from
-    KeyCRM first. Asked before anything starts, by both doors into the write."""
-    from core import pg_buyers_write
-
-    if pg_buyers_write.mode() is None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{pg_buyers_write.WRITE_ENV} is not understood, so the buyers "
-                   "have nowhere known to be written; correct it, or remove it for "
-                   "DuckDB, and retry")
+# `_refuse_unreadable_buyers_chain` stood here until step 14's S14-11: a 409
+# when `KS_WRITE_BUYERS` was not understood, asked by both doors into the
+# write before anything started. The flag is not read any more; the buyers
+# are written to Postgres whatever it says.
 
 
 @router.post("/duckdb/sync-buyers")
@@ -830,7 +817,6 @@ async def sync_buyers(
     """Manually sync missing buyers from KeyCRM. (Admin enforced at router level.)"""
     from core.sync_service import get_sync_service
 
-    _refuse_unreadable_buyers_chain()
     async with _heavy_lock_or_409("Buyer sync"):
         try:
             sync_service = await get_sync_service()
@@ -876,8 +862,6 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
     """
     if any(t.get_name() == "sync_all_buyers" and not t.done() for t in _BACKGROUND_TASKS):
         raise HTTPException(status_code=409, detail="A full buyer sync is already running")
-    # Before "started", not in the log afterwards: every portion would raise.
-    _refuse_unreadable_buyers_chain()
 
     store = await get_store()
 
@@ -1080,18 +1064,11 @@ async def set_manager_retail_status(
     is now something you ask for.
     """
     validate_db_int(manager_id, "manager_id", allow_none=False)
-    # Chain 5 (`core/pg_managers_write.py`). A `KS_WRITE_MANAGERS` nobody can
-    # read writes neither store — the writer refuses and the replica stands
-    # down — so it is refused here before anything is read: 409, the variable
-    # is the thing to fix. Off DuckDB, a Postgres failure is a 503 rather than
-    # a 500: the decision was not stored, and nothing fell back to DuckDB.
+    # Chain 5 (`core/pg_managers_write.py`): a Postgres failure is a 503 rather
+    # than a 500 — the decision was not stored, and nothing fell back to
+    # DuckDB. Until step 14's S14-11 a `KS_WRITE_MANAGERS` nobody could read
+    # was a 409 here, and a chain on DuckDB let the error through as a 500.
     from core import pg_managers_write
-
-    chain_mode = pg_managers_write.mode()
-    if chain_mode is None:
-        raise HTTPException(status_code=409, detail=(
-            f"{pg_managers_write.WRITE_ENV} is not understood, so the "
-            "classification cannot be stored in either store; fix the variable"))
 
     store = await get_store()
     try:
@@ -1121,8 +1098,6 @@ async def set_manager_retail_status(
         # field and the kind of value, never the value.
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
-        if chain_mode == "duckdb":
-            raise
         logger.error("Manager %s not classified: Postgres failed under %s: %s",
                      manager_id, pg_managers_write.WRITE_ENV, type(exc).__name__,
                      exc_info=True)

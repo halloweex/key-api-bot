@@ -29,20 +29,6 @@ from core import ch_silver, warehouse_cutover
 from core.data_quality import IntegrityIssue, Severity
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is what the mirror-landing and reconciliation jobs
-    file, not where the quality journal lives, and it reads the journal
-    back from DuckDB. So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_dq_journal_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
-
-
 UNWATCHED = "gold_values_unwatched"
 
 
@@ -449,55 +435,47 @@ class TestADeadClickHouseKeepsPaging:
         assert "25.5 h ago" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_the_second_morning_of_an_outage_still_pages(self, tmp_path):
+    async def test_the_second_morning_of_an_outage_still_pages(self, monkeypatch):
         """The reviewer's two mornings, persisted through the real
-        `_persist_ch_reconciliation` into a real store and judged by the real
-        canary. Day 1: ClickHouse died at 04:00, the copy is 1.5 h old, the
-        comparison raises. Day 2: still down, the copy is 25.5 h old."""
+        `_persist_ch_reconciliation` and the journal's real door, and judged
+        by the real canary. Day 1: ClickHouse died at 04:00, the copy is 1.5 h
+        old, the comparison raises. Day 2: still down, the copy is 25.5 h old.
+        The journal is chain 9's functions over a list (`tests/journal_fake.py`;
+        a DuckDB store until step 14's S14-10)."""
         from bot import canary
-        from core.data_quality import fetch_last_success_ages, persist_run
-        from core.duckdb_store import DuckDBStore
+        from core import dq_journal
         from core.scheduler import BackgroundScheduler
+        from tests.journal_fake import install_journal
 
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:   # the last good morning
-                persist_run(conn, started_at=now - timedelta(hours=54),
-                            ended_at=now - timedelta(hours=54), as_of=now,
-                            window_start=date(2026, 7, 1),
-                            window_end=date(2026, 9, 30),
-                            layer="reconciliation_ch", issues=[],
-                            discrepancies=[])
+        install_journal(monkeypatch)
+        now = datetime.now(timezone.utc)
+        await dq_journal.journal_run(                     # the last good morning
+            started_at=now - timedelta(hours=54), ended_at=now - timedelta(hours=54),
+            as_of=now, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
+            layer="reconciliation_ch", issues=[], discrepancies=[])
 
-            scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
-            resolve = AsyncMock()
-            with patch("core.duckdb_store.get_store",
-                       new=AsyncMock(return_value=store)), \
-                 patch("core.alerting.resolve_group", new=resolve):
-                for copy_age, started in (
-                    (timedelta(hours=1, minutes=30), now - timedelta(hours=30)),
-                    (timedelta(hours=25, minutes=30), now - timedelta(minutes=5)),
-                ):
-                    result, _ = await _arm(copy_age)
-                    assert result["error"], result
-                    await scheduler._persist_ch_reconciliation(
-                        result, started_at=started, as_of=started,
-                        window_start=date(2026, 7, 1),
-                        window_end=date(2026, 9, 30))
+        scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+        resolve = AsyncMock()
+        with patch("core.alerting.resolve_group", new=resolve):
+            for copy_age, started in (
+                (timedelta(hours=1, minutes=30), now - timedelta(hours=30)),
+                (timedelta(hours=25, minutes=30), now - timedelta(minutes=5)),
+            ):
+                result, _ = await _arm(copy_age)
+                assert result["error"], result
+                await scheduler._persist_ch_reconciliation(
+                    result, started_at=started, as_of=started,
+                    window_start=date(2026, 7, 1),
+                    window_end=date(2026, 9, 30))
 
-            async with store.connection() as conn:
-                ages = fetch_last_success_ages(conn)
-            failures, _ = canary.check_dq_freshness(
-                {"data_quality": ages},
-                {"reconciliation_ch": canary.DQ_MAX_AGE_S["reconciliation_ch"]})
-            assert [k for k, _ in failures] == ["dq_stale:reconciliation_ch"]
-            assert ages["reconciliation_ch"]["age_seconds"] >= 54 * 3600 - 60
-            # Neither blind morning announced anything resolved.
-            resolve.assert_not_awaited()
-        finally:
-            await store.close()
+        ages = await dq_journal.last_success_ages_pg()
+        failures, _ = canary.check_dq_freshness(
+            {"data_quality": ages},
+            {"reconciliation_ch": canary.DQ_MAX_AGE_S["reconciliation_ch"]})
+        assert [k for k, _ in failures] == ["dq_stale:reconciliation_ch"]
+        assert ages["reconciliation_ch"]["age_seconds"] >= 54 * 3600 - 60
+        # Neither blind morning announced anything resolved.
+        resolve.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_fresh_copy_that_compares_is_still_a_success(self):

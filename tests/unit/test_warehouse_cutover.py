@@ -695,20 +695,11 @@ class TestGatheringTheFacts:
         a record of the asking can see it."""
         from core import write_chains
 
-        asked = []
-
-        def chain_state(chain, *a, **k):
-            asked.append(write_chains.chain_name(chain))
-            return {"mode": "duckdb", "error": None}
-
-        def chain_modes(*a, **k):
-            asked.append("chain_modes")
-            return {}
-
-        monkeypatch.setattr(write_chains, "_chain_state", chain_state)
-        monkeypatch.setattr(write_chains, "chain_modes", chain_modes)
+        # Since step 14's S14-11 there is no mode to ask: the registry's
+        # `_chain_state` and `chain_modes` went with the flags.
+        assert not hasattr(write_chains, "_chain_state")
+        assert not hasattr(write_chains, "chain_modes")
         facts = asyncio.run(wc.gather_facts({}))
-        assert asked == []
         assert facts.open_retired_error is None
 
 

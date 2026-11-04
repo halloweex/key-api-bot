@@ -102,16 +102,14 @@ one unmet stayed held until it ended. S14-00 made the answers constants; S14-09
 deleted them, with the routing they fed: the sync's order step, the store's
 selections and the boot ask nothing, and DuckDB's order writers are gone. The
 backup evidence is judged by the canary (`backup_evidence_stale`). Kept:
-`WRITE_ENV` as a name (revision 0035's comments name it; the registry still
-publishes the variable until S14-11, through `env_writes_postgres`), the
-latch and its owner rows (decision 3: an image from before step 14 routes by
-them), and `writes_postgres()`, a constant the registry's sync-key routing
-asks until S14-11.
+`WRITE_ENV` as a name (revision 0035's comments name it, and an image from
+before step 14 reads it) and the latch and its owner rows (decision 3: that
+image routes by them). `env_writes_postgres` and `writes_postgres()`, which
+the registry read until then, went in S14-11 with the flag.
 """
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -246,23 +244,10 @@ STATEMENT_TIMEOUT = "60s"
 ACQUIRE_TIMEOUT_S = 10
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_ORDERS` alone says. Routes nothing: since step 14's
-    S14-00 the chain writes Postgres whatever its flag says, and since S14-09
-    nothing in this module reads the flag either.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule — and the registry
-    publishes the raise as the chain's `error`, which a rollback to an image
-    from before step 14 would route by (`core.write_chains._chain_state`).
-    Last consumer: that registry entry — S14-11.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
+# `env_writes_postgres` stood here until step 14's S14-11: S14-09 left it for
+# the registry alone — `error` and `mismatch` in `/api/health` — and S14-11
+# deleted it with the flag and that reader. `WRITE_ENV` stays a name
+# (revision 0035's comments and an image from before step 14 read it).
 
 
 # ─── What the chain's move stood down — constants since S14-00 ─────────────
@@ -323,15 +308,9 @@ def stood_down_layers() -> frozenset:
     return STOOD_DOWN_LAYERS
 
 
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres: True, a constant since step 14's
-    S14-00 — neither the flag, nor the latch, nor a precondition routes. The
-    first write in a process still takes the latch (decision 3), which the
-    images before step 14 route by. Last consumer: the store's sync-key
-    getter and setter, which ask it of the chain that declares the key
-    through the registry (`DuckDBStore.get_last_sync_time`) — S14-11.
-    Nothing in this build asks it of this chain by name since S14-09."""
-    return True
+# `writes_postgres` stood here until step 14's S14-11: a constant since
+# S14-00, asked by the store's sync-key getter and setter alone after S14-09,
+# which since S14-11 go to `meta.chain_watermarks` without asking.
 
 
 def _latch() -> str:

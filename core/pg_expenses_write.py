@@ -12,18 +12,21 @@ THE ONE WRITER EVERY CALLER GOES THROUGH
 Three methods write the table: `add_expense`, `update_expense`,
 `delete_expense`. `update_expense` has NO HTTP route — its only caller is
 `core/chat_tools.py` — so a port that covered `web/routes/api/expenses.py`
-would have left an editor still writing DuckDB. The routing therefore lives in
-the repository methods themselves, which every caller reaches.
+would have left an editor still writing DuckDB. The routing therefore lived in
+the repository methods themselves, which every caller reaches; since step
+14's S14-11 they call this module and ask nothing, the flag and DuckDB's
+branch gone.
 
-THE FLAG GATES BOTH ENDS
+THE FLAG GATED BOTH ENDS — UNTIL STEP 14
 
-Under `KS_WRITE_EXPENSES=postgres` the three writes come here AND the hourly
-`replicate_operational` stands down for `app.manual_expenses`. Inverting the
+Under `KS_WRITE_EXPENSES=postgres` the three writes came here AND the hourly
+`replicate_operational` stood down for `app.manual_expenses`. Inverting the
 write without standing the shipper down would roll a typed amount back within
 the hour, out of a frozen DuckDB, looking healthy in between — `replicate_sms`'
 recorded failure. The daily comparison stands down with it, or every new row
-would read as a discrepancy the check itself created. Both ask
-`core.write_chains.stood_down_tables()`, so they cannot disagree.
+would read as a discrepancy the check itself created. Both asked
+`core.write_chains.stood_down_tables()`, so they could not disagree; since
+S14-11 both stand down on every chain's tables (`write_chains.chain_tables()`).
 
 A DELETION HAS TO STAY A DELETION
 
@@ -45,7 +48,6 @@ undoing anything.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date
 from typing import Any, List, Optional, Tuple
 
@@ -76,34 +78,12 @@ _UPDATE_RETURNING = ("id, expense_date, category, expense_type, amount, currency
 _UPDATABLE = ("expense_date", "category", "expense_type", "amount", "currency", "note")
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_EXPENSES` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule: a typo in the variable
-    deciding which store holds money nobody else can reconstruct must stop the
-    process, not quietly pick the other store. Since DN-01 it stops this chain
-    and nothing else.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00.
-
-    Neither the flag nor the latch routes any more. The first write still
-    takes the latch (`_latch`, decision 3): an image from before step 14,
-    the rollback target, routes by the marker, and this chain has not written yet in
-    production. Last consumers: the repository's three expense writers, the
-    registry and the hourly copy — they go in S14-11.
-    """
-    return True
+# `env_writes_postgres` and `writes_postgres` stood here until step 14's
+# S14-11: S14-00 made the answer a constant — the three writers write
+# Postgres whatever `KS_WRITE_EXPENSES` says — and S14-11 deleted both with
+# the flag. The first write still takes the latch (`_latch`, decision 3): an
+# image from before step 14, the rollback target, routes by the marker, and
+# this chain had not written in production when S14-11 shipped.
 
 
 def _latch() -> str:

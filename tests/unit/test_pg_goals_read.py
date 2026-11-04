@@ -122,22 +122,19 @@ class TestTheBoundary:
         assert self._reaches_router(name), f"{name} never reaches _goals_run"
 
     @pytest.mark.parametrize("name", WRITERS)
-    def test_a_writer_still_writes_to_duckdb(self, name):
-        """The first version of this asserted that no writer reaches the
-        router at all, and it was wrong: `set_goal` computes a suggestion from
-        the revenue history before storing, and reading that from Postgres is
-        the point. The boundary is narrower — a writer may *read* through the
-        router, and must still open DuckDB to write."""
+    def test_a_writer_writes_through_its_chain_never_duckdb(self, name):
+        """A writer may *read* through the router — `set_goal` computes a
+        suggestion from the revenue history before storing — and writes
+        through its chain's Postgres writer (chain 7a or 7b-3). Until step
+        14's S14-11 it opened DuckDB to write while the chain's flag said
+        duckdb; this asserted that branch was there. Mutation: a DuckDB
+        connection in a writer again."""
         node = self._method(name)
         calls = {c.func.attr for c in ast.walk(node)
                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
-        assert "connection" in calls, (
-            f"{name} no longer opens DuckDB. `app.revenue_goals` is an hourly "
-            f"read replica and DuckDB is the writer by default, so a write "
-            f"that went to Postgres outside a write chain — for `set_goal`, "
-            f"chain 7a behind KS_WRITE_GOALS — would be overwritten within the "
-            f"hour."
-        )
+        assert "connection" not in calls, f"{name} opens DuckDB again"
+        assert calls & {"set_goal", "persist_goal_tables", "store_predictions"}, (
+            f"{name} no longer reaches its chain's writer")
 
     def test_no_write_statement_ever_reaches_the_router(self):
         """The invariant the parametrised tests above approximate: whatever is

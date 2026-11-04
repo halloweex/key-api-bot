@@ -129,7 +129,9 @@ JUNK = "junk-s14"
 # `EXPECTED` and `H0` stay as captured, every comparison leaves these out, and
 # `/api/health` is asserted to publish none of them. S14-07 deleted the
 # `KS_GOALS_HISTORY` refusal with its health block and canary check.
-RETIRED = {"goals_history": "S14-07"}
+RETIRED = {"goals_history": "S14-07",
+           # S14-11 deleted the registry's per-chain answer with the flags.
+           "chain_modes": "S14-11"}
 
 # The same for single fields, by their path in a capture. S14-09 deleted chain
 # 3's, 6's and 6a's routing answers the capture asks of the modules themselves
@@ -146,7 +148,17 @@ RETIRED_FIELDS = {
     ("chains", "pg_catalogue_write", "unmet_precondition"): "S14-09",
     ("chains", "pg_expense_types_write", "unmet_precondition"): "S14-09",
     ("health", "write_chains", "pg_orders_write", "preflight"): "S14-09",
+    # S14-10 deleted the shadow chains' comparison and the registry's answer
+    # to which of their tables it compared (empty since S14-00).
+    ("registry", "compared_in_shadow"): "S14-10",
+    # S14-11 deleted every chain's routing answer with the flags, the
+    # registry's mismatch list, and the `write_chains` entries' flag fields;
+    # `stood_down_tables`/`stood_down_sync_keys` are asked of
+    # `chain_tables()`/`sync_keys()` there, and compared.
+    ("registry", "mismatched_chains"): "S14-11",
 }
+_S14_11_HEALTH_FIELDS = ("env", "mode", "error", "latched", "mismatch",
+                         "unmet_precondition", "shadow", "preflight")
 
 
 def _without_retired(result: dict) -> dict:
@@ -714,6 +726,16 @@ EXPECTED = json.loads(r"""
 }
 """)
 
+# S14-11's per-chain retirements, read off the literal: every routing
+# answer under `chains` (chain 3's two stand-down sets stay until S14-12/14)
+# and every flag field of each `write_chains` entry.
+for _name, _entry in EXPECTED["chains"].items():
+    for _field in _entry:
+        if _field not in ("stood_down_layers", "landing_checks_stood_down"):
+            RETIRED_FIELDS.setdefault(("chains", _name, _field), "S14-11")
+    for _field in _S14_11_HEALTH_FIELDS:
+        RETIRED_FIELDS[("health", "write_chains", _name, _field)] = "S14-11"
+
 # H0: what production's `/api/health` published on 2026-10-21, before S14-00.
 H0 = json.loads(r"""
 {
@@ -991,21 +1013,29 @@ def capture() -> dict:
     out["stores"] = {"user_store_is_postgres": pg_dashboard_users.user_store_is_postgres(),
                      "sms_store_is_postgres": pg_sms.sms_store_is_postgres()}
     chains = {}
+    # Every routing answer went in S14-11 (`RETIRED_FIELDS`); asked where they
+    # still exist, by name, so the capture still runs against the trees
+    # before it — the import walk reads `module.<name>` as a claim it exists.
     for chain in write_chains.WRITE_CHAINS:
         name = write_chains.chain_name(chain)
-        entry = {"writes_postgres": chain.writes_postgres(),
-                 "unmet_precondition": chain.unmet_precondition()
-                 if hasattr(chain, "unmet_precondition") else "<none>"}
+        entry = {}
+        if hasattr(chain, "writes_postgres"):
+            entry["writes_postgres"] = getattr(chain, "writes_postgres")()
+            entry["unmet_precondition"] = (getattr(chain, "unmet_precondition")()
+                                           if hasattr(chain, "unmet_precondition")
+                                           else "<none>")
         if hasattr(chain, "mode"):
-            entry["mode"] = chain.mode()
+            entry["mode"] = getattr(chain, "mode")()
         if hasattr(chain, "reads_postgres"):
-            entry["reads_postgres"] = chain.reads_postgres()
+            entry["reads_postgres"] = getattr(chain, "reads_postgres")()
         if hasattr(chain, "reads_the_chain"):
             holes = getattr(chain, "TABLE_HOLES", None) or (getattr(chain, "TABLE_HOLE"),)
-            entry["reads_the_chain"] = [chain.reads_the_chain(" ".join(holes)),
-                                        chain.reads_the_chain("SELECT 1")]
+            reads = getattr(chain, "reads_the_chain")
+            entry["reads_the_chain"] = [reads(" ".join(holes)), reads("SELECT 1")]
         chains[name] = entry
-    chains["pg_forecast_write"]["_routes_postgres"] = pg_forecast_write._routes_postgres(log=False)
+    if hasattr(pg_forecast_write, "_routes_postgres"):
+        chains["pg_forecast_write"]["_routes_postgres"] = getattr(
+            pg_forecast_write, "_routes_postgres")(log=False)
     chains["pg_orders_write"].update(
         stood_down_layers=sorted(pg_orders_write.stood_down_layers()),
         landing_checks_stood_down=sorted(pg_orders_write.landing_checks_stood_down()))
@@ -1016,18 +1046,34 @@ def capture() -> dict:
         if hasattr(pg_orders_write, name):
             value = getattr(pg_orders_write, name)
             chains["pg_orders_write"][field] = value() if callable(value) else value
-    chains["pg_managers_write"]["unmet_reasons"] = pg_managers_write.unmet_reasons()
+    if hasattr(pg_managers_write, "unmet_reasons"):
+        chains["pg_managers_write"]["unmet_reasons"] = getattr(
+            pg_managers_write, "unmet_reasons")()
     out["chains"] = chains
-    out["chain_modes"] = {
-        name: {k: state[k] for k in ("env", "mode", "error", "latched", "latched_at",
-                                     "mismatch", "unmet_precondition", "shadow")}
-        for name, state in write_chains.chain_modes().items()}
-    out["registry"] = {
-        "compared_in_shadow": sorted(write_chains.compared_in_shadow()),
-        "stood_down_tables": sorted(write_chains.stood_down_tables()),
-        "stood_down_sync_keys": sorted(write_chains.stood_down_sync_keys()),
-        "mismatched_chains": sorted(write_chains.mismatched_chains()),
-    }
+    modes = getattr(write_chains, "chain_modes", None)
+    if modes is not None:
+        out["chain_modes"] = {
+            name: {k: state[k] for k in ("env", "mode", "error", "latched", "latched_at",
+                                         "mismatch", "unmet_precondition", "shadow")}
+            for name, state in modes().items()}
+    # Since S14-11 the stand-down sets are every chain's tables and keys,
+    # asked by name — `stood_down_*` before it, `chain_tables`/`sync_keys`
+    # after — and compared against the same literal.
+    tables = (getattr(write_chains, "stood_down_tables", None)
+              or getattr(write_chains, "chain_tables"))
+    keys = (getattr(write_chains, "stood_down_sync_keys", None)
+            or getattr(write_chains, "sync_keys"))
+    out["registry"] = {"stood_down_tables": sorted(tables()),
+                       "stood_down_sync_keys": sorted(keys())}
+    mismatched = getattr(write_chains, "mismatched_chains", None)
+    if mismatched is not None:
+        out["registry"]["mismatched_chains"] = sorted(mismatched())
+    # Deleted in S14-10 (`RETIRED_FIELDS`); asked where it still exists, so the
+    # capture still runs against the trees before it. By name, as S14-09's
+    # are: the import walk reads `write_chains.<name>` as a claim it exists.
+    compared = getattr(write_chains, "compared_in_shadow", None)
+    if compared is not None:
+        out["registry"]["compared_in_shadow"] = sorted(compared())
     out["health"] = _health()
     return json.loads(json.dumps(out, default=str))
 
@@ -1062,9 +1108,10 @@ def _health() -> dict:
 
 
 def _latched_out(result: dict) -> dict:
-    """`result` without what depends on the markers, and that, apart."""
+    """`result` without what depends on the markers, and that, apart. Empty
+    from S14-11 on: nothing published depends on them any more."""
     latched = {}
-    for name, state in result["chain_modes"].items():
+    for name, state in result.get("chain_modes", {}).items():
         latched[name] = (state.pop("latched"), state.pop("latched_at"),
                          result["health"]["write_chains"][name].pop("latched"))
     return latched
@@ -1080,11 +1127,11 @@ def _constants(result: dict) -> dict:
                   result["warehouse_cutover"]["status"],
                   result["health"]["warehouse_writer_mode"]):
         block.pop("value", None)
-    for state in (*result["chain_modes"].values(),
+    for state in (*result.get("chain_modes", {}).values(),
                   *result["health"]["write_chains"].values()):
         state.pop("error", None)
         state.pop("mismatch", None)
-    result["registry"].pop("mismatched_chains")
+    result["registry"].pop("mismatched_chains", None)
     return result
 
 
@@ -1158,9 +1205,8 @@ def test_every_answer_is_what_the_code_before_s14_00_gave(production, markers):
     result = capture()
     latched = _latched_out(result)
     assert _without_retired(result) == _without_retired(EXPECTED)
-    for name, (flag, at, published) in latched.items():
-        stamp = PROD_MARKERS.get(name) if markers else None
-        assert (flag, at, published) == (stamp is not None, stamp, stamp is not None), name
+    # Since S14-11 nothing published depends on the markers.
+    assert latched == {}
 
 
 def test_the_literal_is_what_production_published(production):
@@ -1174,14 +1220,16 @@ def test_the_literal_is_what_production_published(production):
                   "read_fallback_mode"):
         assert health[block] == H0[block], block
     for block in RETIRED:
-        assert health[block] is None, f"{block} went with {RETIRED[block]}"
+        assert health.get(block) is None, f"{block} went with {RETIRED[block]}"
     for path, pr in RETIRED_FIELDS.items():
         if path[0] == "health":
             entry = health[path[1]][path[2]]
             assert entry.get(path[3]) is None, f"{'.'.join(path)} went with {pr}"
     for name, entry in H0["write_chains"].items():
         published = health["write_chains"][name]
-        assert {k: published[k] for k in entry} == entry, name
+        kept = {k: v for k, v in entry.items()
+                if ("health", "write_chains", name, k) not in RETIRED_FIELDS}
+        assert {k: published[k] for k in kept} == kept, name
 
 
 @pytest.mark.parametrize("how", ["junk", "absent"])

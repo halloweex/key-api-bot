@@ -2330,79 +2330,58 @@ class DuckDBStore(
                 }
 
     async def get_last_sync_time(self, key: str = "orders") -> Optional[datetime]:
-        """Get last sync timestamp for incremental updates.
+        """Get last sync timestamp for incremental updates — from
+        `meta.chain_watermarks`, where every `last_sync_*` key lives.
 
-        Asks the same registry as the setter, so the two cannot disagree about
-        where a watermark lives — they did once, and a sync gated on a value
-        that never moves again runs every tick (revision 0032). A key absent
-        from Postgres is None, which the sync reads as due: the first tick
-        after a switch syncs, and its stamp is the first one there.
+        **Since step 14's S14-11 nothing is asked first.** Until then the
+        getter and the setter asked the key's chain whether it wrote Postgres
+        (`chain.writes_postgres()`, through the registry) and read DuckDB's
+        `sync_metadata` otherwise; S14-00 made the answer a constant and
+        S14-11 deleted it with the flags. A key absent from Postgres is None,
+        which the sync reads as due: the first tick syncs, and its stamp is
+        the first one there.
 
-        Unless its chain declares `CHAIN_WATERMARK_INHERITS_DUCKDB`: then an
-        absent key is DuckDB's own value, which stopped moving at the switch —
-        the same stand-in `_freshness_check` judges. Chain 3 needs it, because
-        `last_sync_orders` is where the order step's window STARTS (the
-        chain-3 review): read as None it became "an hour ago", the window
-        began 25 h back, and every order KeyCRM updated between DuckDB's last
-        stamp and then — a flip after a maintenance window, or after a day of
-        KeyCRM failing — was never fetched by the incremental sync at all.
-        Present, Postgres's value wins: the copy-back deletes it on release,
-        and a stale one left behind only widens the window.
-
-        Under `KS_DUCKDB=off` the inherited stamp is read from DuckDB's
-        `sync_metadata` as Postgres last copied it (`app.sync_metadata`,
-        `core.pg_frozen_metadata`): the same value, since it stopped moving
-        at the latch, and the file is not opened (stage 5, PR-5).
+        Unless its chain declares `CHAIN_WATERMARK_INHERITS_DUCKDB` (chain 3,
+        the only one left since S14-09): then an absent key is DuckDB's own
+        value as Postgres last copied it (`app.sync_metadata`,
+        `core.pg_frozen_metadata`), which stopped moving at the latch — the
+        same stand-in `_freshness_check` judges. `last_sync_orders` is where
+        the order step's window STARTS (the chain-3 review): read as None it
+        became "an hour ago", the window began 25 h back, and every order
+        KeyCRM updated before that was never fetched by the incremental sync
+        at all. Present, Postgres's value wins. Production held every chain
+        key on 2026-10-29 (the plan's H6), so the stand-in answers nothing
+        there today (`tests/unit/test_absent_chain_keys.py` pins what a
+        missing key costs).
         """
         full_key = f"last_sync_{key}"
-        # Only the chain that owns this key is asked — never every chain, or a
-        # typo in an unrelated KS_WRITE_* stops the orders sync (DN-01). A
-        # chain's own typo still raises here, stopping only its own sync.
+        from core.pg_chain_watermarks import get_value
         from core.write_chains import chain_for_sync_key
+
+        value = await get_value(full_key)
+        if value is not None:
+            return value
         chain = chain_for_sync_key(full_key)
-        if chain is not None and chain.writes_postgres():
-            from core.pg_chain_watermarks import get_value
-            value = await get_value(full_key)
-            if value is not None or not getattr(
-                    chain, "CHAIN_WATERMARK_INHERITS_DUCKDB", False):
-                return value
-            # Inherited: DuckDB's frozen stamp — under `off`, its copy.
-            if duckdb_switch.is_off():
-                from core.pg_frozen_metadata import frozen_stamp
-                return await frozen_stamp(full_key)
-            # Under `on`, read below.
-        async with self.connection() as conn:
-            result = conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = ?",
-                [full_key]
-            ).fetchone()
-            if result and result[0]:
-                return datetime.fromisoformat(result[0])
+        if chain is None or not getattr(chain, "CHAIN_WATERMARK_INHERITS_DUCKDB", False):
             return None
+        from core.pg_frozen_metadata import frozen_stamp
+
+        return await frozen_stamp(full_key)
 
     async def set_last_sync_time(self, key: str = "orders", timestamp: datetime = None) -> None:
-        """Update last sync timestamp.
+        """Update last sync timestamp — in `meta.chain_watermarks`.
 
-        One `sync_metadata` row, and the routing is per KEY rather than per
-        table. That table holds three families with three different owners —
-        the nine `last_sync_*` watermarks, the warehouse dirty flag and the
-        digest marker — and stage 4 moves them chain by chain. A watermark
+        One row per key. Stage 4 moved the nine `last_sync_*` watermarks
+        chain by chain, routing each to the store its chain wrote (a watermark
         written to the store its chain no longer uses is a sync that repeats
-        its whole window on the next tick, or never runs again.
+        its whole window on the next tick, or never runs again); since step
+        14's S14-11 every key goes to Postgres, asking nothing.
         """
         timestamp = timestamp or datetime.now(DEFAULT_TZ)
         full_key = f"last_sync_{key}"
-        from core.write_chains import chain_for_sync_key
-        chain = chain_for_sync_key(full_key)
-        if chain is not None and chain.writes_postgres():
-            from core.pg_chain_watermarks import set_value
-            await set_value(full_key, timestamp.isoformat())
-            return
-        async with self.connection() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-            """, [full_key, timestamp.isoformat()])
+        from core.pg_chain_watermarks import set_value
+
+        await set_value(full_key, timestamp.isoformat())
 
     async def mark_warehouse_dirty(self, changed_order_ids: list[int] | None = None) -> None:
         """Set dirty flag so the warehouse refresh job picks it up.
@@ -2873,196 +2852,46 @@ class DuckDBStore(
 
         rows = manager_rows(managers)
 
-        # Chain 5: under `KS_WRITE_MANAGERS=postgres` the managers land in
-        # Postgres with their baselines, and DuckDB's copy stops. Asked before
-        # the DuckDB connection is taken; a flag nobody can read raises here
-        # and stops this chain alone (DN-01) — the sync step contains it.
+        # Chain 5: the managers land in Postgres with their baselines
+        # (`core/pg_managers_write.py`). Since step 14's S14-11 nothing is
+        # asked first: DuckDB's branch, and the copy of it `replicate_managers`
+        # shipped after it, went with `KS_WRITE_MANAGERS`.
+        from datetime import timezone
+
         from core import pg_managers_write
 
-        if pg_managers_write.writes_postgres():
-            from datetime import timezone
+        return await pg_managers_write.upsert_managers(
+            rows, set_at=datetime.now(timezone.utc))
 
-            return await pg_managers_write.upsert_managers(
-                rows, set_at=datetime.now(timezone.utc))
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                count = 0
-                for row in rows:
-                    conn.execute("""
-                        INSERT INTO managers
-                        (id, name, email, status, is_retail, synced_at)
-                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                        ON CONFLICT (id) DO UPDATE SET
-                            name = EXCLUDED.name,
-                            email = EXCLUDED.email,
-                            status = EXCLUDED.status,
-                            -- EXCLUDED, not CURRENT_TIMESTAMP: DuckDB binds a
-                            -- bare name on this side as a column reference.
-                            synced_at = EXCLUDED.synced_at
-                    """, list(row))
-                    count += 1
-
-                conn.execute("COMMIT")
-                logger.info(f"Upserted {count} managers to DuckDB")
-                written = count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-
-        # Step 05. Not a mirror: `is_retail` and the effective-dated
-        # classifications are decisions KeyCRM cannot supply, so Postgres gets
-        # a copy of what this store now holds rather than a re-seed from
-        # RETAIL_MANAGER_IDS. Outside the connection block — `asyncio.Lock` is
-        # not reentrant and `replicate_managers` opens its own. Never raises.
-        from core.pg_replication import replicate_managers
-
-        await replicate_managers(self)
-        return written
-
-    # How many buyers one DuckDB transaction carries. The whole batch used to be
-    # one transaction, and `sync-all-buyers` hands over every buyer KeyCRM has:
-    # measured on DuckDB 1.5.5 under the production 4 GB limit, 6 500 buyers
-    # commit in 22 s and 8 000 or more run out of memory — production holds
-    # about 20 000. Nothing else is lost by the split: each buyer's row and
-    # contacts are still written together, which is the only unit that must
-    # be atomic.
+    # How many buyers the admin's sync-all hands over per portion
+    # (`web/routes/api/admin.py`, `_sync_all_buyers`), each under the
+    # heavy-job lock. It was DuckDB's transaction size — 6 500 buyers
+    # committed in 22 s under the production 4 GB limit and 8 000 ran out of
+    # memory — and stays the portion the route takes the lock for; chain 4's
+    # own writer splits each portion again (`pg_buyers_write.WRITE_PORTION`).
     BUYER_WRITE_PORTION = 1000
 
     async def upsert_buyers(self, buyers: List["Buyer"], *,
                             skipped_out: Optional[List[int]] = None) -> int:
-        """Write buyers to DuckDB in portions, mirroring each portion to Postgres.
+        """Write buyers to Postgres — chain 4's writer
+        (`core/pg_buyers_write.py`), which writes the buyers, their contacts
+        and their gender verdicts in Postgres alone. `skipped_out` is filled
+        with the buyers Postgres would refuse, which the chain skips rather
+        than raising for.
 
-        UNDER CHAIN 4 NONE OF THIS RUNS. Once `KS_WRITE_BUYERS` has moved the
-        buyers (`core/pg_buyers_write.py`), the first statement hands the batch
-        to the chain's writer, which writes Postgres alone — before the portion
-        loop, so DuckDB's copy stops and the mirror has nothing to ship. The
-        answer is `writes_postgres()`, which raises on a flag nobody can read
-        while the chain is unlatched: a batch with nowhere known to go is not
-        written anywhere. `skipped_out` is filled only there — the buyers
-        Postgres would refuse, which the chain skips rather than raising for.
-
-        THE MIRROR LIVES HERE NOW, AND ONLY HERE. It used to be a separate line
-        at one caller, `sync_missing_buyers`, so the other caller — the admin
-        `sync-all-buyers` — wrote DuckDB alone: a buyer it changed stayed
-        different in Postgres for good, and the daily comparison filed a
-        CRITICAL for it every morning with nothing able to repair it. With the
-        call inside the method every writer mirrors, and a test walks the tree
-        to keep it the only call site.
-
-        Each portion is committed, THEN mirrored, outside the store lock — the
-        mirror is a network round trip, and every other DuckDB reader waits
-        behind that lock. The mirror never raises; a failure lands in
-        meta.mirror_state where the comparison reads it, and the hourly ids-diff
-        ships what it missed.
+        Until step 14's S14-11 this wrote DuckDB in portions and mirrored each
+        portion to Postgres (`pg_buyers.mirror_buyers`) whenever the chain's
+        flag said duckdb; S14-00 made the answer `postgres`, a constant, and
+        S14-11 deleted the DuckDB tail (`_upsert_buyer_portion`) with the
+        flag.
 
         Returns:
             Number of buyers upserted
         """
         from core import pg_buyers_write
-        from core.pg_buyers import mirror_buyers
 
-        if pg_buyers_write.writes_postgres():
-            return await pg_buyers_write.upsert_buyers(
-                buyers or [], skipped_out=skipped_out)
-
-        written, unshipped = 0, []
-        for start in range(0, len(buyers or []), self.BUYER_WRITE_PORTION):
-            portion = buyers[start:start + self.BUYER_WRITE_PORTION]
-            written += await self._upsert_buyer_portion(portion)
-            if "error" in await mirror_buyers(portion):
-                unshipped.extend(portion)
-            # Let the minute sync and the warehouse tick take the lock between
-            # portions of a long run.
-            await asyncio.sleep(0)
-
-        if unshipped:
-            # A failed portion leaves no trace otherwise: the NEXT portion's
-            # success stamps meta.mirror_state healthy within seconds, and the
-            # hourly ids-diff ships only ids Postgres lacks — so an EXISTING
-            # buyer whose change was not shipped would differ for good, the
-            # daily CRITICAL this method was moved here to end. One retry of
-            # everything that failed, then a raise, after DuckDB has committed:
-            # the caller reports it, and a rerun ships it.
-            if "error" in await mirror_buyers(unshipped):
-                raise RuntimeError(
-                    f"Postgres mirror failed for {len(unshipped)} buyer(s) after "
-                    "a retry; DuckDB is written, and a rerun ships them")
-        return written
-
-    async def _upsert_buyer_portion(self, buyers: List["Buyer"]) -> int:
-        """One transaction of buyers and their contacts, in DuckDB only.
-
-        The rows come from `core.landing_rows.parse_buyers` — the same reading
-        the Postgres mirror is handed — and are built BEFORE the transaction
-        opens. This writer used to pass the raw birthday string through and
-        let DuckDB cast it, so a birthday DuckDB refuses rolled back the whole
-        batch; now it arrives as a date or as None, and the ids whose birthday
-        could not be read are logged, never the value.
-
-        The SQL is unchanged: the row is replaced whole and the buyer's
-        contacts are deleted and re-inserted, never upserted — a phone list
-        that shrank must not keep the old number.
-
-        Args:
-            buyers: List of Buyer objects
-
-        Returns:
-            Number of buyers upserted
-        """
-        from core.landing_rows import parse_buyers
-
-        if not buyers:
-            return 0
-
-        parsed = parse_buyers(buyers)
-        if parsed.unreadable_birthdays:
-            logger.warning(
-                "buyers: %d unreadable birthday(s) stored as NULL, ids %s",
-                len(parsed.unreadable_birthdays), parsed.unreadable_birthdays,
-            )
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                count = 0
-                contacts_count = 0
-
-                for row, (buyer_id, contacts) in zip(parsed.rows, parsed.contacts):
-                    conn.execute("""
-                        INSERT OR REPLACE INTO buyers
-                        (id, full_name, birthday, note, phone, email,
-                         manager_id, company_id, company_name, city, region,
-                         loyalty_program_name, loyalty_level_name, loyalty_discount, loyalty_amount,
-                         created_at, updated_at, synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, list(row))
-                    count += 1
-
-                    conn.execute("DELETE FROM buyer_contacts WHERE buyer_id = ?", [buyer_id])
-                    for contact in contacts:
-                        conn.execute("""
-                            INSERT INTO buyer_contacts (buyer_id, contact_type, value, is_primary)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT (buyer_id, contact_type, value) DO NOTHING
-                        """, list(contact))
-                        contacts_count += 1
-
-                conn.execute("COMMIT")
-                logger.info(f"Upserted {count} buyers, {contacts_count} contacts to DuckDB")
-                return count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+        return await pg_buyers_write.upsert_buyers(
+            buyers or [], skipped_out=skipped_out)
 
     async def get_missing_buyer_ids(self, limit: int = 100) -> List[int]:
         """Get buyer IDs from orders that need syncing.
@@ -3115,66 +2944,23 @@ class DuckDBStore(
         return [row[0] for row in rows]
 
     async def update_manager_stats(self) -> int:
-        """Update manager order statistics from orders table.
+        """Update manager order statistics from the orders — chain 5's
+        writer (`pg_managers_write.update_manager_stats`), against
+        `bronze.orders`.
 
         Updates first_order_date, last_order_date, and order_count for all
-        managers, and replicates the result to Postgres.
+        managers. Until step 14's S14-11 DuckDB's branch ran the same body
+        against DuckDB's orders and replicated the result
+        (`replicate_managers`), or left the stats alone while chain 3 owned
+        the orders (`duckdb_orders_frozen`); S14-11 deleted both with the
+        flag.
 
         Returns:
             Number of managers updated
         """
-        from core.sql_dialect import DUCKDB, manager_stats_sql
-
-        # Chain 5: the same body, against `bronze.orders`, and no replica
-        # after it — the replica stands down while the chain writes.
         from core import pg_managers_write
 
-        if pg_managers_write.writes_postgres():
-            return await pg_managers_write.update_manager_stats()
-
-        # On DuckDB while a write chain owns the orders — between chain 5's
-        # copy-back and chain 3's, which the order of ways back makes a state
-        # every rollback passes through, and between chain 3's flip and chain
-        # 5's. DuckDB's `orders` stopped at chain 3's latch, so stats counted
-        # from them would carry `last_order_date` and `order_count` backwards,
-        # and the replica below would ship them over Postgres's. They stay as
-        # they stand — after a copy-back, the chain's own last stats — until
-        # the orders come back, and nothing is shipped for a recompute that
-        # did not happen (`pg_managers_write.duckdb_orders_frozen`).
-        frozen = pg_managers_write.duckdb_orders_frozen()
-        if frozen:
-            logger.warning(
-                "Manager statistics not recomputed: a write chain owns %s, so "
-                "DuckDB's orders are frozen and would move them backwards",
-                ", ".join(sorted(frozen)))
-            return 0
-
-        async with self.connection() as conn:
-            # Update stats for managers who have orders. The one body both
-            # engines run, with the order's date spelled in Kyiv rather than
-            # taken from the process's timezone (`core.sql_dialect`).
-            result = conn.execute(manager_stats_sql(DUCKDB))
-            count = result.fetchone()
-            logger.info(f"Updated manager statistics")
-            updated = count[0] if count else 0
-
-        # Step 05. These three columns are computed here, and `replicate_managers`
-        # is what carries them to Postgres — but it only ever ran from
-        # `upsert_managers`, which is a different event. So every recompute left
-        # the two stores disagreeing until the next manager sync, and
-        # `dq_mirror_landing` reported it as CRITICAL every morning
-        # (`mirror_row_values` on last_order_date and order_count, seen daily up
-        # to 2026-08-27). The daily `manager_stats` job never replicated at all,
-        # and `sync_managers` recomputes *after* upserting, so even the sync path
-        # ended with the stores apart. Replicating here is what makes the check's
-        # tolerance of zero honest for this table.
-        #
-        # Outside the connection block: `asyncio.Lock` is not reentrant and
-        # `replicate_managers` opens its own. It never raises.
-        from core.pg_replication import replicate_managers
-
-        await replicate_managers(self)
-        return updated
+        return await pg_managers_write.update_manager_stats()
 
     async def set_manager_retail_status(
         self,
@@ -3217,68 +3003,18 @@ class DuckDBStore(
 
         # Chain 5: the decision is written where it is derived, in one
         # Postgres transaction that also raises the derivation signal — and
-        # then the DuckDB mark below, which is a no-op unless DuckDB derives:
-        # the warehouse is marked dirty on whichever engine derives it. A
-        # backdate behind the manager's latest change is refused there
-        # (`BackdateBehindLatest`, OD-C5-1 (a)); DuckDB's own path is as it was.
+        # then the DuckDB mark below, which is a no-op since DuckDB derives
+        # nothing (DN-29). A backdate behind the manager's latest change is
+        # refused there (`BackdateBehindLatest`, OD-C5-1 (a)). DuckDB's own
+        # path — one transaction closing the open interval and opening the
+        # new one — went with the flag in step 14's S14-11.
+        from datetime import timezone
+
         from core import pg_managers_write
 
-        if pg_managers_write.writes_postgres():
-            from datetime import timezone
-
-            await pg_managers_write.set_manager_retail_status(
-                manager_id, is_retail, effective_from, set_by, note,
-                set_at=datetime.now(timezone.utc))
-            await self.mark_warehouse_dirty(None)
-            return
-
-        async with self.connection() as conn:
-            # One transaction. As four autocommit statements, a failure between
-            # closing the open interval and opening the new one left the
-            # manager with no open interval at all: every order from
-            # `effective_from` on resolved to `internal`, the decision an admin
-            # had just made silently did not take, and the replica carried the
-            # torn state to Postgres so the two stores agreed on it.
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                # An interval already starting on this date is replaced, not
-                # stacked: two rows with the same valid_from would make the
-                # resolution ambiguous, and the PK would reject the second anyway.
-                conn.execute(
-                    "DELETE FROM manager_classifications "
-                    "WHERE manager_id = ? AND valid_from = ?",
-                    [manager_id, effective_from],
-                )
-                conn.execute(
-                    "UPDATE manager_classifications SET valid_to = ? "
-                    "WHERE manager_id = ? AND valid_to IS NULL AND valid_from < ?",
-                    [effective_from, manager_id, effective_from],
-                )
-                conn.execute(
-                    "INSERT INTO manager_classifications "
-                    "(manager_id, is_retail, valid_from, valid_to, set_by, note) "
-                    "VALUES (?, ?, ?, NULL, ?, ?)",
-                    [manager_id, is_retail, effective_from, set_by, note],
-                )
-                conn.execute(
-                    "UPDATE managers SET is_retail = ? WHERE id = ?",
-                    [is_retail, manager_id]
-                )
-                conn.execute("COMMIT")
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-            logger.info(
-                f"Manager {manager_id} retail status set to {is_retail} "
-                f"from {effective_from}"
-            )
-
-        # Outside the connection block on purpose: asyncio.Lock is not
-        # reentrant, and mark_warehouse_dirty takes it again. Calling it inside
-        # deadlocked the validation retry path once already.
+        await pg_managers_write.set_manager_retail_status(
+            manager_id, is_retail, effective_from, set_by, note,
+            set_at=datetime.now(timezone.utc))
         await self.mark_warehouse_dirty(None)
 
     async def get_all_managers(self) -> List[Dict[str, Any]]:
@@ -3287,35 +3023,12 @@ class DuckDBStore(
         Returns:
             List of manager dicts with id, name, status, is_retail, order_count, etc.
         """
-        # Chain 5: from Postgres once the chain owns the tables, with no
-        # fallback — DuckDB's copy is frozen then (`core/pg_managers_read.py`).
-        from core import pg_managers_read, pg_managers_write
+        # Chain 5: from Postgres, with no fallback — DuckDB's copy is frozen
+        # (`core/pg_managers_read.py`). DuckDB's read went with the flag in
+        # step 14's S14-11.
+        from core import pg_managers_read
 
-        if pg_managers_write.reads_postgres():
-            return await pg_managers_read.fetch_all_managers()
-
-        async with self.connection() as conn:
-            result = conn.execute("""
-                SELECT
-                    id, name, email, status, is_retail,
-                    first_order_date, last_order_date, order_count, synced_at
-                FROM managers
-                ORDER BY order_count DESC NULLS LAST, name
-            """).fetchall()
-            return [
-                {
-                    "id": row[0],
-                    "name": row[1],
-                    "email": row[2],
-                    "status": row[3],
-                    "is_retail": row[4],
-                    "first_order_date": row[5],
-                    "last_order_date": row[6],
-                    "order_count": row[7],
-                    "synced_at": row[8],
-                }
-                for row in result
-            ]
+        return await pg_managers_read.fetch_all_managers()
 
     async def get_latest_order_time(self) -> Optional[datetime]:
         """The latest order `updated_at` — the full sync's checkpoint. From
@@ -3337,48 +3050,32 @@ class DuckDBStore(
     async def get_stats(self) -> Dict[str, Any]:
         """Get database statistics.
 
-        The buyer counts are left out once chain 4 writes the buyers somewhere
-        else (`core/pg_buyers_write.py`, or a flag nobody can read): DuckDB's
-        copy has stopped, and a count that never moves on /health/detailed
-        reads as a sync that stopped. Never raises for that — `mode()` does not.
+        No buyer counts: chain 4 writes the buyers in Postgres
+        (`core/pg_buyers_write.py`), so DuckDB's copy has stopped, and a count
+        that never moves on /health/detailed reads as a sync that stopped.
+        Until step 14's S14-11 they were published while the chain's flag
+        said duckdb; the live count is `bronze.buyers`
+        (`pg_buyer_sync_read.count_buyers`).
         """
-        from core import pg_buyers_write
-
-        buyers_here = pg_buyers_write.mode() == "duckdb"
         async with self.connection() as conn:
             orders_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
             products_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
             categories_count = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
             expenses_count = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
             expense_types_count = conn.execute("SELECT COUNT(*) FROM expense_types").fetchone()[0]
-            buyer_counts = {}
-            if buyers_here:
-                buyer_counts = {
-                    "buyers": conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0],
-                    "buyer_contacts": conn.execute(
-                        "SELECT COUNT(*) FROM buyer_contacts").fetchone()[0],
-                }
 
             min_date = conn.execute("SELECT MIN(DATE(ordered_at)) FROM orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(DATE(ordered_at)) FROM orders").fetchone()[0]
 
-            # Age of the last successful data-quality run per layer. Computed
-            # here, inside the connection we already hold, so the health
-            # endpoint's 60s cache covers it and the watchdog costs no extra
-            # store-lock traffic. The verdict lives in bot/canary.py.
-            try:
-                from core.data_quality import fetch_last_success_ages
-                data_quality = fetch_last_success_ages(conn)
-            except Exception as e:
-                # Never let the watchdog's own query break /api/health.
-                logger.warning(f"data-quality freshness query failed: {e}")
-                data_quality = None
+            # The age of the last successful data-quality run per layer used
+            # to ride here, read out of DuckDB's journal inside this
+            # connection; `/api/health` replaced it with Postgres's since
+            # chain 9 moved, and step 14's S14-10 deleted DuckDB's reader.
 
             return {
                 "orders": orders_count,
                 "products": products_count,
                 "categories": categories_count,
-                **buyer_counts,
                 "expenses": expenses_count,
                 "expense_types": expense_types_count,
                 "date_range": {
@@ -3386,7 +3083,6 @@ class DuckDBStore(
                     "max": max_date.isoformat() if max_date else None
                 },
                 "db_size_mb": round(self.db_path.stat().st_size / 1024 / 1024, 2) if self.db_path.exists() else 0,
-                "data_quality": data_quality,
             }
 
 

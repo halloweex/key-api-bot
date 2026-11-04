@@ -121,7 +121,6 @@ def flags(monkeypatch):
     from core import pg_managers_write
 
     monkeypatch.delenv(pg_managers_write.WRITE_ENV, raising=False)
-    monkeypatch.setattr(pg_managers_write, "_unmet_warned", {})
     return monkeypatch
 
 
@@ -132,17 +131,9 @@ def every_precondition_met(flags):
     return flags
 
 
-class TestTheFlag:
-
-
-    def test_the_latch_outranks_any_flag(self, flags):
-        from core import chain_latch, pg_managers_write
-
-        flags.setenv(pg_managers_write.WRITE_ENV, "duckdb")
-        chain_latch.latch(pg_managers_write.CHAIN, pg_managers_write.WRITE_ENV)
-        assert pg_managers_write.writes_postgres() is True
-        assert pg_managers_write.mode() == "postgres"
-        assert pg_managers_write.reads_postgres() is True
+# `TestTheFlag` stood here until step 14's S14-11: the latch outranking any
+# flag in `writes_postgres()`, `mode()` and `reads_postgres()`, which went
+# with `KS_WRITE_MANAGERS`.
 
 
 # ─── The writers, as code ───────────────────────────────────────────────────
@@ -583,15 +574,11 @@ def _tick(monkeypatch, *, upsert=None, managers_due=True):
     svc = SyncService(store=store)
     svc._should_skip_sync = lambda: (False, None)
     svc._fetch_orders_with_date_filter = AsyncMock(return_value=[])
-    svc.sync_offers = AsyncMock(return_value=5)
-    svc.sync_stocks = AsyncMock(return_value=7)
-    # Since step 14's S14-00 every chain writes Postgres, a constant; the
-    # tick's other steps are faked on the store here, and keep its paths.
-    from core import pg_buyers_write, pg_catalogue_write, pg_inventory_write, pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_orders_write, pg_buyers_write,
-                           pg_inventory_write, pg_catalogue_write)
+    # The other chains' steps, each the one entry the tick reaches it by
+    # since step 14's S14-11 (every chain writes Postgres, asking nothing).
+    svc._orders_step = AsyncMock(return_value=[])
+    svc._catalogue_step_postgres = AsyncMock()
+    svc._inventory_step_postgres = AsyncMock()
     return svc, store
 
 
@@ -615,8 +602,7 @@ class TestTheManagersStep:
 
         stats = await svc.incremental_sync()       # does not raise
 
-        svc.sync_offers.assert_awaited_once()
-        svc.sync_stocks.assert_awaited_once()
+        svc._inventory_step_postgres.assert_awaited_once()
         assert not _stamped(store), "a failed step moved its watermark"
         assert stats["managers"] == 0
         assert all(isinstance(v, int) for v in stats.values()), stats
@@ -649,7 +635,7 @@ class TestTheManagersStep:
 
         store.get_last_sync_time = AsyncMock(side_effect=getter)
         await svc.incremental_sync()
-        svc.sync_offers.assert_awaited()
+        svc._inventory_step_postgres.assert_awaited()
         assert svc.managers_step_health()["last_error"] == "ConnectionError"
 
 
@@ -1006,71 +992,23 @@ _CLEAN_SHAPE = {"managers": 40, "intervals": 44, "unclassified": [], "open_wrong
                 "broken": [], "disagree": [], "set_at_null": 0, "orphans": []}
 
 
-class TestThePreflight:
-
-
-    @pytest.mark.asyncio
-    async def test_the_question_is_over_once_the_chain_writes_postgres(self, flags):
-        from core import chain_latch, pg_managers_write
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        assert await pg_managers_write.preflight() == {"ok": None, "reasons": []}
-
-
 class TestHealthPublishesIt:
+    """Chain 5's preflight — the question asked before `KS_WRITE_MANAGERS`
+    was switched on, which said `ok: null` since S14-00 — went in step 14's
+    S14-11 with the flag, with the concurrent bound it shared with chain 1's;
+    the managers step's state stays under the chain's entry."""
+
     @pytest.mark.asyncio
-    async def test_preflight_and_sync_step_sit_under_chain_5s_entry(self, flags, monkeypatch):
+    async def test_the_sync_step_sits_under_chain_5s_entry_alone(self, flags, monkeypatch):
         from unittest.mock import AsyncMock
 
-        from core import pg_inventory_write, pg_managers_write
         from web.routes.api import health
 
-        health._managers_preflight_cache.update(data=None, expires_at=0)
-        health._preflight_cache.update(data=None, expires_at=0)
-        monkeypatch.setattr(pg_managers_write, "preflight", AsyncMock(
-            return_value={"ok": False, "reasons": ["step13: x"]}))
-        monkeypatch.setattr(pg_inventory_write, "preflight", AsyncMock(
-            return_value={"ok": True, "reasons": []}))
         monkeypatch.setattr(health, "_managers_sync_step", AsyncMock(
             return_value={"failures_since_ok": 0}))
-        try:
-            block = await health._write_chains_block()
-        finally:
-            health._managers_preflight_cache.update(data=None, expires_at=0)
-            health._preflight_cache.update(data=None, expires_at=0)
-        entry = block["pg_managers_write"]
-        assert entry["preflight"] == {"ok": False, "reasons": ["step13: x"]}
-        assert entry["sync_step"] == {"failures_since_ok": 0}
-        assert entry["mode"] == "postgres" and entry["unmet_precondition"] is None
-        assert block["pg_inventory_write"]["preflight"]["ok"] is True
-        assert "preflight" not in block["pg_goals_write"]
-
-    @pytest.mark.asyncio
-    async def test_the_two_preflights_cost_one_bound_not_two(self, flags, monkeypatch):
-        """Concurrently: two hung preflights in a row would cost the canary's
-        whole HEALTH_TIMEOUT_S."""
-        import asyncio
-        import time as _time
-
-        from core import pg_inventory_write, pg_managers_write
-        from web.routes.api import health
-
-        async def hangs(*a, **kw):
-            await asyncio.sleep(60)
-
-        health._managers_preflight_cache.update(data=None, expires_at=0)
-        health._preflight_cache.update(data=None, expires_at=0)
-        monkeypatch.setattr(pg_managers_write, "preflight", hangs)
-        monkeypatch.setattr(pg_inventory_write, "preflight", hangs)
-        monkeypatch.setattr(health, "_PREFLIGHT_TIMEOUT_S", 0.3)
-        started = _time.monotonic()
-        try:
-            block = await health._write_chains_block()
-        finally:
-            health._managers_preflight_cache.update(data=None, expires_at=0)
-            health._preflight_cache.update(data=None, expires_at=0)
-        assert _time.monotonic() - started < 0.55
-        assert "did not answer" in block["pg_managers_write"]["preflight"]["reasons"][0]
+        block = await health._write_chains_block()
+        assert block["pg_managers_write"] == {"sync_step": {"failures_since_ok": 0}}
+        assert "preflight" not in block["pg_inventory_write"]
 
 
 # ─── The review of chain 5 (2026-10-08) ─────────────────────────────────────
@@ -1148,11 +1086,11 @@ _BARE = r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:managers|manager_classifications)(?![
 # chain's own answer, the boot seed behind the latch, and the replica's read
 # behind the stand-down. A new site fails until it is added here with its
 # router — the review's probe (`FROM managers` in a new module) is one.
+# The three store methods that named the tables bare in their DuckDB branch
+# (`upsert_managers`, `set_manager_retail_status`, `get_all_managers`, routed
+# by `writes_postgres`/`reads_postgres`) went with those branches in step 14's
+# S14-11: they reach chain 5's Postgres writer and reader alone.
 _BARE_SITES = {
-    ("core/duckdb_store.py", "upsert_managers"): ("upsert_managers", "writes_postgres"),
-    ("core/duckdb_store.py", "set_manager_retail_status"):
-        ("set_manager_retail_status", "writes_postgres"),
-    ("core/duckdb_store.py", "get_all_managers"): ("get_all_managers", "reads_postgres"),
     ("core/migrations.py", "_m0006_seed_manager_classifications"):
         ("_m0006_seed_manager_classifications", "latched"),
     ("core/pg_replication.py", "read_managers"): ("replicate_managers", "tables_stood_down"),
@@ -1221,8 +1159,8 @@ class TestNothingReadsTheFrozenCopiesByName:
         assert found == set(_BARE_SITES), sorted(found ^ set(_BARE_SITES))
 
     def test_each_is_routed_by_the_chain(self):
-        """Mutation: drop the routing from any of them — `get_all_managers`'
-        `reads_postgres()`, say."""
+        """Mutation: drop the routing from any of them — the migration's
+        `latched`, say."""
         _found, calls, callers = _bare_walk()
         for (rel, function), (router, asks) in _BARE_SITES.items():
             assert asks in calls[(rel, router)], (rel, router, asks)

@@ -359,30 +359,14 @@ class ExpensesMixin:
         Returns:
             Created expense dict with id
         """
-        # Chain 8: `KS_WRITE_EXPENSES` decides which store holds money nobody
-        # else can reconstruct. See `core/pg_expenses_write.py`.
+        # Chain 8: money nobody else can reconstruct, written to Postgres
+        # (`core/pg_expenses_write.py`). Until step 14's S14-11
+        # `KS_WRITE_EXPENSES` could send it to DuckDB instead, with a
+        # replication to Postgres after it (`replicate_after_manual_expense`).
         from core import pg_expenses_write
 
-        if pg_expenses_write.writes_postgres():
-            result = await pg_expenses_write.add_expense(
-                expense_date, category, expense_type, amount, currency, note, platform)
-        else:
-            async with self.connection() as conn:
-                result = conn.execute("""
-                    INSERT INTO manual_expenses (expense_date, category, expense_type, amount, currency, note, platform)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at, platform
-                """, [expense_date, category, expense_type, amount, currency, note, platform]).fetchone()
-
-            # And on to Postgres now, not within the hour. The form writes this
-            # store and the page it returns to reads the other once
-            # KS_READ_EXPENSES=postgres, so without this the amount a human just
-            # typed does not appear. Never raises — the DuckDB write has already
-            # committed. Not reached under KS_WRITE_EXPENSES=postgres: there
-            # Postgres IS the write, and the hourly shipper stands down.
-            from core.pg_operational import replicate_after_manual_expense
-
-            await replicate_after_manual_expense(self)
+        result = await pg_expenses_write.add_expense(
+            expense_date, category, expense_type, amount, currency, note, platform)
 
         return {
             "id": result[0],
@@ -416,76 +400,17 @@ class ExpensesMixin:
             Updated expense dict or None if not found
         """
         # Chain 8. `update_expense` has NO HTTP route — the chat tool is its only
-        # caller — which is exactly why the routing lives here, where every
-        # caller arrives, and not in `web/routes/api/expenses.py`.
+        # caller — which is why the writer is called here, where every caller
+        # arrives, and not in `web/routes/api/expenses.py`. DuckDB's branch
+        # went with `KS_WRITE_EXPENSES` in step 14's S14-11.
         from core import pg_expenses_write
 
-        if pg_expenses_write.writes_postgres():
-            result = await pg_expenses_write.update_expense(
-                expense_id, expense_date=expense_date, category=category,
-                expense_type=expense_type, amount=amount, currency=currency,
-                note=note)
-            if not result:
-                return None
-            return {
-                "id": result[0],
-                "expense_date": result[1].isoformat() if result[1] else None,
-                "category": result[2],
-                "expense_type": result[3],
-                "amount": float(result[4]),
-                "currency": result[5],
-                "note": result[6],
-                "created_at": result[7].isoformat() if result[7] else None,
-                "updated_at": result[8].isoformat() if result[8] else None
-            }
-
-        async with self.connection() as conn:
-            # Build dynamic update query
-            updates = []
-            params = []
-
-            if expense_date is not None:
-                updates.append("expense_date = ?")
-                params.append(expense_date)
-            if category is not None:
-                updates.append("category = ?")
-                params.append(category)
-            if expense_type is not None:
-                updates.append("expense_type = ?")
-                params.append(expense_type)
-            if amount is not None:
-                updates.append("amount = ?")
-                params.append(amount)
-            if currency is not None:
-                updates.append("currency = ?")
-                params.append(currency)
-            if note is not None:
-                updates.append("note = ?")
-                params.append(note)
-
-            if not updates:
-                return None
-
-            updates.append("updated_at = CURRENT_TIMESTAMP")
-            params.append(expense_id)
-
-            result = conn.execute(f"""
-                UPDATE manual_expenses
-                SET {', '.join(updates)}
-                WHERE id = ?
-                RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at, updated_at
-            """, params).fetchone()
-
+        result = await pg_expenses_write.update_expense(
+            expense_id, expense_date=expense_date, category=category,
+            expense_type=expense_type, amount=amount, currency=currency,
+            note=note)
         if not result:
             return None
-
-        # Same reason as `add_expense`: the page that opens next reads the
-        # other store. Outside the `async with` above on purpose — this awaits
-        # the network, and the store lock is global.
-        from core.pg_operational import replicate_after_manual_expense
-
-        await replicate_after_manual_expense(self)
-
         return {
             "id": result[0],
             "expense_date": result[1].isoformat() if result[1] else None,
@@ -508,34 +433,12 @@ class ExpensesMixin:
             True if deleted, False if not found
         """
         # Chain 8. A DELETE stays a DELETE in the store that writes — the reason
-        # the replica is a full replace and not an upsert is that a withdrawn
-        # spend must not survive as a ghost still dividing the ROAS.
+        # the replica was a full replace and not an upsert is that a withdrawn
+        # spend must not survive as a ghost still dividing the ROAS. DuckDB's
+        # branch went with `KS_WRITE_EXPENSES` in step 14's S14-11.
         from core import pg_expenses_write
 
-        if pg_expenses_write.writes_postgres():
-            return await pg_expenses_write.delete_expense(expense_id)
-
-        async with self.connection() as conn:
-            result = conn.execute("""
-                DELETE FROM manual_expenses WHERE id = ? RETURNING id
-            """, [expense_id]).fetchone()
-
-        if result is None:
-            # Nothing was deleted, so there is nothing to carry across; a
-            # replication here would be 116 ms spent re-shipping seven tables
-            # unchanged.
-            return False
-
-        # And on to Postgres now, not within the hour. The form writes this
-        # store and the page it returns to reads the other once
-        # KS_READ_EXPENSES=postgres, so without this the row a human just
-        # removed is still on the page. Never raises — the DuckDB write has
-        # already committed.
-        from core.pg_operational import replicate_after_manual_expense
-
-        await replicate_after_manual_expense(self)
-
-        return True
+        return await pg_expenses_write.delete_expense(expense_id)
 
     async def list_expenses(
         self,

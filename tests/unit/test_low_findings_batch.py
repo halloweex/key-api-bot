@@ -1,9 +1,7 @@
 """The last batch of the race audit's LOW findings, each with the guard it got."""
 import asyncio
 import inspect
-from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,39 +16,11 @@ from core.duckdb_store import DuckDBStore
 # itself `tests/unit/test_pg_orders_write.py` (`TestTheDecisionIsDuckDBs`).
 
 
-class TestPersistRunIsOneTransaction:
-    def test_begin_commit_bracket_the_inserts(self):
-        from core.data_quality import persist_run
-
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (7,)
-        now = datetime.now(timezone.utc)
-        run_id = persist_run(
-            conn, started_at=now, ended_at=now, as_of=now,
-            window_start=now.date(), window_end=now.date(), layer="integrity",
-            issues=[], discrepancies=[],
-        )
-        assert run_id == 7
-        sql = [str(c.args[0]).strip() for c in conn.execute.call_args_list]
-        assert sql[0] == "BEGIN TRANSACTION" and sql[-1] == "COMMIT"
-
-    def test_a_failed_insert_rolls_back(self):
-        from core.data_quality import persist_run
-
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (7,)
-        conn.executemany.side_effect = RuntimeError("disk full")
-        now = datetime.now(timezone.utc)
-        from core.data_quality import IntegrityIssue, Severity
-
-        with pytest.raises(RuntimeError):
-            persist_run(
-                conn, started_at=now, ended_at=now, as_of=now,
-                window_start=now.date(), window_end=now.date(), layer="integrity",
-                issues=[IntegrityIssue("x", "t", Severity.WARN, 1)], discrepancies=[],
-            )
-        sql = [str(c.args[0]).strip() for c in conn.execute.call_args_list]
-        assert "ROLLBACK" in sql and "COMMIT" not in sql
+# `TestPersistRunIsOneTransaction` stood here: DuckDB's `persist_run` opened
+# one transaction around the run and its findings and rolled it back on a
+# failed insert. Step 14's S14-10 deleted that writer; the same property of
+# chain 9's, a refused finding leaving no run behind, is
+# `tests/integration/test_dq_journal_pg.py` (`TestOneTransaction`).
 
 
 class TestATimedOutQueryLeavesTheConnectionBeforeTheLockDoes:
