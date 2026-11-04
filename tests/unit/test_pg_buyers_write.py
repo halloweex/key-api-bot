@@ -182,12 +182,15 @@ class TestTheCompletenessCheckFollowsTheChain:
     @pytest.mark.asyncio
     async def test_mirror_off_still_asks(self, flags, monkeypatch):
         """The chain writes Postgres whatever its flag says (S14-00), and the
-        landing mirror's flag is read for nothing."""
+        landing mirror's flag is read for nothing: since step 14's S14-13 the
+        check asks whenever there is a Postgres (`KS_PG_DSN`), which this test
+        names itself rather than inherit from whoever runs it."""
         from unittest.mock import AsyncMock
 
         from core.mirror_reconciliation import reconcile_buyer_completeness
 
         monkeypatch.setenv("KS_MIRROR_LANDING", "0")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         asked = AsyncMock(side_effect=RuntimeError("reached Postgres"))
         monkeypatch.setattr("core.pg.get_pool", asked)
         with pytest.raises(RuntimeError, match="reached Postgres"):
