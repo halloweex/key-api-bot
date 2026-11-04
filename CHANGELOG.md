@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.310
+
+- The manual-expenses list reads its window like every other route
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
 ## 3.0.309
 
 - WIP: S14-08 review 2: the docstring says which tests the mutation passed
