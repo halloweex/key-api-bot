@@ -5654,22 +5654,6 @@
                 }
             },
             {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 24,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 24,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalIterable",
                 "range": {
                     "startColumn": 70,
@@ -5810,14 +5794,6 @@
                 "range": {
                     "startColumn": 41,
                     "endColumn": 46,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 28,
-                    "endColumn": 38,
                     "lineCount": 1
                 }
             }
@@ -6717,22 +6693,6 @@
             }
         ],
         "./core/repositories/users.py": [
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 24,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 24,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
             {
                 "code": "reportOptionalIterable",
                 "range": {

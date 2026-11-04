@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import contextlib
 import dataclasses
 import importlib
 import inspect
@@ -35,6 +34,7 @@ from typing import Callable, Dict, Iterator, List, Set, Tuple
 import duckdb
 import pytest
 
+from tests import store_reach
 from tests.repo_tree import needs_checkout
 
 REPO = Path(__file__).resolve().parents[2]
@@ -455,15 +455,42 @@ _WRITE = re.compile(
 _NOT_A_TABLE = frozenset({"set", "of", "on", "returning", "where", "from",
                           "select", "values", "default", "nowait", "skip"})
 
-# Each store switch: the reader that decides it, whether the reader's True
-# means DuckDB writes, and the routers — functions that pick the engine by the
-# reader and run a statement handed to them. Held to the code below.
+# Each store switch derived from the code: the reader that decides it, whether
+# the reader's True means DuckDB writes, and the routers — functions that pick
+# the engine by the reader and run a statement handed to them. Held to the
+# code below.
 STORE_ROUTERS: Dict[str, Tuple[str, bool, Tuple[str, ...]]] = {
-    fates_mod.SMS_STORE: ("sms_store_is_postgres", False, ("_sms_run", "_sms_tx")),
-    fates_mod.USER_STORE: ("user_store_is_postgres", False, ("_users_run", "_perms_run")),
     fates_mod.WAREHOUSE: ("duckdb_derives", True, ()),
 }
-# `_sms_tx` yields a transaction; these are the methods that run a statement.
+
+# KS_SMS_STORE and KS_USER_STORE were derived the same way until step 14's
+# S14-08, from the routers `_sms_run`/`_sms_tx` and `_users_run`/`_perms_run`,
+# whose DuckDB branches wrote these tables. Those branches are gone, so there
+# is nothing left to derive from: the sets are what the walk derived on the
+# commit before (each equal to the manifest's declaration there), a literal
+# until the manifest itself goes (S14-18). What the code can still be held to
+# is that no literal DuckDB write of them is left anywhere
+# (`test_a_retired_store_switchs_tables_have_no_duckdb_writer`) and that the
+# routers render for Postgres and reach no store, so a DuckDB tail cannot come
+# back inside one (`test_the_postgres_routers_ask_no_store_reader`).
+STORE_SWITCH_TABLES: Dict[str, Set[str]] = {
+    fates_mod.SMS_STORE: {"marketing_optouts", "sms_audience_presets",
+                          "sms_campaign_members", "sms_campaigns",
+                          "sms_dlr_events"},
+    fates_mod.USER_STORE: {"role_permissions", "users"},
+}
+# The readers those two switches had, read by nothing that routes any more.
+RETIRED_STORE_READERS = ("sms_store_is_postgres", "user_store_is_postgres")
+
+# The routers `/sms` and the access lists run every statement through. They
+# render for Postgres alone since S14-08, so the walk reads a statement handed
+# to one as no DuckDB write, whatever table its `{hole}` names. That reading is
+# only as true as the routers' bodies, which
+# `test_the_postgres_routers_ask_no_store_reader` holds to reaching no store.
+POSTGRES_ROUTERS = ("_sms_run", "_sms_tx", "_users_run", "_perms_run")
+# `_sms_tx` yields a transaction; these are the methods that run a statement,
+# read as Postgres's in the same way and held the same way
+# (`test_the_transaction_runs_on_its_postgres_connection_alone`).
 _TX_METHODS = ("all", "one", "none", "many")
 
 # DuckDB writes that never reach the analytics file. Each says why; a listed
@@ -670,64 +697,6 @@ def _statement_text(arg: ast.AST, module: _Module, fn: "_Fn | None") -> "str | N
     return value if isinstance(value, str) else None
 
 
-class _Captured:
-    """A DuckDB connection that records what it is asked to run."""
-
-    def __init__(self):
-        self.sql: List[str] = []
-
-    def execute(self, sql, params=None):
-        self.sql.append(sql)
-        return self
-
-    def executemany(self, sql, rows=None):
-        self.sql.append(sql)
-        return self
-
-    def fetchall(self):
-        return []
-
-    def fetchone(self):
-        return None
-
-
-class _CapturingStore:
-    def __init__(self):
-        self.conn = _Captured()
-
-    @contextlib.asynccontextmanager
-    async def connection(self):
-        yield self.conn
-
-
-def _render_for_duckdb(router: str, sql: str) -> List[str]:
-    """What `router` runs on DuckDB for `sql`, by running the router itself
-    against a connection that records — its own placeholders and its own
-    engine choice, nothing restated here."""
-    from core.duckdb_store import DuckDBStore
-
-    store = _CapturingStore()
-
-    async def run():
-        if router == "_sms_tx":
-            async with DuckDBStore._sms_tx(store) as tx:
-                await tx.none(sql)
-        else:
-            await getattr(DuckDBStore, router)(store, sql, [], mode="none")
-
-    # The routers' DuckDB branch. Until step 14's S14-00 the two variables
-    # chose it; since then both stores are Postgres, a constant, so the
-    # predicates are answered here (S14-08 takes the branches away).
-    from unittest.mock import patch
-
-    with patch("core.pg_sms.sms_store_is_postgres", lambda: False), \
-            patch("core.repositories.customers.sms_store_is_postgres", lambda: False), \
-            patch("core.pg_dashboard_users.user_store_is_postgres", lambda: False):
-        asyncio.run(run())
-    return [s for s in store.conn.sql
-            if s.strip().upper() not in ("BEGIN TRANSACTION", "COMMIT", "ROLLBACK")]
-
-
 @dataclasses.dataclass
 class WriteWalk:
     sites: List[WriteSite]
@@ -773,7 +742,7 @@ def _handed_statements(module: _Module, routers) -> Iterator[Tuple[str, ast.AST,
 def walk_writes(sources: "List[Tuple[str, str]] | None" = None) -> WriteWalk:
     """Every DuckDB write in `DUCKDB_TREES`, or in the `(rel, source)`
     modules given."""
-    routers = {r for _, _, rs in STORE_ROUTERS.values() for r in rs}
+    routers = {r for _, _, rs in STORE_ROUTERS.values() for r in rs} | set(POSTGRES_ROUTERS)
     modules = {m.rel: m for m in _modules(_sources() if sources is None else sources)}
     loaders: Dict[str, List[Tuple[_Fn, ast.AST]]] = {}
     for module in modules.values():
@@ -806,20 +775,18 @@ def walk_writes(sources: "List[Tuple[str, str]] | None" = None) -> WriteWalk:
             sites += [WriteSite(rel, qual, t, None, where)
                       for rel, qual, where in at for t in targets]
 
-        # Routed statements, each rendered for DuckDB by its router.
+        # Routed statements. The only routers left render for Postgres alone
+        # (`POSTGRES_ROUTERS`, step 14's S14-08), so none is counted as a
+        # DuckDB write — which is why a DuckDB tail inside a router is not
+        # seen here, and `test_the_postgres_routers_ask_no_store_reader` and
+        # `test_the_transaction_runs_on_its_postgres_connection_alone` hold
+        # their bodies instead. Each is still read, so a statement the walk
+        # cannot follow is named rather than passed over.
         for router, arg, call in handed:
             kind, owner = module.owners.get(id(call), ("module", ""))
             fn = module.functions.get(owner) if kind == "fn" else None
-            text = _statement_text(arg, module, fn)
-            if text is None:
+            if _statement_text(arg, module, fn) is None:
                 unread.append(f"{module.rel}:{arg.lineno} ({router})")
-                continue
-            for rendered in _render_for_duckdb(router, text):
-                if re.search(r"\b(?:INTO|UPDATE|FROM|TABLE)\s+__HOLE__", rendered):
-                    unread.append(f"{module.rel}:{arg.lineno} ({router})")
-                sites += [WriteSite(module.rel, owner if kind == "fn" else f"<{owner}>",
-                                    t, router, call)
-                          for t in _write_targets(rendered)]
     return WriteWalk(sites, modules, unread)
 
 
@@ -827,7 +794,7 @@ def templated_writes(sources: "List[Tuple[str, str]] | None" = None) -> Set[Tupl
     """`(module, owner)` of every write statement naming its table as a
     `{hole}` — the owner a constant's name or a function's qualname — except
     a statement handed straight to a router, which renders it."""
-    routers = {r for _, _, rs in STORE_ROUTERS.values() for r in rs}
+    routers = {r for _, _, rs in STORE_ROUTERS.values() for r in rs} | set(POSTGRES_ROUTERS)
     out = set()
     for module in _modules(_sources() if sources is None else sources):
         handed = {id(arg) for _, arg, _ in _handed_statements(module, routers)}
@@ -1540,9 +1507,35 @@ class TestTheStoreSwitches:
     was declared by hand and checked against nothing, so a table marked with
     the wrong switch — the unsafe direction, `duckdb_written()` answering
     False for a table DuckDB still writes — passed (review, finding 4:
-    M11, M12, M13, M18, M19)."""
+    M11, M12, M13, M18, M19). Since step 14's S14-08 the first two are
+    literals (`STORE_SWITCH_TABLES`) held to the absence of any writer."""
 
-    @pytest.mark.parametrize("switch", STORE_SWITCHES)
+    def test_every_store_switch_is_derived_or_a_literal(self):
+        assert set(STORE_ROUTERS) | set(STORE_SWITCH_TABLES) == set(STORE_SWITCHES)
+        assert not set(STORE_ROUTERS) & set(STORE_SWITCH_TABLES)
+
+    @pytest.mark.parametrize("switch", sorted(STORE_SWITCH_TABLES))
+    def test_a_retired_store_switch_declares_its_literal(self, switch):
+        assert set(fates_mod.tables_by_switch(switch)) == STORE_SWITCH_TABLES[switch]
+
+    @pytest.mark.parametrize("switch", sorted(STORE_SWITCH_TABLES))
+    def test_a_retired_store_switchs_tables_have_no_duckdb_writer(self, writes, switch):
+        """The DuckDB branches that wrote them went in S14-08: no literal
+        DuckDB write of one of these tables is left anywhere in the walked
+        trees. Mutation: `conn.execute("INSERT INTO sms_campaigns …")` in any
+        function. A DuckDB tail back on a router — `_sms_run` running its own
+        rendered `{hole}` statement on `self.connection()` as well — is not
+        a literal write, and the walk reads routed statements as Postgres's,
+        so it passes here: that is what
+        `test_the_postgres_routers_ask_no_store_reader` (`_PgTx`'s methods:
+        `test_the_transaction_runs_on_its_postgres_connection_alone`) and the
+        entry-points walk (`test_duckdb_off_entry_points.py`) catch."""
+        for table in sorted(STORE_SWITCH_TABLES[switch]):
+            sites = [(s.path, s.owner) for s in writes.writers(table)
+                     if (s.path, s.owner) not in NOT_THE_FILE]
+            assert not sites, f"{switch}: {table} is still written in DuckDB by {sites}"
+
+    @pytest.mark.parametrize("switch", sorted(STORE_ROUTERS))
     def test_a_store_switch_moves_exactly_what_it_stops_duckdb_writing(
             self, writes, switch):
         derived = switch_tables(writes, switch)
@@ -1555,16 +1548,74 @@ class TestTheStoreSwitches:
             f"declared {sorted(derived - declared)}")
 
     def test_the_walk_reads_every_routed_statement(self, writes):
+        """Every statement handed to the Postgres routers is still read — one
+        the walk cannot follow is named rather than passed over — and none is
+        counted as a DuckDB site. This says nothing about what a router does
+        with the statement: the walk renders it for Postgres alone, so a
+        DuckDB tail inside a router is invisible to it, and the routers'
+        bodies are the next two tests'."""
         assert not writes.unread_statements, writes.unread_statements
-        routed = {(s.table, s.router) for s in writes.sites if s.router}
-        # The family: each router, and the transaction.
-        assert {("users", "_users_run"), ("role_permissions", "_perms_run"),
-                ("sms_audience_presets", "_sms_run"),
-                ("sms_campaign_members", "_sms_tx")} <= routed
+        assert not [s for s in writes.sites if s.router], (
+            "a routed statement was counted as a DuckDB write")
+        handed = {router for module in writes.modules.values()
+                  for router, _a, _c in _handed_statements(module, POSTGRES_ROUTERS)}
+        assert handed == set(POSTGRES_ROUTERS), (
+            f"the walk no longer sees statements handed to "
+            f"{set(POSTGRES_ROUTERS) - handed}")
+
+    def test_the_postgres_routers_ask_no_store_reader(self):
+        """`_sms_run`, `_sms_tx`, `_users_run` and `_perms_run` render for
+        Postgres, ask nothing and reach nothing through the store. The walk
+        reads every statement handed to one as Postgres's, so this is what
+        keeps a DuckDB tail out of a router: one that also ran its statement
+        on the store's connection would pass every literal-write test above.
+        Read off the body's syntax (`tests/store_reach.py`), not its text: a
+        router names `self` nowhere but in its signature — every way from the
+        store to the file goes through it — and no `super`, no way to the file
+        on anything else (`connection`, `_fetch_one`, `_fetch_all`,
+        `_offload`, `connect`, `checkpoint`, `open_file`, `get_store`, by
+        attribute, bare or as a string) and no import of `duckdb`, its opener
+        or the store. Mutations, each made on 4cceda69 by the review or since:
+        `async with self.connection() as conn: …` in `_sms_run`;
+        `await self._fetch_all(rendered, params)` there or in `_users_run`
+        (only the entry-points walk caught those two);
+        `await super()._fetch_all(…)` and `getattr(store, "_fetch_all")`
+        (nothing caught those); `get_store().connection()`; a reader back."""
+        from core.duckdb_store import DuckDBStore
+
+        for router in POSTGRES_ROUTERS:
+            fn = store_reach.function(getattr(DuckDBStore, router))
+            spelled = store_reach.names(fn)
+            for reader in RETIRED_STORE_READERS + ("duckdb_derives",):
+                assert reader not in spelled, (router, reader)
+            found = store_reach.reaches(
+                fn, self_attrs=frozenset(), reach=store_reach.ROUTER_REACHES,
+                modules=store_reach.ROUTER_MODULES)
+            assert not found, (
+                f"{router} reaches the store, so a statement handed to it may "
+                f"run on DuckDB and the write walk would not see it: {found}")
+
+    def test_the_transaction_runs_on_its_postgres_connection_alone(self):
+        """`_sms_tx` yields a `_PgTx`, and the walk reads every statement
+        handed to its `all`, `one`, `none` and `many` (`_TX_METHODS`) as
+        Postgres's too. So those four, and the two that render for them, may
+        name nothing on `self` but the asyncpg connection and the rendering,
+        and nothing of the store. Mutation: `get_store().connection()` in
+        `_PgTx.none` — it passed every guard here and the entry-points walk."""
+        from core.repositories.customers import _PgTx, _SmsTx
+
+        rendering = frozenset({"_conn", "_sql", "_render", "_dialect"})
+        held = [(_PgTx, m) for m in _TX_METHODS + ("_sql",)] + [(_SmsTx, "_render")]
+        for cls, method in held:
+            fn = store_reach.function(getattr(cls, method))
+            found = store_reach.reaches(
+                fn, self_attrs=rendering, reach=store_reach.ROUTER_REACHES,
+                modules=store_reach.ROUTER_MODULES)
+            assert not found, f"{cls.__name__}.{method} reaches the store: {found}"
 
     def test_the_routers_are_the_ones_that_route(self):
-        """Each router asks its switch's reader, and the manifest reads the
-        switch through the same reader."""
+        """Each derived switch's router asks its reader, and the manifest
+        reads the switch through the same reader."""
         from core.duckdb_store import DuckDBStore
 
         manifest = inspect.getsource(fates_mod._store_switch_writes_duckdb)
@@ -1577,8 +1628,9 @@ class TestTheStoreSwitches:
     def test_every_router_in_the_code_is_listed(self):
         """A function that asks a store reader and runs a `sql` it is handed
         is a router; one not listed would route statements the walk never
-        renders."""
-        readers = {r for r, _, _ in STORE_ROUTERS.values()}
+        renders. The two retired readers count: a function that asks one is
+        an engine choice nothing here would follow."""
+        readers = {r for r, _, _ in STORE_ROUTERS.values()} | set(RETIRED_STORE_READERS)
         listed = {r for _, _, rs in STORE_ROUTERS.values() for r in rs}
         found = set()
         for module in _modules(_sources(("core",))):
@@ -1586,7 +1638,7 @@ class TestTheStoreSwitches:
                 args = {a.arg for a in fn.node.args.args + fn.node.args.kwonlyargs}
                 if "sql" in args and readers & set(fn.refs):
                     found.add(fn.qualname.rsplit(".", 1)[-1])
-        assert found == listed - {"_sms_tx"}, found
+        assert found == listed, found
 
     def test_not_the_file_lists_only_sites_that_exist(self, writes):
         present = {(s.path, s.owner) for s in writes.sites}
@@ -1683,14 +1735,18 @@ class TestTheStoreSwitches:
     def test_a_write_off_the_duckdb_branch_is_not(self, source):
         assert _guarded([("core/_probe.py", source)]) == [False]
 
-    def test_the_polarity_follows_the_reader(self):
-        """`sms_store_is_postgres()` true means Postgres writes."""
+    def test_the_polarity_follows_the_reader(self, monkeypatch):
+        """A reader whose True means Postgres writes. No switch has one since
+        step 14's S14-08 (`sms_store_is_postgres()` was the last), so a probe
+        switch holds the walk's other polarity to its word."""
+        monkeypatch.setitem(STORE_ROUTERS, "KS_PROBE_STORE",
+                            ("store_is_postgres", False, ()))
         w = 'c.execute("DELETE FROM marketing_optouts")'
-        on = f"def f(c):\n    if not sms_store_is_postgres():\n        {w}"
-        off = f"def f(c):\n    if sms_store_is_postgres():\n        {w}"
-        after = f"def f(c):\n    if sms_store_is_postgres():\n        return\n    {w}"
+        on = f"def f(c):\n    if not store_is_postgres():\n        {w}"
+        off = f"def f(c):\n    if store_is_postgres():\n        {w}"
+        after = f"def f(c):\n    if store_is_postgres():\n        return\n    {w}"
         for source, expected in ((on, True), (off, False), (after, True)):
-            assert _guarded([("core/_probe.py", source)], fates_mod.SMS_STORE,
+            assert _guarded([("core/_probe.py", source)], "KS_PROBE_STORE",
                             "marketing_optouts") == [expected], source
 
 
