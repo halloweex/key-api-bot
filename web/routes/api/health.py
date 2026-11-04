@@ -690,12 +690,14 @@ async def health_check(request: Request):
 
     from core.config import config as app_config
 
-    # Data-quality freshness rides along in the cached stats; lift it to the
-    # top level so the canary reads it without parsing the duckdb block.
-    # Its absence is meaningful (bot/canary.py treats a missing block as a
-    # failure), so never substitute an empty dict for "we could not tell".
+    # The DuckDB block's counts as the store last handed them; none under
+    # KS_DUCKDB=off.
     stats = dict(duckdb_stats or {})
-    # Chain 9: from Postgres, which writes the journal (`_journal_ages`).
+    # `data_quality` is Postgres's layer ages, from `_journal_ages()` (chain 9
+    # writes the journal there), published at the top level for the canary.
+    # None when Postgres cannot answer, and that absence is meaningful: the
+    # canary pages `dq_block_missing` on a missing block, so never substitute
+    # an empty dict for "we could not tell".
     data_quality = await _journal_ages()
     # Chain 3: the layers it stood down marked — per response, after the
     # journal's own cache, which holds Postgres's block unmarked; marked
