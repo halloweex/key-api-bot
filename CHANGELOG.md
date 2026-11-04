@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.315
+
+- WIP: S14-11 — the copy's not-read-out-of-DuckDB proof stays, without its flag
+- WIP: S14-11 — the last DuckDB-writer pins go; a lost needs_postgres comes back
+- WIP: S14-11 — baseline shrinks with the deleted branches; CLAUDE.md says no flag is read
+- WIP: S14-11 — the last DuckDB-routing helpers go; two-engine buyers test against DuckDB's captured answer
+- WIP: S14-11 — remaining unit tests follow the flagless registry
+- WIP: S14-11 — invariants dated by owner rows in tests; registry walk roots on chain_tables
+- WIP: S14-11 — two-engine goal and forecast tests compare against DuckDB's captured answer
+- WIP: S14-11 — more tests follow the flagless chains
+- WIP: S14-11 — tests follow: flags read by nothing, the sweep latches nothing
+- WIP: S14-11 — consumers ask no chain; health and canary lose the flag checks
+- WIP: S14-11 — inventory writers are Postgres alone
+- WIP: S14-11 — chains collapse; registry reduced (consumers in progress)
+
+
 ## 3.0.314
 
 - The margin fingerprint check reads the per-SKU cost #346 introduced
