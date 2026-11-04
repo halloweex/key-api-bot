@@ -2000,8 +2000,18 @@ class RevenueMixin:
         start_date: date,
         end_date: date,
         sales_type: str = "retail",
+        source_id: Optional[int] = None,
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Get all products grouped by source (matches bot Excel format)."""
+        """Get all products grouped by source (matches bot Excel format).
+
+        Filtered the way `get_report_top_products` is, clause for clause. The
+        CSV summary prints these lists under a summary that honours the
+        header's source, category and brand, and until 2026-11-04 the lists
+        took none of the three: a summary of one brand listed every brand's
+        products.
+        """
         source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
 
         params: list = [start_date, end_date]
@@ -2010,6 +2020,18 @@ class RevenueMixin:
         if sales_type != "all":
             where_clauses.append("l.sales_type = ?")
             params.append(sales_type)
+
+        if source_id:
+            where_clauses.append("l.source_id = ?")
+            params.append(source_id)
+
+        if category_id:
+            cat_ids = await self._category_ids(category_id)
+            where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
+            params.extend(cat_ids)
+
+        if brand:
+            where_clauses.append(brand_where(brand, params, "l"))
 
         where_sql = " AND ".join(where_clauses)
 

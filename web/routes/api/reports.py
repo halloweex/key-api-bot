@@ -312,7 +312,7 @@ async def export_report_csv(
 
     if type == "summary":
         data = await store.get_report_summary(s, e, st, src, cat, br)
-        products_by_source = await store.get_report_products_by_source(s, e, st)
+        products_by_source = await store.get_report_products_by_source(s, e, st, src, cat, br)
 
         # Header matching bot Excel format
         display_date = f"{s} to {e}" if s != e else str(s)
