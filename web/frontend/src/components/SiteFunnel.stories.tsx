@@ -21,7 +21,7 @@ const DATA: TrafficFunnelResponse = {
     previous: { start: '2026-08-31', end: '2026-09-30' },
     year_ago: { start: '2025-10-01', end: '2025-10-31' },
   },
-  earliest: '2025-09-01',
+  earliest: '2025-09-04',
   steps: ['entered', 'viewed_product', 'added_to_cart', 'began_checkout', 'purchased'],
   total: {
     current: c(33600, 18900, 2400, 1080, 730),

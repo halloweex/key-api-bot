@@ -209,8 +209,9 @@ class TestTheService:
     def test_the_windows(self):
         assert svc.previous_window(*OCT) == SEP
         assert svc.year_ago(date(2024, 2, 29)) == date(2023, 2, 28)
-        assert svc.earliest_day(date(2026, 11, 4)) == date(2025, 9, 1)
-        assert svc.earliest_day(date(2026, 1, 15)) == date(2024, 11, 1)
+        assert svc.earliest_day(date(2026, 11, 4)) == date(2025, 9, 4)
+        assert svc.earliest_day(date(2026, 1, 15)) == date(2024, 11, 15)
+        assert svc.earliest_day(date(2026, 4, 30)) == date(2025, 2, 28)
 
     @pytest.mark.asyncio
     async def test_three_windows_by_channel_and_device_make_the_answer(self):
@@ -220,7 +221,7 @@ class TestTheService:
         assert google.tokens == 1 and len(google.funnels) == 6
         assert out["periods"]["previous"] == {"start": "2026-08-31", "end": "2026-09-30"}
         assert out["periods"]["year_ago"] == {"start": "2025-10-01", "end": "2025-10-31"}
-        assert out["earliest"] == "2025-09-01"
+        assert out["earliest"] == "2025-09-04"
         assert out["total"]["current"] == dict(zip(ga4.COLUMNS, [1000, 600, 80, 40, 30]))
         assert out["total"]["year_ago"]["entered"] == 1500
 

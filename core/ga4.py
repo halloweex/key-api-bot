@@ -15,8 +15,8 @@ pixel's duplicate page views therefore do not inflate it.
 **A funnel reaches back 14 months.** That is the longest event retention a
 standard property has, and a funnel is built from events. An older range comes
 back empty rather than as an error, while aggregated reports keep the whole
-history. Measured on 2026-11-04: funnels began at 2025-09-01, and January to
-August 2025 came back empty.
+history. Measured on 2026-11-04: funnels began at 2025-09-04, the same date 14
+months back, and January to August 2025 came back empty.
 
 **GA4's trended funnel is not a daily funnel.** Over a range it counts a person
 once, on their first day in it: for 2026-10-01..02 it gave 1 428 people

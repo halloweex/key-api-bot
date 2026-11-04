@@ -22,6 +22,7 @@ other sites and AI assistants.
 from __future__ import annotations
 
 import asyncio
+import calendar
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -81,9 +82,14 @@ def year_ago(day: date) -> date:
 
 
 def earliest_day(today: date) -> date:
-    """The first day GA4 still holds funnel data for, by its retention."""
+    """The first day GA4 still holds funnel data for: the same date 14 months back.
+
+    Measured on 2026-11-04: one funnel per day came back from 2025-09-04 on, and
+    empty for the 1st to the 3rd. The retention rolls by the day, not the month.
+    """
     months = today.year * 12 + (today.month - 1) - RETENTION_MONTHS
-    return date(months // 12, months % 12 + 1, 1)
+    year, month = months // 12, months % 12 + 1
+    return date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
 
 
 def _empty() -> Dict[str, int]:
