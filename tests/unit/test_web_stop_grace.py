@@ -15,7 +15,7 @@ Docker's default is 10 s, and web's shutdown waits on three things in turn:
 
 About 67 s for an ordinary request, and 120 s covers it. **A request to one
 of `SLOW_ENDPOINTS` is not covered**: they get `SLOW_ENDPOINT_TIMEOUT` (300 s),
-uvicorn drains them too, and five write DuckDB (`SLOW_DUCKDB_WRITERS`, derived
+uvicorn drains them too, and three write DuckDB (`SLOW_DUCKDB_WRITERS`, derived
 from the code by `test_the_slow_writers_are_derived_from_the_code`). One
 in flight at a stop keeps web draining past the grace, and Docker kills it.
 Covering them would take ~340 s of grace, and with the same margin the
@@ -59,19 +59,18 @@ KNOWN_SLOW_ENDPOINTS = {
     "/api/revenue/forecast/tune",
     "/api/traffic/reclassify",
 }
-# Of those, the ones that write DuckDB — a kill there leaves a WAL. Under
-# today's flags: the recalculation and the training write the goal and
-# forecast tables to DuckDB until chain 7b-3 (`KS_WRITE_FORECAST=postgres`)
-# moves them, and the list keeps them while the code can. Derived, not kept:
-# it once named three, and the review that found the other two found that
-# nothing checked it (batch-E).
+# Of those, the ones that write DuckDB — a kill there leaves a WAL. Derived,
+# not kept: it once named three, and the review that found two more found that
+# nothing checked it (batch-E). Those two — the recalculation and the
+# training, which wrote the goal and forecast tables to DuckDB while chain
+# 7b-3's flag could say duckdb — write Postgres alone since step 14's S14-11
+# (`MOVED_TO_POSTGRES`).
 SLOW_DUCKDB_WRITERS = {
     "/api/duckdb/resync",
     "/api/duckdb/refresh-statuses",
-    "/api/goals/recalculate",
-    "/api/revenue/forecast/train",
     "/api/traffic/reclassify",
 }
+MOVED_TO_POSTGRES = {"/api/goals/recalculate", "/api/revenue/forecast/train"}
 
 
 def _seconds(value: str) -> int:
@@ -200,18 +199,19 @@ def derived_slow_duckdb_writers() -> set:
 
 
 def test_the_slow_writers_are_derived_from_the_code():
-    """Mutation: drop `/api/goals/recalculate` from `SLOW_DUCKDB_WRITERS`
-    (the review's omission), or name `/api/stocks/analysis`, which only
-    reads."""
+    """Mutation: drop `/api/duckdb/resync` from `SLOW_DUCKDB_WRITERS`, or
+    name `/api/stocks/analysis`, which only reads."""
     assert derived_slow_duckdb_writers() == SLOW_DUCKDB_WRITERS
 
 
-def test_the_derivation_sees_a_write_through_a_constant_and_a_mixin():
-    """Not blind: the recalculation writes through `_SEASONAL_UPSERT_SQL`, a
-    module constant, from a mixin method — the shape the review's omission
-    had. Mutation: read only the strings written in the function."""
-    assert {"/api/goals/recalculate", "/api/revenue/forecast/train"} <= (
-        derived_slow_duckdb_writers())
+def test_the_goal_and_forecast_doors_write_postgres_alone():
+    """Step 14's S14-11: the recalculation and the training reach chain
+    7b-3's writer and no DuckDB statement. Until then they reached DuckDB
+    through `_SEASONAL_UPSERT_SQL`, a module constant, from a mixin method —
+    the shape the review's omission had, which the derivation was held to
+    see. Mutation: give either a DuckDB branch again."""
+    assert not MOVED_TO_POSTGRES & derived_slow_duckdb_writers()
+    assert MOVED_TO_POSTGRES <= KNOWN_SLOW_ENDPOINTS
 
 
 @needs_checkout

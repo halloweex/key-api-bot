@@ -75,7 +75,6 @@ from zoneinfo import ZoneInfo  # noqa: E402
 import pytest  # noqa: E402
 
 from core import chain_latch, pg_forecast_write as chain, read_fallback  # noqa: E402
-from core import write_chains  # noqa: E402
 
 KYIV = ZoneInfo("Europe/Kyiv")
 DSN = "postgresql://nobody@127.0.0.1:1/none"
@@ -98,46 +97,17 @@ def ready(monkeypatch):
     return monkeypatch
 
 
-def _state():
-    return write_chains.chain_modes()[chain.CHAIN]
+# `TestTheLatchOutranks` stood here until step 14's S14-11: the latch
+# outranking any flag in `writes_postgres()`/`reads_postgres()`, which went
+# with `KS_WRITE_FORECAST`.
 
 
-class TestTheLatchOutranks:
-
-    @pytest.mark.parametrize("value", ["duckdb", "postgre", None])
-    def test_any_flag_once_latched(self, ready, value):
-        if value is not None:
-            ready.setenv(chain.WRITE_ENV, value)
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.writes_postgres() is True and chain.reads_postgres() is True
-
-
-class TestReadsTheChain:
-    OTHER = ("SELECT goal_amount FROM {revenue_goals}",
-             "SELECT SUM(revenue) FROM {gold_daily_revenue}",
-             "SELECT * FROM seasonal_indices")
-
-    @pytest.mark.parametrize("hole", chain.TABLE_HOLES)
-    def test_each_hole_follows_once_latched(self, ready, hole):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.reads_the_chain(f"SELECT * FROM {hole}") is True
-
-    @pytest.mark.parametrize("sql", OTHER)
-    def test_nothing_else_follows(self, ready, sql):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.reads_the_chain(sql) is False
-
-
-    @pytest.mark.parametrize("table", chain.CHAIN_TABLES)
-    def test_each_table_the_chain_owns_follows_once_latched(self, ready, table):
-        """Parametrised over `CHAIN_TABLES`, not `TABLE_HOLES`, so a hole
-        dropped from the second is a failure here rather than a case that
-        quietly disappears. Mutation: `{growth_metrics}` removed from
-        `TABLE_HOLES` — a read of that table would go by `KS_READ_GOALS`, with
-        a fallback, to DuckDB's frozen copy."""
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        hole = "{%s}" % table.split(".", 1)[1]
-        assert chain.reads_the_chain(f"SELECT * FROM {hole}") is True
+class TestTheHoles:
+    """`reads_the_chain`, which sent a statement carrying one of these holes
+    to Postgres once the chain was latched, went in step 14's S14-11: every
+    goal and forecast read goes to Postgres
+    (`tests/unit/test_goals_reads_follow_chain.py`). The holes stay, and
+    are the tables the chain owns."""
 
     def test_the_holes_are_the_tables_the_chain_owns(self):
         assert {"app." + h.strip("{}") for h in chain.TABLE_HOLES} == \

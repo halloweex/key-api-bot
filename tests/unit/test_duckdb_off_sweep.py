@@ -28,10 +28,11 @@ whatever `KS_DUCKDB` says, and off's verdict (`core/duckdb_off.py`) is gone —
 so the state is no longer what makes them hold; the sweep still sets it,
 production's own, so it measures the web production runs.
 
-**And with no chain latched** (`down-unlatched`, S14-00): the same state
-with no marker on disk — the chains route by nothing now, so a lost
-`data/write-chain-owners` must change no path, and the sweep must reach
-exactly the same nothing.
+**With no chain latched and no `KS_WRITE_*` set**, in every flavour since
+step 14's S14-11: the chains route by nothing, so a lost
+`data/write-chain-owners` must change no path. S14-00 proved it with a fifth
+flavour (`down-unlatched`) beside four that latched every chain; S14-11 made
+the four unlatched, and the fifth went.
 
 FOUR FLAVOURS: POSTGRES, AND THE WORLD OUTSIDE
 
@@ -107,12 +108,13 @@ OUT_ENV = "KS_SWEEP_OUT"
 # TurboSMS — answering or refusing (`duckdb_off_sweep_world.py`).
 DOWN, LIVE = "down", "live"
 DOWN_OFFLINE, LIVE_OFFLINE = "down-offline", "live-offline"
-# Postgres refusing, the world answering, and no chain marker on disk (S14-00).
-DOWN_UNLATCHED = "down-unlatched"
-FLAVORS = (DOWN, LIVE, DOWN_OFFLINE, LIVE_OFFLINE, DOWN_UNLATCHED)
-DOWNS = frozenset({DOWN, DOWN_OFFLINE, DOWN_UNLATCHED})
+# `down-unlatched` — Postgres refusing, the world answering, and no chain
+# marker on disk (S14-00) — was a fifth flavour until step 14's S14-11: the
+# fixture latches no chain and sets no `KS_WRITE_*` since, so every flavour
+# runs with no marker on disk, and that one was the first.
+FLAVORS = (DOWN, LIVE, DOWN_OFFLINE, LIVE_OFFLINE)
+DOWNS = frozenset({DOWN, DOWN_OFFLINE})
 LIVES = frozenset({LIVE, LIVE_OFFLINE})
-UNLATCHED = frozenset({DOWN_UNLATCHED})
 OFFLINES = frozenset({DOWN_OFFLINE, LIVE_OFFLINE})
 EVERY_FLAVOR = frozenset(FLAVORS)
 STEP_TIMEOUT_S = 60
@@ -209,21 +211,22 @@ KNOWN_FALSE_SUCCESS: Dict[str, str] = {
 
 # ─── The state ───────────────────────────────────────────────────────────────
 
-def apply_target_state(monkeypatch, tmp_path, *, live: bool, markers: bool = True,
+def apply_target_state(monkeypatch, tmp_path, *, live: bool,
                        breaking: Optional[Dict[str, str]] = None) -> None:
     """Set the state production will be in for the week of silence, and read
     it the way web's startup does. `live` points `KS_PG_DSN` at the database
-    the sweep seeded. `markers` latches every chain, as production's are —
-    or leaves `data/write-chain-owners` empty, which since S14-00 must change
-    nothing.
+    the sweep seeded. No `KS_WRITE_*` is set and no chain is latched: since
+    step 14's S14-11 nothing reads either (until then the state set every
+    flag to postgres and, but in the `down-unlatched` flavour, latched every
+    chain as production's are). A chain's first write in the sweep still
+    takes its latch, in the test's own marker directory.
 
     `breaking` sets variables over that state just before it is read, and
     then nothing is asserted about it: the caller judges what the start
     made of the state with one thing wrong."""
-    from core import chain_latch, warehouse_cutover as wc
+    from core import warehouse_cutover as wc
     from core.duckdb_table_fates import STORE_SWITCHES
     from core.runtime_modes import configure_modes
-    from core.write_chains import WRITE_CHAINS, chain_name
     from tests.unit.test_read_fallback_http import _every_switch_on
     from tests.unit.test_warehouse_writer import MET_ENV
 
@@ -238,10 +241,6 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool, markers: bool = Tru
     # Production's. Its fallback is SQLite, never DuckDB, so it is not one of
     # the store switches the table fates ask about.
     monkeypatch.setenv("KS_BOT_STORE", "postgres")
-    for chain in WRITE_CHAINS:
-        monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-        if markers:
-            chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
     monkeypatch.setenv(duckdb_switch.ENV, "off")
     data = tmp_path / "data"
     monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
@@ -264,7 +263,7 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool, markers: bool = Tru
         monkeypatch.setenv(name, value)
     configure_modes(web=True)
     if breaking is None:
-        assert_target_state(markers=markers)
+        assert_target_state()
 
 
 # Step 13's record as production's copy holds it: what the live flavour seeds.
@@ -272,23 +271,18 @@ WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
                    "resolved": True, "resolved_at": "2026-10-01T06:00:01+00:00"}
 
 
-def assert_target_state(*, markers: bool = True) -> None:
+def assert_target_state() -> None:
     """Every cached answer says the state was reached — and if one does not,
     which, rather than a sweep of some other state."""
     from core import read_fallback, warehouse_cutover as wc
-    from core.write_chains import chain_modes
 
     assert duckdb_switch.value() == "off" and duckdb_switch.mode_error() is None
     unmet = [u.key for u in wc.preconditions_unmet()]
     assert wc.writes_postgres() and not unmet, f"step 13 unmet: {unmet}"
     assert read_fallback.mode() == "off"
     assert read_fallback.misconfigured() == [] and read_fallback.no_engine_routes() == []
-    not_moved = {name: state for name, state in chain_modes().items()
-                 if state["mode"] != "postgres" or state["latched"] != markers
-                 or state["mismatch"] or state["error"]}
-    assert not not_moved, not_moved
-    # Chain 3's own `mode()` and its start hold went in step 14's S14-09: the
-    # registry's answer above is the only one left to ask.
+    # Every chain writes Postgres, asking nothing (step 14's S14-11 deleted
+    # the registry's `chain_modes`, which this asked until then).
     assert duckdb_switch.held_back() == ()
     assert duckdb_switch.is_off()
 
@@ -461,25 +455,6 @@ class TestTheState:
         verdicts answer, and reading it opened nothing."""
         assert duckdb_switch.opened() == {}
 
-    def test_every_chain_is_latched(self, target_state):
-        from core import chain_latch
-        from core.write_chains import WRITE_CHAINS, chain_name
-
-        assert all(chain_latch.latched(chain_name(c)) for c in WRITE_CHAINS)
-
-    def test_with_no_marker_the_state_is_the_same_but_the_latch(
-        self, monkeypatch, tmp_path, fresh_read_fallback,  # noqa: F811
-    ):
-        """S14-00: the chains route by nothing, so with no marker on disk every
-        answer is production's but `latched`. Mutation: route a chain by its
-        latch again."""
-        from core import chain_latch
-        from core.write_chains import WRITE_CHAINS, chain_name
-
-        apply_target_state(monkeypatch, tmp_path, live=False, markers=False)
-        assert not any(chain_latch.latched(chain_name(c)) for c in WRITE_CHAINS)
-        assert duckdb_switch.opened() == {}
-
 
 # ─── The sweep ───────────────────────────────────────────────────────────────
 
@@ -553,13 +528,8 @@ def live_offline(tmp_path_factory):
     return _live(LIVE_OFFLINE, tmp_path_factory)
 
 
-@pytest.fixture(scope="module")
-def down_unlatched(tmp_path_factory):
-    return run_sweep(DOWN_UNLATCHED, SWEEPS, tmp_path_factory.mktemp(DOWN_UNLATCHED))
-
-
 FIXTURE_OF = {DOWN: "down", LIVE: "live", DOWN_OFFLINE: "down_offline",
-              LIVE_OFFLINE: "live_offline", DOWN_UNLATCHED: "down_unlatched"}
+              LIVE_OFFLINE: "live_offline"}
 
 
 def swept(request, flavor: str) -> Dict[str, dict]:
@@ -896,33 +866,6 @@ class TestTheSweepUnderARefusingPostgres:
         result = run[ROUTES]
         for path in ("/api/health", "/api/health/detailed", "/api/duckdb/stats"):
             assert result["routes"][path] == 200, path
-        assert result["health"] == {
-            "status": "healthy", "degraded_by": [],
-            "duckdb": "off", "migrations": {"status": "off"}}
-
-
-class TestTheSweepWithNoChainLatched:
-    """S14-00's variant: Postgres refusing, the world answering, and not one
-    chain marker on disk. The chains route by nothing since S14-00, so a lost
-    `data/write-chain-owners` reaches for the file exactly as often as
-    production's eleven markers do — never."""
-
-    @pytest.fixture
-    def run(self, down_unlatched):
-        return down_unlatched
-
-    @pytest.mark.parametrize("sweep", SWEEPS)
-    def test_each_sweep_reaches_exactly_the_known_residual(self, run, sweep):
-        _judge(DOWN_UNLATCHED, sweep, run[sweep])
-
-    def test_every_job_was_run(self, run):
-        result = run[PROCESS]
-        _judge_the_jobs(result)
-        _judge_the_run(result)
-
-    def test_health_says_off_and_is_healthy(self, run):
-        result = run[ROUTES]
-        assert result["routes"]["/api/health"] == 200
         assert result["health"] == {
             "status": "healthy", "degraded_by": [],
             "duckdb": "off", "migrations": {"status": "off"}}

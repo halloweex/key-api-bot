@@ -164,15 +164,11 @@ class TestTheFlag:
     answers that stood in for it: `mode()`, the precondition and its warning,
     the lock-out and the stand-in for an absent key."""
 
-    @pytest.mark.parametrize("value", ["duckdb", "yes", ""])
-    def test_whatever_it_says_the_chain_writes_postgres(self, flags, value):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, value)
-        assert chain.writes_postgres() is True
-
     @pytest.mark.parametrize("name", [
         "mode", "unmet_precondition", "_warn_unmet", "UNMET_WARN_EVERY_S",
-        "_unmet_warned", "LOCKOUT_REVISION", "CHAIN_WATERMARK_INHERITS_DUCKDB"])
+        "_unmet_warned", "LOCKOUT_REVISION", "CHAIN_WATERMARK_INHERITS_DUCKDB",
+        # S14-11, with the flag.
+        "writes_postgres", "env_writes_postgres"])
     def test_the_answers_that_routed_it_are_gone(self, name):
         assert not hasattr(chain, name)
 
@@ -194,8 +190,7 @@ class TestTheRegistrySeesIt:
     def test_the_watermarks_are_this_chains_and_move_with_it(self, met):
         for key in chain.CHAIN_SYNC_KEYS:
             assert write_chains.chain_for_sync_key(key) is chain
-        met.setenv(chain.WRITE_ENV, "postgres")
-        assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.stood_down_sync_keys()
+        assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.sync_keys()
 
 
     def test_each_table_is_a_unit_of_its_own(self):
@@ -820,18 +815,11 @@ class TestTheStandingWatch:
 
 @pytest.fixture
 def health(flags):
-    """The health module with chain 1's preflight answered locally, so the
-    block is the registry's state and the two steps' recorders alone."""
-    from core import pg_inventory_write
+    """The health module: since step 14's S14-11 its `write_chains` block is
+    the steps' recorders and the spools alone, asking no Postgres."""
     from web.routes.api import health as module
 
-    async def preflight(*a, **kw):
-        return {"ok": False, "reasons": ["not asked here"]}
-
-    module._preflight_cache.update(data=None, expires_at=0)
-    flags.setattr(pg_inventory_write, "preflight", preflight)
-    yield module
-    module._preflight_cache.update(data=None, expires_at=0)
+    return module
 
 
 class TestHealthPublishesTheStep:
@@ -857,9 +845,8 @@ class TestHealthPublishesTheStep:
         assert "password" not in str(block)                 # the class, never the text
         # Each chain reads its own recorder: chain 1's stays clean.
         assert block["pg_inventory_write"]["sync_step"]["failures_since_ok"] == 0
-        # The registry's half is untouched: the canary reads `mode` and `error` there.
-        assert block[chain.CHAIN]["mode"] == "postgres"          # S14-00
-        assert "preflight" not in block[chain.CHAIN]
+        # No flag field beside it since S14-11.
+        assert set(block[chain.CHAIN]) == {"sync_step"}
 
     @pytest.mark.asyncio
     async def test_no_sync_service_is_null_not_empty(self, health, monkeypatch):

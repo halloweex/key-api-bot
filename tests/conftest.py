@@ -142,23 +142,10 @@ def _never_the_production_database(monkeypatch, tmp_path):
     monkeypatch.setattr("core.duckdb_store._store_instance", None, raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _no_write_chain_flag_from_outside(monkeypatch):
-    """Every registered write chain starts each test with its KS_WRITE_* unset.
-
-    A chain's flag decides where its writers write, and a developer's shell or
-    `.env` may carry one — a test that inherited `KS_WRITE_EXPENSES=postgres`
-    would exercise a different code path than CI does and pass or fail for a
-    reason nobody can see. Thirteen test files cleared the variables of the
-    chains they knew about, by name; this clears the variable of every chain in
-    `WRITE_CHAINS`, so a chain added to the registry is covered the moment it
-    is registered rather than when somebody remembers the fixtures. Tests still
-    set the flag they mean to test, after this has run.
-    """
-    from core.write_chains import WRITE_CHAINS
-
-    for chain in WRITE_CHAINS:
-        monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+# `_no_write_chain_flag_from_outside`, which cleared every chain's KS_WRITE_*
+# before each test, stood here until step 14's S14-11: a flag inherited from a
+# developer's `.env` decided where a chain's writers wrote. Nothing reads one
+# since (`tests/unit/test_write_flags_are_not_read.py`).
 
 
 @pytest.fixture(autouse=True)
@@ -209,8 +196,8 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
     that a chain writes Postgres and no `KS_WRITE_*` may move it back
     (`core/chain_latch.py`). A test that wrote one into `data/` would hand that
     decision to whatever runs next on the developer's machine — and the suite
-    reaches the writers through the repository methods, so it is one
-    `KS_WRITE_EXPENSES=postgres` away from doing it.
+    reaches the writers through the repository methods, every one of which
+    writes Postgres and takes the latch on its first write.
 
     Redirected and reset per test, `_never_the_production_database`'s
     arrangement: each test starts with nothing latched, and no test can see

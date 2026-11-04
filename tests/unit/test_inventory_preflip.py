@@ -1,20 +1,18 @@
 """Chain 1's pre-flip hardening (DN-24), the parts that need no database.
 
 Chain 1 was flipped on 2026-09-30, and since step 14's S14-00 it writes
-Postgres whatever its flag says, so the preflight answers "already writes
-Postgres" before it asks anything: the tests of what it asked, and of the
-DuckDB path beside the Postgres one, went with that. The chain lock and the
-Postgres step path stay. The same properties against a real Postgres are in
+Postgres whatever its flag says. S14-11 deleted its preflight — the questions
+asked before `KS_WRITE_INVENTORY` was switched on, which answered "already
+writes Postgres" since S14-00 — with the flag, and the health block's
+`preflight` with it. The chain lock and the Postgres step path stay. The same
+properties against a real Postgres are in
 `tests/integration/test_inventory_preflip.py`.
 """
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import pathlib
-import textwrap
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -110,207 +108,27 @@ class TestEveryRebuildAndSnapshotTakesTheChainLock:
         assert pg_inventory_write.CHAIN_LOCK_KEY & 0xFFFF_FFFF == 1   # chain 1
 
 
-# ─── preflight() ─────────────────────────────────────────────────────────────
-
-NOW = datetime(2026, 9, 24, 10, 0, tzinfo=timezone.utc)
-
-
-class _Conn:
-    """Answers the preflight's four reads from a dict of facts."""
-
-    def __init__(self, facts):
-        self.facts = facts
-
-    async def fetchrow(self, sql, *args):
-        if "has_database_privilege" in sql:
-            return ("ks_app", "ks", self.facts["temporary"])
-        if "FROM app.data_quality_runs" in sql:
-            assert args == ("mirror_landing",)
-            return self.facts["run"]
-        raise AssertionError(f"unexpected fetchrow: {sql}")
-
-    async def fetch(self, sql, *args):
-        if "FROM meta.mirror_state" in sql:
-            wanted = set(args[0])
-            return [{"table_name": t, **m} for t, m in self.facts["marks"].items()
-                    if t in wanted]
-        if "FROM app.data_quality_issues" in sql:
-            run_id, tables = args
-            assert set(tables) == {*pg_inventory_write.CHAIN_TABLES, "pg_inventory_write"}
-            return self.facts["findings"]
-        raise AssertionError(f"unexpected fetch: {sql}")
-
-
-class _Pool:
-    def __init__(self, facts=None, error=None):
-        self.facts, self.error, self.acquired = facts, error, 0
-
-    @asynccontextmanager
-    async def acquire(self):
-        self.acquired += 1
-        if self.error:
-            raise self.error
-        yield _Conn(self.facts)
-
-
-def _mark(minutes_ago, failures=0):
-    return {"last_ok_at": NOW - timedelta(minutes=minutes_ago) if minutes_ago is not None else None,
-            "failures_since_ok": failures}
-
-
-def _facts(**over):
-    facts = {
-        "temporary": True,
-        "marks": {**{t: _mark(20) for t in pg_inventory_write.CHAIN_TABLES},
-                  "app.data_quality_runs": _mark(20)},
-        "run": {"run_id": 700, "started_at": NOW - timedelta(hours=2, minutes=30),
-                "error_message": None},
-        "findings": [],
-    }
-    facts.update(over)
-    return facts
-
-
-@pytest.fixture
-def flag_off(monkeypatch):
-    monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-    return monkeypatch
-
-
-async def _ask(facts=None, **kw):
-    return await pg_inventory_write.preflight(_Pool(facts or _facts(), **kw), now=NOW)
-
-
-class TestPreflight:
-
-
-    @pytest.mark.asyncio
-    async def test_once_the_chain_writes_postgres_it_is_not_the_question(self, flag_off):
-        flag_off.setenv("KS_WRITE_INVENTORY", "postgres")
-        pool = _Pool(_facts())
-        result = await pg_inventory_write.preflight(pool, now=NOW)
-        assert result["ok"] is None and pool.acquired == 0
-
-    @pytest.mark.asyncio
-    async def test_a_latched_chain_is_not_the_question_either(self, flag_off):
-        from core import chain_latch
-
-        chain_latch.latch("pg_inventory_write")
-        pool = _Pool(_facts())
-        assert (await pg_inventory_write.preflight(pool, now=NOW))["ok"] is None
-
-
-    def test_the_verdict_age_is_the_canarys_own_limit(self):
-        from bot import canary
-
-        assert (pg_inventory_write.PREFLIGHT_VERDICT_WITHIN.total_seconds()
-                == canary.DQ_MAX_AGE_S[pg_inventory_write.OPERATIONAL_LAYER])
-
-
-# ─── which failure of the mirror_landing run leaves chain 1 uncompared ──────
-
-def _failed_run(error_message):
-    return {"run_id": 702, "started_at": NOW - timedelta(hours=2),
-            "error_message": error_message}
-
-
-async def _job_error_message(outcomes):
-    """The `error_message` the real `_run_dq_mirror_landing` persists when the
-    named checks raise: the producer itself, not a copy of its format, so a
-    renamed check or a reworded message fails here."""
-    from tests.unit.test_mirror_landing_isolation import _run
-
-    persisted, _, _ = await _run(outcomes)
-    return persisted["error_message"]
-
-
-class TestWhichFailureCounts:
-
-
-    def test_the_job_calls_a_failure_between_checks_setup(self):
-        """The one entry the job writes outside `check()`. Parsed, not grepped:
-        its comments name `setup` as readily as the code does."""
-        from core.scheduler import BackgroundScheduler
-
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)))
-        prefixes = {
-            node.args[0].values[0].value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute) and node.func.attr == "append"
-            and getattr(node.func.value, "id", "") == "raised"
-            and node.args and isinstance(node.args[0], ast.JoinedStr)
-            and isinstance(node.args[0].values[0], ast.Constant)
-        }
-        assert prefixes == {"setup: "}
-
-
 # ─── /api/health publishes it ────────────────────────────────────────────────
 
 @pytest.fixture
-def health(monkeypatch):
-    """The health module with an empty preflight cache and a preflight that
-    counts its calls."""
+def health():
+    """The health module, for its `write_chains` block."""
     from web.routes.api import health as module
 
-    calls = []
-
-    async def fake(*a, **kw):
-        calls.append(1)
-        return {"ok": False, "reasons": ["app.stock_movements was last copied 70 min ago (limit 50)"]}
-
-    module._preflight_cache.update(data=None, expires_at=0)
-    monkeypatch.setattr(pg_inventory_write, "preflight", fake)
-    monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-    yield module, calls
-    module._preflight_cache.update(data=None, expires_at=0)
+    return module, []
 
 
-class TestHealthPublishesThePreflight:
+class TestHealthPublishesNoPreflight:
     @pytest.mark.asyncio
-    async def test_it_sits_under_chain_1s_entry_and_nowhere_else(self, health):
+    async def test_no_entry_carries_one(self, health, monkeypatch):
+        """S14-11: the preflight went with the flag. Mutation: put it back
+        under chain 1's (or chain 5's) entry."""
         module, _ = health
+        monkeypatch.setattr(sync_mod, "get_sync_service",
+                            AsyncMock(side_effect=RuntimeError("no store")))
         block = await module._write_chains_block()
-        assert block["pg_inventory_write"]["preflight"]["ok"] is False
-        assert "preflight" not in block["pg_expenses_write"]
-        # The local half is untouched: the canary still reads `error` and `mismatch` there.
-        assert block["pg_inventory_write"]["mode"] == "postgres"     # S14-00
-        assert block["pg_inventory_write"]["mismatch"] is False
-
-    @pytest.mark.asyncio
-    async def test_it_is_asked_once_a_minute_not_once_a_probe(self, health):
-        module, calls = health
-        await module._write_chains_block()
-        await module._write_chains_block()
-        assert len(calls) == 1
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_that_does_not_answer_is_an_answer(self, health, monkeypatch):
-        module, _ = health
-
-        async def hangs(*a, **kw):
-            await asyncio.sleep(60)
-
-        monkeypatch.setattr(pg_inventory_write, "preflight", hangs)
-        monkeypatch.setattr(module, "_PREFLIGHT_TIMEOUT_S", 0.05)
-        preflight = (await module._write_chains_block())["pg_inventory_write"]["preflight"]
-        assert preflight["ok"] is False and "did not answer" in preflight["reasons"][0]
-
-    def test_the_endpoint_returns_it(self, health):
-        from fastapi.testclient import TestClient
-
-        from web.main import app
-        from web.ratelimit import limiter
-
-        limiter.reset()
-        try:
-            body = TestClient(app).get("/api/health").json()
-        finally:
-            limiter.reset()
-        preflight = body["write_chains"]["pg_inventory_write"]["preflight"]
-        assert preflight == {"ok": False, "reasons": [
-            "app.stock_movements was last copied 70 min ago (limit 50)"]}
+        assert not [name for name, entry in block.items() if "preflight" in entry]
+        assert not hasattr(pg_inventory_write, "preflight")
 
 
 # ─── The stock step cannot take the tick down (on the Postgres path) ─────────
@@ -494,7 +312,7 @@ class TestTheStockStepOnPostgres:
 
 class TestHealthPublishesTheSyncStep:
     @pytest.mark.asyncio
-    async def test_it_sits_beside_the_preflight(self, health, monkeypatch):
+    async def test_it_sits_under_chain_1s_entry(self, health, monkeypatch):
         module, _ = health
         state = sync_mod.InventoryStepState()
         state.failed("stocks", RuntimeError("the /inventory status rebuild needs one temporary table"))
