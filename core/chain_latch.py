@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, FrozenSet, Mapping, Optional, Sequence
@@ -158,11 +159,25 @@ def markers_on_disk() -> Dict[str, str]:
     cache would answer for the moment the process started. A directory that
     does not exist holds no marker; one that cannot be read raises `OSError`
     — an unreadable directory is not a lost marker, and the caller says it
-    could not look."""
-    if not MARKER_DIR.exists():
+    could not look.
+
+    Listed with `os.scandir`, never `Path.glob` or `Path.exists`: both
+    swallow the `PermissionError` of a directory that cannot be listed (3.12
+    and 3.14 alike) and answer "nothing here", which turned every chain with
+    owner rows into a false CRITICAL lost marker. A marker removed between the
+    listing and its stamp is gone, which is what the caller asks."""
+    try:
+        with os.scandir(MARKER_DIR) as entries:
+            names = sorted(entry.name for entry in entries if entry.is_file())
+    except FileNotFoundError:
         return {}
-    return {path.name: _stamp_of(path)
-            for path in sorted(MARKER_DIR.glob("*")) if path.is_file()}
+    found: Dict[str, str] = {}
+    for name in names:
+        try:
+            found[name] = _stamp_of(MARKER_DIR / name)
+        except FileNotFoundError:
+            continue
+    return found
 
 
 def _cache() -> Dict[str, str]:
