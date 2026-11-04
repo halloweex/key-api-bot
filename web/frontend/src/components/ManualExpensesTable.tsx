@@ -5,7 +5,7 @@ import { ChartContainer } from './ChartContainer'
 import { MetricCard } from './MetricCard'
 import { Badge } from './Badge'
 import { formatCurrency } from '../utils/formatters'
-import { useFilterStore } from '../store/filterStore'
+import { setPeriodParams, useFilterStore } from '../store/filterStore'
 import { CurrencyIcon, TrashIcon } from './icons'
 import { Select } from './Select'
 import { TileGrid } from './TileGrid'
@@ -202,16 +202,16 @@ const EmptyHint = memo(function EmptyHint() {
 
 export const ManualExpensesTable = memo(function ManualExpensesTable() {
   const { t } = useTranslation()
-  const { period } = useFilterStore()
+  const { period, startDate, endDate } = useFilterStore()
   const queryClient = useQueryClient()
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const { data, isLoading, error, refetch } = useQuery<ExpensesResponse>({
-    queryKey: ['manualExpenses', period, categoryFilter],
+    queryKey: ['manualExpenses', period, startDate, endDate, categoryFilter],
     queryFn: async () => {
       const params = new URLSearchParams()
-      if (period) params.set('period', period)
+      setPeriodParams(params, period, startDate, endDate)
       if (categoryFilter) params.set('category', categoryFilter)
       params.set('limit', '50')
       const response = await fetch(`/api/expenses?${params}`)
