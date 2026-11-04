@@ -80,14 +80,6 @@ class TestTheRegistrySeesIt:
         assert "last_sync_expense_types" in write_chains.sync_keys()
         assert "bronze.expense_types" in write_chains.chain_tables()
 
-    def test_the_table_is_one_the_shipper_replaces(self):
-        """Standing down a table the copy does not touch would be a no-op that
-        reads as a guarantee. (And one the daily comparison read, until step
-        14's S14-12 deleted it.)"""
-        from core.pg_operational import _FULL_REPLACE
-
-        assert set(chain.CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
-
 
 # ─── full_sync: a fault in this chain stops this chain ─────────────────────
 
@@ -145,9 +137,7 @@ async def _full_sync(store):
     async def _client():
         return _Client()
 
-    with patch.object(sync_module, "get_async_client", new=_client), \
-         patch.object(sync_module, "mirror_categories", new=AsyncMock()), \
-         patch.object(sync_module, "mirror_products", new=AsyncMock()):
+    with patch.object(sync_module, "get_async_client", new=_client):
         return await service.full_sync(days_back=30)
 
 

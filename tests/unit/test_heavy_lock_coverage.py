@@ -36,9 +36,9 @@ def test_the_manual_warehouse_refresh_holds_the_lock():
     assert "_heavy_job_lock" in _source(admin, "refresh_warehouse")
 
 
-def test_the_backfill_route_passes_the_lock():
-    src = inspect.getsource(admin)
-    assert "lock=get_scheduler()._heavy_job_lock" in src
+# `test_the_backfill_route_passes_the_lock` held `POST
+# /api/mirror/backfill/orders` to handing the backfill the lock, until step
+# 14's S14-13 deleted the route with `core.pg_backfill`.
 
 
 def test_every_repair_caller_passes_the_lock():
@@ -72,7 +72,8 @@ def test_every_writer_of_orders_outside_core_answers_for_the_lock():
 
     Two acceptable answers, because the callers are genuinely different:
     `_heavy_job_lock` for anything running inside the web process, and
-    `core.pg_backfill.WEB_MUST_BE_STOPPED` for a CLI, where that lock would be
+    `core.pg_orders_write.WEB_MUST_BE_STOPPED` (in `core.pg_backfill` until
+    step 14's S14-13) for a CLI, where that lock would be
     a fresh object guarding nothing. The answer may be given by the function
     or by a function of the same module that calls it (the CLI warns in
     `backfill_utm`, its entry point, and writes in the helper it calls).
@@ -85,7 +86,7 @@ def test_every_writer_of_orders_outside_core_answers_for_the_lock():
     function makes**, which is what `logger.warning(...)` is. Two drafts were
     weaker: the first read `ast.get_source_segment`, so a comment three
     paragraphs below the deleted line still said the words; the second
-    collected `ast.alias` nodes, so the bare `from core.pg_backfill import
+    collected `ast.alias` nodes, so the bare `from core.pg_orders_write import
     WEB_MUST_BE_STOPPED` that a deleted warning leaves behind was accepted as
     proof the operator had been told. Both were found by mutation, the second
     by the review's.

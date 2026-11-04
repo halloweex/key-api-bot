@@ -102,46 +102,33 @@ class TestRemediationLookup:
 
 
 class TestMachineAttemptsNote:
+    """One ledger since step 14's S14-13: the ClickHouse archive's. The
+    buyers' (`core.pg_buyers.last_heal`, the hourly ids-diff) went with the
+    diff."""
+
     def test_quiet_when_nothing_has_healed(self, monkeypatch):
         """The common case. An empty line in a CRITICAL is worse than none."""
         import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
 
-        monkeypatch.setattr(pg_buyers, "last_heal", {})
         monkeypatch.setattr(ch_history, "last_heal", {})
         assert machine_attempts_note() is None
 
     def test_counts_a_recent_heal(self, monkeypatch):
         import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
 
         now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-        monkeypatch.setattr(pg_buyers, "last_heal",
-                            {"at": now - timedelta(minutes=41), "shipped": 3})
-        monkeypatch.setattr(ch_history, "last_heal", {})
-        note = machine_attempts_note(now=now)
-        assert "buyers" in note and "3" in note and "41m" in note
-
-    def test_both_ledgers_are_reported(self, monkeypatch):
-        import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
-
-        now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-        monkeypatch.setattr(pg_buyers, "last_heal",
-                            {"at": now - timedelta(minutes=5), "shipped": 1})
         monkeypatch.setattr(ch_history, "last_heal",
-                            {"at": now - timedelta(hours=2), "shipped": 9})
+                            {"at": now - timedelta(minutes=41), "shipped": 3})
         note = machine_attempts_note(now=now)
-        assert "buyers" in note and "archive" in note
+        assert "archive" in note and "3" in note and "41m" in note
+        assert "buyers" not in note
 
     def test_a_heal_older_than_a_day_is_not_this_incident(self, monkeypatch):
         import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
 
         now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-        monkeypatch.setattr(pg_buyers, "last_heal",
+        monkeypatch.setattr(ch_history, "last_heal",
                             {"at": now - timedelta(days=3), "shipped": 3})
-        monkeypatch.setattr(ch_history, "last_heal", {})
         assert machine_attempts_note(now=now) is None
 
 

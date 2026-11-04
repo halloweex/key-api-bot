@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -80,16 +80,10 @@ def _buyers_stamped(store) -> bool:
     return any(c.args[:1] == ("buyers",) for c in store.set_last_sync_time.await_args_list)
 
 
-@pytest.fixture
-def no_mirror():
-    with patch("core.pg_buyers.mirror_buyers", new=AsyncMock(return_value={"rows": 3})):
-        yield
-
-
 class TestAFailedWriteIsContained:
     @pytest.mark.asyncio
     async def test_offers_and_stocks_still_run_and_the_watermark_holds(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         svc, store, _ = _service(
             monkeypatch, upsert=AsyncMock(side_effect=RuntimeError("store gone")))
 
@@ -105,7 +99,7 @@ class TestAFailedWriteIsContained:
 
     @pytest.mark.asyncio
     async def test_the_next_tick_inside_ten_minutes_asks_nothing_of_anyone(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         svc, store, client = _service(
             monkeypatch, upsert=AsyncMock(side_effect=RuntimeError("store gone")))
         await svc.incremental_sync()
@@ -121,7 +115,7 @@ class TestAFailedWriteIsContained:
 
     @pytest.mark.asyncio
     async def test_after_the_window_it_retries_and_a_success_closes_it(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         upsert = AsyncMock(side_effect=[RuntimeError("store gone"), 3])
         svc, store, _ = _service(monkeypatch, upsert=upsert)
         await svc.incremental_sync()
@@ -137,7 +131,7 @@ class TestAFailedWriteIsContained:
 
     @pytest.mark.asyncio
     async def test_a_data_error_is_recorded_but_does_not_count_as_a_failure(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         svc, _, _ = _service(monkeypatch, upsert=AsyncMock(side_effect=_DataError("x")))
         await svc.incremental_sync()
         state = svc.buyer_sync_state
@@ -181,7 +175,7 @@ class TestAKeyCRMOutageIsAFailureNotAnEmptySelection:
         ("breaker", "KeyCRMConnectionError"),     # CircuitOpenError, wrapped
     ])
     async def test_it_holds_the_watermark_and_backs_off(
-            self, monkeypatch, no_mirror, exc, recorded):
+            self, monkeypatch, exc, recorded):
         from core import sync_service as mod
         from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError
         from core.resilience import CircuitOpenError
@@ -205,7 +199,7 @@ class TestAKeyCRMOutageIsAFailureNotAnEmptySelection:
 
     @pytest.mark.asyncio
     async def test_every_buyer_gone_is_an_empty_selection_not_an_outage(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         from core import sync_service as mod
         from core.exceptions import KeyCRMAPIError
 
@@ -220,7 +214,7 @@ class TestAKeyCRMOutageIsAFailureNotAnEmptySelection:
         assert svc._buyers_retry_in() is None
 
     @pytest.mark.asyncio
-    async def test_a_partial_fetch_writes_what_came_back(self, monkeypatch, no_mirror):
+    async def test_a_partial_fetch_writes_what_came_back(self, monkeypatch):
         from core import sync_service as mod
         from core.exceptions import KeyCRMAPIError
 
@@ -240,7 +234,7 @@ class TestAKeyCRMOutageIsAFailureNotAnEmptySelection:
         assert _buyers_stamped(store)      # buyer 2 is still missing: re-selected
 
     @pytest.mark.asyncio
-    async def test_the_ids_reach_keycrm_in_the_sorted_order(self, monkeypatch, no_mirror):
+    async def test_the_ids_reach_keycrm_in_the_sorted_order(self, monkeypatch):
         """`set` used to shuffle them inside the client."""
         from core import sync_service as mod
 
@@ -259,7 +253,7 @@ class TestAKeyCRMOutageIsAFailureNotAnEmptySelection:
 
 class TestAFailedGetterIsContained:
     @pytest.mark.asyncio
-    async def test_a_getter_that_raises_costs_nothing_else(self, monkeypatch, no_mirror):
+    async def test_a_getter_that_raises_costs_nothing_else(self, monkeypatch):
         now = datetime.now(TZ)
 
         async def last(key):
@@ -276,7 +270,7 @@ class TestAFailedGetterIsContained:
         assert svc.buyer_sync_state.last_error_class == "OSError"
 
     @pytest.mark.asyncio
-    async def test_a_getter_that_hangs_is_cut_off(self, monkeypatch, no_mirror):
+    async def test_a_getter_that_hangs_is_cut_off(self, monkeypatch):
         from core import sync_service as mod
 
         monkeypatch.setattr(mod, "BUYER_WATERMARK_TIMEOUT_S", 0.05)
@@ -297,7 +291,7 @@ class TestAFailedGetterIsContained:
 class TestAGetterThatUnwindsSlowly:
     @pytest.mark.asyncio
     async def test_the_tick_returns_at_the_bound_not_when_the_read_unwinds(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         """A Postgres read cut inside a query unwinds into asyncpg's cancel
         request; a bare `wait_for` waits for that and a shielded one does not
         (DN-05a). The fake unwinds for three seconds on cancel."""
@@ -327,14 +321,14 @@ class TestAGetterThatUnwindsSlowly:
 class TestTheStepItself:
     @pytest.mark.asyncio
     async def test_ids_are_sorted_before_the_request_and_before_the_write(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         svc, store, client = _service(monkeypatch)
         await svc.sync_missing_buyers()
         assert client.fetch_buyers_by_ids.await_args.args[0] == [1, 2, 3]
         assert [b.id for b in store.upsert_buyers.await_args.args[0]] == [1, 2, 3]
 
     @pytest.mark.asyncio
-    async def test_a_success_records_what_it_did(self, monkeypatch, no_mirror):
+    async def test_a_success_records_what_it_did(self, monkeypatch):
         svc, store, _ = _service(monkeypatch)
         assert await svc.sync_missing_buyers() == 3
         state = svc.buyer_sync_state
@@ -351,7 +345,7 @@ class TestTheStepNeverRaises:
     time and would hide the first containment going missing."""
 
     @pytest.mark.asyncio
-    async def test_a_failed_write_returns_zero_and_records_it(self, monkeypatch, no_mirror):
+    async def test_a_failed_write_returns_zero_and_records_it(self, monkeypatch):
         svc, store, _ = _service(
             monkeypatch, upsert=AsyncMock(side_effect=RuntimeError("store gone")))
         assert await svc.sync_missing_buyers() == 0
@@ -359,7 +353,7 @@ class TestTheStepNeverRaises:
         assert not _buyers_stamped(store)
 
     @pytest.mark.asyncio
-    async def test_a_manual_success_inside_the_window_closes_it(self, monkeypatch, no_mirror):
+    async def test_a_manual_success_inside_the_window_closes_it(self, monkeypatch):
         """Fail, then succeed by hand while the window is still open: the next
         tick must not sit out the rest of the ten minutes for nothing."""
         upsert = AsyncMock(side_effect=[RuntimeError("store gone"), 3])
@@ -378,7 +372,7 @@ class TestTheStepNeverRaises:
 class TestTheBootPath:
     @pytest.mark.asyncio
     async def test_init_and_sync_still_reaches_inventory_and_search(
-            self, monkeypatch, no_mirror):
+            self, monkeypatch):
         """At boot the tick is `init_and_sync`; a buyer failure there used to
         stop web's start before the inventory status and the search index."""
         from core import sync_service as mod
@@ -440,7 +434,7 @@ class TestTheManualEndpoint:
         client.cookies.set(SESSION_COOKIE, cookie)
         return client
 
-    def test_a_failed_sync_is_an_error_not_zero_synced(self, monkeypatch, no_mirror):
+    def test_a_failed_sync_is_an_error_not_zero_synced(self, monkeypatch):
         from core import sync_service as mod
 
         svc, _, _ = _service(
@@ -453,7 +447,7 @@ class TestTheManualEndpoint:
         assert "RuntimeError" in r.json()["detail"]
         assert "+380" not in r.text
 
-    def test_a_good_sync_still_answers_success(self, monkeypatch, no_mirror):
+    def test_a_good_sync_still_answers_success(self, monkeypatch):
         from core import sync_service as mod
 
         svc, _, _ = _service(monkeypatch)
@@ -482,7 +476,7 @@ class TestARefusedReadIsAnsweredByTheCaller:
         return svc, store, client
 
     @pytest.mark.asyncio
-    async def test_the_step_records_it_and_passes_it_on(self, monkeypatch, no_mirror):
+    async def test_the_step_records_it_and_passes_it_on(self, monkeypatch):
         from core.read_fallback import ReadUnavailable
 
         svc, store, client = self._refusing(monkeypatch)
@@ -495,7 +489,7 @@ class TestARefusedReadIsAnsweredByTheCaller:
         assert svc._buyers_retry_in() is not None, "the retry window did not open"
 
     @pytest.mark.asyncio
-    async def test_the_tick_names_it_and_goes_on(self, monkeypatch, no_mirror, caplog):
+    async def test_the_tick_names_it_and_goes_on(self, monkeypatch, caplog):
         import logging
 
         svc, store, _ = self._refusing(monkeypatch)
@@ -507,7 +501,7 @@ class TestARefusedReadIsAnsweredByTheCaller:
         # Recorded once, by the step — not a second time by the tick.
         assert svc.buyer_sync_state.consecutive_failures == 1
 
-    def test_the_manual_route_answers_503_naming_the_surface(self, monkeypatch, no_mirror):
+    def test_the_manual_route_answers_503_naming_the_surface(self, monkeypatch):
         from core import sync_service as mod
 
         svc, _, _ = self._refusing(monkeypatch)

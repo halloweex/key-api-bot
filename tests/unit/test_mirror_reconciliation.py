@@ -33,10 +33,10 @@ from core.data_quality import (
     WATCHED_LAYERS,
     Severity,
 )
+from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
 from core.mirror_reconciliation import (
-    CATEGORIES_SPEC,
     MIRROR_LAYER,
-    PRODUCTS_SPEC,
+    MirroredTable,
     compare_table,
     configured,
 )
@@ -44,8 +44,21 @@ from core.mirror_reconciliation import (
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 LAST_OK = NOW - timedelta(hours=4)
 
-PRODUCTS = PRODUCTS_SPEC
-CATEGORIES = CATEGORIES_SPEC
+# The catalogue's two specs, as `core.mirror_reconciliation` declared them
+# until step 14's S14-13 deleted them with their last reader (the catalogue
+# carry). `compare_table` stays — `reconcile_bot_state` runs it — and these
+# are the shapes its tests were written against.
+PRODUCTS = MirroredTable(
+    pg_table="bronze.products",
+    dk_table="products",
+    columns=tuple(PRODUCT_COLUMNS),
+    numeric=("price",),
+)
+CATEGORIES = MirroredTable(
+    pg_table="bronze.categories",
+    dk_table="categories",
+    columns=tuple(CATEGORY_COLUMNS),
+)
 
 
 def _watermark(last_ok_at=LAST_OK, failures=0, last_error=None):

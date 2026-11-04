@@ -676,9 +676,9 @@ class TestGatheringTheFacts:
     def test_it_asks_what_the_read_gate_asks(self):
         """One question, two askers: the switch must not be satisfied by a
         different column or table than the one `_expenses_run` routes on."""
-        from core.pg_expense_backfill import EXPENSES_TABLE
-
-        assert wc.EXPENSES_HISTORY == EXPENSES_TABLE
+        # `core.pg_expense_backfill.EXPENSES_TABLE` was the backfill's
+        # spelling of the table until step 14's S14-13 deleted it.
+        assert wc.EXPENSES_HISTORY == "bronze.expenses"
         tree = ast.parse((REPO / "core/pg_expenses_read.py").read_text(encoding="utf-8"))
         (fn,) = [n for n in ast.walk(tree)
                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "backfilled"]

@@ -1019,7 +1019,7 @@ def capture() -> dict:
                             "no_engine": read_fallback.no_engine_routes()}
     out["pg_twins_flag"] = list(pg_warehouse_dq.flag())
     out["mirror"] = {"enabled": pg_landing.enabled(),
-                     "mirror_on": pg_landing.mirror_on(os.environ.get(pg_landing.MIRROR_ENV))}
+                     "mirror_on": pg_landing.mirror_on(os.environ.get("KS_MIRROR_LANDING"))}
     out["stores"] = {"user_store_is_postgres": pg_dashboard_users.user_store_is_postgres(),
                      "sms_store_is_postgres": pg_sms.sms_store_is_postgres()}
     chains = {}

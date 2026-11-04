@@ -78,14 +78,9 @@ HANDED_BACK = re.compile(
     r"|\bhand(?:s|ed)? (?:[\w'-]+ ){0,2}chains? back\b", re.I)
 NEGATION = re.compile(r"\b(?:nothing|never|no)\b", re.I)
 
-# The soak's lost-marker details: the file and how many times its detail
-# names the lever (one per state that can lose a marker).
-SOAK_DETAILS = {
-    "15_i1_inventory_copy_stood_down.sql": 1,
-    "23_b1_buyers_copies_stood_down.sql": 2,
-    "30_m1_managers_copy_stood_down.sql": 2,
-    "32_o1_orders_copies_stood_down.sql": 2,
-}
+# The soak's lost-marker details — I1, B1, M1 and O1, each naming the lever
+# once per state that can lose a marker — were held here until step 14's
+# S14-13 deleted the four checks with the copies they judged.
 
 # A line a page prints: the charter's one-line imperative
 # (`test_alert_remediation.ARROW_LINE_MAX`, `test_canary`).
@@ -166,8 +161,7 @@ class TestTheWayBackIsGone:
         only the copy-back read. Mutation: leave one behind."""
         from core import (
             mirror_reconciliation, pg_catalogue_write, pg_managers_write,
-            pg_replication, pg_traffic_ledger_write, pg_weekly_ledger_write,
-            report_ledger,
+            pg_traffic_ledger_write, pg_weekly_ledger_write, report_ledger,
         )
 
         leftovers = [
@@ -177,7 +171,6 @@ class TestTheWayBackIsGone:
                 (report_ledger, "land_in_duckdb"),
                 (pg_catalogue_write, "CHAIN_RELEASED_KEYS"),
                 (pg_managers_write, "CHAIN_COPY_BACK_OWES_FULL_REBUILD"),
-                (pg_replication, "REPLICATED_SHAPES"),
                 (mirror_reconciliation, "MIRRORED_LANDING_TABLES"),
                 (mirror_reconciliation, "REPLICATED_TABLES"),
                 (mirror_reconciliation, "ORDERS_SPEC"),
@@ -309,13 +302,6 @@ class TestEveryLeverNamesTheOneLine:
 
         action = dict(canary._ACTIONS)[key]
         assert ROLLBACK_LEVER in action and len(action) <= LINE_MAX, action
-
-    @pytest.mark.parametrize("name,count", sorted(SOAK_DETAILS.items()))
-    def test_the_soak_detail(self, name, count):
-        """The SQL cannot import the constant, so it spells it; this holds
-        the spelling. Mutation: reword one of them."""
-        sql = (ROOT / "deploy" / "stage4_soak" / name).read_text(encoding="utf-8")
-        assert _uncommented(sql, "--").count(ROLLBACK_LEVER) == count, name
 
     def test_the_soak_script_notes(self):
         script = (ROOT / "deploy" / "stage4_soak.sh").read_text(encoding="utf-8")

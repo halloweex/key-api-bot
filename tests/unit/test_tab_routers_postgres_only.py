@@ -477,7 +477,8 @@ COHORTS_FILE = "core/repositories/customers.py"
 # matching this is no licence by itself: it carries readers too
 # (`pg_inventory_write.read_snapshot_calendar`, the chains' `preflight`), so
 # what the files may call in one is decided by the function (`_writer_reaches`).
-WRITE_MODULE = re.compile(r"core\.pg_[a-z0-9_]+_write|core\.pg_operational")
+# `core.pg_operational` matched too, until step 14's S14-13 deleted it.
+WRITE_MODULE = re.compile(r"core\.pg_[a-z0-9_]+_write")
 # The writers' mode, which every write asks first; constant since S14-00.
 MODE_PREDICATE = "writes_postgres"
 
@@ -521,9 +522,9 @@ def _chain_writers(module: str) -> FrozenSet[str]:
     """The functions of a writer module that write: the latch walk's writers
     (`test_chain_latch._writers` — a public async function reaching a
     connection or a writing statement, bar the readers it names), then every
-    function of the module calling one of them by name, to a fixed point:
-    `pg_operational.replicate_after_manual_expense` is the hourly copy called
-    sooner. A reader of the module — `read_snapshot_calendar`, `preflight`,
+    function of the module calling one of them by name, to a fixed point
+    (`pg_operational.replicate_after_manual_expense`, the hourly copy called
+    sooner, was one until step 14's S14-13). A reader of the module — `read_snapshot_calendar`, `preflight`,
     `reading`, `reads_the_chain` — is none of them."""
     from tests.unit.test_chain_latch import _writers
 
@@ -761,7 +762,6 @@ class TestNothingGoesRoundTheRouter:
         assert {"upsert_offers", "upsert_stocks", "record_inventory_snapshot"} <= inventory
         assert not {"read_snapshot_calendar", "preflight", MODE_PREDICATE} & inventory
         assert not {"reads_postgres", "reads_the_chain"} & _chain_writers("core.pg_goals_write")
-        assert "replicate_after_manual_expense" in _chain_writers("core.pg_operational")
 
 
 class TestJunkStartsWeb:
