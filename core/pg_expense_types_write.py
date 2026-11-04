@@ -49,8 +49,9 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
 connection has come out of the pool and before the transaction opens. From the
-first dictionary written here, only `scripts/chain_copy_back.py` can move the
-writes back to DuckDB.
+first dictionary written here, only `scripts/chain_copy_back.py` could move the
+writes back to DuckDB (deleted in step 14's S14-04; the way back since is an
+image from before step 14, `core.rollback_lever`).
 
 "Once a connection has come out of the pool", and not merely once the pool is
 in hand. The acquire does not time out — `core.pg.get_pool` sets no acquire
@@ -58,7 +59,8 @@ timeout, so the Sunday full sync this runs inside holding all five connections
 is a wait — but the wait can end without a connection: a Postgres restart
 during it leaves a reconnect that is refused, and a cancellation ends it too
 (`pg_expenses_write._latch`). A latch taken before it would move the chain with
-nothing written, leaving copy-back as the only way back and
+nothing written, leaving the copy-back as the only way back (since step
+14's S14-04 deleted it, a rollback to an image from before step 14) and
 `chain_latch_disagrees` (CRITICAL) the next morning. Chains
 1, 8 and 7a were written before that was counted and latched between the two
 until 2026-09-25; every chain now latches inside the acquire, and
@@ -103,7 +105,8 @@ WRITE_ENV = "KS_WRITE_EXPENSE_TYPES"
 CHAIN = "pg_expense_types_write"
 
 # The table this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper, the daily comparison and the copy-back.
+# the hourly shipper and the daily comparison (and the copy-back, until step
+# 14's S14-04 deleted it).
 CHAIN_TABLES: Tuple[str, ...] = ("bronze.expense_types",)
 
 # The one `sync_metadata` key that moves with it — what `full_sync` stamps

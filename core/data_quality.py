@@ -35,6 +35,7 @@ from typing import (
 )
 
 from core import duckdb_switch
+from core.rollback_lever import ROLLBACK_LEVER
 
 logger = logging.getLogger(__name__)
 
@@ -2143,7 +2144,8 @@ def insert_journal_rows(conn, rows: JournalRows) -> None:
     The caller owns the transaction (`core.shadow_writes.into_duckdb`). The
     explicit `run_id` bypasses `data_quality_run_seq`, which then lags the
     ids Postgres issued — harmless while Postgres allocates, and floored by
-    `_m0027` on every boot and by the copy-back on the way back.
+    `_m0027` on every boot (and by the copy-back on the way back, until step
+    14's S14-04 deleted it).
     """
     cols = ", ".join(("run_id",) + RUN_COLUMNS)
     marks = ", ".join("?" for _ in range(len(RUN_COLUMNS) + 1))
@@ -2272,16 +2274,15 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # the classification, whose latch fault is paged under its own name.
     ("mirror_stood_down",
      "Not a defect: a write chain owns the table. Never backfill it from DuckDB"),
-    # The owner rows alone: the sync's mirror has NOT stopped, and every tick
-    # writes DuckDB's copy over the chain's rows. Two roads, one line each.
-    ("order_owner_row_without_marker",
-     "Sync overwrites chain-owned orders each tick: restore data/write-chain-owners "
-     "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
+    # The owner rows alone: before step 14 the sync's mirror had NOT stopped,
+    # and every tick wrote DuckDB's copy over the chain's rows. A step-14 build
+    # routes by neither copy of the latch (S14-00) and has no way back
+    # (S14-04), so a lost marker matters to the rollback image alone, which
+    # routes by it: the lever every ownership page names (`ROLLBACK_LEVER`).
+    ("order_owner_row_without_marker", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     # The same, for the catalogue and the order-level expenses (DN-22b), whose
-    # per-tick mirror asks the local answer alone.
-    ("owner_row_without_marker",
-     "Sync overwrites chain-owned rows each run: restore data/write-chain-owners "
-     "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
+    # per-tick mirror asked the local answer alone.
+    ("owner_row_without_marker", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
@@ -2300,8 +2301,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # lever starts there. The catalogue's mirror carries the same KeyCRM
     # payload the chain writes, so there is nothing to restore — a dump would
     # only roll the chain's own writes back.
-    ("chain_latch_disagrees",
-     "Compare data/write-chain-owners/<chain> with the owner: rows in meta.chain_watermarks; scripts/chain_copy_back.py is the only release"),
+    ("chain_latch_disagrees", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     ("chain_shipper_overwrote",
      "Do not re-run the shipper. Find why it shipped (marker vs owner: rows); restore what it overwrote from the nightly dump, not the catalogue"),
     # The shadow chains (OD-02 (c)): Postgres is the writer, DuckDB is
@@ -2311,15 +2311,15 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # OD-S5-3 (a)'s explicit line: after a week under KS_DUCKDB=off that went
     # back to on, that week's rows stand here until the drop, accepted. The
     # finding dates the rows, which is what tells them from a failed shadow
-    # write; the copy-back is never the cure — it releases the latch.
+    # write. Nothing carries them to DuckDB: the copy-back that could was a
+    # rollback, not a cure, and step 14's S14-04 deleted it.
     ("shadow_missing_in_duckdb",
-     "Rows dated while web ran KS_DUCKDB=off are expected until the drop (OD-S5-3); others: the ERROR log at their dates. Never chain_copy_back.py"),
+     "Rows dated while web ran KS_DUCKDB=off are expected until the drop (OD-S5-3); others: the ERROR log at their dates"),
     ("shadow_row_values",
      "Compare the named columns in both stores; Postgres is the writer of record, so suspect DuckDB's statement"),
     ("shadow_pruned_rows",
      "Nothing to do: DuckDB's shadow prune lagged Postgres's and the next tick removes them"),
-    ("chain_owner_unregistered",
-     "Redeploy a build that declares the chain, or run scripts/chain_copy_back.py from one; never re-ship these tables from DuckDB"),
+    ("chain_owner_unregistered", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     # The standing watch on a chain's own tables (DN-07). Nothing here is
