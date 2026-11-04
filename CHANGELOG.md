@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.306
+
+- WIP: S14-05 merge review — the pixel-only filters and route are held by tests
+- WIP: S14-05 merge review — the traffic reader's docstring counts seven methods
+- WIP: S14-05 merge — name the walk's synthetic cases
+- WIP: S14-05 merge — the tab guards hold a reader that goes round the router
+- Step 14 S14-05: six read routers read Postgres alone
+
+
 ## 3.0.305
 
 - The runbook check reads the checkout, so it runs where the checkout is
