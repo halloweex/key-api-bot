@@ -116,10 +116,11 @@ async def backfill_mirror_orders(
 ):
     """Ship the orders Postgres is missing. Idempotent; safe to re-run.
 
-    Step 05. The sync mirrors only what it writes, so Postgres starts at the
-    last few minutes of activity with 46,446 orders of history behind it. This
-    closes that gap, computing the difference fresh on every call rather than
-    remembering a cursor — interrupt it and the next run resumes by definition.
+    Step 05. The sync mirrored only what it wrote (DuckDB's order writer,
+    deleted in step 14's S14-09), so Postgres started at the last few minutes
+    of activity with 46,446 orders of history behind it. This closes that gap,
+    computing the difference fresh on every call rather than remembering a
+    cursor — interrupt it and the next run resumes by definition.
 
     Foreground for a capped run you want to watch; background for the whole
     thing, which takes minutes and would otherwise sit on an HTTP request.
@@ -226,9 +227,10 @@ async def backfill_mirror_expenses(
 ):
     """Ship the order-level expenses Postgres is missing. Idempotent.
 
-    Revision 0020. `mirror_expenses` ships what a sync fetched, so after the
-    first deploy Postgres holds the last few days against DuckDB's 15,020 rows
-    — and until this has run, `reconcile_expenses` reports one
+    Revision 0020. `mirror_expenses` shipped what a sync fetched (nothing has
+    called it since step 14's S14-09), so after the first deploy Postgres held
+    the last few days against DuckDB's 15,020 rows — and until this has run,
+    `reconcile_expenses` reports one
     `mirror_backfill_pending` and suppresses the row-level comparison, because
     before it every expense older than the mirror looks exactly like a lost
     one.

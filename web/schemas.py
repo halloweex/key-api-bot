@@ -198,11 +198,11 @@ class HealthResponse(BaseModel):
             "`sync_step`: consecutive Postgres failures of its offers or "
             "stocks step, the last one's step and error class, and when the "
             "next attempt is allowed. Chain 3's entry (`pg_orders_write`) "
-            "carries the same two: `preflight` names every unmet "
-            "precondition while its flag is still off, and `sync_step` is "
-            "the order step — failures in a row, ages, the last error's "
-            "class and how many orders Postgres would refuse — judged by the "
-            "canary as `orders_sync_failing` once the chain writes Postgres. "
+            "carries `sync_step`, the order step — failures in a row, ages, "
+            "the last error's class and how many orders Postgres would "
+            "refuse — judged by the canary as `orders_sync_failing` (its "
+            "`preflight` went in step 14's S14-09: the question it answered "
+            "was over since S14-00). "
             "Chain 6's entry (the catalogue) carries the same `sync_step` for "
             "its hourly products step."
         ),
@@ -215,8 +215,9 @@ class HealthResponse(BaseModel):
             "`pitr_drill_age_h` (the weekly PITR drill), "
             "`remote_restore_age_h` (the off-site copy restored) and "
             "`pg_offsite_age_h` (a Postgres dump shipped off the host). Null "
-            "where no marker exists. Chain 3's flip waits on all three "
-            "(`unmet_precondition`). Ages only — no path, host or account."
+            "where no marker exists. Judged by the canary as "
+            "`backup_evidence_stale` (chain 3's flip waited on all three "
+            "until step 14). Ages only — no path, host or account."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(

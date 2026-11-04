@@ -31,7 +31,6 @@ if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cost
     from core.models import Buyer
 
 import duckdb
-import pandas as pd
 
 from core import duckdb_switch
 from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
@@ -40,7 +39,7 @@ from core.observability import cut_row_dumps, without_row_dump
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
     B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE,
-    line_window_where, _date_in_kyiv,
+    line_window_where,
     EXHIBITION_SOURCE_ID, REVENUE_SOURCE_IDS,
 )
 from core.repositories import (
@@ -50,34 +49,11 @@ from core.repositories import (
 )
 # What an order upsert did. It lives with its one remaining producer since
 # step 14's S14-01; re-exported here as the same class for one release, for
-# this module's own `upsert_orders` and for callers that have not moved yet.
-from core.pg_orders_write import UpsertResult
+# callers that have not moved yet. This module's own `upsert_orders`, its last
+# user here, went with chain 3's DuckDB half in S14-09.
+from core.pg_orders_write import UpsertResult  # noqa: F401 — the re-export
 
 logger = logging.getLogger(__name__)
-
-
-def _orders_in_postgres() -> bool:
-    """Whether chain 3 writes the orders to Postgres — the one answer every
-    order writer and selection routes on. Raises on a `KS_WRITE_ORDERS`
-    nobody can read while unlatched (`pg_orders_write.writes_postgres`): a
-    repair job then fails loudly rather than choosing a store."""
-    from core import pg_orders_write
-
-    return pg_orders_write.writes_postgres()
-
-
-def _refuse_if_orders_in_postgres(writer: str) -> None:
-    """Raise `ChainOwnsOrders` when a DuckDB writer of chain 3's tables is
-    reached while the chain does not write DuckDB — by its flag, its latch, or
-    a flag nobody can read (`mode()`, which never raises)."""
-    from core import pg_orders_write
-
-    mode = pg_orders_write.mode()
-    if mode != "duckdb":
-        raise pg_orders_write.ChainOwnsOrders(
-            f"DuckDBStore.{writer} was called while chain 3 writes the orders "
-            f"to {mode or 'nowhere (KS_WRITE_ORDERS is not understood)'}; "
-            "the orders go through SyncService._upsert_orders_with_expenses")
 
 
 # Warehouse self-heal bound: how many consecutive failed/errored refreshes we
@@ -2545,6 +2521,16 @@ class DuckDBStore(
                 return True, None
             return True, json.loads(value)
 
+    # ─── Chain 3's selections and its misses, in Postgres ──────────────────
+    #
+    # Every repair job chooses its work by reading the order tables, and
+    # chain 3 writes those to Postgres alone. Until step 14's S14-09 each of
+    # these asked `_orders_in_postgres()` first and read DuckDB otherwise; that
+    # answer had been a constant since S14-00, and S14-09 deleted it with the
+    # DuckDB bodies. They are the store's methods still because their callers
+    # — the scheduler's repair jobs, the 05:15 refresh, the boot — hold the
+    # store; the statements are `core.pg_orders_read`'s.
+
     async def find_order_id_gaps(self, limit: int = 200) -> List[int]:
         """Order ids missing from our copy, found without asking KeyCRM.
 
@@ -2554,27 +2540,12 @@ class DuckDBStore(
         comparison against the API confirmed 1 616 of them were real orders.
 
         Ids already known to be absent upstream are skipped, so the list drains
-        to empty instead of cycling forever.
-
-        Asked of Postgres once chain 3 writes the orders there — the ids it
-        repairs and the misses it records land there, and a scan of DuckDB
-        would never see either and re-fetch the same 200 ids every hour.
+        to empty instead of cycling forever. Asked of Postgres, where chain 3
+        writes both the orders it repairs and the misses it records.
         """
-        if _orders_in_postgres():
-            from core import pg_orders_read
+        from core import pg_orders_read
 
-            return await pg_orders_read.order_id_gaps(limit)
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                WITH bounds AS (SELECT MIN(id) lo, MAX(id) hi FROM orders)
-                SELECT g.id FROM bounds, generate_series(bounds.lo, bounds.hi) AS g(id)
-                WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = g.id)
-                  AND NOT EXISTS (SELECT 1 FROM order_backfill_misses m
-                                  WHERE m.order_id = g.id)
-                ORDER BY g.id
-                LIMIT ?
-            """, [int(limit)]).fetchall()
-        return [int(r[0]) for r in rows]
+        return await pg_orders_read.order_id_gaps(limit)
 
     async def find_backdated_order_ids(self, since: "date", limit: int = 200) -> List[int]:
         """Orders dated on or after `since` but created on or before it, by
@@ -2595,88 +2566,36 @@ class DuckDBStore(
         fetch already returned to cover an hour at the edge. Measured on the
         2026-08-31 copy with a 30-day window: 156 ids over 183 daily runs
         (0.85 a day, at most 5), each one API call.
-
-        Asked of Postgres once chain 3 writes the orders there, for
-        `find_order_id_gaps`' reason.
         """
-        if _orders_in_postgres():
-            from core import pg_orders_read
+        from core import pg_orders_read
 
-            return await pg_orders_read.backdated_order_ids(since, limit)
-        date_ordered = _date_in_kyiv("ordered_at")
-        date_created = _date_in_kyiv("created_at")
-        async with self.connection() as conn:
-            rows = conn.execute(f"""
-                SELECT id FROM orders
-                WHERE {date_ordered} >= ?
-                  AND {date_created} <= ?
-                  AND {date_ordered} > {date_created}
-                ORDER BY id
-                LIMIT ?
-            """, [since, since, int(limit)]).fetchall()
-        return [int(r[0]) for r in rows]
+        return await pg_orders_read.backdated_order_ids(since, limit)
 
     async def record_backfill_misses(self, misses: "Dict[int, str]") -> int:
         """Remember ids KeyCRM could not supply, so they are not retried.
-
-        Written by chain 3 once it writes the orders to Postgres: the ledger
-        moves with the scans that read it (`core.pg_orders_write`)."""
+        Written by chain 3: the ledger lives where the scans read it
+        (`core.pg_orders_write`)."""
         if not misses:
             return 0
-        if _orders_in_postgres():
-            from core import pg_orders_write
+        from core import pg_orders_write
 
-            return await pg_orders_write.record_backfill_misses(misses)
-        async with self.connection() as conn:
-            conn.executemany(
-                "INSERT OR REPLACE INTO order_backfill_misses "
-                "(order_id, checked_at, reason) VALUES (?, CURRENT_TIMESTAMP, ?)",
-                [(int(oid), str(reason)[:200]) for oid, reason in misses.items()],
-            )
-        return len(misses)
-
-    # Orders with revenue and no line items — the half-written repair's
-    # selection, moved here from `scheduler._run_halfwritten_repair` so it can
-    # be asked of Postgres once chain 3 writes the orders there.
-    _EMPTY_LINE_ITEMS_SQL = """
-        SELECT o.id FROM orders o
-        LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
-               ON li.order_id = o.id
-        WHERE li.order_id IS NULL AND o.grand_total > 0
-    """
+        return await pg_orders_write.record_backfill_misses(misses)
 
     async def find_halfwritten_orders(self, limit: int) -> List[int]:
         """Orders with revenue and no line items, not recorded as a miss in
-        the last 30 days, largest first."""
-        if _orders_in_postgres():
-            from core import pg_orders_read
+        the last 30 days, largest first — the half-written repair's selection,
+        moved here from `scheduler._run_halfwritten_repair`."""
+        from core import pg_orders_read
 
-            return await pg_orders_read.halfwritten_candidates(limit)
-        async with self.connection() as conn:
-            return [int(r[0]) for r in conn.execute(f"""
-                {self._EMPTY_LINE_ITEMS_SQL}
-                  AND NOT EXISTS (
-                      SELECT 1 FROM order_backfill_misses m
-                      WHERE m.order_id = o.id
-                        AND m.checked_at > CURRENT_TIMESTAMP - INTERVAL '30 days'
-                  )
-                ORDER BY o.grand_total DESC
-                LIMIT ?
-            """, [int(limit)]).fetchall()]
+        return await pg_orders_read.halfwritten_candidates(limit)
 
     async def halfwritten_among(self, ids: List[int]) -> List[int]:
         """Which of `ids` still carry revenue and no line items."""
         if not ids:
             return []
-        if _orders_in_postgres():
-            from core import pg_orders_read
+        from core import pg_orders_read
 
-            return await pg_orders_read.halfwritten_among(ids)
-        ph = ",".join("?" * len(ids))
-        async with self.connection() as conn:
-            return [int(r[0]) for r in conn.execute(
-                f"{self._EMPTY_LINE_ITEMS_SQL} AND o.id IN ({ph})", list(ids),
-            ).fetchall()]
+        return await pg_orders_read.halfwritten_among(ids)
 
     def _claim_stuck_rebuild_slot(self) -> bool:
         """Take the one full-rebuild attempt allowed per cooldown, if it is free.
@@ -2869,308 +2788,14 @@ class DuckDBStore(
             )
             return {"status": "error", "error": str(e)}
 
-    async def upsert_orders(
-        self,
-        orders: List[Dict[str, Any]],
-        force_update: bool = False,
-        skip_products: bool = False,
-    ) -> "UpsertResult":
-        """
-        Insert or update orders from API response (idempotent).
-
-        Uses DataFrame bulk insert for performance (~10-100x faster than row-by-row).
-        Only updates existing orders if the new updated_at is newer than
-        the existing one. This prevents stale API responses from overwriting
-        fresher data.
-
-        Args:
-            orders: List of order dicts from KeyCRM API
-            force_update: If True, update all orders regardless of updated_at timestamp.
-                         Use this for status refresh since KeyCRM doesn't update
-                         updated_at when status changes.
-            skip_products: If True, skip product deletion/insertion.
-                          Use this for status refresh where only order-level
-                          fields (status_id, etc.) change — avoids OOM on
-                          executemany for ~2000 orders worth of product rows.
-
-        Returns:
-            An UpsertResult. Read `.changed_ids` to find out what actually
-            moved; `.count` includes rows that were already correct, so
-            driving a rebuild from it rebuilds the world every cycle.
-        """
-        # Chain 3 (`core/pg_orders_write.py`): once the orders are written to
-        # Postgres this writer must not run — the sync routes round it in
-        # `SyncService._upsert_orders_with_expenses`, and anything that comes
-        # here directly would write the store nobody reads. First, before the
-        # empty-batch return, so the refusal does not depend on the payload.
-        _refuse_if_orders_in_postgres("upsert_orders")
-        if not orders:
-            return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
-
-        # Parse orders into rows. The shaping lives in `core.landing_rows` so
-        # that the Postgres mirror below is fed the *same* tuples rather than
-        # reading the payload for itself — charter rule 1, one home per rule.
-        # The `ordered_at` skip and the synthetic line-item id moved with it.
-        from core.landing_rows import landed_orders
-
-        landed = landed_orders(orders, with_products=not skip_products)
-        order_rows = landed.orders
-        product_rows = landed.products
-
-        if not order_rows:
-            return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
-
-        # Create DataFrame for orders (products use executemany for simplicity)
-        # Deduplicate by id - API can return same order twice in paginated responses
-        orders_df = pd.DataFrame(order_rows).drop_duplicates(subset=["id"], keep="last")
-
-        # Convert datetime columns to proper pandas datetime type for DuckDB
-        for col in ["ordered_at", "created_at", "updated_at"]:
-            orders_df[col] = pd.to_datetime(orders_df[col], utc=True)
-
-        # Ensure nullable integer columns use Int64 so None stays pd.NA, not float NaN
-        # (DuckDB 1.5+ rejects float NaN → INT32 in executemany)
-        for col in ["source_id", "status_id", "status_group_id", "buyer_id", "manager_id"]:
-            orders_df[col] = orders_df[col].astype("Int64")
-
-        # Ensure nullable string columns are proper type for DuckDB
-        orders_df["manager_comment"] = orders_df["manager_comment"].astype(pd.StringDtype())
-        orders_df["promocode"] = orders_df["promocode"].astype(pd.StringDtype())
-
-        # Get order IDs for use in queries (avoids DuckDB FK bug with subqueries)
-        order_ids = orders_df["id"].tolist()
-
-        # Helper: pd.NA → None for DuckDB compatibility
-        def _int_or_none(v):
-            return None if pd.isna(v) else int(v)
-
-        insert_rows = []
-        for _, row in orders_df.iterrows():
-            insert_rows.append((
-                int(row["id"]), _int_or_none(row["source_id"]),
-                _int_or_none(row["status_id"]),
-                _int_or_none(row["status_group_id"]),
-                float(row["grand_total"]),
-                row["ordered_at"], row["created_at"], row["updated_at"],
-                _int_or_none(row["buyer_id"]),
-                _int_or_none(row["manager_id"]),
-                row["manager_comment"],
-                row["promocode"],
-            ))
-
-        async with self.connection() as conn:
-            # 1. Upsert orders one-by-one in autocommit mode with row-level fault isolation.
-            # DuckDB 1.5: ON CONFLICT inside explicit transactions is broken
-            # (PK violation poisons transaction). Autocommit per-row works for most rows,
-            # but occasional rows hit write-write conflicts. Skip them and continue —
-            # the 24h sync_from buffer will retry on the next cycle.
-            # P2-1: Explicit SELECT→UPDATE/INSERT instead of ON CONFLICT.
-            # DuckDB 1.5.x has MVCC bugs in ON CONFLICT that cause write-write
-            # conflicts on "poisoned" rows. Explicit check avoids that code path.
-            insert_sql = """
-                INSERT INTO orders (id, source_id, status_id, status_group_id,
-                                   grand_total, ordered_at, created_at, updated_at,
-                                   buyer_id, manager_id, manager_comment, promocode, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
-            """
-            # manager_comment carries UTM attribution data. COALESCE keeps the
-            # stored value when the API payload has it as null — otherwise a
-            # re-sync of an order whose payload omits the field would destroy
-            # attribution that backfill restored (loss is unrecoverable: the
-            # UTM silver layer parses from this column).
-            update_sql = """
-                UPDATE orders SET
-                    source_id = ?, status_id = ?, status_group_id = ?, grand_total = ?,
-                    ordered_at = ?, created_at = ?, updated_at = ?,
-                    buyer_id = ?, manager_id = ?,
-                    manager_comment = COALESCE(?, manager_comment),
-                    promocode = ?, synced_at = now()
-                WHERE id = ?
-            """
-
-            # Batch-fetch (id, updated_at) for every existing target row so the
-            # skip-decider can compare timestamps without per-row SELECTs.
-            # See core.upsert_decider.should_update_order for the contract.
-            from core.upsert_decider import should_update_order
-
-            all_ids = [int(p[0]) for p in insert_rows]
-            placeholders = ",".join("?" * len(all_ids))
-            existing_rows = conn.execute(
-                f"SELECT id, updated_at FROM orders WHERE id IN ({placeholders})",
-                all_ids,
-            ).fetchall()
-            existing: Dict[int, Any] = {int(r[0]): r[1] for r in existing_rows}
-
-            # Decide before writing anything. The decision is a pure function
-            # of `existing` and the payload, and knowing the set up front is
-            # what allows the line items to go in before the headers below.
-            success_ids: List[int] = []
-            to_write: List[tuple] = []  # (params, is_update)
-            skipped_count = 0
-            deferred = 0
-            for params in insert_rows:
-                order_id = int(params[0])
-                incoming_updated_at = params[7]  # tuple index matches insert_sql
-                if skip_products and order_id not in existing:
-                    # A header-only refresh must never *create* an order: it
-                    # carries no line items, and the decider would then skip
-                    # the full payload the minute sync brings seconds later
-                    # (same updated_at) — a header-only order for good, or
-                    # until the half-written repair happens to catch it, and
-                    # never for a zero-total one. Left for a full writer.
-                    deferred += 1
-                    continue
-                if order_id in existing and not should_update_order(
-                    existing.get(order_id), incoming_updated_at, force=force_update,
-                ):
-                    # Identity write — same updated_at, nothing to do.
-                    # Counts toward success because the row IS in the
-                    # desired state (just not freshly written).
-                    success_ids.append(order_id)
-                    skipped_count += 1
-                    continue
-                to_write.append((params, order_id in existing))
-            write_ids = [int(p[0]) for p, _ in to_write]
-
-            # 1. Line items FIRST, headers LAST. The header carries the
-            # `updated_at` the skip-decider compares against, so with this
-            # order every partial state — a kill between the products COMMIT
-            # and the header loop, a header row that fails — leaves the header
-            # OLD, and the next sync's decider sees a newer payload and writes
-            # the row again. The reverse order (headers first, as it was) made
-            # a kill between the two leave a header newer than its line items:
-            # the decider then skipped the row for good, the half-written
-            # repair could not see it (it has line items), and the daily
-            # reconciliation compares status and total only — a permanently
-            # wrong product/brand/category picture for that order. Line items
-            # for a header not yet written are invisible: every reader joins
-            # through `orders`.
-            #
-            # Only for rows we actually write. Skipped rows (skip-if-unchanged)
-            # keep their existing products untouched — their order_products
-            # are already correct because the order itself didn't change. This
-            # was the bulk of the 1440x churn.
-            if not skip_products and write_ids:
-                placeholders = ",".join("?" * len(write_ids))
-                conn.execute(
-                    f"DELETE FROM order_products WHERE order_id IN ({placeholders})",
-                    write_ids,
-                )
-
-            if not skip_products and product_rows and write_ids:
-                write_set = set(write_ids)
-                products_to_insert = [p for p in product_rows if p.order_id in write_set]
-                if products_to_insert:
-                    conn.execute("BEGIN TRANSACTION")
-                    try:
-                        conn.executemany("""
-                            INSERT OR REPLACE INTO order_products (id, order_id, product_id, name, quantity, price_sold)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, [
-                            # Column order is the row's own field order — see
-                            # core.landing_rows.ORDER_PRODUCT_COLUMNS.
-                            tuple(p) for p in products_to_insert
-                        ])
-                        conn.execute("COMMIT")
-                    except Exception:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                        raise
-
-            # 2. Headers, one by one in autocommit with row-level fault
-            # isolation (see the DuckDB 1.5 note above). A row that fails here
-            # already has its new line items and its old header; that is the
-            # recoverable direction — the 24h sync buffer offers the order
-            # again and the decider writes it, because the stored `updated_at`
-            # is still the older one.
-            updated_ids: List[int] = []
-            failed: List[tuple] = []  # (order_id, error_str)
-            for params, is_update in to_write:
-                order_id = int(params[0])
-                try:
-                    if is_update:
-                        conn.execute(update_sql, [
-                            params[1], params[2], params[3], params[4], params[5],
-                            params[6], params[7], params[8], params[9], params[10],
-                            params[11],
-                            order_id,
-                        ])
-                    else:
-                        conn.execute(insert_sql, list(params))
-                    updated_ids.append(order_id)
-                    success_ids.append(order_id)
-                except (duckdb.TransactionException, duckdb.ConstraintException) as e:
-                    failed.append((order_id, str(e)))
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-
-            if failed:
-                sample = ", ".join(str(oid) for oid, _ in failed[:5])
-                logger.error(
-                    f"Skipped {len(failed)} poisoned orders (first 5: {sample}). "
-                    f"First error: {failed[0][1]}"
-                )
-
-            count = len(success_ids)
-            n_written = len(updated_ids)
-            logger.info(
-                f"Upserted {count}/{len(insert_rows)} orders to DuckDB "
-                f"(written={n_written}, skipped_unchanged={skipped_count}"
-                + (f", deferred_to_full_sync={deferred}" if deferred else "") + ")"
-            )
-            result = UpsertResult(
-                count=count,
-                changed_ids=updated_ids,
-                skipped_unchanged=skipped_count,
-                failed=len(failed),
-                deferred_to_full_sync=deferred,
-            )
-
-        # Step 05. The mirror ships exactly what this store wrote — `updated_ids`
-        # and no more. Not the whole page: a row DuckDB skipped as unchanged is
-        # already correct on both sides, and a row it failed on must not exist in
-        # Postgres and nowhere else. Whatever predates the mirror belongs to the
-        # backfill, not to this call.
-        #
-        # Outside the `connection()` block deliberately: awaiting a network
-        # round-trip while holding a lock the whole application shares is how a
-        # sync becomes a stall. `mirror_orders` never raises.
-        #
-        # Not at all once a write chain owns either order table (DN-22a): its
-        # writer puts rows in Postgres that DuckDB never sees, and shipping
-        # this store's copy over them would overwrite them — and archive each
-        # overwrite in `app.order_versions` as a transition that never
-        # happened. Asked here, before `write_orders`, and never inside its
-        # transaction, where the capture's all-or-nothing contract lives. With
-        # no chain declaring an order table — every day so far — the answer is
-        # empty without reading a variable or a file.
-        if updated_ids:
-            from core.pg_landing import mirror_orders, order_tables_stood_down
-
-            moved = order_tables_stood_down()
-            if moved:
-                logger.info(
-                    "mirror: %s stood down (a write chain owns it); %d written "
-                    "order(s) not shipped out of DuckDB",
-                    ", ".join(sorted(moved)), len(updated_ids),
-                )
-                return result
-
-            written_ids = set(updated_ids)
-            # Duplicates collapse keeping the last, the same rule the DataFrame
-            # above applies — the API repeats an order across paginated pages.
-            deduped = {r.id: r for r in order_rows if r.id in written_ids}
-            await mirror_orders(
-                list(deduped.values()),
-                [p for p in product_rows if p.order_id in written_ids],
-                replace_products=not skip_products,
-            )
-
-        return result
+    # `upsert_orders` stood here until step 14's S14-09: DuckDB's order writer
+    # (a pandas frame, then the line items before the headers, then the
+    # mirror to Postgres of exactly what it wrote). Chain 3 writes the orders
+    # to Postgres alone (`core.pg_orders_write.upsert_orders_with_expenses`,
+    # reached from `SyncService._upsert_orders_with_expenses`), and since
+    # S14-00 this writer only refused (`ChainOwnsOrders`). Its decision is
+    # pinned beside the chain's as a literal of what it answered
+    # (`tests/unit/test_pg_orders_write.py`, `TestTheDecisionIsDuckDBs`).
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
         """Insert or update products from API response.
@@ -3189,40 +2814,15 @@ class DuckDBStore(
 
         rows = product_rows(products)
 
-        # Chain 6: under KS_WRITE_CATALOGUE=postgres the parsed rows are the
-        # Postgres write and DuckDB's copy stops (`core/pg_catalogue_write.py`).
-        # After the parse, so both stores read a product the same way.
+        # Chain 6: the parsed rows are the Postgres write
+        # (`core/pg_catalogue_write.py`) — after the parse, so a product is
+        # read one way. DuckDB's copy stopped at the chain's flip, and its
+        # writer went with step 14's S14-09.
         from core import pg_catalogue_write
 
-        if pg_catalogue_write.writes_postgres():
-            count = await pg_catalogue_write.upsert_products(rows)
-            logger.info(f"Upserted {count} products to Postgres (chain 6)")
-            return count
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                count = 0
-                for row in rows:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO products (id, name, category_id, brand, sku, price, synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [
-                        row.id, row.name, row.category_id,
-                        row.brand, row.sku, row.price,
-                    ])
-                    count += 1
-
-                conn.execute("COMMIT")
-                logger.info(f"Upserted {count} products to DuckDB")
-                return count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+        count = await pg_catalogue_write.upsert_products(rows)
+        logger.info(f"Upserted {count} products to Postgres (chain 6)")
+        return count
 
     async def upsert_categories(self, categories: List[Dict[str, Any]]) -> int:
         """Insert or update categories from API response.
@@ -3241,32 +2841,9 @@ class DuckDBStore(
 
         from core import pg_catalogue_write
 
-        if pg_catalogue_write.writes_postgres():
-            count = await pg_catalogue_write.upsert_categories(rows)
-            logger.info(f"Upserted {count} categories to Postgres (chain 6)")
-            return count
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                count = 0
-                for row in rows:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO categories (id, name, parent_id, synced_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [row.id, row.name, row.parent_id])
-                    count += 1
-
-                conn.execute("COMMIT")
-                logger.info(f"Upserted {count} categories to DuckDB")
-                return count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+        count = await pg_catalogue_write.upsert_categories(rows)
+        logger.info(f"Upserted {count} categories to Postgres (chain 6)")
+        return count
 
     async def upsert_managers(self, managers: List[Dict[str, Any]]) -> int:
         """Insert or update managers from KeyCRM API response.
@@ -3741,31 +3318,21 @@ class DuckDBStore(
             ]
 
     async def get_latest_order_time(self) -> Optional[datetime]:
-        """Get the latest order updated_at timestamp for sync checkpoint.
+        """The latest order `updated_at` — the full sync's checkpoint. From
+        Postgres, where chain 3 writes the orders (`core/pg_orders_read.py`):
+        DuckDB's MAX is the moment of the flip, for ever."""
+        from core import pg_orders_read
 
-        From Postgres once chain 3 writes the orders there: the full sync
-        stamps `last_sync_orders` from this, and DuckDB's MAX would be the
-        moment of the flip, for ever (`core/pg_orders_read.py`)."""
-        if _orders_in_postgres():
-            from core import pg_orders_read
-
-            return await pg_orders_read.latest_order_time()
-        async with self.connection() as conn:
-            result = conn.execute("SELECT MAX(updated_at) FROM orders").fetchone()
-            return result[0] if result and result[0] else None
+        return await pg_orders_read.latest_order_time()
 
     async def orders_held(self) -> int:
-        """How many orders the store they are written to holds — the boot's
-        "is there any history at all?". DuckDB's count, until chain 3 writes
-        the orders to Postgres: from then DuckDB's never grows, and a fresh
+        """How many orders Postgres holds — the boot's "is there any history
+        at all?". DuckDB's copy never grows since chain 3's flip, and a fresh
         DuckDB on a latched host would read as empty on every boot and pull
         730 days from KeyCRM each time. Raises what the read raises."""
-        if _orders_in_postgres():
-            from core import pg_orders_read
+        from core import pg_orders_read
 
-            return await pg_orders_read.order_count()
-        async with self.connection() as conn:
-            return int(conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0])
+        return await pg_orders_read.order_count()
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get database statistics.

@@ -47,12 +47,10 @@ class TestTheSyncShipsWhatItWrites:
             ]
             yield fn.name, calls
 
-    def test_every_expense_upsert_is_mirrored(self):
-        for name, calls in self._pairs():
-            if "upsert_expenses_batch" in calls:
-                assert "mirror_expenses" in calls, (
-                    f"{name} writes expenses to DuckDB and never ships them"
-                )
+    # `test_every_expense_upsert_is_mirrored` stood here: every sync path that
+    # wrote expenses to DuckDB (`upsert_expenses_batch`) had to ship them.
+    # Step 14's S14-09 deleted that writer — chain 3 writes the expenses with
+    # their orders, in Postgres — so there is nothing left for it to hold.
 
     def test_the_type_dictionary_is_not_mirrored_from_the_payload(self):
         """It rides `replicate_operational` instead, and the difference is not

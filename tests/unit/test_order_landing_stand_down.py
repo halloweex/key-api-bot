@@ -44,7 +44,7 @@ def latched(flags):
     """Chain 3 writes Postgres by its latch, whatever the flag says."""
     chain_latch.latch(pg_orders_write.CHAIN, pg_orders_write.WRITE_ENV)
     chain_latch._latched = None
-    assert pg_orders_write.mode() == "postgres"
+    assert pg_orders_write.writes_postgres()
     yield flags
     chain_latch.release(pg_orders_write.CHAIN)
     chain_latch._latched = None

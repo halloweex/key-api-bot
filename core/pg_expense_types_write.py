@@ -34,7 +34,8 @@ hour out of a dictionary it no longer receives: `replicate_sms`' recorded
 failure of 2026-09-06, exactly. `last_sync_expense_types` moves with the chain
 to `meta.chain_watermarks` (revision 0032), so the freshness check judges the
 store that is actually written — and, until the first full sync under the flag
-has written it there, DuckDB's last stamp (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
+had written it there, DuckDB's last stamp (`CHAIN_WATERMARK_INHERITS_DUCKDB`,
+until step 14's S14-09).
 
 FAILURE POLICY: THIS ONE RAISES
 
@@ -66,25 +67,19 @@ nothing written, leaving the copy-back as the only way back (since step
 until 2026-09-25; every chain now latches inside the acquire, and
 `tests/unit/test_chain_latch.py` holds each registered chain to it.
 
-A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
-
-Since step 14's S14-00 the chain writes Postgres whatever its flag says and
-asks no precondition (`writes_postgres`, `unmet_precondition` are
-constants). What follows is the history.
+A PRECONDITION THE FLAG ENFORCED — UNTIL STEP 14
 
 Everything that reads the dictionary reads it through `_expenses_run`, which
-asks Postgres only under `KS_READ_EXPENSES=postgres`. With that flag off the
-page reads DuckDB's copy, so a chain writing Postgres would leave every type
-KeyCRM adds afterwards in Postgres alone, shown as "Other" — and nothing would
-say so: the daily comparison stands down for the table, and the standing watch
-reads Postgres, which is right. So `unmet_precondition()` names the read flag,
-and until it is on an unlatched chain runs as duckdb whatever
-`KS_WRITE_EXPENSE_TYPES` says — `core.write_chains` reads the same answer, so
-the hourly copy keeps shipping — while `/api/health`'s write_chains block
-publishes why and the canary warns. DN-27's rule for the buyers chain. A
-latched chain cannot go back that way (OD-19 (a)): it keeps writing Postgres,
-and the same warning then says its readers are on the frozen copy. Chain 8
-carries the same assumption unenforced; it is live, and left to its own change.
+asked Postgres only under `KS_READ_EXPENSES=postgres`, so until step 14's
+S14-00 `unmet_precondition()` held an unlatched chain on DuckDB until that
+read flag was on (DN-27's rule for the buyers chain). S14-00 made the answer a
+constant and S14-07 made the reader Postgres alone; S14-09 deleted the
+answer, with the routing it fed: the repository's writer and `full_sync` ask
+nothing. Kept: `WRITE_ENV` as a name (the registry still publishes the
+variable until S14-11, through `env_writes_postgres`), the latch and its owner
+row (decision 3: an image from before step 14 routes by them), and
+`writes_postgres()`, a constant the registry's sync-key routing asks until
+S14-11.
 """
 from __future__ import annotations
 
@@ -123,25 +118,25 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_expense_types",)
 # names would make one page read as two problems.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 
-# Until the first full sync under the flag writes the key to
-# `meta.chain_watermarks`, `_freshness_check` judges DuckDB's frozen stamp
-# instead of calling the dictionary never synced. Flipped on a Wednesday, the
-# key would otherwise be absent until Sunday 02:00 Kyiv, and every integrity
-# run in between — 01, 07, 13, 19 — would file `freshness_expense_types` into
-# the 09:00 digest about a dictionary the hourly copy shipped until the flip.
-# DuckDB's stamp is the honest age of what Postgres holds then, judged at the
-# same 192 h: a first sync that fails still pages when a DuckDB one would
-# have. Chain 1 does not declare this — its keys move every hour, so absence
-# past one tick is itself the finding.
-CHAIN_WATERMARK_INHERITS_DUCKDB = True
+# `CHAIN_WATERMARK_INHERITS_DUCKDB` stood here until step 14's S14-09: until
+# the first full sync under the flag wrote the key to `meta.chain_watermarks`,
+# `_freshness_check` judged DuckDB's frozen stamp instead of calling the
+# dictionary never synced — a mid-week flip would otherwise have filed
+# `freshness_expense_types` on every integrity run until Sunday. The flip is
+# long past and production holds the key (H6, 2026-10-29); nothing in the sync
+# reads it back, so an absent key would only be "never synced", which is then
+# true (`tests/unit/test_absent_chain_keys.py`).
 
 
 def env_writes_postgres() -> bool:
-    """What `KS_WRITE_EXPENSE_TYPES` alone says.
+    """What `KS_WRITE_EXPENSE_TYPES` alone says. Routes nothing: since step
+    14's S14-00 the chain writes Postgres whatever its flag says, and since
+    S14-09 neither the repository's writer nor `full_sync` reads the flag.
 
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands it down, and
-    `full_sync` contains the raise.
+    An unrecognised value raises — `KS_BOT_STORE`'s rule — and the registry
+    publishes the raise as the chain's `error`, which a rollback to an image
+    from before step 14 would route by (`core.write_chains._chain_state`).
+    Last consumer: that registry entry — S14-11.
     """
     value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
     if value not in {"duckdb", "postgres"}:
@@ -152,23 +147,14 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and nothing it waited on is asked any more —
-    production met every clause, and the readers it named read Postgres.
-    Kept for the registry's `unmet_precondition` field, which keeps its shape
-    until S14-11."""
-    return None
-
-
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
-    nor a precondition routes any more; the first write in a process still
-    takes the latch (decision 3), which the images before step 14 route by.
-    Last consumers:
-    the repository's writer, `full_sync` and the registry — S14-09.
-    """
+    """Whether this chain writes Postgres: True, a constant since step 14's
+    S14-00 — neither the flag, nor the latch, nor a precondition routes. The
+    first write in a process still takes the latch (decision 3), which the
+    images before step 14 route by. Last consumer: the store's sync-key
+    getter and setter, which ask it of the chain that declares the key
+    through the registry (`DuckDBStore.get_last_sync_time`) — S14-11.
+    Nothing in this build asks it of this chain by name since S14-09."""
     return True
 
 

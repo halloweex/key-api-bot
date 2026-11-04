@@ -70,80 +70,20 @@ class ExpensesMixin:
 
         rows = expense_type_rows(expense_types)
 
-        # Chain 6a: `KS_WRITE_EXPENSE_TYPES` decides which store holds the
-        # dictionary, and it is asked AFTER the parse so both stores are
-        # handed the same resolved names. Raises — see
-        # `core/pg_expense_types_write.py`.
+        # Chain 6a: the parsed rows are the Postgres write — after the parse,
+        # so a type is called one thing (`core/pg_expense_types_write.py`).
+        # Raises. DuckDB's copy stopped at the chain's flip, and its writer
+        # went with step 14's S14-09.
         from core import pg_expense_types_write
 
-        if pg_expense_types_write.writes_postgres():
-            written = await pg_expense_types_write.upsert_expense_types(rows)
-            logger.info(f"Upserted {written} expense types to Postgres")
-            return written
+        written = await pg_expense_types_write.upsert_expense_types(rows)
+        logger.info(f"Upserted {written} expense types to Postgres")
+        return written
 
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for row in rows:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO expense_types (id, name, alias, is_active, synced_at)
-                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, list(row))
-
-                conn.execute("COMMIT")
-                logger.info(f"Upserted {len(rows)} expense types to DuckDB")
-                return len(rows)
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-
-    async def upsert_expenses_batch(self, orders_with_expenses: List[Dict[str, Any]]) -> int:
-        """
-        Insert or update expenses for multiple orders in a single transaction.
-
-        Args:
-            orders_with_expenses: List of order dicts with 'id' and 'expenses' keys
-
-        Returns:
-            Total number of expenses upserted
-        """
-        # Chain 3 writes the order-level expenses with their orders, in one
-        # Postgres transaction (`core/pg_orders_write.py`); this DuckDB writer
-        # refuses while it does. `upsert_expenses`, the per-order writer beside
-        # this one, had no caller anywhere and was deleted with chain 3.
-        from core.duckdb_store import _refuse_if_orders_in_postgres
-
-        _refuse_if_orders_in_postgres("upsert_expenses_batch")
-        # Flattened and parsed in one place, for `upsert_expense_types`' reason.
-        from core.landing_rows import expense_rows
-
-        rows = expense_rows(orders_with_expenses)
-        if not rows:
-            return 0
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for row in rows:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO expenses
-                        (id, order_id, expense_type_id, amount, description, status, payment_date, created_at, synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, list(row))
-
-                conn.execute("COMMIT")
-                return len(rows)
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+    # `upsert_expenses_batch` stood here until step 14's S14-09: DuckDB's
+    # writer of the order-level expenses. Chain 3 writes them with their
+    # orders, in one Postgres transaction (`core/pg_orders_write.py`), and
+    # since S14-00 this writer only refused.
 
     async def get_expense_types(self) -> List[Dict[str, Any]]:
         """Get all expense types for filter dropdown."""

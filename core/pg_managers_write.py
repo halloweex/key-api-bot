@@ -454,7 +454,8 @@ def duckdb_orders_frozen() -> FrozenSet[str]:
     until the orders come back.
 
     The local answer (`pg_landing.order_tables_stood_down`), as the per-tick
-    order mirror takes it: it asks only a chain that declares an order table —
+    order mirror took it until step 14's S14-09 deleted that mirror's caller:
+    it asks only a chain that declares an order table —
     chain 3, whose flag and marker it reads, and which with its flag off and
     no marker answers that nothing is taken, so the stats count DuckDB's
     orders as they always did.

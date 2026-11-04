@@ -33,19 +33,7 @@ from core.models import (
     Order,
     OrderStatus,
 )
-
-
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module pins the status-group rule in the Silver body both engines
-    render, seeded through DuckDB's order writer. So this module keeps
-    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
-    until their DuckDB branches go."""
-    from core import pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+from tests.pg_orders_seed import needs_pg, pg_orders  # noqa: F401 — the fixture
 
 
 # The mapping the API returned, as measured.
@@ -160,45 +148,49 @@ class TestOrderPrefersTheGroup:
         assert order.status_group_id == 6
 
 
+@needs_pg
 class TestSilverUsesIt:
-    @pytest.mark.asyncio
-    async def test_the_group_overrides_the_id_list_in_silver(self, tmp_path):
-        store = await _make_store(tmp_path)
+    """The status-group rule in the Silver body, on Postgres: seeded through
+    chain 3's writer and derived by `pg_silver.rebuild_silver`. It ran on
+    DuckDB's writer and DuckDB's Silver until step 14's S14-09 deleted the
+    writer; the body is the one both engines rendered
+    (`core.warehouse_sql.silver_select_sql`)."""
+
+    @staticmethod
+    async def _silver(pool, payloads):
+        from core import pg_orders_write
+        from core.pg_silver import rebuild_silver
+
+        await pg_orders_write.upsert_orders_with_expenses(payloads)
         try:
-            # Same status id, opposite groups.
-            await store.upsert_orders([
-                _api_order(1, status_id=12, group_id=5),   # revenue
-                _api_order(2, status_id=12, group_id=6),   # lost/cancel
-            ])
-            await store.refresh_warehouse_layers(trigger="manual")
-
-            async with store.connection() as conn:
-                rows = dict(conn.execute(
-                    "SELECT id, is_return FROM silver_orders ORDER BY id"
-                ).fetchall())
-            assert rows[1] is False
-            assert rows[2] is True
+            await rebuild_silver(pool)
+            async with pool.acquire() as conn:
+                return {r["id"]: r["is_return"] for r in await conn.fetch(
+                    "SELECT id, is_return FROM silver.orders ORDER BY id")}
         finally:
-            await store.close()
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM silver.orders")
 
     @pytest.mark.asyncio
-    async def test_rows_without_a_group_keep_the_old_verdict(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_orders([
-                _api_order(1, status_id=19),   # excluded by the list
-                _api_order(2, status_id=20),   # revenue: not in the list
-            ])
-            await store.refresh_warehouse_layers(trigger="manual")
+    async def test_the_group_overrides_the_id_list_in_silver(self, pg_orders):
+        _store, pool = pg_orders
+        # Same status id, opposite groups.
+        rows = await self._silver(pool, [
+            _api_order(1, status_id=12, group_id=5),   # revenue
+            _api_order(2, status_id=12, group_id=6),   # lost/cancel
+        ])
+        assert rows[1] is False
+        assert rows[2] is True
 
-            async with store.connection() as conn:
-                rows = dict(conn.execute(
-                    "SELECT id, is_return FROM silver_orders ORDER BY id"
-                ).fetchall())
-            assert rows[1] is True
-            assert rows[2] is False
-        finally:
-            await store.close()
+    @pytest.mark.asyncio
+    async def test_rows_without_a_group_keep_the_old_verdict(self, pg_orders):
+        _store, pool = pg_orders
+        rows = await self._silver(pool, [
+            _api_order(1, status_id=19),   # excluded by the list
+            _api_order(2, status_id=20),   # revenue: not in the list
+        ])
+        assert rows[1] is True
+        assert rows[2] is False
 
 
 class TestTheColumnArrivesOnAnExistingDatabase:

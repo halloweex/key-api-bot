@@ -503,13 +503,13 @@ def _freshness_check(
     A moved key Postgres does not hold yet is "never synced" — unless its
     chain declares `CHAIN_WATERMARK_INHERITS_DUCKDB`, in which case DuckDB's
     frozen stamp stands in, at the same threshold, until the first sync under
-    the flag writes one. That is for a chain whose sync is rarer than this
+    the flag writes one. That was for a chain whose sync is rarer than this
     check: chain 6a's dictionary moves on the Sunday full sync, so a mid-week
-    flip would otherwise file "never synced" on every run for up to a week
-    about a dictionary the hourly copy shipped until the flip — and DuckDB's
-    stamp is exactly the age of what Postgres then holds. Chain 3 declares it
-    for its sync window, and the store's getter answers the same stand-in
-    (`DuckDBStore.get_last_sync_time`), so this judges what the sync reads.
+    flip would otherwise have filed "never synced" on every run for up to a
+    week; chains 6 and 6a declared it until step 14's S14-09, their flips long
+    past. Chain 3 declares it for its sync window, and the store's getter
+    answers the same stand-in (`DuckDBStore.get_last_sync_time`), so this
+    judges what the sync reads.
 
     The read and the judgement are apart (`_judge_freshness`), because under
     `KS_DUCKDB=off` DuckDB's `sync_metadata` is not read here at all: its

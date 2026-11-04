@@ -58,7 +58,10 @@ class TestAdjacentMarks:
         src = inspect.getsource(SyncService._orders_step)
         assert src.index("mark_warehouse_dirty(changed_ids)") < src.index("_get_max_updated_at(")
         tick = inspect.getsource(SyncService.incremental_sync)
-        assert tick.index("self._orders_step(") < tick.index('get_last_sync_time("products")')
+        # The products step reads its watermark itself since chain 6
+        # (`_catalogue_step_postgres`); the tick's own read of it went with
+        # DuckDB's path in step 14's S14-09.
+        assert tick.index("self._orders_step(") < tick.index("self._catalogue_step_postgres(")
 
     def test_the_manual_silver_rebuild_asks_for_validation(self):
         from web.routes.api import admin

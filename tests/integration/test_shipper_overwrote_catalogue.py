@@ -78,8 +78,6 @@ async def stores(tmp_path, monkeypatch):
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_MIRROR_LANDING", "1")
-    monkeypatch.setattr(chain, "unmet_precondition", lambda: None)
-    monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
     store = DuckDBStore(db_path=tmp_path / "shipper.duckdb")
     await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)

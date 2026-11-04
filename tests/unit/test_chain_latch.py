@@ -441,7 +441,7 @@ _CONNECTION = {"get_pool", "_pool", "acquire"}
 # nothing, so a write added to one fails there instead of hiding here.
 _READERS = {
     "pg_inventory_write": {"read_snapshot_calendar", "preflight"},
-    "pg_orders_write": {"preflight"},
+    # Chain 3's `preflight` was one, until step 14's S14-09 deleted it.
     "pg_managers_write": {"preflight"},
     # Chain 9 (OD-02 (c)): the connection the journal's readers are handed —
     # the digest, the layer ages, the data-quality endpoint, the catch-up.

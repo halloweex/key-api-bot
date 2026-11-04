@@ -275,7 +275,7 @@ WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
 def assert_target_state(*, markers: bool = True) -> None:
     """Every cached answer says the state was reached — and if one does not,
     which, rather than a sweep of some other state."""
-    from core import pg_orders_write, read_fallback, warehouse_cutover as wc
+    from core import read_fallback, warehouse_cutover as wc
     from core.write_chains import chain_modes
 
     assert duckdb_switch.value() == "off" and duckdb_switch.mode_error() is None
@@ -287,7 +287,8 @@ def assert_target_state(*, markers: bool = True) -> None:
                  if state["mode"] != "postgres" or state["latched"] != markers
                  or state["mismatch"] or state["error"]}
     assert not not_moved, not_moved
-    assert pg_orders_write.mode() == "postgres", "chain 3 held on DuckDB"
+    # Chain 3's own `mode()` and its start hold went in step 14's S14-09: the
+    # registry's answer above is the only one left to ask.
     assert duckdb_switch.held_back() == ()
     assert duckdb_switch.is_off()
 

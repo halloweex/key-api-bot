@@ -99,9 +99,10 @@ The expense-type dictionary (chain 6a):
 * **Not its watermark.** `last_sync_expense_types` moves once a week, so the
   90-minute limit above would page every run; the chain declares
   `CHAIN_WATERMARK_MAX_AGE_MIN = None` and `_freshness_check` judges it at
-  192 h from `meta.chain_watermarks`, alone — and from DuckDB's frozen stamp
-  until the first full sync under the flag writes one there
-  (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
+  192 h from `meta.chain_watermarks`, alone — and judged it from DuckDB's
+  frozen stamp until the first full sync under the flag wrote one there
+  (`CHAIN_WATERMARK_INHERITS_DUCKDB`, which the chain declared until step
+  14's S14-09).
 
 The buyers (chain 4):
 

@@ -8,9 +8,10 @@ THE ONE RULE: A MARK CAN NEVER COST THE ROWS IT MARKS
 The marks will be raised inside the Postgres landing writers' transactions, and
 `write_orders` captures `app.order_versions` in that same transaction — the
 archive nothing can rebuild. A mark that raised there would roll back the order,
-its line items and the version together, and `mirror_orders` swallows the error,
-so the transition would be gone for good. The chain-2 review found exactly that
-in the first design.
+its line items and the version together, and `mirror_orders`, the sync's path
+then (until step 14's S14-09), would have swallowed the error, so the
+transition would be gone for good. The chain-2 review found exactly that in
+the first design.
 
 So `mark` runs in a savepoint with a one-second lock timeout, and any error is
 logged, recorded against `meta.derivation_signal` in `meta.mirror_state`, and

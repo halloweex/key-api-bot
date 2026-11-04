@@ -2203,11 +2203,12 @@ outside INTEGER, a NULL into NOT NULL) is refused before the latch, logged by
 id, counted in `failed`. A `DataError` nobody foresaw retries the batch order
 by order on the same connection, each with its own claim. Anything else raises.
 
-**Every path asks the chain's one answer.** `SyncService._upsert_orders_with_expenses`
-routes at its first statement; DuckDB's `upsert_orders` and
-`upsert_expenses_batch` raise `ChainOwnsOrders` while it writes Postgres
+**Every path asked the chain's one answer**, until step 14's S14-09 left it
+none to ask (below). `SyncService._upsert_orders_with_expenses`
+routed at its first statement; DuckDB's `upsert_orders` and
+`upsert_expenses_batch` raised `ChainOwnsOrders` while it wrote Postgres
 (`upsert_expenses`, which had no caller, is deleted). `record_backfill_misses`
-routes, dated by the web clock rather than `now()` — the clock the copy-back
+writes Postgres, dated by the web clock rather than `now()` — the clock the copy-back
 ordered the two stores by (an image from before step 14 still does). The gap,
 backdated, half-written and checkpoint selections read Postgres
 (`core/pg_orders_read.py`, no `except`), and so does the boot's "do we hold any
@@ -2216,7 +2217,7 @@ orders" gate — a latched host with an empty DuckDB would otherwise full-sync
 `restore_manager_comments`: only NULL comments, headers only,
 `kind='backfill'`. `tests/unit/test_order_paths_consult_chain.py` walks
 `core/`, `web/` and `scripts/` for every DuckDB statement writing the four
-tables.
+tables, and since S14-09 finds none but DuckDB's own schema migrations.
 
 **The order step cannot take the tick down.** Under the chain a failure that
 is not KeyCRM's is recorded (`write_chains.pg_orders_write.sync_step`, the
@@ -2274,6 +2275,22 @@ off-site restore drill older than 8 days, an off-site shipment older than
 36 h, or a marker that was never written — and names the script that writes
 it. Until then only this precondition judged the two drills, and
 `deploy/offsite_check.sh` reads the shipment's marker alone. History below.
+
+**Since step 14's S14-09 the routing is gone, not only constant.** The
+order step, the store's selections and misses, the boot's "any orders held"
+and both comment backfills (the route and `scripts/backfill_utm.py`) have one
+path, chain 3's; DuckDB's `upsert_orders` and `upsert_expenses_batch` (and
+`ChainOwnsOrders`), `mode()`, `unmet_precondition`/`unmet_reasons`, the start
+hold, `LOCKOUT_REVISION` and the `preflight` — with its place in
+`/api/health`'s `write_chains` entry — are deleted. Kept: `WRITE_ENV` as a name,
+`env_writes_postgres` for the registry's published `error` and
+`writes_postgres()` for its sync-key routing (both until S14-11), the latch and
+its owner rows (decision 3), the stood-down layers and checks (until S14-12 and
+S14-14), and `CHAIN_WATERMARK_INHERITS_DUCKDB`: production holds both keys
+(H6), but an absent `last_sync_orders` would open the 25-hour window again
+(`tests/unit/test_absent_chain_keys.py`). The writers' statements are held to
+a literal recorded before the change (`tests/unit/test_chain_writers_sql_frozen.py`,
+rule 12), and DuckDB's decision grid to what DuckDB answered.
 
 **Preconditions, every one read locally** (`unmet_precondition()`, published
 through the registry, `write_chain_precondition_unmet` on the canary):
@@ -5086,7 +5103,8 @@ tables, so registering a chain for `bronze.orders` would have had the sync's
 mirror overwrite the chain's rows and archive each overwrite in
 `app.order_versions` as a change that never happened. Now every such path asks
 `core.pg_landing.order_tables_stood_down()` **before** `write_orders`, never
-inside its transaction: the sync's mirror in `upsert_orders` skips, the ids-diff
+inside its transaction: the sync's mirror in `upsert_orders` skips (until
+step 14's S14-09 deleted DuckDB's order writer), the ids-diff
 and header-only repair refuse, the hourly diff returns `stood_down`, the
 comment ship reports `skipped`, `POST /api/mirror/backfill/orders` answers 409,
 and the bucket comparison files `mirror_stood_down` (INFO). Either table stands
@@ -5153,13 +5171,17 @@ daily comparison stand down. Three things differ from the chains before it:
   192 h. The standing watch judges instead that the table is not empty
   (CRITICAL — /expenses collapses into "Other") and that no name is still a
   localisation key (WARN).
-- **Its watermark is inherited across the flip.** Postgres holds no
-  `last_sync_expense_types` until the Sunday full sync under the flag writes
+- **Its watermark was inherited across the flip.** Postgres held no
+  `last_sync_expense_types` until the Sunday full sync under the flag wrote
   one, and a mid-week flip used to file "entity never synced" on every
-  integrity run until then. `CHAIN_WATERMARK_INHERITS_DUCKDB` has the check
+  integrity run until then. `CHAIN_WATERMARK_INHERITS_DUCKDB` had the check
   judge DuckDB's frozen stamp for the absent key instead — the age of what
   the hourly copy last shipped — at the same 192 h, so a first sync that
   fails still pages. Chain 1 does not declare it: its keys move hourly.
+  **Step 14's S14-09 took it off**, with the chain's routing (the repository's
+  DuckDB tail, `full_sync`'s "on DuckDB, raise", `unmet_precondition`): the
+  flip is long past, production holds the key, and nothing in the sync reads
+  it back, so an absent key is "never synced", which is then true.
 
 **`KS_READ_EXPENSES=postgres` comes first, and the chain enforces it.** Every
 reader of the dictionary goes through `_expenses_run`, so with the read flag
@@ -5284,7 +5306,13 @@ out over 5% and 10 rows of what the write before it carried — the record's
 truncated catalogue reads as mass retirement. Measured per write, not as
 retired against the table, which only rises because nothing deletes, and so
 warned after every complete write once ordinary retirements passed 5%). Its watermarks are left to the freshness check (48
-h, 192 h) and inherited from DuckDB until the first write under the flag.
+h, 192 h), and were inherited from DuckDB until the first write under the flag
+— until step 14's S14-09, which took the stand-in off with the chain's
+routing: the products step syncs at once on an absent `last_sync_products`,
+and nothing reads `last_sync_categories` back (`tests/unit/test_absent_chain_keys.py`).
+Since S14-09 the hourly products step and `full_sync`'s containment are the
+only paths, the store's two writers have no DuckDB tail, and `mode()`,
+`unmet_precondition` and `LOCKOUT_REVISION` are deleted.
 
 **Two hazards 6a's template did not cover, closed before the flag.** The
 products watermark was read at the top of the incremental tick, ahead of the
@@ -5770,8 +5798,9 @@ read no switch (`_POSTGRES_STORE_HELPERS`), with `_PgTx`'s `none`, `many`,
 `one` and `all` beside them: `_DuckTx`'s same-named methods had hidden the
 transaction's writers from the walk, by accident. And "holding a pool" means
 reaching `get_pool` through a callee too — `replicate_managers` held it
-inside `write_managers`, where the walk did not look — with `_mirror` and
-`upsert_orders` the two named per-tick exemptions.
+inside `write_managers`, where the walk did not look — with `_mirror` the
+named per-tick exemption (`upsert_orders` was the second, until step 14's
+S14-09 deleted it).
 Limits that remain: a target held on an object attribute
 (`dialect.silver_orders`) reads as unknown, statements kept in a container
 constant (a dict of SQL) are not rendered, and DuckDB SQL beside a Postgres

@@ -339,24 +339,9 @@ async def _orders_sync_step() -> "dict | None":
         return None
 
 
-# Chain 3's pre-flip answer, on the same cache shape as chain 1's.
-_orders_preflight_cache: dict = {"data": None, "expires_at": 0}
-_orders_preflight_cache_lock = asyncio.Lock()
-
-
-async def _orders_preflight() -> dict:
-    """`pg_orders_write.preflight()`, cached and bounded. Never raises."""
-    from core import pg_orders_write
-
-    now = time.time()
-    async with _orders_preflight_cache_lock:
-        if (_orders_preflight_cache["data"] is not None
-                and now < _orders_preflight_cache["expires_at"]):
-            return _orders_preflight_cache["data"]
-        data = await _bounded_preflight(pg_orders_write.preflight)
-        _orders_preflight_cache["data"] = data
-        _orders_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
-        return data
+# Chain 3's pre-flip answer (`_orders_preflight`, on chain 1's cache shape)
+# stood here until step 14's S14-09: it said `ok: null` since S14-00, the
+# question being over, and went with `pg_orders_write.preflight`.
 
 
 # Chain 5's pre-flip answer, on the same cache shape as chain 1's.
@@ -402,20 +387,20 @@ async def _write_chains_block() -> dict:
     the chain, and a stock step that keeps failing stops `last_sync_stocks`,
     which the integrity job's chain invariants already watch.
 
-    Chain 3's and chain 5's entries carry the same two
-    (`pg_orders_write.preflight` and the order step's state, which the canary
-    does judge; `pg_managers_write.preflight` and the managers step's). The
-    preflights are asked at once, never one after the other: each is bounded
-    at `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row would cost
-    the canary's whole `HEALTH_TIMEOUT_S`."""
+    Chain 5's entry carries the same two (`pg_managers_write.preflight` and
+    the managers step's state). Chain 3's carries the order step's state
+    alone, which the canary judges as `orders_sync_failing`; its preflight
+    went in step 14's S14-09, the question it answered being over since
+    S14-00. The preflights are asked at once, never one after the other: each
+    is bounded at `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row
+    would cost the canary's whole `HEALTH_TIMEOUT_S`."""
     from core import pg_inventory_write, pg_managers_write, pg_orders_write
 
     block = _write_chains()
     inventory = block.get(pg_inventory_write.CHAIN)
-    # Chain 3: its preflight — every precondition by name while the flag is
-    # still off — and the order step the canary judges.
+    # Chain 3: the order step the canary judges.
     orders = block.get(pg_orders_write.CHAIN)
-    # Chain 5: the same two, its preflight and its managers step.
+    # Chain 5: its preflight and its managers step.
     managers = block.get(pg_managers_write.CHAIN)
     # The preflights at once, never one after the other: each is bounded at
     # `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row cost twice
@@ -425,16 +410,14 @@ async def _write_chains_block() -> dict:
     # a hung Postgres held them for asyncpg's cancel round trip instead.
     preflights = await asyncio.gather(
         _inventory_preflight() if isinstance(inventory, dict) else _nothing(),
-        _orders_preflight() if isinstance(orders, dict) else _nothing(),
         _managers_preflight() if isinstance(managers, dict) else _nothing())
     if isinstance(inventory, dict):
         inventory["preflight"] = preflights[0]
         inventory["sync_step"] = await _inventory_sync_step()
     if isinstance(orders, dict):
-        orders["preflight"] = preflights[1]
         orders["sync_step"] = await _orders_sync_step()
     if isinstance(managers, dict):
-        managers["preflight"] = preflights[2]
+        managers["preflight"] = preflights[1]
         managers["sync_step"] = await _managers_sync_step()
     # Chain 6's hourly products step off DuckDB, in chain 1's shape: recorded
     # instead of ending the tick. Not judged by the canary — the freshness
@@ -537,10 +520,11 @@ def _utm_parse_mode() -> dict:
 
 
 def _backups() -> "dict | None":
-    """The ages of what the host's backup scripts last proved — chain 3's
-    flip evidence (`core.backup_evidence`): the PITR drill, the off-site
-    restore drill and the Postgres off-site shipment, in hours, null where no
-    marker exists. Ages only: the endpoint is public. Local files, no
+    """The ages of what the host's backup scripts last proved
+    (`core.backup_evidence`) — chain 3's flip evidence once, judged by the
+    canary as `backup_evidence_stale` since step 14's S14-00: the PITR drill,
+    the off-site restore drill and the Postgres off-site shipment, in hours,
+    null where no marker exists. Ages only: the endpoint is public. Local files, no
     database, so it answers with Postgres down; null if even that fails."""
     try:
         from core import backup_evidence

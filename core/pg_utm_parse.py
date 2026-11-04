@@ -528,8 +528,9 @@ async def reparse_router(store, *, full: bool = False,
     replaces the table whole. `force` is the CLI's flag and nobody else's.
 
     Under `postgres` the DuckDB `store` is not read: the parse reads
-    `bronze.orders`, which the backfills reach through `ship_orders_by_id`
-    before they get here.
+    `bronze.orders`, which the backfills reach before they get here — through
+    `pg_orders_write.restore_manager_comments` since step 14's S14-09, through
+    `ship_orders_by_id` until then.
     """
     if not parses_in_postgres():
         from core.pg_order_utm import ship_after_reparse

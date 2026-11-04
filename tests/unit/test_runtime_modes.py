@@ -189,9 +189,11 @@ class TestScriptsConfigureBeforeTheyWrite:
         deleted it.) `backfill_utm.py` was named here as the near miss — it
         rewrote `manager_comment` in DuckDB with a plain `UPDATE` and reached
         Postgres only through `ship_after_reparse`, whose table no derivation
-        reads. DN-17 gave it `ship_orders_by_id`, so it writes `bronze.orders`
-        now, and this walk found it on the first run rather than a reviewer
-        finding it later."""
+        reads. DN-17 gave it `ship_orders_by_id`, so it wrote `bronze.orders`,
+        and this walk found it on the first run rather than a reviewer
+        finding it later. Since step 14's S14-09 it writes `bronze.orders`
+        through `pg_orders_write.restore_manager_comments`, which the walk
+        finds the same way."""
         found = self._scripts()
         assert "backfill_utm.py" in found, sorted(found)
         # Chain 4: the gender derivation's CLI routes by the chain's latch.

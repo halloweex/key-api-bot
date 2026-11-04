@@ -600,11 +600,25 @@ class _Walk:
         seen = set() if seen is None else seen
         if key in self.consulting or key[0] in _chain_modules():
             return True
+        if key in _DEAD_SHIPPERS and not self.callers.get(key):
+            # Nothing reaches it: no path through it is a path at all.
+            return True
         if key in seen:
             return False
         seen = seen | {key}
         callers = self.callers.get(key, set())
         return bool(callers) and all(self.covered(c, seen) for c in callers)
+
+
+# Shippers whose last caller is gone, kept until the PR that deletes them
+# (rule 14). A dead shipper cannot ask on anybody's behalf, so the walk counts
+# it covered only while nothing calls it — `test_the_dead_shippers_are_dead`
+# fails the moment one is called again.
+_DEAD_SHIPPERS = {
+    ("core/pg_landing.py", "mirror_orders"):
+        "its one caller, DuckDB's `upsert_orders`, went in step 14's S14-09; "
+        "the mirror's half of `pg_landing` goes in S14-13",
+}
 
 
 @pytest.fixture(scope="module")
@@ -619,6 +633,13 @@ def _chain_modules() -> set:
 
 
 class TestEveryPostgresWriterAsksTheRegistry:
+    def test_the_dead_shippers_are_dead(self, walk):
+        """Kills: a dead shipper called again — it asks nobody (its caller
+        did), so it would ship round a chain."""
+        for key in _DEAD_SHIPPERS:
+            assert key in walk.fns, f"{key} is gone: take it off the list"
+            assert not walk.callers.get(key), (key, walk.callers.get(key))
+
     def test_each_one_asks_or_is_reached_only_by_askers(self, walk):
         chains = _chain_modules()
         uncovered = sorted(
@@ -666,7 +687,6 @@ class TestEveryPostgresWriterAsksTheRegistry:
             ("core/pg_replication.py", "replicate_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
             ("core/pg_expense_backfill.py", "hourly_expenses_ids_diff"),
-            ("core/duckdb_store.py", "upsert_orders"),
             ("web/routes/api/admin.py", "backfill_mirror_expenses"),
         } <= walk.consulting
 
@@ -859,12 +879,12 @@ _OWNER_READS = {"order_tables_stood_down_or_owned", "tables_stood_down_or_owned"
 # The sync's per-tick mirrors, which keep the local answer alone: the write
 # path, once a minute, where a Postgres read is the one `writes_postgres()`
 # exists to avoid (DN-22a). The daily comparisons page the state they cannot
-# see — `order_owner_row_without_marker`, `owner_row_without_marker`.
+# see — `order_owner_row_without_marker`, `owner_row_without_marker`. The
+# orders mirror in `DuckDBStore.upsert_orders` was the second, until step 14's
+# S14-09 deleted that writer.
 _PER_TICK_MIRRORS = {
     ("core/pg_landing.py", "_mirror"):
         "the catalogue and expense mirror, every sync tick",
-    ("core/duckdb_store.py", "upsert_orders"):
-        "the orders mirror, every sync tick",
 }
 
 
@@ -1191,17 +1211,13 @@ def _rolled_back(flags) -> None:
         if not {ORDERS, LINES} & set(c.CHAIN_TABLES)))
 
 
-async def _store(tmp_path, ids=()):
-    """A DuckDB holding `ids`, written with the mirror patched out."""
-    from unittest.mock import AsyncMock, patch
-
+async def _store(tmp_path):
+    """An empty DuckDB. It held seeded orders through `upsert_orders`, until
+    step 14's S14-09 deleted that writer; nothing here asked it to any more."""
     from core.duckdb_store import DuckDBStore
 
     store = DuckDBStore(db_path=tmp_path / "dn22a.duckdb")
     await store.connect()
-    if ids:
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders([_order(i) for i in ids])
     return store
 
 
@@ -1216,8 +1232,9 @@ def _chains_splitting_the_order_tables(chains) -> list:
 
 class TestOwnershipOfTheOrderTablesPassesAsAUnit:
     """Why either order table stands both down. Not that they ship together —
-    `write_orders(replace_products=False)` ships headers alone every day, from
-    the 05:15 status refresh and the comment ship — but that whoever takes the
+    `write_orders`' core with `replace_products=False` writes headers alone
+    every day, from the 05:15 status refresh and the comment backfills (the
+    comment ship until step 14's S14-09) — but that whoever takes the
     headers takes their line items: a chain declares both or neither. Walked
     over the real registry, which `TestEveryWriteChainIsRegistered` holds equal
     to every module that declares a chain."""
@@ -1648,13 +1665,16 @@ class TestEveryOrderShipperAsksFirst:
 
     def test_the_walk_is_not_vacuous(self):
         found = {name for _rel, name, _called in self._sites()}
-        assert {"upsert_orders", "backfill_orders", "ship_orders_by_id"} <= found
+        # `upsert_orders`, the sync's per-tick mirror, was the third until
+        # step 14's S14-09 deleted DuckDB's order writer.
+        assert {"backfill_orders", "ship_orders_by_id"} <= found
+        assert "upsert_orders" not in found
 
     def test_one_that_takes_the_pool_asks_the_owner_rows_too(self):
         """DN-06: anything already holding a Postgres connection stands down on
-        either copy of the latch. The sync's mirror in `upsert_orders` takes
+        either copy of the latch. The sync's mirror in `upsert_orders` took
         no pool — the write path, where that read is the one to avoid — and so
-        is not held to it."""
+        was not held to it, until step 14's S14-09 deleted it."""
         holding = [(rel, name, called) for rel, name, called in self._sites()
                    if "get_pool" in called]
         assert {"backfill_orders", "ship_orders_by_id"} <= {n for _r, n, _c in holding}
