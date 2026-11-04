@@ -193,6 +193,20 @@ class TestTheFiles:
         block = re.search(r"blind_checks AS \((.*?)\n\),", sql, flags=re.S).group(1)
         assert set(re.findall(r"'(\w+)'", block)) == warns | {ch_silver.GOLD_UNWATCHED}
 
+    def test_d8s_named_checks_are_filed_by_the_code_that_stays(self):
+        """Step 14's S14-12 deleted the comparisons against DuckDB, and with
+        them the names D8 listed for them (`mirror_buckets_disagree`,
+        `gold_missing_cells`, `gold_orphan_cells`). Every name D8 still lists
+        by name is a registered condition. Mutation: list one with no
+        emitter."""
+        from core.alerting import REGISTRY
+
+        sql = _uncommented((SQL_DIR / "09_d8_mirror_landing.sql").read_text(encoding="utf-8"))
+        block = re.search(r"derived AS \((.*?)\n\),", sql, flags=re.S).group(1)
+        named = set(re.findall(r"'(\w+)'", block.split("i.check_name IN", 1)[1]))
+        assert named == {"gold_rollup_mismatch", "customer_profile_mismatch"}
+        assert named <= set(REGISTRY)
+
     def test_d8s_grace_checks_are_the_info_the_utm_completeness_files(self):
         """D8 forgives a UTM verdict still inside its grace (the 07:30 run
         files one nearly every morning since KS_UTM_PARSE=postgres). Derived,

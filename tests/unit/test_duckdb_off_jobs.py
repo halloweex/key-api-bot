@@ -30,7 +30,7 @@ import ast
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -268,6 +268,12 @@ class TestTheIntegrityJobUnderOff:
         monkeypatch.setattr(pg_chain_watermarks, "read_values",
                             AsyncMock(side_effect=lambda keys: {
                                 k: v for k, v in watermarks.items() if k in keys}))
+        # The integrity job reads each row's stamp beside its value; here the
+        # rows were written when their values say.
+        monkeypatch.setattr(pg_chain_watermarks, "read_values_and_stamps",
+                            AsyncMock(side_effect=lambda keys: (
+                                {k: v for k, v in watermarks.items() if k in keys},
+                                {k: v for k, v in watermarks.items() if k in keys})))
         monkeypatch.setattr(pg_frozen_metadata, "frozen_sync_rows",
                             AsyncMock(return_value=frozen))
         monkeypatch.setattr(pg_warehouse_dq, "read_facts",
@@ -366,38 +372,9 @@ def postgres(monkeypatch):
     return install
 
 
-class TestTheLandingIsReadOnlyForWhatSurvives:
-    @pytest.mark.asyncio
-    async def test_in_the_target_state_duckdb_is_never_read(
-            self, target_state, postgres):  # noqa: F811
-        """Chains 5 and 6 own every landing table, so nothing survives the
-        stand-down and the reader is never awaited. Mutation: read DuckDB
-        first under off, as under on — the sweep's `_landing` row."""
-        from core.mirror_reconciliation import MIRRORED_TABLES, reconcile_mirror
-
-        pool = postgres(_Pool(_every_owner_row()))
-        reader = AsyncMock(side_effect=AssertionError("DuckDB read"))
-        issues = await reconcile_mirror(None, read_duckdb=reader)
-        reader.assert_not_awaited()
-        assert {i.check_name for i in issues} == {"mirror_stood_down"}
-        assert {i.table_name for i in issues} == {s.pg_table for s in MIRRORED_TABLES}
-        assert pool.acquired == 0       # held on the local answer, before Postgres
-        assert duckdb_switch.opened() == {}
-
-    @pytest.mark.asyncio
-    async def test_under_on_the_side_read_first_is_compared_as_before(
-            self, monkeypatch, postgres):
-        """The control: handed a DuckDB side, the reader is not consulted."""
-        from core.mirror_reconciliation import MIRRORED_TABLES, reconcile_mirror
-        from core.write_chains import WRITE_CHAINS
-
-        for chain in WRITE_CHAINS:
-            monkeypatch.delenv(chain.WRITE_ENV, raising=False)
-        postgres(_Pool())
-        reader = AsyncMock(side_effect=AssertionError("asked under on"))
-        side = {s.pg_table: ({}, {}) for s in MIRRORED_TABLES}
-        await reconcile_mirror(side, read_duckdb=reader)
-        reader.assert_not_awaited()
+# `TestTheLandingIsReadOnlyForWhatSurvives` held the landing comparison
+# (`reconcile_mirror`) to reading DuckDB only for what survived the stand-down
+# — nothing in the target state — until step 14's S14-12 deleted it.
 
 
 # ─── The operational copy ────────────────────────────────────────────────────
@@ -518,73 +495,10 @@ class TestTheOperationalCopyUnderOff:
 
 
 # ─── The operational comparison ──────────────────────────────────────────────
-
-
-class _Store:
-    """A DuckDB that is only counted: the readers are patched."""
-
-    def __init__(self):
-        self.opened = 0
-
-    @asynccontextmanager
-    async def _connection(self):
-        self.opened += 1
-        yield object()
-
-    def connection(self):
-        return self._connection()
-
-
-@pytest.fixture
-def duckdb_reads(monkeypatch):
-    """Every table the comparison reads out of DuckDB, whole or by fingerprint."""
-    import core.mirror_reconciliation as mr
-
-    read = []
-
-    def read_duckdb_side(conn, specs):
-        read.extend(s.pg_table for s in specs)
-        return {s.pg_table: ({}, {}) for s in specs}
-
-    def fingerprints(conn, spec):
-        read.append(spec.pg_table)
-        return {}
-
-    monkeypatch.setattr(mr, "read_duckdb_side", read_duckdb_side)
-    monkeypatch.setattr(mr, "fingerprints", fingerprints)
-    return read
-
-
-class TestTheOperationalComparisonUnderOff:
-    @pytest.mark.asyncio
-    async def test_the_history_is_not_compared_under_off(
-            self, target_state, postgres, duckdb_reads):  # noqa: F811
-        """Never the history. (What DuckDB was still asked for in the target
-        state was the shadow chains' tables, compared facing the other way —
-        PR-4's to stand down under off — until step 14's S14-10 deleted that
-        comparison; nothing is read since.) Mutation: drop
-        `stood_down_under_off()` from the comparison."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        postgres(_Pool(_every_owner_row()))
-        issues = await reconcile_operational(_Store())
-        assert not set(DUCKDB_HISTORY_TABLES) & set(duckdb_reads)
-        assert duckdb_reads == []
-        assert not [i for i in issues if i.table_name in DUCKDB_HISTORY_TABLES]
-
-    @pytest.mark.asyncio
-    async def test_with_nothing_left_to_read_duckdb_is_not_opened(
-            self, target_state, postgres, duckdb_reads, monkeypatch):  # noqa: F811
-        """With no shadow table compared — PR-4's answer under off, and
-        every answer since step 14's S14-10 deleted the comparison — the store
-        is not opened at all. Mutation: open it for an empty read, as under
-        on."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        postgres(_Pool(_every_owner_row()))
-        store = _Store()
-        await reconcile_operational(store)
-        assert store.opened == 0 and duckdb_reads == []
+#
+# `reconcile_operational` read neither the history nor, in the target state,
+# anything out of DuckDB (`TestTheOperationalComparisonUnderOff`), until step
+# 14's S14-12 deleted it.
 
 
 # ─── The reconciliation against KeyCRM ───────────────────────────────────────
@@ -594,11 +508,9 @@ class TestTheReconciliationUnderOff:
     @pytest.mark.asyncio
     async def test_it_compares_postgres_without_reaching_the_file(
             self, target_state):  # noqa: F811
-        """Chain 3 took DuckDB's arm, so the unconnected store is enough:
-        the Postgres arm runs and is journalled, and nothing is refused
-        (the design's 2.3 — the variant under off of
-        `test_reconciliation_postgres.TestItRidesOnTheDuckDBHalfToday`).
-        Mutation: extract DuckDB's arm whatever chain 3 says."""
+        """No DuckDB arm since step 14's S14-12 (chain 3 had stood it down):
+        the store is never asked, the Postgres arm runs and is journalled,
+        and nothing is refused (the design's 2.3). Mutation: ask the store."""
         from core.scheduler import BackgroundScheduler
 
         sync = AsyncMock()
@@ -610,16 +522,14 @@ class TestTheReconciliationUnderOff:
             return_value={"issues": [], "discrepancies": [], "error": None})
         scheduler._persist_postgres_reconciliation = AsyncMock()
         scheduler._reconcile_clickhouse = AsyncMock(return_value=None)
-        extract = MagicMock(side_effect=AssertionError("DuckDB's arm extracted"))
         with patch("core.reconciliation_io.keycrm_orders_in_window",
                    new=AsyncMock(return_value=({}, 1, set()))), \
-             patch("core.reconciliation_io.duckdb_orders_in_window", new=extract), \
              patch("core.data_quality.machine_attempts_note", return_value=None), \
              patch("core.sync_service.get_sync_service", new=AsyncMock(return_value=sync)), \
-             patch("core.duckdb_store.get_store", new=AsyncMock(return_value=DuckDBStore())):
+             patch("core.duckdb_store.get_store",
+                   new=AsyncMock(side_effect=AssertionError("the store was asked"))):
             result = await scheduler._run_dq_reconciliation()
         assert result["error"] is None, result
-        assert result["stood_down"] == ["reconciliation"]
         scheduler._reconcile_postgres.assert_awaited_once()
         scheduler._persist_postgres_reconciliation.assert_awaited_once()
         assert duckdb_switch.opened() == {}

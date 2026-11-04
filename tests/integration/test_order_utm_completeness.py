@@ -45,8 +45,11 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TABLE = mr.ORDER_UTM_TABLE.pg_table
-GRACE = mr.SILVER_GRACE_MINUTES
+TABLE = mr.ORDER_UTM_PG_TABLE
+# The grace at the default floor (`pg_warehouse_dq.silver_grace_minutes()`) —
+# the number the Silver comparison fixed as `SILVER_GRACE_MINUTES` until step
+# 14's S14-12 deleted it with that comparison.
+GRACE = 20
 # A fixed clock, so no verdict depends on when the suite happened to run.
 NOW = datetime(2030, 6, 5, 4, 30, tzinfo=timezone.utc)
 CUTOFF = NOW - timedelta(minutes=GRACE)

@@ -156,6 +156,11 @@ RETIRED_FIELDS = {
     # `stood_down_tables`/`stood_down_sync_keys` are asked of
     # `chain_tables()`/`sync_keys()` there, and compared.
     ("registry", "mismatched_chains"): "S14-11",
+    # S14-12 deleted the DuckDB comparisons and the 05:30 job's DuckDB arm,
+    # and with them the predicate the comparisons stood down on and chain 3's
+    # answer to which layer that arm wrote.
+    ("warehouse_cutover", "warehouse_checks_stand_down"): "S14-12",
+    ("chains", "pg_orders_write", "stood_down_layers"): "S14-12",
 }
 _S14_11_HEALTH_FIELDS = ("env", "mode", "error", "latched", "mismatch",
                          "unmet_precondition", "shadow", "preflight")
@@ -727,7 +732,8 @@ EXPECTED = json.loads(r"""
 """)
 
 # S14-11's per-chain retirements, read off the literal: every routing
-# answer under `chains` (chain 3's two stand-down sets stay until S14-12/14)
+# answer under `chains` (chain 3's two stand-down sets went in S14-12 and go
+# in S14-14)
 # and every flag field of each `write_chains` entry.
 for _name, _entry in EXPECTED["chains"].items():
     for _field in _entry:
@@ -986,7 +992,6 @@ def capture() -> dict:
     out["warehouse_cutover"] = {
         "mode": wc.mode(), "value": wc.value(), "error": wc.mode_error(),
         "writes_postgres": wc.writes_postgres(), "duckdb_derives": wc.duckdb_derives(),
-        "warehouse_checks_stand_down": wc.warehouse_checks_stand_down(),
         "stood_down_duckdb_checks": sorted(wc.stood_down_duckdb_checks()),
         "preconditions_unmet": [u.key for u in wc.preconditions_unmet()],
         "way_back_refused": list(wc.way_back_refused()),
@@ -998,6 +1003,11 @@ def capture() -> dict:
             "writer", "held", "held_since", "reclassify_needed",
             "stood_down_duckdb_checks", "way_back_refused")},
     }
+    # Deleted in S14-12 (`RETIRED_FIELDS`); asked where it still exists, by
+    # name, so the capture still runs against the trees before it.
+    stand_down = getattr(wc, "warehouse_checks_stand_down", None)
+    if stand_down is not None:
+        out["warehouse_cutover"]["warehouse_checks_stand_down"] = stand_down()
     out["pg_derivation"] = {"mode": pg_derivation.mode(), "owns": pg_derivation.owns(),
                             "error": pg_derivation.mode_error()}
     out["pg_utm_parse"] = {"mode": pg_utm_parse.mode(),
@@ -1037,8 +1047,12 @@ def capture() -> dict:
         chains["pg_forecast_write"]["_routes_postgres"] = getattr(
             pg_forecast_write, "_routes_postgres")(log=False)
     chains["pg_orders_write"].update(
-        stood_down_layers=sorted(pg_orders_write.stood_down_layers()),
         landing_checks_stood_down=sorted(pg_orders_write.landing_checks_stood_down()))
+    # Deleted in S14-12 (`RETIRED_FIELDS`); asked where it still exists, so
+    # the capture still runs against the trees before it.
+    layers = getattr(pg_orders_write, "stood_down_layers", None)
+    if layers is not None:
+        chains["pg_orders_write"]["stood_down_layers"] = sorted(layers())
     # Deleted in S14-09 (`RETIRED_FIELDS`); asked where they still exist, so
     # the capture still runs against the trees before it.
     for name, field in (("unmet_reasons", "unmet_reasons"), ("settle_hold", "settle_hold"),

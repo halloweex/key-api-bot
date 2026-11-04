@@ -10,7 +10,8 @@ one the port shipped wrong or left unguarded:
 3. three admin endpoints rewrote the UTM in DuckDB and never shipped it —
    and since DN-19, which store a re-parse reaches is `KS_UTM_PARSE`'s to
    say, through `reparse_router`, with no ship reachable under `postgres`;
-4. `reconcile_order_utm` was written and nothing exercised it;
+4. `reconcile_order_utm` was written and nothing exercised it (its tests
+   went with it in step 14's S14-12);
 5. a full replace copied whatever DuckDB held, a half-finished re-parse
    included (DN-04) — the row guard, from `TestTheShrinkRule` down, and
    against a real Postgres in `tests/integration/test_order_utm_row_guard.py`.
@@ -23,20 +24,16 @@ import functools
 import inspect
 import textwrap
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core import pg_order_utm
-from core.mirror_reconciliation import ORDER_UTM_TABLE, compare_table
-from core.pg_order_utm import UTM_COLUMNS
 
 REPO = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
-
-
 
 
 def _migration_columns() -> set:
@@ -82,10 +79,26 @@ def _migration_columns() -> set:
             columns.add(words[0])
     return columns
 
-def _row(order_id, campaign="spring", traffic="paid_confirmed", platform="facebook"):
-    return (order_id, "fbads", "paid", campaign, None, None, None,
-            None, None, None, "abc", traffic, platform,
-            NOW - timedelta(hours=6))
+
+def test_the_written_columns_are_the_migrations():
+    """`UTM_COLUMNS` is what the Postgres parser (`core.pg_utm_parse`) writes
+    into `silver.order_utm`. The list that can drift is the migration's, a
+    file and a language away, so that is the one read here: a column the
+    table has and the parser does not carry would be written NULL for ever.
+
+    Until step 14's S14-12 this sat beside the DuckDB comparison's spec
+    (`ORDER_UTM_TABLE`), which went with that comparison; the parser's
+    columns are the same tuple.
+
+    Parsed, not grepped. The first attempt split the DDL text on `")\n"`
+    and stopped inside a *comment* — `VARCHAR(n)` wraps exactly there —
+    which is the failure this repository has written down twice. So the
+    SQL is lifted out with `ast`, its comments are stripped, and the
+    column list is taken by matching parentheses.
+    """
+    from core.pg_order_utm import UTM_COLUMNS
+
+    assert _migration_columns() - {"mirrored_at"} == set(UTM_COLUMNS)
 
 
 class TestTheReadsKeepTheirTimeout:
@@ -515,113 +528,6 @@ class TestAReparseReachesPostgres:
         with patch("core.mirror_reconciliation.configured", return_value=False):
             out = await pg_order_utm.ship_after_reparse(AsyncMock())
         assert "skipped" in out
-
-
-class TestTheComparisonCatchesWhatItMustCatch:
-    """Finding 4. `compare_table` is pure and takes two already-read
-    dictionaries, so the whole comparison can be driven without a database —
-    which is the only reason a planted-defect test is cheap enough to keep."""
-
-    WATERMARK = {"last_ok_at": NOW - timedelta(minutes=2),
-                 "failures_since_ok": 0, "last_error": None}
-
-    def _sides(self):
-        dk = {i: _row(i) for i in (1, 2, 3)}
-        return dk, {k: v for k, v in dk.items()}
-
-    # `None` is a *meaningful* watermark here — it is what "never shipped"
-    # looks like — so the default cannot be None. The first version of this
-    # helper used None for both, and the never-shipped case was silently
-    # handed a healthy watermark and asserted against the wrong branch.
-    _DEFAULT = object()
-
-    def _run(self, dk, pg, watermark=_DEFAULT):
-        synced = {k: v[-1] for k, v in dk.items()}
-        return compare_table(
-            ORDER_UTM_TABLE, dk, synced, pg,
-            self.WATERMARK if watermark is self._DEFAULT else watermark,
-            now=NOW, grace_minutes=20,
-        )
-
-    def test_an_honest_copy_reports_nothing(self):
-        dk, pg = self._sides()
-        assert self._run(dk, pg) == []
-
-    def test_a_row_postgres_lost_is_critical(self):
-        """`full_replace=True` removes the retired category, and correctly:
-        every ship writes the whole table, so a row Postgres is missing was
-        lost rather than retired."""
-        dk, pg = self._sides()
-        del pg[2]
-        issues = self._run(dk, pg)
-        assert issues and any(2 in (i.sample_ids or ()) for i in issues)
-
-    def test_a_renamed_campaign_is_caught(self):
-        """The reason this table is read whole rather than fingerprinted: a
-        bucket fingerprint sums numbers and text *lengths*, and `spring` and
-        `autumn` are both six characters."""
-        dk, pg = self._sides()
-        pg[1] = _row(1, campaign="autumn")
-        assert len("spring") == len("autumn")          # the point, stated
-        issues = self._run(dk, pg)
-        assert issues, "a same-length rename went unreported"
-
-    def test_a_reclassified_order_is_caught(self):
-        dk, pg = self._sides()
-        pg[3] = _row(3, traffic="organic", platform="instagram")
-        assert self._run(dk, pg)
-
-    def test_a_row_only_postgres_has_is_caught(self):
-        dk, pg = self._sides()
-        pg[99] = _row(99)
-        assert self._run(dk, pg)
-
-    def test_a_table_never_shipped_says_that_and_stops(self):
-        """One fact about the schedule, not 32,905 facts about rows."""
-        dk, pg = self._sides()
-        issues = self._run(dk, {}, watermark=None)
-        assert len(issues) == 1
-        assert issues[0].check_name == "mirror_never_shipped"
-
-    def test_a_failing_shipper_is_named_as_such(self):
-        dk, pg = self._sides()
-        del pg[2]
-        issues = self._run(dk, pg, watermark={
-            "last_ok_at": NOW - timedelta(hours=3),
-            "failures_since_ok": 7, "last_error": "connection refused",
-        })
-        assert any(i.check_name == "mirror_failing" for i in issues)
-
-
-class TestTheSpecItself:
-    def test_the_compared_columns_are_the_shipped_columns(self):
-        """`ORDER_UTM_TABLE.columns` *is* `UTM_COLUMNS`, so asserting the two
-        equal proves nothing — it compares an object with itself. The list
-        that can actually drift is the migration's, a file and a language
-        away, so that is the one read here: a column the table has and the
-        shipper does not carry would be written NULL for ever and compared
-        against DuckDB's real value.
-
-        Parsed, not grepped. The first attempt split the DDL text on `")\n"`
-        and stopped inside a *comment* — `VARCHAR(n)` wraps exactly there —
-        which is the failure this repository has written down twice. So the
-        SQL is lifted out with `ast`, its comments are stripped, and the
-        column list is taken by matching parentheses.
-        """
-        assert _migration_columns() - {"mirrored_at"} == set(UTM_COLUMNS)
-
-    def test_it_is_a_full_replace(self):
-        assert ORDER_UTM_TABLE.full_replace is True
-
-    def test_its_clock_is_the_parse_time(self):
-        assert ORDER_UTM_TABLE.synced_column == "parsed_at"
-
-    def test_its_origin_note_is_its_own(self):
-        """The shared default is landing's story — the same parsed tuple in
-        the same call — and that is false here: this is a copy."""
-        from core.mirror_reconciliation import _COPIED_FROM_DUCKDB
-        assert ORDER_UTM_TABLE.origin_note != _COPIED_FROM_DUCKDB
-        assert "organic" in ORDER_UTM_TABLE.origin_note
 
 
 # ── DN-04: the row guard ────────────────────────────────────────────────────

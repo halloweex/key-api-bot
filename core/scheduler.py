@@ -84,6 +84,10 @@ SEASONALITY_SCHEDULE = {"day_of_week": "mon", "hour": 4, "minute": 0}
 # Checks whose scheduled instant we may simply not have been alive for, and how
 # stale their last *successful* verdict may be at process start before we run a
 # one-off catch-up. Shape: job_id -> (data_quality layer, max age s, delay s).
+# The layer is None for a job whose every layer is a sibling below —
+# `dq_reconciliation`, whose DuckDB half wrote `reconciliation` until step
+# 14's S14-12 (standing down from chain 3's flip, so its age decided nothing
+# since).
 #
 # A CronTrigger computes its next fire from the moment of registration, so a
 # process that starts at 02:00:51 for a job due at 02:00:00 sets the next run a
@@ -95,19 +99,18 @@ SEASONALITY_SCHEDULE = {"day_of_week": "mon", "hour": 4, "minute": 0}
 # The delay keeps the catch-up out of the startup rush (initial sync, model
 # training, first warehouse refresh) and staggers the two checks.
 CATCHUP_CHECKS = {
-    "dq_reconciliation": ("reconciliation", 26 * 3600, 300),
+    "dq_reconciliation": (None, 26 * 3600, 300),
     "dq_integrity_check": ("integrity", 8 * 3600, 120),
     "dq_mirror_landing": ("mirror_landing", 26 * 3600, 180),
 }
 
 # Layers a job above writes besides its own, whose age decides its catch-up
-# too. `dq_reconciliation` writes three: the DuckDB half, and the Postgres and
-# ClickHouse arms against the same snapshot, each a layer of its own so that
-# an arm that stopped cannot hide behind a fresh sibling — and the canary
-# pages each at 30 h. Keyed on `reconciliation` alone, an arm that failed its
-# last run while the DuckDB half succeeded got no catch-up, so a restart
-# inside the 26–30 h window left it to page at 30 h although one run would
-# have cleared it. The 26 h limit is what keeps the canary's first probe,
+# too. `dq_reconciliation` writes two: the Postgres and ClickHouse arms
+# against the same snapshot, each a layer of its own so that an arm that
+# stopped cannot hide behind a fresh sibling — and the canary pages each at
+# 30 h. (It wrote a third, DuckDB's `reconciliation`, until step 14's S14-12;
+# keyed on that one alone, an arm that failed its last run while the DuckDB
+# half succeeded got no catch-up.) The 26 h limit is what keeps the canary's first probe,
 # 90 s after a start, from paging a layer the catch-up is about to refresh.
 # It cannot hold a page back that is owed: a run that compared nothing — the
 # ClickHouse arm against a copy over 3 h old included — is a failed run and
@@ -463,16 +466,13 @@ class BackgroundScheduler:
                     )
                 except Exception as e:
                     logger.warning(f"Could not queue inventory catch-up: {e}")
-        from core.pg_orders_write import stood_down_layers
-
-        stood_down = stood_down_layers()
         for job_id, (layer, max_age_s, delay_s) in CATCHUP_CHECKS.items():
             # The layers this process writes for the job, and their ages: its
-            # own — absent counts as never succeeded — unless chain 3 stood it
-            # down, and each sibling arm this process writes
-            # (`CATCHUP_SIBLING_LAYERS`), where absence is no evidence.
+            # own, if it has one — absent counts as never succeeded — and each
+            # sibling arm this process writes (`CATCHUP_SIBLING_LAYERS`), where
+            # absence is no evidence.
             candidates = []
-            if layer not in stood_down:
+            if layer is not None:
                 candidates.append((layer, (ages.get(layer) or {}).get("age_seconds")))
             for sibling in CATCHUP_SIBLING_LAYERS.get(job_id, ()):
                 sibling_entry = ages.get(sibling)
@@ -2091,14 +2091,19 @@ class BackgroundScheduler:
                     "will report itself unwatched: %s", e)
 
             # Same reason for the sync watermarks a chain took with it: the
-            # freshness check is sync, `meta.chain_watermarks` is not.
+            # freshness check is sync, `meta.chain_watermarks` is not. With
+            # them, when each row was last written: `last_sync_orders` holds
+            # KeyCRM's clock and stands still every quiet night, so the check
+            # judges the order step by its own stamp (JUDGED_BY_LAST_WRITE).
             chain_watermarks = None
+            chain_stamps = None
             try:
                 from core.write_chains import sync_keys
                 moved_keys = sync_keys()
                 if moved_keys:
-                    from core.pg_chain_watermarks import read_values
-                    chain_watermarks = await read_values(moved_keys)
+                    from core.pg_chain_watermarks import read_values_and_stamps
+                    chain_watermarks, chain_stamps = await read_values_and_stamps(
+                        moved_keys)
             except Exception as e:
                 logger.error(
                     "chain watermarks unreadable, freshness check will report "
@@ -2149,6 +2154,7 @@ class BackgroundScheduler:
                     issues = check_internal_integrity(
                         conn, inventory_calendar=inventory_calendar,
                         chain_watermarks=chain_watermarks,
+                        chain_stamps=chain_stamps,
                         frozen_sync_rows=frozen_sync_rows,
                         raised_out=raised_checks, pairing_out=duckdb_measured,
                         stood_down=stood_down)
@@ -2317,12 +2323,15 @@ class BackgroundScheduler:
             return result
 
     async def _run_dq_mirror_landing(self) -> Dict[str, Any]:
-        """Reconciliation A: does Postgres hold — and compute — what DuckDB does?
+        """The `mirror_landing` layer: the Postgres-alone completeness and
+        liveness checks, `data/bot.db` against its copy, the витрина, and
+        ClickHouse against Postgres (`core/mirror_reconciliation.py`'s
+        docstring). Until step 14's S14-12 it was Reconciliation A, Postgres
+        against DuckDB, and the closing criterion of step 05.
 
-        The closing criterion for step 05 is this reporting zero, so it runs on
-        its own layer with its own age rather than riding along with the
-        integrity scan — one layer covering two jobs would make a stale mirror
-        check invisible behind a fresh integrity one.
+        Its own layer with its own age rather than riding along with the
+        integrity scan — one layer covering two jobs would make a stale check
+        invisible behind a fresh integrity one.
 
         07:30 Kyiv: after the 07:00 integrity scan, before the 09:00 digest, so
         the morning's message carries the same morning's verdict. Nowhere near
@@ -2342,19 +2351,14 @@ class BackgroundScheduler:
             machine_attempts_note,
             overall_severity,
         )
-        from core.duckdb_store import get_store
         from core.mirror_reconciliation import (
             MIRROR_LAYER,
             configured,
-            read_duckdb_side,
-            reconcile_mirror,
+            pg_gold_internal_check,
             reconcile_bot_state,
-            reconcile_gold,
-            reconcile_operational,
-            reconcile_order_utm,
+            reconcile_buyer_completeness,
+            reconcile_order_utm_completeness,
             reconcile_order_versions,
-            reconcile_orders,
-            reconcile_silver,
         )
 
         with correlation_context():
@@ -2363,9 +2367,8 @@ class BackgroundScheduler:
                 return {"skipped": "KS_PG_DSN is not set"}
 
             started_at = datetime.now(timezone.utc)
-            logger.info("Mirror reconciliation (landing PG vs DuckDB) starting")
+            logger.info("Mirror reconciliation starting")
 
-            store = await get_store()
             error_message = None
             issues = []
             # Each check in its own try, and why that is not a second layer.
@@ -2387,21 +2390,10 @@ class BackgroundScheduler:
             # only change is that the checks that did complete are no longer
             # thrown away, and a CRITICAL among them still pages.
             raised: list = []
-            # What the comparisons DN-29 retires reported, and which reached a
-            # verdict: their Silver and UTM findings share `mirror_*` names
-            # with the comparisons that stay, so the job marks whose page is
-            # whose (`warehouse_cutover.note_comparisons_reported`).
-            from core import warehouse_cutover
-
-            retired_reported: set = set()
-            retired_verdicts: set = set()
             # Every check this run asked, verdict or raise, in order — so that
-            # a stand-down can be read off the run itself. Absent findings
-            # cannot say it: `compare_gold` excuses a cell whose orders synced
-            # inside its grace, so a `reconcile_gold` that ran when it should
-            # not have files nothing on the morning after a busy sync, and
-            # reads exactly like one that stood down. The step-13 rehearsal
-            # judged P5 on this list, until S14-03 deleted it.
+            # what ran can be read off the run itself: absent findings cannot
+            # say whether a check ran. The step-13 rehearsal judged P5 on this
+            # list, until S14-03 deleted it.
             checks_run: list = []
 
             async def check(name, run) -> bool:
@@ -2415,11 +2407,6 @@ class BackgroundScheduler:
                     logger.exception("Mirror reconciliation check %s raised", name)
                     return False
                 issues += found
-                if name in warehouse_cutover.RETIRED_COMPARISONS:
-                    retired_verdicts.add(name)
-                    retired_reported.update(
-                        i.check_name for i in found
-                        if i.severity == Severity.CRITICAL)
                 return True
 
             # Whether ClickHouse re-aggregated Gold this run (OD-08). The
@@ -2432,91 +2419,26 @@ class BackgroundScheduler:
             history_compared = False
 
             try:
-                # The DuckDB read and the Postgres round-trips are deliberately
-                # in separate blocks: the store's lock is not held across the
-                # network.
-                async def _landing():
-                    # Under KS_DUCKDB=off the DuckDB side is read only for
-                    # what survives the stand-down — under chains 5 and 6,
-                    # nothing (stage 5, PR-7). Under on, read first as always.
-                    from core import duckdb_switch
-
-                    if duckdb_switch.is_off():
-                        async def read_duckdb(specs):
-                            async with store.connection() as conn:
-                                return read_duckdb_side(conn, specs)
-
-                        return await reconcile_mirror(None, read_duckdb=read_duckdb)
-                    async with store.connection() as conn:
-                        dk_side = read_duckdb_side(conn)
-                    return await reconcile_mirror(dk_side)
-
-                await check("reconcile_mirror", _landing)
-                # Orders are compared by fingerprint and drill-down instead,
-                # and that interleaves the two stores — so it takes the store
-                # and manages its own short acquisitions.
-                await check("reconcile_orders", lambda: reconcile_orders(store))
-                # The three comparisons that set DuckDB's Silver, Gold and UTM
-                # against Postgres' stand down while Postgres alone derives
-                # them (KS_WRITE_WAREHOUSE=postgres, DN-29) — DuckDB's copies
-                # are as old as the switch, and after a Sunday compaction
-                # empty — and while the way back is still owed its first
-                # validated full DuckDB tick. The last run ids where they
-                # found zero are the final independent proof of the parallel
-                # period; `pg_gold_internal_check` below keeps the one Gold
-                # question that needs no DuckDB.
-                duckdb_compared = not warehouse_cutover.warehouse_checks_stand_down()
-                # And the two computations of Silver. Same layer: it is the
-                # same question — do the stores agree — asked one level up.
-                if duckdb_compared:
-                    await check("reconcile_silver", lambda: reconcile_silver(store))
-                # And the UTM classification beside it — the one Silver object
-                # Postgres is shipped rather than computes, so a difference is
-                # a defect in the shipper and not in a projection. Read whole
-                # rather than fingerprinted: the table is almost all text, and
-                # a campaign renamed to another name of the same length moves
-                # no number and no length. Revision 0018.
-                if duckdb_compared:
-                    await check("reconcile_order_utm", lambda: reconcile_order_utm(store))
-                # And whether every order the parser reads has a current
-                # verdict at all (DN-16). The comparison above cannot see an
-                # order both copies lack, and has nothing to compare once the
-                # parse moves into Postgres; this reads Postgres alone, so it
-                # outlives it. Report-only, like the rest of the layer.
-                from core.mirror_reconciliation import reconcile_order_utm_completeness
+                # Until step 14's S14-12 the job opened with Reconciliation A —
+                # Postgres against DuckDB: the landing mirror, the orders by
+                # fingerprint, Silver, the UTM verdicts and Gold (those three
+                # standing down since step 13), the order-level expenses, the
+                # replicated operational tables with the latch's two copies
+                # (`chain_latch_disagrees`, which the integrity layer's chain
+                # invariants judge since), the buyers, the SMS tables and the
+                # dashboard's users. Every chain writes Postgres since S14-00,
+                # so there was no second copy left to compare.
+                #
+                # Whether every order the UTM parser reads has a current
+                # verdict (DN-16). Postgres alone. Report-only, like the rest
+                # of the layer.
                 await check(
                     "reconcile_order_utm_completeness",
                     lambda: reconcile_order_utm_completeness(),
                 )
-                # And the order-level expenses — landing, like the catalogue,
-                # but delta-shipped like orders, so gated on `backfilled_at`
-                # and read whole rather than fingerprinted (revision 0020).
-                from core.mirror_reconciliation import reconcile_expenses
-                await check("reconcile_expenses", lambda: reconcile_expenses(store))
-                # And of Gold, one level up again. Still the same layer, and
-                # here the argument is stronger than for Silver: all three run
-                # inside this one call, so they cannot have different ages, and
-                # separate layers would only invent an age that does not exist.
-                # That is the opposite of `reconciliation_pg`, which is a
-                # separate layer precisely because it *can* stop running on its
-                # own. (An exception here used to skip every check below it;
-                # see `check` — the layer still has one age and the run is still
-                # failed, but the checks below still run and still page.)
-                if duckdb_compared:
-                    await check("reconcile_gold", lambda: reconcile_gold(store))
-                else:
-                    # And, while the comparison stands down, the roll-up
-                    # question asked of Postgres by itself (DN-28): it rode
-                    # `compare_gold`, so it is asked once a run either way and
-                    # needs no DuckDB read.
-                    from core.mirror_reconciliation import pg_gold_internal_check
-                    await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
-                # And the five tables that are neither landing nor computed —
-                # the ones with no source to be rebuilt from. Last because they
-                # are the least likely to be wrong and the most expensive to
-                # read, and because a Silver or Gold finding above them is
-                # almost certainly the better explanation of both.
-                await check("reconcile_operational", lambda: reconcile_operational(store))
+                # Gold's two grains against each other (DN-28): Postgres
+                # alone, asked on every run since `reconcile_gold` went.
+                await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
                 # And the third store. `data/bot.db` is SQLite, not DuckDB, and
                 # it is the only one of the three that is in no backup — which
                 # is the whole reason its fifty rows are being copied at all.
@@ -2527,29 +2449,10 @@ class BackgroundScheduler:
                 # anything. Same layer as the rest for the same reason — one
                 # call, one age, and a fourth layer would invent one.
                 await check("reconcile_order_versions", lambda: reconcile_order_versions())
-                # And the buyer landing — step 2. Same layer, same argument.
-                from core.mirror_reconciliation import reconcile_buyers
-                await check("reconcile_buyers", lambda: reconcile_buyers(store))
                 # And whether every landed buyer has a verdict and every buyer
-                # an order names exists — Postgres alone, so it holds in every
-                # state of chain 4, and runs with the flag off so its false
-                # positives are measured before the flip (chain 4 PR-1 step 4).
-                from core.mirror_reconciliation import reconcile_buyer_completeness
+                # an order names exists — Postgres alone (chain 4 PR-1 step 4).
                 await check("reconcile_buyer_completeness",
                             lambda: reconcile_buyer_completeness())
-                # And the SMS tab's own six (revision 0013), on the way to
-                # answering /sms without DuckDB. Five of them are irreplaceable
-                # in `stock_movements`' sense — a frozen roster cannot be
-                # recomputed, so a lost one costs a campaign its control group
-                # and with it any measurable lift. Stands down once
-                # KS_SMS_STORE=postgres freezes the DuckDB side.
-                from core.mirror_reconciliation import reconcile_sms
-                await check("reconcile_sms", lambda: reconcile_sms(store))
-                # And who may open the dashboard (revision 0016). Same layer,
-                # so it cannot have an age of its own; stands down once
-                # KS_USER_STORE=postgres makes Postgres the writer.
-                from core.mirror_reconciliation import reconcile_dashboard_users
-                await check("reconcile_dashboard_users", lambda: reconcile_dashboard_users(store))
                 # And the витрина, which rebuilds itself and then checks the
                 # materialisation against the same Silver snapshot.
                 from core.pg_vitrina import reconcile_customer_profile
@@ -2561,8 +2464,8 @@ class BackgroundScheduler:
                 # than an exception — one store being down must not silence
                 # the comparisons of the others. And never silent: without
                 # KS_CH_URL, or on any run that did not compare, the Gold half
-                # files `gold_values_unwatched` — CRITICAL once it is the only
-                # independent check of Gold left (OD-08 (a)). The archive half
+                # files `gold_values_unwatched`, CRITICAL: it is the only
+                # independent check of Gold (OD-08 (a)). The archive half
                 # still stands down without KS_CH_URL.
                 from core.ch_history import reconcile_ch_history
                 from core.ch_silver import reconcile_clickhouse
@@ -2627,17 +2530,10 @@ class BackgroundScheduler:
                                 if i.severity == Severity.CRITICAL],
                     evidence=evidence_for_agent(MIRROR_LAYER, issues, run_id=run_id),
                 )
-            # After the page is delivered, so a page this run delivered is
-            # marked too. Only a run in which the retired comparisons ran:
-            # one where they stood down knows nothing about their pages.
-            if retired_verdicts:
-                try:
-                    warehouse_cutover.note_comparisons_reported(
-                        retired_reported,
-                        complete=retired_verdicts == set(
-                            warehouse_cutover.RETIRED_COMPARISONS))
-                except Exception as e:  # noqa: BLE001 — the next run marks again
-                    logger.warning(f"Mirror reconciliation: pages not marked: {e}")
+            # A run marked the delivered pages the comparisons step 13
+            # retired were still reporting
+            # (`warehouse_cutover.note_comparisons_reported`) while they ran;
+            # none has run since step 13, and step 14's S14-12 deleted them.
             # A run in which ClickHouse did not compare cannot announce what
             # only that comparison re-examines as resolved (OD-08) — the Gold
             # half's or the archive's.
@@ -3340,26 +3236,20 @@ class BackgroundScheduler:
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
 
-        Pulls (month, source) rollup for the last 90 days from both DuckDB
-        and KeyCRM with a 2-hour watermark, classifies discrepancies,
-        persists, and alerts on CRITICAL.
+        Fetches the last 90 days of orders from KeyCRM once, with a 2-hour
+        watermark, and compares that one snapshot against Postgres (layer
+        `reconciliation_pg`) and ClickHouse (layer `reconciliation_ch`), each
+        persisted and alerted on CRITICAL by its own arm. Then re-fetches by
+        id the orders the Postgres arm found missing (MISSING_IN_DK).
+
+        Until step 14's S14-12 the snapshot was compared against DuckDB too,
+        on layer `reconciliation`; that arm stood down from chain 3's flip
+        (2026-10-15) and was deleted with the layer.
         """
         from datetime import datetime, timedelta, timezone
         from zoneinfo import ZoneInfo
-        from core.data_quality import (
-            DiscrepancyClass,
-            Severity,
-            alert_fingerprint,
-            evidence_for_agent,
-            classify_discrepancies,
-            classify_order_discrepancies,
-            format_alert_message,
-            machine_attempts_note,
-            overall_severity,
-        )
-        from core.duckdb_store import get_store
+        from core.data_quality import DiscrepancyClass
         from core.reconciliation_io import (
-            duckdb_orders_in_window,
             keycrm_orders_in_window,
             rollup_from_orders,
         )
@@ -3383,64 +3273,32 @@ class BackgroundScheduler:
                 f"window={window_start}..{window_end} as_of={as_of.isoformat()}"
             )
 
-            store = await get_store()
             error_message = None
-            issues: list = []
-            discrepancies: list = []
             api_calls = 0
             pg_result = None
             ch_result = None
-            # Chain 3: once the orders are written to Postgres, DuckDB's arm
-            # compares a store that stopped receiving them — every new order
-            # MISSING, every status change STATUS_DRIFT. It stands down: not
-            # extracted, not persisted, not paged, not resolved; the Postgres
-            # arm is the comparison against the source, and drives the repair.
-            from core import pg_orders_write
-
-            duckdb_arm = "reconciliation" not in pg_orders_write.stood_down_layers()
 
             try:
                 # 1. KeyCRM orders (counts API calls). Runs first because it
-                #    decides which orders are in-flight — DuckDB's updated_at is
-                #    a synced copy and can only be older, so KeyCRM's cut is the
-                #    wider one and both sides must honour it.
+                #    decides which orders are in-flight — the stores' copies
+                #    can only be older, so KeyCRM's cut is the wider one and
+                #    every side must honour it.
                 kc_orders, api_calls, inflight_ids = await keycrm_orders_in_window(
                     window_start, window_end, watermark=as_of,
                 )
 
                 kc_rollup = rollup_from_orders(kc_orders)
-                if duckdb_arm:
-                    # 2. The same facts from the warehouse, minus the same orders
-                    async with store.connection() as conn:
-                        dk_orders = duckdb_orders_in_window(
-                            conn, window_start, window_end, watermark=as_of,
-                            exclude_ids=inflight_ids,
-                        )
-
-                    # 3. Classify (pure). Both rollups come from one function,
-                    #    so the two sides cannot aggregate differently. The
-                    #    per-order pass costs no extra API calls and catches
-                    #    what totals hide: offsetting errors net to zero in a
-                    #    monthly sum.
-                    dk_rollup = rollup_from_orders(dk_orders)
-                    discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
-                    discrepancies += classify_order_discrepancies(dk_orders, kc_orders)
-                    logger.info(
-                        f"DQ reconciliation: dk_cells={len(dk_rollup)} "
-                        f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
-                    )
-                # The same KeyCRM snapshot, compared a second time — against
-                # Postgres. Free: the API calls are the expensive part and they
-                # have already been made, and comparing both stores to the
-                # *identical* fetch is what makes the two verdicts mean
-                # anything next to each other.
+                # The KeyCRM snapshot, compared against Postgres. Comparing
+                # every store to the *identical* fetch is what makes the
+                # verdicts mean anything next to each other, and the API calls
+                # are the expensive part.
                 pg_result = await self._reconcile_postgres(
                     kc_orders, kc_rollup,
                     window_start=window_start, window_end=window_end,
                     as_of=as_of, inflight_ids=inflight_ids,
                 )
-                # …and a third time, against ClickHouse. Same snapshot, same
-                # zero API calls, own layer.
+                # …and a second time, against ClickHouse. Same snapshot, zero
+                # API calls, own layer.
                 ch_result = await self._reconcile_clickhouse(
                     kc_orders,
                     window_start=window_start, window_end=window_end,
@@ -3452,29 +3310,9 @@ class BackgroundScheduler:
 
             ended_at = datetime.now(timezone.utc)
 
-            # 4. Persist — DuckDB's arm only while it compares (chain 3).
-            run_id = None
-            try:
-                if duckdb_arm:
-                    run_id = await dq_journal.journal_run(
-                        started_at=started_at, ended_at=ended_at,
-                        as_of=as_of,
-                        window_start=window_start, window_end=window_end,
-                        layer="reconciliation",
-                        issues=issues, discrepancies=discrepancies,
-                        api_calls_used=api_calls,
-                        error_message=error_message,
-                    )
-            except Exception as e:
-                logger.exception(f"DQ reconciliation persist failed: {e}")
-
-            # 4b. The Postgres verdict, on its own layer so it gets its own age
-            #     and its own digest section. Never allowed to disturb the one
-            #     above it: if this raised, the DuckDB reconciliation still
-            #     happened and still has to be reported. The guard is what keeps
-            #     that promise — it was written here long before it was, and a
-            #     NameError in the Postgres arm once stood to cost the DuckDB
-            #     alert, the repair and the ClickHouse verdict all at once.
+            # 2. Each arm's verdict, on its own layer so it gets its own age
+            #    and its own digest section, and neither may disturb the other
+            #    or the repair below.
             if pg_result is not None:
                 try:
                     await self._persist_postgres_reconciliation(
@@ -3492,12 +3330,15 @@ class BackgroundScheduler:
                 except Exception:
                     logger.exception("DQ ClickHouse reconciliation verdict failed")
 
-            # 5. Repair what can only be repaired by id. A delta sync keyed on
+            # 3. Repair what can only be repaired by id. A delta sync keyed on
             #    updated_at can never reach an order we do not hold, so finding
             #    them and doing nothing would mean finding them again tomorrow.
-            #    Additive only — MISSING_IN_KC is deliberately not touched,
-            #    because deleting on the strength of one API reading is how you
-            #    turn a fetch glitch into data loss.
+            #    The orders we do not hold are the ones Postgres lacks: its arm
+            #    classified the snapshot with Postgres on the store's side, so
+            #    MISSING_IN_DK there means missing from the store the chain
+            #    writes. Additive only — MISSING_IN_KC is deliberately not
+            #    touched, because deleting on the strength of one API reading
+            #    is how you turn a fetch glitch into data loss.
             #    Half-written orders used to be repaired here too. They are
             #    found by scanning our own tables, owe nothing to the comparison
             #    or its 90-day window, and cost one API call each — so they hung
@@ -3506,12 +3347,7 @@ class BackgroundScheduler:
             #    now: `halfwritten_repair`.
             repair = None
             if not error_message:
-                # Under chain 3 the orders we do not hold are the ones
-                # Postgres lacks: its arm classified the same snapshot with
-                # Postgres on the store's side, so MISSING_IN_DK there means
-                # missing from the store the chain writes.
-                source = (discrepancies if duckdb_arm else
-                          (pg_result or {}).get("discrepancies") or [])
+                source = (pg_result or {}).get("discrepancies") or []
                 repairable = sorted({
                     oid
                     for d in source
@@ -3528,39 +3364,7 @@ class BackgroundScheduler:
                     except Exception as e:
                         logger.exception(f"DQ repair failed: {e}")
 
-            # 6. Alert on CRITICAL severity
-            sev = overall_severity(issues, discrepancies)
-            if sev == Severity.CRITICAL and not error_message and duckdb_arm:
-                msg = format_alert_message(
-                    "reconciliation", sev, issues, discrepancies,
-                    window=(window_start, window_end),
-                    machine_note=machine_attempts_note(),
-                )
-                if repair and repair.get("repaired"):
-                    msg += (
-                        f"\n\nRe-fetched {repair['repaired']} order(s) by id"
-                        + (f", {repair['remaining']} queued for the next run"
-                           if repair.get("remaining") else "")
-                        + "."
-                    )
-                await self._send_dq_alert_throttled(
-                    "reconciliation", msg,
-                    alert_fingerprint("reconciliation", sev, issues, discrepancies),
-                    conditions=[i.check_name for i in issues
-                                if i.severity == Severity.CRITICAL],
-                    evidence=evidence_for_agent("reconciliation", issues,
-                                                discrepancies, run_id=run_id),
-                )
-            # A stood-down arm resolves nothing: it looked at nothing, and the
-            # flip waited for its pages to clear (`landing_pages_clear`).
-            if duckdb_arm:
-                await self._resolve_dq_layer("reconciliation", issues, error_message)
-
             result = {
-                **({} if duckdb_arm else {"stood_down": ["reconciliation"]}),
-                "run_id": run_id,
-                "discrepancies_count": len(discrepancies),
-                "severity": sev.value,
                 "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
                 "api_calls_used": api_calls,
                 "repair": repair,
@@ -3649,16 +3453,10 @@ class BackgroundScheduler:
 
         with correlation_context():
             now = datetime.now(timezone.utc)
-            from core.pg_orders_write import stood_down_layers
-
-            stood_down = stood_down_layers()
-            layers = []
-            for layer in WATCHED_LAYERS:
-                # A layer chain 3 stood down is written by nothing; its last
-                # run would read stale here every morning.
-                if layer in stood_down:
-                    continue
-                layers.append(layer)
+            # Every watched layer is written by a job that runs: DuckDB's
+            # `reconciliation`, which chain 3 stood down, left the list in
+            # step 14's S14-12.
+            layers = list(WATCHED_LAYERS)
             # The beat and every layer's runs, from Postgres (chain 9): the
             # beat inherited from the copy of DuckDB's `sync_metadata` while
             # `meta.chain_watermarks` lacks it.

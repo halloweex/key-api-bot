@@ -1,10 +1,19 @@
 -- D8 — the 07:30 mirror_landing run, as far as the derived layers go.
 --
 -- WHY IT EXISTS
--- `dq_mirror_landing` compares Postgres' Silver, Gold, customer profile and UTM
--- copy against DuckDB's every morning with a tolerance of zero. Under own the
--- two stores derive independently for the first time, so this comparison is
--- the soak's actual criterion: zero findings on the derived tables, every day.
+-- `dq_mirror_landing` judges Postgres' derived tables every morning with a
+-- tolerance of zero: ClickHouse re-derives Gold from a round-tripped Silver
+-- and the two engines' Gold are set against each other — the one independent
+-- re-aggregation left — beside the Postgres-alone checks of the same tables
+-- (`gold_rollup_mismatch`, `customer_profile_mismatch`, the UTM verdicts'
+-- completeness). Zero findings on the derived tables, every day.
+--
+-- Until step 14's S14-12 the run also set Postgres' Silver, Gold and UTM
+-- against DuckDB's (`reconcile_silver`, `reconcile_order_utm`,
+-- `reconcile_gold`, standing down since step 13) and filed their names here:
+-- `mirror_buckets_disagree`, `gold_missing_cells`, `gold_orphan_cells`.
+-- S14-12 deleted those comparisons, so D8 reads ClickHouse's comparison and
+-- the Postgres-alone checks only.
 --
 -- THE EVIDENCE IS A COPY, SO FIRST ASK WHETHER THE COPY IS CURRENT
 -- The DQ journal is written in DuckDB and carried into Postgres by the hourly
@@ -20,7 +29,8 @@
 -- - no mirror_landing run since that 07:30: the job did not fire (a deploy on
 --   the cron instant, or the scheduler down); the catch-up only runs at start.
 -- - the run carries `error_message`: it wrote a row and checked nothing.
--- - findings on the derived tables: the two stores' Silver or Gold disagree.
+-- - findings on the derived tables: Postgres' and ClickHouse's Gold disagree,
+--   or a Postgres-alone check of them failed.
 --   `app.data_quality_issues.description` names the columns.
 --
 -- A VERDICT STILL INSIDE ITS GRACE IS NOT A DISAGREEMENT EITHER
@@ -39,7 +49,7 @@
 -- findings say only that it did not compare: `gold_values_unwatched` (OD-08
 -- (a): KS_CH_URL unset, a failed ship or read-back, two empty Golds) and the
 -- two WARNs about ClickHouse itself beside it. Counted as findings they read
--- "the two stores' Silver or Gold disagree" about a run in which one engine
+-- "the two engines' Gold disagree" about a run in which one engine
 -- saw nothing. So with nothing else found they make the run UNKNOWN; any real
 -- finding beside them is still a FAIL, since a disagreement outranks a blind
 -- spot. A test holds the list to every WARN `reconcile_clickhouse` files.
@@ -104,9 +114,7 @@ derived AS (
     JOIN runs USING (run_id)
     WHERE i.table_name IN ('silver.orders', 'gold.daily_revenue',
                            'app.customer_profile', 'silver.order_utm')
-       OR i.check_name IN ('mirror_buckets_disagree', 'gold_rollup_mismatch',
-                           'gold_missing_cells', 'gold_orphan_cells',
-                           'gold_cell_values', 'customer_profile_mismatch')
+       OR i.check_name IN ('gold_rollup_mismatch', 'customer_profile_mismatch')
 ),
 grace_checks AS (
     SELECT unnest(ARRAY['pg_order_utm_in_flight']) AS check_name
@@ -162,7 +170,7 @@ SELECT 'D8 mirror_landing (derived)'::text AS "check",
            WHEN agg.errored > 0 THEN left(agg.errors, 400)
            WHEN agg.n_findings > 0 THEN left(format('%s finding(s) on the derived tables: %s',
                                                     agg.n_findings, agg.listed), 400)
-           WHEN agg.n_blind > 0 THEN left(format('ClickHouse did not compare Gold (%s): the comparisons of the two stores found nothing, and nothing re-aggregated Gold in a second engine; re-run after the next dq_mirror_landing',
+           WHEN agg.n_blind > 0 THEN left(format('ClickHouse did not compare Gold (%s): the Postgres-alone checks found nothing, and nothing re-aggregated Gold in a second engine; re-run after the next dq_mirror_landing',
                                                  agg.blind_listed), 400)
            ELSE format('%s run(s) since %s Kyiv, no error, zero findings on the derived tables',
                        agg.n_runs, to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))

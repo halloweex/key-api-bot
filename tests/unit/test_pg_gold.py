@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_constants import REVENUE_SOURCE_IDS
 from core.duckdb_store import (
     DUCKDB_GOLD_COLUMNS,
     GOLD_REVENUE_SELECT_SQL,
@@ -29,12 +28,23 @@ from core.duckdb_store import (
 from core.mirror_reconciliation import (
     _GOLD_ADDITIVE,
     _GOLD_ROLLUP_MEASURES,
-    _GOLD_SOURCE_MEASURES,
-    GOLD_GRACE_MINUTES,
     GOLD_PG_TABLE,
-    SILVER_GRACE_MINUTES,
-    compare_gold,
+    _gold_internal_findings,
 )
+
+# DuckDB's channel column → (source_id, the Postgres column holding the same
+# number). The daily comparison read DuckDB's Gold through this mapping
+# (`mirror_reconciliation._GOLD_SOURCE_MEASURES`) until step 14's S14-12
+# deleted it; `TestTheTwoShapesAgree` still runs both projections over one
+# Silver, so the mapping it asserts is written out here.
+_GOLD_SOURCE_MEASURES = {
+    "instagram_revenue": (1, "revenue"),
+    "telegram_revenue": (2, "revenue"),
+    "shopify_revenue": (4, "revenue"),
+    "instagram_orders": (1, "orders_count"),
+    "telegram_orders": (2, "orders_count"),
+    "shopify_orders": (4, "orders_count"),
+}
 from core.pg_gold import (
     GOLD_COLUMNS,
     GOLD_MEASURE_COLUMNS,
@@ -209,16 +219,6 @@ class TestOneDefinitionOfAGoldMeasure:
             assert tuple(columns) == DUCKDB_GOLD_COLUMNS
         finally:
             await store.close()
-
-    def test_the_channel_mapping_is_only_sound_while_those_sources_are_active(self):
-        """DuckDB's channel columns filter `source_id = n`; Postgres filters
-        `is_active_source`. They agree exactly because 1, 2 and 4 are active —
-        drop one from REVENUE_SOURCE_IDS and the reconciliation starts
-        comparing two different questions.
-        """
-        mapped = {source_id for source_id, _ in _GOLD_SOURCE_MEASURES.values()}
-        assert mapped <= set(REVENUE_SOURCE_IDS)
-
 
 # ── the projection, executed ─────────────────────────────────────────────────
 
@@ -402,110 +402,27 @@ def _cell(**overrides):
     return row
 
 
-def _dk_row(**overrides):
-    row = {c: Decimal(0) for c in _GOLD_ROLLUP_MEASURES}
-    row.update({c: Decimal(0) for c in _GOLD_SOURCE_MEASURES})
-    row.update({k: Decimal(str(v)) for k, v in overrides.items()})
-    return row
-
-
 def _names(issues):
     return {i.check_name for i in issues}
 
 
-class TestCompareGold:
-    def test_identical_sides_report_nothing(self):
-        dk = {(DAY, "retail"): _dk_row(revenue=100, instagram_revenue=100)}
-        rollup = {(DAY, "retail"): _cell(revenue=100)}
-        fine = {(DAY, "retail", 1): _cell(revenue=100)}
-        assert compare_gold(dk, {}, rollup, fine) == []
-
-    def test_a_missing_fine_row_reads_as_zero_not_as_a_missing_row(self):
-        """Postgres writes a channel row only for channels that sold; DuckDB
-        writes a zero into the column regardless."""
-        dk = {(DAY, "retail"): _dk_row(revenue=100, instagram_revenue=100)}
-        rollup = {(DAY, "retail"): _cell(revenue=100)}
-        fine = {(DAY, "retail", 1): _cell(revenue=100)}
-        assert compare_gold(dk, {}, rollup, fine) == []
-
-    def test_a_cell_postgres_never_aggregated_is_critical(self):
-        dk = {(DAY, "retail"): _dk_row(revenue=100)}
-        issues = compare_gold(dk, {}, {}, {})
-        assert _names(issues) == {"gold_missing_cells"}
-        assert issues[0].severity.name == "CRITICAL"
-
-    def test_a_cell_only_postgres_has_is_critical(self):
-        rollup = {(DAY, "retail"): _cell(revenue=100)}
-        issues = compare_gold({}, {}, rollup, {})
-        assert "gold_orphan_cells" in _names(issues)
-
-    def test_a_disagreeing_measure_names_the_column_and_both_values(self):
-        dk = {(DAY, "retail"): _dk_row(revenue=100)}
-        rollup = {(DAY, "retail"): _cell(revenue=101)}
-        issues = [i for i in compare_gold(dk, {}, rollup, {})
-                  if i.check_name == "gold_cell_values"]
-        assert len(issues) == 1
-        assert "revenue" in issues[0].description
-        assert "DuckDB=100" in issues[0].description
-        assert "Postgres=101" in issues[0].description
-
-    def test_a_disagreeing_channel_is_caught_through_the_mapping(self):
-        dk = {(DAY, "retail"): _dk_row(revenue=100, instagram_revenue=100)}
-        rollup = {(DAY, "retail"): _cell(revenue=100)}
-        fine = {(DAY, "retail", 1): _cell(revenue=99)}
-        issues = [i for i in compare_gold(dk, {}, rollup, fine)
-                  if i.check_name == "gold_cell_values"]
-        assert "instagram_revenue" in issues[0].description
-
-    def test_avg_order_value_may_differ_by_a_cent_and_nothing_else_may(self):
-        """DuckDB's DECIMAL division promotes to DOUBLE; PostgreSQL divides
-        exactly. Every other column is compared at zero."""
-        dk = {(DAY, "retail"): _dk_row(avg_order_value=Decimal("8.00"))}
-        rollup = {(DAY, "retail"): _cell(avg_order_value=Decimal("8.01"))}
-        assert compare_gold(dk, {}, rollup, {}) == []
-
-        dk = {(DAY, "retail"): _dk_row(avg_order_value=Decimal("8.00"))}
-        rollup = {(DAY, "retail"): _cell(avg_order_value=Decimal("8.02"))}
-        assert "gold_cell_values" in _names(compare_gold(dk, {}, rollup, {}))
-
-        dk = {(DAY, "retail"): _dk_row(returns_revenue=Decimal("8.00"))}
-        rollup = {(DAY, "retail"): _cell(returns_revenue=Decimal("8.01"))}
-        assert "gold_cell_values" in _names(compare_gold(dk, {}, rollup, {}))
-
-    def test_a_cell_holding_a_just_synced_order_is_not_reported(self):
-        """Postgres is legitimately up to KS_PG_SILVER_INTERVAL_S behind."""
-        now = datetime.now(timezone.utc)
-        dk = {(DAY, "retail"): _dk_row(revenue=100)}
-        fresh = {(DAY, "retail"): now - timedelta(minutes=1)}
-        assert compare_gold(dk, fresh, {}, {}, now=now) == []
-
-    def test_the_same_cell_is_reported_once_the_window_has_passed(self):
-        now = datetime.now(timezone.utc)
-        dk = {(DAY, "retail"): _dk_row(revenue=100)}
-        stale = {(DAY, "retail"): now - timedelta(minutes=GOLD_GRACE_MINUTES + 1)}
-        assert "gold_missing_cells" in _names(compare_gold(dk, stale, {}, {}, now=now))
-
-    def test_the_grace_window_is_the_one_silver_uses(self):
-        """Gold is rebuilt in the same call, on the same floor, so it is behind
-        by the same amount. Two numbers here would drift apart."""
-        assert GOLD_GRACE_MINUTES == SILVER_GRACE_MINUTES
-
-
 class TestTheRollUpIsCheckedAgainstItsOwnFineRows:
-    """The only check that sees sources 3 and 5, which have no DuckDB column."""
+    """The only check that sees sources 3 and 5, which have no DuckDB column.
+    Asked of `_gold_internal_findings` directly since step 14's S14-12 deleted
+    `compare_gold`, which handed it the same two grains."""
 
     def test_fine_rows_that_do_not_add_up_are_critical(self):
         rollup = {(DAY, "retail"): _cell(revenue=100)}
         fine = {(DAY, "retail", 1): _cell(revenue=60),
                 (DAY, "retail", 5): _cell(revenue=30)}
-        issues = compare_gold({}, {}, rollup, fine)
+        issues = _gold_internal_findings(rollup, fine)
         assert "gold_rollup_mismatch" in _names(issues)
 
     def test_fine_rows_that_add_up_are_silent(self):
         rollup = {(DAY, "retail"): _cell(revenue=100)}
         fine = {(DAY, "retail", 1): _cell(revenue=70),
                 (DAY, "retail", 5): _cell(revenue=30)}
-        issues = [i for i in compare_gold({}, {}, rollup, fine)
+        issues = [i for i in _gold_internal_findings(rollup, fine)
                   if i.check_name == "gold_rollup_mismatch"]
         assert issues == []
 
@@ -519,7 +436,7 @@ class TestTheRollUpIsCheckedAgainstItsOwnFineRows:
         rollup = {(DAY, "retail"): _cell(unique_customers=1)}
         fine = {(DAY, "retail", 1): _cell(unique_customers=1),
                 (DAY, "retail", 2): _cell(unique_customers=1)}
-        issues = [i for i in compare_gold({}, {}, rollup, fine)
+        issues = [i for i in _gold_internal_findings(rollup, fine)
                   if i.check_name == "gold_rollup_mismatch"]
         assert issues == []
 
@@ -546,9 +463,9 @@ def _gold_row(source_id, **measures):
 
 
 class TestTheRollUpCheckStandsAlone:
-    """Step 13 retires `reconcile_gold`, which was the only road to the one
-    check that sees sources 3 and 5. `pg_gold_internal_check` asks it of
-    Postgres alone; `compare_gold` leaves it out when that runs."""
+    """Step 13 retired `reconcile_gold`, which was the only road to the one
+    check that sees sources 3 and 5, and step 14's S14-12 deleted it.
+    `pg_gold_internal_check` asks it of Postgres alone, on every run."""
 
     def _check(self, rows):
         from core.mirror_reconciliation import pg_gold_internal_check
@@ -596,68 +513,10 @@ class TestTheRollUpCheckStandsAlone:
             n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         assert not names & {"store", "connection", "fetch_duckdb_gold", "get_store"}
 
-    def test_compare_gold_can_leave_it_out(self):
-        rollup = {(DAY, "retail"): _cell(revenue=100)}
-        fine = {(DAY, "retail", 1): _cell(revenue=60)}
-        assert "gold_rollup_mismatch" in _names(compare_gold({}, {}, rollup, fine))
-        assert "gold_rollup_mismatch" not in _names(
-            compare_gold({}, {}, rollup, fine, rollup_internal=False))
-
-    @pytest.mark.parametrize("writer, asked_inside", [("postgres", False)])
-    def test_reconcile_gold_leaves_it_out_exactly_when_it_stands_alone(
-        self, monkeypatch, writer, asked_inside,
-    ):
-        """Once a run, never twice and never not at all: the standalone check
-        asks it while Postgres derives, on the one predicate. (`reconcile_gold`
-        asked it while DuckDB derived; since step 14's S14-00 that is no state
-        this code reaches.)"""
-        import asyncio
-        from contextlib import asynccontextmanager
-        from unittest.mock import MagicMock
-
-        from core import mirror_reconciliation as mr, warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", writer)
-        rollup = {(DAY, "retail"): _cell(revenue=100)}
-        fine = {(DAY, "retail", 1): _cell(revenue=60)}
-        dk = {(DAY, "retail"): _dk_row(revenue=100, instagram_revenue=60)}
-
-        @asynccontextmanager
-        async def _conn():
-            yield MagicMock()
-
-        store = MagicMock()
-        store.connection = _conn
-        ok = {"last_ok_at": datetime.now(timezone.utc), "failures_since_ok": 0}
-        with patch("core.pg_landing.enabled", return_value=True), \
-             patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
-             patch("core.pg.require_revision", new=AsyncMock()), \
-             patch.object(mr, "fetch_watermarks", AsyncMock(return_value={GOLD_PG_TABLE: ok})), \
-             patch.object(mr, "_watermark_findings", return_value=([], ok["last_ok_at"])), \
-             patch.object(mr, "fetch_duckdb_gold", return_value=(dk, {})), \
-             patch.object(mr, "fetch_pg_gold", AsyncMock(return_value=(rollup, fine))):
-            issues = asyncio.run(mr.reconcile_gold(store))
-        assert ("gold_rollup_mismatch" in _names(issues)) is asked_inside
-
-
 # ── the hook ─────────────────────────────────────────────────────────────────
 
 
 class TestTheJobRunsIt:
-    def test_the_mirror_landing_job_reconciles_gold_after_silver(self):
-        """Gold aggregates the Silver the same run just compared, so a Gold
-        finding reported before the Silver one would be an effect above its
-        cause."""
-        import inspect
-
-        from core.scheduler import BackgroundScheduler
-
-        # Parsed, not grepped — the function's comments name every check.
-        from tests.unit.test_mirror_landing_isolation import check_order
-
-        order = check_order()
-        assert order.index("reconcile_silver") < order.index("reconcile_gold")
-
     def test_the_gold_table_is_watched_under_the_same_layer(self):
         """All three comparisons run inside one call, so they cannot have
         different ages and a fourth layer would invent one."""

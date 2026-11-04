@@ -437,8 +437,9 @@ class TestTheJob:
         # Parsed, not grepped — the function's comments name every check.
         from tests.unit.test_mirror_landing_isolation import check_order
 
-        order = check_order()
-        assert order.index("reconcile_operational") < order.index("reconcile_bot_state")
+        # It ran after the operational comparison until step 14's S14-12
+        # deleted that one; it still runs, once.
+        assert check_order().count("reconcile_bot_state") == 1
 
     def test_the_copy_path_still_does_not_touch_the_bot(self):
         """Step 03's first half needed no change to the bot at all — it reads
