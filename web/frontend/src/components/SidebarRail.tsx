@@ -9,7 +9,7 @@ import { useNavStore } from '../store/navStore'
 import { useAuth, usePermission, useUserDisplayName } from '../hooks/useAuth'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { api } from '../api/client'
-import { navigate, useRouter } from '../hooks/useRouter'
+import { isUnder, navigate, useRouter } from '../hooks/useRouter'
 import { NavLink } from './NavLink'
 import type { IconComponent } from './icons'
 import { UserProfileDropdown } from './UserProfileDropdown'
@@ -41,7 +41,7 @@ const Logo = ({ size = 32 }: { size?: number }) => (
 
 function CollapsedNavIcon({ href, icon: Icon, label }: { href: string; icon: IconComponent; label: string }) {
   const path = useRouter()
-  const isActive = path === href
+  const isActive = isUnder(path, href)
 
   const handleClick = (e: React.MouseEvent) => {
     e.preventDefault()
