@@ -156,9 +156,6 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg, reconciliation_ch — with issues/diffs (за сессией) |
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
-| `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
-| `/api/mirror/backfill/buyers` | Re-ship every buyer DuckDB holds, with its contacts, detached; chain 4's pre-flip lever (POST, admin) |
-| `/api/mirror/backfill/catalogue` | Carry the catalogue rows only DuckDB holds and KeyCRM retired (product 1055) into Postgres; dry run by default; chain 6's pre-flip lever (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
@@ -1185,7 +1182,7 @@ whole reason the group is read from the source now.
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
 | `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, the витрина, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
-| `replicate_operational` | every 1 h | Copy the five irreplaceable tables and `data/bot.db` into Postgres |
+| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
@@ -1836,8 +1833,9 @@ the end of `connect()`.
   Anything unlisted gets an anchor to this section — which is the signal to
   add one.
 - **The alert says what the machine already tried**, and still never triggers
-  a repair. `machine_attempts_note()` reads the two ids-diff heal ledgers
-  (24 h window) and is *passed into* `format_alert_message`, which stays pure
+  a repair. `machine_attempts_note()` reads the ClickHouse archive's heal
+  ledger (24 h window; the buyers' ids-diff was the other until step 14's
+  S14-13 deleted it) and is *passed into* `format_alert_message`, which stays pure
   but for one mode cached at boot: `KS_UTM_PARSE` picks which lever line the
   `pg_order_utm_*` findings carry (`REMEDIATION_UTM_PARSED_IN_POSTGRES`).
 - **Mirror freshness**: `/api/health` publishes `mirrors` — `last_ok_at` age,
@@ -1914,7 +1912,7 @@ routed differently:
 - **The copy-back knew mirrored tables**, and `POST /api/mirror/backfill/buyers`
   was the lever its pre-flip handover named. Both went with step 14's
   S14-04, and the way back is the image ("Before any rollback to an image
-  from before step 14"); the backfill route stays.
+  from before step 14"); the backfill route went in S14-13.
 
 The chain itself, its rollback under the DN-06 latch and the owner's decisions
 are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`, revised against today's main in
@@ -2014,7 +2012,7 @@ files `chain_buyer_orphan_rows` (CRITICAL, from the handover on),
 the copy-back could not carry it back) and `chain_buyer_contact_missing` (WARN):
 all three read zero on production on 2026-09-30. Its watermark is left to the
 canary, which pages on the step's own state. `deploy/stage4_soak.sh` reads
-B1–B5 — copies stood down, the watermark's stored value at 90 minutes,
+B1–B5 (B1 went in step 14's S14-13 with the copies it judged) — copies stood down, the watermark's stored value at 90 minutes,
 verdicts and the override floor, the selection's backlog, integrity — and
 knows a fifth state for this chain, `held`: flagged, unlatched and a reader
 not on postgres, reported by B1 as the flip that did not move. B1 dates the
@@ -2347,7 +2345,8 @@ Proved against a real Postgres in
 `tests/integration/test_chain_copy_back_orders.py` until step 14's S14-00,
 which deleted it: every case set up the pre-flip state through DuckDB's order
 writer, which nothing routes to any more.
-**Soak checks O1–O5**: the hourly copy of the misses and the two ids-diffs
+**Soak checks O1–O5** (O1 went in step 14's S14-13 with the copies it
+judged; O2–O5 stay): the hourly copy of the misses and the two ids-diffs
 stood down (no `last_ok_at` or failure on the misses, no `backfilled_at` on
 the bronze three, after the owner rows — else `SOAK_ORDERS_FLIP_AT`, else a
 75-minute window read as UNKNOWN; the chain stamps `last_ok_at` on the bronze
@@ -2383,6 +2382,22 @@ the backfills and the misses ledger's copy, and not the per-tick orders and
 expenses mirrors, which never asked the revision.
 
 ### The Postgres mirror of landing
+
+**Since step 14's S14-13 there is no mirror.** Every table it shipped is a
+write chain's, so `pg_landing._mirror`, `mirror_categories`, `mirror_products`,
+`mirror_expenses`, `mirror_orders`, the catalogue carry, the stand-down helpers
+(`tables_stood_down*`, the shipping units), the backfills and the hourly
+ids-diffs (`core/pg_backfill.py`, `core/pg_expense_backfill.py`,
+`core/pg_buyers.py`) and the four `POST /api/mirror/backfill/*` routes are
+deleted. What stays in `core/pg_landing.py`, byte for byte, is what the chains
+run: `_write_order_rows`, `_write_rows`, `WATERMARK_OK_SQL` and
+`_record_failure`; `enabled()`/`mirror_on()` answer True until S14-15. The
+checks that were gated on the mirror (`reconcile_order_versions`,
+`reconcile_buyer_completeness`, `reconcile_bot_state`, the UTM completeness)
+are gated on `mirror_reconciliation.configured()` (`KS_PG_DSN`). A
+`mirror_backfill_pending` finding now says to restore the table's history from
+the nightly dump. History below.
+
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
 rows; DuckDB and Postgres each write the rows they are handed. Bookkeeping
 columns are *not* shared — DuckDB stamps `synced_at`, Postgres `mirrored_at` —
@@ -2421,6 +2436,13 @@ items in **13.2 s**, then compared column by column — **0 differing rows on
 both tables**.
 
 ### Replicated, not mirrored: the manager classification
+
+**Since step 14's S14-13 there is no copy**: chain 5 writes both tables, and
+`core/pg_replication.py` (`replicate_managers`, its startup run and its call
+in the retail-status route, whose answer lost its `replica` key) is deleted;
+`MANAGERS_TABLE`/`CLASSIFICATIONS_TABLE` live in `core/pg_managers_write.py`.
+History below.
+
 `bronze.managers` and `app.manager_classifications` are the one pair that does
 **not** come from a KeyCRM payload. `sales_type` is decided by
 `silver_sales_type_case()`, four of whose six branches read these tables, and
@@ -2519,7 +2541,8 @@ over 26 h old and the shape the standing watch would file.
 (CRITICAL), `chain_manager_unclassified` (WARN, from the latch on),
 `chain_manager_intervals_broken` and `chain_manager_retail_disagrees` (WARN),
 and a NULL `set_at` as `chain_required_column_null` — one read,
-`pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (the
+`pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (gone
+since step 14's S14-13, with the replica; the
 replica stayed away; with `managers_on=0` or `pending` and owner rows
 standing, a FAIL as a lost marker naming
 `data/write-chain-owners/pg_managers_write` and `ROLLBACK_LEVER` (the
@@ -2629,8 +2652,8 @@ conditions (`mirror_stood_down`, `owner_row_without_marker`,
 `gold_orphan_cells`). Every chain writes Postgres since S14-00, so there was
 no second copy to compare. The job keeps its Postgres-alone checks and
 ClickHouse's; `chain_latch_disagrees` moved to the chain invariants (below).
-`fetch_duckdb_rows` and the catalogue's specs stay for
-`pg_landing.carry_retired_catalogue` until S14-13. History below.
+`fetch_duckdb_rows` and the catalogue's specs went with
+`pg_landing.carry_retired_catalogue` in S14-13. History below.
 
 `dq_mirror_landing` (layer `mirror_landing`, daily 07:30) compares
 `bronze.products` and `bronze.categories` in Postgres against `products` and
@@ -2775,6 +2798,15 @@ failed runs, so the layer ages go stale and the 09:00 digest says so. Fails
 closed, not silently — but you find out the next morning, not at deploy.
 
 ### The five tables with no source to be rebuilt from
+
+**Since step 14's S14-13 nothing copies them**: each is a write chain's, and
+`core/pg_operational.py` is deleted with `replicate_after_manual_expense`, the
+SMS state's copy (`replicate_sms`) and the dashboard users' copy
+(`replicate_dashboard_users`). The hourly job keeps its id,
+`replicate_operational` — `/api/jobs`' history and the catch-up read it — and
+runs `derive_gender_pg` and `replicate_bot_state`. `app.sync_metadata`,
+`app.warehouse_refreshes` and `app.reconciliation_log` are history (OD-S5-4).
+History below.
 
 `bronze.*` can be re-fetched from KeyCRM; Silver and Gold can be recomputed.
 These cannot, which is why the plan's 2026-08-22 amendment routes them to
@@ -3717,12 +3749,14 @@ Checkout — доля дошедших до следующего шага. То�
 читает Postgres, поэтому отставание, которое ревизия 0018 сознательно приняла,
 здесь перестаёт быть приемлемым. `add/update/delete_expense` зовут
 `replicate_after_manual_expense` — 116 мс по замеру, **вне лока стора** и без
-права упасть, потому что запись в DuckDB уже состоялась.
+права упасть, потому что запись в DuckDB уже состоялась. (С S14-11 пишет
+цепочка 8, а с S14-13 копии нет вовсе.)
 
 **Сверка**: `expense_types` идёт с каталогом (27 строк, отгружается целиком
 каждый синк, так что первая успешная отгрузка и есть его история).
 `bronze.expenses` едет дельтой, поэтому гейтится на `backfilled_at` как заказы,
-имеет `core/pg_expense_backfill.py` и `POST /api/mirror/backfill/expenses`, и
+имела `core/pg_expense_backfill.py` и `POST /api/mirror/backfill/expenses`
+(оба удалены в S14-13), и
 **читается целиком, а не отпечатками**: 15 тыс. строк дёшево сравнить точно, а
 `description` — текст, переписывание которого в ту же длину отпечаток не видит.
 Часы сверки — `synced_at` (бухгалтерия DuckDB), не `created_at`: штамп KeyCRM
@@ -4133,7 +4167,8 @@ version by a clock both stores carry — and it was the gate before every flip.
 Its specs were derived from the shippers' shapes and the daily comparison's
 specs, never written out. All of it is in git and in the rollback image.
 
-I1 dates the handover by chain 1's owner rows, then by
+I1 and E1 went in step 14's S14-13 with the copies they judged; until then
+I1 dated the handover by chain 1's owner rows, then by
 `SOAK_INVENTORY_FLIP_AT`, and with neither reads a copy's stamp inside its
 75-minute window as UNKNOWN. I1 counts a copy's failure only after the
 handover and for the day it was stamped, and with `inventory_on=0` and owner
@@ -5149,6 +5184,12 @@ noise, not the deploy. Two "before"s say nothing about a live one.
 
 ### The order write path asks the registry too (DN-22a)
 
+**History since step 14's S14-13**: nothing ships orders out of DuckDB, so the
+question (`order_tables_stood_down*`) and every path that asked it are gone.
+What the section's review settled stays and is held by
+`tests/unit/test_write_chains.py`: the order tables and the archive each have
+one writer, `pg_landing._write_order_rows`, which chain 3 runs.
+
 Until DN-22a nothing that ships orders out of DuckDB asked who owns the order
 tables, so registering a chain for `bronze.orders` would have had the sync's
 mirror overwrite the chain's rows and archive each overwrite in
@@ -5387,9 +5428,9 @@ step-13 switch files its `reader:*` keys from, so the two cannot disagree.
 Over-inclusive on purpose: the walked list beats a hand-picked one. The warning
 is rate-limited to once an hour.
 
-**Product 1055 is carried before the flip**, by
+**Product 1055 was carried before the flip**, by
 `POST /api/mirror/backfill/catalogue` (dry run by default;
-`pg_landing.carry_retired_catalogue`). It ships only the rows the daily
+`pg_landing.carry_retired_catalogue`; both deleted in step 14's S14-13). It ships only the rows the daily
 comparison already calls retired — its own rule, `synced_at <= last_ok_at`,
 pinned row for row against `compare_table` — with a `mirrored_at` before the
 watermark, so they still read as retired, and never touches
@@ -5552,7 +5593,7 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
   (`report_ledger.land_in_duckdb`, `land_pending`) with the copy-back, and
   since S14-00 the `duckdb` branch is unreachable.
 
-**Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
+**Soak:** H1 (`28_h1`, gone since step 14's S14-13 with the copy) — the hourly copy stood down on each on-chain's tables
 since its owner rows, a failure counting for the day it was stamped; H2
 (`29_h2`) — the 07:30 run filed no `shadow_*` above INFO (bar
 `shadow_missing_in_duckdb` once web has run `KS_DUCKDB=off`, OD-S5-3 (a)) —
@@ -5797,6 +5838,11 @@ leaves `weekly_patterns` as they are, on purpose. Expect `retail_months: 12`,
 four under `stood_down`.
 
 ### Every other shipper asks too, and a walk finds them (DN-22b)
+
+**History since step 14's S14-13**, which deleted every shipper below and the
+question they asked (`tables_stood_down*`). The walk stays, for the two things
+it still holds: one writer of the order tables and the archive, and the `/sms`
+and access store helpers writing Postgres alone with no switch.
 
 The catalogue, the order-level expenses, the buyers and the manager
 classification reached Postgres through paths that never asked who owns the

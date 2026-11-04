@@ -1,6 +1,6 @@
 -- I2 (chain 1) — the chain's own sync watermarks keep moving.
 --
--- Only under KS_WRITE_INVENTORY=postgres; the variables are I1's.
+-- Only under KS_WRITE_INVENTORY=postgres; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- Under the Postgres writer, `last_sync_offers` and `last_sync_stocks` live in
@@ -45,6 +45,6 @@ SELECT 'I2 inventory watermarks'::text AS "check",
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 1 still writes DuckDB (KS_WRITE_INVENTORY is not postgres and no latch marker)'
            WHEN '1' THEN agg.listed || ' (limit 75 min)'
-           ELSE format('inventory_on=%s: see I1', flag.state)
+           ELSE format('inventory_on=%s: KS_WRITE_INVENTORY not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN agg;

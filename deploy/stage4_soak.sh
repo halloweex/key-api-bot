@@ -298,7 +298,6 @@ run_check() {
             -v dq_pg_warehouse_on="$DQ_PG_WAREHOUSE_ON" \
             -v buyers_on="$BUYERS_ON" \
             -v buyers_flip_at="$BUYERS_FLIP_AT" \
-            -v buyers_held_by="$BUYERS_HELD_BY" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
             -v managers_on="$MANAGERS_ON" \
             -v managers_flip_at="$MANAGERS_FLIP_AT" \

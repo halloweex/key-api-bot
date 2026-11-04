@@ -1,6 +1,6 @@
 -- I3 (chain 1) — stock movements after the flip look like the ones before it.
 --
--- Only under KS_WRITE_INVENTORY=postgres; the variables are I1's. The window is
+-- Only under KS_WRITE_INVENTORY=postgres; the variables are deploy/stage4_soak.sh's. The window is
 -- the last 14 days, or since the flip if that is later.
 --
 -- WHY IT EXISTS
@@ -65,6 +65,6 @@ SELECT 'I3 inventory movements'::text AS "check",
                       to_char(win.since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
                       agg.max_initial, offers.n, agg.no_product,
                       COALESCE('; initial bursts: ' || agg.bursts, ''))
-           ELSE format('inventory_on=%s: see I1', flag.state)
+           ELSE format('inventory_on=%s: KS_WRITE_INVENTORY not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN win CROSS JOIN offers CROSS JOIN agg;

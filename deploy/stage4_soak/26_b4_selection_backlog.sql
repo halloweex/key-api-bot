@@ -1,6 +1,6 @@
 -- B4 (chain 4) — the buyers the step owes KeyCRM a fetch for stay few.
 --
--- Only under chain 4; the variables are B1's.
+-- Only under chain 4; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- The step selects every buyer an order names that `bronze.buyers` does not
@@ -49,9 +49,9 @@ SELECT 'B4 buyers selection backlog'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 4 still writes DuckDB (KS_WRITE_BUYERS is not postgres and no latch marker)'
-           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB (see B1)'
+           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB'
            WHEN '1' THEN format('%s buyer(s) owed a fetch (limit 50), %s of them for over a day',
                                 f.owed, f.day_old)
-           ELSE format('buyers_on=%s: see B1', flag.state)
+           ELSE format('buyers_on=%s: KS_WRITE_BUYERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN facts f;

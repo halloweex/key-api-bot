@@ -2,7 +2,7 @@
 --
 -- I5 (chain 1) — the stock movement id allocator is above every id.
 --
--- Only under KS_WRITE_INVENTORY=postgres; the variables are I1's. Runs as
+-- Only under KS_WRITE_INVENTORY=postgres; the variables are deploy/stage4_soak.sh's. Runs as
 -- ks_app, the sequence's owner, for E2's reason: `ks_readonly` cannot read the sequence, and
 -- `pg_sequences.last_value` is NULL for a sequence nothing has called yet.
 -- deploy/stage4_soak.sh keeps the session read-only.
@@ -37,6 +37,6 @@ SELECT 'I5 inventory allocator'::text AS "check",
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 1 still writes DuckDB (KS_WRITE_INVENTORY is not postgres and no latch marker)'
            WHEN '1' THEN format('next id %s, max id %s over %s row(s)', seq.next_id, t.max_id, t.n)
-           ELSE format('inventory_on=%s: see I1', flag.state)
+           ELSE format('inventory_on=%s: KS_WRITE_INVENTORY not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN seq CROSS JOIN t;

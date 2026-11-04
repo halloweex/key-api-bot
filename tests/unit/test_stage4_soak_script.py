@@ -46,15 +46,6 @@ case "$1" in
     exec)
         if [ "$2" = "keycrm-web" ]; then
             if [ "$3" = "test" ]; then
-                # When a test asks, the moment of every marker read, and the
-                # first one waits past a second boundary, so a clock the script
-                # took after it cannot fall in the same second.
-                if [ -n "${FAKE_MARKER_CLOCK:-}" ]; then
-                    first=""
-                    [ -s "$FAKE_MARKER_CLOCK" ] || first=1
-                    date -u +%s >> "$FAKE_MARKER_CLOCK"
-                    [ -z "$first" ] || sleep 1.1
-                fi
                 # `test -f <marker>`: the latch, read the way the script reads it.
                 case "$5" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
@@ -62,9 +53,6 @@ case "$1" in
                     */pg_managers_write) [ -n "${FAKE_MANAGERS_LATCHED:-}" ] && exit 0 ;;
                     */pg_orders_write) [ -n "${FAKE_ORDERS_LATCHED:-}" ] && exit 0 ;;
                     */pg_dq_journal_write) [ -n "${FAKE_DQ_JOURNAL_LATCHED:-}" ] && exit 0 ;;
-                    */pg_watchdog_write) [ -n "${FAKE_WATCHDOGS_LATCHED:-}" ] && exit 0 ;;
-                    */pg_weekly_ledger_write) [ -n "${FAKE_WEEKLY_LEDGER_LATCHED:-}" ] && exit 0 ;;
-                    */pg_traffic_ledger_write) [ -n "${FAKE_TRAFFIC_LEDGER_LATCHED:-}" ] && exit 0 ;;
                 esac
                 exit 1
             fi
@@ -78,9 +66,6 @@ case "$1" in
                 KS_WRITE_MANAGERS) v="${FAKE_KS_WRITE_MANAGERS-__unset__}" ;;
                 KS_WRITE_ORDERS) v="${FAKE_KS_WRITE_ORDERS-__unset__}" ;;
                 KS_WRITE_DQ_JOURNAL) v="${FAKE_KS_WRITE_DQ_JOURNAL-__unset__}" ;;
-                KS_WRITE_WATCHDOGS) v="${FAKE_KS_WRITE_WATCHDOGS-__unset__}" ;;
-                KS_WRITE_WEEKLY_LEDGER) v="${FAKE_KS_WRITE_WEEKLY_LEDGER-__unset__}" ;;
-                KS_WRITE_TRAFFIC_LEDGER) v="${FAKE_KS_WRITE_TRAFFIC_LEDGER-__unset__}" ;;
                 KS_DUCKDB) v="${FAKE_KS_DUCKDB-__unset__}" ;;
                 *) v="__unset__" ;;
             esac
@@ -316,7 +301,8 @@ class TestChain4:
 
     def test_the_flag_with_every_reader_is_one(self, tmp_path):
         run = _run(tmp_path, FAKE_KS_WRITE_BUYERS=" Postgres ", **self.READERS)
-        assert all("buyers_on=1 " in c and "buyers_held_by= " in c for c in run.psql)
+        assert all("buyers_on=1 " in c for c in run.psql)
+        assert "held by" not in run.out
 
     @pytest.mark.parametrize("reader", ["FAKE_KS_SMS_STORE", "FAKE_KS_READ_SEARCH_INDEX",
                                         "FAKE_KS_READ_DASHBOARD"])
@@ -324,14 +310,17 @@ class TestChain4:
         readers = {**self.READERS, reader: "duckdb"}
         run = _run(tmp_path, FAKE_KS_WRITE_BUYERS="postgres", **readers)
         name = reader[len("FAKE_"):]
-        assert all("buyers_on=held " in c and f"buyers_held_by={name} " in c
+        # The reader is reported, not passed: B1 read `buyers_held_by`, until
+        # step 14's S14-13 deleted it.
+        assert all("buyers_on=held " in c and "buyers_held_by" not in c
                    for c in run.psql), run.psql
         assert f"held by {name}" in run.out
 
     def test_an_unset_reader_holds_it_too(self, tmp_path):
         readers = {k: v for k, v in self.READERS.items() if k != "FAKE_KS_READ_DASHBOARD"}
         run = _run(tmp_path, FAKE_KS_WRITE_BUYERS="postgres", **readers)
-        assert all("buyers_held_by=KS_READ_DASHBOARD " in c for c in run.psql)
+        assert all("buyers_on=held " in c for c in run.psql)
+        assert "held by KS_READ_DASHBOARD" in run.out
 
     def test_the_latch_outranks_the_flag_and_the_readers(self, tmp_path):
         """Latched, the chain writes Postgres whatever the flag or the readers
@@ -429,49 +418,17 @@ class TestChain3:
                    for c in run.psql), run.psql
         assert "orders flip at 2026-10-12 10:30+03" in run.out
 
-    def test_the_five_checks_are_in_the_report(self, healthy):
-        """O1–O5, each once, in the order a reader works down them."""
+    def test_the_four_checks_are_in_the_report(self, healthy):
+        """O2–O5, each once, in the order a reader works down them. (O1, the
+        copies stood down, went in step 14's S14-13 with the copies.)"""
         labels = [label for label in healthy.rows if label.startswith("O")]
-        assert labels == ["O1 orders copies stood down", "O2 orders watermark",
-                          "O3 order versions", "O4 half-written orders",
-                          "O5 orders integrity"], labels
+        assert labels == ["O2 orders watermark", "O3 order versions",
+                          "O4 half-written orders", "O5 orders integrity"], labels
 
 
-class TestTheMarkerClock:
-    """O1 and M1 judge owner rows standing beside a marker the script found
-    missing, and the script reads the markers some thirty psql sessions before
-    those two files run. A healthy first write takes the marker and then
-    claims the owner rows, so the checks need the moment the markers were
-    read: owner rows dated after it are a chain that latched during the
-    report, not a lost marker (chain 3 soak review, 2026-10-10)."""
-
-    @staticmethod
-    def _read_at(run):
-        stamps = {m.group(1) for c in run.psql
-                  for m in [re.search(r"markers_read_at=(\S*)", c)] if m}
-        assert len(stamps) == 1 and len(run.psql) == len(FILES), (stamps, run.psql)
-        return stamps.pop()
-
-    def test_it_is_passed_in_utc_to_the_second(self, healthy):
-        stamp = self._read_at(healthy)
-        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp), stamp
-
-    def test_it_is_taken_before_any_marker_is_read(self, tmp_path):
-        """Truncated to the second it can only err early, which reads a latch
-        in that second as taken during the report: UNKNOWN, never a false
-        FAIL. Mutation: take it after the marker reads, beside the loop that
-        runs the checks — the fake's first read waits past a second boundary,
-        so this fails."""
-        from datetime import datetime, timezone
-
-        clock = tmp_path / "marker-clock"
-        run = _run(tmp_path, FAKE_MARKER_CLOCK=str(clock))
-        read_at = datetime.strptime(self._read_at(run), "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc).timestamp()
-        reads = [int(x) for x in clock.read_text().split()]
-        assert any(c.endswith("/pg_orders_write") for c in run.calls), run.calls
-        assert any(c.endswith("/pg_managers_write") for c in run.calls), run.calls
-        assert reads and read_at <= min(reads), (read_at, reads)
+# `TestTheMarkerClock` held `markers_read_at` — the moment the script read the
+# latch markers, which O1 and M1 judged owner rows against — until step 14's
+# S14-13 deleted both checks and the variable with them.
 
 
 class TestChain9:
@@ -499,33 +456,8 @@ class TestChain9:
         assert all("dq_journal_direct=invalid" in c for c in run.psql), run.psql
 
 
-class TestTheOtherShadowChains:
-    """Chains 10, 11a and 11b (OD-02 (c)) reach H1 and H2 the way chain 9
-    reaches D8: the flag, outranked by the latch. Mutation: stop passing one
-    of the three, or drop the latch from `shadow_state` — a latched chain with
-    its flag put back would read "not applicable" in the one state the stand-
-    down exists for."""
-
-    NAMES = (("watchdogs_on", "KS_WRITE_WATCHDOGS", "WATCHDOGS"),
-             ("weekly_ledger_on", "KS_WRITE_WEEKLY_LEDGER", "WEEKLY_LEDGER"),
-             ("traffic_ledger_on", "KS_WRITE_TRAFFIC_LEDGER", "TRAFFIC_LEDGER"))
-
-    def test_unset_is_zero(self, healthy):
-        for var, _, _ in self.NAMES:
-            assert all(f"{var}=0" in c for c in healthy.psql), (var, healthy.psql)
-
-    @pytest.mark.parametrize("var,env,latch", NAMES)
-    def test_the_flag_is_one_and_a_typo_invalid(self, tmp_path, var, env, latch):
-        run = _run(tmp_path / "on", **{f"FAKE_{env}": " Postgres "})
-        assert all(f"{var}=1" in c for c in run.psql), run.psql
-        run = _run(tmp_path / "typo", **{f"FAKE_{env}": "postgress"})
-        assert all(f"{var}=invalid" in c for c in run.psql), run.psql
-
-    @pytest.mark.parametrize("var,env,latch", NAMES)
-    def test_the_latch_outranks_the_flag(self, tmp_path, var, env, latch):
-        run = _run(tmp_path, **{f"FAKE_{env}": "duckdb", f"FAKE_{latch}_LATCHED": "1"})
-        assert all(f"{var}=1" in c for c in run.psql), run.psql
-        assert f"{var}=1 ({env})" in run.out
+# `TestTheOtherShadowChains` held the states of chains 10, 11a and 11b, which
+# only H1 read, until step 14's S14-13 deleted H1 and the three states.
 
 
 class TestStage5:

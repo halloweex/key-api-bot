@@ -1,6 +1,6 @@
 -- B5 (chain 4) — what is true of the three buyer tables on their own.
 --
--- Only under chain 4; the variables are B1's.
+-- Only under chain 4; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- The daily comparison against DuckDB stands down for these tables once the
@@ -53,11 +53,11 @@ SELECT 'B5 buyers integrity'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 4 still writes DuckDB (KS_WRITE_BUYERS is not postgres and no latch marker)'
-           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB (see B1)'
+           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB'
            WHEN '1' THEN format(
                '%s orphaned contact(s), %s orphaned verdict(s), %s NULL name(s), '
                '%s buyer(s) whose phone or email is not in their contact list',
                f.orphan_contacts, f.orphan_verdicts, f.null_names, f.contact_missing)
-           ELSE format('buyers_on=%s: see B1', flag.state)
+           ELSE format('buyers_on=%s: KS_WRITE_BUYERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN facts f;
