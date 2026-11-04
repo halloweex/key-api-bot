@@ -300,6 +300,56 @@ class TestWhenTheFirstWriteFails:
         assert "1 of its 1 table(s)" in found.description
 
     @pytest.mark.asyncio
+    async def test_a_marker_lost_while_the_process_runs_is_read_from_disk(self, stores):
+        """The marker is read afresh on every run, never the process's cache:
+        a volume lost under a running web must not wait for a restart to be
+        filed. The file is unlinked by hand — `release()` would also empty
+        the cache, so a `read_facts` answering from the cache passed the test
+        above. Mutation: `_latch_facts(owners, dict(chain_latch._cache()))`."""
+        store, pool, env = stores
+        env.setenv("KS_WRITE_EXPENSES", "postgres")
+        await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
+        assert await _latch_findings(pool) == []
+
+        chain_latch.marker_path("pg_expenses_write").unlink()
+        assert chain_latch.latched("pg_expenses_write"), "the cache forgot it"
+
+        (found,) = await _latch_findings(pool)
+        assert (found.table_name, found.severity.value) == ("pg_expenses_write",
+                                                            "CRITICAL")
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root lists a directory whatever its mode")
+    @pytest.mark.asyncio
+    async def test_a_directory_that_cannot_be_listed_is_blindness(self, stores):
+        """Not a lost marker: an unreadable `data/write-chain-owners` says
+        nothing about whether a marker is there. The run is
+        `chain_invariants_unwatched` on that directory, which holds every
+        condition, and never `chain_latch_disagrees` with a restore
+        instruction. Through the real read: `Path.glob` swallowed the
+        PermissionError and filed the CRITICAL. Mutation: list with
+        `MARKER_DIR.glob('*')`."""
+        from core import pg_chain_invariants as inv
+
+        store, pool, env = stores
+        env.setenv("KS_WRITE_EXPENSES", "postgres")
+        await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
+
+        chain_latch.MARKER_DIR.chmod(0o000)
+        try:
+            facts = await inv.read_facts(pool=pool)
+        finally:
+            chain_latch.MARKER_DIR.chmod(0o700)
+        issues = inv.check_chain_invariants(facts)
+
+        assert isinstance(facts.latch, inv.Unwatched), facts.latch
+        assert [i for i in issues if i.check_name == inv.LATCH_DISAGREES] == []
+        blind = [i for i in issues if (i.check_name, i.table_name)
+                 == (inv.UNWATCHED, inv.MARKERS_PART)]
+        assert len(blind) == 1, issues
+        assert inv.LATCH_DISAGREES in inv.unverified_conditions(blind)
+
+    @pytest.mark.asyncio
     async def test_the_shipper_stands_down_on_the_owner_row_alone(self, stores):
         """The finding above arrives at 07:30. The destruction it describes
         would have happened within the hour.
