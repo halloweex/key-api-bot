@@ -27,11 +27,11 @@ first — `set_goal` computes a suggestion before it writes — gets the live po
 so a test cannot pass because something upstream failed first; the pool counts
 what it handled and every test requires exactly the writer's one.
 
-Chains 3, 6 and 6a route by nothing since step 14's S14-09, so their writers
-are driven in the state step 14 promises: no flag, the flag at `duckdb` and a
-flag nobody can read (`FLAGLESS`). A writer that asked its flag again would
-stop before its acquire, or raise, in one of the three. The other chains keep
-`postgres` until their own step-14 PR.
+No chain routes by its flag since step 14 (chains 3, 6 and 6a since S14-09,
+the rest since S14-11), so every writer is driven in the state step 14
+promises: no flag, the flag at `duckdb` and a value nobody could read
+(`FLAG_VALUES`). A writer that asked its flag again would stop before its
+acquire, or raise, in one of the three.
 """
 from __future__ import annotations
 
@@ -390,17 +390,15 @@ def _writer_name(key: str) -> str:
     return key.split(":", 1)[0]
 
 
-# The chains whose flag routes nothing since step 14's S14-09 (chains 3, 6,
-# 6a), and the values their writers are driven under: absent, `duckdb` — what
-# routed them to DuckDB until S14-00 — and one `env_writes_postgres` raises on.
-# Every other chain keeps the flag at `postgres` until its own step-14 PR
-# (S14-10, S14-11) takes the routing away.
-FLAGLESS = (pg_orders_write, pg_catalogue_write, pg_expense_types_write)
-FLAGLESS_VALUES = (None, "duckdb", "pgsql-typo")
+# The values every writer is driven under, since no chain's flag routes
+# anything (S14-09 for chains 3, 6 and 6a, S14-11 for the rest): absent,
+# `duckdb` — what routed them to DuckDB until S14-00 — and one the flags'
+# readers refused until S14-11 deleted them.
+FLAG_VALUES = (None, "duckdb", "pgsql-typo")
 
 
 def _flags_for(chain) -> tuple:
-    return FLAGLESS_VALUES if chain in FLAGLESS else ("postgres",)
+    return FLAG_VALUES
 
 
 def _cases(keys, chain_of) -> list:
@@ -414,11 +412,9 @@ def _set_flag(env, chain, flag) -> None:
         env.delenv(chain.WRITE_ENV, raising=False)
     else:
         env.setenv(chain.WRITE_ENV, flag)
-    if chain in FLAGLESS:
-        # The point of the case: a flagless chain is never driven at the value
-        # that would make a writer reading its flag again look correct.
-        assert os.environ.get(chain.WRITE_ENV) != "postgres"
-    assert chain.writes_postgres(), f"{chain.__name__} does not write Postgres"
+    # The point of the case: a chain is never driven at the value that would
+    # make a writer reading its flag again look correct.
+    assert os.environ.get(chain.WRITE_ENV) != "postgres"
 
 
 @pytest_asyncio.fixture
@@ -438,11 +434,7 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
-    # Chain 5 is held on DuckDB by facts no environment variable sets (step
-    # 13, chain 3); this harness proves where its latch is taken, not whether
-    # it may move.
-    monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
-    # Chain 7b-3's four preconditions: its inputs on Postgres, and the
+    # Chain 7b-3's four preconditions (none routes anything since step 14): its inputs on Postgres, and the
     # fallback off as configured. The goal history then reads an empty
     # `silver.orders`, which still writes a placeholder growth row.
     monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
@@ -554,29 +546,17 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
         assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
 
 
-def test_the_flagless_chains_are_driven_with_no_flag(monkeypatch):
-    """Each writer of chains 3, 6 and 6a, and each first write, runs under
-    every value of `FLAGLESS_VALUES` and never under `postgres` — what keeps
-    the proofs below in step 14's state rather than production's flag. The
-    unreadable value is one the flag's own reader refuses, so a writer that
-    asked it again would raise rather than pass."""
-    assert {write_chains.chain_name(c) for c in FLAGLESS} == {
-        "pg_orders_write", "pg_catalogue_write", "pg_expense_types_write"}
+def test_every_chain_is_driven_with_no_flag():
+    """Each writer, and each first write, runs under every value of
+    `FLAG_VALUES` and never under `postgres` — what keeps the proofs below in
+    step 14's state rather than production's flag. Mutation: drive a chain at
+    `postgres` again."""
     for key, (chain, _call) in WRITERS.items():
         flags = {p.values[1] for p in _cases([key], lambda k: WRITERS[k][0])}
-        assert flags == (set(FLAGLESS_VALUES) if chain in FLAGLESS
-                         else {"postgres"}), key
+        assert flags == set(FLAG_VALUES), key
     for chain_name, (key, *_row) in FIRST_WRITES.items():
         flags = {p.values[1] for p in _cases([chain_name], _first_write_chain)}
-        assert flags == set(_flags_for(WRITERS[key][0])), chain_name
-    for chain in FLAGLESS:
-        for flag in FLAGLESS_VALUES:
-            _set_flag(monkeypatch, chain, flag)
-            if flag == "pgsql-typo":
-                with pytest.raises(RuntimeError, match=chain.WRITE_ENV):
-                    chain.env_writes_postgres()
-            else:
-                assert chain.env_writes_postgres() is False
+        assert flags == set(FLAG_VALUES), chain_name
 
 
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
