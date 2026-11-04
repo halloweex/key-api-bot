@@ -575,7 +575,7 @@ class Latch:
 
 Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Orders,
               Managers, Catalogue, Forecast, Journal, Watchdogs, Ledger,
-              Latch, Unwatched, None]
+              Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -609,7 +609,8 @@ class Facts:
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # The owner rows against the markers on disk (`chain_latch_disagrees`).
-    latch: Group = None
+    # Not a `Group`: no chain's reader fills it, the whole registry's does.
+    latch: Union[Latch, Unwatched, None] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
     # here knows what is true of their tables.
     unread: Tuple[str, ...] = ()

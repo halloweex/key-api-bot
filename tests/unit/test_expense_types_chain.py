@@ -80,14 +80,13 @@ class TestTheRegistrySeesIt:
         assert "last_sync_expense_types" in write_chains.sync_keys()
         assert "bronze.expense_types" in write_chains.chain_tables()
 
-    def test_the_table_is_one_the_shipper_replaces_and_the_comparison_reads(self):
-        """Standing down a table neither touches would be a no-op that reads as
-        a guarantee."""
-        from core.mirror_reconciliation import OPERATIONAL_TABLES
+    def test_the_table_is_one_the_shipper_replaces(self):
+        """Standing down a table the copy does not touch would be a no-op that
+        reads as a guarantee. (And one the daily comparison read, until step
+        14's S14-12 deleted it.)"""
         from core.pg_operational import _FULL_REPLACE
 
         assert set(chain.CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
-        assert set(chain.CHAIN_TABLES) <= {s.pg_table for s in OPERATIONAL_TABLES}
 
 
 # ─── full_sync: a fault in this chain stops this chain ─────────────────────

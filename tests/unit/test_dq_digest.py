@@ -93,7 +93,7 @@ class TestBuildDigest:
     def test_quiet_day_sends_nothing(self):
         sections = [
             DigestSection(layer="integrity", run=_run("PASS"), age_hours=2),
-            DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=4),
+            DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=4),
         ]
         assert build_digest(sections) is None
 
@@ -131,20 +131,20 @@ class TestBuildDigest:
 
     def test_stale_layer_is_called_out(self):
         sections = [
-            DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=52),
+            DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=52),
         ]
         msg = build_digest(sections)
         assert msg is not None
         assert "silent 52h" in msg
 
     def test_layer_that_never_ran_is_called_out(self):
-        msg = build_digest([DigestSection(layer="reconciliation", run=None)])
+        msg = build_digest([DigestSection(layer="reconciliation_pg", run=None)])
         assert msg is not None
         assert "no successful run" in msg
 
     def test_discrepancies_are_listed(self):
         sections = [DigestSection(
-            layer="reconciliation", run=_run("CRITICAL"), age_hours=3,
+            layer="reconciliation_pg", run=_run("CRITICAL"), age_hours=3,
             diffs=[{
                 "month": "2026-04", "source_id": 1, "field": "orders",
                 "dk_value": 565.0, "kc_value": 566.0,
@@ -250,7 +250,7 @@ class TestStandingFindingsGoQuiet:
     def test_a_stale_layer_speaks_through_the_quiet(self):
         """Silence has to mean "nothing changed", never "the checks stopped"."""
         sections = self._standing() + [
-            DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=52),
+            DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=52),
         ]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
@@ -312,7 +312,7 @@ class TestStandingDiscrepancies:
 
     def _section(self, diffs, previous_diffs):
         return [DigestSection(
-            layer="reconciliation", run=_run("WARN"), age_hours=3,
+            layer="reconciliation_pg", run=_run("WARN"), age_hours=3,
             diffs=diffs, previous_diffs=previous_diffs,
         )]
 
@@ -344,7 +344,7 @@ class TestStandingDiscrepancies:
         """A layer going clean is the one change nobody should have to notice
         by the absence of a message."""
         msg = build_digest(
-            [DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=3,
+            [DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=3,
                            diffs=[], previous_diffs=[self._diff()])],
             last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
         )

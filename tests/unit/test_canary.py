@@ -29,9 +29,9 @@ def _healthy_payload():
         "sync": {"status": "active", "seconds_since_sync": 30},
         "data_quality": {
             "integrity": {"last_success_at": "2026-08-08T19:00:00+03:00", "age_seconds": 1800},
-            "reconciliation": {"last_success_at": "2026-08-08T05:00:00+03:00", "age_seconds": 52200},
             "mirror_landing": {"last_success_at": "2026-08-08T07:30:00+03:00", "age_seconds": 43200},
-            # The same 05:30 job's Postgres half (DN-21).
+            # The 05:30 job's Postgres half (DN-21); its DuckDB half,
+            # `reconciliation`, went in step 14's S14-12.
             "reconciliation_pg": {"last_success_at": "2026-08-08T05:30:00+03:00", "age_seconds": 50400},
             # …and its ClickHouse half (OD-08 (a)).
             "reconciliation_ch": {"last_success_at": "2026-08-08T05:30:00+03:00", "age_seconds": 50400},
@@ -149,19 +149,30 @@ def _dq_payload(**layers):
 def test_dq_freshness_passes_when_all_layers_recent():
     failures, ages = canary.check_dq_freshness(_healthy_payload())
     assert failures == []
-    assert ages == {"integrity": 1800, "reconciliation": 52200,
+    assert ages == {"integrity": 1800,
                     "mirror_landing": 43200, "reconciliation_pg": 50400,
                     "reconciliation_ch": 50400}
 
 
 def test_dq_freshness_flags_stale_reconciliation():
     payload = _healthy_payload()
-    payload["data_quality"]["reconciliation"]["age_seconds"] = 3 * 86400
+    payload["data_quality"]["reconciliation_pg"]["age_seconds"] = 3 * 86400
     failures, ages = canary.check_dq_freshness(payload)
     keys = [k for k, _ in failures]
-    assert keys == ["dq_stale:reconciliation"]
+    assert keys == ["dq_stale:reconciliation_pg"]
     assert "3d" in failures[0][1]
-    assert ages["reconciliation"] == 3 * 86400
+    assert ages["reconciliation_pg"] == 3 * 86400
+
+
+def test_dq_freshness_ignores_the_layer_nothing_writes():
+    """`reconciliation`, the 05:30 job's DuckDB half, went in step 14's
+    S14-12: an old web that still publishes it is not judged on it, and its
+    absence is no failure. Mutation: put it back in `DQ_MAX_AGE_S`."""
+    payload = _healthy_payload()
+    payload["data_quality"]["reconciliation"] = {
+        "last_success_at": "2026-08-01T05:00:00+03:00", "age_seconds": 40 * 86400}
+    failures, ages = canary.check_dq_freshness(payload)
+    assert failures == [] and "reconciliation" not in ages
 
 
 def test_dq_freshness_missing_block_is_a_failure():
@@ -180,17 +191,16 @@ def test_dq_freshness_missing_layer_is_a_failure():
     payload = _dq_payload(integrity={"age_seconds": 60})
     failures, ages = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
-        "dq_missing:mirror_landing", "dq_missing:reconciliation",
+        "dq_missing:mirror_landing",
         "dq_missing:reconciliation_ch", "dq_missing:reconciliation_pg",
     ]
-    assert ages["reconciliation"] is None
+    assert ages["reconciliation_pg"] is None
 
 
 def test_dq_freshness_never_succeeded_is_a_failure():
     """A layer whose only runs all errored reports a null age, not a big one."""
     payload = _dq_payload(
         integrity={"last_success_at": None, "age_seconds": None},
-        reconciliation={"last_success_at": None, "age_seconds": None},
         mirror_landing={"last_success_at": None, "age_seconds": None},
         reconciliation_pg={"last_success_at": None, "age_seconds": None},
         reconciliation_ch={"last_success_at": None, "age_seconds": None},
@@ -198,8 +208,7 @@ def test_dq_freshness_never_succeeded_is_a_failure():
     failures, _ = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
         "dq_never:integrity", "dq_never:mirror_landing",
-        "dq_never:reconciliation", "dq_never:reconciliation_ch",
-        "dq_never:reconciliation_pg",
+        "dq_never:reconciliation_ch", "dq_never:reconciliation_pg",
     ]
 
 
@@ -529,7 +538,7 @@ async def test_run_canary_cert_failure_alone_is_warn():
 @pytest.mark.asyncio
 async def test_run_canary_flags_stale_reconciliation_as_warn():
     payload = _healthy_payload()
-    payload["data_quality"]["reconciliation"]["age_seconds"] = 4 * 86400
+    payload["data_quality"]["reconciliation_pg"]["age_seconds"] = 4 * 86400
 
     def handler(request):
         return httpx.Response(200, json=payload)
@@ -542,8 +551,8 @@ async def test_run_canary_flags_stale_reconciliation_as_warn():
             result = await run_canary(DASHBOARD, client=client)
     assert result.ok is False
     assert result.severity == "warn"
-    assert result.failure_keys == ["dq_stale:reconciliation"]
-    assert result.dq_ages["reconciliation"] == 4 * 86400
+    assert result.failure_keys == ["dq_stale:reconciliation_pg"]
+    assert result.dq_ages["reconciliation_pg"] == 4 * 86400
 
 
 @pytest.mark.asyncio
