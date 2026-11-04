@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.309
+
+- WIP: S14-08 review 2: the docstring says which tests the mutation passed
+- WIP: S14-08 review 2: the access routers are held to the hole they render
+- WIP: S14-08 review: the access docs say what the code does now
+- WIP: S14-08 review: CLAUDE.md claims only what the walks catch
+- WIP: S14-08 review: the /sms and access guards read attributes and helpers
+- WIP: S14-08 review: the routers are held to their syntax, not to a grep
+- WIP: S14-08 the entry-points walk: seventeen /sms and access routes no longer reach the file
+- WIP: S14-08 two docstrings stop naming a switch nothing reads
+- WIP: S14-08 CLAUDE.md lines rewrapped
+- WIP: S14-08 the type baseline shrinks by the five DuckDB branches
+- WIP: S14-08 CLAUDE.md paragraphs
+- WIP: S14-08 the conftest store helpers go
+- WIP: S14-08 audience groups two-engine test to golden literals
+- WIP: S14-08 SMS segments two-engine test to golden literals
+- WIP: S14-08 dashboard users two-engine test to golden literals
+- WIP: S14-08 the write-chain walk exempts the store helpers as Postgres's
+- WIP: S14-08 store-switch literal in the fates manifest test; the unported guard's tests
+- WIP: S14-08 dashboard users store tests
+- WIP: S14-08 access tests on Postgres
+- WIP: S14-08 send guards, webhook and DLR replay on Postgres
+- WIP: S14-08 delivery tests on Postgres
+- WIP: S14-08 freeze, results, groups tests on Postgres
+- WIP: S14-08 audience tests on Postgres
+- WIP: S14-08 /sms and access routers on Postgres alone
+
+
 ## 3.0.308
 
 - WIP: S14-07 merge review — CLAUDE.md says what the writer allowance covers
