@@ -4,7 +4,8 @@ subject is a job and not where its journal lives.
 Since step 14's S14-10 the data-quality journal is Postgres's alone: every
 run goes through `core.dq_journal`'s door into `core.pg_dq_journal_write`.
 Tests that ran a check job against a DuckDB store to read its run back
-(routing the chain to DuckDB with `tests.conftest.route_chains_to_duckdb`)
+(routing the chain to DuckDB with `tests.conftest.route_chains_to_duckdb`,
+which went in step 14's S14-11)
 install this instead: the chain module's writers and readers are replaced
 with a list of runs, so the door's own code — the fold of repeated keys,
 `run_values`, the beat's inheritance, the digest's sections — runs as it does

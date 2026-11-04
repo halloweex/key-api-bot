@@ -25,10 +25,10 @@ Since step 14's S14-00 the chain writes Postgres whatever its flag says, so
 the tests that needed the flag to route a write to DuckDB went with that
 path: the controls proving the hourly replace would otherwise wipe a goal,
 the typo refusing the write, the copy-back's round trip and the pre-flip
-handover. Where DuckDB must hold a value — the comparison of the two
-branches, the frozen copy a read must not show — it is written there on
-purpose (`tests.conftest.chains_on_duckdb`). The copy-back's own tests went
-with the copy-back in S14-04.
+handover. Since S14-11 there is no DuckDB branch to write through: the
+comparison of the two branches compares Postgres with DuckDB's answer
+captured before it went (`DUCKDB_GOALS`, rule 9). The copy-back's own tests
+went with the copy-back in S14-04.
 """
 from __future__ import annotations
 
