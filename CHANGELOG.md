@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.307
+
+- WIP: S14-06 merge review — rule 5's engine names are a required argument
+- WIP: S14-06 merge review — CLAUDE.md says what rule 5 reads now
+- WIP: S14-06 merge review — the allowance drops only what rule 5 judges
+- WIP: S14-06 merge review — rule 5 reads every spelling of an engine call
+- WIP: S14-06 merge — CLAUDE.md says what holds the dashboard to its routers
+- WIP: S14-06 merge — S14-05's round-the-router guards hold the dashboard too
+- WIP: S14-06 the managers-chain walk takes the module's own name however it is bound
+- WIP: S14-06 no present-tense line names the Gold readers' gate or fallback
+- WIP: S14-06 the managers-chain walk resolves names and walks every production tree
+- WIP: S14-06 the date-params sweep and the switch walk know the dashboard reads Postgres
+- WIP: S14-06 the typecheck baseline shrinks with the DuckDB tails (1100 -> 1090)
+- WIP: S14-06 keep _comparable for the assistant's two-engine test
+- WIP: S14-06 CLAUDE.md says the dashboard reads Postgres alone
+- WIP: S14-06 two-engine dashboard tests become literals; the routers' contract
+- WIP: S14-06 the dashboard's unit tests read Postgres alone
+- WIP: S14-06 the fallback walks know the dashboard's routers refuse
+- WIP: S14-06 the dashboard's routers read Postgres alone
+- WIP: S14-06 dashboard golden literals recorded on the base
+
+
 ## 3.0.306
 
 - WIP: S14-05 merge review — the pixel-only filters and route are held by tests
