@@ -1,7 +1,8 @@
 """The one writer of buyer rows, against a real PostgreSQL (chain 4, PR-2, 2.1).
 
-`core.pg_buyer_rows._write_buyer_rows` is what the landing mirror runs now and
-what chain 4's writer will run. These pin what both depend on:
+`core.pg_buyer_rows._write_buyer_rows` is what chain 4's writer runs (the
+landing mirror ran it too, until step 14's S14-13 deleted `core.pg_buyers`).
+These pin what it depends on:
 
 - the core writes exactly the rows the shared parse produced (the mirror,
   whose stamps were pinned here too, stands down for chain 4's tables since
@@ -199,7 +200,6 @@ async def test_a_contact_list_that_empties_empties(pg):
 @pytest.mark.asyncio
 async def test_the_signal_rises_once_for_a_batch_and_never_for_an_empty_one(pg):
     from core.pg_buyer_rows import _write_buyer_rows
-    from core.pg_buyers import _write
 
     # Two buyers with two contacts each: a mark raised per buyer or per
     # contact would pass a batch of one (the review's mutation).
@@ -212,18 +212,25 @@ async def test_the_signal_rises_once_for_a_batch_and_never_for_an_empty_one(pg):
             await _write_buyer_rows(conn, parsed.rows, parsed.contacts)
     assert await _requested(pg) == before + 1
 
-    await _write([], [])
+    async with pg.acquire() as conn:
+        async with conn.transaction():
+            await _write_buyer_rows(conn, [], [])
     assert await _requested(pg) == before + 1, "an empty batch raised the signal"
 
 
 @pytest.mark.asyncio
 async def test_the_core_alone_never_stamps_the_buyers_watermarks(pg):
     from core.pg_buyer_rows import _write_buyer_rows
-    from core.pg_buyers import _write
+    from core.pg_landing import WATERMARK_OK_SQL
 
     # Both watermark rows must exist first, or a core that UPDATEd them would
-    # change nothing and pass — which the first draft of this test did.
-    await _write([], [])
+    # change nothing and pass — which the first draft of this test did. The
+    # buyers mirror stamped them (`core.pg_buyers._write`) until step 14's
+    # S14-13 deleted it; the statement it stamped them with is the one every
+    # writer shares.
+    async with pg.acquire() as conn:
+        for table in STATES:
+            await conn.execute(WATERMARK_OK_SQL, table, 0)
     parsed = parse_buyers([_buyer(7), _buyer(8)])
     before = await _state(pg)
     assert set(before) == set(STATES), before

@@ -324,39 +324,6 @@ class TestTheStats:
             date(2026, 3, 1), date(2026, 8, 1), 2)
 
 
-class TestTheReplicaStandsDown:
-    async def _duckdb_holds_one(self, store):
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO managers (id, name, is_retail) VALUES (9, 'D', TRUE)")
-
-    @pytest.mark.asyncio
-    async def test_on_the_flag(self, stores):
-        """M8. Mutation: drop DN-22b's question from replicate_managers."""
-        from core.pg_replication import replicate_managers
-
-        store, pool, env = stores
-        await self._duckdb_holds_one(store)
-        env.setenv(ENV, "postgres")
-        out = await replicate_managers(store)
-        assert out["ok"] is False and "stood down" in out["skipped"]
-        assert await _pg_managers(pool) == {}
-
-    @pytest.mark.asyncio
-    async def test_on_an_owner_row_alone(self, stores):
-        """The marker lost with the flag off: the owner row still holds it."""
-        from core.pg_replication import replicate_managers
-
-        store, pool, env = stores
-        await self._duckdb_holds_one(store)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
-                "VALUES ('owner:bronze.managers', '2026-10-07T00:00:00+00:00', now())")
-        out = await replicate_managers(store)
-        assert out["ok"] is False and "stood down" in out["skipped"]
-        assert await _pg_managers(pool) == {}
-
-
 class TestTheStandingWatchReadsTheShape:
     @pytest.mark.asyncio
     async def test_each_seeded_shape_is_reported_once(self, stores):
@@ -466,7 +433,10 @@ class TestTheReadsFollow:
                 listed = (await client.get("/api/managers")).json()["managers"]
         finally:
             limiter.reset()
-        assert "stood down" in res.json()["replica"]["skipped"]
+        # No `replica` since step 14's S14-13: the route called the
+        # classification copy, `{"skipped": "stood down: …"}` under the chain,
+        # until it went with `core.pg_replication`.
+        assert "replica" not in res.json()
         assert _open(await _pg_intervals(pool), 34)[0][1:4] == (date(2026, 10, 7), None, True)
         async with pool.acquire() as conn:
             assert await conn.fetchval(
