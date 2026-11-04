@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.317
+
+- WIP: S14-12 — the baseline shrinks with the deleted comparisons
+- WIP: S14-12 — the chain invariants' blindness no longer names the daily comparison
+- WIP: S14-12 — D8 reads ClickHouse and the Postgres-alone checks; CLAUDE.md's paragraphs on the comparisons and the latch
+- WIP: S14-12 — canary, digest, lever and invariant tests without the reconciliation layer; the latch is not a reader group
+- WIP: S14-12 — tests follow the comparisons out: the job's isolation, the repair from the Postgres arm, the latch on the chain invariants
+- WIP: S14-12 — tests of the deleted comparisons go; the store's extractor is run against Postgres
+- WIP: S14-12 — the DuckDB comparisons and the reconciliation layer go; the latch check moves to the chain invariants
+
+
+## 3.0.316
+
+- fix(dq): freshness_orders judges when the order step last wrote
+
+
 ## 3.0.315
 
 - WIP: S14-11 — the copy's not-read-out-of-DuckDB proof stays, without its flag
