@@ -53,17 +53,22 @@ that does not look like the application's.
 
 HOW TO RUN IT ON THE HOST
 
-The host has no DuckDB; the web image does. Mount this file, the manifest and
-the backups read-only into a throwaway container of the running image:
+The host has no DuckDB; the pinned image does — `rollback-step14` on the host,
+the last image before step 14, pinned at S14-00's deploy (step 14's H1/H2),
+DuckDB 1.5.5. Never `:latest`, which from step 14's S14-19 on carries no
+DuckDB. Mount this file, the manifest and the backups read-only into a
+throwaway container of it:
 
-    cd /opt/key-api-bot && docker run --rm --user 0 \\
+    cd /opt/key-api-bot && docker run --rm --pull never --network none --user 0 \\
         -v "$PWD/data/backups:/app/data/backups:ro" \\
         -v "$PWD/core/duckdb_table_fates.py:/app/core/duckdb_table_fates.py:ro" \\
         -v "$PWD/deploy/duckdb_table_fates_check.py:/app/deploy/duckdb_table_fates_check.py:ro" \\
-        -w /app --entrypoint python halloweex/keycrm-web:latest \\
+        -w /app --entrypoint python halloweex/keycrm-web:rollback-step14 \\
         /app/deploy/duckdb_table_fates_check.py
 
-`--user 0` because the image runs as uid 999 and the backups are root's.
+`--user 0` because the image runs as uid 999 and the backups are root's. The two
+mounted files run in that image, so at import they reach only what it carries:
+tests/unit/test_archive_image.py holds them to it.
 """
 from __future__ import annotations
 

@@ -20,10 +20,12 @@
 # WHAT ONE RUN DOES, IN ORDER
 #   1. Refuses whatever it can see is wrong before any Ark or upload exists:
 #      no remote or no passphrase file (78); a .wal beside the source, --out
-#      under ./data or anywhere in the repository, too little disk, no image,
-#      the lock held (2).
+#      under ./data or anywhere in the repository, too little disk, the lock
+#      held, or an image that is not the pinned one (2) — BACKUP_ARK_IMAGE
+#      unset or :latest, absent from this host, or not carrying DuckDB 1.5.5
+#      (deploy/archive_image.sh; step 14, S14-02).
 #   2. --source: freezes the file into <out>/<stamp> in a throwaway container
-#      of the image production runs (--network none, --pull never, the file
+#      of that image (--network none, --pull never, the file
 #      mounted alone and read-only), hashing it before and after. The byte
 #      copy must equal both hashes, or the file moved under the freeze — it
 #      was not static — and the half-made Ark is deleted. Then it prints
@@ -204,9 +206,20 @@ PG_REMOTE_DIR="$ARK_REMOTE_DIR"
 # Two, the owner's number: the first Ark is not this family's and is not
 # counted, so in practice this keeps the second Ark and one re-freeze of it.
 RETAIN="${BACKUP_ARK_RETAIN:-2}"
-# The image production runs, never pulled: its DuckDB is the version that wrote
-# the file, and a pull would change what the next `up -d` starts.
-IMAGE="${BACKUP_ARK_IMAGE:-${BACKUP_RESTORE_IMAGE:-halloweex/keycrm-web:latest}}"
+# The pinned image, never pulled: rollback-step14 on the host, the last image
+# before step 14, pinned at S14-00's deploy (step 14's H1/H2), whose DuckDB
+# 1.5.5 is the version that wrote the file. It used to default to :latest —
+# the image production runs — which moves with every deploy and carries no
+# DuckDB from step 14's S14-19 on. Now it is set in deploy/backup.env or
+# nothing runs; BACKUP_RESTORE_IMAGE, the restore drill's, stands in when
+# BACKUP_ARK_IMAGE is unset.
+# shellcheck source=/dev/null
+source deploy/archive_image.sh
+IMAGE_VAR=BACKUP_ARK_IMAGE
+if [ -z "${BACKUP_ARK_IMAGE:-}" ] && [ -n "${BACKUP_RESTORE_IMAGE:-}" ]; then
+    IMAGE_VAR=BACKUP_RESTORE_IMAGE
+fi
+IMAGE="${BACKUP_ARK_IMAGE:-${BACKUP_RESTORE_IMAGE:-}}"
 MEM="${BACKUP_ARK_MEMORY:-6500m}"
 OUT_ROOT="${OUT_ARG:-$(_abspath "${BACKUP_ARK_DIR:-/root/ark/key-api-bot}")}"
 
@@ -272,8 +285,9 @@ else
     NEED_KB=$(( $(du -sk "$ARK_IN" | cut -f1) * 3 ))
 fi
 
-docker image inspect "$IMAGE" >/dev/null 2>&1 \
-    || refuse "no image $IMAGE on this host. The Ark is frozen and verified by the DuckDB production runs, and this does not pull"
+if ! why="$(archive_image_require "$IMAGE_VAR" "$IMAGE")"; then
+    refuse "$why"
+fi
 
 mkdir -p "$OUT_ROOT"
 AVAIL_KB="$(df -Pk "$OUT_ROOT" | awk 'NR == 2 {print $4}')"
@@ -290,6 +304,15 @@ if command -v flock >/dev/null 2>&1; then
 else
     echo "note: flock is not installed, running without the concurrency lock" >&2
 fi
+
+# The last refusal, and the only one that starts a container: the image is on
+# this host and its DuckDB is the version that wrote the file. ark_freeze.py
+# is mounted from this checkout into it, so it imports only what the image
+# carries — the standard library and duckdb (tests/unit/test_archive_image.py).
+if ! why="$(archive_image_probe "$IMAGE_VAR" "$IMAGE")"; then
+    refuse "$why"
+fi
+echo "image: $IMAGE (DuckDB $ARCHIVE_DUCKDB_VERSION)"
 
 # ── the work ──────────────────────────────────────────────────────────────────
 

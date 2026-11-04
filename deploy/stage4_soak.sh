@@ -3,14 +3,19 @@
 #
 # The soak checks are the only detectors for a lost derivation mark (D4, D5),
 # stale Silver rows (D7), the chain-8 stand-down (E1) and a halted order intake
-# (S0), and the only daily verdict on reads served from DuckDB, whose PASS
-# counts the week KS_READ_FALLBACK=off waits for (F1), and the two clocks
-# stage 5 waits for — the 14-day parallel period and the week of silence —
-# with their breach detectors (P1–P4, OD-17 (a)), and they have to run
-# every day for weeks. Run by hand from a checklist
+# (S0), and the one daily verdict on the DuckDB file's hash (P1, until the
+# file is deleted), and they have to run every day for weeks. Run by hand
+# from a checklist
 # they drift: a query pasted from yesterday's terminal, a precondition skipped
 # on a busy morning. So each check is a file under deploy/stage4_soak/ that
 # returns its own verdict, and this script only runs them and adds them up.
+#
+# F1 (reads served from DuckDB) and P2–P4 (stage 5's rollback levers, its
+# parallel period and its week of silence) are gone since step 14's S14-02:
+# the owner closed both clocks on 2026-10-20, and they had nothing left to
+# license. Kept, they would have turned UNKNOWN every day once the canary's
+# watch rows stop being written, and an UNKNOWN that is always there hides
+# the new one.
 #
 # THREE VERDICTS, AND THE THIRD IS THE POINT
 # PASS and FAIL are the obvious two. UNKNOWN is a check that could not see:
@@ -33,12 +38,9 @@
 #   deploy/stage4_soak.sh
 #   SOAK_INVENTORY_FLIP_AT='2026-10-01 10:00+03' deploy/stage4_soak.sh
 #   SOAK_BUYERS_FLIP_AT='2026-10-01 10:30+03' SOAK_BUYERS_OVERRIDE_FLOOR=0 deploy/stage4_soak.sh
-#   SOAK_PARALLEL_FROM='2026-11-02 10:00+02' deploy/stage4_soak.sh
 # The second form is for chain 1's flip day; see 15_i1_inventory_copy_stood_down.sql.
 # The third is chain 4's: the flip time, and how many human overrides of a
 # gender verdict there were that day (25_b3_gender_coverage.sql).
-# The fourth declares the stage-5 parallel period: the moment the last
-# KS_WRITE_* flag flipped (52_p3_parallel_period.sql, OD-17 (a)).
 # Chain 5's flip day: SOAK_MANAGERS_FLIP_AT='<latch time>' (30_m1_managers_copy_stood_down.sql).
 # Chain 3's flip day: SOAK_ORDERS_FLIP_AT='<latch time>' (32_o1_orders_copies_stood_down.sql).
 #
@@ -247,54 +249,17 @@ if [ "$INVENTORY_LATCHED" = "1" ] && [ "$INVENTORY_ON" != "1" ]; then
     INVENTORY_ON=1
 fi
 
-# ── stage 5: the parallel period and the week of silence (OD-17 (a)) ───────────
-# KS_DUCKDB=off is the week of silence: 1 when web runs off, 0 when on or
-# unset. Read by name, like every flag here.
+# ── the DuckDB file (P1, OD-17 (a)) ───────────────────────────────────────────
+# KS_DUCKDB=off: 1 when web runs off, 0 when on or unset. Read by name, like
+# every flag here. P1 judges the file's hash only under off: under on web
+# writes the file all day.
 DUCKDB_OFF="$(flag_state KS_DUCKDB off on)"
-PARALLEL_FROM="${SOAK_PARALLEL_FROM:-}"
-
-# What refuses the host-cron sidecars is not web's environment but `.env`:
-# the weekly compaction and the nightly off-site start theirs with
-# `docker run --env-file .env`, and their phase 1 opens the live file
-# read-only — no byte changes, so only the switch in the sidecar can stop it.
-# So P4 asks the file too, by exact name and as `docker run --env-file` reads
-# it — through deploy/duckdb_env.sh, the reader the host scripts stand down
-# by, never a parse of its own, so the soak and the scripts cannot judge one
-# line two ways. Its docker answer: off (1), on (0), `invalid` (quotes or an
-# inline comment kept, which the switch does not understand, and runs on
-# over), or `refused` (export, or a space before the `=`: docker rejects the
-# whole file and starts no sidecar at all). No reader, or no file, is
-# `unknown`. And since when: the file's mtime, because nothing says the
-# sidecars read `off` before the last edit of it.
-ENV_FOR_SIDECARS="${SOAK_ENV_FILE:-.env}"
-DUCKDB_OFF_ENV=unknown
-DUCKDB_ENV_CHANGED_AT=""
-KS_DUCKDB_ENV_READ=0
-# shellcheck source=deploy/duckdb_env.sh
-if [ -f deploy/duckdb_env.sh ] && source deploy/duckdb_env.sh; then
-    ks_duckdb_env_read "$ENV_FOR_SIDECARS"
-else
-    echo "deploy/duckdb_env.sh is missing: whether .env says KS_DUCKDB=off is unknown" >&2
-fi
-if [ "$KS_DUCKDB_ENV_READ" = 1 ]; then
-    case "$KS_DUCKDB_ENV" in
-        off) DUCKDB_OFF_ENV=1 ;;
-        on) DUCKDB_OFF_ENV=0 ;;
-        invalid|refused) DUCKDB_OFF_ENV="$KS_DUCKDB_ENV" ;;
-    esac
-    env_mtime="$(stat -c %Y "$ENV_FOR_SIDECARS" 2>/dev/null || stat -f %m "$ENV_FOR_SIDECARS" 2>/dev/null || true)"
-    case "$env_mtime" in
-        ''|*[!0-9]*) ;;
-        *) DUCKDB_ENV_CHANGED_AT="$(date -u -d "@$env_mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-               || date -u -r "$env_mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" ;;
-    esac
-fi
 
 # The file's hash, as the hourly host cron recorded it
 # (deploy/duckdb_silence_check.sh). `--status` reads the record and nothing
 # else: it hashes nothing — a multi-GB file is the cron's to hash, not this
 # report's — and writes nothing, which this report promises above. The record
-# reaches the SQL as variables so P1 and P4 judge it on the same clock as
+# reaches the SQL as variables so P1 judges it on the same clock as
 # everything else.
 SILENCE_CHECK="deploy/duckdb_silence_check.sh"
 FILE_LAST=error FILE_SINCE="" FILE_SINCE_REASON="" FILE_CHECKED_AT="" FILE_MISSING_AT=""
@@ -374,9 +339,6 @@ run_check() {
             -v weekly_ledger_on="$WEEKLY_LEDGER_ON" \
             -v traffic_ledger_on="$TRAFFIC_LEDGER_ON" \
             -v duckdb_off="$DUCKDB_OFF" \
-            -v duckdb_off_env="$DUCKDB_OFF_ENV" \
-            -v duckdb_env_changed_at="$DUCKDB_ENV_CHANGED_AT" \
-            -v parallel_from="$PARALLEL_FROM" \
             -v duckdb_file_last="$FILE_LAST" \
             -v duckdb_file_since="$FILE_SINCE" \
             -v duckdb_file_since_reason="$FILE_SINCE_REASON" \
@@ -422,7 +384,7 @@ echo "  watchdogs_on=$WATCHDOGS_ON (KS_WRITE_WATCHDOGS), weekly_ledger_on=$WEEKL
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
 echo "  managers_on=$MANAGERS_ON (KS_WRITE_MANAGERS)${MANAGERS_NOTE}${MANAGERS_FLIP_AT:+, managers flip at $MANAGERS_FLIP_AT}"
 echo "  orders_on=$ORDERS_ON (KS_WRITE_ORDERS)${ORDERS_NOTE}${ORDERS_FLIP_AT:+, orders flip at $ORDERS_FLIP_AT}"
-echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), in .env: $DUCKDB_OFF_ENV${DUCKDB_ENV_CHANGED_AT:+ (edited $DUCKDB_ENV_CHANGED_AT)}, file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${FILE_MISSING_AT:+, last missing $FILE_MISSING_AT}${PARALLEL_FROM:+, parallel period from $PARALLEL_FROM}"
+echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${FILE_MISSING_AT:+, last missing $FILE_MISSING_AT}"
 echo
 printf '%s' "$ROWS" | awk '
     { lines[NR] = $0; c = $0; sub(/\|.*/, "", c); if (length(c) > w) w = length(c) }
