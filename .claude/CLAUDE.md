@@ -1886,10 +1886,12 @@ routed differently:
   and a `BOUNDED_SHRINK` tier at 1%: its writers replace a buyer's contacts
   whole, so a small fall is a dropped number and not a loss — but an export
   that falls by more than 1% (~330 rows at 32 700), or to zero, is rejected,
-  including after a copy-back that writes back noticeably fewer contacts.
-- **The copy-back knows mirrored tables** — see "A write flag is no longer a
-  rollback" — and `POST /api/mirror/backfill/buyers` is the lever its
-  pre-flip handover names.
+  and so was one after a copy-back that wrote back noticeably fewer contacts,
+  until S14-04 deleted the copy-back.
+- **The copy-back knew mirrored tables**, and `POST /api/mirror/backfill/buyers`
+  was the lever its pre-flip handover named. Both went with step 14's
+  S14-04, and the way back is the image ("Before any rollback to an image
+  from before step 14"); the backfill route stays.
 
 The chain itself, its rollback under the DN-06 latch and the owner's decisions
 are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`, revised against today's main in
@@ -1930,7 +1932,8 @@ current rules version, and nothing would ever select that buyer again. Proved
 by running it: without `FOR SHARE` the old verdict lands. A human override is
 never overwritten; an equal verdict is not rewritten, so `decided_at` is when
 the answer last changed — the web process's UTC clock, passed in, which is the
-clock DuckDB's `CURRENT_TIMESTAMP` is and the one the copy-back orders by.
+clock DuckDB's `CURRENT_TIMESTAMP` is and the one the copy-back ordered by
+(an image from before step 14 still does; S14-04 deleted this build's).
 DuckDB never re-derives on a rename; this does, on purpose.
 
 **A buyer Postgres would refuse is skipped, not raised.** Refused before the
@@ -1958,8 +1961,8 @@ raising):
   DuckDB, before and regardless of `KS_READ_BUYER_SYNC` — a selection from a
   DuckDB that stopped would fetch the same buyers every hour. A latched chain
   with its flag set back routes both the selection and the write to Postgres;
-  the copy-back's post-latch levers depend on exactly that, and one test pins
-  the two together.
+  the copy-back's post-latch levers depended on exactly that (S14-04 deleted
+  it), and one test pins the two together.
 - A `KS_WRITE_BUYERS` nobody can read writes nowhere: the step refuses before
   KeyCRM is asked, both manual doors answer 409 before starting, the gender
   rider reports `stood_down`, and `get_stats` — `/health/detailed`,
@@ -1996,11 +1999,12 @@ handover by the owner rows, then by `SOAK_BUYERS_FLIP_AT`, and with neither
 reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. With
 `buyers_on=0` and the chain's owner rows standing it FAILs as a lost marker —
 the buyers step back on DuckDB and nothing shipping it — naming
-`data/write-chain-owners/pg_buyers_write` and `scripts/chain_copy_back.py
-buyers`, and it counts a copy's failure for the day it was stamped. `held`
-with owner rows standing is the same lost marker, so B1 names the marker, the
-copy-back and the reader instead of "take the flag back", which would only
-make it `0`. The restore drill counts all three tables, because once the
+`data/write-chain-owners/pg_buyers_write` and `ROLLBACK_LEVER` (the
+copy-back it named went with S14-04), and it counts a copy's failure for the
+day it was stamped. `held` with owner rows standing is the same lost marker,
+so B1 names the marker, the reader and the lever instead of "take the flag
+back", which would only make it `0`. The restore drill counts all three
+tables, because once the
 chain writes them the nightly dump is their only backup.
 
 **Revision 0034 locks older images out** (PR-4, owner decision 16) and is
@@ -2020,12 +2024,13 @@ it does not do, both written down in the revision:
   downgrade 0033_derivation_signal` first, run with the new migrate image, and
   then all three images moved back — keycrm-migrate too, or `up -d` re-runs its
   `alembic upgrade head` and puts 0034 back. Only before the flip: after chain
-  4 has written Postgres the way back is `scripts/chain_copy_back.py buyers`,
-  never a downgrade below 0034.
+  4 had written Postgres the way back was `scripts/chain_copy_back.py buyers`,
+  never a downgrade below 0034 (since S14-04 the way back is the image,
+  "Before any rollback to an image from before step 14").
 - **A locked-out image still writes DuckDB.** From v3.0.249 on, a build without
   chain 4 cannot reach the buyer tables but its sync still commits buyers to
-  DuckDB before the mirror refuses — and after the flip `--handover` then
-  refuses on those ids. After the flip, no image rollback at all.
+  DuckDB before the mirror refuses — and after the flip the copy-back's
+  handover refused on those ids. After the flip, no image rollback at all.
 
 ### Revision 0035: the same lock for the eight chains #280 registered
 
@@ -2080,8 +2085,10 @@ first, run with the **new** migrate image — an older one
 does not know 0035 — and then all three images moved back, keycrm-migrate with
 web and bot, or `up -d` re-runs `alembic upgrade head` and puts 0035 back.
 Only before the first of these chains latches: after one has written Postgres,
-the way back is `scripts/chain_copy_back.py <chain>`, never a downgrade below
-0035. It also locks out 3.0.271 and 3.0.272, which carry these chains — the
+the way back was `scripts/chain_copy_back.py <chain>`, never a downgrade below
+0035 — and since S14-04 it is the image ("Before any rollback to an image from
+before step 14"). It also locks out 3.0.271 and 3.0.272, which carry these
+chains — the
 cost of a bump, not a hazard.
 
 **Deploying it** is any revision's rule: CI rebuilds `keycrm-migrate` with
@@ -2139,8 +2146,9 @@ deployed by the time the flips are due, the flips wait for it.
 `app.order_backfill_misses`, moved together by `KS_WRITE_ORDERS=postgres`.
 **Off in production, and held off by its own preconditions.** Owner decision
 OD-13 (a): a **raising** writer. Under the chain a Postgres write *is* the
-write; there is no DuckDB fallback when Postgres is down, and the way back is
-`scripts/chain_copy_back.py orders`.
+write; there is no DuckDB fallback when Postgres is down, and the way back was
+`scripts/chain_copy_back.py orders` — since S14-04 the image ("Before any
+rollback to an image from before step 14").
 
 **What moves together, and why.** The two order tables are one unit (DN-22a).
 The expenses come in the same payload (`include=…,expenses`) at the same call
@@ -2179,11 +2187,12 @@ routes at its first statement; DuckDB's `upsert_orders` and
 `upsert_expenses_batch` raise `ChainOwnsOrders` while it writes Postgres
 (`upsert_expenses`, which had no caller, is deleted). `record_backfill_misses`
 routes, dated by the web clock rather than `now()` — the clock the copy-back
-orders the two stores by. The gap, backdated, half-written and checkpoint
-selections read Postgres (`core/pg_orders_read.py`, no `except`), and so does
-the boot's "do we hold any orders" gate — a latched host with an empty DuckDB
-would otherwise full-sync 730 days on every start. The two comment backfills
-write through `restore_manager_comments`: only NULL comments, headers only,
+ordered the two stores by (an image from before step 14 still does). The gap,
+backdated, half-written and checkpoint selections read Postgres
+(`core/pg_orders_read.py`, no `except`), and so does the boot's "do we hold any
+orders" gate — a latched host with an empty DuckDB would otherwise full-sync
+730 days on every start. The two comment backfills write through
+`restore_manager_comments`: only NULL comments, headers only,
 `kind='backfill'`. `tests/unit/test_order_paths_consult_chain.py` walks
 `core/`, `web/` and `scripts/` for every DuckDB statement writing the four
 tables.
@@ -2214,12 +2223,13 @@ products, a Postgres clock, and it is the chain's second sync key: under the
 chain the store's getter and setter keep it in `meta.chain_watermarks`,
 DuckDB's frozen cursor stands in until the first index tick writes it there
 (the same `CHAIN_WATERMARK_INHERITS_DUCKDB`, so that tick goes on
-incrementally rather than re-indexing everything), and the copy-back carries
-it into DuckDB and the release deletes it. Nothing judges its age: it is in no
-`FRESHNESS_THRESHOLDS` entry, so a run that cannot read the moved watermarks
-does not name it in `sync_watermarks_unwatched`. `last_sync_meilisearch`, the
-DuckDB-built index's cursor, is a DuckDB clock and stays DuckDB's. Declared on
-no chain until a review found it, while this file said chain 3 carried it.
+incrementally rather than re-indexing everything), and the copy-back carried it
+into DuckDB and its release removed it, until S14-04 deleted the copy-back.
+Nothing judges its age: it is in no `FRESHNESS_THRESHOLDS` entry, so a run that
+cannot read the moved watermarks does not name it in
+`sync_watermarks_unwatched`. `last_sync_meilisearch`, the DuckDB-built index's
+cursor, is a DuckDB clock and stays DuckDB's. Declared on no chain until a
+review found it, while this file said chain 3 carried it.
 
 **What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
 `reconciliation`): against a DuckDB that no longer receives orders it would
@@ -2279,19 +2289,21 @@ later `/api/health` — meanwhile (batch-E review). Its `reasons` are one entry
 per precondition by structure (`unmet_reasons()`), never the joined answer
 split on "; ", which two of them carry.
 
-**The way back** is the copy-back generalised from chain 4's mirrored tables:
-the orders, expenses and line items each dated by their own `mirrored_at`,
-KeyCRM's `updated_at` refusing a later DuckDB version, and the misses
-replaced whole. **A line item is never dated by its order's header**: the
-05:15 refresh and the comment restore write headers alone, so a line only
-DuckDB holds under any refreshed order read as a basket the chain shrank and
-`--execute` deleted it (found in review). It is the chain's only when
-Postgres's line items of its order carry a stamp from after the latch. A
-basket the chain emptied leaves no line to date and is refused, knowingly too
-strict, with the per-id decision named. No allocator to carry. Proved against
-a real Postgres in `tests/integration/test_chain_copy_back_orders.py` until
-step 14's S14-00, which deleted it: every case set up the pre-flip state
-through DuckDB's order writer, which nothing routes to any more.
+**The way back** was the copy-back generalised from chain 4's mirrored tables,
+until S14-04 deleted it; since then it is the image ("Before any rollback to an
+image from before step 14"). History: the orders, expenses and line items were
+each dated by their own `mirrored_at`, KeyCRM's `updated_at` refusing a later
+DuckDB version, and the misses replaced whole. **A line item was never dated by
+its order's header**: the 05:15 refresh and the comment restore write headers
+alone, so a line only DuckDB held under any refreshed order read as a basket
+the chain shrank and `--execute` deleted it (found in review). It was the
+chain's only when Postgres's line items of its order carried a stamp from after
+the latch. A basket the chain emptied left no line to date and was refused,
+knowingly too strict, with the per-id decision named. No allocator to carry.
+Proved against a real Postgres in
+`tests/integration/test_chain_copy_back_orders.py` until step 14's S14-00,
+which deleted it: every case set up the pre-flip state through DuckDB's order
+writer, which nothing routes to any more.
 **Soak checks O1–O5**: the hourly copy of the misses and the two ids-diffs
 stood down (no `last_ok_at` or failure on the misses, no `backfilled_at` on
 the bronze three, after the owner rows — else `SOAK_ORDERS_FLIP_AT`, else a
@@ -2309,8 +2321,9 @@ orders in the 120 days before the flip (measured 2026-10-09). O1 counts a
 copy's failure for the day it was stamped — nothing resets the count while the
 chain owns the table — and FAILs owner rows with `orders_on=0` as the marker
 lost (`order_owner_row_without_marker`'s state), naming
-`data/write-chain-owners/pg_orders_write` and `scripts/chain_copy_back.py
-orders` — and FAILs the same with `orders_on=pending`, where a precondition
+`data/write-chain-owners/pg_orders_write` and `ROLLBACK_LEVER` (the
+copy-back it named went with S14-04) — and FAILs the same with
+`orders_on=pending`, where a precondition
 unmet keeps the mirror shipping and the flag is not the lever, rather than
 read it as a flip waiting for its first write. Unless the owner rows are
 dated after `markers_read_at`, the moment the script took before reading any
@@ -2412,7 +2425,9 @@ lock-out revision — 0035, shared by all eight of #280's chains — deployed
 before the first of those eight flips (see "Revision 0035"). 7b-4 had to come
 before chain 3, since chains 3 and 5 held on its `goals_bridge`, and not
 before step 13, whose own `goals_bridge` `KS_GOALS_HISTORY=silver` met. The
-way back runs in reverse.
+way back ran in reverse, chain 5's copy-back before chain 3's, until S14-04
+deleted both; since then it is the image ("Before any rollback to an image
+from before step 14").
 
 **Three writers, one advisory lock** (`CHAIN_LOCK_KEY`, 'ks' + 5), taken
 first in every transaction. Measured before building: two classifications of
@@ -2424,7 +2439,7 @@ one manager in flight leave **two open intervals** without it, one with it.
   same transaction seeds a baseline for every manager without one — DuckDB
   does that only at the next boot (`_m0006`), which stands down once the
   chain is latched, because a DuckDB baseline after the latch is a key the
-  copy-back refuses on.
+  copy-back refused on (and an image from before step 14 still refuses on).
 - `update_manager_stats` — one body for both engines
   (`sql_dialect.manager_stats_sql`) with the date **spelled in Kyiv**.
   `DATE(ordered_at)` took the process's timezone: right in production only
@@ -2438,7 +2453,8 @@ one manager in flight leave **two open intervals** without it, one with it.
   writes two open intervals and an overlap, and the `sales_type` it then
   gives depends on the direction — that latent defect is left as it is, since
   changing what DuckDB accepts changes production. `set_at` is the web
-  container's UTC clock, the copy-back's handover clock.
+  container's UTC clock, the copy-back's handover clock (an image from
+  before step 14 still orders by it).
 
 **Around it, with the flag off nothing moves**: the store routes the four
 methods by `writes_postgres()` (or `reads_postgres()`); `get_all_managers`
@@ -2463,8 +2479,8 @@ and a NULL `set_at` as `chain_required_column_null` — one read,
 `pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (the
 replica stayed away; with `managers_on=0` or `pending` and owner rows
 standing, a FAIL as a lost marker naming
-`data/write-chain-owners/pg_managers_write` and
-`scripts/chain_copy_back.py managers` — at `pending` only for rows older than
+`data/write-chain-owners/pg_managers_write` and `ROLLBACK_LEVER` (the
+copy-back it named went with S14-04) — at `pending` only for rows older than
 the script's `markers_read_at`, since newer ones are the first tick latching
 during the report, UNKNOWN; a failure counts for its day) and M2
 (the shape and `last_sync_managers` under 26 h);
@@ -2474,27 +2490,31 @@ counts both tables once the chain owns them (`grows`: nothing deletes a
 manager, and the writer's one DELETE is followed by the INSERT of the same
 key).
 
-**The way back** is `scripts/chain_copy_back.py managers`. `chain_specs`
-derives the pair from a fourth source — `pg_replication.REPLICATED_SHAPES`
-and `mirror_reconciliation.REPLICATED_TABLES` — and the handover differs from
-an operational table's in two places: the pre-flip lever is
-`replicate_managers` and `POST /api/jobs/manager_stats/trigger`, and after the
-latch a key only DuckDB holds is a DuckDB write after it. Before a flip a key
-only Postgres holds is **CRITICAL** (there is no next full replace to remove a
-ghost interval) — this pair's rule first, and every full-replace operational
-table's since F6 (review of #265). Expect one pre-flip CRITICAL naming a
-`(manager, 1970-01-01)` baseline: the script's own connect runs `_m0006` for
-a manager synced since web's last start; `up -d web` ships it. A chain
-declaring `CHAIN_COPY_BACK_OWES_FULL_REBUILD` gets `warehouse_dirty='full'`
-in the copy's own transaction — `sales_type` is materialised at rebuild time
-and an incremental rebuild never re-derives an order whose classification
-moved. **Step 13's way back is refused while this chain is latched**: a
-start that would run as duckdb stays `postgres` and pages
-`warehouse_way_back_refused` (see "Step 13"); copy chain 5 back first, then
-chain 3, then take the way back.
+**The way back** was `scripts/chain_copy_back.py managers`, until S14-04
+deleted it; since then it is the image ("Before any rollback to an image from
+before step 14"). History: `chain_specs` derived the pair from a fourth source
+— `pg_replication.REPLICATED_SHAPES` and
+`mirror_reconciliation.REPLICATED_TABLES`, both deleted with it — and the
+handover differed from an operational table's in two places: the pre-flip
+lever was `replicate_managers` and `POST /api/jobs/manager_stats/trigger`, and
+after the latch a key only DuckDB held was a DuckDB write after it. Before a
+flip a key only Postgres held was **CRITICAL** (there is no next full replace
+to remove a ghost interval) — this pair's rule first, and every full-replace
+operational table's since F6 (review of #265). One pre-flip CRITICAL naming a
+`(manager, 1970-01-01)` baseline was expected: the script's own connect ran
+`_m0006` for a manager synced since web's last start; `up -d web` shipped it. A
+chain declaring `CHAIN_COPY_BACK_OWES_FULL_REBUILD` (deleted with it) got
+`warehouse_dirty='full'` in the copy's own transaction — `sales_type` is
+materialised at rebuild time and an incremental rebuild never re-derives an
+order whose classification moved. **Step 13's way back was refused while this
+chain was latched**: a start that would have run as duckdb stayed `postgres`
+and paged `warehouse_way_back_refused` (see "Step 13"), whose lever was to copy
+chain 5 back first, then chain 3, then take the way back. Since step 14 no
+start takes the way back (S14-00) and nothing copies a chain back (S14-04): the
+page's action is `core.rollback_lever.ROLLBACK_LEVER`.
 
-**What the review moved (2026-10-08).** The ways back leave a state where this
-chain is on DuckDB and chain 3 still owns the orders; DuckDB's
+**What the review moved (2026-10-08).** The ways back left a state where this
+chain was on DuckDB and chain 3 still owned the orders; DuckDB's
 `update_manager_stats` then leaves the stats as the copy-back carried them
 (`duckdb_orders_frozen`) rather than count frozen orders and ship
 `last_order_date` and `order_count` backwards. A value Postgres would refuse —
@@ -3802,7 +3822,8 @@ precondition: every chain writes Postgres, a constant** (`writes_postgres()`,
 rows (decision 3), because an image from before step 14 — the rollback
 target, see "Before any rollback to an image from before step 14" — routes
 by them; `/api/health` still publishes `env`, `error`, `latched` and `mismatch`.
-History below.
+**Since S14-04 nothing in the code hands a chain back to DuckDB either**: the
+copy-back is deleted and the way back is the image (below). History below.
 
 Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
@@ -3846,215 +3867,47 @@ the running build declares. Today nothing is latched: `app.manual_expenses` hold
 rows, so chain 8's flag can still be moved freely, and the first typed expense
 ends that.
 
-**The way back is `scripts/chain_copy_back.py`** (DN-08), and it is the only
-thing that may release a latch. It reads every table the chain owns out of
-Postgres and then, in **one DuckDB transaction**, writes them, carries the
-chain's `last_sync_*` values back into `sync_metadata`, moves the DuckDB id
-allocator above every id either store has used, and compares both sides
-**whole, with tolerance zero and no grace** — on the same connection, before
-COMMIT, and on every column it wrote **except the two bookkeeping stamps the
-daily spec forgives** (`ignore_columns`): `bronze.offers.synced_at` and
-`app.sku_inventory_status.updated_at`. That is right, not a gap: each is one
-value stamped across the whole table by one sync or one rebuild, so it says
-when that writer last ran and nothing about an offer or a SKU, and the writer
-restamps it wholesale on its next hourly run after `up -d` — a bad copy could
-cost a wrong "as of" on /inventory until then. Keeping the daily list is
-also what keeps the specs derived rather than a second opinion, and a unit
-test computes the set so a third cannot join it quietly. Chain 7b-3 added four
-more on purpose, with the reason in that test: the goal tables' `updated_at`
-and `revenue_predictions.created_at`, each one stamp per writer run and read
-by nothing in DuckDB. Two of them are **not** restamped by the next run —
-`weekly_patterns` is stored only by `POST /api/goals/recalculate`, never by
-the Monday job, and a training replaces only the range it predicts, so a past
-day's `created_at` stands for good — so a mis-copy of either is seen by no
-comparison and corrected by no run. What the copy carries is pinned by the
-suite instead (`test_forecast_writer.py::TestTheCopyBack`, stamps that differ
-by row).
-`stock_movements.recorded_at` is the opposite case and **is** compared: the
-daily check leaves it out only because it is that check's clock, but it dates
-one movement for good, and a review shifted every copied value by an hour and
-saw the latch released. It commits, and
-releases the marker and the `owner:` rows, **only on zero findings**. A
-difference is a ROLLBACK: DuckDB is left exactly as it was and Postgres stays
-the writer. A ROLLBACK does not undo a sequence burn — measured on 1.5.5, the
-burn stays in the process and reaches the file only if something commits
-afterwards — so the allocator ends at or above where it was: a gap, never a
-reissued id.
+**Since step 14's S14-04 there is no way back in the code: the way back is
+the image.** `scripts/chain_copy_back.py` (DN-08), its handover
+(`core/chain_transfer.py`) and the lever journal (`core/lever_journal.py`)
+are deleted. Under `KS_DUCKDB=off` the script refused without
+`-e KS_DUCKDB=on`, and a step-14 image routes by no latch anyway (S14-00); an
+image from before step 14 carries its own copy-back if it is ever wanted. The
+way back from a step-14 image is that image, after the checks in "Before any
+rollback to an image from before step 14". Every page, finding, health
+description and soak detail that named the copy-back as the cure names one
+line instead, `core.rollback_lever.ROLLBACK_LEVER`: *investigate with
+`pg_chain_invariants`; roll back to `rollback-step14` only after checking the
+markers against the owner rows*. Not "redeploy and look": for a lost marker
+the rollback is exactly the dangerous step, because the old image routes a
+chain without its marker by its flag and its preconditions.
+`tests/unit/test_rollback_lever.py` holds every such text to that line, the
+soak's SQL and shell included, and fails on any string that still names the
+script. The `lever_used` rows already in `app.alert_events` stay as history
+(OD-11, no DROP); nothing writes one again.
 
-**After the COMMIT come a checkpoint and the release, and either can fail.**
-That is exit 3, never exit 1: until it had its own code, an exception there
-left through the interpreter's exit 1 — "rolled back" — with the copy in
-DuckDB. The message reads which copies of the latch survived and names one
-step: owner rows still standing → `--execute` again (its handover finds DuckDB
-already equal, and it releases); owner rows UNREADABLE — Postgres gone
-between the comparison and the release, so the read that would answer fails
-too — → the same, once Postgres answers, and never a guess
-either way; owner rows gone and the marker not → the marker-only steps below,
-`--handover` first. The marker is read from disk, not the process's cache: an
-unlink whose directory fsync raised has removed the file and not the entry.
+*History: what the copy-back was.* The only thing that could release a latch.
+It read every table a chain owned out of Postgres and, in one DuckDB
+transaction, wrote them, carried the chain's `last_sync_*` values back into
+`sync_metadata`, moved DuckDB's id allocator above every id either store had
+used, and compared both sides whole, at tolerance zero, before COMMIT; it
+released the marker and the owner rows only on zero findings, and said exit 3
+when the COMMIT held and the release did not. Its `--handover` asked first,
+read-only and with web stopped, whether a flip or a rollback would strand a
+row — a key only one side held, two rows under one append-only key, a later
+version by a clock both stores carry — and it was the gate before every flip.
+Its specs were derived from the shippers' shapes and the daily comparison's
+specs, never written out. All of it is in git and in the rollback image.
 
-**A comparison run after the copy cannot see what the copy destroyed.** A
-full-replace table is DELETE+INSERT, and afterwards the two stores agree by
-construction; the first draft released a latch exactly so, with an offer
-DuckDB had catalogued after the last shipment deleted by the copy it then
-"verified". So the handover question is asked first, of both stores as they
-stand — in the dry run as well — and any CRITICAL refuses before anything is
-written:
-
-- a key only DuckDB holds — bar two the copy may delete, each INFO: a row
-  older than anything Postgres holds on a table both stores sweep by age
-  (DuckDB's sweep lagging the writer's), and after the latch a contact or
-  line item the chain's rewrite of its owner dropped (decision 6, below);
-- before a flip, a key only Postgres holds in a table the hourly copy replaces
-  whole: a row DuckDB deleted after the copy last ran. The copy would remove
-  it, but it stands down at the flip, so the flip would keep it in the store
-  the page reads — the review of #265 (F6) reproduced a withdrawn expense back
-  in the ad spend. The lever is the copy itself, with the chain writing DuckDB
-  (the flag at duckdb, no marker). One exception, and only on a table both
-  stores sweep by age (chain 10's samples): a row older than anything DuckDB
-  still holds is its sweep, which Postgres's own writer repeats after a flip.
-  A row's own clock is no sweep — an older withdrawn expense is a ghost too.
-  An append table's key only Postgres holds, above DuckDB's watermark, is
-  refused too (owner's decision, 2026-10-09; the review of F6 had left it
-  INFO): a DuckDB file restored from before the last copy and a writer round
-  the copy look the same there, and a flip would keep either as the record.
-  So the decision is made per id, with web stopped — a row DuckDB lost is
-  written back into DuckDB (its allocator moved above it), a phantom is
-  deleted from Postgres — and `--handover` is asked again. After the latch
-  the same row is Postgres's later write and stays INFO;
-- in an append-only table, two different rows under one key. There is no
-  "newer" there: they are two events, and the usual one is a movement id both
-  allocators issued, because Postgres floors its sequence on its own MAX(id);
-- in an append-only table, a Postgres row the copy can never read back: below
-  DuckDB's watermark, or at it where the copy reads strictly above
-  (`stock_movements`; `inventory_sku_history` re-reads its watermark day with
-  `>=`, so a row on that day is carried);
-- a DuckDB version later than Postgres's by a clock both stores carry as a value
-  — derived per table from the daily spec (`_shared_clock`; `manual_expenses`
-  and `inventory_history` first, then every chain that carries one, such as
-  `revenue_goals`, whose two writers stamp `updated_at` from the web
-  container's clock for exactly this reason), and for a buyer or an order
-  KeyCRM's own `updated_at`. `TestTheClockIsDerived` lists every one.
-
-Any other difference after the latch is taken as Postgres being newer, and that
-is true by construction only when `--handover` was clean before the flip —
-which is why the runbook puts it first. One refusal is knowingly too strict: an
-expense DuckDB held before the flip and Postgres deleted after the latch looks
-exactly like a stranded one (a row on one side has nothing to compare a clock
-against). Unreachable today, since DuckDB holds no expenses; the refusal names
-the ids and the two levers.
-
-Its specs are derived rather than written out — `_FULL_REPLACE` and
-`_APPEND_ABOVE` intersected with the chain's `CHAIN_TABLES`, plus the daily
-comparison's own specs — and a chain table with no shipping shape or no
-comparison spec **raises** instead of being skipped. Chain 4 added a third
-source, `MIRRORED_LANDING_TABLES`: `bronze.buyers` and `bronze.buyer_contacts`
-are shipped by the buyers mirror from the same parse as DuckDB and nothing
-replaces them whole. Their handover is stricter because it can be — Postgres
-dates every write of a buyer (`mirrored_at = now()`), and the owner row's
-`updated_at` is `now()` in the latching transaction, one clock. Before a flip
-any difference, either side, is CRITICAL. A buyer or contact DuckDB holds that
-Postgres lacks or holds differently, and a contact only Postgres holds of a
-buyer DuckDB holds, name `POST /api/mirror/backfill/buyers`, which re-ships
-every buyer DuckDB holds with its contacts (detached, heavy lock per portion;
-it moves every `mirrored_at`, so the search index re-indexes everything and
-`buyers_without_verdict` is blind for 90 minutes). A buyer only Postgres holds
-is a per-id decision — nothing deletes one. After the latch a difference, or
-a row on one side only, is INFO only for a buyer the chain rewrote since the
-latch and CRITICAL otherwise (decision 6); a buyer only DuckDB holds always
-refuses — the chain never deletes one — and so does a buyer DuckDB holds in a
-version KeyCRM's own `updated_at` dates later, with its contacts: a DuckDB
-write after the latch (the marker lost with the flag back at duckdb) that the
-rewrite clock alone would take for the chain's. Contacts are read in both
-stores through a join to their own buyers, as the daily check reads DuckDB's,
-so an orphan on either side is outside the landing rather than a refusal the
-reship could never clear. For every chain, a Postgres row with NULL where
-DuckDB declares NOT NULL (read from DuckDB's catalogue) is a handover CRITICAL
-whose lever is correcting it in Postgres, so `--handover` refuses what
-`--execute` would otherwise have died on at its first INSERT. The two big tables are
-compared row by row rather than by fingerprint, because the fingerprint's one
-blind spot — a text column rewritten to the same length — is affordable every
-morning and not affordable in the comparison that releases a latch.
-
-**Preconditions, and one deliberate absence.** Web must be stopped, which is
-proved by DuckDB opening read-write at all: the file lock is exclusive, so a
-check against the docker socket would only be a second opinion that can be
-wrong. The chain's **owner rows** must exist — they are written inside every
-Postgres write, so they are the proof that rows changed hands, marker or no
-marker (a lost `./data` loses the marker and keeps them). A **marker without
-owner rows** is a first write that failed, or a release that died between its
-two deletes: Postgres received nothing, a copy would be a rewind, and it is
-refused with the steps that clear it. **`--handover` is the first of them**:
-with no owner rows it applies the pre-flip rule, and a CRITICAL there is a row
-DuckDB wrote after the shipper stood down. Then the flag in `.env` — left at
-`postgres` only on exit 0, or the next write latches the chain over that row
-and every later copy-back refuses on it — then delete
-`data/write-chain-owners/<chain>`, then `up -d`. `KS_WRITE_*` is **not** a
-precondition: under OD-19 (a) it does not route writes while the chain is
-latched, and it is put back afterwards, by the runbook.
-
-**`--handover` comes first, in both directions.** It reads only and needs no
-latch, but it does need the database file to itself — DuckDB will not let a
-second process open a file web holds, not even read-only — so it runs in the
-stopped window. Before a flip it is the gate; before a rollback it is the
-preview, and its CRITICALs are exactly what `--execute` refuses on.
-
-```bash
-cd /opt/key-api-bot && docker compose stop web bot
-docker compose run --rm --no-deps -T web \
-    python /app/scripts/chain_copy_back.py inventory --handover
-# BEFORE A FLIP: first, with web still up, /api/health must show
-#   write_chains.pg_inventory_write.preflight.ok = true (DN-24). Then this:
-#   exit 0, or do not flip. A CRITICAL is a row the flip would
-#   strand, or one DuckDB deleted that the flip would keep: up -d web with the
-#   chain writing DuckDB — KS_WRITE_INVENTORY=duckdb and no marker under
-#   data/write-chain-owners — let replicate_operational ship
-#   (POST /api/jobs/replicate_operational/trigger), stop, ask again. Not
-#   "the flag unchanged": the handover asks the same pre-flip question with
-#   the flag already at postgres and nothing latched, or with a marker whose
-#   first write failed, and there the copy stays down and the next write
-#   latches the chain over the row.
-# TO ROLL BACK: the same command with --dry-run (also the default), then with
-#   --execute. Exit 0 released. 1 not committed (a difference rolled back, or
-#   a traceback before COMMIT): DuckDB as it was, latch kept. 2 refused before
-#   writing. 3 COMMITTED, then the checkpoint or the release failed: DuckDB
-#   HAS the copy; do what the message says for the latch it found. Only after
-#   exit 0:
-#   1. set KS_WRITE_INVENTORY=duckdb in .env   (the flag decides again)
-#   2. docker compose up -d web bot
-#   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
-#      chain 1; chains 7a, 6a and 7b-3 have no soak check yet, so meta.mirror_state
-#      for app.revenue_goals or bronze.expense_types. The hourly copy must be
-#      shipping the chain's tables again. Chain 4's B1-B5 read "not
-#      applicable" once it is released, so read meta.mirror_state for its
-#      three tables: the buyers mirror stamps the bronze two on its next
-#      batch (POST /api/mirror/backfill/buyers now), replicate_operational
-#      stamps app.buyer_gender within the hour.
-```
-
-**Run it as the web service, never as a bare `docker run --env-file .env`.**
-`KS_PG_DSN` is not in `.env`: `docker-compose.yml` builds it in web's
-`environment:` block, with the password interpolated from `.env`. The first
-form of this runbook passed `--env-file .env` and a hand-picked network, and at
-chain 1's flip (2026-09-30) the handover died on `KS_PG_DSN is not set` — safely,
-exit 1 before anything was written, web back in 8 s. `docker compose run
---rm --no-deps -T web` gives the one-off exactly web's environment, volumes and
-networks, so the DSN, `./data` and the route to Postgres are web's own and not
-a second copy that can drift. I1 dates the handover by chain 1's owner rows,
-then by `SOAK_INVENTORY_FLIP_AT`, and with neither reads a copy's stamp inside
-its 75-minute window as UNKNOWN, so on flip day pass the flip time
-(`SOAK_INVENTORY_FLIP_AT='<latch time>' deploy/stage4_soak.sh`) until the
-chain's first write. I1 counts a copy's failure only after the handover and
-for the day it was stamped, and with `inventory_on=0` and owner rows standing
-FAILs as the marker lost, naming `data/write-chain-owners/pg_inventory_write`
-and `scripts/chain_copy_back.py inventory`. E1 counts a failure on
-`app.manual_expenses` for its day too, and once chain 8 holds an owner row,
-only after it: nothing resets the count while the copy stands down. At
-production's size — 162,883 history rows, 56,277 movements —
-the whole copy-back is ~9 s on a laptop, because rows go in 1,000 to a
-statement. `executemany` runs once per row in DuckDB's client: about eight
-minutes for the history alone with no memory limit, and under the store's own
-4 GB — what the one-off container gets — `OutOfMemoryException` in 17 s.
+I1 dates the handover by chain 1's owner rows, then by
+`SOAK_INVENTORY_FLIP_AT`, and with neither reads a copy's stamp inside its
+75-minute window as UNKNOWN. I1 counts a copy's failure only after the
+handover and for the day it was stamped, and with `inventory_on=0` and owner
+rows standing FAILs as the marker lost, naming
+`data/write-chain-owners/pg_inventory_write` and, since S14-04,
+`ROLLBACK_LEVER`. E1 counts a failure on `app.manual_expenses` for its day
+too, and once chain 8 holds an owner row, only after it: nothing resets the
+count while the copy stands down.
 
 **Chain 7a moves the write, and the reads of its table follow it.**
 `KS_WRITE_GOALS=postgres` routes `set_goal` — and `reset_goal_to_auto` through
@@ -4068,8 +3921,8 @@ and after the latch that would have shown the pre-flip goal out of a DuckDB
 nothing writes, for good and in silence. The flags still choose the engine for
 the rest of those pages. `tests/unit/test_goals_reads_follow_chain.py` walks
 `core/` and `web/` for every goal statement and fails if its router does not
-ask. `scripts/chain_copy_back.py goals` is the chain's way back; there is no
-sequence and no sync key to carry.
+ask. The chain's way back was `scripts/chain_copy_back.py goals`, until
+S14-04 deleted it.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue
@@ -4172,9 +4025,8 @@ bounded at 5 s, and publishes the answer.
   the job's format. Any other check raising — SMS, ClickHouse — leaves chain
   1's comparison complete, so it is a `note`, not a reason; the run still
   counts as failed everywhere else. `ok` is null once the chain writes
-  Postgres. It is not a substitute for `chain_copy_back.py --handover`, which
-  is still the gate: read the preflight first, then stop web and ask the
-  handover.
+  Postgres. It was not a substitute for `chain_copy_back.py --handover`,
+  which was the gate before a flip (deleted with the way back in S14-04).
 - **A step failure is not the tick's end.** On the Postgres path the offers
   and stocks steps run in `SyncService._inventory_step_postgres`, which never
   raises: a failure (the watermark reads included — they are Postgres reads
@@ -4281,8 +4133,11 @@ that would run as duckdb — unset, typo or an unmet precondition — stays
 `postgres` while such a chain is latched (`DUCKDB_DERIVATION_SOURCES`, local
 markers only), publishes the chains as `warehouse_writer_mode.way_back_refused`,
 and the canary pages `warehouse_way_back_refused` (CRITICAL, "Warehouse way
-back refused") in place of `warehouse_preconditions_unmet`. The lever: copy the
-chains back first (chain 5, then chain 3), then the way back. Postgres derives
+back refused") in place of `warehouse_preconditions_unmet`. The lever was to
+copy the chains back first (chain 5, then chain 3), then take the way back;
+since step 14 nothing copies a chain back (S14-04), and the canary's action
+is `core.rollback_lever.ROLLBACK_LEVER` ("Before any rollback to an image
+from before step 14"). Postgres derives
 on its own signal only under `KS_PG_DERIVE=own` — under `piggyback` its
 rebuild rides the DuckDB tick a `postgres` start does not run — so a refusal
 with `own` gone leaves **nothing** deriving, screens frozen and correct up to
@@ -4729,7 +4584,8 @@ silence", below). Under `off` an open is refused **before the
 driver runs**, so the file is not even created — and `DuckDBStore.connect()`
 and `backup_database()` ask first, before either touches the disk beside the
 file (`data/`, `duckdb_tmp/`, `backups/` and the temp copies in it); the
-copy-back asks before `configure_modes()`, which would read Postgres;
+copy-back asked before `configure_modes()`, which would read Postgres, until
+S14-04 deleted it;
 counted **at the raise**, because dozens of callers wrap `get_store()` in
 `except Exception` and a swallowed refusal is exactly the open the week must
 not miss; logged CRITICAL; published as `duckdb_switch.opened_while_off`
@@ -4762,9 +4618,9 @@ eight, `sync_metadata` and `schema_migrations` — pinned in
 `test_duckdb_table_fates.py`. After a week under `off` a way back reads the
 week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)), accepted
 until the drop: the finding dates its rows on Postgres's clock, its lever says
-rows of a week under `off` are expected and never names
-`scripts/chain_copy_back.py` as the cure (it releases the latch and hands the
-chain back to DuckDB), and the soak's H2 lists it as accepted, not failed, once
+rows of a week under `off` are expected (it used to add that
+`scripts/chain_copy_back.py` was never the cure; the script went with
+S14-04), and the soak's H2 lists it as accepted, not failed, once
 the canary's `watch:duckdb_switch` row exists. On the read
 path (PR-8) DuckDB answers nothing even by routing: `/api/summary?source_id=3`
 (Opencart, no column in Gold) answers DuckDB's zeros without a connection;
@@ -4938,17 +4794,20 @@ only the history file — which nothing reads — remembered the episode, so the
 soak passed (review of 02.10). It cannot see a change and its exact reversal
 inside one hour, nor a read-only open.
 
-**A copy-back now leaves a trace.** `scripts/chain_copy_back.py` is the only
-lever that gives a chain back to DuckDB, and it used to leave only an absence
+**A copy-back left a trace — history since S14-04**, which deleted
+`scripts/chain_copy_back.py`, its `release_chain` and `core/lever_journal.py`;
+the rows below stay in `app.alert_events` as history and nothing writes one
+again. `scripts/chain_copy_back.py` was the only
+lever that gave a chain back to DuckDB, and it used to leave only an absence
 — owner rows deleted, a marker unlinked, its report gone with its `--rm`
-container. `release_chain` now writes one `app.alert_events` row
+container. `release_chain` then wrote one `app.alert_events` row
 (`condition_key = 'lever:chain_copy_back'`, `event_type = 'lever_used'`,
-`context` naming the chain and outcome) **inside the transaction that deletes
-the owner rows** (`core/lever_journal.py`): a release whose record fails does
-not commit. Exit 3 writes `committed_not_released` while the owner rows still
-stand. No revision — `event_type` has no CHECK, and every reader of the journal
+`context` naming the chain and outcome) **inside the transaction that deleted
+the owner rows** (`core/lever_journal.py`): a release whose record failed did
+not commit. Exit 3 wrote `committed_not_released` while the owner rows still
+stood. No revision — `event_type` has no CHECK, and every reader of the journal
 asks for `fired`/`escalated`/`resolved` by name. A copy-back container that
-inherits `KS_DUCKDB=off` is refused (exit 2); `-e KS_DUCKDB=on` is the
+inherited `KS_DUCKDB=off` was refused (exit 2); `-e KS_DUCKDB=on` was the
 decision to restart both clocks, said out loud.
 
 **The soak checks**, `deploy/stage4_soak/50`–`53`, read-only as `ks_readonly`:
@@ -5080,7 +4939,8 @@ the harmless direction, and their line says which line to write.
    the last flip), no FAIL in P1–P3 or F1.
 4. *History since S14-00: a step-14 web checks none of this, and
    `core/duckdb_off.py` and `chains_keeping_sync_metadata()` are deleted —
-   `chain_transfer._carried_keys` names the same chains' keys.* What web's
+   the same chains are those declaring `CHAIN_SYNC_KEYS` or
+   `CHAIN_MARKER_KEYS`.* What web's
    verdict would check at its start (`core/duckdb_off.py`), read
    beforehand so the start is not the first time anybody asks: `/api/health`
    `write_chains` with every chain's `mode` `postgres` — by its latch or by
@@ -5204,8 +5064,9 @@ Deployment); the steps below are that image's.
    `offsite_check` pages the DuckDB copy stale; and `shadow_missing_in_duckdb`
    WARNs in the digest every morning — the week's shadow rows, accepted until
    the drop (OD-S5-3 (a)).
-5. Not the way back: `scripts/chain_copy_back.py`. It hands a chain's writes
-   back to DuckDB, a different decision with its own clock.
+5. Not the way back: the copy-back, which handed a chain's writes back to
+   DuckDB, a different decision with its own clock. Since S14-04 there is
+   none in the code; an image from before step 14 carries its own.
 
 Starting again later is step 1 again, a new Ark included: the file changed
 the moment web ran `on`.
@@ -5249,8 +5110,9 @@ sync's mirror has stopped too, and `mirror_stood_down` stays INFO — a decision
 somebody took. On the owner rows alone it has not — the per-tick mirror asks
 only the local answer — so every tick writes DuckDB's copy over the chain's
 rows, and that is `order_owner_row_without_marker`, **CRITICAL**, whose lever
-names `data/write-chain-owners` and `scripts/chain_copy_back.py` (or, with no
-chain declared in this build, a redeploy of one that does). It was the same
+named `data/write-chain-owners` and `scripts/chain_copy_back.py` (or, with no
+chain declared in this build, a redeploy of one that does) — and since S14-04
+names `ROLLBACK_LEVER`. It was the same
 INFO once, and a page or the digest prints only the check's label and lever,
 never its description: all three said "not a defect" about the one state
 here that is. Production today files neither: no chain declares an order
@@ -5303,7 +5165,8 @@ publishes `unmet_precondition`, which the canary turns into
 Postgres (OD-19 (a)) and the same warning says its readers are on the frozen
 copy. DN-27's rule, generic in the registry. Chain 8 carries the same
 assumption unenforced: it is live, so enforcing it is its own change.
-Rollback is `scripts/chain_copy_back.py expense_types` once latched.
+Rollback was `scripts/chain_copy_back.py expense_types` once latched; since
+S14-04 it is the image ("Before any rollback to an image from before step 14").
 
 **The latch waits for a connection.** Every chain latches inside
 `pool.acquire()`, not between `_pool()` and it. `core.pg.get_pool` sets no
@@ -5370,12 +5233,13 @@ the instants the chain has written at — `writes:<table>` in
 some row still carries, so bounded by the table and not by the number of
 writes — locked before any product so two writes cannot lose each other's
 stamp. From the latch on, "the chain wrote this row" means its `mirrored_at`
-is a recorded stamp, for the watch and the copy-back alike; any other instant
-at or after the latch stays CRITICAL until KeyCRM serves the row again or a
-human deletes or restores it. What it cannot see, and says so: an edit that
-leaves `mirrored_at` alone, or copies a recorded instant — on a retired row
-only a trigger or a migration would date that. The copy-back releases the
-record with the latch.
+is a recorded stamp, for the watch (and, until S14-04, the copy-back); any
+other instant at or after the latch stays CRITICAL until KeyCRM serves the row
+again or a human deletes or restores it. What it cannot see, and says so: an
+edit that leaves `mirrored_at` alone, or copies a recorded instant — on a
+retired row only a trigger or a migration would date that. The copy-back
+released the record with the latch (`CHAIN_RELEASED_KEYS`), until S14-04
+deleted both; nothing in this build releases it.
 
 **E1 reads the record too** (2026-10-14). The daily comparison's
 `chain_shipper_overwrote` took any `last_ok_at` after the owner row for a
@@ -5452,15 +5316,17 @@ whichever of chains 3 and 6 lands last, which is chain 3, and chain 3 declares
 it (see "Chain 3"). A test keeps it off every chain that does not own an order
 table, and requires it on chain 3.
 
-**The way back** is `scripts/chain_copy_back.py catalogue`. Both tables are
+**The way back** was `scripts/chain_copy_back.py catalogue`, until S14-04
+deleted it; since then it is the image ("Before any rollback to an image from
+before step 14"). History: both tables were
 mirrored landing tables there, each its own rewrite clock (`mirrored_at` one
 of the chain's recorded instants, at or after the owner row's `updated_at`),
 compared whole at zero. Before a flip a row on one
-side only, or differing, refuses and names the carry or the next products sync
+side only, or differing, refused and named the carry or the next products sync
 (categories: `POST /api/jobs/full_sync_weekly/trigger`); after the latch a row
-the chain re-stamped is the copy's work (INFO) and a retired row that differs,
-one written round the chain since the latch, or one only DuckDB holds,
-refuses. The chain map's "run a full sync" rollback
+the chain re-stamped was the copy's work (INFO) and a retired row that
+differed, one written round the chain since the latch, or one only DuckDB
+held, refused. The chain map's "run a full sync" rollback
 is wrong under OD-19 (a): a full sync under a latched chain writes Postgres
 again. No lock-out of its own, and revision 0035 — shipped for the other
 chains #280 registered — holds none of its writers: an image older than the
@@ -5472,13 +5338,16 @@ paging `owner_row_without_marker`.
 
 Proved on PostgreSQL 17.2 (`tests/integration/test_catalogue_writer.py`): the
 one-`xmin` write, retirement, a repeated id, two concurrent full writes with no
-deadlock, three planted defects reaching the watch by name, and the carry →
-handover → flip → copy-back round trip with 1055 landing in DuckDB. Since the
-review: a write round the chain still CRITICAL after the next full write and
-refused by the copy-back, the record locked before any product, the short
-write judged per write (20 ordinary retirements quiet, a truncated write
-warned and cleared), the acquire and statement bounds, and the carry's
-`DO NOTHING` and `W − 1 µs` clamp.
+deadlock and three planted defects reaching the watch by name. Since the
+review: a write round the chain still CRITICAL after the next full write, the
+record locked before any product, the short write judged per write (20
+ordinary retirements quiet, a truncated write warned and cleared), and the
+acquire and statement bounds. The carry → handover → flip → copy-back round
+trip with 1055 landing in DuckDB, the copy-back's refusal of a write round the
+chain, and the carry's `DO NOTHING` and `W − 1 µs` clamp were proved there
+too, until S14-00 removed those cases (each began with the mirror shipping
+DuckDB's catalogue, which stands down for the chain's tables) and S14-04 the
+copy-back itself.
 
 ### Chains 9, 10, 11a, 11b: the shadow state (OD-02 (c), all off)
 
@@ -5517,10 +5386,12 @@ never raised — published as `write_chains.<chain>.shadow_failures`, class
 only. A Postgres failure raises and DuckDB is not written, so DuckDB ⊆
 Postgres holds by construction. The latch (OD-19 (a)) is unchanged: a row whose
 shadow failed exists in Postgres alone, so the flag is no more a rollback than
-chain 8's, and the way back is `scripts/chain_copy_back.py dq_journal |
-watchdog | weekly_ledger | traffic_ledger`. It carries `CHAIN_MARKER_KEYS` (the
-digest's beat) with the sync keys, and its handover reads a DuckDB-only sample
-older than everything Postgres still holds as a lagging prune, INFO.
+chain 8's, and the way back was `scripts/chain_copy_back.py dq_journal |
+watchdog | weekly_ledger | traffic_ledger` — carrying `CHAIN_MARKER_KEYS` (the
+digest's beat) with the sync keys, its handover reading a DuckDB-only sample
+older than everything Postgres still held as a lagging prune, INFO — until
+S14-04 deleted it; since then it is the image ("Before any rollback to an
+image from before step 14").
 
 **Readers follow the writer, with no fallback** — chain 7a's rule. Under
 `postgres` the digest, `/api/health`'s layer ages, `/api/health/data-quality`
@@ -5564,11 +5435,13 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
   and the next tick sends again — today's exposure on the `duckdb` path, left
   as it is because closing it there changes the default. Flip and roll back
   Wednesday to Sunday. **A spool outlives the flag that wrote it**: the gate
-  under `duckdb` lands it in DuckDB and counts a still-spooled week as sent
-  (a flag put back after a record that never latched, or after a copy-back,
-  sent the week twice before the review); the handover reports the spool —
-  INFO, a file that will not parse CRITICAL — and `--execute` lands it in
-  Postgres before it reads, refusing if anything is left.
+  under `duckdb` counts a still-spooled week as sent (a flag put back after a
+  record that never latched, or after a copy-back, sent the week twice before
+  the review). It also landed the spool in DuckDB, the handover reported
+  the spool — INFO, a file that would not parse CRITICAL — and `--execute`
+  landed it in Postgres before it read; S14-04 deleted all three
+  (`report_ledger.land_in_duckdb`, `land_pending`) with the copy-back, and
+  since S14-00 the `duckdb` branch is unreachable.
 
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows, a failure counting for the day it was stamped; H2
@@ -5789,9 +5662,11 @@ would have to exceed the Thu→Mon gap.
 **The way back.** Flagged and not yet latched: unset, `up -d web`, free.
 Latched: `scripts/chain_copy_back.py forecast` (specs derived, no sequence,
 no sync key; the stamps forgiven as above), then the flag, then
-`replicate_operational`. Recalculating and retraining are the cheaper way to
-fix the *content* — they write wherever the chain writes — but only the
-copy-back releases a latch. The model artefact (`data/revenue_model.joblib`
+`replicate_operational` — until S14-04 deleted the copy-back; since then the
+image ("Before any rollback to an image from before step 14"). Recalculating
+and retraining are the cheaper way to fix the
+*content* — they write wherever the chain writes — but nothing in a step-14
+image releases a latch. The model artefact (`data/revenue_model.joblib`
 and its JSON siblings) is a file and does not move.
 
 **The flip**, after `KS_READ_FALLBACK=off` is live (the goal history is
@@ -5799,7 +5674,8 @@ Silver's since 7b-4), one flag a day, outside Mon/Thu 03:20–04:40 Kyiv and ≥
 write to these tables, before step 13: `/api/health` shows the chain
 `duckdb`/unlatched and `goals_history.mode` silver; record `/api/goals/smart`
 and `/api/revenue/forecast`; `docker compose stop web bot`; `chain_copy_back.py
-forecast --handover` exits 0 or no flip; set the flag; `up -d web bot`; then
+forecast --handover` (gone since S14-04) exits 0 or no flip; set the flag; `up
+-d web bot`; then
 trigger `seasonality_calc` and `revenue_prediction_train` (admin, `POST
 /api/jobs/<id>/trigger`) so the first writes happen watched — the trigger
 leaves `weekly_patterns` as they are, on purpose. Expect `retail_months: 12`,

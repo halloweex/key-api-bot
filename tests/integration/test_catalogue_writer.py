@@ -1,4 +1,4 @@
-"""Chain 6, the catalogue, written to a real Postgres and carried back.
+"""Chain 6, the catalogue, written to a real Postgres.
 
 Everything goes through `DuckDBStore.upsert_products` / `upsert_categories` —
 the only path the catalogue is written by — so the routing is what is proved,
@@ -19,9 +19,10 @@ What is proved, in the design's numbering:
   copy-back), went in S14-00: every case began with the mirror shipping
   DuckDB's catalogue, which stands down for the chain's tables now;
 - the record of the chain's own write instants: what it keeps, that a write
-  round the chain outlives the next full write in the watch and refuses the
-  copy-back, that it is locked before any product, and that one nobody can
-  parse stops the write (the chain-6 review's first finding).
+  round the chain outlives the next full write in the watch (it refused the
+  copy-back too, until S14-00 removed that case and S14-04 the copy-back),
+  that it is locked before any product, and that one nobody can parse stops
+  the write (the chain-6 review's first finding).
 
 The catalogue tables are emptied around each test, with the owner rows and the
 two watermark rows.

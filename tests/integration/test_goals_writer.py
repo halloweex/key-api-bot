@@ -9,11 +9,9 @@ to survive, and what has to stay true around it, is what these tests pin:
 - the typed goal is on the page at once and survives the hourly replace,
   which stands down for its table — and a control proves the replace would
   otherwise have wiped it;
-- the first write latches the chain, so putting the flag back without the
-  copy-back changes nothing (OD-19 (a)): the writes stay in Postgres, the
-  replace stays stood down, and the disagreement is published;
-- the copy-back carries the goals into DuckDB, compares them at zero, releases
-  the latch, and the hourly copy resumes shipping exactly what came back;
+- the first write latches the chain, so putting the flag back changes
+  nothing (OD-19 (a)): the writes stay in Postgres, the replace stays stood
+  down, and the disagreement is published;
 - every read of the table follows the chain whatever `KS_READ_GOALS` or
   `KS_READ_MARKETING` say, and a Postgres failure there raises rather than
   showing DuckDB's frozen copy;
@@ -29,7 +27,8 @@ path: the controls proving the hourly replace would otherwise wipe a goal,
 the typo refusing the write, the copy-back's round trip and the pre-flip
 handover. Where DuckDB must hold a value — the comparison of the two
 branches, the frozen copy a read must not show — it is written there on
-purpose (`tests.conftest.chains_on_duckdb`).
+purpose (`tests.conftest.chains_on_duckdb`). The copy-back's own tests went
+with the copy-back in S14-04.
 """
 from __future__ import annotations
 
@@ -41,7 +40,6 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_goals_write
-from core.chain_transfer import CopyBackRefused, copy_back
 from tests.conftest import chains_on_duckdb
 
 DSN = os.getenv("KS_PG_DSN")
@@ -487,29 +485,5 @@ class TestTheFlagGoesBackWithoutTheCopyBack:
         block = _write_chains()[CHAIN]
         assert block["mode"] == "postgres" and block["latched"] is True
         assert block["mismatch"] is True
-
-
-class TestTheCopyBack:
-    """DN-08's machinery, derived for this chain rather than written for it."""
-
-    @pytest.mark.asyncio
-    async def test_a_dry_run_writes_nothing_and_releases_nothing(self, stores):
-        store, pool, env = stores
-        env.setenv("KS_WRITE_GOALS", "postgres")
-        await store.set_goal("monthly", 1_750_000.0)
-
-        result = await copy_back(store, pg_goals_write)
-
-        assert result["executed"] is False and result["rows"] == {GOALS: 1}
-        assert await _duck_goals(store) == {}
-        assert chain_latch.latched(CHAIN)
-
-    @pytest.mark.asyncio
-    async def test_an_unlatched_chain_is_refused(self, stores):
-        store, _pool, env = stores
-        env.setenv("KS_WRITE_GOALS", "postgres")        # the flag is not the latch
-
-        with pytest.raises(CopyBackRefused, match="not latched"):
-            await copy_back(store, pg_goals_write, dry_run=False)
 
 

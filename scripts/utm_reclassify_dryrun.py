@@ -9,9 +9,10 @@
             --snapshot /snap/order_utm-$(date -u +%Y%m%d-%H%M%S).csv.gz
     # exit 0 reported · 1 failed, no snapshot left behind · 2 refused before reading
 
-The one-off container is `scripts/chain_copy_back.py`'s shape: the image
-carries every module, `--env-file` supplies `KS_READONLY_PASSWORD`, and the
-network is the one Postgres is on (it publishes no port). `--user root`
+The one-off container is the shape `scripts/chain_copy_back.py` had (deleted
+in step 14's S14-04): the image carries every module, `--env-file` supplies
+`KS_READONLY_PASSWORD`, and the network is the one Postgres is on (it
+publishes no port). `--user root`
 because the image runs as `appuser`, which cannot write a directory only root
 may enter; the snapshot directory is outside the repository tree because the
 repository is public. Being root in the container does not make the database
