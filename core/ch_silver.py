@@ -370,10 +370,10 @@ async def _fetch_pg_gold_cells() -> List[Tuple[Any, ...]]:
 #   files those two, since a raise leaves nothing to return here);
 # - both engines' Gold came back empty, which compares nothing.
 #
-# WARN while DuckDB's own Gold is still compared against Postgres', CRITICAL
-# once it is not (`warehouse_checks_stand_down`: Postgres alone derives, or the
-# way back is still holding DuckDB's comparisons down) — then this is the only
-# independent check left, and a day without it is a day nobody checked Gold.
+# CRITICAL: this is the only independent check of Gold, and a day without it
+# is a day nobody checked Gold. (WARN while DuckDB's own Gold was still
+# compared against Postgres', until step 13; step 14's S14-12 deleted that
+# comparison and the predicate.)
 GOLD_UNWATCHED = "gold_values_unwatched"
 
 # What only this comparison re-examines. A run that did not compare cannot
@@ -386,34 +386,20 @@ GOLD_WATCH_CONDITIONS: Tuple[str, ...] = (
 )
 
 
-def gold_unwatched_severity() -> Severity:
-    """CRITICAL exactly when the mirror-landing job does not compare DuckDB's
-    Gold with Postgres' — the predicate it stands `reconcile_gold` down on.
-    A predicate that cannot be read is CRITICAL too: nothing then shows that
-    another engine looked, and the finding must still be filed."""
-    try:
-        from core import warehouse_cutover
-
-        stood_down = warehouse_cutover.warehouse_checks_stand_down()
-    except Exception:  # noqa: BLE001 — unknown is not "DuckDB still compares"
-        logger.exception("gold_values_unwatched: cannot tell who derives Gold")
-        return Severity.CRITICAL
-    return Severity.CRITICAL if stood_down else Severity.WARN
-
-
 def gold_values_unwatched(reason: str) -> IntegrityIssue:
-    """The finding for a run in which ClickHouse did not re-aggregate Gold."""
-    severity = gold_unwatched_severity()
+    """The finding for a run in which ClickHouse did not re-aggregate Gold.
+
+    CRITICAL, always: ClickHouse's derivation is the only independent check of
+    Postgres' Gold (OD-08 (a)). Until step 14's S14-12 it was WARN while
+    DuckDB's Gold was still compared against Postgres' — never, since step 13
+    stood that comparison down, and S14-12 deleted it."""
     alone = (
-        "Postgres alone derives Gold and DuckDB's comparison stands down, so "
-        "no second engine checked a single Gold value this run"
-        if severity is Severity.CRITICAL else
-        "DuckDB's Gold was still compared against Postgres'; after step 13 "
-        "this would be the only independent check"
+        "Postgres alone derives Gold, so no second engine checked a single "
+        "Gold value this run"
     )
     return IntegrityIssue(
         check_name="gold_values_unwatched",
-        table_name=GOLD_TABLE, severity=severity, count=1,
+        table_name=GOLD_TABLE, severity=Severity.CRITICAL, count=1,
         description=(
             f"ClickHouse did not re-aggregate Gold this run: {reason}. {alone}. "
             f"{', '.join(GOLD_WATCH_CONDITIONS)} are held as they were, not "

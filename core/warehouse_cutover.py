@@ -4,9 +4,10 @@ whether this deployment is ready for the switch — and the switch.
 **Since step 14's S14-00 the mode is a constant: `postgres`.** Step 13 has
 been in force in production since 2026-10-09 and DuckDB derives nothing, so
 `configure_mode()` reads `KS_WRITE_WAREHOUSE` only to publish it, evaluates
-no precondition and asks Postgres nothing; `writes_postgres()` is True,
-`duckdb_derives()` False and `warehouse_checks_stand_down()` True whatever
-the environment says. `readiness()` for `/api/warehouse/status` still
+no precondition and asks Postgres nothing; `writes_postgres()` is True and
+`duckdb_derives()` False whatever the environment says
+(`warehouse_checks_stand_down()`, True too, went with its last consumers,
+the mirror-landing comparisons, in S14-12). `readiness()` for `/api/warehouse/status` still
 evaluates the preconditions, as a report, until S14-15 removes it with the
 rest of this module. What follows is the history of the switch.
 
@@ -188,14 +189,6 @@ def duckdb_derives() -> bool:
     return not writes_postgres()
 
 
-def warehouse_checks_stand_down() -> bool:
-    """The DuckDB checks over Silver, Gold and UTM — and the mirror-landing
-    comparisons of those tables — do not run: True, a constant since S14-00
-    (Postgres alone derives; the way back's hold is the pre-step-14
-    images')."""
-    return True
-
-
 # ─── What stands down ────────────────────────────────────────────────────────
 #
 # The names `check_internal_integrity` guards each check under. Each reads a
@@ -305,7 +298,11 @@ def note_comparisons_reported(reported, *, complete: bool) -> None:
     """After a `dq_mirror_landing` run in which the retired comparisons ran:
     `reported` are the CRITICAL conditions they found, `complete` whether all
     three reached a verdict. Marks those pages of the job's group as theirs,
-    and — when complete — unmarks the rest. Local state, no I/O."""
+    and — when complete — unmarks the rest. Local state, no I/O.
+
+    No caller since step 14's S14-12, which deleted the comparisons (none had
+    run since step 13); it goes with this module in S14-15, the last reader
+    of `AlertGate.mark_delivered`."""
     from core.alerting import mark_delivered
     from core.mirror_reconciliation import MIRROR_LAYER
 
@@ -361,8 +358,8 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
 # `duckdb_derives()`, and requires exactly these. A door added after OD-10
 # joins the list and holds the switch until it is ported, retired or put
 # behind the predicate. The readers in `core/` ride the `KS_READ_*` switches
-# below, and the checks and comparisons stand down on
-# `warehouse_checks_stand_down()`.
+# below, and the checks stood down on `warehouse_checks_stand_down()` until
+# step 14's S14-12 deleted the comparisons and the predicate.
 OD10_DOORS: Tuple[Tuple[str, str], ...] = ()
 
 

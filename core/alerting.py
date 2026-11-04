@@ -93,13 +93,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "cert_expiring": _c("the cert is renewed past the warning window"),
     "cert_unreachable": _c("the TLS handshake succeeds again"),
     "dq_block_missing": _c("health payload carries a data_quality block again"),
-    "dq_missing:reconciliation": _c("the layer reports freshness again"),
+    # `dq_*:reconciliation` — the 05:30 job's DuckDB half — went with the half
+    # in step 14's S14-12; it had stood down since chain 3's flip.
     "dq_missing:integrity": _c("the layer reports freshness again"),
     "dq_missing:mirror_landing": _c("the layer reports freshness again"),
-    "dq_never:reconciliation": _c("the layer's first successful run"),
     "dq_never:integrity": _c("the layer's first successful run"),
     "dq_never:mirror_landing": _c("the layer's first successful run"),
-    "dq_stale:reconciliation": _c("a successful run inside the age limit"),
     "dq_stale:integrity": _c("a successful run inside the age limit"),
     "dq_stale:mirror_landing": _c("a successful run inside the age limit"),
     # The Postgres half of the 05:30 reconciliation, which the canary pages on
@@ -271,59 +270,21 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "integrity_check_raised": _c("every integrity check completes again"),
     "mirror_never_shipped": _c("the table's first successful shipment"),
     "mirror_backfill_pending": _c("the backfill finishes with nothing left"),
-    "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),
-    "mirror_disabled": _c("KS_PG_DSN is configured"),
+    # `mirror_buckets_disagree` and `mirror_disabled` were the comparisons'
+    # against DuckDB, deleted with them in step 14's S14-12.
     "mirror_failing": _c("failures_since_ok back to zero"),
-    # INFO, never a page: a comparison stood down because this process's own
-    # answer — the marker, or the flag — says a write chain owns the table
-    # (DN-22a for the orders, DN-22b for the catalogue, expenses, buyers and
-    # the classification), and its shipper stopped on the same answer. A
-    # decision somebody took, not a fault. Also filed on the owner rows alone
-    # for the buyers and the classification, whose shippers read them too and
-    # have stopped: the table is not being damaged, and the latch that is wrong
-    # has its own page (chain_latch_disagrees / chain_owner_unregistered).
-    # Since step 14 no flag routes (S14-00) and nothing hands a chain back
-    # (S14-04), so in this build it stands while the chain owns the table.
-    "mirror_stood_down": _c(
-        "nothing in this build hands a chain's tables back to DuckDB or lets "
-        "its flag move them: it stands while the chain owns them"),
-    # The same stand-down seen on the owner rows alone — a lost marker, or an
-    # image older than the orders chain — and that is a fault, not a decision:
-    # in an image from before step 14 the sync's mirror asked only the local
-    # answer, so it wrote DuckDB's copy over the chain's rows every tick. A
-    # step-14 image has no such mirror (S14-09); the fault is the lost marker a
-    # rollback to such an image would route by. Never clears by itself.
-    "order_owner_row_without_marker": _c(
-        "the marker is back — a human, not a job. " + ROLLBACK_LEVER),
-    # The same fault on the catalogue and the order-level expenses (DN-22b):
-    # in an image from before step 14 their per-tick mirror asked the local
-    # answer alone and so shipped over the chain's rows. Since S14-09
-    # `mirror_expenses` has had no caller, and `_mirror` is reached from the
-    # weekly full sync alone. The buyers mirror and the classification copy
-    # read the owner rows too since the DN-22b review, so they file
-    # mirror_stood_down instead. Never clears by itself.
-    "owner_row_without_marker": _c(
-        "the marker is back — a human, not a job. " + ROLLBACK_LEVER),
-    # The ownership latch's two copies, compared daily (DN-06). Neither clears
-    # by itself: one is a human putting the missing copy back, the other is a
-    # shipment that has already overwritten rows and cannot be un-shipped.
+    # `mirror_stood_down`, `order_owner_row_without_marker` and
+    # `owner_row_without_marker` were the daily comparisons' answers for a
+    # table a write chain owns, `chain_shipper_overwrote` (E1) and
+    # `chain_owner_unregistered` the operational comparison's: all five went
+    # with those comparisons in step 14's S14-12.
+    #
+    # The ownership latch's two copies (DN-06), judged on the integrity
+    # layer by the chain invariants since step 14's S14-12 (decision 12) — the
+    # one direction that matters to a rollback: owner rows standing with no
+    # marker. It does not clear by itself: a human puts the marker back.
     "chain_latch_disagrees": _c(
         "the marker and the owner rows agree again — a human, not a job"),
-    # On a table the chain stamps itself and keeps a record of (chain 6's
-    # catalogue) it also stops at the chain's next write, which moves the
-    # watermark back onto an instant the record carries — the stamp that was
-    # not the chain's is then out of the check's sight, not repaired. Since
-    # step 14 nothing hands a chain back (S14-04), so elsewhere it stands.
-    "chain_shipper_overwrote": _c(
-        "nothing repairs the rows it replaced and nothing hands the chain back, "
-        "so a human decides; on a table the chain stamps itself it stops at the "
-        "chain's next write. " + ROLLBACK_LEVER),
-    # Owner rows naming a table no chain in the running build declares — an
-    # image older than the chain (DN-22b review). The copies stand down on
-    # them; the build's own writers do not know the chain, so a human decides.
-    "chain_owner_unregistered": _c(
-        "a build that declares the chain runs again — a human, not a job. "
-        + ROLLBACK_LEVER),
     # The standing watch on the tables a chain has taken (DN-07). The hourly
     # shipper and the daily comparison both stand down for them, so these are
     # the only checks those tables have — and none of them clears by itself:
@@ -407,8 +368,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "silver_orphan_rows": _c("the next rebuild drops the orphans"),
     "silver_row_values": _c("the next rebuild recomputes the values"),
     "gold_cell_values": _c("the next rebuild recomputes the cells"),
-    "gold_missing_cells": _c("the next rebuild restores the cells"),
-    "gold_orphan_cells": _c("the next rebuild drops the orphans"),
+    # `gold_missing_cells`, `gold_orphan_cells`: `compare_gold`'s, deleted
+    # with it in step 14's S14-12.
     "gold_rollup_mismatch": _c("fine rows add up to the roll-up again"),
     "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
 
@@ -497,7 +458,7 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "inventory_snapshot_gaps": _c("cannot heal — a missed day is missed forever"),
 
     # ── self-heal trails (INFO riders on the digest, facts about past heals) ──
-    "mirror_selfhealed_rows": _EVENT,
+    # `mirror_selfhealed_rows` was `reconcile_buyers`' (step 14's S14-12).
     "ch_history_selfhealed": _EVENT,
 }
 
