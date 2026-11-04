@@ -6,6 +6,7 @@ import { ROASSection } from './ROASSection'
 import { PlatformBreakdownChart } from './PlatformBreakdownChart'
 import { OrganicBreakdown } from './OrganicBreakdown'
 import { PixelOnlyBreakdown } from './PixelOnlyBreakdown'
+import { SiteFunnel } from './SiteFunnel'
 import { TrafficTrendChart } from './TrafficTrendChart'
 import { TrafficTransactionsTable } from './TrafficTransactionsTable'
 import { UtmCampaignsTable } from './UtmCampaignsTable'
@@ -19,6 +20,9 @@ export const TrafficPage = memo(function TrafficPage() {
     <PageShell variant="feature">
       <section aria-label={t('traffic.summary')}>
         <TrafficSummaryCards />
+      </section>
+      <section aria-label={t('traffic.funnelTitle')}>
+        <SiteFunnel />
       </section>
       <section aria-label={t('traffic.trend')}>
         <TrafficTrendChart />

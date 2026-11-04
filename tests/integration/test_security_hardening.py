@@ -198,6 +198,18 @@ class TestAuthorizationStructure:
         assert require_admin in _deps(path), \
             f"{path} dropped require_admin — admin→user downgrade regression"
 
+    @pytest.mark.parametrize("method,path", [
+        ("POST", "/api/revenue/forecast/train"),
+        ("POST", "/api/revenue/forecast/tune"),
+        ("GET", "/api/revenue/forecast/evaluate"),
+    ])
+    def test_the_forecast_levers_require_admin(self, method, path):
+        """Each holds the single ML thread for minutes. `evaluate` was gated
+        on the dashboard tab until 2026-11-04, so any viewer could start a
+        walk-forward cross-validation five times an hour."""
+        assert require_admin in _deps(path, method), \
+            f"{method} {path} is not admin-only"
+
     def test_admin_endpoint_403_for_non_admin(self, client, monkeypatch):
         """A logged-in viewer (not a hardcoded admin) is forbidden from /api/jobs."""
         viewer_id = 555_000_111

@@ -53,6 +53,7 @@ import type {
   TrafficAnalyticsResponse,
   TrafficOrganicResponse,
   TrafficPixelOnlyResponse,
+  TrafficFunnelResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
   TrafficROASResponse,
@@ -777,6 +778,9 @@ export const api = {
 
   getTrafficPixelOnly: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficPixelOnlyResponse>('/traffic/pixel-only', params, options),
+
+  getTrafficFunnel: (params: string, options?: FetchOptions) =>
+    fetchApi<TrafficFunnelResponse>('/traffic/funnel', params, options),
 
   getTrafficTrend: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficTrendResponse>('/traffic/trend', params, options),
