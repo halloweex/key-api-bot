@@ -92,9 +92,11 @@ SEASONALITY_SCHEDULE = {"day_of_week": "mon", "hour": 4, "minute": 0}
 # A CronTrigger computes its next fire from the moment of registration, so a
 # process that starts at 02:00:51 for a job due at 02:00:00 sets the next run a
 # full day out. The job is not late — it does not exist when it is due, and
-# misfire_grace_time has nothing to forgive. That is not a rare event: the host
-# cron `0 2 * * 0 weekly_compact.sh` stops the containers at exactly 02:00 UTC
-# every Sunday, and any deploy landing on a cron instant does the same.
+# misfire_grace_time has nothing to forgive. It was not a rare event while the
+# host cron `0 2 * * 0 weekly_compact.sh` stopped the containers at exactly
+# 02:00 UTC every Sunday (its line was retired on 2026-10-16 and its script
+# deleted in step 14's S14-18), and any deploy or restart landing on a cron
+# instant still does the same.
 #
 # The delay keeps the catch-up out of the startup rush (initial sync, model
 # training, first warehouse refresh) and staggers the two checks.
@@ -608,11 +610,13 @@ class BackgroundScheduler:
         # KeyCRM doesn't update updated_at when status changes, so we need to
         # periodically re-fetch recent orders to catch status changes (like cancellations)
         #
-        # 05:15 and not 05:00. The host cron `0 2 * * 0 weekly_compact.sh` is
-        # 02:00 UTC = 05:00 Kyiv: it stops the containers at 02:00:01, swaps the
-        # database and starts them at 02:00:39, and the scheduler comes up at
-        # 02:00:51 — past the cron instant, so CronTrigger sets the next fire a
-        # day out. The job is not late; it does not exist when it is due, which
+        # 05:15 and not 05:00. The host cron `0 2 * * 0 weekly_compact.sh` was
+        # 02:00 UTC = 05:00 Kyiv: it stopped the containers at 02:00:01, swapped
+        # the database and started them at 02:00:39, and the scheduler came up
+        # at 02:00:51 — past the cron instant, so CronTrigger set the next fire
+        # a day out (the compaction is retired since 2026-10-16 and deleted in
+        # step 14's S14-18; a deploy on the instant does the same). The job was
+        # not late; it did not exist when it was due, which
         # is why misfire_grace_time cannot help. That mechanism was diagnosed on
         # 2026-08-09 for dq_reconciliation and fixed there with a catch-up. This
         # job sat on the same instant and nobody checked: it ran 35 times in 42
@@ -700,12 +704,13 @@ class BackgroundScheduler:
         # Classifies discrepancies, persists to data_quality_runs, alerts
         # admin on CRITICAL severity.
         #
-        # 05:00 Kyiv is FORBIDDEN — it is 02:00 UTC, and the host cron
-        # `0 2 * * 0 weekly_compact.sh` stops both containers at that exact
+        # 05:00 Kyiv was FORBIDDEN — it is 02:00 UTC, and the host cron
+        # `0 2 * * 0 weekly_compact.sh` stopped both containers at that exact
         # instant every Sunday. The scheduler came back at 02:00:51, after the
         # cron instant, so CronTrigger set the next fire a day out and the run
-        # was lost. Not late — absent, which no misfire grace can forgive.
-        # The compact takes ~85 s; half an hour of clearance is plenty.
+        # was lost. Not late — absent, which no misfire grace can forgive. The
+        # compaction is retired (2026-10-16) and deleted (S14-18); the lesson
+        # stands for any restart on a cron instant, and 05:30 stays.
         self._add_job(
             job_id="dq_reconciliation",
             name="DQ: Reconciliation",
@@ -825,8 +830,8 @@ class BackgroundScheduler:
         # the six days that week has already been delivered. A weekly
         # CronTrigger would be the obvious thing and the wrong one: it computes
         # its next fire from registration, so a container that was not alive at
-        # its Monday instant — the Sunday compact stops both, and so does any
-        # deploy — pushes the next run a full week out and the week is never
+        # its Monday instant — any deploy or restart, as the Sunday compaction
+        # did until it was retired — pushes the next run a full week out and the week is never
         # reported at all. A daily tick against a ledger turns that into a
         # Tuesday delivery. 09:30 is after the DQ digest at 09:00, so a broken
         # warehouse is heard about before its numbers are read.
@@ -2445,8 +2450,8 @@ class BackgroundScheduler:
                     f"{icon} <b>Disk: {alert.disk_pct_used:.0f}% used, "
                     f"{alert.disk_free_gb:.0f} GB free</b>\n"
                     f"{alert.reason}\n"
-                    "→ du -xd1 data; du -sx /var /opt; docker system df. "
-                    "Never trigger the compact — it stops the containers"
+                    # The compaction this once warned off is deleted (S14-18).
+                    "→ du -xd1 data; du -sx /var /opt; docker system df"
                 )
                 # The three-line message names one mover; this carries the
                 # whole group table, so the reader can see that everything

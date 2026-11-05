@@ -1173,7 +1173,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
 
 # `_FATAL_ACTIONS` stood here until step 14's S14-17: the lever of a
 # `health_status` page for a DuckDB FATAL alone — rebuild the indexes by a
-# compaction for `index`, grep web's log for `other`. It went with the FATAL.
+# compaction for `index`, grep web's log for `other`. It went with the FATAL,
+# and the compaction itself in S14-18.
 
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:
