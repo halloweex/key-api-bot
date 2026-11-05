@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.321
+
+- WIP: S14-15 — the slow endpoints write no DuckDB, the warehouse lever's lock is the derivation's, and two tests made hermetic
+- WIP: S14-15 — the rollback lever's tests over the two emptied lists go
+- WIP: S14-15 — the baseline shrinks by 23 with the deleted step-13 code
+- WIP: S14-15 — CLAUDE.md: step 13's, the UTM parse's and the jobs' paragraphs say the switch is code
+- WIP: S14-15 — the tests follow step 13's switch, the UTM ship and the DuckDB rebuild out
+- WIP: S14-15 — the conftest's warehouse-writer reset goes with its module
+- WIP: S14-15 — step 13 as code with no mode: warehouse_cutover, the UTM ship and KS_PG_DERIVE go
+- WIP: S14-15 — DuckDB's UTM parse over the golden fixtures, captured before its side goes (rule 9)
+
+
 ## 3.0.320
 
 - WIP: S14-14 — the walks' non-vacuity examples and the digest's sample names follow the scan out
