@@ -329,6 +329,22 @@ class BuyersRefused(ValueError):
     count toward `consecutive_failures`; the age still pages."""
 
 
+class OrdersRefused(ValueError):
+    """The order step's window landed nothing — no order written, none found
+    unchanged, no expense — and the parse refused orders in it (AR-02).
+
+    One payload the parse cannot read is refused by id and the rest of the
+    window lands (L1-01). A window in which nothing could be read is not that:
+    it is KeyCRM changing a field's shape for every order, or a parser defect
+    that shipped, and before L1-01 it failed the step on every tick. Reported
+    as a success it moved `last_sync_orders` past orders nobody wrote and kept
+    `orders_sync_failing` quiet until the 05:30 reconciliation. So the step
+    fails on it: the watermark holds, `consecutive_failures` counts it and
+    `meta.mirror_state` marks `bronze.orders` failing, as the TypeError did.
+    Chain 4's `BuyersRefused` for the same shape; unlike it, counted as a
+    failure, because the order step's canary pages on the count."""
+
+
 def _is_data_error(exc: BaseException) -> bool:
     return any(k.__name__ in _DATA_ERROR_NAMES for k in type(exc).__mro__)
 
@@ -442,6 +458,8 @@ class SyncService:
         # many orders its last write refused (`UpsertResult.failed`).
         self.orders_step = OrdersStepState()
         self._last_refused = 0
+        # Of those, the ones the parse could not read (`UpsertResult.unparseable`).
+        self._last_unparseable = 0
         # Chain 6's hourly products step off DuckDB — see CATALOGUE_RETRY_AFTER_S.
         self.catalogue_step = InventoryStepState()
         self._catalogue_retry_at = 0.0
@@ -639,6 +657,9 @@ class SyncService:
         # attribute, like the count, so the many mocks of this method keep
         # their signature.
         self._last_refused_ids = tuple(result.refused)
+        # Of those, how many the parse could not read at all: the order step
+        # fails on a window that landed nothing and holds one (`OrdersRefused`).
+        self._last_unparseable = getattr(result, "unparseable", 0)
         return result.count, expense_count
 
     async def sync_managers(self) -> int:
@@ -1132,9 +1153,18 @@ class SyncService:
         # and rebuilt Gold for all of it every two minutes around the clock.
         changed_ids: list[int] = []
         if orders:
+            self._last_unparseable = 0
             order_count, expense_count = await self._upsert_orders_with_expenses(
                 orders, changed_ids_out=changed_ids,
             )
+            # Nothing landed and the parse refused orders: a shape nothing
+            # could read, not one bad order. A failure, before the watermark
+            # moves (`OrdersRefused`).
+            if not order_count and not expense_count and self._last_unparseable:
+                raise OrdersRefused(
+                    f"none of the {len(orders)} order(s) fetched landed and the "
+                    f"parse could not read {self._last_unparseable} of them; "
+                    "their ids are in the log above")
             stats["orders"] = order_count
             stats["expenses"] = expense_count
             # The derivation is owed by the writer itself: chain 3 raises

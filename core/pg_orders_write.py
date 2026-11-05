@@ -146,6 +146,10 @@ class UpsertResult:
     # counts these and any payload with no usable id. The repairs read it to
     # ledger a refused id rather than ask KeyCRM for it again (L1-10).
     refused: Tuple[Tuple[int, str], ...] = ()
+    # Of `failed`, the payloads the parse could not read at all (a header, a
+    # line or an expense), whatever their id. The order step fails on a batch
+    # that landed nothing and holds any of these (`OrdersRefused`, AR-02).
+    unparseable: int = 0
 
     def __len__(self) -> int:
         return self.count
@@ -524,13 +528,15 @@ async def upsert_orders_with_expenses(
     # its expenses: before this it raised out of the parse, failed the order
     # step on every tick and held `last_sync_orders` behind it (L1-01).
     refusals: Dict[int, str] = {}
-    unidentified = 0
+    unidentified = 0            # refused by the parse with no usable id
+    unparsed: set = set()       # ids the parse refused
     for oid, why in landed.refused:
         logger.error("orders: order %r not written to Postgres: %s", oid, why)
         if _int_or_none(oid) is None:
             unidentified += 1
         else:
             refusals[int(oid)] = why
+            unparsed.add(int(oid))
     # One row per order, the last one given — the DuckDB DataFrame's rule; the
     # API repeats an order across paginated pages. A refused id is refused in
     # every copy; an id that is not a number cannot be written at all.
@@ -564,6 +570,7 @@ async def upsert_orders_with_expenses(
                 unidentified += 1
             else:
                 refusals[oid] = why
+                unparsed.add(oid)
                 latest.pop(oid, None)
     expenses = {e.id: e for e in parsed_expenses
                 if e.id is not None and _int_or_none(e.order_id) not in refusals}
@@ -596,9 +603,13 @@ async def upsert_orders_with_expenses(
     def refused() -> Tuple[Tuple[int, str], ...]:
         return tuple(refusals.items())
 
+    def unparseable() -> int:
+        return len(unparsed) + unidentified
+
     if not orders and not kept_expenses:
         return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0,
-                            failed=failed(), refused=refused()), 0
+                            failed=failed(), refused=refused(),
+                            unparseable=unparseable()), 0
 
     written: List[int] = []
     skipped: List[int] = []
@@ -614,7 +625,7 @@ async def upsert_orders_with_expenses(
             return UpsertResult(
                 count=len(skipped), changed_ids=[], skipped_unchanged=len(skipped),
                 failed=failed(), deferred_to_full_sync=deferred,
-                refused=refused()), 0
+                refused=refused(), unparseable=unparseable()), 0
         # Inside the acquire, not before it: an acquire that ends without a
         # connection is a write that never reached Postgres (`_latch`).
         stamp = _latch()
@@ -677,7 +688,8 @@ async def upsert_orders_with_expenses(
     return UpsertResult(
         count=len(written) + len(skipped), changed_ids=written,
         skipped_unchanged=len(skipped), failed=failed(),
-        deferred_to_full_sync=deferred, refused=refused()), expense_count
+        deferred_to_full_sync=deferred, refused=refused(),
+        unparseable=unparseable()), expense_count
 
 
 async def record_backfill_misses(misses: Mapping[int, str]) -> int:
