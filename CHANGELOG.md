@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.324
+
+- Traffic in three sections, and a funnel that reads as one
+
+
 ## 3.0.323
 
 - WIP: S14-17 — the baseline shrinks by one with the canary's FATAL reader
