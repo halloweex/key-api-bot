@@ -28,7 +28,7 @@
 #              snapshot), the one it adds (this check), and the way back.
 #              Reads no file, hashes nothing, writes nothing, and installs
 #              nothing — a crontab is changed by a person, from that print
-#              (CLAUDE.md, "Starting the week of silence"). A `-`/`+` before
+#              (CLAUDE.md, "The week of silence, and its way back"). A `-`/`+` before
 #              each line is what makes pasting the whole print into
 #              `crontab -e` fail instead of installing a retired line.
 #
@@ -101,7 +101,7 @@ if [ "$MODE" = crontab ]; then
     cat <<CRONTAB
 # The week of silence: root's crontab, as a diff. Printed, never installed:
 # change it by hand with \`crontab -e\`, one line at a time (CLAUDE.md,
-# "Starting the week of silence"). An installed line may carry a redirect
+# "The week of silence, and its way back"). An installed line may carry a redirect
 # after its command; it is the command that names it.
 #
 # First keep a copy, and find the lines:
