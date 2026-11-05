@@ -3803,6 +3803,29 @@ exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
 exception text, the endpoint is public. **Under the default, nothing a read
 returns changed.**
 
+**Since step 14's S14-16 nothing falls back, and only the refusal is
+left.** `core/read_fallback.py` is `ReadUnavailable`, `refuse(surface, exc)`
+— counted, logged as "read refused: <surface> — its engine failed…" with the
+cause, and raised by the router's handler — `refusals()`, `answered()`,
+`READ_UNAVAILABLE` and `reset_counts`. `fall_back`, `no_address`,
+`no_engine`, `chain_refusal`, the mode and its cache, `misconfigured`,
+`ENGINE_ONLY` and the fallback counts are deleted, none with a caller since
+S14-07, and **`KS_READ_FALLBACK` is not read**: `configure_modes()` returns
+`KS_DUCKDB` alone. `/api/health` lost `read_fallbacks`, and
+`read_fallback_mode` keeps its name — the canary reads it there — as
+`{"refused": {surface: {count, last_at}}}`. The canary lost
+`read_fallback_used`, `read_routed_to_duckdb` and
+`read_fallback_mode_invalid` with their REGISTRY entries and levers; the
+names are not reused. `read_refused` stays, and so does what answers a
+refusal no HTTP request waits for (DN-20c, below): the scheduler's, the
+sync's, the assistant's and the forecast's handlers naming
+`ReadUnavailable`, which `tests/unit/test_read_fallback_consumers.py` holds
+alive — derived from `read_fallback.refuse` alone now, with the scripts that
+reach one pinned as a person's terminal and no bot function reaching one.
+The bot no longer writes `watch:read_fallbacks`; its row stays in
+`app.alert_series` as history. The `.env` line stays while an image from
+before step 14 is a rollback target. What follows is the history.
+
 **Since step 14's S14-05 six routers have no DuckDB tail at all** —
 `_traffic_run`, `_margin_run`, `_intel_run` (product intelligence),
 `_reports_run`, `_marketing_run` and `_lookups_run` (the filter bar and the
@@ -3908,7 +3931,8 @@ the call — and `DUCKDB` itself stays until its last users go (the SMS
 audience, chain 4's gender backfill, the store's own schema and rebuild).
 
 **The week `off` waits for is proven by the canary, not by the log** (OD-07
-(a), 2026-09-30). The condition for `KS_READ_FALLBACK=off` is a covered, clean
+(a), 2026-09-30; history since S14-16, which deleted both keys and the
+watch's writer). The condition for `KS_READ_FALLBACK=off` is a covered, clean
 168 h with no read answered from DuckDB. The plan measured it by grepping web's
 log from its oldest surviving line, but every deploy recreates web and loses
 the counters and the log together, so a week that spans a deploy could not be
@@ -3994,7 +4018,7 @@ finished 18 minutes earlier. `ch_cohorts.fetch` now asks again after 1 s and
 
 `KS_READ_FALLBACK` (`duckdb` default | `off`; production `off` since
 2026-10-09 08:01 UTC, ahead of step 13 — the owner shortened the clean week
-to the rehearsal) is read in `configure_modes()`,
+to the rehearsal; read by nothing since S14-16) was read in `configure_modes()`,
 before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
 (DN-20b) instead of letting its caller read DuckDB, and one exception handler
 in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
