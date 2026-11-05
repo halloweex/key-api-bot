@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { ChartContainer } from './ChartContainer'
 import { DataTable, Tr, Th, Td } from './DataTable'
 import { InfoPopover } from './InfoPopover'
+import { ShareBar } from './ShareBar'
 import { Wrapper } from './Wrapper'
 import { useTrafficAnalytics, useTrafficOrganic } from '../hooks/useApi'
 import { formatCurrency, formatDate, formatNumber, formatPercent } from '../utils/formatters'
@@ -93,22 +94,6 @@ const ChangeValue = memo(function ChangeValue({ change }: { change: Change }) {
           : change.value < -0.05 ? 'text-red-600 font-medium'
             : 'text-slate-500 font-medium'
   return <span className={tone}>{changeText(change, t)}</span>
-})
-
-// ─── Share bar ────────────────────────────────────────────────────────────────
-
-const ShareBar = memo(function ShareBar({ pct, color }: { pct: number; color: string }) {
-  return (
-    <div className="flex items-center gap-2 min-w-[120px]">
-      <div className="h-2 flex-1 rounded-full bg-slate-100 overflow-hidden">
-        <div
-          className="h-full rounded-full"
-          style={{ width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: color }}
-        />
-      </div>
-      <span className="w-12 text-right tabular-nums text-slate-600">{formatPercent(pct)}</span>
-    </div>
-  )
 })
 
 // ─── One source / medium row ─────────────────────────────────────────────────
