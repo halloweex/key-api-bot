@@ -356,14 +356,20 @@ class TestUnderDuckdbOff:
 
     @pytest.mark.parametrize("case", UNSWITCHED + [MANAGERS], ids=repr)
     def test_a_switch_it_no_longer_reads_asks_postgres(
-        self, case, admin_client, stores, duckdb_off, monkeypatch, caplog,
+        self, case, admin_client, stores, monkeypatch, caplog,
     ):
         """S14-05's six and S14-06's dashboard and managers screen: the
         switch at `duckdb` is not read, the router asks Postgres, and
-        Postgres failing is the refusal — nothing reaches for the file, and
-        the log names no switch."""
-        from core import duckdb_switch
+        Postgres failing is the refusal — nothing reaches for the file (the
+        store's connection a trap: since step 14's S14-18 it would be a
+        refusal naming `duckdb`, not this tab), and the log names no
+        switch."""
+        from core import duckdb_store
 
+        def _no_duckdb(self):
+            raise AssertionError("the route reached for the DuckDB connection")
+
+        monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", _no_duckdb)
         (switch, _value), = case.env.items()
         monkeypatch.setenv(switch, "duckdb")
 
@@ -375,7 +381,7 @@ class TestUnderDuckdbOff:
         assert read_fallback.refusals()[case.surface]["count"] >= 1
         assert f"{switch}=duckdb" not in caplog.text
         assert "its engine failed" in caplog.text
-        assert duckdb_switch.opened() == {}
+        assert "duckdb" not in read_fallback.refusals()
 
 
 # ─── Cohorts: a live ClickHouse or nothing ─────────────────────────────────

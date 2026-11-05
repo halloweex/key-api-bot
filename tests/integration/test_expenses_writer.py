@@ -32,7 +32,7 @@ async def writer(monkeypatch):
         # no local marker — a real CRITICAL, manufactured by a fixture.
         await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
 
-    store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+    store = DuckDBStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("an expense write reached DuckDB under KS_WRITE_EXPENSES=postgres")

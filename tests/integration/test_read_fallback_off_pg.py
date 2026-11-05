@@ -107,8 +107,7 @@ async def stores(tmp_path, monkeypatch):
 
     read_fallback.reset_counts()
 
-    store = DuckDBStore(db_path=tmp_path / "off.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     async with store.connection() as conn:
         conn.execute(
             "INSERT INTO gold_daily_revenue (date, sales_type, revenue, "
@@ -140,7 +139,6 @@ async def stores(tmp_path, monkeypatch):
         await cleanup.close()
         if not pool._closed:
             await pool.close()
-        await store.close()
         read_fallback.reset_counts()
 
 

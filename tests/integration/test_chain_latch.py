@@ -65,8 +65,7 @@ async def stores(tmp_path, monkeypatch):
     for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore(db_path=tmp_path / "latch.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -74,7 +73,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _expense_rows(pool):

@@ -337,20 +337,17 @@ class TestTheJobSendsOnce:
         pg = FakePostgres(flags, chain)
         pg.refuse = 3
         store = await _store(tmp_path)
-        try:
-            job = TestSchedulerJob()
-            week_start = await job._seed(warehouse, complete=True)
-            sent = []
-            scheduler = job._wire(monkeypatch, store, sent, tmp_path)
-            first = await scheduler._run_weekly_report()
-            assert first["sent"] is True and first["ledger"] == "pending"
-            second = await scheduler._run_weekly_report()
-            assert second == {"sent": False, "reason": "already_sent",
-                              "week": week_start.isoformat()}
-            assert len(sent) == 1
-            assert (week_start, "retail") in pg.rows        # drained by the gate
-        finally:
-            await store.close()
+        job = TestSchedulerJob()
+        week_start = await job._seed(warehouse, complete=True)
+        sent = []
+        scheduler = job._wire(monkeypatch, store, sent, tmp_path)
+        first = await scheduler._run_weekly_report()
+        assert first["sent"] is True and first["ledger"] == "pending"
+        second = await scheduler._run_weekly_report()
+        assert second == {"sent": False, "reason": "already_sent",
+                          "week": week_start.isoformat()}
+        assert len(sent) == 1
+        assert (week_start, "retail") in pg.rows        # drained by the gate
 
     @pytest.mark.asyncio
     async def test_the_traffic_floor_is_asked_before_the_ledger(
@@ -369,18 +366,15 @@ class TestTheJobSendsOnce:
         flags.setenv(chain.WRITE_ENV, "postgres")
         flags.setattr(chain, "find_sent", AsyncMock(side_effect=ConnectionRefusedError()))
         store = await _job_store(tmp_path)
-        try:
-            week_start = await _seed_gold(store)
-            monkeypatch.setenv(FIRST_WEEK_ENV, (week_start + timedelta(days=7)).isoformat())
-            job = TestTheScheduledJob()
-            scheduler = job._wire(monkeypatch, store, tmp_path)
-            sent = job._capture(monkeypatch)
-            result = await scheduler._run_traffic_report()
-            assert result["reason"] == "before_first_week", result
-            assert sent["rich"] == [] and sent["text"] == []
-            assert not chain.find_sent.await_count
-        finally:
-            await store.close()
+        week_start = await _seed_gold(store)
+        monkeypatch.setenv(FIRST_WEEK_ENV, (week_start + timedelta(days=7)).isoformat())
+        job = TestTheScheduledJob()
+        scheduler = job._wire(monkeypatch, store, tmp_path)
+        sent = job._capture(monkeypatch)
+        result = await scheduler._run_traffic_report()
+        assert result["reason"] == "before_first_week", result
+        assert sent["rich"] == [] and sent["text"] == []
+        assert not chain.find_sent.await_count
 
 
 # ─── The watch and the canary ────────────────────────────────────────────────
@@ -552,23 +546,20 @@ class TestASpoolOutlivesItsFlag:
         pg = FakePostgres(flags, chain)
         pg.refuse = 3
         store = await _store(tmp_path)
-        try:
-            job = TestSchedulerJob()
-            week_start = await job._seed(warehouse, complete=True)
-            sent = []
-            scheduler = job._wire(monkeypatch, store, sent, tmp_path)
-            first = await scheduler._run_weekly_report()
-            assert first["sent"] is True and first["ledger"] == "pending"
-            flags.setenv(chain.WRITE_ENV, "duckdb")
-            pg.refuse = 1
-            quiet = {"sent": False, "reason": "already_sent",
-                     "week": week_start.isoformat()}
-            assert await scheduler._run_weekly_report() == quiet   # spooled
-            assert report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
-            assert await scheduler._run_weekly_report() == quiet   # drained
-            assert not report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
-            assert await scheduler._run_weekly_report() == quiet   # Postgres's row
-            assert len(sent) == 1
-            assert (week_start, "retail") in pg.rows
-        finally:
-            await store.close()
+        job = TestSchedulerJob()
+        week_start = await job._seed(warehouse, complete=True)
+        sent = []
+        scheduler = job._wire(monkeypatch, store, sent, tmp_path)
+        first = await scheduler._run_weekly_report()
+        assert first["sent"] is True and first["ledger"] == "pending"
+        flags.setenv(chain.WRITE_ENV, "duckdb")
+        pg.refuse = 1
+        quiet = {"sent": False, "reason": "already_sent",
+                 "week": week_start.isoformat()}
+        assert await scheduler._run_weekly_report() == quiet   # spooled
+        assert report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
+        assert await scheduler._run_weekly_report() == quiet   # drained
+        assert not report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
+        assert await scheduler._run_weekly_report() == quiet   # Postgres's row
+        assert len(sent) == 1
+        assert (week_start, "retail") in pg.rows

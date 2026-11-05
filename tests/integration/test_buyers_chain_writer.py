@@ -59,8 +59,7 @@ async def stores(tmp_path, monkeypatch):
     for reader in READERS:
         monkeypatch.setenv(reader, "postgres")
     monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-    store = DuckDBStore(db_path=tmp_path / "buyers-chain.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -68,7 +67,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _verdicts(pool):

@@ -119,7 +119,7 @@ def store(tmp_path, name: str = "never.duckdb"):
     a trap for as long as `on_postgres` is open."""
     from core.duckdb_store import DuckDBStore
 
-    return DuckDBStore(db_path=tmp_path / name)
+    return DuckDBStore()
 
 
 @asynccontextmanager

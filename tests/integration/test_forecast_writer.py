@@ -105,22 +105,18 @@ async def stores(tmp_path, monkeypatch):
     from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
 
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
-    store = DuckDBStore(db_path=tmp_path / "forecast.duckdb")
-    await store.connect()
+    store = DuckDBStore()
 
     async def populate(conn, pool):
         await _clean(pool)
         await _seed_history_pg(conn, pool)
 
-    try:
-        async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
-            async with pool.acquire() as conn:
-                assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") > 1500
-            with patch("core.pg.require_revision", new=AsyncMock()):
-                yield store, pool, monkeypatch
-            await _clean(pool)
-    finally:
-        await store.close()
+    async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") > 1500
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            yield store, pool, monkeypatch
+        await _clean(pool)
 
 
 def _flag(env):

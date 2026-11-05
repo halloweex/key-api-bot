@@ -289,7 +289,7 @@ def reads(tmp_path, monkeypatch):
 async def _store(tmp_path: Path) -> DuckDBStore:
     """The store the job is handed: never connected, its DuckDB connection a
     trap — the report reads Postgres and the ledger is `ledger`'s dict."""
-    s = DuckDBStore(db_path=tmp_path / "weekly.duckdb")
+    s = DuckDBStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("the weekly report reached for DuckDB")
@@ -560,16 +560,13 @@ class TestSchedulerJob:
     ):
         """Numbers rendered mid-rebuild would understate revenue with confidence."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=False)
-            sent = []
-            result = await self._wire(monkeypatch, store, sent, tmp_path)._run_weekly_report()
+        await self._seed(pg, complete=False)
+        sent = []
+        result = await self._wire(monkeypatch, store, sent, tmp_path)._run_weekly_report()
 
-            assert result == {"sent": False, "reason": "warehouse_behind",
-                              "week": result["week"]}
-            assert sent == []
-        finally:
-            await store.close()
+        assert result == {"sent": False, "reason": "warehouse_behind",
+                          "week": result["week"]}
+        assert sent == []
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -578,25 +575,22 @@ class TestSchedulerJob:
     ):
         """Six of seven daily firings must say nothing."""
         store = await _store(tmp_path)
-        try:
-            week_start = await self._seed(pg, complete=True)
-            sent = []
-            scheduler = self._wire(monkeypatch, store, sent, tmp_path)
+        week_start = await self._seed(pg, complete=True)
+        sent = []
+        scheduler = self._wire(monkeypatch, store, sent, tmp_path)
 
-            first = await scheduler._run_weekly_report()
-            assert first["sent"] is True
-            assert first["week"] == week_start.isoformat()
-            assert first["revenue"] == 35_000
-            assert first["delivered"] == len(self.ADMINS)
-            assert len(sent) == 1
-            assert "Weekly report" in sent[0]
+        first = await scheduler._run_weekly_report()
+        assert first["sent"] is True
+        assert first["week"] == week_start.isoformat()
+        assert first["revenue"] == 35_000
+        assert first["delivered"] == len(self.ADMINS)
+        assert len(sent) == 1
+        assert "Weekly report" in sent[0]
 
-            second = await scheduler._run_weekly_report()
-            assert second == {"sent": False, "reason": "already_sent",
-                              "week": week_start.isoformat()}
-            assert len(sent) == 1
-        finally:
-            await store.close()
+        second = await scheduler._run_weekly_report()
+        assert second == {"sent": False, "reason": "already_sent",
+                          "week": week_start.isoformat()}
+        assert len(sent) == 1
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -605,30 +599,27 @@ class TestSchedulerJob:
     ):
         """One message carrying both, not a picture and then a wall of text."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+        await self._seed(pg, complete=True)
+        text_sends = []
+        scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
 
-            calls = []
+        calls = []
 
-            async def _photo(data, caption="", **kwargs):
-                calls.append((data, caption))
-                return 2
+        async def _photo(data, caption="", **kwargs):
+            calls.append((data, caption))
+            return 2
 
-            monkeypatch.setattr(
-                "core.telegram_alerts.send_admin_photo_http", _photo,
-            )
-            result = await scheduler._run_weekly_report()
+        monkeypatch.setattr(
+            "core.telegram_alerts.send_admin_photo_http", _photo,
+        )
+        result = await scheduler._run_weekly_report()
 
-            assert result["card"] is True
-            assert len(calls) == 1
-            png, caption = calls[0]
-            assert png[:8] == b"\x89PNG\r\n\x1a\n"
-            assert "Weekly report" in caption
-            assert text_sends == [], "the caption already carried the report"
-        finally:
-            await store.close()
+        assert result["card"] is True
+        assert len(calls) == 1
+        png, caption = calls[0]
+        assert png[:8] == b"\x89PNG\r\n\x1a\n"
+        assert "Weekly report" in caption
+        assert text_sends == [], "the caption already carried the report"
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -637,26 +628,23 @@ class TestSchedulerJob:
     ):
         """Two languages among the admins means two renders, not one guess."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            scheduler = self._wire(monkeypatch, store, [], tmp_path,
-                                   languages={111: "uk", 222: "en"})
+        await self._seed(pg, complete=True)
+        scheduler = self._wire(monkeypatch, store, [], tmp_path,
+                               languages={111: "uk", 222: "en"})
 
-            calls = []
+        calls = []
 
-            async def _photo(data, caption="", chat_ids=None, **kwargs):
-                calls.append((caption, list(chat_ids or [])))
-                return len(chat_ids or [])
+        async def _photo(data, caption="", chat_ids=None, **kwargs):
+            calls.append((caption, list(chat_ids or [])))
+            return len(chat_ids or [])
 
-            monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
-            result = await scheduler._run_weekly_report()
+        monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
+        result = await scheduler._run_weekly_report()
 
-            assert result["delivered"] == 2
-            by_recipient = {tuple(ids): caption for caption, ids in calls}
-            assert by_recipient[(111,)].startswith("📊 <b>Тижневий звіт</b>")
-            assert by_recipient[(222,)].startswith("📊 <b>Weekly report</b>")
-        finally:
-            await store.close()
+        assert result["delivered"] == 2
+        by_recipient = {tuple(ids): caption for caption, ids in calls}
+        assert by_recipient[(111,)].startswith("📊 <b>Тижневий звіт</b>")
+        assert by_recipient[(222,)].startswith("📊 <b>Weekly report</b>")
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -665,33 +653,30 @@ class TestSchedulerJob:
     ):
         """The default policy, end to end, plus a stored choice overriding it."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            scheduler = self._wire(
-                monkeypatch, store, [], tmp_path,
-                approved=[301, 302, 303],
-                languages={303: "ru"},   # chose Russian; the default must yield
-            )
+        await self._seed(pg, complete=True)
+        scheduler = self._wire(
+            monkeypatch, store, [], tmp_path,
+            approved=[301, 302, 303],
+            languages={303: "ru"},   # chose Russian; the default must yield
+        )
 
-            calls = []
+        calls = []
 
-            async def _photo(data, caption="", chat_ids=None, **kwargs):
-                calls.append((caption.split("\n")[0], sorted(chat_ids or [])))
-                return len(chat_ids or [])
+        async def _photo(data, caption="", chat_ids=None, **kwargs):
+            calls.append((caption.split("\n")[0], sorted(chat_ids or [])))
+            return len(chat_ids or [])
 
-            monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
-            result = await scheduler._run_weekly_report()
+        monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
+        result = await scheduler._run_weekly_report()
 
-            # Two admins plus three approved staff, nobody twice.
-            assert result["recipients"] == 5
-            assert result["delivered"] == 5
+        # Two admins plus three approved staff, nobody twice.
+        assert result["recipients"] == 5
+        assert result["delivered"] == 5
 
-            by_head = {head: ids for head, ids in calls}
-            assert by_head["📊 <b>Weekly report</b>"] == self.ADMINS
-            assert by_head["📊 <b>Тижневий звіт</b>"] == [301, 302]
-            assert by_head["📊 <b>Недельный отчёт</b>"] == [303]
-        finally:
-            await store.close()
+        by_head = {head: ids for head, ids in calls}
+        assert by_head["📊 <b>Weekly report</b>"] == self.ADMINS
+        assert by_head["📊 <b>Тижневий звіт</b>"] == [301, 302]
+        assert by_head["📊 <b>Недельный отчёт</b>"] == [303]
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -702,27 +687,24 @@ class TestSchedulerJob:
         import sqlite3
 
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            scheduler = self._wire(monkeypatch, store, [], tmp_path,
-                                   approved=[301, 302])
-            with sqlite3.connect(tmp_path / "prefs.db") as conn:
-                conn.execute("INSERT OR REPLACE INTO user_preferences "
-                             "(user_id, notifications_enabled) VALUES (302, 0)")
+        await self._seed(pg, complete=True)
+        scheduler = self._wire(monkeypatch, store, [], tmp_path,
+                               approved=[301, 302])
+        with sqlite3.connect(tmp_path / "prefs.db") as conn:
+            conn.execute("INSERT OR REPLACE INTO user_preferences "
+                         "(user_id, notifications_enabled) VALUES (302, 0)")
 
-            reached = []
+        reached = []
 
-            async def _photo(data, caption="", chat_ids=None, **kwargs):
-                reached.extend(chat_ids or [])
-                return len(chat_ids or [])
+        async def _photo(data, caption="", chat_ids=None, **kwargs):
+            reached.extend(chat_ids or [])
+            return len(chat_ids or [])
 
-            monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
-            await scheduler._run_weekly_report()
+        monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
+        await scheduler._run_weekly_report()
 
-            assert 301 in reached
-            assert 302 not in reached
-        finally:
-            await store.close()
+        assert 301 in reached
+        assert 302 not in reached
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -734,24 +716,21 @@ class TestSchedulerJob:
         None of that is a reason for the week to go unreported.
         """
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            sent = []
-            scheduler = self._wire(monkeypatch, store, sent, tmp_path)
+        await self._seed(pg, complete=True)
+        sent = []
+        scheduler = self._wire(monkeypatch, store, sent, tmp_path)
 
-            class _Unreachable:
-                def __getattr__(self, name):
-                    raise RuntimeError("bot store unreachable")
+        class _Unreachable:
+            def __getattr__(self, name):
+                raise RuntimeError("bot store unreachable")
 
-            monkeypatch.setattr("core.bot_store._store", _Unreachable())
+        monkeypatch.setattr("core.bot_store._store", _Unreachable())
 
-            result = await scheduler._run_weekly_report()
+        result = await scheduler._run_weekly_report()
 
-            assert result["sent"] is True
-            assert len(sent) == 1
-            assert "Weekly report" in sent[0]
-        finally:
-            await store.close()
+        assert result["sent"] is True
+        assert len(sent) == 1
+        assert "Weekly report" in sent[0]
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -760,21 +739,18 @@ class TestSchedulerJob:
     ):
         """A missing font must cost the picture and never the numbers."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
-            monkeypatch.setattr("core.weekly_report_image._font_file",
-                                lambda *a, **k: None)
+        await self._seed(pg, complete=True)
+        text_sends = []
+        scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+        monkeypatch.setattr("core.weekly_report_image._font_file",
+                            lambda *a, **k: None)
 
-            result = await scheduler._run_weekly_report()
+        result = await scheduler._run_weekly_report()
 
-            assert result["sent"] is True
-            assert result["card"] is False
-            assert len(text_sends) == 1
-            assert "Weekly report" in text_sends[0]
-        finally:
-            await store.close()
+        assert result["sent"] is True
+        assert result["card"] is False
+        assert len(text_sends) == 1
+        assert "Weekly report" in text_sends[0]
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -783,26 +759,23 @@ class TestSchedulerJob:
     ):
         """Marking a week delivered that never left the host would drop it."""
         store = await _store(tmp_path)
-        try:
-            week_start = await self._seed(pg, complete=True)
-            scheduler = self._wire(monkeypatch, store, [], tmp_path)
+        week_start = await self._seed(pg, complete=True)
+        scheduler = self._wire(monkeypatch, store, [], tmp_path)
 
-            async def _reaches_nobody(*args, **kwargs):
-                return 0
+        async def _reaches_nobody(*args, **kwargs):
+            return 0
 
-            for name in ("send_admin_photo_http", "send_admin_message_http"):
-                monkeypatch.setattr(f"core.telegram_alerts.{name}", _reaches_nobody)
+        for name in ("send_admin_photo_http", "send_admin_message_http"):
+            monkeypatch.setattr(f"core.telegram_alerts.{name}", _reaches_nobody)
 
-            result = await scheduler._run_weekly_report()
-            assert result == {"sent": False, "reason": "not_delivered",
-                              "week": week_start.isoformat()}
+        result = await scheduler._run_weekly_report()
+        assert result == {"sent": False, "reason": "not_delivered",
+                          "week": week_start.isoformat()}
 
-            from core import report_ledger
+        from core import report_ledger
 
-            assert await report_ledger.already_sent(
-                report_ledger.WEEKLY, week_start, "retail") is False
-        finally:
-            await store.close()
+        assert await report_ledger.already_sent(
+            report_ledger.WEEKLY, week_start, "retail") is False
 
 
 class TestTheOrderSplitSentence:
@@ -947,30 +920,27 @@ class TestTheRichFormIsWhatTheJobSends:
         self, pg, tmp_path, monkeypatch,
     ):
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            await self._seed_channels(pg)
-            text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
-            rich = self._capture_rich(monkeypatch)
-            photo = self._capture_photo(monkeypatch)
+        await self._seed(pg, complete=True)
+        await self._seed_channels(pg)
+        text_sends = []
+        scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+        rich = self._capture_rich(monkeypatch)
+        photo = self._capture_photo(monkeypatch)
 
-            result = await scheduler._run_weekly_report()
+        result = await scheduler._run_weekly_report()
 
-            assert result["sent"] is True and result["rich"] is True
-            assert len(rich) == 1
-            # Every picture the report can carry goes up in the same request,
-            # under the id the document names.
-            assert set(rich[0]["media"]) == {"card", "days", "why", "channels"}
-            for blob in rich[0]["media"].values():
-                assert blob[:8] == b"\x89PNG\r\n\x1a\n"
-            html = rich[0]["html"]
-            assert html.startswith("<h1>")
-            for role in ("card", "days", "why", "channels"):
-                assert f'tg://photo?id={role}' in html
-            assert photo == [] and text_sends == [], "the rich form carried it"
-        finally:
-            await store.close()
+        assert result["sent"] is True and result["rich"] is True
+        assert len(rich) == 1
+        # Every picture the report can carry goes up in the same request,
+        # under the id the document names.
+        assert set(rich[0]["media"]) == {"card", "days", "why", "channels"}
+        for blob in rich[0]["media"].values():
+            assert blob[:8] == b"\x89PNG\r\n\x1a\n"
+        html = rich[0]["html"]
+        assert html.startswith("<h1>")
+        for role in ("card", "days", "why", "channels"):
+            assert f'tg://photo?id={role}' in html
+        assert photo == [] and text_sends == [], "the rich form carried it"
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -979,22 +949,19 @@ class TestTheRichFormIsWhatTheJobSends:
     ):
         """An unsupported tag is a 400, which the transport reports as 0."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
-            rich = self._capture_rich(monkeypatch, delivered=0)
-            photo = self._capture_photo(monkeypatch)
+        await self._seed(pg, complete=True)
+        text_sends = []
+        scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+        rich = self._capture_rich(monkeypatch, delivered=0)
+        photo = self._capture_photo(monkeypatch)
 
-            result = await scheduler._run_weekly_report()
+        result = await scheduler._run_weekly_report()
 
-            assert result["sent"] is True
-            assert result["rich"] is False and result["card"] is True
-            assert len(rich) == 1 and len(photo) == 1
-            assert "Weekly report" in photo[0][1], "the caption carries the report"
-            assert text_sends == []
-        finally:
-            await store.close()
+        assert result["sent"] is True
+        assert result["rich"] is False and result["card"] is True
+        assert len(rich) == 1 and len(photo) == 1
+        assert "Weekly report" in photo[0][1], "the caption carries the report"
+        assert text_sends == []
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -1005,21 +972,18 @@ class TestTheRichFormIsWhatTheJobSends:
         reach the transport — a rollback that still spends the call is not
         one."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            monkeypatch.setenv("KS_WEEKLY_REPORT_RICH", "0")
-            text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
-            rich = self._capture_rich(monkeypatch)
-            photo = self._capture_photo(monkeypatch)
+        await self._seed(pg, complete=True)
+        monkeypatch.setenv("KS_WEEKLY_REPORT_RICH", "0")
+        text_sends = []
+        scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+        rich = self._capture_rich(monkeypatch)
+        photo = self._capture_photo(monkeypatch)
 
-            result = await scheduler._run_weekly_report()
+        result = await scheduler._run_weekly_report()
 
-            assert result["sent"] is True and result["rich"] is False
-            assert rich == [], "the flag is off; nothing may be sent as rich"
-            assert len(photo) == 1
-        finally:
-            await store.close()
+        assert result["sent"] is True and result["rich"] is False
+        assert rich == [], "the flag is off; nothing may be sent as rich"
+        assert len(photo) == 1
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -1028,20 +992,17 @@ class TestTheRichFormIsWhatTheJobSends:
     ):
         """The bottom rung. Numbers are the deliverable; pictures are not."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
-            self._capture_rich(monkeypatch, delivered=0)
-            self._capture_photo(monkeypatch, delivered=0)
+        await self._seed(pg, complete=True)
+        text_sends = []
+        scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+        self._capture_rich(monkeypatch, delivered=0)
+        self._capture_photo(monkeypatch, delivered=0)
 
-            result = await scheduler._run_weekly_report()
+        result = await scheduler._run_weekly_report()
 
-            assert result["sent"] is True
-            assert result["rich"] is False and result["card"] is False
-            assert len(text_sends) == 1 and "Weekly report" in text_sends[0]
-        finally:
-            await store.close()
+        assert result["sent"] is True
+        assert result["rich"] is False and result["card"] is False
+        assert len(text_sends) == 1 and "Weekly report" in text_sends[0]
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -1051,27 +1012,24 @@ class TestTheRichFormIsWhatTheJobSends:
         """The pictures carry translated labels, so they are drawn per
         language too — not once and reused."""
         store = await _store(tmp_path)
-        try:
-            await self._seed(pg, complete=True)
-            text_sends = []
-            scheduler = self._wire(
-                monkeypatch, store, text_sends, tmp_path,
-                approved=[333], languages={self.ADMINS[0]: "en", 333: "uk"},
-            )
-            rich = self._capture_rich(monkeypatch, delivered=1)
+        await self._seed(pg, complete=True)
+        text_sends = []
+        scheduler = self._wire(
+            monkeypatch, store, text_sends, tmp_path,
+            approved=[333], languages={self.ADMINS[0]: "en", 333: "uk"},
+        )
+        rich = self._capture_rich(monkeypatch, delivered=1)
 
-            await scheduler._run_weekly_report()
+        await scheduler._run_weekly_report()
 
-            by_recipient = {tuple(c["chat_ids"]): c for c in rich}
-            assert len(rich) == 2, "one render per language"
-            uk = next(c for c in rich if c["chat_ids"] == [333])
-            assert "ТИЖНЕВИЙ ЗВІТ" in uk["html"]
-            assert 333 not in sum(
-                (c["chat_ids"] for c in rich if c is not uk), [],
-            ), "nobody is written to twice"
-            assert all(c["media"] for c in rich), "each language gets its own pictures"
-        finally:
-            await store.close()
+        by_recipient = {tuple(c["chat_ids"]): c for c in rich}
+        assert len(rich) == 2, "one render per language"
+        uk = next(c for c in rich if c["chat_ids"] == [333])
+        assert "ТИЖНЕВИЙ ЗВІТ" in uk["html"]
+        assert 333 not in sum(
+            (c["chat_ids"] for c in rich if c is not uk), [],
+        ), "nobody is written to twice"
+        assert all(c["media"] for c in rich), "each language gets its own pictures"
 
 
 class TestBuildReport:

@@ -387,7 +387,7 @@ class TestTheRoleMatrixLeftDuckDB:
         monkeypatch.setattr(duf, "fetch_row", fetch_row)
         monkeypatch.setattr(duf, "execute", execute)
 
-        store = DuckDBStore(db_path=Path("/nonexistent/never-opened.duckdb"))
+        store = DuckDBStore()
 
         def explode():
             raise AssertionError(

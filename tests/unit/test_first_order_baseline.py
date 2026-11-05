@@ -14,8 +14,7 @@ from tests.silver_on_duckdb import derive_silver
 
 
 async def _store(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     return store
 
 
@@ -41,75 +40,60 @@ class TestFirstOrderBaseline:
     @pytest.mark.asyncio
     async def test_opencart_first_order_makes_the_next_one_returning(self, tmp_path):
         store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _order(conn, 1, buyer=50, source=3, ordered="2024-03-01")  # Opencart
-                _order(conn, 2, buyer=50, source=1, ordered="2026-01-15")  # Instagram
-            await derive_silver(store)
+        async with store.connection() as conn:
+            _order(conn, 1, buyer=50, source=3, ordered="2024-03-01")  # Opencart
+            _order(conn, 2, buyer=50, source=1, ordered="2026-01-15")  # Instagram
+        await derive_silver(store)
 
-            flags = await _flags(store)
-            assert flags[2][0] is False, "buyer had already bought — not an acquisition"
-            assert flags[2][1] == date(2024, 3, 1)
-        finally:
-            await store.close()
+        flags = await _flags(store)
+        assert flags[2][0] is False, "buyer had already bought — not an acquisition"
+        assert flags[2][1] == date(2024, 3, 1)
 
     @pytest.mark.asyncio
     async def test_a_genuinely_first_order_is_still_new(self, tmp_path):
         store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _order(conn, 1, buyer=51, source=1, ordered="2026-01-15")
-                _order(conn, 2, buyer=51, source=1, ordered="2026-02-20")
-            await derive_silver(store)
+        async with store.connection() as conn:
+            _order(conn, 1, buyer=51, source=1, ordered="2026-01-15")
+            _order(conn, 2, buyer=51, source=1, ordered="2026-02-20")
+        await derive_silver(store)
 
-            flags = await _flags(store)
-            assert flags[1][0] is True
-            assert flags[2][0] is False
-        finally:
-            await store.close()
+        flags = await _flags(store)
+        assert flags[1][0] is True
+        assert flags[2][0] is False
 
     @pytest.mark.asyncio
     async def test_a_cancelled_first_order_does_not_consume_the_baseline(self, tmp_path):
         """Returns stay excluded — a cancelled order is not a purchase."""
         store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _order(conn, 1, buyer=52, source=1, ordered="2025-06-01", status=19)
-                _order(conn, 2, buyer=52, source=1, ordered="2026-01-15")
-            await derive_silver(store)
+        async with store.connection() as conn:
+            _order(conn, 1, buyer=52, source=1, ordered="2025-06-01", status=19)
+            _order(conn, 2, buyer=52, source=1, ordered="2026-01-15")
+        await derive_silver(store)
 
-            flags = await _flags(store)
-            assert flags[2][0] is True, "their first actual purchase"
-        finally:
-            await store.close()
+        flags = await _flags(store)
+        assert flags[2][0] is True, "their first actual purchase"
 
     @pytest.mark.asyncio
     async def test_an_order_on_a_retired_channel_is_never_flagged_new_itself(self, tmp_path):
         """Inactive sources stay out of the metrics; only the baseline uses them."""
         store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _order(conn, 1, buyer=53, source=3, ordered="2024-03-01")
-            await derive_silver(store)
+        async with store.connection() as conn:
+            _order(conn, 1, buyer=53, source=3, ordered="2024-03-01")
+        await derive_silver(store)
 
-            flags = await _flags(store)
-            assert flags[1][0] is False
-        finally:
-            await store.close()
+        flags = await _flags(store)
+        assert flags[1][0] is False
 
     @pytest.mark.asyncio
     async def test_same_day_first_orders_are_both_new(self, tmp_path):
         store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _order(conn, 1, buyer=54, source=1, ordered="2026-01-15")
-                _order(conn, 2, buyer=54, source=2, ordered="2026-01-15")
-            await derive_silver(store)
+        async with store.connection() as conn:
+            _order(conn, 1, buyer=54, source=1, ordered="2026-01-15")
+            _order(conn, 2, buyer=54, source=2, ordered="2026-01-15")
+        await derive_silver(store)
 
-            flags = await _flags(store)
-            assert flags[1][0] is True and flags[2][0] is True
-        finally:
-            await store.close()
+        flags = await _flags(store)
+        assert flags[1][0] is True and flags[2][0] is True
 
 
 class TestDeadTableIsGone:
@@ -117,13 +101,10 @@ class TestDeadTableIsGone:
     async def test_daily_stats_is_not_created(self, tmp_path):
         """It was empty, unwritten, and advertised itself as revenue by source."""
         store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                names = {r[0] for r in conn.execute(
-                    "SELECT table_name FROM duckdb_tables()"
-                ).fetchall()}
-            assert "daily_stats" not in names
-            assert "gold_daily_revenue" in names
-        finally:
-            await store.close()
+        async with store.connection() as conn:
+            names = {r[0] for r in conn.execute(
+                "SELECT table_name FROM duckdb_tables()"
+            ).fetchall()}
+        assert "daily_stats" not in names
+        assert "gold_daily_revenue" in names
 

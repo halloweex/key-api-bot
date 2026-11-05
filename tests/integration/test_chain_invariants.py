@@ -657,8 +657,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
         from core.scheduler import BackgroundScheduler
 
         monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
@@ -666,7 +665,6 @@ class TestTheJobWhenTheDuckDBHalfFails:
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.alerting.resolve_group", resolve):
             yield latched[0], scheduler, store, sent, resolve
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_a_movement_allocator_at_max_is_persisted_and_pages(self, job):

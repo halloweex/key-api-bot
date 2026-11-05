@@ -17,7 +17,7 @@ what the other sees.
   (`test_read_fallback_consumers.build_graph`, over `bot/` and `core/`): no
   function in `bot/` may reach, through any call the walk resolves, one that
   imports DuckDB or the store, or asks for the store (`get_store`,
-  `DuckDBStore(...)`, `get_sync_service`, `open_file`). A call the walk
+  `DuckDBStore()`, `get_sync_service`, `open_file`). A call the walk
   resolves by its name alone is left out — `self._thread.start()` is not
   `BackgroundScheduler.start` — and so is anything the walk cannot read: a
   `getattr`, a table of callables.

@@ -8,9 +8,10 @@ ledger's adoption of a week delivered before the flip. Under `off` the first
 three read `app.sync_metadata` — the hourly copy of the same table
 (`core.pg_frozen_metadata`) — and the fourth reads nothing.
 
-Each class holds one consumer: under `off` the copy answers and DuckDB is
-never asked (`duckdb_switch.opened() == {}`, and the store's directory never
-made); under `on` the first two answer DuckDB's, as before. Step 14's S14-10
+Each class holds one consumer: the copy answers and DuckDB is never asked
+(the store's `connection()` a trap; until step 14's S14-18 the switch's
+refusal count and a data directory never made, under `off`, while under `on`
+the first two answered DuckDB's). Step 14's S14-10
 deleted the journal's and the ledgers' DuckDB halves, so the digest's beat
 reads the copy under `on` too, and the ledger adopts nothing in either mode.
 The round trip against a real `app.sync_metadata` is at the end, skipped
@@ -29,7 +30,7 @@ import pytest
 import pytest_asyncio
 
 from core import (
-    chain_latch, data_quality as dq, dq_journal, duckdb_switch,
+    chain_latch, data_quality as dq, dq_journal,
     pg_chain_watermarks, pg_frozen_metadata, pg_traffic_ledger_write,
     pg_weekly_ledger_write, report_ledger,
 )
@@ -80,10 +81,28 @@ class Copy:
         monkeypatch.setattr(pg_frozen_metadata, "values_on", values_on)
 
 
-def _untouched(data_dir):
-    """Nothing reached for the file: no refusal counted, no directory made."""
-    assert duckdb_switch.opened() == {}
-    assert not data_dir.exists()
+@pytest.fixture
+def duckdb_off(monkeypatch):
+    """The store's DuckDB connection a trap that records and raises. Until
+    step 14's S14-18 this was KS_DUCKDB=off read the way web read it (the
+    conftest's `duckdb_off`), and the proof was the switch's refusal count
+    and a data directory never made; the switch is deleted, and the store's
+    `connection()` is all a reader could still reach."""
+    from core import duckdb_store
+
+    reached = []
+
+    def connection(self):
+        reached.append(True)
+        raise AssertionError("reached DuckDB")
+
+    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
+    return reached
+
+
+def _untouched(reached):
+    """Nothing reached for the file."""
+    assert reached == []
 
 
 # ─── 1. The sync window a chain inherits ─────────────────────────────────────
@@ -395,8 +414,6 @@ class TestTheDigestBeat:
         """Until S14-10 a process on `KS_DUCKDB=on` inherited the beat from
         DuckDB's own `sync_metadata`; the journal's DuckDB half went, and the
         copy answers in either mode. Mutation: inherit only under off."""
-        monkeypatch.setenv(duckdb_switch.ENV, "on")
-        duckdb_switch.configure_mode()
         copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-09-29T06:00:00+00:00"})
         last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime(2026, 9, 29, 6, tzinfo=UTC)
@@ -427,8 +444,6 @@ class TestTheLedgerAdoptsNothingUnderOff:
         """Until S14-10 a process on `KS_DUCKDB=on` adopted a week only DuckDB
         held; the adoption went with the ledgers' DuckDB half, and Postgres
         alone answers in either mode. Mutation: put the adoption back."""
-        monkeypatch.setenv(duckdb_switch.ENV, "on")
-        duckdb_switch.configure_mode()
         chain = pg_weekly_ledger_write
         flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
         adopted = AsyncMock()

@@ -23,8 +23,7 @@ from tests.silver_on_duckdb import derive_silver
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "lines.duckdb")
-    await s.connect()
+    s = DuckDBStore()
     return s
 
 
@@ -61,14 +60,11 @@ class TestTheLevel:
     @pytest.mark.asyncio
     async def test_the_grain_is_the_line(self, tmp_path):
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                lines = conn.execute("SELECT COUNT(*) FROM silver_order_lines").fetchone()[0]
-                raw = conn.execute("SELECT COUNT(*) FROM order_products").fetchone()[0]
-            assert lines == raw == 4
-        finally:
-            await store.close()
+        await _seed(store)
+        async with store.connection() as conn:
+            lines = conn.execute("SELECT COUNT(*) FROM silver_order_lines").fetchone()[0]
+            raw = conn.execute("SELECT COUNT(*) FROM order_products").fetchone()[0]
+        assert lines == raw == 4
 
     @pytest.mark.asyncio
     async def test_a_line_whose_product_left_the_catalog_survives(self, tmp_path):
@@ -79,36 +75,30 @@ class TestTheLevel:
         revenue went uncategorised without anyone seeing a number move.
         """
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                row = conn.execute(
-                    "SELECT product_name, brand, category_id, line_amount "
-                    "FROM silver_order_lines WHERE product_id IS NULL"
-                ).fetchone()
-            assert row is not None, "the uncatalogued line was dropped"
-            assert row[1] is None and row[2] is None
-            assert float(row[3]) == 250.0
-        finally:
-            await store.close()
+        await _seed(store)
+        async with store.connection() as conn:
+            row = conn.execute(
+                "SELECT product_name, brand, category_id, line_amount "
+                "FROM silver_order_lines WHERE product_id IS NULL"
+            ).fetchone()
+        assert row is not None, "the uncatalogued line was dropped"
+        assert row[1] is None and row[2] is None
+        assert float(row[3]) == 250.0
 
     @pytest.mark.asyncio
     async def test_it_carries_the_order_answer_rather_than_deriving_one(self, tmp_path):
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                mismatches = conn.execute("""
-                    SELECT COUNT(*) FROM silver_order_lines l
-                    JOIN silver_orders s ON s.id = l.order_id
-                    WHERE l.sales_type IS DISTINCT FROM s.sales_type
-                       OR l.order_date IS DISTINCT FROM s.order_date
-                       OR l.is_return IS DISTINCT FROM s.is_return
-                       OR l.is_active_source IS DISTINCT FROM s.is_active_source
-                """).fetchone()[0]
-            assert mismatches == 0
-        finally:
-            await store.close()
+        await _seed(store)
+        async with store.connection() as conn:
+            mismatches = conn.execute("""
+                SELECT COUNT(*) FROM silver_order_lines l
+                JOIN silver_orders s ON s.id = l.order_id
+                WHERE l.sales_type IS DISTINCT FROM s.sales_type
+                   OR l.order_date IS DISTINCT FROM s.order_date
+                   OR l.is_return IS DISTINCT FROM s.is_return
+                   OR l.is_active_source IS DISTINCT FROM s.is_active_source
+            """).fetchone()[0]
+        assert mismatches == 0
 
     # `test_it_reproduces_gold_to_the_kopeck` stood here.
     #
@@ -132,27 +122,24 @@ class TestTheLevel:
     async def test_it_holds_what_gold_excludes_rather_than_hiding_it(self, tmp_path):
         """Returns and dead sources belong to the caller's predicate, not the level."""
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                conn.execute("UPDATE orders SET status_id = 19 WHERE id = 2")
-            await derive_silver(store)
+        await _seed(store)
+        async with store.connection() as conn:
+            conn.execute("UPDATE orders SET status_id = 19 WHERE id = 2")
+        await derive_silver(store)
 
-            async with store.connection() as conn:
-                total = conn.execute(
-                    "SELECT ROUND(SUM(line_amount), 2) FROM silver_order_lines"
-                ).fetchone()[0]
-                counted = conn.execute(
-                    "SELECT ROUND(COALESCE(SUM(line_amount), 0), 2) FROM silver_order_lines "
-                    "WHERE NOT is_return AND is_active_source"
-                ).fetchone()[0]
-                returned = conn.execute(
-                    "SELECT ROUND(SUM(line_amount), 2) FROM silver_order_lines WHERE is_return"
-                ).fetchone()[0]
-            assert float(returned) > 0, "the fixture did not actually produce a return"
-            assert float(total) == float(counted) + float(returned)
-        finally:
-            await store.close()
+        async with store.connection() as conn:
+            total = conn.execute(
+                "SELECT ROUND(SUM(line_amount), 2) FROM silver_order_lines"
+            ).fetchone()[0]
+            counted = conn.execute(
+                "SELECT ROUND(COALESCE(SUM(line_amount), 0), 2) FROM silver_order_lines "
+                "WHERE NOT is_return AND is_active_source"
+            ).fetchone()[0]
+            returned = conn.execute(
+                "SELECT ROUND(SUM(line_amount), 2) FROM silver_order_lines WHERE is_return"
+            ).fetchone()[0]
+        assert float(returned) > 0, "the fixture did not actually produce a return"
+        assert float(total) == float(counted) + float(returned)
 
     # `test_it_still_resolves_after_silver_is_rebuilt_from_scratch` stood here
     # until step 14's S14-15 deleted DuckDB's half of `rebuild-silver`, the

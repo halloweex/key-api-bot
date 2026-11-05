@@ -138,11 +138,9 @@ class TestTheDeclaration:
 async def duck(tmp_path, flags):
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "orders.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     flags.setenv("KS_MIRROR_LANDING", "0")
     yield store
-    await store.close()
 
 
 class TestTheDecisionIsDuckDBs:

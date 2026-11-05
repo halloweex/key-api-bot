@@ -115,30 +115,20 @@ def _fresh_alert_gate():
 
 
 @pytest.fixture(autouse=True)
-def _never_the_production_database(monkeypatch, tmp_path):
-    """No test may open the real analytics database. Ever.
+def _a_fresh_store(monkeypatch):
+    """Every test starts with no store singleton (`core.store.get_store()`).
 
-    `DuckDBStore()` with no argument opens DB_PATH, and `get_store()` — which
-    every route reaches through Depends — builds exactly that. So a single
-    `TestClient(app)` request was enough: tests/integration/test_internal_sales_type.py
-    opened the 8.7 GB production file on every run, and the only reason it did
-    no damage is that this machine holds a copy rather than the live one. On a
-    host where data/ is the real volume, running the suite would have opened
-    the database the bot and the web container are using.
+    The store holds no state since step 14's S14-18 — no connection, no file
+    — so one test's store cannot hand another its data. But tests patch the
+    instance they get (`store.upsert_buyers = ...`), and a patched singleton
+    left behind would answer the next test's `get_store()`.
 
-    Redirecting DB_PATH is only possible because __init__ resolves it at call
-    time; it used to be a default argument, frozen at import.
-
-    Function-scoped against tmp_path, so each test gets an empty database and
-    none of them can see another's writes. A test that wants a specific file
-    still passes db_path= explicitly and is unaffected.
-    """
-    monkeypatch.setattr(
-        "core.duckdb_store.DB_PATH", tmp_path / "test-analytics.duckdb",
-    )
-    # get_store() caches a singleton, and one built before this fixture ran
-    # would keep the old path for the rest of the session.
-    monkeypatch.setattr("core.duckdb_store._store_instance", None, raising=False)
+    Until S14-18 this was `_never_the_production_database`: `DuckDBStore()`
+    with no argument opened `core.duckdb_store.DB_PATH`, and a single
+    `TestClient(app)` request was enough to open the 8.7 GB production file,
+    so the path was redirected into `tmp_path` per test. Nothing opens the
+    file since."""
+    monkeypatch.setattr("core.store._store_instance", None)
 
 
 # `_no_write_chain_flag_from_outside`, which cleared every chain's KS_WRITE_*
@@ -147,44 +137,10 @@ def _never_the_production_database(monkeypatch, tmp_path):
 # since (`tests/unit/test_write_flags_are_not_read.py`).
 
 
-@pytest.fixture(autouse=True)
-def _duckdb_switch_on_and_forgotten(monkeypatch):
-    """Every test starts with KS_DUCKDB unset and the switch's cache and counts
-    empty (core/duckdb_switch.py), and leaves them so.
-
-    A developer's shell or `.env` carrying `KS_DUCKDB=off` would refuse every
-    store the suite opens, and a test that switched it off must not hand the
-    refusal to the next one. Tests that mean `off` set it after this ran.
-    `reset()` also forgets that a test configured the switch as web's
-    (`configure_modes(web=True)`), which is `off` whatever the variable says
-    since step 14's S14-00."""
-    from core import duckdb_switch
-
-    monkeypatch.delenv(duckdb_switch.ENV, raising=False)
-    duckdb_switch.reset()
-    yield
-    duckdb_switch.reset()
-
-
-@pytest.fixture
-def duckdb_off(monkeypatch, tmp_path):
-    """`KS_DUCKDB=off`, read the way web reads it, with the store's directory
-    and file redirected to a directory that does not exist yet. Returns that
-    directory, so a test can say what it expects to find there — under off,
-    usually nothing at all.
-
-    `_never_the_production_database` above redirects the file and not its
-    directory, and `DuckDBStore.connect()` used to make that directory before
-    the switch refused; with the real `data/` already there, a test could not
-    have seen it. Opt-in: a test under `on` keeps the autouse arrangement."""
-    from core import duckdb_switch
-
-    data = tmp_path / "data"
-    monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
-    monkeypatch.setattr("core.duckdb_store.DB_PATH", data / "analytics.duckdb")
-    monkeypatch.setenv(duckdb_switch.ENV, "off")
-    duckdb_switch.configure_mode()
-    return data
+# `_duckdb_switch_on_and_forgotten` (KS_DUCKDB unset and the switch's counts
+# empty for every test) and `duckdb_off` (KS_DUCKDB=off read the way web read
+# it, with the store's file redirected) stood here until step 14's S14-18
+# deleted the switch (`core/duckdb_switch.py`).
 
 
 @pytest.fixture(autouse=True)
@@ -198,9 +154,10 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
     reaches the writers through the repository methods, every one of which
     writes Postgres and takes the latch on its first write.
 
-    Redirected and reset per test, `_never_the_production_database`'s
-    arrangement: each test starts with nothing latched, and no test can see
-    another's marker.
+    Redirected and reset per test: each test starts with nothing latched,
+    and no test can see another's marker. `latch()` itself stays (decision 3:
+    a first write still takes the marker an image from before step 14 routes
+    by), so the redirect does too.
     """
     from core import chain_latch
 
@@ -220,9 +177,10 @@ def _never_the_real_data_directory(monkeypatch, tmp_path):
     The disk watchdog walks the data directory and writes
     `health/watchdog_last_sample` into it, which host cron reads as proof the
     watchdog is alive. Until step 14's S14-01 it found that directory as the
-    DuckDB store's parent, so `_never_the_production_database`'s redirect of
-    the store kept every test out of `data/`; it reads `core.paths.DATA_DIR`
-    now, so the redirect is made here, at the one name the scheduler reads.
+    DuckDB store's parent, so the redirect of the store's file kept every
+    test out of `data/`; it reads `core.paths.DATA_DIR` now, so the redirect
+    is made here, at the one name the scheduler reads (and S14-18 took the
+    file's own path off the store too: `DATA_DIR / DUCKDB_FILE_NAME`).
     `tmp_path` itself, the directory a test's own store usually sits in, so a
     test that builds its store there and expects the heartbeat beside it
     still finds it.

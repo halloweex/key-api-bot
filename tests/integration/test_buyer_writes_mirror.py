@@ -45,8 +45,7 @@ def _buyer(name, phones):
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore(db_path=tmp_path / "b.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     async with pool.acquire() as conn:
         before = await conn.fetch(
@@ -74,7 +73,6 @@ async def stores(tmp_path, monkeypatch):
                     f"({', '.join(f'${i}' for i in range(1, len(cols) + 1))})",
                     *row.values())
         await pool.close()
-        await store.close()
 
 
 @pytest.mark.asyncio

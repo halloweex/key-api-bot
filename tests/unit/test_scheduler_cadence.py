@@ -19,9 +19,6 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-# The stage 5 sweep's target state, for the one class below that asks what is
-# registered in it.
-from tests.unit.test_duckdb_off_sweep import target_state  # noqa: F401 — fixture
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
 
 # The instants every cadence below is read at, never the wall clock.
@@ -240,27 +237,24 @@ class TestARequestedRunIsMarked:
         assert "_requested_runs.add(job_id)" in src
 
 
-class TestWhatIsNotRegisteredUnderDuckdbOff:
-    """Stage 5, PR-7: under `KS_DUCKDB=off` the two jobs whose subject is the
-    DuckDB file are not registered — a CHECKPOINT of a file nothing writes,
-    and a daily copy of one frozen at the start of the week — and neither is
-    DuckDB's warehouse tick, which step 13 already leaves out."""
+class TestTheDuckDBJobsAreNotRegistered:
+    """The two jobs whose subject was the DuckDB file — an hourly CHECKPOINT,
+    a nightly copy — were registered under `KS_DUCKDB=on` only (stage 5,
+    PR-7), so not in web since the week of silence began; step 14's S14-18
+    deleted them with the switch. DuckDB's warehouse tick went in S14-15.
+    The names are not reused (rule 15)."""
 
-    DUCKDB_JOBS = {"duckdb_checkpoint", "db_backup"}
+    DUCKDB_JOBS = {"duckdb_checkpoint", "db_backup", "warehouse_refresh"}
 
-    def test_under_on_both_are_registered(self):
-        """The control. Mutation: drop either from `_register_jobs`."""
+    def test_none_of_the_three_is_registered(self):
+        """Mutation: register `duckdb_checkpoint` or `db_backup` again."""
         ids = {j.id for j in _registered()._scheduler.get_jobs()}
-        assert self.DUCKDB_JOBS <= ids
-
-    def test_under_off_in_the_target_state_none_of_the_three_is(self, target_state):
-        """Mutation: register either under off — the sweep's `job:db_backup`
-        row comes back, and a CHECKPOINT runs against an unconnected store
-        every hour for nothing."""
-        ids = {j.id for j in _registered()._scheduler.get_jobs()}
-        assert not ids & (self.DUCKDB_JOBS | {"warehouse_refresh"}), ids
+        assert not ids & self.DUCKDB_JOBS, ids
         assert {"dq_integrity_check", "replicate_operational",
                 "dq_mirror_landing"} <= ids
-        from core import duckdb_switch
 
-        assert duckdb_switch.opened() == {}
+    def test_their_runners_are_gone(self):
+        from core.scheduler import BackgroundScheduler
+
+        assert not hasattr(BackgroundScheduler, "_run_duckdb_checkpoint")
+        assert not hasattr(BackgroundScheduler, "_run_backup")

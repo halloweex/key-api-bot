@@ -453,10 +453,8 @@ class TestFullSyncContainsThisChainOnly:
 async def real_store(tmp_path):
     from core.duckdb_store import DuckDBStore
 
-    s = DuckDBStore(db_path=tmp_path / "c6.duckdb")
-    await s.connect()
+    s = DuckDBStore()
     yield s
-    await s.close()
 
 
 def _tick(monkeypatch, store, *, upsert_products=None):

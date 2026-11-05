@@ -40,7 +40,7 @@ async def pg_only(monkeypatch):
         monkeypatch.delenv(env, raising=False)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     await _clean(pool)
-    store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+    store = DuckDBStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("reached DuckDB")
@@ -139,8 +139,7 @@ class TestTheHourlyReplaceCannotRollItBack:
         for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", DSN)
-        store = DuckDBStore(db_path=tmp_path / "frozen.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
         await _clean(pool)
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -148,7 +147,6 @@ class TestTheHourlyReplaceCannotRollItBack:
             yield store, pool, monkeypatch
         await _clean(pool)
         await pool.close()
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_the_watermark_survives_and_the_freshness_check_is_quiet(

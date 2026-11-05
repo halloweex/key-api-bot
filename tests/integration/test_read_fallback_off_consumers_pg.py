@@ -114,14 +114,11 @@ class TestTheTrafficReport:
     ):
         _pool, get_pool = live
         store, _week_start, scheduler, _sent = await self._job(monkeypatch, tmp_path)
-        try:
-            result = await scheduler._run_traffic_report()
+        result = await scheduler._run_traffic_report()
 
-            assert get_pool.await_count > 0, "the report never asked Postgres"
-            assert result.get("reason") != read_fallback.READ_UNAVAILABLE, result
-            assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
+        assert get_pool.await_count > 0, "the report never asked Postgres"
+        assert result.get("reason") != read_fallback.READ_UNAVAILABLE, result
+        assert read_fallback.refusals() == {}
 
     @pytest.mark.asyncio
     async def test_an_outage_defers_it_with_no_ledger_row(
@@ -132,21 +129,18 @@ class TestTheTrafficReport:
         pool, _get_pool = live
         store, week_start, scheduler, sent = await self._job(
             monkeypatch, tmp_path, gate_answers=True)
-        try:
-            # The ledger is chain 11b's, in Postgres since step 14's S14-00,
-            # and asked first: answered here, so the refusal under test is the
-            # report's own read rather than the ledger's.
-            marked = _ledger_answers(monkeypatch)
-            await pool.close()
+        # The ledger is chain 11b's, in Postgres since step 14's S14-00,
+        # and asked first: answered here, so the refusal under test is the
+        # report's own read rather than the ledger's.
+        marked = _ledger_answers(monkeypatch)
+        await pool.close()
 
-            result = await scheduler._run_traffic_report()
+        result = await scheduler._run_traffic_report()
 
-            assert result == {"sent": False, "week": week_start.isoformat(),
-                              **_refused("traffic")}
-            assert sent == []
-            marked.assert_not_awaited()
-        finally:
-            await store.close()
+        assert result == {"sent": False, "week": week_start.isoformat(),
+                          **_refused("traffic")}
+        assert sent == []
+        marked.assert_not_awaited()
 
 
 async def _twenty_five_march_days(conn, pool):
@@ -232,15 +226,12 @@ class TestTheAssistant:
 
         _pool, get_pool = live
         store = await _duck(tmp_path)
-        try:
-            TestAssistant._serve_tools(monkeypatch, store)
-            result = await execute_tool("list_expenses", {})
+        TestAssistant._serve_tools(monkeypatch, store)
+        result = await execute_tool("list_expenses", {})
 
-            assert get_pool.await_count > 0
-            assert "error" not in result, result
-            assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
+        assert get_pool.await_count > 0
+        assert "error" not in result, result
+        assert read_fallback.refusals() == {}
 
     @pytest.mark.asyncio
     async def test_an_outage_is_the_named_result(self, live, tmp_path, monkeypatch):
@@ -249,13 +240,10 @@ class TestTheAssistant:
 
         pool, _get_pool = live
         store = await _duck(tmp_path)
-        try:
-            TestAssistant._serve_tools(monkeypatch, store)
-            await pool.close()
+        TestAssistant._serve_tools(monkeypatch, store)
+        await pool.close()
 
-            result = await execute_tool("list_expenses", {})
+        result = await execute_tool("list_expenses", {})
 
-            assert result["error"] == DATA_UNAVAILABLE
-            assert result["surface"] == "expenses"
-        finally:
-            await store.close()
+        assert result["error"] == DATA_UNAVAILABLE
+        assert result["surface"] == "expenses"

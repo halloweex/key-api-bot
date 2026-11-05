@@ -32,34 +32,28 @@ from __future__ import annotations
 from typing import Dict
 
 
-def configure_modes(*, web: bool = False) -> Dict[str, str]:
+def configure_modes() -> Dict[str, str]:
     """Read every cached mode from the environment, and say what was read.
 
     Idempotent: a second call reads the same environment into the same caches,
     so web's startup and the scheduler can both call it without either having
     to know whether the other already has. The latch is re-read rather than
-    assumed unchanged, because a copy-back between two calls releases it.
+    assumed unchanged.
 
-    `web` is web's own two calls, its startup and its scheduler. Since step
-    14's S14-00 web runs `KS_DUCKDB=off` whatever the variable says
-    (`duckdb_switch.configure_mode(web=True)`); every other entry point reads
-    the variable as before.
-
-    **Since S14-00 every mode configured here is a constant** — the value
-    production published on 2026-10-21 (`.planning/DUCKDB_EXIT_STEP14_PLAN.md`
-    H0). Since S14-15 three of them have no reader left and are not
-    configured at all: `KS_PG_DERIVE` (Postgres derives on its own signal,
-    `core.pg_derivation`), `KS_UTM_PARSE` (Postgres parses the UTM verdicts,
-    `core.pg_utm_parse`) and `KS_WRITE_WAREHOUSE` (step 13's switch, whose
-    module `core/warehouse_cutover.py` is deleted). Since S14-16
-    `KS_READ_FALLBACK` is not configured either: a read whose engine fails
-    is refused whatever it says (`core.read_fallback`), and the read
-    switches with no address it looked for at start route nothing.
-    `KS_DUCKDB` remains, going with its module (S14-18).
-    `tests/unit/test_step14_prod_parity.py` holds every answer to what the
-    code before S14-00 gave under production's environment and markers.
+    **No mode is left to read** (step 14). S14-00 made every one a constant
+    — the value production published on 2026-10-21
+    (`.planning/DUCKDB_EXIT_STEP14_PLAN.md` H0) — and the PRs after it
+    deleted each with its last reader: `KS_PG_DERIVE`, `KS_UTM_PARSE` and
+    `KS_WRITE_WAREHOUSE` (S14-15), `KS_READ_FALLBACK` (S14-16) and
+    `KS_DUCKDB` (S14-18, with `core/duckdb_switch.py`: nothing in any
+    process opens the DuckDB file, so there is nothing for it to switch).
+    The mapping is therefore empty; it stays the return value so that a mode
+    added later is added here and nowhere else. A value left in `.env` for
+    an image from before step 14 is read by nothing here, whatever it is.
+    `web=True`, which made web run `KS_DUCKDB=off` whatever the variable
+    said, went with the switch.
     """
-    from core import chain_latch, duckdb_switch
+    from core import chain_latch
 
     # Not in the returned mapping: that maps an environment variable to the
     # value read from it, and the latch is read from disk. Since S14-00 it
@@ -69,6 +63,4 @@ def configure_modes(*, web: bool = False) -> Dict[str, str]:
     # rollback target), and
     # `/api/health` publishes `latched` from it.
     chain_latch.load()
-    # `KS_DUCKDB`: whether this process may open the DuckDB file at all. In
-    # web, never (S14-00). Never raises — see `core/duckdb_switch.py`.
-    return {duckdb_switch.ENV: duckdb_switch.configure_mode(web=web)}
+    return {}

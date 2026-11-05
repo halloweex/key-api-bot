@@ -889,15 +889,13 @@ class TestTheJobEndToEnd:
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
         monkeypatch.setattr(scheduler, "_resolve_dq_layer", AsyncMock())
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)):
             yield scheduler, store, sent
-        await store.close()
 
     async def _issues(self, store, run_id):
         """The run's findings from the journal's one store, Postgres (chain
@@ -985,14 +983,12 @@ class TestTheJobEndToEnd:
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)):
             yield scheduler, store, sent
-        await store.close()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("case", ["covered", "abandoned"])

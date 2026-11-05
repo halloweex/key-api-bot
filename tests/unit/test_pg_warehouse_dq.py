@@ -784,7 +784,7 @@ class TestTheJobFilesTheTwins:
         from tests.journal_fake import install_journal
 
         journal = install_journal(monkeypatch)
-        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
+        store = DuckDBStore()
         asyncio.run(store.connect())
         scheduler = BackgroundScheduler()
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled",

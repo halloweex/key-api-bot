@@ -151,7 +151,7 @@ def store(tmp_path, monkeypatch):
     from core import pg_expenses_read
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+    store = DuckDBStore()
 
     def trap(*_a, **_k):
         raise AssertionError("a one-engine reader reached for DuckDB")

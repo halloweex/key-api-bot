@@ -369,18 +369,15 @@ class TestTheSharedSqlRuns:
         from core.dashboard_access import GRANT_ACCESS, SELECT_ACCESS, access_row
 
         store = await self._store(tmp_path)
-        try:
-            await store._users_run(
-                GRANT_ACCESS,
-                [7, "tester", "Test", None, "viewer", "traffic", 1],
-                mode="none",
-            )
-            row = access_row(
-                await store._users_run(SELECT_ACCESS, [7], mode="one"))
-            assert row["status"] == "approved"
-            assert row["allowed_features"] == ["traffic"]
-        finally:
-            await store.close()
+        await store._users_run(
+            GRANT_ACCESS,
+            [7, "tester", "Test", None, "viewer", "traffic", 1],
+            mode="none",
+        )
+        row = access_row(
+            await store._users_run(SELECT_ACCESS, [7], mode="one"))
+        assert row["status"] == "approved"
+        assert row["allowed_features"] == ["traffic"]
 
     async def test_a_second_grant_keeps_the_role_and_the_name(self, tmp_path):
         """Approving is not a statement about what somebody *is*: re-approving
@@ -389,45 +386,36 @@ class TestTheSharedSqlRuns:
         from core.dashboard_access import GRANT_ACCESS, SELECT_ACCESS, access_row
 
         store = await self._store(tmp_path)
-        try:
-            await store._users_run(
-                GRANT_ACCESS, [7, "tester", "Test", None, "viewer", None, 1],
-                mode="none")
-            await store.update_user_role(7, "admin", changed_by=1)
-            await store._users_run(
-                GRANT_ACCESS, [7, None, None, None, "viewer", "traffic", 1],
-                mode="none")
+        await store._users_run(
+            GRANT_ACCESS, [7, "tester", "Test", None, "viewer", None, 1],
+            mode="none")
+        await store.update_user_role(7, "admin", changed_by=1)
+        await store._users_run(
+            GRANT_ACCESS, [7, None, None, None, "viewer", "traffic", 1],
+            mode="none")
 
-            row = access_row(
-                await store._users_run(SELECT_ACCESS, [7], mode="one"))
-            assert row["role"] == "admin"
-            assert row["username"] == "tester"
-            assert row["allowed_features"] == ["traffic"]
-        finally:
-            await store.close()
+        row = access_row(
+            await store._users_run(SELECT_ACCESS, [7], mode="one"))
+        assert row["role"] == "admin"
+        assert row["username"] == "tester"
+        assert row["allowed_features"] == ["traffic"]
 
     async def test_set_features_round_trips_all_three_states(self, tmp_path):
         store = await self._store(tmp_path)
-        try:
-            await store.create_user(7, username="tester", status="approved")
+        await store.create_user(7, username="tester", status="approved")
 
-            assert await store.set_user_features(7, ["traffic"], changed_by=1)
-            assert (await store.get_user(7))["allowed_features"] == ["traffic"]
+        assert await store.set_user_features(7, ["traffic"], changed_by=1)
+        assert (await store.get_user(7))["allowed_features"] == ["traffic"]
 
-            assert await store.set_user_features(7, [], changed_by=1)
-            assert (await store.get_user(7))["allowed_features"] == []
+        assert await store.set_user_features(7, [], changed_by=1)
+        assert (await store.get_user(7))["allowed_features"] == []
 
-            assert await store.set_user_features(7, None, changed_by=1)
-            assert (await store.get_user(7))["allowed_features"] is None
-        finally:
-            await store.close()
+        assert await store.set_user_features(7, None, changed_by=1)
+        assert (await store.get_user(7))["allowed_features"] is None
 
     async def test_setting_the_tabs_of_a_missing_user_says_so(self, tmp_path):
         store = await self._store(tmp_path)
-        try:
-            assert await store.set_user_features(404, ["traffic"], changed_by=1) is False
-        finally:
-            await store.close()
+        assert await store.set_user_features(404, ["traffic"], changed_by=1) is False
 
 
 class TestTheHandlersAreReachable:

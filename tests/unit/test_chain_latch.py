@@ -178,10 +178,8 @@ class TestPostgresDownAtBoot:
     async def store(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
-        s = DuckDBStore(db_path=tmp_path / "latched.duckdb")
-        await s.connect()
+        s = DuckDBStore()
         yield s
-        await s.close()
 
     @pytest.mark.asyncio
     async def test_an_expense_raises_instead_of_landing_in_duckdb(self, flags, store):
@@ -224,10 +222,8 @@ class TestAWriteThatNeverReachesPostgres:
     async def store(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
-        s = DuckDBStore(db_path=tmp_path / "unreached.duckdb")
-        await s.connect()
+        s = DuckDBStore()
         yield s
-        await s.close()
 
     @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
     @pytest.mark.asyncio
@@ -732,7 +728,7 @@ class TestTheWatermarkGoesToPostgresAskingNothing:
         not, whatever the flag says."""
         from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+        store = DuckDBStore()
         if latched:
             chain_latch.latch("pg_inventory_write")
         flags.setenv("KS_WRITE_INVENTORY", "duckdb")

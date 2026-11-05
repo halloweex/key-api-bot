@@ -40,30 +40,24 @@ async def _cell(store, role, feature):
 @pytest.mark.asyncio
 async def test_a_flag_left_none_keeps_its_stored_value(tmp_path):
     store = pg_sms_seed.store(tmp_path, "perm.duckdb")
-    try:
-        await store.set_permission("editor", "expenses", True, False, False, 1)
-        # Admin B grants edit; admin A, from a stale copy, grants delete.
-        await store.set_permission("editor", "expenses", None, True, None, 2)
-        await store.set_permission("editor", "expenses", None, None, True, 1)
-        assert await _cell(store, "editor", "expenses") == (True, True, True)
-        # Revoking one column leaves the others alone.
-        await store.set_permission("editor", "expenses", None, False, None, 2)
-        assert await _cell(store, "editor", "expenses") == (True, False, True)
-    finally:
-        await store.close()
+    await store.set_permission("editor", "expenses", True, False, False, 1)
+    # Admin B grants edit; admin A, from a stale copy, grants delete.
+    await store.set_permission("editor", "expenses", None, True, None, 2)
+    await store.set_permission("editor", "expenses", None, None, True, 1)
+    assert await _cell(store, "editor", "expenses") == (True, True, True)
+    # Revoking one column leaves the others alone.
+    await store.set_permission("editor", "expenses", None, False, None, 2)
+    assert await _cell(store, "editor", "expenses") == (True, False, True)
 
 
 @pytest.mark.asyncio
 async def test_a_new_pair_defaults_the_flags_it_was_not_given(tmp_path):
     store = pg_sms_seed.store(tmp_path, "perm.duckdb")
-    try:
-        async with pg_conn() as conn:
-            await conn.execute("DELETE FROM app.role_permissions"
-                               " WHERE role = 'marketer' AND feature = 'traffic'")
-        await store.set_permission("marketer", "traffic", True, None, None, 1)
-        assert await _cell(store, "marketer", "traffic") == (True, False, False)
-    finally:
-        await store.close()
+    async with pg_conn() as conn:
+        await conn.execute("DELETE FROM app.role_permissions"
+                           " WHERE role = 'marketer' AND feature = 'traffic'")
+    await store.set_permission("marketer", "traffic", True, None, None, 1)
+    assert await _cell(store, "marketer", "traffic") == (True, False, False)
 
 
 def test_the_route_accepts_a_partial_and_refuses_an_empty_one():

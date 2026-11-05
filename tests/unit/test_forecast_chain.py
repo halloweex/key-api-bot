@@ -529,26 +529,18 @@ TABLES = {
 
 def _goal_rows(store_path):
     async def read():
-        store = DuckDBStore(db_path=store_path)
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                return {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
-                        for t in ("seasonal_indices", "growth_metrics",
-                                  "weekly_patterns", "revenue_predictions")}
-        finally:
-            await store.close()
+        store = DuckDBStore()
+        async with store.connection() as conn:
+            return {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
+                    for t in ("seasonal_indices", "growth_metrics",
+                              "weekly_patterns", "revenue_predictions")}
     return asyncio.run(read())
 
 
 def _with_store(path, step):
     async def run():
-        store = DuckDBStore(db_path=path)
-        await store.connect()
-        try:
-            return await step(store)
-        finally:
-            await store.close()
+        store = DuckDBStore()
+        return await step(store)
     return asyncio.run(run())
 
 

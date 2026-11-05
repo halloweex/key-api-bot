@@ -148,31 +148,28 @@ class TestTheJobSendsOnce:
 
         monkeypatch.setattr(chain, "mark_sent", mark_sent)
         store = await _store(tmp_path)
-        try:
-            job = TestSchedulerJob()
-            week_start = await job._seed(warehouse, complete=True)
-            sent = []
-            scheduler = job._wire(monkeypatch, store, sent, tmp_path)
+        job = TestSchedulerJob()
+        week_start = await job._seed(warehouse, complete=True)
+        sent = []
+        scheduler = job._wire(monkeypatch, store, sent, tmp_path)
 
-            first = await scheduler._run_weekly_report()
-            assert first["sent"] is True and first["ledger"] == "pending"
-            (spooled,) = report_ledger._spooled(chain.CHAIN)
-            assert await _rows(pool, chain) == []
+        first = await scheduler._run_weekly_report()
+        assert first["sent"] is True and first["ledger"] == "pending"
+        (spooled,) = report_ledger._spooled(chain.CHAIN)
+        assert await _rows(pool, chain) == []
 
-            quiet = {"sent": False, "reason": "already_sent", "week": week_start.isoformat()}
-            refusals["left"] = 1
-            assert await scheduler._run_weekly_report() == quiet        # still spooled
-            assert report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
+        quiet = {"sent": False, "reason": "already_sent", "week": week_start.isoformat()}
+        refusals["left"] = 1
+        assert await scheduler._run_weekly_report() == quiet        # still spooled
+        assert report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
 
-            assert await scheduler._run_weekly_report() == quiet        # drained
-            assert not report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
-            (row,) = await _rows(pool, chain)
-            assert row[0] == week_start and row[4] == spooled["sent_at"]
+        assert await scheduler._run_weekly_report() == quiet        # drained
+        assert not report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
+        (row,) = await _rows(pool, chain)
+        assert row[0] == week_start and row[4] == spooled["sent_at"]
 
-            assert await scheduler._run_weekly_report() == quiet        # Postgres's row
-            assert len(sent) == 1
-        finally:
-            await store.close()
+        assert await scheduler._run_weekly_report() == quiet        # Postgres's row
+        assert len(sent) == 1
 
 
 class TestTheStandingWatch:

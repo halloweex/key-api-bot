@@ -108,7 +108,7 @@ def store(tmp_path, monkeypatch):
     here may reach for DuckDB, under any value of any switch."""
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+    store = DuckDBStore()
 
     def trap(*_a, **_k):
         raise AssertionError("a Postgres-only dashboard read reached for DuckDB")

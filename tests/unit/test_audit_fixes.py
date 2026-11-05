@@ -18,8 +18,7 @@ from core.data_quality import _freshness_check, Severity
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     return store
 
 

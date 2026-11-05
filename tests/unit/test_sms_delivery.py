@@ -73,7 +73,6 @@ async def test_only_the_target_arm_is_returned_for_sending(tmp_path):
     targets = await store.get_sms_campaign_targets("aug")
 
     assert {t["buyerId"] for t in targets} == {1, 2}
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -85,7 +84,6 @@ async def test_sending_twice_is_refused(tmp_path):
     with pytest.raises(ValueError, match="already sent"):
         await store.get_sms_campaign_targets("aug")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -93,7 +91,6 @@ async def test_unknown_campaign_has_no_targets(tmp_path):
     store = await _make_store(tmp_path)
     with pytest.raises(ValueError, match="not frozen"):
         await store.get_sms_campaign_targets("nope")
-    await store.close()
 
 
 # ─── recording the gateway's answer ──────────────────────────────────────
@@ -128,7 +125,6 @@ async def test_send_records_ids_stoplist_and_failures(tmp_path):
     assert rows[3] == "INVALID_NUMBER"
     assert sent_at is not None, "recording a send stamps the campaign"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -151,7 +147,6 @@ async def test_stoplisted_recipients_become_optouts(tmp_path):
     assert rows[0][3] == "stoplist"
     assert rows[0][4] == "turbosms"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -172,7 +167,6 @@ async def test_the_stoplist_completes_a_phoneless_optout(tmp_path):
     assert (row[1], row[2]) == ("complaint", "ops"), \
         "the gateway confirms a refusal it did not receive; it does not reattribute it"
 
-    await store.close()
 
 
 # ─── delivery reports ────────────────────────────────────────────────────
@@ -197,7 +191,6 @@ async def test_delivery_report_marks_the_member(tmp_path):
     assert row[1] is True
     assert row[2] is not None
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -217,7 +210,6 @@ async def test_non_final_status_leaves_the_flag_alone(tmp_path):
     assert row[0] == "Sent"
     assert row[1] is None, "still open, not a failure"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -225,7 +217,6 @@ async def test_report_for_unknown_message_is_reported_as_unmatched(tmp_path):
     store = await _make_store(tmp_path)
     assert await store.record_sms_delivery(
         "never-seen", "DELIVRD", True, event_id="evt-1") is False
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -258,7 +249,6 @@ async def test_a_confirmed_delivery_is_not_downgraded_by_a_later_failure(tmp_pat
 
     assert row[1] is True, "a confirmed delivery must stay delivered"
     assert row[0] == "DELIVRD", "and its status is not clobbered by the downgrade"
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -279,7 +269,6 @@ async def test_a_confirmed_delivery_is_not_reopened_by_a_later_nonfinal_status(t
             "message_id='mid-1'"))
 
     assert row == ("DELIVRD", True)
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -303,7 +292,6 @@ async def test_an_open_report_can_still_progress_to_delivered(tmp_path):
             "message_id='mid-1'"))
 
     assert row == ("READ", True)
-    await store.close()
 
 
 # ─── an event id names one message, for good ─────────────────────────────
@@ -329,7 +317,6 @@ async def test_an_event_id_cannot_be_re_pointed_at_another_message(tmp_path):
             "message_id='mid-2'"))
     assert row == ("Accepted", None), "the other recipient is untouched"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -352,7 +339,6 @@ async def test_the_same_event_reported_nine_times_is_recorded_every_time(tmp_pat
             "message_id='mid-1'"))
 
     assert row == ("DELIVRD", True)
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -369,7 +355,6 @@ async def test_an_event_spent_on_an_unknown_message_is_still_spent(tmp_path):
     with pytest.raises(DlrEventRebound):
         await store.record_sms_delivery("mid-1", "UNDELIV", False, event_id="evt-1")
 
-    await store.close()
 
 
 # ─── opt-outs keep people out ────────────────────────────────────────────
@@ -408,7 +393,6 @@ async def test_optout_excludes_the_customer_from_future_segments(tmp_path):
     after = await store.get_sms_segments(include_customers=True, holdout_pct=0)
     assert {c["buyerId"] for c in after["customers"]} == {1}
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -418,7 +402,6 @@ async def test_optout_is_idempotent(tmp_path):
     result = await store.add_marketing_optout(buyer_id=7, reason="complaint")
 
     assert result["totalOptouts"] == 1, "the same person is not recorded twice"
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -471,7 +454,6 @@ async def test_a_later_optout_supplies_the_phone_the_first_one_lacked(tmp_path):
     assert {c["buyerId"] for c in after["customers"]} == {3}, \
         "the second buyer record carries the same number and must be suppressed too"
 
-    await store.close()
 
 
 # ─── schema migration ────────────────────────────────────────────────────
@@ -511,8 +493,7 @@ async def test_delivery_columns_are_added_to_a_pre_existing_table(tmp_path):
     )
     con.close()
 
-    store = DuckDBStore(db_path=db)
-    await store.connect()
+    store = DuckDBStore()
 
     async with store.connection() as conn:
         columns = {r[0] for r in conn.execute(
@@ -538,7 +519,6 @@ async def test_delivery_columns_are_added_to_a_pre_existing_table(tmp_path):
 
     assert "idx_sms_members_message_id" in indexes
 
-    await store.close()
 
 
 # ─── claiming ────────────────────────────────────────────────────────────
@@ -561,7 +541,6 @@ async def test_asking_for_targets_claims_the_campaign(tmp_path):
     with pytest.raises(ValueError, match="already sent"):
         await store.get_sms_campaign_targets("aug")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -582,7 +561,6 @@ async def test_concurrent_sends_cannot_both_take_the_roster(tmp_path):
     assert len(ok) == 1, "exactly one caller may send"
     assert len(refused) == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -596,7 +574,6 @@ async def test_a_released_campaign_can_be_sent_again(tmp_path):
 
     assert [t["buyerId"] for t in await store.get_sms_campaign_targets("aug")] == [1]
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -625,7 +602,6 @@ async def test_members_the_gateway_never_answered_for_are_marked(tmp_path):
     assert rows[2] == rows[3] == "NotSent"
     assert rows[4] is None, "the control was never sent to, so it is not NotSent"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -641,7 +617,6 @@ async def test_a_complete_send_marks_nobody_as_unsent(tmp_path):
 
     assert summary["notSent"] == 0, "a refusal is an answer, not a silence"
 
-    await store.close()
 
 
 # ─── the hand-written send time and the gateway's ─────────────────────────
@@ -658,7 +633,6 @@ async def test_marking_sent_by_hand_is_refused_once_the_gateway_sent_it(tmp_path
 
     with pytest.raises(ValueError, match="through the gateway"):
         await store.mark_sms_campaign_sent("aug", None)
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -669,7 +643,6 @@ async def test_marking_sent_by_hand_still_works_for_a_campaign_that_left_as_a_fi
     second = await store.mark_sms_campaign_sent("aug", None)
     assert first["previouslySentAt"] is None
     assert second["previouslySentAt"] is not None, "date correction is still allowed"
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -687,7 +660,6 @@ async def test_a_re_freeze_after_a_claim_is_refused_and_the_roster_survives(tmp_
         ids = sorted(r[0] for r in await conn.fetch(
             "SELECT buyer_id FROM app.sms_campaign_members WHERE campaign='aug'"))
     assert ids == [1, 2], "the claimed roster is the control group; it must not move"
-    await store.close()
 
 
 def test_the_binding_is_written_before_it_is_read():

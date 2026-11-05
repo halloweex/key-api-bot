@@ -134,17 +134,22 @@ SHARED_SQL = (
 
 class TestTheOldNamesAreTheNewObjects:
     @pytest.mark.parametrize("name", SHARED_SQL)
-    def test_duckdb_store_re_exports_the_warehouse_sql(self, name):
-        """Mutation: a copy left behind in `core/duckdb_store.py` — the two
-        would be two homes of one rule, which is what #101 proved diverges."""
+    def test_duckdb_store_holds_no_copy_of_the_warehouse_sql(self, name):
+        """`core/duckdb_store.py` re-exported these as the same objects from
+        S14-01 until S14-18, which made it a shim of the store alone. Neither
+        a re-export nor a copy is left there: a copy would be two homes of
+        one rule, which is what #101 proved diverges. Mutation: define or
+        re-export any of them in the shim again."""
         from core import duckdb_store, warehouse_sql
 
-        assert getattr(duckdb_store, name) is getattr(warehouse_sql, name)
+        assert hasattr(warehouse_sql, name)
+        assert not hasattr(duckdb_store, name)
 
     def test_upsert_result(self):
+        """Re-exported by `core/duckdb_store.py` until S14-18."""
         from core import duckdb_store, pg_orders_write
 
-        assert duckdb_store.UpsertResult is pg_orders_write.UpsertResult
+        assert not hasattr(duckdb_store, "UpsertResult")
         assert pg_orders_write.UpsertResult.__module__ == "core.pg_orders_write"
 
     def test_the_data_directory(self):

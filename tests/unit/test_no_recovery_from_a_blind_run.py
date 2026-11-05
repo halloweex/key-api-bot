@@ -27,10 +27,8 @@ from core.duckdb_store import DuckDBStore
 
 @pytest_asyncio.fixture
 async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "blind.duckdb")
-    await s.connect()
+    s = DuckDBStore()
     yield s
-    await s.close()
 
 
 def _issue(name, severity=Severity.WARN):

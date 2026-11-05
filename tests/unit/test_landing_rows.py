@@ -211,10 +211,6 @@ class TestTheStoreReadsThroughIt:
     async def test_an_empty_list_still_writes_nothing(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path=tmp_path / "empty.duckdb")
-        await store.connect()
-        try:
-            assert await store.upsert_categories([]) == 0
-            assert await store.upsert_products([]) == 0
-        finally:
-            await store.close()
+        store = DuckDBStore()
+        assert await store.upsert_categories([]) == 0
+        assert await store.upsert_products([]) == 0

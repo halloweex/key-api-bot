@@ -86,8 +86,7 @@ _VERSIONS = Path(__file__).resolve().parents[2] / "migrations" / "versions"
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "gold.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     return store
 
 
@@ -222,34 +221,28 @@ class TestTheTwoShapesAgree:
     @pytest.mark.asyncio
     async def test_the_rollup_reproduces_every_shared_measure(self, tmp_path):
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store, FOUR_ORDERS)
-            async with store.connection() as conn:
-                pg = _run_pg_projection(conn)
+        await _seed(store, FOUR_ORDERS)
+        async with store.connection() as conn:
+            pg = _run_pg_projection(conn)
 
-            dk = DUCKDB_GOLD["four_orders"]
-            (rollup,) = [v for (_d, s, src), v in pg.items() if src is None and s == "retail"]
-            for measure in _GOLD_ROLLUP_MEASURES:
-                assert _stored(dk[measure]) == _stored(rollup[measure]), measure
-        finally:
-            await store.close()
+        dk = DUCKDB_GOLD["four_orders"]
+        (rollup,) = [v for (_d, s, src), v in pg.items() if src is None and s == "retail"]
+        for measure in _GOLD_ROLLUP_MEASURES:
+            assert _stored(dk[measure]) == _stored(rollup[measure]), measure
 
     @pytest.mark.asyncio
     async def test_the_fine_rows_reproduce_every_channel_column(self, tmp_path):
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store, FOUR_ORDERS)
-            async with store.connection() as conn:
-                pg = _run_pg_projection(conn)
+        await _seed(store, FOUR_ORDERS)
+        async with store.connection() as conn:
+            pg = _run_pg_projection(conn)
 
-            dk = DUCKDB_GOLD["four_orders"]
-            (date,) = {d for (d, s, src) in pg if src is None and s == "retail"}
-            for dk_column, (source_id, pg_column) in _GOLD_SOURCE_MEASURES.items():
-                fine = pg.get((date, "retail", source_id))
-                actual = Decimal(0) if fine is None else Decimal(str(fine[pg_column]))
-                assert Decimal(str(dk[dk_column])) == actual, dk_column
-        finally:
-            await store.close()
+        dk = DUCKDB_GOLD["four_orders"]
+        (date,) = {d for (d, s, src) in pg if src is None and s == "retail"}
+        for dk_column, (source_id, pg_column) in _GOLD_SOURCE_MEASURES.items():
+            fine = pg.get((date, "retail", source_id))
+            actual = Decimal(0) if fine is None else Decimal(str(fine[pg_column]))
+            assert Decimal(str(dk[dk_column])) == actual, dk_column
 
     @pytest.mark.asyncio
     async def test_the_exhibition_gets_a_row_where_it_had_no_column(self, tmp_path):
@@ -257,22 +250,19 @@ class TestTheTwoShapesAgree:
         production revenue that `SUM(the three channel columns)` cannot see.
         """
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store, [
-                (1, 1, 100, "1000.00"),
-                (2, 5, 101, "266.00"),
-            ])
-            async with store.connection() as conn:
-                pg = _run_pg_projection(conn)
+        await _seed(store, [
+            (1, 1, 100, "1000.00"),
+            (2, 5, 101, "266.00"),
+        ])
+        async with store.connection() as conn:
+            pg = _run_pg_projection(conn)
 
-            # DuckDB's Gold had revenue for it and every channel column empty —
-            # on production ₴266,059.00 across 177 orders a per-channel reading
-            # could not see (that half went with DuckDB's Gold in S14-15).
-            # Postgres: the channel has a row, and it needed no new column.
-            (date,) = {d for (d, s, src) in pg if s == "exhibition" and src is None}
-            assert pg[(date, "exhibition", 5)]["revenue"] == Decimal("266.00")
-        finally:
-            await store.close()
+        # DuckDB's Gold had revenue for it and every channel column empty —
+        # on production ₴266,059.00 across 177 orders a per-channel reading
+        # could not see (that half went with DuckDB's Gold in S14-15).
+        # Postgres: the channel has a row, and it needed no new column.
+        (date,) = {d for (d, s, src) in pg if s == "exhibition" and src is None}
+        assert pg[(date, "exhibition", 5)]["revenue"] == Decimal("266.00")
 
     @pytest.mark.asyncio
     async def test_an_inactive_source_gets_a_row_of_zeroes(self, tmp_path):
@@ -281,19 +271,16 @@ class TestTheTwoShapesAgree:
         written out, and DuckDB already does the same one grain up.
         """
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store, [
-                (1, 1, 100, "1000.00"),
-                (2, 3, 101, "5000.00"),
-            ])
-            async with store.connection() as conn:
-                pg = _run_pg_projection(conn)
+        await _seed(store, [
+            (1, 1, 100, "1000.00"),
+            (2, 3, 101, "5000.00"),
+        ])
+        async with store.connection() as conn:
+            pg = _run_pg_projection(conn)
 
-            opencart = [v for (_d, _s, src), v in pg.items() if src == 3]
-            assert opencart, "no row for the inactive source at all"
-            assert all(Decimal(str(row["revenue"])) == 0 for row in opencart)
-        finally:
-            await store.close()
+        opencart = [v for (_d, _s, src), v in pg.items() if src == 3]
+        assert opencart, "no row for the inactive source at all"
+        assert all(Decimal(str(row["revenue"])) == 0 for row in opencart)
 
 
 class TestWhyTheRollUpIsStored:
@@ -302,58 +289,52 @@ class TestWhyTheRollUpIsStored:
     @pytest.mark.asyncio
     async def test_summing_the_fine_rows_overstates_the_customer_count(self, tmp_path):
         store = await _make_store(tmp_path)
-        try:
-            # One buyer, two channels, one day.
-            await _seed(store, [
-                (1, 1, 100, "500.00"),
-                (2, 2, 100, "500.00"),
-            ])
-            async with store.connection() as conn:
-                pg = _run_pg_projection(conn)
+        # One buyer, two channels, one day.
+        await _seed(store, [
+            (1, 1, 100, "500.00"),
+            (2, 2, 100, "500.00"),
+        ])
+        async with store.connection() as conn:
+            pg = _run_pg_projection(conn)
 
-            dk = DUCKDB_GOLD["one_buyer_two_channels"]
-            (date, sales_type) = next((d, s) for (d, s, src) in pg if src is None)
-            rollup = pg[(date, sales_type, None)]
-            folded = sum(
-                int(v["unique_customers"])
-                for (d, s, src), v in pg.items()
-                if src is not None and (d, s) == (date, sales_type)
-            )
+        dk = DUCKDB_GOLD["one_buyer_two_channels"]
+        (date, sales_type) = next((d, s) for (d, s, src) in pg if src is None)
+        rollup = pg[(date, sales_type, None)]
+        folded = sum(
+            int(v["unique_customers"])
+            for (d, s, src), v in pg.items()
+            if src is not None and (d, s) == (date, sales_type)
+        )
 
-            assert int(dk["unique_customers"]) == 1
-            assert int(rollup["unique_customers"]) == 1
-            # The number the fine grain alone would have produced, and the
-            # reason this table stores a roll-up instead of deriving one.
-            assert folded == 2
+        assert int(dk["unique_customers"]) == 1
+        assert int(rollup["unique_customers"]) == 1
+        # The number the fine grain alone would have produced, and the
+        # reason this table stores a roll-up instead of deriving one.
+        assert folded == 2
 
-        finally:
-            await store.close()
 
     @pytest.mark.asyncio
     async def test_the_additive_measures_do_fold(self, tmp_path):
         """Which is what `gold_rollup_mismatch` is entitled to assert."""
         store = await _make_store(tmp_path)
-        try:
-            await _seed(store, [
-                (1, 1, 100, "500.00"),
-                (2, 2, 100, "500.00"),
-                (3, 4, 101, "125.25"),
-            ])
-            async with store.connection() as conn:
-                pg = _run_pg_projection(conn)
+        await _seed(store, [
+            (1, 1, 100, "500.00"),
+            (2, 2, 100, "500.00"),
+            (3, 4, 101, "125.25"),
+        ])
+        async with store.connection() as conn:
+            pg = _run_pg_projection(conn)
 
-            cells = {(d, s) for (d, s, src) in pg if src is None}
-            for date, sales_type in cells:
-                rollup = pg[(date, sales_type, None)]
-                for measure in _GOLD_ADDITIVE:
-                    folded = sum(
-                        Decimal(str(v[measure]))
-                        for (d, s, src), v in pg.items()
-                        if src is not None and (d, s) == (date, sales_type)
-                    )
-                    assert Decimal(str(rollup[measure])) == folded
-        finally:
-            await store.close()
+        cells = {(d, s) for (d, s, src) in pg if src is None}
+        for date, sales_type in cells:
+            rollup = pg[(date, sales_type, None)]
+            for measure in _GOLD_ADDITIVE:
+                folded = sum(
+                    Decimal(str(v[measure]))
+                    for (d, s, src), v in pg.items()
+                    if src is not None and (d, s) == (date, sales_type)
+                )
+                assert Decimal(str(rollup[measure])) == folded
 
 
 # ── the comparison ───────────────────────────────────────────────────────────

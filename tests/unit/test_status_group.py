@@ -41,8 +41,7 @@ MEASURED_GROUPS = {1: 1, 9: 4, 12: 5, 15: 6, 19: 6, 20: 4, 21: 6, 22: 6, 23: 6}
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     return store
 
 
@@ -232,26 +231,22 @@ class TestTheColumnArrivesOnAnExistingDatabase:
         """)
         conn.close()
 
-        store = DuckDBStore(db_path=db)
-        await store.connect()
-        try:
-            async with store.connection() as c:
-                cols = {r[1] for r in c.execute("PRAGMA table_info('orders')").fetchall()}
-                assert "status_group_id" in cols
-                # The rows that were already there keep their verdict.
-                value = c.execute(
-                    "SELECT status_group_id FROM orders WHERE id = 1"
-                ).fetchone()[0]
-                assert value is None
+        store = DuckDBStore()
+        async with store.connection() as c:
+            cols = {r[1] for r in c.execute("PRAGMA table_info('orders')").fetchall()}
+            assert "status_group_id" in cols
+            # The rows that were already there keep their verdict.
+            value = c.execute(
+                "SELECT status_group_id FROM orders WHERE id = 1"
+            ).fetchone()[0]
+            assert value is None
 
-            # And the Silver rule that reads the column now binds — the shared
-            # projection, run as DuckDB's rebuild ran it until step 14's S14-15.
-            from tests.silver_on_duckdb import derive_silver
+        # And the Silver rule that reads the column now binds — the shared
+        # projection, run as DuckDB's rebuild ran it until step 14's S14-15.
+        from tests.silver_on_duckdb import derive_silver
 
-            assert await derive_silver(store) == 1
-            async with store.connection() as c:
-                assert c.execute(
-                    "SELECT is_return FROM silver_orders WHERE id = 1"
-                ).fetchone()[0] is True
-        finally:
-            await store.close()
+        assert await derive_silver(store) == 1
+        async with store.connection() as c:
+            assert c.execute(
+                "SELECT is_return FROM silver_orders WHERE id = 1"
+            ).fetchone()[0] is True

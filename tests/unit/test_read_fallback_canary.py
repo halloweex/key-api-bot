@@ -12,19 +12,19 @@ block), one on every read a switch routed there uncounted
 the `watch:read_fallbacks` row the bot rewrote on every probe that read the
 block. No read falls back since S14-00 and no switch routes one since S14-07,
 so S14-16 deleted them with the blocks; what is held here instead is that
-none of them is a condition any more, that the bot writes no such row, and —
-since `core.alert_archive.record_watch` still writes the week of silence's
-watch — that the writer wears the archive's armour, under that watch's key.
+none of them is a condition any more and that the bot writes no such row.
+The writer itself (`core.alert_archive.record_watch`) went in S14-18 with the
+week of silence's watch, its last caller, and so does nothing write any watch
+row since.
 """
 from __future__ import annotations
 
 import ast
-import asyncio
 import logging
 import textwrap
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -227,7 +227,6 @@ class TestWhatWebPublishes:
         assert "read_fallbacks" not in health
         assert canary.check_read_refusals(health) == []
         assert "read_refused" not in canary.unjudged_keys(health)
-        assert canary.web_uptime_s(health) == health["uptime_seconds"]
 
 
     def test_a_refusal_under_off_is_read_refused_and_the_week_stays_clean(
@@ -281,7 +280,7 @@ class TestWhatOffWouldRefuseIsSeen:
             return ""
 
         monkeypatch.setattr("core.ch_common.execute", _answers)
-        store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+        store = DuckDBStore()
         try:
             rows = await store._analytics_rows(
                 lambda d: f"SELECT 1 FROM {d.silver_orders} o", [], ("int",))
@@ -364,11 +363,10 @@ class TestABlindProbeKeepsThePage:
                    side_effect=lambda *a, **k: agent.append(a[1])), \
              patch("core.alert_archive.write_resolved_now",
                    new=AsyncMock(return_value=True)), \
-             patch("core.alert_escalator.escalate_due", new=AsyncMock()), \
-             patch("core.alert_archive.record_watch") as watch:
+             patch("core.alert_escalator.escalate_due", new=AsyncMock()):
             for _ in probes:
                 await job(None)
-        return sent, agent, watch
+        return sent, agent, None
 
     def _payload(self, refused):
         payload = _healthy_payload()
@@ -378,15 +376,14 @@ class TestABlindProbeKeepsThePage:
     @pytest.mark.asyncio
     async def test_a_deferred_blip_neither_resolves_nor_repages(self):
         standing = self._payload(self._refused())
-        sent, agent, watch = await self._run([standing, standing, None, standing])
+        sent, agent, _ = await self._run([standing, standing, None, standing])
         assert len(sent) == 1, sent
         assert "Dashboard warning" in sent[0]
         assert not any("Resolved" in line for line in sent), sent
         assert agent == ["canary:read_refused"], agent
-        # No watch row: the read-fallback watch went in S14-16, and the week
-        # of silence's is written only for a probe that read the switch block
-        # under `off`, which these payloads carry none of.
-        assert watch.call_args_list == []
+        # No watch row: the read-fallback watch went in S14-16 and the week
+        # of silence's in S14-18; the writer is gone
+        # (`TestTheBotWritesTheWatch`).
 
     @pytest.mark.asyncio
     async def test_a_restarted_web_still_resolves_it(self):
@@ -443,16 +440,15 @@ class TestUnjudgedKeys:
     _CHAIN4 = {"buyer_sync": {"last_ok_age_s": 60},
                "write_chains": {canary.ORDERS_CHAIN: {
                    "sync_step": {"consecutive_failures": 0}}}}
-    # The switch block, and since S14-00 the backup evidence's.
-    _SWITCH = {"duckdb_switch": {"mode": "on", "opened_while_off": {}},
-               "backups": {"pitr_drill_age_h": 1.0}}
+    # Since S14-00 the backup evidence's. (The DuckDB switch's block answered
+    # for two keys here until step 14's S14-18 deleted it.)
+    _SWITCH = {"backups": {"pitr_drill_age_h": 1.0}}
 
     def test_no_payload_judges_none_of_them(self):
         assert canary.unjudged_keys(None) == [
             "read_refused",
             "buyer_sync_stalled", "buyer_sync_stalled_chain",
-            "duckdb_opened_while_off", "duckdb_off_held_back", "orders_sync_failing",
-            "backup_evidence_stale"]
+            "orders_sync_failing", "backup_evidence_stale"]
 
     def test_a_payload_with_every_block_judges_all_of_them(self):
         payload = {"read_fallback_mode": {"refused": {}},
@@ -475,8 +471,8 @@ class TestUnjudgedKeys:
                                      "write_chains": self._CHAIN4["write_chains"]}) == [
             "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
         assert canary.unjudged_keys({"read_fallback_mode": {},
-                                     "backups": {}, **self._CHAIN4}) == [
-            "duckdb_opened_while_off", "duckdb_off_held_back"], "no switch block"
+                                     "backups": {}, **self._CHAIN4}) == [], (
+            "no switch block holds nothing since S14-18")
         assert canary.unjudged_keys({"read_fallback_mode": {},
                                      "duckdb_switch": {}, **self._CHAIN4}) == [
             "backup_evidence_stale"], "no backups block"
@@ -491,10 +487,6 @@ class TestUnjudgedKeys:
         emitted |= {k for k, _ in canary.check_buyer_sync_chain(
             {"buyer_sync": {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 1,
                             "last_attempt_age_s": 60}})}
-        emitted |= {k for k, _ in canary.check_duckdb_switch(
-            {"duckdb_switch": {"opened_while_off": {"a": _entry(1)}}})}
-        emitted |= {k for k, _ in canary.check_duckdb_off_held_back(
-            {"duckdb_switch": {"held_back": ["user_store"]}})}
         emitted |= {k for k, _ in canary.check_orders_sync_chain(
             {"write_chains": {canary.ORDERS_CHAIN: {
                 "sync_step": {"consecutive_failures": 9}}}})}
@@ -532,13 +524,6 @@ class TestUnjudgedKeys:
                               side_effect=OSError("no route")):
                 result = await canary.run_canary(DASHBOARD, client=client)
         assert result.unjudged_keys == canary.unjudged_keys(None)
-        assert result.web_uptime_s is None
-
-    @pytest.mark.parametrize("value, expected", [
-        (3868, 3868.0), (0, 0.0), (12.5, 12.5), (-1, None), (True, None),
-        ("3868", None), (None, None)])
-    def test_uptime_is_a_number_or_nothing(self, value, expected):
-        assert canary.web_uptime_s({"uptime_seconds": value}) == expected
 
 
 # ─── The bot writes the watch ──────────────────────────────────────────────
@@ -556,109 +541,25 @@ def _parents(root: ast.AST) -> dict:
 
 
 class TestTheBotWritesTheWatch:
-    def test_no_read_fallback_watch_is_written(self):
-        """Parsed, not grepped: since step 14's S14-16 `canary_job` calls
-        `record_watch` once, under the week of silence's key
-        (tests/unit/test_duckdb_switch.py holds that call), and never under
-        `watch:read_fallbacks`, whose row stays in `app.alert_series` as
-        history. Mutation: write it again."""
+    def test_no_watch_is_written_at_all(self):
+        """Parsed, not grepped: `canary_job` wrote `watch:read_fallbacks` until
+        step 14's S14-16 and the week of silence's `watch:duckdb_switch` until
+        S14-18; both rows stay in `app.alert_series` as history, and nothing
+        writes either. The writer went with its last caller. Mutation: call a
+        watch writer from `canary_job` again, or put `record_watch` back."""
         job = _canary_job()
-        calls = [n for n in ast.walk(job) if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Name) and n.func.id == "record_watch"]
-        assert [ast.unparse(c.args[0]) for c in calls] == ["DUCKDB_SWITCH_WATCH_KEY"]
-        assert "read_fallbacks" not in ast.unparse(job)
+        source = ast.unparse(job)
+        assert "record_watch" not in source and "WATCH_KEY" not in source
+        assert "read_fallbacks" not in source and "duckdb_switch" not in source
         assert not hasattr(canary, "READ_FALLBACK_WATCH_KEY")
-
-    def test_it_is_written_before_the_page(self):
-        """Whatever the page does after it — deferred, suppressed, raised —
-        the watch has already been told what this probe read."""
-        job = _canary_job()
-        body = [ast.unparse(stmt) for stmt in job.body]
-        watch = next(i for i, s in enumerate(body) if "record_watch(" in s)
-        raise_ = next(i for i, s in enumerate(body) if "raise_alert(" in s)
-        assert watch < raise_
+        assert not hasattr(canary, "DUCKDB_SWITCH_WATCH_KEY")
+        assert not hasattr(canary, "web_uptime_s")
+        assert not hasattr(alert_archive, "record_watch")
+        assert not hasattr(alert_archive, "_WATCH_SQL")
 
 
-class TestTheWatchWriter:
-    def test_no_dsn_writes_nothing(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-
-        async def main():
-            return alert_archive.record_watch("watch:x", clean=True, gap_s=60)
-
-        assert asyncio.run(main()) is None
-
-    def test_a_dead_postgres_costs_one_warning_and_never_the_probe(
-        self, monkeypatch, caplog,
-    ):
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@nowhere:5/ks")
-        monkeypatch.setattr(alert_archive, "_standing_down", False)
-        monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=ConnectionError("refused")))
-
-        async def main():
-            with caplog.at_level(logging.WARNING, logger="core.alert_archive"):
-                for _ in range(3):
-                    task = alert_archive.record_watch("watch:x", clean=True, gap_s=60)
-                    assert task is not None
-                    await task  # never raises
-
-        asyncio.run(main())
-        assert caplog.text.count("standing down") == 1
-
-    def test_the_write_carries_its_own_timeout(self, monkeypatch):
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@nowhere:5/ks")
-        monkeypatch.setattr(alert_archive, "WRITE_TIMEOUT_S", 0.05)
-        monkeypatch.setattr(alert_archive, "_standing_down", False)
-
-        async def hang(*a, **kw):
-            await asyncio.sleep(30)
-
-        async def main():
-            with patch("core.alert_archive._write_watch", new=hang):
-                task = alert_archive.record_watch("watch:x", clean=False, gap_s=60)
-                await asyncio.wait_for(task, timeout=1.0)
-
-        asyncio.run(main())
-
-    def test_it_hands_the_statement_what_the_canary_read(self, monkeypatch):
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@nowhere:5/ks")
-        monkeypatch.setenv("KS_INSTANCE", "test-host")
-        conn = MagicMock()
-        conn.execute = AsyncMock()
-        acquire = MagicMock()
-        acquire.__aenter__ = AsyncMock(return_value=conn)
-        acquire.__aexit__ = AsyncMock(return_value=False)
-        pool = MagicMock()
-        pool.acquire = MagicMock(return_value=acquire)
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=pool))
-
-        async def main():
-            await alert_archive.record_watch(
-                canary.DUCKDB_SWITCH_WATCH_KEY, clean=False,
-                gap_s=canary.DUCKDB_SWITCH_WATCH_GAP_S)
-
-        asyncio.run(main())
-        sql, *params = conn.execute.await_args.args
-        assert sql == alert_archive._WATCH_SQL
-        assert params == ["watch:duckdb_switch", False, 2100.0, "test-host", None]
-
-    def test_it_hands_the_statement_webs_uptime(self, monkeypatch):
-        """What tells the web process read last time from a new one."""
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@nowhere:5/ks")
-        conn = MagicMock()
-        conn.execute = AsyncMock()
-        acquire = MagicMock()
-        acquire.__aenter__ = AsyncMock(return_value=conn)
-        acquire.__aexit__ = AsyncMock(return_value=False)
-        pool = MagicMock()
-        pool.acquire = MagicMock(return_value=acquire)
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=pool))
-
-        async def main():
-            await alert_archive.record_watch(
-                canary.DUCKDB_SWITCH_WATCH_KEY, clean=True, gap_s=60,
-                web_uptime_s=3868)
-
-        asyncio.run(main())
-        assert conn.execute.await_args.args[-1] == 3868.0
+# `TestTheWatchWriter` stood here until step 14's S14-18: `record_watch`
+# wore the archive's armour (nothing without `KS_PG_DSN`, one warning per
+# streak, its own timeout) and handed `_WATCH_SQL` what the canary read,
+# web's uptime among it. The writer went with the week of silence's watch,
+# its last caller.
