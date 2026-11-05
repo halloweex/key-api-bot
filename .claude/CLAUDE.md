@@ -1179,7 +1179,7 @@ whole reason the group is read from the source now.
 |---|---|---|
 | `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard; not registered under `KS_WRITE_WAREHOUSE=postgres` |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
-| `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
+| `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
 | `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, the витрина, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
@@ -2277,9 +2277,10 @@ same KeyCRM snapshot, drives the repair; the stood-down arm journals no run.
 which answers Postgres's block and ignores the one it is handed, so marking
 first loses the mark — and the canary, the catch-up and the digest skip it.
 Each of those is pinned by running it, not by reading its source. The ten
-DuckDB integrity checks over the order tables (`ORDER_LANDING_CHECKS`) join
-`stood_down_duckdb_checks()`, so DN-23's Postgres twins stand in alone;
-`tests/unit/test_order_landing_stand_down.py` derives the list from the scan.
+DuckDB integrity checks over the order tables (`ORDER_LANDING_CHECKS`) joined
+`stood_down_duckdb_checks()`, so DN-23's Postgres twins stood in alone; step
+14's S14-14 deleted the ten with the DuckDB scan, and the twins are those
+tables' checks.
 The standing watch adds `chain_expense_orphans` (an expense with no order past
 a day) and a NULL `checked_at` in the misses.
 
@@ -4232,7 +4233,10 @@ hid it outright, because pixel-only orders were counted as Facebook until
 number was 58. Every guard in this system watched whether data was
 transported faithfully; not one asked whether it still said anything.
 
-`_attribution_coverage_check` is the first that does, and it rides
+`_attribution_coverage_check` was the first that does. Since step 14's
+S14-14 deleted it with the DuckDB scan, its Postgres twin
+`pg_attribution_coverage_website` is the check, at the same thresholds
+(moved byte for byte to `core/pg_warehouse_dq.py`). It rides
 `dq_integrity_check` (01, 07, 13, 19) so it reaches people through the 09:00
 digest. It measures the share of **website** orders (`source_id = 4`) that
 carry a `utm_campaign` — an order taken by hand in the Instagram inbox cannot
@@ -4284,10 +4288,11 @@ forecast tables complete and stored by their last scheduled slot (WARN, see
 "Chain 7b-3"). Who is watched comes from
 `chain_modes()`, a watched chain with no invariants written for it is reported
 unwatched rather than clean, and nothing is repaired. **It is judged in the
-integrity job beside the Postgres twins, not inside the DuckDB scan**: these
-are Postgres facts about tables DuckDB no longer writes, so a DuckDB half that
-raises neither loses a chain finding nor holds back its page, and the
-`chain_*` conditions resolve on such a run the way the twins' `pg_*` ones do.
+integrity job beside the Postgres twins, not inside `check_internal_integrity`**
+(the DuckDB scan until step 14's S14-14): these are Postgres facts about
+tables DuckDB no longer writes, so a scan that raises neither loses a chain
+finding nor holds back its page, and the `chain_*` conditions resolve on such
+a run the way the twins' `pg_*` ones do.
 **Production reads chain 8 on every run**: `KS_WRITE_EXPENSES=postgres` is live
 and nothing is latched, so each run reads `app.manual_expenses`' allocator and
 NULL count, and a Postgres it cannot read is `chain_invariants_unwatched`
@@ -4342,8 +4347,10 @@ precondition is evaluated at the start and Postgres is not asked there;
 `KS_UTM_PARSE`, `KS_READ_FALLBACK`, `KS_DQ_PG_WAREHOUSE`, `KS_MIRROR_LANDING`
 and `KS_GOALS_HISTORY` are constants too (`own`, `postgres`, `off`, `on`, on,
 `silver`) — production's values, held by `tests/unit/test_step14_prod_parity.py`.
-`/api/warehouse/status` still reports the preconditions until S14-15. History
-below.
+`/api/warehouse/status` still reports the preconditions until S14-15. Since
+S14-14 `KS_DQ_PG_WAREHOUSE` is read by nothing else — the twins' flag went
+with the DuckDB integrity scan — and `retired_conditions_clear` is no
+precondition. History below.
 
 `KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
 `duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
@@ -4365,7 +4372,8 @@ registered, every production call of `refresh_warehouse_layers` stands behind
 `deploy/` for one that does not), `mark_warehouse_dirty` is a no-op and the id
 list pending at the switch is abandoned, `POST /api/warehouse/refresh` and
 rebuild-silver run the Postgres derivation alone. The five DuckDB integrity
-checks over Silver, Gold and UTM stand down and the Postgres twins stand in;
+checks over Silver, Gold and UTM stand down and the Postgres twins stand in
+(the five deleted in step 14's S14-14);
 in `dq_mirror_landing` `reconcile_silver`, `reconcile_order_utm` and
 `reconcile_gold` stand down and `pg_gold_internal_check` asks
 `gold_rollup_mismatch` in `reconcile_gold`'s place. ClickHouse's own
@@ -4478,8 +4486,9 @@ over them (the set is derived from the view bodies, `{views}` hole included)
 without asking `duckdb_derives()`, and a test walks `web/` and requires
 exactly that list. It is **empty since 2026-09-30**, when the owner retired
 all seven doors; a door added later joins it and holds the switch again),
-and **no delivered page open under a condition only a stood-down check
-reports** (`retired_conditions_clear`). A stood-down
+and, until step 14's S14-14 deleted the checks it waited on, **no delivered
+page open under a condition only a stood-down check reports**
+(`retired_conditions_clear`). A stood-down
 check is not a raised one, so the integrity job does not hold its conditions,
 and the first run after the switch would announce such a page "✅ Resolved"
 with no check looking. Holding them instead would keep it open for as long as
@@ -4721,7 +4730,8 @@ stand-down, and the integrity scan is handed a connection that refuses
 (`duckdb_switch.RefusedConnection` — a check that still reaches is counted
 where it reached) with `pk_uniqueness_{products,buyers,categories}` stood down
 and no twin (`DUCKDB_OFF_STOOD_DOWN`, OD-S5-5), so its run is a verdict with no
-`error_message`. Those three stay bare calls skipped by name, never lambdas:
+`error_message` (since step 14's S14-14 the scan has no DuckDB half, and the
+connection and the set are deleted). Those three stay bare calls skipped by name, never lambdas:
 the set is read out of the scan by the rule the `off` verdict reads its
 retired conditions by, so the two cannot part. The copied tables no chain
 owns — `app.sync_metadata`, `app.warehouse_refreshes`, `app.reconciliation_log`
