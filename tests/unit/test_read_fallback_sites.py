@@ -890,3 +890,27 @@ class TestThroughTheApp:
         assert "read_fallbacks" not in health
         assert health["read_fallback_mode"] == {"refused": {}}
 
+
+    @pytest.mark.parametrize("value", [None, "", "off", "duckdb", "junk-s14-16", " OFF\n"],
+                             ids=["absent", "empty", "off", "duckdb", "junk", "spaced"])
+    def test_ks_read_fallback_is_read_by_nothing(
+        self, admin_client, fresh_read_fallback, monkeypatch, value,
+    ):
+        """Rule 3 of the plan: since step 14's S14-16 no value of the
+        variable — or none — changes the start or the block, and a failed
+        engine is refused whatever it says. (Every variable at once, in a
+        fresh interpreter, is `tests/unit/test_step14_prod_parity.py`'s.)
+        Mutation: read it for a decision again."""
+        from core.runtime_modes import configure_modes
+
+        if value is None:
+            monkeypatch.delenv("KS_READ_FALLBACK", raising=False)
+        else:
+            monkeypatch.setenv("KS_READ_FALLBACK", value)
+        assert configure_modes(web=True) == {"KS_DUCKDB": "off"}
+        health = admin_client.get("/api/health")
+        assert health.status_code == 200, health.text
+        assert health.json()["read_fallback_mode"] == {"refused": {}}
+        refusal = read_fallback.refuse("standin", OSError("down"))
+        assert isinstance(refusal, read_fallback.ReadUnavailable)
+        assert read_fallback.refusals()["standin"]["count"] == 1
