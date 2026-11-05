@@ -10,6 +10,7 @@ from datetime import date
 import pytest
 
 from core.duckdb_store import DuckDBStore
+from tests.silver_on_duckdb import derive_silver
 
 
 async def _store(tmp_path):
@@ -44,7 +45,7 @@ class TestFirstOrderBaseline:
             async with store.connection() as conn:
                 _order(conn, 1, buyer=50, source=3, ordered="2024-03-01")  # Opencart
                 _order(conn, 2, buyer=50, source=1, ordered="2026-01-15")  # Instagram
-            await store.refresh_warehouse_layers(trigger="manual")
+            await derive_silver(store)
 
             flags = await _flags(store)
             assert flags[2][0] is False, "buyer had already bought — not an acquisition"
@@ -59,7 +60,7 @@ class TestFirstOrderBaseline:
             async with store.connection() as conn:
                 _order(conn, 1, buyer=51, source=1, ordered="2026-01-15")
                 _order(conn, 2, buyer=51, source=1, ordered="2026-02-20")
-            await store.refresh_warehouse_layers(trigger="manual")
+            await derive_silver(store)
 
             flags = await _flags(store)
             assert flags[1][0] is True
@@ -75,7 +76,7 @@ class TestFirstOrderBaseline:
             async with store.connection() as conn:
                 _order(conn, 1, buyer=52, source=1, ordered="2025-06-01", status=19)
                 _order(conn, 2, buyer=52, source=1, ordered="2026-01-15")
-            await store.refresh_warehouse_layers(trigger="manual")
+            await derive_silver(store)
 
             flags = await _flags(store)
             assert flags[2][0] is True, "their first actual purchase"
@@ -89,7 +90,7 @@ class TestFirstOrderBaseline:
         try:
             async with store.connection() as conn:
                 _order(conn, 1, buyer=53, source=3, ordered="2024-03-01")
-            await store.refresh_warehouse_layers(trigger="manual")
+            await derive_silver(store)
 
             flags = await _flags(store)
             assert flags[1][0] is False
@@ -103,7 +104,7 @@ class TestFirstOrderBaseline:
             async with store.connection() as conn:
                 _order(conn, 1, buyer=54, source=1, ordered="2026-01-15")
                 _order(conn, 2, buyer=54, source=2, ordered="2026-01-15")
-            await store.refresh_warehouse_layers(trigger="manual")
+            await derive_silver(store)
 
             flags = await _flags(store)
             assert flags[1][0] is True and flags[2][0] is True

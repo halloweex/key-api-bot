@@ -170,8 +170,6 @@ class TestTheOldNamesAreTheNewObjects:
         sources = {
             "core/chain_latch.py": ('MARKER_DIR: Path = DATA_DIR / "write-chain-owners"',),
             "core/report_ledger.py": ('SPOOL_DIR: Path = DATA_DIR / "report-ledger-pending"',),
-            "core/warehouse_cutover.py":
-                ('UTM_MARKER: Path = DATA_DIR / "warehouse-utm-reparsed-at"',),
             "core/backup_evidence.py": ("return base if base is not None else DATA_DIR",),
             "core/scheduler.py": ("from core.paths import DATA_DIR",
                                   "str(DATA_DIR),",
@@ -246,8 +244,11 @@ NEUTRAL = (
     "core/pg_silver.py", "core/pg_gold.py", "core/ch_silver.py",
     "core/pg_orders_write.py", "core/pg_warehouse_dq.py",
     "core/chain_latch.py", "core/report_ledger.py", "core/backup_evidence.py",
-    "core/warehouse_cutover.py",
 )
+# `core/warehouse_cutover.py` was one too, and the UTM re-parse marker's path
+# (`data/warehouse-utm-reparsed-at`) among the files above, until step 14's
+# S14-15 deleted the module: nothing writes or reads the marker in this build,
+# and the file stays on disk for an image from before step 14.
 
 FORBIDDEN = ("duckdb", "core.duckdb_store")
 

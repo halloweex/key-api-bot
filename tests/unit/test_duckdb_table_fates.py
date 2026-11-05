@@ -466,9 +466,10 @@ _NOT_A_TABLE = frozenset({"set", "of", "on", "returning", "where", "from",
 # the reader's True means DuckDB writes, and the routers — functions that pick
 # the engine by the reader and run a statement handed to them. Held to the
 # code below.
-STORE_ROUTERS: Dict[str, Tuple[str, bool, Tuple[str, ...]]] = {
-    fates_mod.WAREHOUSE: ("duckdb_derives", True, ()),
-}
+STORE_ROUTERS: Dict[str, Tuple[str, bool, Tuple[str, ...]]] = {}
+# `KS_WRITE_WAREHOUSE` was the last derived one, through `duckdb_derives`
+# (`core/warehouse_cutover.py`), until step 14's S14-15 deleted the switch and
+# the DuckDB rebuild behind it: a literal below since, like the two before it.
 
 # KS_SMS_STORE and KS_USER_STORE were derived the same way until step 14's
 # S14-08, from the routers `_sms_run`/`_sms_tx` and `_users_run`/`_perms_run`,
@@ -485,9 +486,15 @@ STORE_SWITCH_TABLES: Dict[str, Set[str]] = {
                           "sms_campaign_members", "sms_campaigns",
                           "sms_dlr_events"},
     fates_mod.USER_STORE: {"role_permissions", "users"},
+    # What the walk derived for KS_WRITE_WAREHOUSE on the commit before step
+    # 14's S14-15, equal to the manifest's declaration there; DuckDB's
+    # warehouse rebuild, their writer, went in that PR.
+    fates_mod.WAREHOUSE: {"gold_daily_revenue", "silver_order_utm",
+                          "silver_orders", "warehouse_refreshes"},
 }
 # The readers those two switches had, read by nothing that routes any more.
-RETIRED_STORE_READERS = ("sms_store_is_postgres", "user_store_is_postgres")
+RETIRED_STORE_READERS = ("sms_store_is_postgres", "user_store_is_postgres",
+                         "duckdb_derives")
 
 # The routers `/sms` and the access lists run every statement through. They
 # render for Postgres alone since S14-08, so the walk reads a statement handed
@@ -1468,14 +1475,9 @@ def every_switch_at_its_default(monkeypatch):
     this machine's `.env` says. `core.config` loads `.env` at import, and
     production's sets `KS_USER_STORE` and `KS_WRITE_EXPENSES`: a laptop
     holding a copy would otherwise read "every switch off" as a failure."""
-    from core import warehouse_cutover as wc
-
     for env in [*_chain_switches(), *STORE_SWITCHES]:
         if env != fates_mod.WAREHOUSE:
             monkeypatch.setenv(env, "duckdb")
-    # As `configure_mode()` leaves it for an unset variable, in web.
-    monkeypatch.setattr(wc, "_value", wc.DUCKDB)
-    monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
 
 
 class TestTheChains:
@@ -1528,11 +1530,19 @@ class TestTheChains:
 
 # ─── 4b. the store switches, read off the code ───────────────────────────────
 
-def _guarded(sources: List[Tuple[str, str]], switch: str = fates_mod.WAREHOUSE,
+def _guarded(sources: List[Tuple[str, str]], switch: str = "KS_PROBE_WAREHOUSE",
              table: str = "silver_orders") -> List[bool]:
-    walk = walk_writes(sources)
-    check = guarded_by(walk, switch)
-    return [check(s) for s in walk.writers(table)]
+    """The walk's guard over `sources`. The default switch is a probe with
+    `duckdb_derives` as its reader, True meaning DuckDB writes — what
+    KS_WRITE_WAREHOUSE was until step 14's S14-15 made it a literal — so the
+    walk's mechanics stay held to their word with no derived switch left."""
+    routers = dict(STORE_ROUTERS)
+    routers.setdefault("KS_PROBE_WAREHOUSE", ("duckdb_derives", True, ()))
+    with __import__("unittest.mock", fromlist=["patch"]).patch.dict(
+            STORE_ROUTERS, routers):
+        walk = walk_writes(sources)
+        check = guarded_by(walk, switch)
+        return [check(s) for s in walk.writers(table)]
 
 
 class TestTheStoreSwitches:
@@ -1568,17 +1578,11 @@ class TestTheStoreSwitches:
                      if (s.path, s.owner) not in NOT_THE_FILE]
             assert not sites, f"{switch}: {table} is still written in DuckDB by {sites}"
 
-    @pytest.mark.parametrize("switch", sorted(STORE_ROUTERS))
-    def test_a_store_switch_moves_exactly_what_it_stops_duckdb_writing(
-            self, writes, switch):
-        derived = switch_tables(writes, switch)
-        declared = set(fates_mod.tables_by_switch(switch))
-        assert derived, f"the walk found nothing {switch} moves"
-        assert declared == derived, (
-            f"{switch}: declared and not stopped by it {sorted(declared - derived)} "
-            f"— DuckDB still writes these whatever {switch} says, so "
-            f"duckdb_written() would lie about them; stopped by it and not "
-            f"declared {sorted(derived - declared)}")
+    # `test_a_store_switch_moves_exactly_what_it_stops_duckdb_writing` held
+    # each derived switch's declared tables to what its router stopped DuckDB
+    # writing. KS_WRITE_WAREHOUSE was the last derived one; since step 14's
+    # S14-15 it is a literal (`STORE_SWITCH_TABLES`), held by the two tests
+    # above, and nothing is left to derive.
 
     def test_the_walk_reads_every_routed_statement(self, writes):
         """Every statement handed to the Postgres routers is still read — one
@@ -1619,7 +1623,7 @@ class TestTheStoreSwitches:
         for router in POSTGRES_ROUTERS:
             fn = store_reach.function(getattr(DuckDBStore, router))
             spelled = store_reach.names(fn)
-            for reader in RETIRED_STORE_READERS + ("duckdb_derives",):
+            for reader in RETIRED_STORE_READERS:
                 assert reader not in spelled, (router, reader)
             found = store_reach.reaches(
                 fn, self_attrs=frozenset(), reach=store_reach.ROUTER_REACHES,
@@ -1645,18 +1649,6 @@ class TestTheStoreSwitches:
                 fn, self_attrs=rendering, reach=store_reach.ROUTER_REACHES,
                 modules=store_reach.ROUTER_MODULES)
             assert not found, f"{cls.__name__}.{method} reaches the store: {found}"
-
-    def test_the_routers_are_the_ones_that_route(self):
-        """Each derived switch's router asks its reader, and the manifest
-        reads the switch through the same reader."""
-        from core.duckdb_store import DuckDBStore
-
-        manifest = inspect.getsource(fates_mod._store_switch_writes_duckdb)
-        for switch, (reader, _, routers) in STORE_ROUTERS.items():
-            assert reader in manifest, (switch, reader)
-            for router in routers:
-                source = inspect.getsource(getattr(DuckDBStore, router))
-                assert re.search(rf"\b{reader}\(\)", source), (router, reader)
 
     def test_every_router_in_the_code_is_listed(self):
         """A function that asks a store reader and runs a `sql` it is handed
@@ -1809,27 +1801,10 @@ class TestDuckdbWritten:
         configure_modes(web=True)
         assert set(fates_mod.duckdb_written().values()) == {False}
 
-    def test_the_warehouse_is_unknown_where_its_mode_was_never_configured(
-            self, monkeypatch):
-        """Outside web, `configure_modes()` never ran, and the warehouse
-        tables read True whatever KS_WRITE_WAREHOUSE said (review, finding 5).
-        Mutation: drop the `value() is None` answer."""
-        from core import warehouse_cutover as wc
-
-        monkeypatch.setattr(wc, "_value", None)
-        monkeypatch.setattr(wc, "_mode", None)
-        monkeypatch.setenv(fates_mod.WAREHOUSE, "postgres")
-        written = fates_mod.duckdb_written()
-        moved = set(fates_mod.tables_by_switch(fates_mod.WAREHOUSE))
-        assert moved and {written[n] for n in moved} == {None}
-        assert all(written[n] is not None for n in FATES if n not in moved
-                   and FATES[n].switch not in _chain_switches())
-
-    def test_the_warehouse_switch(self, monkeypatch):
-        from core import warehouse_cutover as wc
-
-        monkeypatch.setattr(wc, "_value", wc.POSTGRES)
-        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+    def test_the_warehouse_switch(self):
+        """A literal False since step 14's S14-15: DuckDB derives nothing,
+        whatever the variable says and whether `configure_modes()` ran (its
+        answer was None where it never ran, until then)."""
         written = fates_mod.duckdb_written()
         moved = set(fates_mod.tables_by_switch(fates_mod.WAREHOUSE))
         assert {"silver_orders", "gold_daily_revenue", "warehouse_refreshes"} <= moved
@@ -1876,7 +1851,7 @@ class TestDuckdbWritten:
         under off, nothing at all. A chain added later that leaves a table
         behind, or a shadow retired, moves this set and says so here.
         Mutation: drop the `off` answer in `duckdb_written`."""
-        from core import chain_latch, duckdb_switch, warehouse_cutover as wc
+        from core import chain_latch, duckdb_switch
         from core.write_chains import chain_name
 
         monkeypatch.setenv(duckdb_switch.ENV, duckdb)
@@ -1885,8 +1860,6 @@ class TestDuckdbWritten:
             chain_latch.latch(chain_name(chain), env)
         for switch in (fates_mod.SMS_STORE, fates_mod.USER_STORE):
             monkeypatch.setenv(switch, "postgres")
-        monkeypatch.setattr(wc, "_value", wc.POSTGRES)
-        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
         written = fates_mod.duckdb_written()
         assert None not in written.values(), {
             n for n, w in written.items() if w is None}

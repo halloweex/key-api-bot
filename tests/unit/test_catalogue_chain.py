@@ -27,7 +27,7 @@ import pytest_asyncio
 
 from core import chain_latch, pg_catalogue_write as chain
 from core import pg_chain_invariants as inv
-from core import read_fallback, warehouse_cutover, write_chains
+from core import read_fallback, write_chains
 from core.landing_rows import CategoryRow, ProductRow, category_rows, product_rows
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -49,8 +49,6 @@ def flags(monkeypatch):
     production today."""
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
-    for name in warehouse_cutover.WAREHOUSE_READERS:
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(read_fallback, "_mode", "duckdb")
     return monkeypatch
 
@@ -58,11 +56,11 @@ def flags(monkeypatch):
 @pytest.fixture
 def met(flags):
     """Every precondition of the flip met, as the environment says it: chain 1
-    on Postgres, the fallback off, every warehouse reader on Postgres."""
+    on Postgres and the fallback off. (Every warehouse reader on Postgres too,
+    from step 13's list, until step 14's S14-15 deleted it: nothing reads
+    those switches.)"""
     flags.setenv("KS_WRITE_INVENTORY", "postgres")
     flags.setattr(read_fallback, "_mode", "off")
-    for name in warehouse_cutover.WAREHOUSE_READERS:
-        flags.setenv(name, "postgres")
     return flags
 
 

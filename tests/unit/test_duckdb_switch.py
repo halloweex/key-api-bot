@@ -1159,8 +1159,8 @@ class TestTheStartup:
 class TestTheBootSync:
     """`init_and_sync` under off asks the store the orders are written to
     whether there is history, and never DuckDB's counts (stage 5, PR-1).
-    Under `on` the order is pinned in `test_warehouse_writer.py`
-    (settle, stats, sync)."""
+    (Under `on` the order — settle, stats, sync — was pinned in
+    `test_warehouse_writer.py` until step 14's S14-15 deleted the settle.)"""
 
     def _boot(self, monkeypatch, held):
         from core import sync_service as mod
@@ -1175,7 +1175,6 @@ class TestTheBootSync:
         monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
         monkeypatch.setattr(mod, "get_sync_service", AsyncMock(return_value=service))
         monkeypatch.setattr(mod, "init_meilisearch", AsyncMock(return_value=False))
-        monkeypatch.setattr(mod.warehouse_cutover, "settle_writer", AsyncMock())
         asyncio.run(mod.init_and_sync())
         store.get_stats.assert_not_awaited()
         store.orders_held.assert_awaited_once()
@@ -1199,15 +1198,39 @@ class TestTheFullSync:
     no-op is not one connection away from a CHECKPOINT (stage 5, PR-1)."""
 
     def _chunked(self, store):
-        from tests.unit.test_warehouse_writer import _service, _sync
+        from core import sync_service as sync_module
 
-        service = _service(store, orders=[{"id": 1, "status_id": 1}])
-        _sync(lambda: service.full_sync(days_back=45))
+        service = sync_module.SyncService(store)
+        service.sync_managers = AsyncMock(return_value=0)
+        service.sync_offers = AsyncMock(return_value=0)
+        service.sync_stocks = AsyncMock(return_value=0)
+        service._fetch_orders_with_date_filter = AsyncMock(
+            return_value=[{"id": 1, "status_id": 1}])
+        service._upsert_orders_with_expenses = AsyncMock(return_value=(1, 0))
+
+        class _Client:
+            async def paginate(self, endpoint, params=None, page_size=50):
+                if endpoint == "order":
+                    yield [{"id": 1, "status_id": 1}]
+
+        async def client():
+            return _Client()
+
+        with patch.object(sync_module, "get_async_client", new=client):
+            asyncio.run(service.full_sync(days_back=45))
 
     def _store(self):
-        from tests.unit.test_warehouse_writer import _FullSyncStore
-
-        store = _FullSyncStore()
+        """What `full_sync` asks of the store (the helpers of the deleted
+        `tests/unit/test_warehouse_writer.py`, which raised on the DuckDB
+        derivation `full_sync` no longer calls since step 14's S14-15)."""
+        store = MagicMock()
+        for name, value in (("upsert_categories", 0), ("upsert_expense_types", 0),
+                            ("upsert_products", 0), ("set_last_sync_time", None),
+                            ("refresh_sku_inventory_status", 0),
+                            ("record_sku_inventory_snapshot", False),
+                            ("get_latest_order_time", None),
+                            ("find_backdated_order_ids", [])):
+            setattr(store, name, AsyncMock(return_value=value))
         store.checkpoint = AsyncMock()
         return store
 

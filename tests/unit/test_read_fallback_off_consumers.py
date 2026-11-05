@@ -537,7 +537,6 @@ class TestSearchIndex:
             # Chain 1's rebuild, Postgres's since S14-00; not this test's.
             monkeypatch.setattr(store, "refresh_sku_inventory_status",
                                 AsyncMock(return_value=0))
-            monkeypatch.setattr(sync_mod.warehouse_cutover, "settle_writer", AsyncMock())
             monkeypatch.setattr(duckdb_switch, "is_off", lambda: True)
             service = _sync_service(monkeypatch, store)
             service.incremental_sync = AsyncMock(return_value={})

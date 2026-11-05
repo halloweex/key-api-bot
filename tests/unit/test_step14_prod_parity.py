@@ -133,7 +133,19 @@ RETIRED = {"goals_history": "S14-07",
            # S14-11 deleted the registry's per-chain answer with the flags.
            "chain_modes": "S14-11",
            # S14-14 deleted KS_DQ_PG_WAREHOUSE's reader, a constant `on`.
-           "pg_twins_flag": "S14-14"}
+           "pg_twins_flag": "S14-14",
+           # S14-15 deleted step 13's switch (`core/warehouse_cutover.py`),
+           # KS_PG_DERIVE's and KS_UTM_PARSE's modes, and the landing mirror's
+           # `enabled`/`mirror_on` — and from `/api/health` the
+           # `warehouse_writer_mode` and `utm_parse` blocks and `derivation`'s
+           # `mode` and `error`, the only fields of it captured here.
+           "warehouse_cutover": "S14-15",
+           "pg_derivation": "S14-15",
+           "pg_utm_parse": "S14-15",
+           "mirror": "S14-15",
+           "warehouse_writer_mode": "S14-15",
+           "utm_parse": "S14-15",
+           "derivation": "S14-15"}
 
 # The same for single fields, by their path in a capture. S14-09 deleted chain
 # 3's, 6's and 6a's routing answers the capture asks of the modules themselves
@@ -169,6 +181,11 @@ RETIRED_FIELDS = {
     ("warehouse_cutover", "stood_down_duckdb_checks"): "S14-14",
     ("warehouse_cutover", "status", "stood_down_duckdb_checks"): "S14-14",
     ("chains", "pg_orders_write", "landing_checks_stood_down"): "S14-14",
+    # S14-15 stopped configuring the three modes it deleted, so
+    # `configure_modes()` names them no more.
+    **{(call, name): "S14-15"
+       for call in ("configure_modes", "configure_modes_again")
+       for name in ("KS_PG_DERIVE", "KS_UTM_PARSE", "KS_WRITE_WAREHOUSE")},
 }
 _S14_11_HEALTH_FIELDS = ("env", "mode", "error", "latched", "mismatch",
                          "unmet_precondition", "shadow", "preflight")
@@ -947,10 +964,13 @@ def _stub_the_old_start() -> None:
     and expenses history, off's frozen record, its copy and the owner rows —
     as production holds them. The code after S14-00 asks none of them, and
     has none of these to stub."""
-    from core import warehouse_cutover as wc
     from core.pg import REQUIRED_REVISION
 
-    if hasattr(wc, "_read_postgres_in_a_worker"):
+    try:
+        from core import warehouse_cutover as wc   # deleted in S14-15
+    except ImportError:
+        wc = None
+    if wc is not None and hasattr(wc, "_read_postgres_in_a_worker"):
         wc._read_postgres_in_a_worker = lambda env: {
             "revision": REQUIRED_REVISION, "revision_error": None,
             "expenses_backfilled": True, "expenses_backfill_error": None,
@@ -982,8 +1002,13 @@ def capture() -> dict:
     S14-00 define."""
     from core import (duckdb_switch, pg_dashboard_users, pg_derivation,
                       pg_landing, pg_sms, pg_utm_parse, pg_warehouse_dq, read_fallback,
-                      runtime_modes, warehouse_cutover as wc, write_chains)
+                      runtime_modes, write_chains)
     from core import pg_forecast_write, pg_managers_write, pg_orders_write
+
+    try:
+        from core import warehouse_cutover as wc   # deleted in S14-15
+    except ImportError:
+        wc = None
 
     out: dict = {}
     out["configure_modes"] = runtime_modes.configure_modes(web=True)
@@ -995,6 +1020,37 @@ def capture() -> dict:
         "held_back": list(duckdb_switch.held_back() or ()),
         "health_block": duckdb_switch.health_block(),
     }
+    # Deleted in S14-15 (`RETIRED`) with their modules or names; asked where
+    # they still exist, by name, so the capture still runs against the trees
+    # before it — the import walk reads `module.<name>` as a claim it exists.
+    if wc is not None:
+        out.update(_step13(wc))
+    if hasattr(pg_derivation, "owns"):
+        out["pg_derivation"] = {name: getattr(pg_derivation, fn)() for name, fn in (
+            ("mode", "mode"), ("owns", "owns"), ("error", "mode_error"))}
+    if hasattr(pg_utm_parse, "parses_in_postgres"):
+        out["pg_utm_parse"] = {name: getattr(pg_utm_parse, fn)() for name, fn in (
+            ("mode", "mode"), ("parses_in_postgres", "parses_in_postgres"),
+            ("error", "mode_error"))}
+    out["read_fallback"] = {"mode": read_fallback.mode(), "error": read_fallback.mode_error(),
+                            "refusing": read_fallback.refusing(),
+                            "misconfigured": read_fallback.misconfigured(),
+                            "no_engine": read_fallback.no_engine_routes()}
+    twins_flag = getattr(pg_warehouse_dq, "flag", None)
+    if twins_flag is not None:
+        out["pg_twins_flag"] = list(twins_flag())
+    if hasattr(pg_landing, "mirror_on"):
+        out["mirror"] = {"enabled": getattr(pg_landing, "enabled")(),
+                         "mirror_on": getattr(pg_landing, "mirror_on")(
+                             os.environ.get("KS_MIRROR_LANDING"))}
+    out.update(_after_step13(pg_dashboard_users, pg_sms, write_chains,
+                             pg_forecast_write, pg_managers_write, pg_orders_write))
+    return json.loads(json.dumps(out, default=str))
+
+
+def _step13(wc) -> dict:
+    """What `core.warehouse_cutover` answered, while it existed (S14-15)."""
+    out: dict = {}
     status = wc.status()
     out["warehouse_cutover"] = {
         "mode": wc.mode(), "value": wc.value(), "error": wc.mode_error(),
@@ -1019,20 +1075,14 @@ def capture() -> dict:
     stand_down = getattr(wc, "warehouse_checks_stand_down", None)
     if stand_down is not None:
         out["warehouse_cutover"]["warehouse_checks_stand_down"] = stand_down()
-    out["pg_derivation"] = {"mode": pg_derivation.mode(), "owns": pg_derivation.owns(),
-                            "error": pg_derivation.mode_error()}
-    out["pg_utm_parse"] = {"mode": pg_utm_parse.mode(),
-                           "parses_in_postgres": pg_utm_parse.parses_in_postgres(),
-                           "error": pg_utm_parse.mode_error()}
-    out["read_fallback"] = {"mode": read_fallback.mode(), "error": read_fallback.mode_error(),
-                            "refusing": read_fallback.refusing(),
-                            "misconfigured": read_fallback.misconfigured(),
-                            "no_engine": read_fallback.no_engine_routes()}
-    twins_flag = getattr(pg_warehouse_dq, "flag", None)
-    if twins_flag is not None:
-        out["pg_twins_flag"] = list(twins_flag())
-    out["mirror"] = {"enabled": pg_landing.enabled(),
-                     "mirror_on": pg_landing.mirror_on(os.environ.get("KS_MIRROR_LANDING"))}
+    return out
+
+
+def _after_step13(pg_dashboard_users, pg_sms, write_chains, pg_forecast_write,
+                  pg_managers_write, pg_orders_write) -> dict:
+    """The rest of `capture`: the store switches, the chains, the registry
+    and `/api/health`."""
+    out: dict = {}
     out["stores"] = {"user_store_is_postgres": pg_dashboard_users.user_store_is_postgres(),
                      "sms_store_is_postgres": pg_sms.sms_store_is_postgres()}
     chains = {}
@@ -1103,7 +1153,7 @@ def capture() -> dict:
     if compared is not None:
         out["registry"]["compared_in_shadow"] = sorted(compared())
     out["health"] = _health()
-    return json.loads(json.dumps(out, default=str))
+    return out
 
 
 def _health() -> dict:
@@ -1123,7 +1173,9 @@ def _health() -> dict:
         "status_code": response.status_code,
         "duckdb_switch": body.get("duckdb_switch"),
         "warehouse_writer_mode": body.get("warehouse_writer_mode"),
-        "derivation": {k: (body.get("derivation") or {}).get(k) for k in ("mode", "error")},
+        # `mode` and `error` alone, and absent once they are (S14-15).
+        "derivation": ({k: (body.get("derivation") or {}).get(k) for k in ("mode", "error")}
+                       if "mode" in (body.get("derivation") or {}) else None),
         "utm_parse": body.get("utm_parse"),
         "read_fallback_mode": {k: (body.get("read_fallback_mode") or {}).get(k)
                                for k in ("mode", "error", "misconfigured", "no_engine")},
@@ -1151,9 +1203,7 @@ def _constants(result: dict) -> dict:
     value changes by design (rule 3: the answer must not)."""
     result = _without_retired(result)
     for block in (result["duckdb_switch"], result["duckdb_switch"]["health_block"],
-                  result["health"]["duckdb_switch"], result["warehouse_cutover"],
-                  result["warehouse_cutover"]["status"],
-                  result["health"]["warehouse_writer_mode"]):
+                  result["health"]["duckdb_switch"]):
         block.pop("value", None)
     for state in (*result.get("chain_modes", {}).values(),
                   *result["health"]["write_chains"].values()):
@@ -1244,8 +1294,7 @@ def test_the_literal_is_what_production_published(production):
     production(markers=True)
     health = capture()["health"]
     assert health["status_code"] == 200
-    for block in ("duckdb_switch", "warehouse_writer_mode", "derivation", "utm_parse",
-                  "read_fallback_mode"):
+    for block in ("duckdb_switch", "read_fallback_mode"):
         assert health[block] == H0[block], block
     for block in RETIRED:
         assert health.get(block) is None, f"{block} went with {RETIRED[block]}"

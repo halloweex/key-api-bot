@@ -51,7 +51,10 @@ class TestRepairOrders:
         assert upserted.kwargs["force_update"] is True
 
     @pytest.mark.asyncio
-    async def test_marks_the_warehouse_dirty_for_the_repaired_ids(self):
+    async def test_marks_no_duckdb_warehouse(self):
+        """It marked DuckDB's warehouse dirty for the repaired ids until step
+        14's S14-15 — a no-op since step 13. Chain 3's writer raises the
+        Postgres derivation's signal in the order's own transaction."""
         service = _service()
         service._upsert_orders_with_expenses = AsyncMock(return_value=(1, 0))
         client = _client({7: {"id": 7}})
@@ -59,7 +62,7 @@ class TestRepairOrders:
         with patch("core.sync_service.get_async_client", AsyncMock(return_value=client)):
             await service.repair_orders([7])
 
-        service.store.mark_warehouse_dirty.assert_awaited_once_with([7])
+        service.store.mark_warehouse_dirty.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_one_failing_order_does_not_lose_the_others(self):
@@ -139,11 +142,12 @@ class TestIntegrityScanSurvivesAMissingTable:
 
 
 class TestTheWriteRunsUnderTheHeavyLock:
-    """The lock covers the upsert and the dirty mark — never the per-id
-    fetches, which would hold the sync up for a batch of HTTP calls."""
+    """The lock covers the upsert — never the per-id fetches, which would hold
+    the sync up for a batch of HTTP calls. (It covered DuckDB's dirty mark
+    too, until step 14's S14-15 deleted the mark.)"""
 
     @pytest.mark.asyncio
-    async def test_fetch_outside_write_and_mark_inside(self):
+    async def test_fetch_outside_and_write_inside(self):
         import asyncio
 
         lock = asyncio.Lock()
@@ -158,17 +162,13 @@ class TestTheWriteRunsUnderTheHeavyLock:
             seen["upsert"] = lock.locked()
             return (len(orders), 0)
 
-        async def _mark(ids):
-            seen["mark"] = lock.locked()
-
         client = MagicMock()
         client.get_order = AsyncMock(side_effect=_get_order)
         service._upsert_orders_with_expenses = AsyncMock(side_effect=_upsert)
-        service.store.mark_warehouse_dirty = AsyncMock(side_effect=_mark)
 
         with patch("core.sync_service.get_async_client", AsyncMock(return_value=client)):
             result = await service.repair_orders([5], lock=lock)
 
         assert result["repaired"] == 1
-        assert seen == {"fetch": False, "upsert": True, "mark": True}
+        assert seen == {"fetch": False, "upsert": True}
         assert not lock.locked()

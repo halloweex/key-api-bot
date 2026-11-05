@@ -323,7 +323,7 @@ _WITHOUT_ITEMS_MIN_TOTAL = 0.01
 # `flag()` and `ENV` stood here until step 14's S14-14: `KS_DQ_PG_WAREHOUSE`,
 # a constant `on` since S14-00. The twins are the only checks of Silver, Gold
 # and UTM, so nothing may turn them off, and the variable is read by nothing
-# here (step 13's readiness still reports it, until S14-15).
+# here (step 13's readiness reported it until S14-15 deleted the readiness).
 
 
 def floor_seconds() -> int:

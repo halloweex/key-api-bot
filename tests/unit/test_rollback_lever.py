@@ -55,8 +55,11 @@ REMEDIATION_REWRITTEN = ("chain_latch_disagrees",)
 # `chain_shipper_overwrote` (the second) went in S14-12 with their emitters,
 # the daily comparisons against DuckDB (rule 8); `chain_latch_disagrees` moved
 # to the chain invariants with its lever (decision 12).
-CLEARS_REWRITTEN = ("warehouse_way_back_refused",)
-CANARY_REWRITTEN = ("warehouse_way_back_refused",)
+# `warehouse_way_back_refused` was in both until step 14's S14-15 deleted it
+# with step 13's switch, its emitter (rule 8); `test_step13_as_code.py` holds
+# that it is gone, and rule 15's literal keeps the name from being reused.
+CLEARS_REWRITTEN: tuple = ()
+CANARY_REWRITTEN: tuple = ()
 # Rewritten too, to say what is true without the copy-back, with no lever of
 # their own about a chain's ownership. `shadow_missing_in_duckdb` was the one
 # until step 14's S14-10 deleted it with `compare_shadow`, its emitter

@@ -182,13 +182,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # Registered so the completeness test sees it; firing it is a bug.
     "unkeyed": _EVENT,
 
-    # ── warehouse validator and its escalation ladder (web, every 2 min) ──
-    "warehouse:validation_retrying": _c("a tick passes validation"),
-    "warehouse:validation_rebuilding": _c("a tick passes validation"),
-    "warehouse:validation_unfixed": _c("a tick passes validation"),
-    "warehouse:sales_type_partition": _c("Gold's known types cover Silver again"),
-    "warehouse:refresh_errored": _c("a refresh completes without raising"),
-    "warehouse:refresh_errored_exhausted": _c("a refresh completes without raising"),
+    # ── the warehouse ──
+    # DuckDB's warehouse validator and its escalation ladder (every 2 min)
+    # paged under six `warehouse:` conditions — validation_retrying,
+    # validation_rebuilding, validation_unfixed, sales_type_partition,
+    # refresh_errored, refresh_errored_exhausted — until step 14's S14-15
+    # deleted the rebuild, their one emitter (rule 8). It had not run since
+    # step 13. The names are not reused.
     # The Postgres derivation on its own signal (chain 2, KS_PG_DERIVE=own).
     # Its own group, so a DuckDB tick's clean pass cannot resolve them.
     "warehouse_pg:derive_failed": _c("a Postgres derivation completes"),

@@ -25,27 +25,25 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from core import ch_silver, warehouse_cutover
+from core import ch_silver
 from core.data_quality import IntegrityIssue, Severity
 
 
 UNWATCHED = "gold_values_unwatched"
 
 
+# `duckdb_derives` and `postgres_alone` set step 13's mode one way or the
+# other (`core/warehouse_cutover.py`) to show that nothing here read it. The
+# module went in step 14's S14-15; the two names stay as fixtures that do
+# nothing, so each test still says which state it was written for.
 @pytest.fixture
-def duckdb_derives(monkeypatch):
-    """The module's mode set back to DuckDB — a state no step-14 build is
-    in (step 13 is a constant since S14-00); kept to show that nothing here
-    reads it."""
-    monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-    monkeypatch.setattr(warehouse_cutover, "_held", False)
+def duckdb_derives():
+    """A state no step-14 build is in; nothing here ever read it."""
 
 
 @pytest.fixture
-def postgres_alone(monkeypatch):
-    """After step 13: Postgres alone derives."""
-    monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
-    monkeypatch.setattr(warehouse_cutover, "_held", False)
+def postgres_alone():
+    """After step 13: Postgres alone derives — the only state there is."""
 
 
 def _names(issues):
@@ -150,9 +148,6 @@ class TestItIsAlwaysCritical:
         issue = ch_silver.gold_values_unwatched("x")
         assert issue.severity is Severity.CRITICAL
         assert "no second engine checked" in issue.description
-
-    def test_critical_whatever_the_cutover_module_says(self, duckdb_derives):
-        assert ch_silver.gold_values_unwatched("x").severity is Severity.CRITICAL
 
     def test_no_predicate_is_read(self):
         import ast

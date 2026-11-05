@@ -69,9 +69,11 @@ class TestTheUtmBackfillFlagIsAlwaysReleased:
         from web.routes.api import traffic
 
         async def _boom():
-            raise RuntimeError("store unavailable")
+            raise RuntimeError("KeyCRM unavailable")
 
-        monkeypatch.setattr(traffic, "get_store", _boom)
+        # The client, the first thing the body awaits since step 14's S14-15
+        # (the store it opened first went with the way back's note).
+        monkeypatch.setattr("core.keycrm.get_async_client", _boom)
         traffic._backfill_status.update(running=True, result={"status": "started"})
         with pytest.raises(RuntimeError):
             await traffic._run_backfill(1)
@@ -86,11 +88,12 @@ class TestTheRest:
         assert "with self._lock:" in inspect.getsource(SyncKeyCRMClient._run)
 
     def test_utm_parse_stamps_the_updated_at_it_parsed(self):
-        from core.repositories.traffic import TrafficMixin
+        """The parse's own, in Postgres since step 13 and alone since step 14's
+        S14-15 deleted DuckDB's (`TrafficMixin._parse_utm_into_silver`)."""
+        from core import pg_utm_parse
 
-        src = inspect.getsource(TrafficMixin.parse_utm_data) if hasattr(TrafficMixin, "parse_utm_data") else inspect.getsource(TrafficMixin)
-        assert "SELECT o.id, o.manager_comment, o.updated_at" in src
-        assert "COALESCE(?, CURRENT_TIMESTAMP)" in src
+        assert "SELECT o.id, o.manager_comment, o.updated_at" in pg_utm_parse.INCREMENTAL_SELECT_SQL
+        assert "COALESCE($14::timestamptz, now())" in pg_utm_parse.insert_sql()
 
     # `test_the_classification_endpoint_reports_its_replica` held the
     # retail-status route to answering the classification copy's result, until

@@ -54,12 +54,7 @@ def _buyer(n, *, name=None, phones=None, emails=None):
 
 @pytest_asyncio.fixture
 async def pg(monkeypatch):
-    from core import pg_derivation
-
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setenv("KS_PG_DERIVE", "own")
-    before_mode = (pg_derivation._mode, pg_derivation._mode_error)
-    pg_derivation.configure_mode()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
 
     async def clear():
@@ -92,7 +87,6 @@ async def pg(monkeypatch):
                     f"({', '.join(f'${i}' for i in range(1, len(cols) + 1))})",
                     *row.values())
         await pool.close()
-        pg_derivation._mode, pg_derivation._mode_error = before_mode
 
 
 async def _buyers(pool, ids):
