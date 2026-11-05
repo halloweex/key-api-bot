@@ -588,6 +588,11 @@ class SyncService:
         if changed_ids_out is not None:
             changed_ids_out.extend(result.changed_ids)
         self._last_refused = result.failed
+        # `(order id, reason)` for every order the writer refused — what the
+        # repairs ledger rather than ask KeyCRM for again (L1-10). An
+        # attribute, like the count, so the many mocks of this method keep
+        # their signature.
+        self._last_refused_ids = tuple(result.refused)
         return result.count, expense_count
 
     async def sync_managers(self) -> int:
@@ -1787,6 +1792,21 @@ class SyncService:
             return {"requested": 0, "attempted": 0, "repaired": 0,
                     "failed": 0, "remaining": 0, "failures": {}}
 
+        # Postgres' clock before the first fetch (L1-12): an order some writer
+        # stores after this instant is newer than the payload we are about to
+        # fetch, and written under force the payload would put the older state
+        # back — the 05:15 refresh's status, overwritten by a stale fetch that
+        # carried the same `updated_at`. Best effort: unread, nothing is
+        # skipped, and a Postgres that cannot answer fails the write anyway.
+        try:
+            from core.pg_orders_read import postgres_now
+
+            fetch_began = await postgres_now()
+        except Exception as exc:  # noqa: BLE001 — see above
+            logger.warning("Order repair: Postgres' clock unread, every fetched "
+                           "order is written: %s", type(exc).__name__)
+            fetch_began = None
+
         client = await get_async_client()
         for order_id in attempted:
             try:
@@ -1803,14 +1823,37 @@ class SyncService:
                 failures[order_id] = f"{type(exc).__name__}: {exc}"
 
         repaired = 0
+        rewritten: list = []
+        refused: list = []
         if fetched:
             held = lock if lock is not None else contextlib.nullcontext()
             async with held:
+                # Under the lock, so nothing the sync writes can land between
+                # this read and the write below.
+                if fetch_began is not None:
+                    try:
+                        from core.pg_orders_read import rewritten_since
+
+                        rewritten = await rewritten_since(
+                            [o["id"] for o in fetched], fetch_began)
+                    except Exception as exc:  # noqa: BLE001 — as for the clock
+                        logger.warning("Order repair: could not ask which orders "
+                                       "were rewritten: %s", type(exc).__name__)
+                if rewritten:
+                    newer = set(rewritten)
+                    fetched = [o for o in fetched if int(o["id"]) not in newer]
                 # force_update: the whole point is to overwrite what we hold,
                 # and KeyCRM's updated_at may well be older than our last touch.
-                repaired, _ = await self._upsert_orders_with_expenses(
-                    fetched, force_update=True,
-                )
+                if fetched:
+                    self._last_refused_ids = ()
+                    repaired, _ = await self._upsert_orders_with_expenses(
+                        fetched, force_update=True,
+                    )
+                    refused = list(getattr(self, "_last_refused_ids", ()))
+        # A refused order is a failure the caller can ledger, so the id scan
+        # moves on instead of asking KeyCRM for it every run (L1-10).
+        for order_id, why in refused:
+            failures[int(order_id)] = f"Postgres refused: {why}"
 
         result = {
             "requested": len(ids),
@@ -1822,6 +1865,8 @@ class SyncService:
             # permanently absent and must never be asked for again; handing it
             # ten of thirty-seven meant the rest came round every hour forever.
             "failures": failures,
+            # Fetched, and not written: Postgres held a newer write of them.
+            "rewritten_since_fetch": sorted(rewritten),
         }
         logger.info(
             "Order repair: %s",

@@ -3071,8 +3071,15 @@ class BackgroundScheduler:
                 candidates, lock=self._heavy_job_lock,
             )
 
-            # Which ones KeyCRM served without line items anyway.
-            still_empty = await store.halfwritten_among(candidates)
+            # Which ones KeyCRM served without line items anyway — of those
+            # it served at all. A fetch that failed (a 503, an open breaker) or
+            # a write Postgres refused is not KeyCRM saying "no line items",
+            # and ledgered as one it hid a real order from this job for 30
+            # days (L1-07).
+            not_served = set(result.get("failures", {})) | set(
+                result.get("rewritten_since_fetch", ()))
+            still_empty = [oid for oid in await store.halfwritten_among(candidates)
+                           if oid not in not_served]
             recorded = await store.record_backfill_misses({
                 oid: "re-fetched by id; KeyCRM served no line items"
                 for oid in still_empty
@@ -3536,10 +3543,15 @@ class BackgroundScheduler:
             result = await sync_service.repair_orders(gaps, lock=self._heavy_job_lock)
 
             # An id KeyCRM does not have is a hole that will never close.
-            # Recording it is what lets the job finish rather than loop.
+            # Recording it is what lets the job finish rather than loop. So is
+            # an order Postgres refuses (a NUL in its comment): asked again it
+            # is refused again, and the scan offered the same 200 ids every run
+            # with `failed` 0 (L1-10). Ledgered as refused, it comes back after
+            # the misses' retry window like any other.
             permanent = {
                 oid: reason for oid, reason in result.get("failures", {}).items()
                 if "not found" in str(reason).lower()
+                or str(reason).startswith("Postgres refused: ")
             }
             recorded = await store.record_backfill_misses(permanent)
 
