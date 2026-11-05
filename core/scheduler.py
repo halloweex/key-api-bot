@@ -3079,23 +3079,32 @@ class BackgroundScheduler:
 
             # Which ones KeyCRM served without line items anyway — of those
             # it served at all. A fetch that failed (a 503, an open breaker) or
-            # a write Postgres refused is not KeyCRM saying "no line items",
-            # and ledgered as one it hid a real order from this job for 30
-            # days (L1-07).
-            not_served = set(result.get("failures", {})) | set(
+            # a fetch Postgres held a newer write of is not KeyCRM saying "no
+            # line items", and ledgered as one it hid a real order from this
+            # job for 30 days (L1-07).
+            failures = result.get("failures", {})
+            not_served = set(failures) | set(
                 result.get("rewritten_since_fetch", ()))
-            still_empty = [oid for oid in await store.halfwritten_among(candidates)
-                           if oid not in not_served]
-            recorded = await store.record_backfill_misses({
-                oid: "re-fetched by id; KeyCRM served no line items"
-                for oid in still_empty
-            })
+            empty_now = await store.halfwritten_among(candidates)
+            still_empty = [oid for oid in empty_now if oid not in not_served]
+            # An order KeyCRM did serve, and Postgres refused (a NUL in a line's
+            # name): asked again it is refused again, so left out of the ledger
+            # it was offered every two hours for ever, one KeyCRM call and one
+            # ERROR each time. Ledgered under the refusal, as the gap backfill
+            # does, it comes back after the misses' retry window like any other.
+            refused = {oid: str(failures[oid]) for oid in empty_now
+                       if str(failures.get(oid, "")).startswith("Postgres refused: ")}
+            misses = {oid: "re-fetched by id; KeyCRM served no line items"
+                      for oid in still_empty}
+            misses.update(refused)
+            await store.record_backfill_misses(misses)
 
             out = {
                 "candidates": len(candidates),
                 "repaired": result.get("repaired", 0),
                 "failed": result.get("failed", 0),
-                "still_empty": recorded,
+                "still_empty": len(still_empty),
+                "refused": len(refused),
             }
             logger.info(f"Half-written repair: {out}")
             return out
