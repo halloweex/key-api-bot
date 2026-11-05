@@ -967,18 +967,19 @@ class CustomersMixin:
         total_orders = int(gold_result[0] or 0)
         total_revenue = float(gold_result[1] or 0)
 
+        monthly = granularity == "monthly"
+        aov_sql = _INSIGHTS_DAILY_SQL if monthly else _INSIGHTS_AOV_SQL
+        aov_results = await self._dashboard_run(
+            aov_sql.replace("{where}", gold_where_sql), gold_params)
+
         labels = []
         aov_data = []
-        if granularity == "monthly":
-            daily_rows = await self._dashboard_run(
-                _INSIGHTS_DAILY_SQL.replace("{where}", gold_where_sql), gold_params)
-            daily = {row[0]: (float(row[1] or 0), int(row[2] or 0)) for row in daily_rows}
+        if monthly:
+            daily = {row[0]: (float(row[1] or 0), int(row[2] or 0)) for row in aov_results}
             for label, revenue, orders in by_month(start_date, end_date, daily):
                 labels.append(label)
                 aov_data.append(round(revenue / orders, 2) if orders > 0 else 0)
         else:
-            aov_results = await self._dashboard_run(
-                _INSIGHTS_AOV_SQL.replace("{where}", gold_where_sql), gold_params)
             aov_by_day = {row[0]: float(row[1]) for row in aov_results}
             current = start_date
             while current <= end_date:
@@ -1051,7 +1052,7 @@ class CustomersMixin:
                     "tension": 0.3
                 }],
                 # Only for months: a daily answer keeps the body the goldens hold.
-                **({"granularity": "monthly"} if granularity == "monthly" else {}),
+                **({"granularity": "monthly"} if monthly else {}),
             },
             "metrics": {
                 "totalCustomers": total_customers,
