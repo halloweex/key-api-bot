@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.319
+
+- WIP: S14-13 — the entry walk and the gender tick test follow the copies out
+- WIP: S14-13 — the re-gated checks ask for a Postgres, held by a test that names its own DSN
+- WIP: S14-13 — the baseline shrinks with the deleted shippers
+- WIP: S14-13 — step 13's expenses lever names the dump, not the deleted backfill; the walks' lists drop the deleted modules
+- WIP: S14-13 — soak's E1, I1, B1, H1, M1 and O1 go with the copies; CLAUDE.md's paragraphs on the mirror, the copies and the walks
+- WIP: S14-13 — unit tests follow the copies out; frozen literals where the copy was the only statement of a pairing
+- WIP: S14-13 — tests of the deleted copies, mirrors and backfills go; the writers' proofs stay
+- WIP: S14-13 — the mirrors, backfills and hourly copies out of DuckDB go; the hourly job is the gender and the bot
+
+
 ## 3.0.318
 
 - WIP: S14-12 review — an unreadable marker directory is blindness, and the markers are read from disk
