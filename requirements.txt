@@ -35,8 +35,14 @@ slowapi>=0.1.9
 # in the production base image.
 asyncpg==0.31.0
 
-# DuckDB analytics
-duckdb==1.5.5
+# The model's frames (core/prediction_service.py) and the frames the forecast
+# and search-index readers build (core/pg_forecast_read.py,
+# core/pg_search_index_read.py).
+#
+# No `duckdb` since step 14's S14-19: nothing web or the bot runs imports it.
+# The archives are read by the pinned image (`keycrm-web:rollback-step14`,
+# deploy/archive_image.sh), and the tests of the frozen host tools get the
+# driver from requirements-dev.txt.
 pandas>=2.0.0
 
 # Job scheduling
