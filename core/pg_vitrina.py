@@ -12,9 +12,14 @@ immediately after it — one floor, one tick, revision 0007's reasoning: the
 TRUNCATE + INSERT in one transaction, `pg_silver`'s reasons.
 
 Retail only, non-return, active sources — the same slice the SMS audience
-machinery reads, which is what makes the numbers here recognisable to the one
-consumer that exists today. `internal` is admin-gated on the dashboard, and a
-customer row that mixed it in would leak what the API deliberately hides.
+reads, so its numbers would be recognisable to the audience if it read them.
+It does not: nothing reads this table today but its own check below. The SMS
+audience aggregates the order lines itself (`core.sql_dialect`'s
+`_SMS_SEGMENTS_BODY`, over `{order_lines}`): it needs what a row per customer
+does not carry — each line's cost, for the margin basis, and the lines
+themselves, for the content filters (`core/repositories/customers.py`).
+`internal` is admin-gated on the dashboard, and a customer row that mixed it
+in would leak what the API deliberately hides.
 
 Which Postgres this ultimately lives in — this one or the shop's — is the
 owner's open question. Until answered it is built here; being derived, moving
@@ -110,9 +115,9 @@ FULL JOIN app.customer_profile p ON p.buyer_id = s.buyer_id
 async def reconcile_customer_profile(*, max_note: int = 3):
     """Rebuild the витрина and verify it against Silver in one snapshot.
 
-    `ch_gold`'s shape, for `ch_gold`'s reason: the profile is legitimately one
-    rebuild-tick behind Silver, so checking a *stale* profile with tolerance
-    zero would report the schedule, not the data. Rebuild and check run inside
+    Rebuild-then-check, because the profile is legitimately one rebuild-tick
+    behind Silver, so checking a *stale* profile with tolerance zero would
+    report the schedule, not the data. Rebuild and check run inside
     one REPEATABLE READ transaction — one snapshot of Silver for both — and
     what the zero tolerance then measures is the materialisation itself.
     """

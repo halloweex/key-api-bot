@@ -899,74 +899,65 @@ OPERATIONAL_GRACE_MINUTES = 90
 # through the COALESCE to organic or unattributed, on the chart and in the
 # Monday traffic report, with nothing on either to say so.
 #
-# **The population is the parser's own predicate**, `_parse_utm_into_silver`
-# in core/repositories/traffic.py: an order whose `manager_comment` is neither
-# NULL nor empty, with no row or with `updated_at > parsed_at`. `parsed_at` is
-# the order's `updated_at` at the moment its comment was read, not the wall
-# clock, so a finished parse leaves the two equal and a later edit compares
-# greater. An order with no comment never gets a row, by design, and is not
-# asked about.
+# **The population is the parser's own predicate**, `INCREMENTAL_SELECT_SQL`
+# in core/pg_utm_parse.py: an order in `bronze.orders` whose `manager_comment`
+# is neither NULL nor empty, with no row or with `updated_at > parsed_at`.
+# `parsed_at` is the order's `updated_at` at the moment its comment was read,
+# not the wall clock, so a finished parse leaves the two equal and a later edit
+# compares greater. An order with no comment never gets a row, by design, and
+# is not asked about.
 #
-# **Read from `bronze.orders`, which is not the table the parser reads.** The
-# parser reads DuckDB's `orders`; `bronze.orders` is the only copy of that
-# input Postgres holds, and the one step 9's parser will read. Both are fed the
-# same tuple in the same call, so they normally hold the same comment — but
-# not always. The Postgres upsert keeps a stored `manager_comment` when the
-# payload carries NULL (`COALESCE` on conflict), while DuckDB applies that rule
-# only on its UPDATE path: an order it INSERTs afresh — the next sync after
-# `POST /api/duckdb/purge-orders`, retired by OD-10 on 2026-09-30 but not
-# before it ran — stores whatever the payload carries, NULL included, and a
-# restore from an export taken before a backfill brings the NULL back with
-# it. A resync does neither; it updates rows that exist. Such
-# an order has its comment here and none in DuckDB, so the parser never reads
-# it and no parse or ship can clear the finding: it would page CRITICAL every
-# morning with a lever that cannot move it. So the findings and the
-# REMEDIATION name this second cause beside the first. The same morning's
-# orders fingerprint sees the divergence too — it compares `manager_comment`
-# and names it in `mirror_row_values` on `bronze.orders` — and the lever is
-# putting the comment back in DuckDB from this copy, never the ship. Not the
-# `manager_comment` backfill either: it re-fetches the field from KeyCRM,
-# whose payload after a purge is the NULL DuckDB stored, skips it as empty,
-# and still reports success. It helps only where KeyCRM serves the comment
-# today, as after a restore from an export older than a backfill.
+# **Read from `bronze.orders`, the table the parser reads.** The parse is
+# `core/pg_utm_parse.py`, the derivation's last step, so a missing or stale
+# verdict has one cause left: a parse that has not run since the order landed,
+# or did not finish. Until step 14's S14-15 the parser read DuckDB's `orders`,
+# and this check read `bronze.orders` as the only copy of that input Postgres
+# held. The two normally held the same comment, but not always — DuckDB kept a
+# stored comment over a NULL payload only on its UPDATE path, so an order it
+# INSERTed afresh (after `POST /api/duckdb/purge-orders`, retired by OD-10 on
+# 2026-09-30, or a restore from an export older than a backfill) could hold
+# NULL there and its comment here. No parse could clear such a finding, and its
+# lever was putting the comment back in DuckDB. That cause went with DuckDB's
+# parse, and the lever with it (`_ORDER_UTM_LEVER_REASONS` below says so).
 #
-# **The grace is absolute, on `bronze.orders.mirrored_at`.** Under
-# KS_PG_DERIVE=own the order reaches `silver.orders` on Postgres' own signal,
-# while its verdict waits for DuckDB's next warehouse tick (two minutes) and
-# then the ship's floor (`KS_PG_SILVER_INTERVAL_S`, 600 s by default) — the
-# gap #213 accepted rather than patched. So the grace is resolved from that
-# variable when the check runs, through
-# `pg_warehouse_dq.silver_grace_minutes()`: the floor plus the twins'
-# ten-minute margin, twenty minutes at the default — the number
-# `SILVER_GRACE_MINUTES` fixes for the comparison above. A constant here would
-# go on paging the old floor's width the day somebody raised it, and the floor
-# and the grace would then be two numbers somebody has to remember to move
-# together. `deploy/daily_soak/11_utm_gap.sql` asks the same question by hand
-# with fifteen minutes: right for a reading, and a page on a slow tick here.
+# **The grace is absolute, on `bronze.orders.mirrored_at`.** An order and its
+# verdict arrive in the same derivation: Postgres derives on its own signal,
+# no sooner than the floor (`KS_PG_SILVER_INTERVAL_S`, 600 s by default) after
+# its last attempt, and the parse is that derivation's last step
+# (`parse_incremental_locked`, run once the derivation has let
+# `PG_LAYER_LOCK` go). So the grace is resolved from that variable when the
+# check runs, through `pg_warehouse_dq.silver_grace_minutes()`: the floor plus
+# the twins' ten-minute margin, twenty minutes at the default. A constant here
+# would go on paging the old floor's width the day somebody raised it, and the
+# floor and the grace would then be two numbers somebody has to remember to
+# move together. (Until step 14's S14-15 the verdict waited for DuckDB's next
+# warehouse tick and then the ship's floor instead — the gap #213 accepted.)
+# `deploy/daily_soak/11_utm_gap.sql` asks the same question by hand with
+# fifteen minutes: right for a reading, and a page on a slow tick here.
 #
 # **`mirrored_at` is when the row was last written, not when the order
-# arrived**, and that is the grace's blind spot. The upsert stamps it on every
+# arrived**, and that is the grace's blind spot. The orders upsert
+# (`pg_landing._write_order_rows`, which chain 3 runs) stamps it on every
 # write, identical rewrites included: the 05:15 status refresh force-writes
-# ~1,400 unchanged orders, and a backfill ship re-stamps every order it
-# carries. A verdict missing for days therefore reads as in flight — INFO,
+# ~1,400 unchanged orders, and the comment backfills re-stamp every order they
+# fill in. A verdict missing for days therefore reads as in flight — INFO,
 # counted, not paged — for one grace after such a rewrite. Not changed here:
-# the stamp belongs to the mirror's upsert, and Reconciliation A reads it too.
-# The scheduled run does not meet the 05:15 case, since 07:30 is two hours
-# past that window; a backfill run by hand in the grace before 07:30 would
-# hide the orders it re-stamps for that one morning, as INFO.
+# the stamp belongs to the orders writer, and other checks read it too. The
+# scheduled run does not meet the 05:15 case, since 07:30 is two hours past
+# that window; a backfill run by hand in the grace before 07:30 would hide the
+# orders it re-stamps for that one morning, as INFO.
 #
-# **Not the ship's watermark**, which was the other clock available while
-# DuckDB's parse was shipped (until step 14's S14-15 deleted the ship). A ship
-# that stops being *called* records nothing at all — a warehouse refresh that
-# errors returns before `_rebuild_postgres_layers` ships anything, so
-# `last_ok_at` just ages and `failures_since_ok` stays at zero — and this
-# check is then the only witness left. It is also an ordinary morning: the
-# 05:15 status refresh, the weekly full sync and the sync of today each parse
-# in DuckDB without marking the warehouse dirty, and a restart forgets the
-# in-memory deferral (`_pg_layers_pending`), so their verdicts wait for the
-# next dirty tick. The watermark is also the wrong shape:
-# a ship can land between an order's arrival and DuckDB's parse of it, so
-# "shipped since the order arrived" does not mean "should have carried it".
+# **Not the parse's watermark** (`meta.mirror_state`, `silver.order_utm`),
+# which is the other clock available. A parse that stops being *called*
+# records no failure — a tick that cannot read the derivation's signal returns
+# before it, a scheduler that has stopped runs nothing — so
+# `failures_since_ok` stays at zero, only `last_ok_at` ages, and an age names
+# no order. (The parse runs after the derivation whatever the derivation did,
+# so a Gold or profile fault does not stop it.) The watermark is also the wrong
+# shape: the incremental parse stamps it on every success, zero rows included,
+# so "the parser ran since the order arrived" does not mean "it read that
+# order". (Until step 14's S14-15 it was the ship's watermark, the copy out of
+# DuckDB, and the same two objections held.)
 #
 # **Inside the grace is INFO, counted, never nothing.** The plan asked for the
 # width of the two-clocks gap to be measured before step 9's flip, and a daily
@@ -974,10 +965,9 @@ OPERATIONAL_GRACE_MINUTES = 90
 # digest and never summons it, so a busy morning costs a line and not a page.
 #
 # Report only, like everything in this module: no finding here repairs
-# anything or reaches `validation_passed`. The lever is the parse, the ship, or
-# DuckDB's copy of the comment, and a check that re-shipped what it found
-# missing would hide which one broke. It reads Postgres alone and takes no
-# store, so it holds whichever store does the parsing.
+# anything or reaches `validation_passed`. The lever is the parse, and a check
+# that re-parsed what it found missing would hide that the parse broke. It
+# reads Postgres alone and takes no store.
 
 # The table the verdicts live in. Until step 14's S14-12 the name came off the
 # daily comparison's spec (`ORDER_UTM_TABLE`), deleted with that comparison.
@@ -1157,11 +1147,12 @@ async def reconcile_order_utm_completeness(
     Postgres? Reports only.
 
     Takes no store: both sides of the question are in Postgres, which is what
-    lets it outlive `reconcile_order_utm` when the parse moves there.
+    let it outlive `reconcile_order_utm` (deleted in step 14's S14-12) once the
+    parse moved there.
 
-    `grace_minutes=None` — what the job passes — is the ship's floor plus the
-    twins' margin, read from `KS_PG_SILVER_INTERVAL_S` now rather than at
-    import, so the two move together. A floor that is not a number raises
+    `grace_minutes=None` — what the job passes — is the derivation's floor
+    plus the twins' margin, read from `KS_PG_SILVER_INTERVAL_S` now rather
+    than at import, so the two move together. A floor that is not a number raises
     here, and the job's `check` names the error on the run.
     """
     from core.pg import get_pool, require_revision
