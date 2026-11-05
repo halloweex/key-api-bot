@@ -47,10 +47,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, FrozenSet, Sequence
 
-# The lever every ownership page names since step 14's S14-04 deleted the way
-# back (`core/rollback_lever.py` says why it reads as it does).
-from core.rollback_lever import ROLLBACK_LEVER
-
 
 class Kind(str, Enum):
     CONDITION = "condition"  # holds and can clear → lifecycle, may escalate
@@ -112,8 +108,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "dq_never:reconciliation_ch": _c("the layer's first successful run"),
     "dq_stale:reconciliation_ch": _c("a successful run inside the age limit"),
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
-    # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
-    "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),
+    # `derivation_mode_invalid` (a KS_PG_DERIVE web did not understand) went
+    # in step 14's S14-15 with the variable; the name is not reused (rule 15).
     # KS_READ_FALLBACK set to a value web did not understand (ran as duckdb,
     # DN-20a). Not a stop: web is the only syncer.
     "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
@@ -129,29 +125,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # A read refused with a 503 under KS_READ_FALLBACK=off (DN-20b), recently.
     # Not a fallback — nothing came from DuckDB — so never under that key.
     "read_refused": _c("no read refused for thirty minutes"),
-    # KS_WRITE_WAREHOUSE set to a value web did not understand (ran as duckdb,
-    # DN-28). Not a stop: web is the only syncer.
-    "warehouse_mode_invalid": _c("web restarts with a valid KS_WRITE_WAREHOUSE"),
-    # KS_WRITE_WAREHOUSE=postgres with a precondition of the switch unmet: web
-    # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
-    "warehouse_preconditions_unmet": _c(
-        "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
-    # A start that would have run as duckdb after a flip — the way back —
-    # stayed postgres, because a latched write chain owns a table DuckDB
-    # derives from (`warehouse_cutover`, THE WAY BACK, REFUSED). Since step
-    # 14 no start takes the way back (S14-00) and nothing copies a chain back
-    # (S14-04), so a step-14 web publishes no refusal and the page resolves.
-    "warehouse_way_back_refused": _c(
-        "web restarts on a step-14 image, which never takes the way back; "
-        "nothing in this build copies a chain back to DuckDB. " + ROLLBACK_LEVER),
-    # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
-    # down past the canary's limit: a UTM parse that keeps raising, or no tick
-    # after a full one whose parse raised (DN-29).
-    "warehouse_hold_stuck": _c("a validated full DuckDB tick and a finished UTM parse"),
-    # KS_UTM_PARSE set to a value web did not understand, or to postgres
-    # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
-    "utm_parse_mode_invalid": _c(
-        "web restarts with a valid KS_UTM_PARSE, postgres only beside KS_PG_DERIVE=own"),
+    # Step 13's switch paged under five names until step 14's S14-15 deleted
+    # it (`core/warehouse_cutover.py`) with the `warehouse_writer_mode` and
+    # `utm_parse` blocks of /api/health that the canary judged them from:
+    # `warehouse_mode_invalid`, `warehouse_preconditions_unmet`,
+    # `warehouse_way_back_refused`, `warehouse_hold_stuck` and
+    # `utm_parse_mode_invalid`. The names are not reused (rule 15).
     # A path in web opened, or tried to open, the DuckDB file under
     # KS_DUCKDB=off — the week of silence's tripwire (OD-17 (a)). The counters
     # are per process, so only a restart empties them.
@@ -829,46 +808,13 @@ class AlertGate:
         `take_resolved` can take. A copy; reading it changes nothing."""
         return {key: entry.get("group") for key, entry in self._delivered.items()}
 
-    def mark_delivered(
-        self, group: str, mark: str, keys: "Sequence[str]", *, complete: bool,
-        now: "float | None" = None,
-    ) -> None:
-        """Say which of `group`'s delivered conditions one emitter inside it
-        was still reporting on its last pass: `mark` goes on each of `keys`
-        delivered under `group`. With `complete` the emitter reached a verdict
-        on everything it reports, so the mark comes off the group's other
-        entries — it verified those clear; without, marks are only added.
-
-        For a group whose emitters share condition names, where the key alone
-        cannot say whose page it is. The mark lives on the entry, so it is
-        persisted with it and goes with it when `take_resolved` pops it; an
-        entry `restore_delivered` puts back carries none, correctly — it was
-        taken because nothing in the run was reporting it."""
-        now = _time.time() if now is None else now
-        wanted = set(keys)
-        changed = False
-        for key, entry in self._delivered.items():
-            if entry.get("group") != group:
-                continue
-            marks = set(entry.get("marks") or ())
-            if key in wanted:
-                marks.add(mark)
-            elif complete:
-                marks.discard(mark)
-            else:
-                continue
-            if sorted(marks) != sorted(entry.get("marks") or ()):
-                entry["marks"] = sorted(marks)
-                changed = True
-        if changed:
-            self._dirty = True
-            self._save(now, force=True)
-
-    def delivered_marked(self, mark: str) -> "Dict[str, str | None]":
-        """`{condition_key: group}` for every delivered, unresolved condition
-        carrying `mark`. A copy; reading it changes nothing."""
-        return {key: entry.get("group") for key, entry in self._delivered.items()
-                if mark in (entry.get("marks") or ())}
+    # `mark_delivered` and `delivered_marked` stood here until step 14's
+    # S14-15: one emitter's mark on the delivered entries of a group whose
+    # emitters share condition names (step 13's retired comparisons in
+    # `dq_mirror_landing`, `warehouse_cutover.note_comparisons_reported`).
+    # Their last caller went with that module. The `marks` already on entries
+    # in `data/alert-gate-*.json` stay: an entry is loaded and saved whole, so
+    # a rewrite keeps them, and an image from before step 14 reads them.
 
     def take_resolved(
         self, group: str, still_firing: "Sequence[str]" = (),
@@ -916,18 +862,6 @@ def delivered_conditions() -> "Dict[str, str | None]":
     each was delivered under: what a `resolve_group` could announce. Local
     state, no I/O."""
     return _gate.delivered_groups()
-
-
-def mark_delivered(group: str, mark: str, keys: "Sequence[str]", *,
-                   complete: bool) -> None:
-    """`AlertGate.mark_delivered` on this process's gate. Local state."""
-    _gate.mark_delivered(group, mark, keys, complete=complete)
-
-
-def delivered_marked(mark: str) -> "Dict[str, str | None]":
-    """This process's delivered, unresolved conditions carrying `mark`, and
-    the group each was delivered under. Local state, no I/O."""
-    return _gate.delivered_marked(mark)
 
 
 async def raise_alert(
@@ -1070,8 +1004,8 @@ async def resolve_group(
     notice per fired-cycle: taking a key out of the map is the idempotence.
 
     `note` is one more line under the list, for a resolve whose reason is not
-    a healthy pass — the warehouse group closed by the switch that retires its
-    only resolver (`core.warehouse_cutover.settle_writer`).
+    a healthy pass — the warehouse group closed by the switch that retired its
+    only resolver (step 13's `settle_writer`, deleted in step 14's S14-15).
 
     Returns admins reached (0: nothing to resolve, or nothing deliverable).
     """

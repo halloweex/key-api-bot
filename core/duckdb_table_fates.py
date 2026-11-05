@@ -449,14 +449,13 @@ def _store_switch_writes_duckdb(switch: str) -> Optional[bool]:
             from core.pg_dashboard_users import user_store_is_postgres
             return not user_store_is_postgres()
         if switch == WAREHOUSE:
-            from core import warehouse_cutover
-            if warehouse_cutover.value() is None:
-                # `configure_modes()` has not run in this process, and only
-                # web's does: a script, a test, or anything reading this from
-                # outside web would otherwise answer "duckdb" whatever the
-                # variable says. Not knowing is the answer here.
-                return None
-            return warehouse_cutover.duckdb_derives()
+            # DuckDB derives nothing: step 13 has been in force since
+            # 2026-10-09, a constant since step 14's S14-00, and S14-15
+            # deleted its module (`core/warehouse_cutover.py`), which this
+            # asked — and which answered None in a process where
+            # `configure_modes()` never ran. A literal until S14-18 removes
+            # this function with the store switches.
+            return False
     except ValueError:
         return None
     raise KeyError(f"{switch} is not a switch this manifest knows how to read")
@@ -471,9 +470,10 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     latch counted as it did for the writers, OD-19 (a)) and since then asks
     nothing. A shadow chain (OD-02 (c)) was True whichever store its mode
     named, while DuckDB was handed each row after the Postgres commit; step
-    14's S14-10 retired the shadow. A store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
-    process configured, and None in a process where `configure_modes()` never
-    ran — every process but web's. With no switch, DuckDB writes every table
+    14's S14-10 retired the shadow. A store switch asks its own reader;
+    `KS_WRITE_WAREHOUSE`'s tables are False since step 14's S14-15 (they
+    were the mode this process configured until then, and None in a process
+    where `configure_modes()` never ran). With no switch, DuckDB writes every table
     in its schema except a frozen archive; nothing writes a view, a table
     with no DDL left, or a migration's scratch outside its own step.
 

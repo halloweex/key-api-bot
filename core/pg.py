@@ -146,8 +146,8 @@ async def current_revision(conn=None, *, strict: bool = False) -> Optional[str]:
     version table absent (or empty), and lets every other failure raise: a
     connection lost in the middle of the read is not a database nobody
     migrated, and a caller that asks again must be able to tell them apart
-    (`core.warehouse_cutover`, where after a flip that reading is the way
-    back).
+    (step 13's switch, where after a flip that reading was the way back,
+    asked it so until step 14's S14-15 deleted it).
     """
     sql = (
         f"SELECT version_num FROM {VERSION_TABLE_SCHEMA}.{VERSION_TABLE} LIMIT 1"

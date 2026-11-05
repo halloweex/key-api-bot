@@ -30,7 +30,7 @@ from core.events import (
     emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
-from core import duckdb_switch, read_fallback, warehouse_cutover
+from core import duckdb_switch, read_fallback
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -1004,19 +1004,10 @@ class SyncService:
             )
             stats["orders"] = order_count
             stats["expenses"] = expense_count
-            # Mark warehouse dirty only for orders that actually changed
-            # (separate job handles refresh), and mark it HERE, adjacent to
-            # the write. It used to happen at the end of the tick, after
-            # the hourly catalogue/manager/buyer/stock branches — so a 429
-            # on the products page skipped the mark and the orders just
-            # written stayed out of Silver/Gold until the 05:15 refresh.
-            #
-            # This used to key off stats["orders"], which counts a row
-            # already in the desired state as a success — so it was ~200
-            # every cycle forever and the warehouse was permanently dirty.
-            # Nothing changing now means nothing to rebuild.
-            if changed_ids:
-                await self.store.mark_warehouse_dirty(changed_ids)
+            # The derivation is owed by the writer itself: chain 3 raises
+            # `meta.derivation_signal` in the order's own transaction. The
+            # DuckDB warehouse mark that stood here, a no-op since step 13,
+            # went in step 14's S14-15.
             # Use max(updated_at) from SOURCE data, not now()
             max_updated = _get_max_updated_at(orders)
             # Guard against checkpoint rollback — never go backward
@@ -1377,12 +1368,9 @@ class SyncService:
             # Record Layer 2: daily per-SKU snapshot
             await self.store.record_sku_inventory_snapshot()
 
-            # Refresh warehouse layers (Silver → Gold) — DuckDB's own, which
-            # it does not derive under KS_WRITE_WAREHOUSE=postgres (DN-29). On
-            # an empty DuckDB this is the boot's path, so the mode has to be
-            # cached before it: `configure_modes()` runs first in web's startup.
-            if warehouse_cutover.duckdb_derives():
-                await self.store.refresh_warehouse_layers(trigger="full_sync")
+            # DuckDB's own Silver → Gold rebuild stood here until step 14's
+            # S14-15; it did not run since step 13 (DN-29). Postgres derives
+            # off the signal the writers raise.
 
             # Update sync checkpoint with latest order timestamp
             last_order_time = await self.store.get_latest_order_time()
@@ -1581,11 +1569,6 @@ class SyncService:
                 stats["expenses"] = expense_count
                 logger.debug(f"Today sync: {stats['orders']} orders, {stats['expenses']} expenses")
 
-                # Refresh warehouse layers (Silver → Gold), while DuckDB
-                # derives them (DN-29).
-                if warehouse_cutover.duckdb_derives():
-                    await self.store.refresh_warehouse_layers(trigger="sync_today")
-
         except KeyCRMConnectionError as e:
             logger.debug(f"Today sync connection error (will retry): {e}")
         except KeyCRMError as e:
@@ -1633,8 +1616,6 @@ class SyncService:
             orders = list(orders_by_id.values())
 
             if orders:
-                order_ids = [o["id"] for o in orders if "id" in o]
-
                 # Use force_update=True because KeyCRM doesn't update updated_at on status changes
                 # Without this, orders with changed status but same updated_at won't be updated
                 order_count, expense_count = await self._upsert_orders_with_expenses(
@@ -1656,16 +1637,10 @@ class SyncService:
                         f"(sample: {dict(list(api_returns.items())[:5])})"
                     )
 
-                # Incremental warehouse refresh — only rebuild Silver for changed
-                # orders instead of DELETE+INSERT all 36K rows (prevents OOM).
-                # DuckDB's own, so not under KS_WRITE_WAREHOUSE=postgres
-                # (DN-29): the headers written above raise Postgres' signal in
-                # the mirror, and the derivation rebuilds from it.
-                if warehouse_cutover.duckdb_derives():
-                    await self.store.refresh_warehouse_layers(
-                        trigger="status_refresh",
-                        changed_order_ids=order_ids,
-                    )
+                # The headers written above raise Postgres' derivation signal
+                # in their own transaction, and the derivation rebuilds from
+                # it. (DuckDB's incremental rebuild of these ids stood here
+                # until step 14's S14-15; it did not run since step 13.)
                 # No read-back of Silver here. A sample of twenty return orders
                 # used to be compared with DuckDB's `silver_orders`, and all it
                 # produced was a log line. `dq_reconciliation` checks every
@@ -1781,7 +1756,6 @@ class SyncService:
                 repaired, _ = await self._upsert_orders_with_expenses(
                     fetched, force_update=True,
                 )
-                await self.store.mark_warehouse_dirty([o["id"] for o in fetched])
 
         result = {
             "requested": len(ids),
@@ -1826,17 +1800,11 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
     Called on application startup.
     """
     store = await get_store()
-    # What a change of warehouse writer owes, before the sync below writes a
-    # row (DN-29): under KS_WRITE_WAREHOUSE=postgres the writer is recorded and
-    # the DuckDB tick's alert group closed, once; back under duckdb, a full
-    # DuckDB rebuild is marked and the DuckDB checks are held until it
-    # validates. A no-op when neither applies — the default path. A settle that
-    # raises costs this boot nothing: the scheduler's start and every refresh
-    # tick try again before the first DuckDB rebuild or check.
-    try:
-        await warehouse_cutover.settle_writer(store)
-    except Exception as e:
-        logger.error(f"Warehouse writer not settled at boot: {e}", exc_info=True)
+    # Step 13's settle of the warehouse writer stood here until step 14's
+    # S14-15 (`core/warehouse_cutover.py`, deleted): under KS_DUCKDB=off it read
+    # the record's frozen copy in Postgres, `app.sync_metadata`, and closed the
+    # `warehouse` alert group once. The record stays there, untouched: an image
+    # from before step 14 reads it.
     # The orders held where they are written — Postgres, chain 3's, whose
     # DuckDB copy never grows and on a fresh DuckDB would read as empty on
     # every boot, pulling 730 days from KeyCRM each time (`orders_held`).

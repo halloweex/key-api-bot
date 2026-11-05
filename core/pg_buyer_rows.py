@@ -86,11 +86,10 @@ async def _write_buyer_rows(
             await conn.executemany(_INSERT_CONTACT, buyer_contacts)
             written += len(buyer_contacts)
 
-    # `app.customer_profile` joins `bronze.buyers`. A no-op unless
-    # KS_PG_DERIVE=own; `core/pg_derivation.py` says why it cannot cost this
-    # transaction.
-    from core.pg_derivation import mark_if_owned
+    # `app.customer_profile` joins `bronze.buyers`. `core/pg_derivation.py`
+    # says why the mark cannot cost this transaction.
+    from core.pg_derivation import mark
 
     async with conn.transaction():
-        await mark_if_owned(conn)
+        await mark(conn)
     return written

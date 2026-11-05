@@ -108,123 +108,15 @@ async def refresh_order_statuses(
 @router.get("/warehouse/status")
 @limiter.limit("60/minute")
 async def get_warehouse_status(request: Request):
-    """Get warehouse layer (Silver/Gold) status and last refresh info."""
-    store = await get_store()
-    from core import pg_derivation, warehouse_cutover
+    """The warehouse's state: Postgres derives Silver and Gold alone.
 
-    if warehouse_cutover.writes_postgres():
-        # Postgres alone derives (KS_WRITE_WAREHOUSE=postgres, DN-29): the
-        # Postgres block leads, and DuckDB's last refresh — as old as the
-        # switch — is nested and named for what it is, never the top-level
-        # answer an operator reads as the warehouse's state.
-        status = {"writer": warehouse_cutover.POSTGRES,
-                  "postgres": await _pg_derivation_status(),
-                  "duckdb_frozen": await _duckdb_refresh_status(store)}
-    else:
-        status = await _duckdb_refresh_status(store)
-        # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a
-        # status page that showed only DuckDB's refreshes would describe the
-        # engine the dashboard is leaving.
-        if pg_derivation.owns():
-            status = {**status, "postgres": await _pg_derivation_status()}
-    # Step 13's readiness (DN-28, DN-29): KS_WRITE_WAREHOUSE as this process
-    # read it, what settling the writer found, and every precondition of the
-    # switch still unmet, each by name. Published whatever the mode — the list
-    # is what a person reads before the flip, and after it what a restart
-    # would need to stay switched.
-    try:
-        cutover = await warehouse_cutover.readiness()
-    except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
-        # The class alone, as everywhere readiness reports: the text is a
-        # driver's and names the database user, host and port. Whole in the log.
-        logger.error("cutover readiness raised: %s: %s", type(e).__name__, e)
-        cutover = {**warehouse_cutover.status(),
-                   "readiness_error": type(e).__name__}
-    return {**status, "cutover": cutover}
-
-
-async def _duckdb_refresh_status(store) -> dict:
-    """DuckDB's last warehouse refresh — its own `warehouse_refreshes`, or,
-    under KS_DUCKDB=off, the hourly copy of that table in Postgres.
-
-    Under off the file is not read (stage 5, PR-8). The copy holds the same
-    rows: DuckDB has not derived since step 13, so its last refresh is as old
-    as the switch, and the copy went across before the week began — the
-    table is history there (OD-S5-4). The answer is DuckDB's own keys, plus
-    `status: off` and the table they came from; a Postgres that cannot be
-    read leaves `status: off` and the error's class alone, the way every
-    fact on this page is published. Under on, the store's answer, untouched."""
-    from core import duckdb_switch
-
-    if not duckdb_switch.is_off():
-        return await store.get_warehouse_status()
-    try:
-        last, recent = await asyncio.wait_for(
-            _read_frozen_refreshes(), _FROZEN_STATUS_TIMEOUT_S)
-    except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
-        logger.error("frozen warehouse_refreshes unreadable: %s: %s",
-                     type(e).__name__, e)
-        return {"status": duckdb_switch.OFF, "error": type(e).__name__}
-    return {"status": duckdb_switch.OFF, "source": REFRESHES_TABLE,
-            **_refresh_fields(last, recent)}
-
-
-# A status page answers; a Postgres that hangs costs this block, not the page.
-_FROZEN_STATUS_TIMEOUT_S = 5
-
-# DuckDB's `warehouse_refreshes` as the hourly copy last shipped it, history
-# since the week of silence (OD-S5-4). Spelled here since step 14's S14-13
-# deleted `core.pg_operational`, which named it `REFRESHES_TABLE`.
-REFRESHES_TABLE = "app.warehouse_refreshes"
-
-
-async def _read_frozen_refreshes():
-    """The last row and the last hour's count: DuckDB's two statements, over
-    the copy (`REFRESHES_TABLE`)."""
-    from core.pg import get_pool
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        last = await conn.fetchrow(
-            "SELECT refreshed_at, trigger, duration_ms, bronze_orders, "
-            "silver_rows, gold_revenue_rows, gold_products_rows, "
-            "checksum_match, validation_passed FROM app.warehouse_refreshes "
-            "ORDER BY id DESC LIMIT 1")
-        recent = await conn.fetchval(
-            "SELECT COUNT(*) FROM app.warehouse_refreshes "
-            "WHERE refreshed_at > now() - INTERVAL '1 hour'")
-    return last, recent
-
-
-def _refresh_fields(last, recent) -> dict:
-    """`DuckDBStore.get_warehouse_status`'s answer, built from a row of the
-    same nine columns in the same order. A test holds the two answers equal,
-    key for key and value for value."""
-    if last is None:
-        return {
-            "last_refresh": None,
-            "last_trigger": None,
-            "last_duration_ms": None,
-            "bronze_orders": 0,
-            "silver_rows": 0,
-            "gold_revenue_rows": 0,
-            "gold_products_rows": 0,
-            "checksum_match": None,
-            "validation_passed": None,
-            "recent_refreshes": 0,
-        }
-    return {
-        "last_refresh": last[0].isoformat() if last[0] else None,
-        "last_trigger": last[1],
-        "last_duration_ms": float(last[2]) if last[2] else None,
-        "bronze_orders": last[3],
-        "silver_rows": last[4],
-        "gold_revenue_rows": last[5],
-        "gold_products_rows": last[6],
-        "checksum_match": last[7],
-        "validation_passed": last[8],
-        "recent_refreshes": recent or 0,
-    }
+    Until step 14's S14-15 the answer also carried `duckdb_frozen` — DuckDB's
+    last refresh, as old as step 13's switch, read from the hourly copy of its
+    `warehouse_refreshes` — and `cutover`, step 13's readiness (the variable,
+    the recorded writer, every precondition by name). The switch is a
+    constant and its module is deleted; nothing read either block, the
+    frontend included. `app.warehouse_refreshes` stays as history (OD-S5-4)."""
+    return {"writer": "postgres", "postgres": await _pg_derivation_status()}
 
 
 async def _pg_derivation_status() -> dict:
@@ -240,9 +132,8 @@ async def _pg_derivation_status() -> dict:
                 "SELECT trigger, started_at, ended_at, validation_passed, error"
                 " FROM meta.derivation_runs ORDER BY id DESC LIMIT 1")
     except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
-        return {"mode": pg_derivation.mode(), "error": f"{type(e).__name__}: {e}"}
+        return {"error": f"{type(e).__name__}: {e}"}
     return {
-        "mode": pg_derivation.mode(),
         "requested": requested,
         "built": built,
         "owed": requested > built,
@@ -258,9 +149,8 @@ async def _pg_derivation_status() -> dict:
 
 
 async def _derive_postgres_now(trigger: str) -> dict:
-    """Run the Postgres derivation immediately, past its floor. Under
-    KS_PG_DERIVE=own only; takes the heavy lock itself, so call it after
-    releasing yours."""
+    """Run the Postgres derivation immediately, past its floor; takes the
+    heavy lock itself, so call it after releasing yours."""
     from core.scheduler import get_scheduler
 
     return await get_scheduler()._run_pg_derivation(trigger=trigger, force=True)
@@ -272,33 +162,12 @@ async def refresh_warehouse(
     request: Request,
     admin: dict = Depends(require_admin),
 ):
-    """Manually trigger warehouse layer refresh (Silver -> Gold). Requires admin."""
-    from core import warehouse_cutover
-    from core.scheduler import get_scheduler
+    """Rebuild the warehouse (Silver -> Gold) now, in Postgres. Requires admin.
 
-    if warehouse_cutover.duckdb_derives():
-        store = await get_store()
-        # Under the heavy-job lock, like the two-minute job that runs the same
-        # code. Without it a manual refresh interleaved with the scheduled one:
-        # a validation reading Bronze/Silver across the other's commits reported
-        # a correct rebuild as failed, and the two raced each other's fired and
-        # resolved notices for the same alert group.
-        async with get_scheduler()._heavy_job_lock:
-            result = await store.refresh_warehouse_layers(trigger="manual")
-    else:
-        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB no longer derives, and
-        # the lever is the Postgres derivation below — own is a precondition
-        # of the switch, so it always runs here.
-        result = {"status": "skipped", "trigger": "manual",
-                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
-    # The lever every Silver/Gold alert names. Under KS_PG_DERIVE=own it
-    # rebuilds the Postgres layers too — otherwise it would repair the engine
-    # the dashboard no longer reads and leave the one it does as it was.
-    from core import pg_derivation
-
-    if pg_derivation.owns():
-        result = {**result, "postgres": await _derive_postgres_now("manual")}
-    return result
+    The lever every Silver/Gold alert names. Until step 14's S14-15 it ran
+    DuckDB's rebuild first while DuckDB derived, and answered `skipped` for
+    that half since step 13; the Postgres derivation is the whole of it now."""
+    return {"trigger": "manual", "postgres": await _derive_postgres_now("manual")}
 
 
 @router.post("/warehouse/rebuild-silver")
@@ -307,47 +176,15 @@ async def rebuild_silver_from_scratch(
     request: Request,
     admin: dict = Depends(require_admin),
 ):
-    """
-    DROP + CREATE + INSERT silver_orders from bronze. Bypasses MVCC —
-    use when silver has corrupted rows blocking DELETE+INSERT rebuild.
-    """
-    from core import warehouse_cutover
-    from core.duckdb_store import (
-        SILVER_ORDERS_DDL, silver_select_sql, silver_pass2_sql,
-    )
-    from core.sql_dialect import DUCKDB
+    """Rebuild Silver from scratch — in Postgres, the derivation run past its
+    floor, which rebuilds `silver.orders` whole (TRUNCATE and both passes in
+    one transaction, `core.pg_silver.rebuild_silver`).
 
-    if not warehouse_cutover.duckdb_derives():
-        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB's Silver is frozen on
-        # purpose, and rebuilding it would hand no tick anything to validate —
-        # the refresh job is not registered. The Postgres half below still runs.
-        result = {"status": "skipped",
-                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
-    else:
-        store = await get_store()
-
-        async with store.connection() as conn:
-            conn.execute("DROP TABLE IF EXISTS silver_orders")
-            conn.execute(SILVER_ORDERS_DDL)
-            conn.execute(
-                f"INSERT INTO silver_orders SELECT {silver_select_sql(DUCKDB)} FROM orders o")
-            conn.execute(silver_pass2_sql(dialect=DUCKDB))
-            count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
-            max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
-
-        logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
-        # DROP/CREATE/INSERT are autocommit statements on purpose (this endpoint
-        # exists to bypass the transactional path when Silver is already
-        # misbehaving), so an INSERT that dies leaves Silver empty. Marking dirty
-        # hands the result to the next refresh tick, which validates it and, if it
-        # is half-done, rebuilds it.
-        await store.mark_warehouse_dirty(None)
-        result = {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
-    from core import pg_derivation
-
-    if pg_derivation.owns():
-        result["postgres"] = await _derive_postgres_now("manual")
-    return result
+    Until step 14's S14-15 this DROPped, re-created and re-filled DuckDB's
+    `silver_orders` first — a lever for DuckDB rows that blocked its
+    DELETE+INSERT rebuild — and answered `skipped` for that half since step
+    13, when DuckDB stopped deriving."""
+    return {"postgres": await _derive_postgres_now("manual")}
 
 
 # POST /api/duckdb/purge-orders was retired by the owner's decision OD-10
