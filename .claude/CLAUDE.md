@@ -154,7 +154,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
 | `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg, reconciliation_ch — with issues/diffs (за сессией) |
-| `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
+| `/api/warehouse/status` | The Postgres derivation: owed or not, when built, the last journalled run (`cutover` and `duckdb_frozen` went with step 13's switch in step 14's S14-15) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
@@ -1177,7 +1177,7 @@ whole reason the group is read from the source now.
 
 | Job | Trigger | What it does |
 |---|---|---|
-| `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard; not registered under `KS_WRITE_WAREHOUSE=postgres` |
+| `pg_warehouse_derive` | every 1 min | Postgres derives Silver, Gold and the customer profile when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
@@ -1848,9 +1848,10 @@ the end of `connect()`.
 - **The alert says what the machine already tried**, and still never triggers
   a repair. `machine_attempts_note()` reads the ClickHouse archive's heal
   ledger (24 h window; the buyers' ids-diff was the other until step 14's
-  S14-13 deleted it) and is *passed into* `format_alert_message`, which stays pure
-  but for one mode cached at boot: `KS_UTM_PARSE` picks which lever line the
-  `pg_order_utm_*` findings carry (`REMEDIATION_UTM_PARSED_IN_POSTGRES`).
+  S14-13 deleted it) and is *passed into* `format_alert_message`, which is
+  pure: the `pg_order_utm_*` findings carry the Postgres parser's lever line,
+  the one `KS_UTM_PARSE=postgres` picked (`REMEDIATION_UTM_PARSED_IN_POSTGRES`)
+  until step 14's S14-15 removed the mode and the swap.
 - **Mirror freshness**: `/api/health` publishes `mirrors` — `last_ok_at` age,
   `failures_since_ok` and a boolean `failing` for `bronze.orders`. The error
   *text* is deliberately not published; this endpoint is public and the text
@@ -2405,7 +2406,8 @@ ids-diffs (`core/pg_backfill.py`, `core/pg_expense_backfill.py`,
 `core/pg_buyers.py`) and the four `POST /api/mirror/backfill/*` routes are
 deleted. What stays in `core/pg_landing.py`, byte for byte, is what the chains
 run: `_write_order_rows`, `_write_rows`, `WATERMARK_OK_SQL` and
-`_record_failure`; `enabled()`/`mirror_on()` answer True until S14-15. The
+`_record_failure`; `enabled()`/`mirror_on()` answered True until S14-15
+deleted them with their last consumer, step 13's preconditions. The
 checks that were gated on the mirror (`reconcile_order_versions`,
 `reconcile_buyer_completeness`, `reconcile_bot_state`, the UTM completeness)
 are gated on `mirror_reconciliation.configured()` (`KS_PG_DSN`). A
@@ -3232,7 +3234,7 @@ finding, not by reading the code.
 
 **С S14-06 шага 14 дашборд читает только Postgres**: `KS_READ_GOLD`,
 `KS_READ_SILVER` и `KS_READ_DASHBOARD` движок больше не выбирают (до S14-15
-их читает только готовность шага 13 на `/api/warehouse/status`), сбой —
+их читала только готовность шага 13 на `/api/warehouse/status`), сбой —
 отказ 503 `surface=dashboard` (у экрана менеджеров — `managers`).
 `/api/summary` по источнику без колонки в DuckDB-Gold (3, 5) по-прежнему
 отвечает нулями — константа по решению владельца 5 для шага 14; маршрут
@@ -3379,7 +3381,7 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 
 **С S14-05 шага 14 вкладка читает только Postgres** — каждый её метод,
 разбивка органики и «Тільки піксель» тоже, одним роутером `_traffic_run`:
-`KS_READ_TRAFFIC` движок больше не выбирает (до S14-15 его читает только
+`KS_READ_TRAFFIC` движок больше не выбирает (до S14-15 его читала только
 готовность шага 13 на `/api/warehouse/status`), сбой — отказ 503
 `surface=traffic` (см. «Every read that falls back to DuckDB is counted»).
 Ниже — история переноса и блоки вкладки.
@@ -3549,6 +3551,17 @@ COUNT(*) FROM ( ... )` без имени производной таблицы; 
 под `LIMIT`/`OFFSET`, из-за чего две кампании с равной выручкой попадают на обе
 страницы или ни на одну; и `SUM(revenue)` по выручковому Gold без предиката
 свёртки — в Postgres это считает каждый заказ дважды и **делит ROAS пополам**.
+
+**С S14-15 шага 14 `silver.order_utm` пишет только разбор в Postgres.**
+Копия из DuckDB (`core/pg_order_utm.py`, `ship_order_utm`,
+`ship_after_reparse`), разбор DuckDB (`refresh_utm_silver_layer`) и режим
+`KS_UTM_PARSE` удалены: деривация кончается `parse_incremental_locked`, четыре
+двери зовут `reparse_router` без стора — `parse_full` для reclassify и CLI,
+`parse_incremental_locked` для остальных, — блок `utm_parse` и канарейка
+`utm_parse_mode_invalid` ушли, строка «→» находок `pg_order_utm_*` — та, что
+была при `postgres`. Обходы дверей — `tests/unit/test_utm_parse_doors.py`;
+разбор держится литерала того, что DuckDB писал на золотых фикстурах
+(`tests/integration/golden/utm_parse.json`). Ниже — история.
 
 **Перепарсинг UTM обязан отгружаться сам.** Три админских эндпоинта и
 `scripts/backfill_utm.py` переписывают `silver_order_utm` в DuckDB, **не помечая
@@ -3798,9 +3811,9 @@ the same failure under `off` — same body, so the same count under
 `read_fallback_mode.refused`, the same log line and the same 503 naming the
 surface. `KS_READ_TRAFFIC`, `_MARGIN`, `_PRODUCTS_INTEL`, `_REPORTS`,
 `_MARKETING` and `_LOOKUPS` route nothing: no router reads them and their
-modules carry no `ENV`. One reader is left, step 13's readiness on
+modules carry no `ENV`. The last reader, step 13's readiness on
 `/api/warehouse/status` (`cutover`, a `reader:*` key per switch not at
-`postgres`), until S14-15. The `.env` lines stay while an image from before
+`postgres`), went in S14-15. The `.env` lines stay while an image from before
 step 14 is a rollback target. Without `KS_PG_DSN` the pool refuses to guess
 a database, and that is the failure refused — where `no_address` used to
 name the switch. The `/marketing` goal read has no branch of its own any
@@ -4347,10 +4360,37 @@ precondition is evaluated at the start and Postgres is not asked there;
 `KS_UTM_PARSE`, `KS_READ_FALLBACK`, `KS_DQ_PG_WAREHOUSE`, `KS_MIRROR_LANDING`
 and `KS_GOALS_HISTORY` are constants too (`own`, `postgres`, `off`, `on`, on,
 `silver`) — production's values, held by `tests/unit/test_step14_prod_parity.py`.
-`/api/warehouse/status` still reports the preconditions until S14-15. Since
-S14-14 `KS_DQ_PG_WAREHOUSE` is read by nothing else — the twins' flag went
-with the DuckDB integrity scan — and `retired_conditions_clear` is no
-precondition. History below.
+Since S14-14 `KS_DQ_PG_WAREHOUSE` is read by nothing else — the twins' flag
+went with the DuckDB integrity scan — and `retired_conditions_clear` is no
+precondition.
+
+**Since S14-15 step 13 is code with no mode.** `core/warehouse_cutover.py` is
+deleted — the mode, the preconditions and their readiness report, the
+recorded writer and its settle, the way back and its refusal, the UTM
+re-parse marker and the Gate's marks for the retired comparisons
+(`AlertGate.mark_delivered`) — and so are DuckDB's rebuild
+(`refresh_warehouse_layers`, its validation and cell guard, the dirty flag,
+`get_warehouse_status`), DuckDB's UTM parse and its copy into Postgres
+(`core/pg_order_utm.py`), and the `KS_PG_DERIVE` and `KS_UTM_PARSE` modes:
+`pg_warehouse_derive` is registered unconditionally, every writer calls
+`pg_derivation.mark`, and the four UTM doors parse Postgres alone through
+`reparse_router`, which takes no store. `configure_modes()` configures
+`KS_DUCKDB` and `KS_READ_FALLBACK` alone, and reads none of
+`KS_WRITE_WAREHOUSE`, `KS_PG_DERIVE`, `KS_UTM_PARSE`, `KS_MIRROR_LANDING`,
+whatever they say (`tests/unit/test_step13_as_code.py`). `/api/health` lost
+`warehouse_writer_mode` and `utm_parse`, and `derivation` its `mode` and
+`error`; the canary lost `warehouse_mode_invalid`,
+`warehouse_preconditions_unmet`, `warehouse_way_back_refused`,
+`warehouse_hold_stuck`, `utm_parse_mode_invalid` and
+`derivation_mode_invalid`, and the REGISTRY those and the six `warehouse:`
+conditions of DuckDB's validator; `/api/warehouse/status` answers the
+Postgres derivation alone, and its refresh and `rebuild-silver` run it alone.
+**Left on disk on purpose**: the `warehouse_writer` row in
+`app.sync_metadata` and `data/warehouse-utm-reparsed-at`, which an image from
+before step 14 reads; the `marks` on `data/alert-gate-*.json` entries, which
+the Gate keeps when it rewrites the file. Nothing in this build writes the
+marker any more, so a reclassify run on it is not noted for a way back from
+step 13 that such an image would take. History below.
 
 `KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
 `duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
