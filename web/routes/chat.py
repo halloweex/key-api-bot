@@ -14,7 +14,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from web.ratelimit import limiter  # single app-wide limiter instance
 from web.routes.auth import require_admin
+from core import read_fallback
+from core.meilisearch_client import MeiliUnavailable
 from web.services.search_service import get_search_service
+
 from web.services.chat_service import get_chat_service, ConversationAccessError
 from core.observability import get_logger
 
@@ -202,8 +205,14 @@ async def chat_status():
 # SEARCH ENDPOINTS (No LLM, fast)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# A Meilisearch that does not answer is a counted 503 naming `search`
+# (L3-04), refused here at the routes; the assistant's tools refuse it the same
+# way and answer it inside the conversation. `_route` on the names: the
+# consumer walk (`tests/unit/test_read_fallback_consumers.py`) resolves a call
+# by its name, and a route called `search` would make every `re.search` read
+# as a road to a refusal.
 @router.get("/search")
-async def search(
+async def search_route(
     q: str = Query(..., min_length=2, description="Search query"),
     type: str = Query("all", description="Search type: buyers, orders, products, or all"),
     limit: int = Query(10, ge=1, le=50, description="Max results per type"),
@@ -215,40 +224,52 @@ async def search(
     No LLM involvement - direct database search.
     """
     service = get_search_service()
-    results = await service.search(q, type, limit)
+    try:
+        results = await service.search(q, type, limit)
+    except MeiliUnavailable as exc:
+        raise read_fallback.refuse("search", exc)
     return results
 
 
 @router.get("/search/buyers")
-async def search_buyers(
+async def search_buyers_route(
     q: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(10, ge=1, le=50),
     city: Optional[str] = Query(None),
 ):
     """Search buyers by name, phone, or email."""
     service = get_search_service()
-    return await service.search_buyers(q, limit, city)
+    try:
+        return await service.search_buyers(q, limit, city)
+    except MeiliUnavailable as exc:
+        raise read_fallback.refuse("search", exc)
 
 
 @router.get("/search/orders")
-async def search_orders(
+async def search_orders_route(
     q: str = Query(..., min_length=1, description="Search query (order ID or buyer name)"),
     limit: int = Query(10, ge=1, le=50),
 ):
     """Search orders by ID or buyer name."""
     service = get_search_service()
-    return await service.search_orders(q, limit)
+    try:
+        return await service.search_orders(q, limit)
+    except MeiliUnavailable as exc:
+        raise read_fallback.refuse("search", exc)
 
 
 @router.get("/search/products")
-async def search_products(
+async def search_products_route(
     q: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(10, ge=1, le=50),
     brand: Optional[str] = Query(None),
 ):
     """Search products by name, SKU, or brand."""
     service = get_search_service()
-    return await service.search_products(q, limit, brand)
+    try:
+        return await service.search_products(q, limit, brand)
+    except MeiliUnavailable as exc:
+        raise read_fallback.refuse("search", exc)
 
 
 # The buyer, order and product cards that stood here — GET /api/buyers/{id},
