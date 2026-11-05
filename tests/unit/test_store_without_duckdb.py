@@ -15,9 +15,11 @@ snapshot. What is held here:
 * rule 3: junk, or nothing, in the variables S14-18 stopped reading
   (`KS_DUCKDB`, `DUCKDB_MEMORY_LIMIT`) — import, configure and `/api/health`
   answer as with production's values;
-* rule 5: nothing in the code deletes or renames the DuckDB file, its
-  backups, the export or the Arks, and the chain markers and the report
-  spool are touched by the two functions that always did and no other;
+* rule 5: nothing in the code — Python or shell, `deploy/` included —
+  deletes, renames or replaces the DuckDB file, its backups, the export or
+  the Arks but the Ark shipping's cleanup of its own work, and the chain
+  markers and the report spool are touched by the four functions that always
+  did and no other (`tests/deletion_walk.py`);
 * rule 8: the conditions S14-18 removed are no condition and no lever.
 
 Every guard names, in its docstring, the mutation it catches.
@@ -35,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from core import read_fallback
+from tests import deletion_walk
 from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 REPO = Path(__file__).resolve().parents[2]
@@ -291,79 +294,218 @@ def test_a_variable_it_stopped_reading_changes_nothing(tmp_path, how):
 
 
 # ─── rule 5: what the code may delete ────────────────────────────────────────
+#
+# The walk is `tests/deletion_walk.py`, which says what it reads and what it
+# cannot. Every mutation case below runs through the same two functions the
+# guards run — over the real tree with one file added or changed — never
+# through a hand-made `ast.parse`. The review of S14-18 found the first form
+# blind to four of them (a from-import, a module constant, `deploy/`, a helper
+# naming the marker); each is a case here.
 
-_DELETING = {"unlink", "rename", "replace", "remove", "rmtree", "move", "rmdir",
-             "truncate", "removedirs"}
-# Words a function that deletes or renames would have to name to reach the
-# DuckDB file, its backups, the export or the Arks.
-_DUCKDB_PLACES = ("analytics", "DUCKDB_FILE_NAME", "DB_PATH", "DB_DIR",
-                  "export_parquet", "backups", "/ark", "BACKUP_ARK", ".duckdb")
-# The two that touch the other protected places, and why they may.
-ALLOWED = {
+# Every deletion, rename or replacement that reaches a protected place, with
+# the places it reaches and why it may. Equality, not a subset: a new one, a
+# stale entry and a place that moved all fail.
+ALLOWED_PY = {
+    ("core/chain_latch.py", "latch"): (
+        ("MARKER_DIR", "write-chain-owners"),
+        "writes the chain's marker at its first Postgres write, atomically "
+        "over its own path — the one write rule 5 allows (decision 3)"),
     ("core/chain_latch.py", "release"): (
-        "the chain marker's own remover; no caller since S14-04 deleted the "
+        ("MARKER_DIR", "write-chain-owners"),
+        "the marker's own remover; no caller since S14-04 deleted the "
         "copy-back (tests only)"),
+    ("core/report_ledger.py", "spool"): (
+        ("SPOOL_DIR", "report-ledger-pending"),
+        "writes a delivered week Postgres refused, atomically — the spool's "
+        "design (OD-16 (a))"),
     ("core/report_ledger.py", "drain"): (
-        "lands a spooled week in Postgres, then removes that spooled file — "
-        "the spool's design (OD-16 (a))"),
+        ("SPOOL_DIR", "report-ledger-pending"),
+        "lands a spooled week in Postgres, then removes that spooled file "
+        "(OD-16 (a))"),
+}
+# The Ark's own shipping (stage 5's PR-11, before step 14) cleans up after
+# itself inside the Ark root: the work directory `.ship.*` it made, the copy
+# it fetched back, and an Ark this run froze and that failed. Never an Ark a
+# run did not make.
+_ARK = "deploy/ark_ship.sh"
+ALLOWED_SHELL = {
+    (_ARK, 'rm -rf "${OUT_ROOT:?}/$s"'): (
+        ("/root/ark",), "a freeze that failed: the stamps it made, never one in `$had`"),
+    (_ARK, 'rm -rf "$ARK_DIR"'): (
+        ("/root/ark", "BACKUP_ARK"),
+        "the Ark this run just froze, when the source moved under it"),
+    (_ARK, 'rm -f "$plain"'): (
+        ("/root/ark", "BACKUP_ARK"), "the plain tarball in the run's work directory"),
+    (_ARK, 'rm -f "$WORK/$enc"'): (
+        ("/root/ark", "BACKUP_ARK"), "the encrypted tarball in the work directory, shipped"),
+    (_ARK, 'rm -f "$back/$enc"'): (
+        ("/root/ark", "BACKUP_ARK"), "the copy fetched back to verify"),
+    (_ARK, 'rm -f "$back/ark.tar.gz"'): (
+        ("/root/ark",), "the copy fetched back, decrypted"),
+    (_ARK, 'rm -rf "$back"'): (
+        ("/root/ark",), "the fetched-back directory inside the work directory"),
 }
 
 
-def _deleters():
-    for top in TREES:
-        for path in sorted((REPO / top).rglob("*.py")):
-            if "frontend" in path.parts:
-                continue
-            rel = path.relative_to(REPO).as_posix()
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for fn in ast.walk(tree):
-                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-                         and isinstance(n.func, ast.Attribute)
-                         and n.func.attr in _DELETING
-                         # `str.replace` is not a rename: only a path's, os's
-                         # or shutil's `replace` moves a file.
-                         and (n.func.attr != "replace" or len(n.args) < 2)]
-                if calls:
-                    yield rel, fn
-
-
 class TestNothingDeletesWhatRule5Keeps:
-    def test_no_deleting_function_names_the_duckdb_file_or_its_copies(self):
-        """Mutation: write a function that unlinks `DATA_DIR / DUCKDB_FILE_NAME`,
-        a backup or the export."""
-        offenders = []
-        for rel, fn in _deleters():
-            body = ast.unparse(fn)
-            hit = [w for w in _DUCKDB_PLACES if w in body]
-            if hit:
-                offenders.append(f"{rel}:{fn.name} {hit}")
-        assert offenders == [], offenders
+    def test_the_python_deletions_are_exactly_the_allowed(self):
+        """Mutation: delete, rename or replace the DuckDB file, a backup, the
+        export, an Ark, a marker or a spooled file from anywhere else."""
+        found = deletion_walk.python_deletions()
+        assert found == {k: places for k, (places, _) in ALLOWED_PY.items()}, found
 
-    def test_the_markers_and_the_spool_are_touched_by_the_two_that_always_did(self):
-        """Mutation: delete a marker or a spooled file from anywhere else."""
-        touching = set()
-        for rel, fn in _deleters():
-            body = ast.unparse(fn)
-            if any(w in body for w in ("MARKER_DIR", "write-chain-owners", "SPOOL_DIR",
-                                       "report-ledger-pending")):
-                touching.add((rel, fn.name))
-        assert touching <= set(ALLOWED), touching - set(ALLOWED)
-        # The two modules that own the places delete in those two functions
-        # alone (the spool's `drain` reaches its files through `_spooled`).
-        owners = {(rel, fn.name) for rel, fn in _deleters()
-                  if rel in ("core/chain_latch.py", "core/report_ledger.py")}
-        assert owners == set(ALLOWED), owners
+    def test_the_shell_deletions_are_exactly_the_allowed(self):
+        """Mutation: `rm`, `mv` or `ln -f` over those places in a script."""
+        found = deletion_walk.shell_deletions()
+        assert found == {k: places for k, (places, _) in ALLOWED_SHELL.items()}, found
 
-    def test_the_walk_sees_a_deletion(self, tmp_path):
-        source = ("from core.paths import DATA_DIR, DUCKDB_FILE_NAME\n"
-                  "def wipe():\n    (DATA_DIR / DUCKDB_FILE_NAME).unlink()\n")
-        fn = ast.parse(source).body[1]
-        assert any(isinstance(n, ast.Call) and n.func.attr == "unlink"
-                   for n in ast.walk(fn) if isinstance(n, ast.Call)
-                   and isinstance(n.func, ast.Attribute))
-        assert "DUCKDB_FILE_NAME" in ast.unparse(fn)
+    def test_the_walks_read_the_trees_they_say(self):
+        """`deploy/` is walked for both languages, and the walk is not empty.
+        Mutation: drop `deploy` from either list."""
+        assert "deploy" in deletion_walk.PYTHON_TREES
+        assert "deploy" in deletion_walk.SHELL_TREES
+        modules, deleters = deletion_walk._tree()
+        assert any(rel.startswith("deploy/") for rel in modules)
+        assert ("func", "core/atomic_file.py", "write_atomic") in deleters
+
+    # One case per shape, each a file the walk did not see before.
+    PY_CASES = {
+        "from-import, module constant, loop variable": (
+            "core/mut_b.py",
+            "from os import remove\n"
+            "from core.paths import DATA_DIR\n"
+            "NIGHTLY = DATA_DIR / 'backups'\n"
+            "def prune(keep):\n"
+            "    for old in sorted(NIGHTLY.glob('*'))[:-keep]:\n"
+            "        remove(old)\n",
+            ("core/mut_b.py", "prune"), {"backups"}),
+        "an alias of shutil, a constant behind a parameter's `or`": (
+            "core/disk_monitor.py", None,  # appended to the real module
+            ("core/disk_monitor.py", "_mut_wipe"), {"export_parquet"}),
+        "deploy/, a path built with +": (
+            "deploy/mut_c.py",
+            "import os\n"
+            "def swap(path):\n"
+            "    os.rename(path + '/analytics.duckdb', path + '/analytics.old')\n",
+            ("deploy/mut_c.py", "swap"), {"analytics", ".duckdb"}),
+        "a helper of another module naming the marker": (
+            "core/mut_e.py",
+            "from core import chain_latch\n"
+            "def forget(chain):\n"
+            "    chain_latch.marker_path(chain).unlink()\n",
+            ("core/mut_e.py", "forget"), {"MARKER_DIR", "write-chain-owners"}),
+        "inline, the control": (
+            "core/mut_d.py",
+            "import shutil\n"
+            "from core.paths import DATA_DIR\n"
+            "def drop():\n"
+            "    shutil.rmtree(DATA_DIR / 'export_parquet')\n",
+            ("core/mut_d.py", "drop"), {"export_parquet"}),
+        "a wrapper, seen at its caller": (
+            "core/mut_f.py",
+            "from core.paths import DATA_DIR, DUCKDB_FILE_NAME\n"
+            "def _rm(p):\n"
+            "    p.unlink()\n"
+            "def wipe():\n"
+            "    _rm(DATA_DIR / DUCKDB_FILE_NAME)\n",
+            ("core/mut_f.py", "wipe"), {"DUCKDB_FILE_NAME", "analytics", ".duckdb"}),
+        "self, as the class assigns it": (
+            "core/mut_g.py",
+            "from core.duckdb_constants import DB_PATH\n"
+            "class Holder:\n"
+            "    def __init__(self):\n"
+            "        self._file = DB_PATH\n"
+            "    def drop(self):\n"
+            "        self._file.unlink()\n",
+            ("core/mut_g.py", "Holder.drop"), {"DB_PATH", "analytics", ".duckdb"}),
+        "a subprocess handed rm": (
+            "scripts/mut_h.py",
+            "import subprocess\n"
+            "from core.paths import DATA_DIR\n"
+            "BACKUPS = DATA_DIR / 'backups'\n"
+            "def purge():\n"
+            "    subprocess.run(['rm', '-rf', str(BACKUPS)], check=True)\n",
+            ("scripts/mut_h.py", "purge"), {"backups"}),
+        "a rename onto the file": (
+            "core/mut_i.py",
+            "from core.paths import DATA_DIR, DUCKDB_FILE_NAME\n"
+            "def put(tmp):\n"
+            "    tmp.replace(DATA_DIR / DUCKDB_FILE_NAME)\n",
+            ("core/mut_i.py", "put"), {"DUCKDB_FILE_NAME", "analytics", ".duckdb"}),
+        "the spool, through the private helper of its module": (
+            "web/mut_j.py",
+            "from core.report_ledger import _spool_dir\n"
+            "def clear():\n"
+            "    for p in _spool_dir('weekly').glob('*.json'):\n"
+            "        p.unlink()\n",
+            ("web/mut_j.py", "clear"), {"SPOOL_DIR", "report-ledger-pending"}),
+        "module-level code": (
+            "scripts/mut_k.py",
+            "import os\n"
+            "from core.paths import DATA_DIR\n"
+            "os.remove(DATA_DIR / 'analytics.duckdb.wal')\n",
+            ("scripts/mut_k.py", "<module>"), {"analytics", ".duckdb"}),
+    }
+    _APPENDED = ("\n\nimport shutil as _mut_shutil\n"
+                 "from core.paths import DATA_DIR as _MUT_DATA\n"
+                 "_MUT_EXPORT = _MUT_DATA / 'export_parquet'\n"
+                 "def _mut_wipe(target=None):\n"
+                 "    _mut_shutil.rmtree(target or _MUT_EXPORT)\n")
+
+    @pytest.mark.parametrize("shape", sorted(PY_CASES))
+    def test_the_python_walk_sees_each_shape(self, shape):
+        rel, source, unit, places = self.PY_CASES[shape]
+        if source is None:
+            source = (REPO / rel).read_text(encoding="utf-8") + self._APPENDED
+        found = deletion_walk.python_deletions({rel: source})
+        assert unit in found, (shape, found)
+        assert places <= set(found[unit]), (shape, found[unit])
+
+    def test_the_python_walk_is_not_fooled_by_names_alike(self):
+        """`list.remove`, `str.replace`, `datetime.replace` and an alert
+        whose evidence names the backups are not deletions there — or the
+        guard would be an allowlist of noise."""
+        source = ("from core.paths import DATA_DIR\n"
+                  "def f(items, when):\n"
+                  "    items.remove('analytics.duckdb')\n"
+                  "    name = 'analytics.duckdb'.replace('a', 'b')\n"
+                  "    return when.replace(tzinfo=None), name\n"
+                  "def g(bucket):\n"
+                  "    from core.atomic_file import write_atomic\n"
+                  "    write_atomic(DATA_DIR / 'alert-tasks' / f'{bucket}.json', '')\n"
+                  "def h():\n"
+                  "    g('disk:backups:export_parquet:analytics.duckdb')\n")
+        assert deletion_walk.python_deletions({"core/mut_neg.py": source}) == {}
+
+    SHELL_CASES = {
+        "a variable": ("D=/opt/key-api-bot/data\nrm -f \"$D/analytics.duckdb\"\n",
+                       {".duckdb"}),
+        "a default, the directory itself": ("mv \"${DATA:-data}/backups\" /tmp/old\n",
+                                            {"backups"}),
+        "ln -f": ("ln -sf /dev/null data/export_parquet\n", {"export_parquet"}),
+        "find -delete": ("ARK=/root/ark/key-api-bot\nfind \"$ARK\" -name '*.gpg' -delete\n",
+                         {"/root/ark"}),
+        "down a pipe": ("ls -1t data/backups/analytics-*.duckdb | tail -n +3 | xargs -r rm -f\n",
+                        {".duckdb"}),
+        "a continued line in a subshell": (
+            "( cd /opt/key-api-bot && \\\n  rm -rf data/write-chain-owners )\n",
+            {"write-chain-owners"}),
+    }
+
+    @pytest.mark.parametrize("shape", sorted(SHELL_CASES))
+    def test_the_shell_walk_sees_each_shape(self, shape):
+        text, places = self.SHELL_CASES[shape]
+        found = deletion_walk.shell_deletions({"deploy/mut.sh": text})
+        assert found and places <= set().union(*found.values()), (shape, found)
+
+    def test_the_shell_walk_leaves_postgres_s_own_backups(self):
+        """`backups/postgres` and `backups/pg_wal` are Postgres's: their
+        retention is not rule 5's business."""
+        text = ("rm -f \"backups/postgres/_drill-$STAMP.dump\"\n"
+                "WAL_DIR=\"$(pwd)/backups/pg_wal\"\n"
+                "for seg in \"$WAL_DIR\"/*.gz; do rm -f \"/tmp/x/$(basename \"$seg\")\"; done\n"
+                "docker rm -f -v ks-pg\n")
+        assert deletion_walk.shell_deletions({"deploy/mut.sh": text}) == {}
 
 
 # ─── rule 8: the conditions S14-18 removed ───────────────────────────────────
