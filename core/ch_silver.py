@@ -216,6 +216,10 @@ async def ch_silver_sync() -> Dict[str, Any]:
 
     if not configured():
         return {"skipped": f"{URL_ENV} is not set"}
+    # Which state row a failure belongs to: the silver ship's until it is
+    # marked OK, then Gold's derivation's. Recorded against Silver alone, a
+    # Gold that stopped deriving read as fresh (A17).
+    stage = SILVER_STATE
     try:
         # Under PG_LAYER_LOCK for two of the review's races: the hourly tick
         # and the daily reconciliation both drive TRUNCATE/EXCHANGE on the
@@ -225,6 +229,7 @@ async def ch_silver_sync() -> Dict[str, Any]:
             rows = await _fetch_pg_silver()
             await _ship_silver_rows(rows)
             await _mark_ok(SILVER_STATE, len(rows))
+            stage = GOLD_STATE
             gold_rows = await _derive_gold()
             await _mark_ok(GOLD_STATE, gold_rows)
         logger.info(
@@ -235,7 +240,7 @@ async def ch_silver_sync() -> Dict[str, Any]:
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"
         logger.error("ch_silver: sync failed: %s", detail)
-        await _mark_failed(SILVER_STATE, detail)
+        await _mark_failed(stage, detail)
         return {"error": detail}
 
 
@@ -451,15 +456,17 @@ async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]
         return [gold_values_unwatched(f"{URL_ENV} is not set")]
 
     async with PG_LAYER_LOCK:
+        stage = SILVER_STATE           # whose row a failure is (`ch_silver_sync`)
         try:
             shipped = await _fetch_pg_silver()
             await _ship_silver_rows(shipped)
             await _mark_ok(SILVER_STATE, len(shipped))
+            stage = GOLD_STATE
             gold_rows = await _derive_gold()
             await _mark_ok(GOLD_STATE, gold_rows)
         except Exception as e:
             detail = f"{type(e).__name__}: {e}"
-            await _mark_failed(SILVER_STATE, detail)
+            await _mark_failed(stage, detail)
             return [IntegrityIssue(
                 check_name="ch_silver_sync_failed",
                 table_name=SILVER_TABLE, severity=Severity.WARN, count=1,

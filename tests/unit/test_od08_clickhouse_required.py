@@ -340,8 +340,9 @@ class TestABlindArchiveRunResolvesNothingEither:
         from core import ch_history
 
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
+        # `ch_history_stalled` beside the buckets since L2-02 (A17).
         assert ch_history.history_unverified_conditions([], compared=False) == [
-            "ch_history_buckets"]
+            "ch_history_buckets", "ch_history_stalled"]
         assert ch_history.history_unverified_conditions([], compared=True) == []
 
     @pytest.mark.asyncio
@@ -358,7 +359,7 @@ class TestABlindArchiveRunResolvesNothingEither:
         issues = await ch_history.reconcile_ch_history()
         assert _names(issues) == [ch_history.HISTORY_UNREACHABLE]
         assert ch_history.history_unverified_conditions(issues, compared=True) == [
-            "ch_history_buckets"]
+            "ch_history_buckets", "ch_history_stalled"]
 
     def test_the_held_conditions_are_every_critical_the_archive_files(self):
         """Derived from what `reconcile_ch_history` emits, so a CRITICAL
@@ -367,7 +368,9 @@ class TestABlindArchiveRunResolvesNothingEither:
         import inspect
         from core import ch_history
 
-        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history))
+        # And `_stall`, which it calls for `ch_history_stalled` (L2-02).
+        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history)
+                         + "\n" + inspect.getsource(ch_history._stall))
         critical = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -376,7 +379,7 @@ class TestABlindArchiveRunResolvesNothingEither:
                 if (isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute)
                         and sev.attr == "CRITICAL"):
                     critical.add(name.value)
-        assert critical == {"ch_history_buckets"}
+        assert critical == {"ch_history_buckets", "ch_history_stalled"}
         assert set(ch_history.HISTORY_WATCH_CONDITIONS) == critical
 
 

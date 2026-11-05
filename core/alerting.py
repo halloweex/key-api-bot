@@ -416,6 +416,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_engines_gold_mismatch": _c("the engines' aggregations agree again"),
     "ch_history_unreachable": _c("ClickHouse answers again"),
     "ch_history_buckets": _c("a human repairs the archive copy"),
+    # The archive copy stopped receiving (L2-02): below its own MAX(id) the
+    # buckets agree, so only Postgres' side of the ship can say so.
+    "ch_history_stalled": _c("the archive ships within 3 h and nothing waits past it"),
     # OD-08 (a): the one independent re-aggregation of Gold did not run —
     # KS_CH_URL unset, a failed ship or read-back, a raise. WARN while DuckDB's
     # Gold is still compared, CRITICAL once it is not.
