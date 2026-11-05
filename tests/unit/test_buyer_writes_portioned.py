@@ -132,7 +132,7 @@ class TestTheRoutes:
         monkeypatch.setattr(admin, "_sync_all_buyers", body)
         monkeypatch.setattr(admin, "get_store", AsyncMock(return_value=MagicMock()))
 
-        r = _client().post("/api/duckdb/sync-all-buyers")
+        r = _client().post("/api/sync/sync-all-buyers")
 
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "started"
@@ -145,7 +145,7 @@ class TestTheRoutes:
         running.done.return_value = False
         monkeypatch.setattr(admin, "_BACKGROUND_TASKS", {running})
 
-        r = _client().post("/api/duckdb/sync-all-buyers")
+        r = _client().post("/api/sync/sync-all-buyers")
 
         assert r.status_code == 409, r.text
 
@@ -156,7 +156,7 @@ class TestTheRoutes:
         monkeypatch.setattr(admin, "HEAVY_LOCK_WAIT_S", 0.05)
         monkeypatch.setattr(get_scheduler(), "_heavy_job_lock", _FakeLock())
 
-        r = _client().post("/api/duckdb/sync-buyers")
+        r = _client().post("/api/sync/sync-buyers")
 
         assert r.status_code == 409, r.text
 
@@ -166,5 +166,5 @@ class TestTheRoutes:
         from web import middleware
         from web.routes.api import admin
 
-        assert "/api/duckdb/sync-buyers" not in middleware.SLOW_ENDPOINTS
+        assert "/api/sync/sync-buyers" not in middleware.SLOW_ENDPOINTS
         assert admin.HEAVY_LOCK_WAIT_S < middleware.DEFAULT_REQUEST_TIMEOUT

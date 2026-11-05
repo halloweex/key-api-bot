@@ -809,10 +809,11 @@ def test_routes(state, sweep_network, sweep_world, production_host, monkeypatch)
     calls = asyncio.run(sweep())
     body = calls.bodies.get("GET /api/health")
     if isinstance(body, dict):
-        # What the canary judges the week's probe by (PR-3).
+        # What the canary judges the week's probe by (PR-3). (`duckdb` and
+        # `migrations`, the DuckDB block's status and the ledger, beside it
+        # until step 14's S14-17 took both out of the answer.)
         health.update(status=body.get("status"), degraded_by=body.get("degraded_by"),
-                      duckdb=(body.get("duckdb") or {}).get("status"),
-                      migrations=body.get("migrations"))
+                      blocks=sorted(k for k in ("duckdb", "migrations") if k in body))
     record.write(routes=routes, variants=variants,
                  surfaces={step[4:]: s for step, s in calls.surfaces.items()},
                  health=health,

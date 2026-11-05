@@ -1205,7 +1205,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("chain_buyer_orphan_rows",
      "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
     ("chain_buyer_contact_missing",
-     "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
+     "POST /api/sync/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
     # Chain 3's orders: an order and its costs are written together, so an
     # orphaned cost is an order refused or a write that went round the chain.
     ("chain_expense_orphans",

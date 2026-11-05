@@ -669,7 +669,7 @@ class SyncService:
         The one thing is a read refused because its engine failed
         (`read_fallback.ReadUnavailable`, DN-20c): recorded the same way, and
         then passed on, because the caller is the one that can answer it — the
-        tick names it and skips the step, and `POST /duckdb/sync-buyers`
+        tick names it and skips the step, and `POST /sync/sync-buyers`
         answers 503 naming the surface, as every route does. Answered here it
         was "Synced 0 buyers" to the one and a quiet step to the other.
 

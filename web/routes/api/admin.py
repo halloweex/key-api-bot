@@ -1,4 +1,4 @@
-"""Admin operations: DuckDB management, warehouse, cache, jobs, sync, events."""
+"""Admin operations: sync levers, warehouse, cache, jobs, events."""
 import asyncio
 import contextlib
 import logging
@@ -20,10 +20,30 @@ logger = logging.getLogger(__name__)
 _BACKGROUND_TASKS: set = set()
 
 
-# ─── DuckDB Admin ─────────────────────────────────────────────────────────────
+# ─── Sync levers ──────────────────────────────────────────────────────────────
+#
+# The four doors that start a sync from KeyCRM by hand live under `/sync/`
+# since step 14's S14-17 (the owner's decision 6 for step 14, OD-S5-8: renamed
+# when the DuckDB code went). They were `/duckdb/…`, a name from the days they
+# wrote DuckDB; each writes Postgres alone since the chains. The old paths
+# stay as aliases out of the schema — the same function, its rate limit
+# shared — until step 14's final stage, so a runbook, a bookmark or a
+# person's habit still reaches the lever. Each limit is shared by its two
+# names (`shared_limit`, scoped by the new path): slowapi scopes a plain
+# `limit` by the request's path, which would give each name a count of its
+# own. `SLOW_ENDPOINTS` and nginx's long timeout name both paths of the two
+# slow ones.
+SYNC_DOORS = {
+    "/sync/resync": "/duckdb/resync",
+    "/sync/refresh-statuses": "/duckdb/refresh-statuses",
+    "/sync/sync-buyers": "/duckdb/sync-buyers",
+    "/sync/sync-all-buyers": "/duckdb/sync-all-buyers",
+}
 
-@router.post("/duckdb/resync")
-@limiter.limit("1/minute")
+
+@router.post("/sync/resync")
+@router.post("/duckdb/resync", include_in_schema=False)
+@limiter.shared_limit("1/minute", scope="sync/resync")
 async def trigger_resync(
     request: Request,
     days: int = 365,
@@ -50,8 +70,9 @@ async def trigger_resync(
         raise HTTPException(status_code=500, detail=f"Resync failed: {str(e)}")
 
 
-@router.post("/duckdb/refresh-statuses")
-@limiter.limit("10/hour")
+@router.post("/sync/refresh-statuses")
+@router.post("/duckdb/refresh-statuses", include_in_schema=False)
+@limiter.shared_limit("10/hour", scope="sync/refresh-statuses")
 async def refresh_order_statuses(
     request: Request,
     days: int = Query(30, ge=1, le=90, description="Days to look back for status changes"),
@@ -285,8 +306,9 @@ async def _sync_all_buyers(store) -> dict:
 # are written to Postgres whatever it says.
 
 
-@router.post("/duckdb/sync-buyers")
-@limiter.limit("120/minute")
+@router.post("/sync/sync-buyers")
+@router.post("/duckdb/sync-buyers", include_in_schema=False)
+@limiter.shared_limit("120/minute", scope="sync/sync-buyers")
 async def sync_buyers(
     request: Request,
     limit: int = Query(100, ge=1, le=500, description="Maximum buyers to sync"),
@@ -321,8 +343,9 @@ async def sync_buyers(
     }
 
 
-@router.post("/duckdb/sync-all-buyers")
-@limiter.limit("1/hour")
+@router.post("/sync/sync-all-buyers")
+@router.post("/duckdb/sync-all-buyers", include_in_schema=False)
+@limiter.shared_limit("1/hour", scope="sync/sync-all-buyers")
 async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)):
     """Start a sync of ALL buyers from KeyCRM, detached. Requires admin.
 
@@ -365,8 +388,8 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
 # it reads "all synced" beside a full `silver.orders`, and chain 4 freezes the
 # third table too. The number that mattered, the buyers orders name and nobody
 # has fetched, is what the buyer step's own selection
-# (`get_missing_buyer_ids`, KS_READ_BUYER_SYNC) computes from Postgres; DuckDB's
-# raw counts stay at GET /api/duckdb/stats.
+# (`get_missing_buyer_ids`, KS_READ_BUYER_SYNC) computes from Postgres. DuckDB's
+# raw counts stayed at GET /api/duckdb/stats until step 14's S14-17.
 
 
 # ─── Jobs & Sync ───────────────────────────────────────────────────────────────
@@ -696,5 +719,5 @@ async def get_events(
 # GET /api/reconciliation and POST /api/reconciliation/run were retired with the
 # legacy 06:00 job by the owner's decision OD-10 (2026-09-30). The detection is
 # POST /api/reconcile (dq_reconciliation over any window, all three stores);
-# the repair is POST /api/duckdb/refresh-statuses. `reconciliation_log` keeps
+# the repair is POST /api/sync/refresh-statuses. `reconciliation_log` keeps
 # its history in DuckDB and in `app.reconciliation_log`.
