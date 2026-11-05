@@ -6,9 +6,11 @@ were proven against — both in every image built before step 14, and the host
 tags the last of them `rollback-step14`, pinned at S14-00's deploy (the image
 production runs then; 3.0.292 was the tag's first target and is kept as
 `rollback-step14-3.0.292`). So `deploy/restore-test.sh`,
-`deploy/daily_offsite.sh` and `deploy/ark_ship.sh` take their image from a
-variable that must be set, and ask it before using it
-(`deploy/archive_image.sh`). Two halves are held here:
+and `deploy/ark_ship.sh` take their image from a variable that must be set,
+and ask it before using it (`deploy/archive_image.sh`); so did
+`deploy/daily_offsite.sh`, the nightly snapshot, until step 14's S14-18
+deleted it with `deploy/snapshot_export.py` and `core/snapshot_validation.py`
+(their cron line was retired on 2026-10-16). Two halves are held here:
 
 * the library itself, run against a fake `docker`: an unset, moving or
   untagged image is refused before docker is asked anything; an absent one,
@@ -59,7 +61,7 @@ REPO = Path(__file__).resolve().parents[2]
 DEPLOY = REPO / "deploy"
 LIBRARY = DEPLOY / "archive_image.sh"
 PINNED = "halloweex/keycrm-web:rollback-step14"
-ARCHIVE_SCRIPTS = ("restore-test.sh", "daily_offsite.sh", "ark_ship.sh")
+ARCHIVE_SCRIPTS = ("restore-test.sh", "ark_ship.sh")
 
 pytestmark = pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
 
@@ -194,8 +196,6 @@ class TestProbe:
 # functions whose imports reach the rest of the application).
 MOUNTED = {
     "deploy/restore_from_export.py": ("restore-test.sh", "whole"),
-    "deploy/snapshot_export.py": ("daily_offsite.sh", "whole"),
-    "core/snapshot_validation.py": ("daily_offsite.sh", "whole"),
     "deploy/ark_freeze.py": ("ark_ship.sh", "whole"),
     "deploy/duckdb_table_fates_check.py": ("duckdb_table_fates_check.py", "whole"),
     "core/duckdb_table_fates.py": ("duckdb_table_fates_check.py", "module"),
@@ -207,7 +207,9 @@ MOUNTED = {
 # 2026-10-21 and checked against 6ac33044, 3.0.298's code, on 2026-10-25
 # (`scripts/compact_duckdb.py` on its /app/scripts, `core/duckdb_switch.py` on
 # /app; both unchanged between the two). Never derived from today's tree: step
-# 14 deletes both from main, and the image keeps them.
+# 14 deletes both from main, and the image keeps them. (`core.duckdb_switch`
+# was imported by the nightly snapshot's `deploy/snapshot_export.py` alone;
+# S14-18 deleted that file, and the entry stays as what the image carries.)
 PINNED_IMAGE = {
     "compact_duckdb": frozenset({
         "section", "log", "MANIFEST_PATH", "NEW_DB", "SOURCE_DB",
@@ -289,10 +291,13 @@ def test_the_mounts_are_the_listed_ones():
     assert {"restore_from_export.py", "duckdb_table_fates_check.py"} <= set(_recipes())
 
 
-_SNAPSHOT_ANCHOR = '-v "$PWD/deploy/snapshot_export.py:'
+# The mount every probe below is inserted beside: the restore drill's, the one
+# archive script left that mounts a file of this checkout. (The nightly
+# snapshot's `daily_offsite.sh` was the vehicle until S14-18 deleted it.)
+_RESTORE_ANCHOR = '-v "$PWD/deploy/restore_from_export.py:'
 
 
-def _with_line(line: str, script: str = "daily_offsite.sh", anchor: str = _SNAPSHOT_ANCHOR):
+def _with_line(line: str, script: str = "restore-test.sh", anchor: str = _RESTORE_ANCHOR):
     """The script's text with `line` inserted before the line carrying
     `anchor`, at its indentation, as one more argument of that command."""
     text = (DEPLOY / script).read_text()
@@ -315,19 +320,19 @@ def test_the_walk_reads_every_spelling(line):
     """Each is one mount — a file from main inside the pinned image — in another
     spelling. The first walk read `-v "$PWD/…"` alone and passed the
     `${PWD}` one. Mutation: go back to a regex over one spelling."""
-    walks = _walks(scripts={"daily_offsite.sh": _with_line(line)}, recipes={})
-    assert walks["daily_offsite.sh"].found.get("core/write_chains.py") == "daily_offsite.sh"
+    walks = _walks(scripts={"restore-test.sh": _with_line(line)}, recipes={})
+    assert walks["restore-test.sh"].found.get("core/write_chains.py") == "restore-test.sh"
 
 
 def test_the_walk_follows_a_variable_and_a_function_argument():
     """A variable assigned from the checkout, in any spelling, and the
     checkout passed to a function that mounts its argument."""
     text = _with_line('-v "$CHAIN:/app/core/write_chains.py:ro"')
-    text = text.replace('WORK="data/.snapshot_tmp"',
-                        'WORK="data/.snapshot_tmp"\nHERE="$(pwd)"\n'
+    text = text.replace('TMP="$(mktemp -d)"',
+                        'TMP="$(mktemp -d)"\nHERE="$(pwd)"\n'
                         'CHAIN="${HERE}/core/write_chains.py"')
-    found = _walks(scripts={"daily_offsite.sh": text}, recipes={})["daily_offsite.sh"].found
-    assert found.get("core/write_chains.py") == "daily_offsite.sh"
+    found = _walks(scripts={"restore-test.sh": text}, recipes={})["restore-test.sh"].found
+    assert found.get("core/write_chains.py") == "restore-test.sh"
 
     ark = (DEPLOY / "ark_ship.sh").read_text().replace(
         'verify_in_container "$ARK_DIR" "$FREEZER"',
@@ -352,8 +357,8 @@ def test_the_walk_follows_a_variable_and_a_function_argument():
 def test_a_checkout_directory_or_other_file_is_a_problem(line, words):
     """A directory of main's code mounted over the image's would run it all
     with no import held to anything. Mutation: accept a directory."""
-    problems = _walks(scripts={"daily_offsite.sh": _with_line(line)},
-                      recipes={})["daily_offsite.sh"].problems
+    problems = _walks(scripts={"restore-test.sh": _with_line(line)},
+                      recipes={})["restore-test.sh"].problems
     assert any(words in p for p in problems), problems
 
 
@@ -362,10 +367,10 @@ def test_a_source_the_walk_cannot_resolve_is_outside_and_unlisted():
     walk does not resolve: it is reported as written, and `OUTSIDE` does not
     hold it, so the mounts test fails on it."""
     line = '-v "$(dirname "$0")/../core/write_chains.py:/app/core/write_chains.py:ro"'
-    walks = _walks(scripts={"daily_offsite.sh": _with_line(line)}, recipes={})
-    unlisted = {e for e in walks["daily_offsite.sh"].outside
-                if ("daily_offsite.sh", e) not in OUTSIDE}
-    assert unlisted, walks["daily_offsite.sh"]
+    walks = _walks(scripts={"restore-test.sh": _with_line(line)}, recipes={})
+    unlisted = {e for e in walks["restore-test.sh"].outside
+                if ("restore-test.sh", e) not in OUTSIDE}
+    assert unlisted, walks["restore-test.sh"]
 
 
 def test_every_recipe_names_the_pinned_image():
@@ -475,8 +480,7 @@ def test_the_walk_sees_what_it_guards():
     for path, (_, mode) in MOUNTED.items():
         tree = ast.parse((REPO / path).read_text())
         seen |= {m for m, _, _ in _imports(tree, module_level_only=mode == "module")}
-    assert {"compact_duckdb", "core.duckdb_switch", "core.snapshot_validation",
-            "core.duckdb_table_fates", "duckdb"} <= seen, seen
+    assert {"compact_duckdb", "core.duckdb_table_fates", "duckdb"} <= seen, seen
     assert _allowed("core.pg_orders_write", ("x",), {}) is not None
     assert _allowed("compact_duckdb", ("phase9",), {}) is not None
     assert _allowed("pandas", (), {}) is not None

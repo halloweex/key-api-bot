@@ -1,61 +1,46 @@
-"""What becomes of every DuckDB table and view — one declaration, walked.
+"""What became of every DuckDB table and view — a frozen literal.
 
-Stage 5 deletes DuckDB, and its preconditions open with this sentence: "a
+Stage 5 deleted DuckDB from the code, and its preconditions opened with "a
 table-fate manifest covering every DuckDB table, and a test walks
-`_init_schema` and a live file against it". Chain 12 needs the same thing as
-a gate: a chain that moves a table must leave the schema, the weekly
-compaction's exclusion list and the off-site archive saying the same thing
-about it, because the Sunday compaction rebuilds the file from today's code
-and ships whatever it exported — a table dropped from the DDL there is a DROP,
-and a table added to `DERIVED_TABLES` stops travelling off-site (OD-11).
+`_init_schema` and a live file against it". This was that manifest: every
+name the code could put into `analytics.duckdb`, and every name the
+production file still held after its DDL went, with one entry here.
 
-So every name the code can put into `analytics.duckdb`, and every name the
-production file still holds after its DDL went, has one entry here, and
-`tests/unit/test_duckdb_table_fates.py` derives the set from the code rather
-than trusting this file: a fresh `DuckDBStore.connect()` (the schema, every
-migration, every view), an AST walk of every `CREATE TABLE` / `CREATE VIEW` /
-`RENAME TO` literal in DuckDB code, and the compaction's own list. It then
-checks each entry against the lists that already decide its fate —
-`DERIVED_TABLES`, the snapshot validator's tiers, the real `phase1_export`,
-the DuckDB→Postgres pairings every shipper and comparison already states, and
-the registered write chains.
+**Since step 14's S14-18 it is a literal and nothing more** (`FATES`, its
+types and the vocabulary its entries are written in). The schema it was
+walked against (`DuckDBStore._init_schema`), the compaction whose lists it
+was checked against (`scripts/compact_duckdb.py`) and the reader of the
+switches that said which tables DuckDB still wrote (`duckdb_written`,
+`STORE_SWITCHES`) are deleted: nothing in any process writes the file. What
+is left reads a *file*, never the code — `deploy/duckdb_table_fates_check.py`,
+run by hand against the newest nightly backup inside the pinned image
+(`rollback-step14`), which mounts this module beside it and so may import
+nothing outside the standard library; and the final stage, which deletes the
+file and reads here what each table became. The test
+(`tests/unit/test_duckdb_table_fates.py`) holds the literal to the check on a
+fixture file.
 
-NOTHING READS THIS IN PRODUCTION. It is data, two pure functions and one
-reader of switches that already exist; `deploy/duckdb_table_fates_check.py`
-runs it against a copy of the production file by hand. Adding it moved no
-table, flag, list or revision.
+NOTHING READS THIS IN PRODUCTION.
 
 WHAT AN ENTRY SAYS
 
-- `kind` — MOVED (a writer moves and the rows are carried to `successors`),
+- `kind` — MOVED (a writer moved and the rows were carried to `successors`),
   DERIVED (recomputed from Postgres, or a view Postgres renders itself),
   ARCHIVE_ONLY (history, frozen where it stands — the Postgres copy and the
   off-site archive — and nothing writes it again), RETIRED (no successor; the
   `reason` says why).
-- `switch` — the variable that moves the writes: a registered chain's
-  `KS_WRITE_*`, `KS_SMS_STORE`, `KS_USER_STORE` or `KS_WRITE_WAREHOUSE`. None
-  means no switch is built yet — the chain map names the chain, DuckDB still
-  writes — or, for a view or a retired table, that nothing writes at all. When
-  a chain is registered (`core.write_chains.WRITE_CHAINS`) the test requires
-  its tables to carry its variable, so a chain cannot land without saying here
-  which tables it took. A SHADOW chain's tables (OD-02 (c): chains 9, 10, 11a,
-  11b) carry their switch like any other. Until step 14's S14-10 moving it did
-  not stop DuckDB writing them — Postgres wrote first and DuckDB was still
-  handed every row — so `duckdb_written()` read them True under
-  `KS_DUCKDB=on`; S14-10 deleted that DuckDB half, and they read as every
-  latched chain's do. Under `off` it reads every table False.
+- `switch` — the variable that moved the writes: a write chain's `KS_WRITE_*`,
+  `KS_SMS_STORE`, `KS_USER_STORE` or `KS_WRITE_WAREHOUSE`. Since step 14 no
+  code reads any of them; they stay in `.env` while an image from before step
+  14 is a rollback target, and here as what moved each table.
 - `origin` — what could rebuild the rows if every copy were lost: KeyCRM, a
-  computation over other tables, or nothing (IRREPLACEABLE). An irreplaceable
-  table must travel off-site; that is chain 12's largest blast radius.
-- `ddl` — SCHEMA (a fresh file has it), SCRATCH (a migration makes and drops
+  computation over other tables, or nothing (IRREPLACEABLE).
+- `ddl` — SCHEMA (a fresh file had it), SCRATCH (a migration made and dropped
   it inside one step; a file holds one only if that step died), NONE (no DDL
-  left; the production file still holds it, which is why the compaction names
-  it).
-- `compaction` — what `scripts/compact_duckdb.py` does: EXPORTED (to Parquet,
-  which is also the off-site archive), SKIPPED (`DERIVED_TABLES`), or
-  NOT_A_TABLE (views; the export reads base tables only).
-
-"Which tables are still DuckDB-written today?" is `duckdb_written()`.
+  left; the production file still holds it).
+- `compaction` — what the weekly compaction did with it, while there was one:
+  EXPORTED (to Parquet, which is also the off-site archive), SKIPPED (its
+  `DERIVED_TABLES`), or NOT_A_TABLE (views; the export read base tables only).
 """
 from __future__ import annotations
 
@@ -92,14 +77,11 @@ COMPACTIONS = (EXPORTED, SKIPPED, NOT_A_TABLE)
 TABLE = "BASE TABLE"
 VIEW = "VIEW"
 
-# The switches that are not a registered write chain. Each has exactly one
-# reader in the code, and `duckdb_written` asks that reader rather than the
-# environment, so a latch, a cached mode or a refusal to read a typo is the
-# answer here too.
+# The switches that were not a write chain's, as `FATES` names them. Nothing
+# reads them since step 14 (`STORE_SWITCHES` and their readers went in S14-18).
 SMS_STORE = "KS_SMS_STORE"
 USER_STORE = "KS_USER_STORE"
 WAREHOUSE = "KS_WRITE_WAREHOUSE"
-STORE_SWITCHES = (SMS_STORE, USER_STORE, WAREHOUSE)
 
 # OD-11 (owner, 01.10.2026): no DROP of any kind before the owner's week after
 # stage 4 completes — removing a table from `_init_schema`, adding a name to
@@ -432,79 +414,3 @@ FATES: Dict[str, TableFate] = {
         "since 2026-05-19.",
         ddl=NONE, compaction=SKIPPED),
 }
-
-
-def tables_by_switch(switch: str) -> Tuple[str, ...]:
-    return tuple(sorted(n for n, f in FATES.items() if f.switch == switch))
-
-
-def _store_switch_writes_duckdb(switch: str) -> Optional[bool]:
-    """The one reader each store switch has. None when it cannot answer — a
-    value the reader refuses, which is the reader's own rule for a typo."""
-    try:
-        if switch == SMS_STORE:
-            from core.pg_sms import sms_store_is_postgres
-            return not sms_store_is_postgres()
-        if switch == USER_STORE:
-            from core.pg_dashboard_users import user_store_is_postgres
-            return not user_store_is_postgres()
-        if switch == WAREHOUSE:
-            # DuckDB derives nothing: step 13 has been in force since
-            # 2026-10-09, a constant since step 14's S14-00, and S14-15
-            # deleted its module (`core/warehouse_cutover.py`), which this
-            # asked — and which answered None in a process where
-            # `configure_modes()` never ran. A literal until S14-18 removes
-            # this function with the store switches.
-            return False
-    except ValueError:
-        return None
-    raise KeyError(f"{switch} is not a switch this manifest knows how to read")
-
-
-def duckdb_written() -> Dict[str, Optional[bool]]:
-    """`{table: True | False | None}` — does DuckDB still write it, in this
-    process, now. None is "cannot tell from here".
-
-    A registered chain's table is False: every chain writes Postgres, which
-    until step 14's S14-11 this read through `write_chains.chain_modes()` (a
-    latch counted as it did for the writers, OD-19 (a)) and since then asks
-    nothing. A shadow chain (OD-02 (c)) was True whichever store its mode
-    named, while DuckDB was handed each row after the Postgres commit; step
-    14's S14-10 retired the shadow. A store switch asks its own reader;
-    `KS_WRITE_WAREHOUSE`'s tables are False since step 14's S14-15 (they
-    were the mode this process configured until then, and None in a process
-    where `configure_modes()` never ran). With no switch, DuckDB writes every table
-    in its schema except a frozen archive; nothing writes a view, a table
-    with no DDL left, or a migration's scratch outside its own step.
-
-    `kind` is the fate at stage 5, not today's state: `schema_migrations` is
-    retired with the file, and DuckDB writes it on every connect that applies
-    a migration until then. The test holds this answer to the writers the
-    code has, not to `kind`.
-
-    Under KS_DUCKDB=off every entry is False (stage 5, PR-4): this process
-    may not open the file, so it writes no table in it. No None either: a
-    flag nobody can read routes nowhere near a file that is not opened.
-    """
-    from core import duckdb_switch, write_chains
-
-    if duckdb_switch.is_off():
-        return {name: False for name in FATES}
-
-    # Every chain writes Postgres — since step 14's S14-11 asked of no flag
-    # (`write_chains.chain_modes()` answered "postgres" for every chain since
-    # S14-00, and went with the flags).
-    chain_mode: Dict[str, Optional[bool]] = {
-        chain.WRITE_ENV: False for chain in write_chains.WRITE_CHAINS}
-
-    out: Dict[str, Optional[bool]] = {}
-    for name, fate in FATES.items():
-        if fate.object == VIEW or fate.ddl != SCHEMA:
-            out[name] = False
-        elif fate.switch is None:
-            out[name] = fate.kind != ARCHIVE_ONLY
-        elif fate.switch in chain_mode:
-            out[name] = chain_mode[fate.switch]
-        else:
-            out[name] = _store_switch_writes_duckdb(fate.switch)
-    return out

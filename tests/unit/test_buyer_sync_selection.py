@@ -64,7 +64,7 @@ class TestUnderChain4TheSelectionFollowsTheWrites:
         """A real store whose DuckDB fails the test if the selection reads it."""
         from core.duckdb_store import DuckDBStore
 
-        s = DuckDBStore(db_path=tmp_path / "selection.duckdb")
+        s = DuckDBStore()
 
         def refused():
             raise AssertionError("the selection read DuckDB")

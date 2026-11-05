@@ -440,15 +440,13 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
-    store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(live)
     with patch("core.pg.require_revision", new=AsyncMock()):
         yield store, live, monkeypatch
     await _clean(live)
     await live.close()
-    await store.close()
 
 
 def _nobody_listening() -> str:

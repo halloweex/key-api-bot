@@ -92,9 +92,11 @@ def test_the_walk_found_the_family():
     """If either list empties or halves, the derivation has gone wrong and
     every assertion below would pass by looking at nothing."""
     names = {p.name for p in BACKUP_SCRIPTS}
-    assert len(names) >= 6, names
-    assert {"pg_offsite.sh", "pg_restore_drill.sh", "offsite_check.sh",
-            "offsite_parquet.sh"} <= names
+    # `offsite_parquet.sh` and `daily_offsite.sh`, the DuckDB archive's
+    # shipment and its nightly driver, were two of these until step 14's
+    # S14-18 deleted them.
+    assert len(names) >= 5, names
+    assert {"pg_offsite.sh", "pg_restore_drill.sh", "offsite_check.sh"} <= names
 
     # And the library the two rules below have to reach. It is where
     # `remote_rm` lives, so a retention written by age would be written there.
@@ -172,7 +174,7 @@ def test_a_passphrase_is_never_on_a_command_line():
             f"{path.relative_to(REPO)} runs gpg without --passphrase-file"
         )
 
-    assert {"offsite_parquet.sh", "pg_offsite.sh", "pg_restore_drill.sh"} <= set(users), users
+    assert {"pg_offsite.sh", "pg_restore_drill.sh"} <= set(users), users
 
 
 def test_gpg_runs_only_through_gpg_safe():
@@ -210,7 +212,7 @@ def test_gpg_runs_only_through_gpg_safe():
                 f"{path.relative_to(REPO)} calls gpg_safe without sourcing "
                 f"deploy/gpg_safe.sh"
             )
-    assert {"offsite_parquet.sh", "pg_offsite.sh", "pg_restore_drill.sh",
+    assert {"pg_offsite.sh", "pg_restore_drill.sh",
             "ark_ship.sh"} <= set(callers), callers
 
     # The walk itself, on the shape a review found it missing: a call whose
@@ -335,7 +337,8 @@ def test_the_archive_tools_run_only_a_pinned_image():
     put `:-halloweex/keycrm-web:latest` back on any of them, or drop a
     `--pull never`."""
     names = {p.name for p in ARCHIVE_TOOLS}
-    assert names >= {"restore-test.sh", "daily_offsite.sh", "ark_ship.sh"}, names
+    # `daily_offsite.sh` was the third until step 14's S14-18 deleted it.
+    assert names >= {"restore-test.sh", "ark_ship.sh"}, names
     for path in ARCHIVE_TOOLS:
         code = _calls(path.read_text())
         where = path.relative_to(REPO)

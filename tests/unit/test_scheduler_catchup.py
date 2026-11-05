@@ -387,7 +387,9 @@ class TestInventorySnapshotCatchUp:
 class TestUnderDuckdbOffPostgresIsAskedFirst:
     """Stage 5, PR-7: under `KS_DUCKDB=off` the catch-up's two facts — the
     layer ages and today's snapshot — come out of Postgres, and the DuckDB
-    block that read them first and then replaced them is not opened."""
+    block that read them first and then replaced them is not opened. Since
+    step 14's S14-11 there is no such block, and since S14-18 no switch:
+    the store is a trap here, so a read of it fails the test."""
 
     @staticmethod
     def _postgres(monkeypatch, ages, snapshot_taken):
@@ -407,11 +409,10 @@ class TestUnderDuckdbOffPostgresIsAskedFirst:
 
     @pytest.mark.asyncio
     async def test_the_snapshot_catch_up_is_queued_by_the_postgres_probe(
-            self, monkeypatch, duckdb_off):
-        """Mutation: read DuckDB first under off — the read is refused, the
-        whole catch-up is skipped, and a day of snapshots is lost on every
-        boot after 01:00 (the sweep's `_schedule_catchup_runs` row)."""
-        from core import duckdb_switch
+            self, monkeypatch):
+        """Mutation: read DuckDB first — the read is refused, the whole
+        catch-up is skipped, and a day of snapshots is lost on every boot
+        after 01:00 (the stage 5 sweep's `_schedule_catchup_runs` row)."""
         from core.scheduler import BackgroundScheduler
 
         self._postgres(monkeypatch, _ages(30 * 3600, 3600), snapshot_taken=False)
@@ -425,12 +426,10 @@ class TestUnderDuckdbOffPostgresIsAskedFirst:
 
         assert set(scheduler._scheduler.added) == {
             "inventory_snapshot_catchup", "dq_reconciliation_catchup"}
-        assert duckdb_switch.opened() == {}
-        assert not duckdb_off.exists()
 
     @pytest.mark.asyncio
     async def test_a_snapshot_taken_and_fresh_ages_queue_nothing(
-            self, monkeypatch, duckdb_off):
+            self, monkeypatch):
         from core.scheduler import BackgroundScheduler
 
         self._postgres(monkeypatch, _ages(3600, 3600), snapshot_taken=True)
@@ -444,11 +443,10 @@ class TestUnderDuckdbOffPostgresIsAskedFirst:
 
     @pytest.mark.asyncio
     async def test_a_postgres_that_cannot_answer_skips_rather_than_reads_duckdb(
-            self, monkeypatch, duckdb_off):
+            self, monkeypatch):
         from unittest.mock import AsyncMock
 
         import core.scheduler as scheduler_module
-        from core import duckdb_switch
         from core.scheduler import BackgroundScheduler
 
         self._postgres(monkeypatch, {}, snapshot_taken=True)
@@ -460,4 +458,3 @@ class TestUnderDuckdbOffPostgresIsAskedFirst:
         await scheduler._schedule_catchup_runs()  # must not raise
 
         assert scheduler._scheduler.added == {}
-        assert duckdb_switch.opened() == {}

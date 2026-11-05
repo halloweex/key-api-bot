@@ -65,8 +65,7 @@ async def stores(tmp_path, monkeypatch):
     for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore(db_path=tmp_path / "latch.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -74,7 +73,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _expense_rows(pool):
@@ -121,9 +119,6 @@ class TestChain8AfterTheFlagGoesBack:
         assert second["id"] == first["id"] + 1, "the id came from somewhere else"
         rows = await _expense_rows(pool)
         assert [r["id"] for r in rows] == [first["id"], second["id"]]
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM manual_expenses").fetchone()[0] == 0, \
-                "the flag moved a typed expense back into DuckDB"
 
     @pytest.mark.asyncio
     async def test_the_owner_row_is_written_with_the_first_expense(self, stores):
@@ -193,20 +188,11 @@ class TestChain1AfterTheFlagGoesBack:
             ("initial", 40), ("stock_out", -3)]
         assert allocator >= 2, "Postgres' sequence stopped allocating"
 
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == 0
-            assert conn.execute(
-                "SELECT COALESCE(MAX(id), 0) FROM stock_movements").fetchone()[0] == 0, \
-                "DuckDB's seq_stock_movements_id was consulted"
 
         # And the watermark is read back from Postgres, not from DuckDB's
         # frozen copy — revision 0032's defect, one flag flip later.
         assert await store.get_last_sync_time("stocks") == datetime(
             2026, 9, 17, 12, tzinfo=timezone.utc)
-        async with store.connection() as conn:
-            assert conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = 'last_sync_stocks'"
-            ).fetchone() is None
 
     @pytest.mark.asyncio
     async def test_all_six_tables_are_claimed(self, stores):

@@ -235,8 +235,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+REPO = Path(__file__).resolve().parents[2]
+
+
 def _store(tmp_path: Path):
-    """The store the job reads its file's size through, and nothing else."""
+    """The store the job read its file's size through until step 14's S14-18;
+    it asks for no store since (the file is `DATA_DIR / DUCKDB_FILE_NAME`), so
+    what the tests below hand it is never read."""
     return SimpleNamespace(db_path=tmp_path / "test.duckdb")
 
 
@@ -278,28 +283,37 @@ class TestSchedulerJob:
         assert call["sample"] is sample
 
     @pytest.mark.asyncio
-    async def test_the_directory_is_the_data_directory_not_the_store_s(
+    async def test_the_file_the_directory_and_the_heartbeat_are_the_data_directory_s(
             self, tmp_path, monkeypatch):
-        """Step 14's S14-01: the directory sampled and the heartbeat host cron
-        reads are `core.paths.DATA_DIR`'s; only the file's own size is read
-        through the DuckDB store. In production the two are one directory —
-        the file sits in it — so here they are pulled apart, and the store is
-        not a DuckDB store at all, so nothing but the path decides where the
-        heartbeat lands. Mutation: `store.db_path.parent` back in either the
-        `sample_data_dir` call or `health_dir`."""
-        from types import SimpleNamespace
-
+        """Step 14's S14-01 took the directory sampled and the heartbeat off
+        the DuckDB store, and S14-18 the file's own path (the store holds no
+        file since): the file is `DATA_DIR / DUCKDB_FILE_NAME`, the directory
+        `DATA_DIR`, and the heartbeat `DATA_DIR/health/watchdog_last_sample`
+        — the path host cron reads (`deploy/offsite_check.sh`'s
+        `WATCHDOG_MARKER`, relative to the checkout whose `data/` is the
+        container's `/app/data`). A heartbeat written anywhere else reads, the
+        next morning, as CRITICAL "disk watchdog has stopped sampling".
+        Mutation: write it to another directory or name, sample another file,
+        or move the default in offsite_check.sh alone."""
         import core.disk_monitor as disk_monitor
         import core.scheduler as scheduler_module
-        from core import watchdog_samples
+        from core import paths, watchdog_samples
         from core.scheduler import BackgroundScheduler
+
+        # The scheduler's own name for the directory is `core.paths`' (the
+        # conftest redirects that name for every test, so it is read here as
+        # the import the module makes).
+        assert ("from core.paths import DATA_DIR, DUCKDB_FILE_NAME"
+                in (REPO / "core" / "scheduler.py").read_text(encoding="utf-8"))
+        assert paths.DATA_DIR == REPO / "data"
+        assert paths.DUCKDB_FILE_NAME == "analytics.duckdb"
+        check = (REPO / "deploy" / "offsite_check.sh").read_text(encoding="utf-8")
+        assert ('WATCHDOG_MARKER="${WATCHDOG_MARKER:-data/health/watchdog_last_sample}"'
+                in check)
 
         data = tmp_path / "data"
         data.mkdir()
         (data / "something").write_bytes(b"x" * 4096)
-        elsewhere = tmp_path / "elsewhere"
-        elsewhere.mkdir()
-        store = SimpleNamespace(db_path=elsewhere / "analytics.duckdb")
         monkeypatch.setattr(scheduler_module, "DATA_DIR", data)
 
         disk_states, dirs = [], []
@@ -314,20 +328,26 @@ class TestSchedulerJob:
             dirs.append(path)
             return real_sample_data_dir(path, **kwargs)
 
+        async def _no_store():
+            raise AssertionError("the watchdog asked for the store")
+
         with patch("core.disk_monitor.sample_disk_state", side_effect=disk_state), \
              patch("core.disk_monitor.sample_data_dir", side_effect=data_dir), \
-             patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+             patch("core.duckdb_store.get_store", _no_store), \
+             patch("core.store.get_store", _no_store), \
              patch.object(watchdog_samples, "disk_tick",
                           AsyncMock(return_value=dict(watchdog_samples.EMPTY_DISK))), \
              patch("core.alerting.resolve_group", new=AsyncMock()), \
              patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
             result = await BackgroundScheduler()._run_disk_watchdog()
 
-        assert disk_states == [str(elsewhere / "analytics.duckdb")]
+        assert disk_states == [str(data / "analytics.duckdb")]
         assert dirs == [str(data)]
         assert result["data_dir_mb"] is not None
-        assert (data / "health" / "watchdog_last_sample").exists()
-        assert not (elsewhere / "health").exists()
+        beat = data / "health" / "watchdog_last_sample"
+        assert beat.is_file()
+        assert sorted(p.relative_to(data).as_posix() for p in (data / "health").iterdir()) \
+            == ["health/watchdog_last_sample"]
         send.assert_not_called()
 
     @pytest.mark.asyncio

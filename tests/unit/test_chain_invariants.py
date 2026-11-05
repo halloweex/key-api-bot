@@ -981,8 +981,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
         # through chain 9's door into a list (`tests/journal_fake.py`). Until
         # S14-10 it was read back from this DuckDB, the chain routed to it.
         journal = install_journal(monkeypatch)
-        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
@@ -990,7 +989,6 @@ class TestTheJobWhenTheDuckDBHalfFails:
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.alerting.resolve_group", resolve):
             yield scheduler, journal, sent, resolve
-        await store.close()
 
     @staticmethod
     async def _run(scheduler, facts, *, duckdb_raises: bool):

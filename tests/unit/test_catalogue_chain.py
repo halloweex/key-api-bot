@@ -334,8 +334,10 @@ class TestTheFullCatalogueContract:
 
     @pytest.mark.parametrize("attr", ["upsert_products", "upsert_categories"])
     def test_the_writer_is_reached_from_the_repository_alone(self, attr):
+        # `core/store.py` since step 14's S14-18 (`core/duckdb_store.py`
+        # before it, a shim of the name since).
         assert _walk_callers(attr, on="pg_catalogue_write") == {
-            ("core/duckdb_store.py", attr)}
+            ("core/store.py", attr)}
 
     @pytest.mark.parametrize("attr,sites", [
         # `incremental_sync` wrote the products itself on DuckDB's path, until
@@ -345,7 +347,7 @@ class TestTheFullCatalogueContract:
         ("upsert_categories", {("core/sync_service.py", "full_sync")}),
     ])
     def test_the_repository_is_reached_from_the_full_catalogue_sites_alone(self, attr, sites):
-        callers = _walk_callers(attr) - {("core/duckdb_store.py", attr)}
+        callers = _walk_callers(attr) - {("core/store.py", attr)}
         assert callers == sites, callers
 
 
@@ -453,10 +455,8 @@ class TestFullSyncContainsThisChainOnly:
 async def real_store(tmp_path):
     from core.duckdb_store import DuckDBStore
 
-    s = DuckDBStore(db_path=tmp_path / "c6.duckdb")
-    await s.connect()
+    s = DuckDBStore()
     yield s
-    await s.close()
 
 
 def _tick(monkeypatch, store, *, upsert_products=None):

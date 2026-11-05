@@ -53,8 +53,7 @@ def _refused(surface: str) -> dict:
 async def _duck(tmp_path, name="consumers.duckdb"):
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / name)
-    await store.connect()
+    store = DuckDBStore()
     return store
 
 
@@ -113,16 +112,13 @@ class TestWeeklyReport:
         store, _week_start, sent, scheduler = await self._job(monkeypatch, tmp_path)
         marked = AsyncMock()
         monkeypatch.setattr(pg_weekly_ledger_write, "mark_sent", marked)
-        try:
-            monkeypatch.setenv("KS_READ_WEEKLY", "postgres")
+        monkeypatch.setenv("KS_READ_WEEKLY", "postgres")
 
-            with pytest.raises(OSError, match="connection refused"):
-                await scheduler._run_weekly_report()
+        with pytest.raises(OSError, match="connection refused"):
+            await scheduler._run_weekly_report()
 
-            assert sent == []
-            marked.assert_not_awaited()
-        finally:
-            await store.close()
+        assert sent == []
+        marked.assert_not_awaited()
 
 
 # ─── The weekly traffic report ────────────────────────────────────────────
@@ -181,21 +177,18 @@ class TestTrafficReport:
         self, stores, monkeypatch, tmp_path,
     ):
         store = await _duck(tmp_path)
-        try:
-            week_start = self._the_warehouse_is_ready(monkeypatch)
-            scheduler, sent = self._wire(monkeypatch, store, tmp_path)
-            marked = _ledger_answers(monkeypatch)
-            monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
+        week_start = self._the_warehouse_is_ready(monkeypatch)
+        scheduler, sent = self._wire(monkeypatch, store, tmp_path)
+        marked = _ledger_answers(monkeypatch)
+        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
 
-            result = await scheduler._run_traffic_report()
+        result = await scheduler._run_traffic_report()
 
-            assert result == {"sent": False, "week": week_start.isoformat(),
-                              **_refused("traffic")}
-            assert sent == []
-            marked.assert_not_awaited()
-            assert read_fallback.refusals()["traffic"]["count"] >= 1
-        finally:
-            await store.close()
+        assert result == {"sent": False, "week": week_start.isoformat(),
+                          **_refused("traffic")}
+        assert sent == []
+        marked.assert_not_awaited()
+        assert read_fallback.refusals()["traffic"]["count"] >= 1
 
 # ─── The Monday goals job ─────────────────────────────────────────────────
 
@@ -221,16 +214,13 @@ class TestSeasonalityJob:
         from core.scheduler import BackgroundScheduler
 
         store = await _duck(tmp_path, "goals.duckdb")
-        try:
-            _serve(monkeypatch, store)
-            written = _writer_recorded(monkeypatch)
+        _serve(monkeypatch, store)
+        written = _writer_recorded(monkeypatch)
 
-            result = await BackgroundScheduler()._run_seasonality_calc()
+        result = await BackgroundScheduler()._run_seasonality_calc()
 
-            assert result == {"skipped": True, **_refused("goals")}
-            assert written == [], "a refused job wrote a goal table — half an update"
-        finally:
-            await store.close()
+        assert result == {"skipped": True, **_refused("goals")}
+        assert written == [], "a refused job wrote a goal table — half an update"
 
 
 class TestSeasonalityJobRefusedAtEveryRead:
@@ -356,16 +346,13 @@ class TestTraining:
         from core.scheduler import BackgroundScheduler
 
         store = await _duck(tmp_path)
-        try:
-            _serve(monkeypatch, store)
+        _serve(monkeypatch, store)
 
-            result = await BackgroundScheduler()._run_revenue_prediction()
+        result = await BackgroundScheduler()._run_revenue_prediction()
 
-            assert result["status"] == "error"
-            assert model()
-            assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
+        assert result["status"] == "error"
+        assert model()
+        assert read_fallback.refusals() == {}
 
 
 # ─── The assistant ────────────────────────────────────────────────────────
@@ -385,18 +372,15 @@ class TestAssistant:
         from core.chat_tools import DATA_UNAVAILABLE, execute_tool
 
         store = await _duck(tmp_path)
-        try:
-            self._serve_tools(monkeypatch, store)
-            monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+        self._serve_tools(monkeypatch, store)
+        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
 
-            result = await execute_tool("list_expenses", {})
+        result = await execute_tool("list_expenses", {})
 
-            assert result["error"] == DATA_UNAVAILABLE
-            assert result["surface"] == "expenses"
-            assert "Do not estimate" in result["message"]
-            assert "connection refused" not in json.dumps(result)
-        finally:
-            await store.close()
+        assert result["error"] == DATA_UNAVAILABLE
+        assert result["surface"] == "expenses"
+        assert "Do not estimate" in result["message"]
+        assert "connection refused" not in json.dumps(result)
 
     @pytest.mark.asyncio
     async def test_a_failure_is_the_error_it_always_was(
@@ -422,7 +406,7 @@ class TestAssistant:
         from core.duckdb_store import DuckDBStore
         from web.services import chat_service as cs
 
-        self._serve_tools(monkeypatch, DuckDBStore(db_path=tmp_path / "chat.duckdb"))
+        self._serve_tools(monkeypatch, DuckDBStore())
 
         class _LLM:
             is_available = True
@@ -488,16 +472,13 @@ class TestSearchIndex:
         from core.scheduler import BackgroundScheduler
 
         store = await _duck(tmp_path)
-        try:
-            _sync_service(monkeypatch, store)
+        _sync_service(monkeypatch, store)
 
-            result = await BackgroundScheduler()._run_meilisearch_sync()
+        result = await BackgroundScheduler()._run_meilisearch_sync()
 
-            assert result == {"buyers": 0, "orders": 0, "products": 0}
-            store.set_last_sync_time.assert_not_awaited()
-            assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
+        assert result == {"buyers": 0, "orders": 0, "products": 0}
+        store.set_last_sync_time.assert_not_awaited()
+        assert read_fallback.refusals() == {}
 
 
     @pytest.mark.asyncio
@@ -509,29 +490,24 @@ class TestSearchIndex:
         counts. The index's read fails with the pool, and the index's own
         handler contains it (since step 14's S14-07 no switch can make it a
         refusal)."""
-        from core import duckdb_switch
         from core import sync_service as sync_mod
 
         store = await _duck(tmp_path)
-        try:
-            _serve(monkeypatch, store)
-            monkeypatch.setattr(sync_mod, "get_store", AsyncMock(return_value=store))
-            monkeypatch.setattr(store, "orders_held", AsyncMock(return_value=1))
-            # Chain 1's rebuild, Postgres's since S14-00; not this test's.
-            monkeypatch.setattr(store, "refresh_sku_inventory_status",
-                                AsyncMock(return_value=0))
-            monkeypatch.setattr(duckdb_switch, "is_off", lambda: True)
-            service = _sync_service(monkeypatch, store)
-            service.incremental_sync = AsyncMock(return_value={})
-            monkeypatch.setattr(sync_mod, "init_meilisearch", AsyncMock(return_value=True))
+        _serve(monkeypatch, store)
+        monkeypatch.setattr(sync_mod, "get_store", AsyncMock(return_value=store))
+        monkeypatch.setattr(store, "orders_held", AsyncMock(return_value=1))
+        # Chain 1's rebuild, Postgres's since S14-00; not this test's.
+        monkeypatch.setattr(store, "refresh_sku_inventory_status",
+                            AsyncMock(return_value=0))
+        service = _sync_service(monkeypatch, store)
+        service.incremental_sync = AsyncMock(return_value={})
+        monkeypatch.setattr(sync_mod, "init_meilisearch", AsyncMock(return_value=True))
 
-            with caplog.at_level(logging.WARNING):
-                await sync_mod.init_and_sync()
+        with caplog.at_level(logging.WARNING):
+            await sync_mod.init_and_sync()
 
-            store.set_last_sync_time.assert_not_awaited()
-            assert "Meilisearch sync error: connection refused" in caplog.text
-        finally:
-            await store.close()
+        store.set_last_sync_time.assert_not_awaited()
+        assert "Meilisearch sync error: connection refused" in caplog.text
 
 
 # ─── The buyers step, inside the sync tick ────────────────────────────────

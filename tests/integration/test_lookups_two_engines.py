@@ -106,7 +106,7 @@ async def _populate(conn, pool):
 async def in_postgres(tmp_path, monkeypatch):
     """The filter bar's store, never connected: its DuckDB connection is a
     trap, so an answer below can only be Postgres's."""
-    store = DuckDBStore(db_path=tmp_path / "lookups.duckdb")
+    store = DuckDBStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("the filter bar reached for DuckDB")

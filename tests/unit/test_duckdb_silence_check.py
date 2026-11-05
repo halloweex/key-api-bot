@@ -299,26 +299,33 @@ class TestTheCrontabIsPrinted:
         # retired, added — then, on the way back, re-added and removed
         return lines(start, "-"), lines(start, "+"), lines(back, "+"), lines(back, "-")
 
+    # The two lines the week retired, as their scripts' headers documented
+    # them — a literal since step 14's S14-18 deleted both scripts
+    # (`scripts/weekly_compact.sh`'s `# Cron:`, `deploy/daily_offsite.sh`'s
+    # `# Install:`, read at 50cc367b).
+    RETIRED_LINES = ("0 2 * * 0  /opt/key-api-bot/scripts/weekly_compact.sh",
+                     "45 2 * * *  /opt/key-api-bot/deploy/daily_offsite.sh")
+
     def test_the_lines_are_the_ones_the_scripts_document(self, box, tmp_path):
         """Each printed line is its script's own header line, with this
         checkout's path for /opt/key-api-bot — so the print and the headers
-        cannot drift. Mutation: change a schedule in one place only."""
+        cannot drift. Since S14-18 the retired two are deleted: the print
+        still names them, so the lines can be found and confirmed gone, and
+        the way back no longer offers them, since nothing in this checkout
+        would run. Mutation: change a schedule in one place only, or offer a
+        deleted script back."""
         _, out, _ = self._print(box, tmp_path)
         retire, add, re_add, remove = self._diff(out)
         root = str(REPO)
-        documented = {
-            "compact": _documented(REPO / "scripts" / "weekly_compact.sh", "# Cron:"),
-            "snapshot": _documented(REPO / "deploy" / "daily_offsite.sh", "# Install:"),
-            "silence": _documented(SCRIPT, "# Install at the start of the week of silence"),
-        }
-        documented = {k: v.replace("/opt/key-api-bot", root) for k, v in documented.items()}
-        assert retire == [documented["compact"], documented["snapshot"]], (retire, documented)
-        assert add == [documented["silence"]], (add, documented)
-        # The way back is the exact reverse.
-        assert (re_add, remove) == (retire, add)
-        # And each names a script that is there to run.
-        for line in retire + add:
-            assert Path(line.split()[5]).is_file(), line
+        silence = _documented(SCRIPT, "# Install at the start of the week of silence")
+        documented = [v.replace("/opt/key-api-bot", root)
+                      for v in (*self.RETIRED_LINES, silence)]
+        assert retire == documented[:2], (retire, documented)
+        assert add == [documented[2]], (add, documented)
+        assert (re_add, remove) == ([], add)
+        assert Path(add[0].split()[5]).is_file(), add
+        for line in retire:
+            assert not Path(line.split()[5]).exists(), line
 
     def test_no_printed_line_can_be_installed_as_it_stands(self, box, tmp_path):
         """Pasting the whole print into `crontab -e` must fail, not install

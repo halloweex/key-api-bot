@@ -17,3 +17,11 @@ from __future__ import annotations
 from pathlib import Path
 
 DATA_DIR: Path = Path(__file__).parent.parent / "data"
+
+# The DuckDB file's name inside `DATA_DIR`. Nothing opens it since step 14:
+# it stays on disk, unchanged, until the final stage deletes it, and the disk
+# watchdog reads its size (`db_size_mb`). Named here since S14-18, when the
+# store that held its path (`DuckDBStore.db_path`) lost its DuckDB half; a
+# name and not a path, so that a reader joins it to `DATA_DIR` where it reads
+# that, and a patched `DATA_DIR` moves both.
+DUCKDB_FILE_NAME = "analytics.duckdb"

@@ -78,8 +78,7 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
 
-    store = DuckDBStore(db_path=tmp_path / "backfill.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
 
@@ -93,7 +92,6 @@ async def stores(tmp_path, monkeypatch):
 
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 class TestTheRestoredCommentReachesPostgres:

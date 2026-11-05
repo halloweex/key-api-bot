@@ -96,7 +96,6 @@ async def test_lift_is_the_difference_not_the_raw_rate(tmp_path):
     assert cmp["significant"] is True
     assert cmp["pValue"] < 0.01
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -117,7 +116,6 @@ async def test_no_real_effect_is_reported_as_not_significant(tmp_path):
     assert cmp["ci95Pp"][0] < 0 < cmp["ci95Pp"][1]
     assert cmp["pValue"] > 0.5
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -136,7 +134,6 @@ async def test_small_holdout_widens_the_interval(tmp_path):
     assert cmp["significant"] is False, "but 10 controls cannot establish it"
     assert cmp["ci95Pp"][0] < 0, "the interval reaches below zero"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -156,7 +153,6 @@ async def test_purchases_outside_the_window_are_ignored(tmp_path):
     assert wider["overall"]["target"]["converted"] == 3, "wider window catches day 31"
     assert wider["windowDays"] == 60
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -178,7 +174,6 @@ async def test_incremental_money_is_per_contact_difference(tmp_path):
     assert cmp["incrementalMarginPerContact"] == 180.0
     assert cmp["incrementalMarginTotal"] == 1800.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -197,7 +192,6 @@ async def test_promocode_orders_counted_separately(tmp_path):
     assert result["overall"]["target"]["promoOrders"] == 2
     assert result["overall"]["target"]["converted"] == 4, "all four still bought"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -227,7 +221,6 @@ async def test_results_broken_down_by_tier(tmp_path):
     assert tiers["REACTIVATION"]["target"]["converted"] == 1
     assert result["overall"]["target"]["converted"] == 2
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -243,7 +236,6 @@ async def test_only_roster_members_are_counted(tmp_path):
     assert overall["target"]["contacts"] == 5
     assert overall["target"]["converted"] == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -264,7 +256,6 @@ async def test_returns_and_dead_sources_excluded(tmp_path):
     overall = (await store.get_sms_campaign_results("aug"))["overall"]
     assert overall["target"]["converted"] == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -286,7 +277,6 @@ async def test_delivery_counts_are_reported(tmp_path):
     # buyer 4 has no report yet — neither delivered nor failed
     assert target["delivered"] + target["undelivered"] < target["contacts"]
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -325,7 +315,6 @@ async def test_delivered_only_never_filters_the_control(tmp_path):
     assert itt["comparison"]["conversionTarget"] == 30.0
     assert restricted["overall"]["comparison"]["conversionTarget"] == 60.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -342,7 +331,6 @@ async def test_unsent_campaign_refuses_to_report(tmp_path):
     with pytest.raises(ValueError, match="no send date"):
         await store.get_sms_campaign_results("draft")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -350,7 +338,6 @@ async def test_unknown_campaign(tmp_path):
     store = await _make_store(tmp_path)
     with pytest.raises(ValueError, match="not frozen"):
         await store.get_sms_campaign_results("nope")
-    await store.close()
 
 
 # ─── the window starts at the send, not at midnight ──────────────────────
@@ -380,7 +367,6 @@ async def test_a_purchase_before_the_send_is_not_the_campaign(tmp_path):
     overall = (await store.get_sms_campaign_results("aug"))["overall"]
     assert overall["target"]["converted"] == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -393,7 +379,6 @@ async def test_a_purchase_after_the_send_counts_the_same_day(tmp_path):
     overall = (await store.get_sms_campaign_results("aug"))["overall"]
     assert overall["target"]["converted"] == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -407,7 +392,6 @@ async def test_the_window_closes_exactly_n_days_after_the_send(tmp_path):
     overall = (await store.get_sms_campaign_results("aug", window_days=7))["overall"]
     assert overall["target"]["converted"] == 1, "only the one inside the window"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -429,7 +413,6 @@ async def test_members_never_handed_to_the_gateway_leave_the_arm(tmp_path):
     assert overall["holdout"]["contacts"] == 10, "the control is untouched"
     assert overall["holdout"]["notSent"] == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -450,7 +433,6 @@ async def test_a_purchase_by_someone_never_messaged_is_not_a_response(tmp_path):
     assert overall["target"]["converted"] == 1, "buyer 2 only"
     assert overall["target"]["contacts"] == 9
 
-    await store.close()
 
 
 async def _second_record(store, *, buyer_id: int, phone: str, name: str):
@@ -489,7 +471,6 @@ async def test_an_empty_control_does_not_certify_an_effect(tmp_path):
     assert cmp["ci95Pp"][0] < 0, "the interval must reach below zero"
     assert cmp["pValue"] > 0.05
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -513,7 +494,6 @@ async def test_a_verdict_needs_purchases_in_both_arms(tmp_path):
     assert cmp["verdictReady"] is False
     assert cmp["significant"] is False
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -533,7 +513,6 @@ async def test_a_verdict_is_offered_once_both_arms_have_bought(tmp_path):
     assert cmp["significant"] is True
     assert cmp["ci95Pp"][0] > 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -552,7 +531,6 @@ async def test_the_interval_holds_the_lift_it_is_drawn_around(tmp_path):
     lo, hi = cmp["ci95Pp"]
     assert lo <= cmp["liftPp"] <= hi
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -578,7 +556,6 @@ async def test_a_response_under_a_second_customer_record_still_counts(tmp_path):
     assert overall["target"]["revenue"] == 2000.0
     assert overall["target"]["contacts"] == 10, "and still one contact"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -598,7 +575,6 @@ async def test_one_person_on_two_records_is_still_one_response(tmp_path):
     assert overall["target"]["orders"] == 2, "who placed two orders"
     assert overall["target"]["revenue"] == 2000.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -616,7 +592,6 @@ async def test_a_stranger_on_a_different_number_is_not_a_member(tmp_path):
     assert overall["target"]["converted"] == 0
     assert overall["holdout"]["converted"] == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -644,7 +619,6 @@ async def test_delivery_filter_keeps_recipients_with_no_report(tmp_path):
     assert restricted["target"]["contacts"] == 9, "only the refusal is dropped"
     assert restricted["holdout"]["contacts"] == 10
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -664,7 +638,6 @@ async def test_the_send_records_what_it_cost(tmp_path):
     # are not billed, so the roster size is the wrong number to multiply.
     assert res["costTotal"] == pytest.approx(8 * 2 * 1.28)
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -678,7 +651,6 @@ async def test_a_campaign_sent_before_costs_were_recorded_reports_none(tmp_path)
 
     assert res["costTotal"] is None
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -703,4 +675,3 @@ async def test_the_tariff_is_frozen_onto_the_campaign(tmp_path):
     assert float(stored[3]) == pytest.approx(1.28)
     assert float(stored[4]) == pytest.approx(2 * 1.28)
 
-    await store.close()

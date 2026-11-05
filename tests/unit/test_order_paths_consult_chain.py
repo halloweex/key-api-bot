@@ -38,14 +38,10 @@ _WRITE = re.compile(
 
 # The writers left, each with the reason. The walk must find exactly these; a
 # writer added to them is a decision.
-EXEMPT = {
-    ("core/migrations.py", "_m0007_order_products_drop_fk"):
-        "a DuckDB schema migration, run once per file at connect, before any sync",
-    ("core/migrations.py", "_m0008_expenses_drop_fk"):
-        "a DuckDB schema migration, run once per file at connect, before any sync",
-    ("core/migrations.py", "_m0011_order_products_id_bigint"):
-        "a DuckDB schema migration, run once per file at connect, before any sync",
-}
+# DuckDB's schema migrations (`core/migrations.py`: `_m0007`, `_m0008`,
+# `_m0011`) were the last until step 14's S14-18 deleted them with the store's
+# DuckDB half: no writer of the four tables is left in DuckDB.
+EXEMPT: dict = {}
 
 
 def _writes(fn) -> set:

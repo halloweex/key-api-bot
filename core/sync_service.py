@@ -30,7 +30,7 @@ from core.events import (
     emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
-from core import duckdb_switch, read_fallback
+from core import read_fallback
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -1341,16 +1341,9 @@ class SyncService:
                     stats["orders"] += order_count
                     stats["expenses"] += expense_count
                     logger.info(f"  Chunk {chunk_num}: Saved {order_count} orders, {expense_count} expenses")
-
-                    # Force WAL checkpoint after each chunk to prevent WAL corruption
-                    # on aarch64 (DuckDB 1.4.x bug with large WAL files).
-                    #
-                    # Not under KS_DUCKDB=off: the store is unconnected there and
-                    # its checkpoint a no-op already, but a no-op by accident is
-                    # one connection away from a CHECKPOINT of a file this
-                    # process must not touch (stage 5, PR-1).
-                    if not duckdb_switch.is_off():
-                        await self.store.checkpoint()
+                    # A DuckDB CHECKPOINT followed each chunk under
+                    # KS_DUCKDB=on until step 14's S14-18 (a WAL bug of
+                    # DuckDB 1.4.x on aarch64); the chunks land in Postgres.
 
                 current_start = current_end + timedelta(days=1)
 
@@ -1540,41 +1533,9 @@ class SyncService:
 
         return stats
 
-    async def sync_today(self) -> Dict[str, Any]:
-        """
-        Sync only today's orders for real-time dashboard.
-
-        Returns:
-            Dict with sync statistics
-        """
-        stats = {"orders": 0, "expenses": 0}
-
-        try:
-            client = await get_async_client()
-            today = datetime.now(DEFAULT_TZ).date()
-            tomorrow = today + timedelta(days=1)
-
-            # Sync today's orders using the smart date filter helper
-            orders = await self._fetch_orders_with_date_filter(
-                client,
-                str(today),
-                str(tomorrow)
-            )
-
-            if orders:
-                order_count, expense_count = await self._upsert_orders_with_expenses(
-                    orders,
-                )
-                stats["orders"] = order_count
-                stats["expenses"] = expense_count
-                logger.debug(f"Today sync: {stats['orders']} orders, {stats['expenses']} expenses")
-
-        except KeyCRMConnectionError as e:
-            logger.debug(f"Today sync connection error (will retry): {e}")
-        except KeyCRMError as e:
-            logger.error(f"Today sync error: {e}")
-
-        return stats
+    # `sync_today` stood here until step 14's S14-18: today's orders, fetched
+    # and written, with no caller anywhere (the stage 5 entry-point walk listed
+    # it dead). The incremental sync covers today every minute.
 
     async def refresh_order_statuses(self, days_back: int = 30) -> Dict[str, Any]:
         """
@@ -1808,14 +1769,9 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
     # The orders held where they are written — Postgres, chain 3's, whose
     # DuckDB copy never grows and on a fresh DuckDB would read as empty on
     # every boot, pulling 730 days from KeyCRM each time (`orders_held`).
-    #
-    # Under KS_DUCKDB=off (stage 5, PR-1; web's only mode since step 14's
-    # S14-00) `get_stats` is not asked at all: it counts DuckDB's tables,
-    # which is the one thing this boot must not do. Under `on` — a script, a
-    # pinned image's tool — it still answers the products count for the log.
-    stats = None
-    if not duckdb_switch.is_off():
-        stats = await store.get_stats()
+    # Until step 14's S14-18 a process under KS_DUCKDB=on also counted
+    # DuckDB's products for the log line below (`get_stats`); the store has
+    # no DuckDB to count since.
     held = await store.orders_held()
 
     # If no orders, do a full sync
@@ -1824,10 +1780,7 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
         sync_service = await get_sync_service()
         await sync_service.full_sync(days_back=full_sync_days)
     else:
-        if stats is None:
-            logger.info(f"{held} orders held (KS_DUCKDB=off: no DuckDB counts)")
-        else:
-            logger.info(f"{held} orders held, DuckDB has {stats['products']} products")
+        logger.info(f"{held} orders held")
         # Do incremental sync
         sync_service = await get_sync_service()
         await sync_service.incremental_sync()

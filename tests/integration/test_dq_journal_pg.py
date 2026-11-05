@@ -243,15 +243,12 @@ class TestTheBeat:
         assert last == datetime(2026, 10, 1, 6, tzinfo=timezone.utc)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("duckdb", ["on", "off"])
-    async def test_absent_it_is_inherited_from_the_copy(self, pool, monkeypatch, duckdb):
+    async def test_absent_it_is_inherited_from_the_copy(self, pool, monkeypatch):
         """`meta.chain_watermarks` without the key, `app.sync_metadata` with
-        it: the copy answers, whatever `KS_DUCKDB` says, and nothing opens
-        DuckDB. Mutation: inherit only under off, as before S14-10."""
-        from core import duckdb_store, duckdb_switch
-
-        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
-        duckdb_switch.configure_mode()
+        it: the copy answers, and nothing opens DuckDB. (Until step 14's
+        S14-18 it ran under both values of `KS_DUCKDB`; the switch is
+        deleted.) Mutation: inherit only under off, as before S14-10."""
+        from core import duckdb_store
 
         def _no_duckdb(self):
             raise AssertionError("the digest opened DuckDB")

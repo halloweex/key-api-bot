@@ -6,31 +6,16 @@ Covers:
   negative/NaN predictions are never persisted.
 """
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from core.duckdb_store import DuckDBStore
 from core.data_quality import _freshness_check, Severity
-
-
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    return store
-
-
-def _insert_order(conn, oid: int, buyer_id: int = 10):
-    conn.execute(
-        """INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,
-           created_at, updated_at, buyer_id, manager_id, manager_comment, promocode)
-           VALUES (?, 4, 1, '100.00', '2026-01-15T10:00:00+03:00',
-                   '2026-01-15T10:00:00+03:00', '2026-01-15T10:00:00+03:00', ?, NULL, NULL, NULL)""",
-        [oid, buyer_id],
-    )
+from tests.integration.pg_tab_seed import (
+    DSN, derive, needs_postgres, seed, tab_in_postgres,
+)
 
 
 # A5-1 / F3, the DuckDB warehouse refresh's self-heal and its consecutive-
@@ -38,72 +23,37 @@ def _insert_order(conn, oid: int, buyer_id: int = 10):
 # S14-15.
 
 
-# ─────────────────────────── A9-1 backup ───────────────────────────
-
-class TestBackup:
-    @pytest.mark.asyncio
-    async def test_backup_produces_valid_copy(self, tmp_path):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            _insert_order(conn, oid=1)
-            _insert_order(conn, oid=2)
-        dest = tmp_path / "backups"
-        res = await store.backup_database(dest_dir=dest, keep=7)
-        assert res["status"] == "success"
-        assert res["orders"] == 2
-        backups = list(dest.glob("*.duckdb"))
-        assert len(backups) == 1
-        # backup opens read-only and has the rows
-        import duckdb
-        con = duckdb.connect(str(backups[0]), read_only=True)
-        try:
-            assert con.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 2
-        finally:
-            con.close()
-
-    @pytest.mark.asyncio
-    async def test_backup_retention_prunes_old(self, tmp_path):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            _insert_order(conn, oid=1)
-        dest = tmp_path / "backups"
-        dest.mkdir(parents=True)
-        # Pre-seed 3 fake older backups (same stem as the store db = "test");
-        # keep=2 → after a real backup, only the 2 newest remain.
-        for name in ("test-20260101-000000.duckdb",
-                     "test-20260102-000000.duckdb",
-                     "test-20260103-000000.duckdb"):
-            (dest / name).write_bytes(b"old")
-        res = await store.backup_database(dest_dir=dest, keep=2)
-        assert res["status"] == "success"
-        assert len(list(dest.glob("test-*.duckdb"))) == 2
+# A9-1, the DuckDB backup's consistent copy and its retention
+# (`TestBackup`), went with the backup in step 14's S14-18.
 
 
 # ─────────────────────── A2-RETURNS-3 lost/cancel group ───────────────────────
 
+@needs_postgres
 class TestReturnStatusGroup:
     @pytest.mark.asyncio
-    async def test_status15_excluded_from_gold_revenue(self, tmp_path):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            _insert_order(conn, oid=1)              # status 1 → counts
-            # status 15 (not_available) — must be treated as is_return now.
-            conn.execute(
-                """INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,
-                   created_at, updated_at, buyer_id, manager_id, manager_comment, promocode)
-                   VALUES (2, 4, 15, '999.00', '2026-01-15T10:00:00+03:00',
-                           '2026-01-15T10:00:00+03:00', '2026-01-15T10:00:00+03:00', 11, NULL, NULL, NULL)""",
-            )
-        # The shared Silver projection and the Postgres Gold projection, both
-        # rendered for DuckDB (DuckDB's own rebuild went in step 14's S14-15).
-        from tests.silver_on_duckdb import derive_silver, gold_cells
+    async def test_status15_excluded_from_gold_revenue(self, monkeypatch):
+        """Postgres's Silver and Gold, derived from Bronze. Until step 14's
+        S14-18 the shared projections ran on DuckDB here; the answer is the
+        one DuckDB gave on the same two orders (rule 9)."""
+        from datetime import timezone as tz
 
-        await derive_silver(store)
-        async with store.connection() as conn:
-            is_ret = conn.execute(
-                "SELECT is_return FROM silver_orders WHERE id = 2"
-            ).fetchone()[0]
-            rev = sum(cell["revenue"] for cell in gold_cells(conn).values())
+        when = datetime(2026, 1, 15, 10, tzinfo=tz(timedelta(hours=3)))
+
+        async def populate(conn, pool):
+            await seed(conn, orders=[
+                (1, 4, 1, 100.00, when, 10, None, None),     # status 1 → counts
+                # status 15 (not_available) — must be treated as is_return now.
+                (2, 4, 15, 999.00, when, 11, None, None),
+            ])
+
+        async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+            await derive(pool)
+            async with pool.acquire() as conn:
+                is_ret = await conn.fetchval(
+                    "SELECT is_return FROM silver.orders WHERE id = 2")
+                rev = await conn.fetchval(
+                    "SELECT SUM(revenue) FROM gold.daily_revenue WHERE source_id IS NULL")
         assert is_ret is True
         assert float(rev) == 100.0, "status-15 ₴999 order must be excluded from revenue"
 

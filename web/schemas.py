@@ -177,24 +177,8 @@ class HealthResponse(BaseModel):
             "beside it — the reads answered from DuckDB, none since S14-00."
         ),
     )
-    duckdb_switch: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "KS_DUCKDB, the week of silence's switch: `mode` as run (on, the "
-            "default, or off — this process must not open the DuckDB file), "
-            "`value` as read, `error` naming a value that was not understood "
-            "and ran as on. `opened_while_off` is `{site: {count, last_at}}` "
-            "for every open refused under off since the process started, a "
-            "site being the `module:function` that asked; never an "
-            "exception's text. Paged CRITICAL by the canary when non-empty. "
-            "Under KS_DUCKDB=off only, `held_back`: since step 14's S14-00 "
-            "always [] from web, which runs off whatever KS_DUCKDB says. An "
-            "image from before step 14 published there the keys of off's "
-            "coherence verdict web found unmet at its start, so it ran on "
-            "(paged CRITICAL as duckdb_off_held_back), and null before any "
-            "verdict. Keys only, never the details."
-        ),
-    )
+    # `duckdb_switch` (KS_DUCKDB as run, and every open of the DuckDB file
+    # refused under off) stood here until step 14's S14-18 deleted the switch.
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(
         None,
         description=(

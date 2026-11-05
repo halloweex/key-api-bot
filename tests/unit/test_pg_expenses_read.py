@@ -245,8 +245,7 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         `no_engine` made of it under `KS_DUCKDB=off` before step 14's S14-07,
         a 503 naming `expenses`, never a page of zeros."""
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "h1.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         read_fallback.reset_counts()
         try:
             with patch("core.pg_expenses_read.backfilled",
@@ -260,7 +259,6 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
             assert read_fallback.refusals()["expenses"]["count"] == 1
         finally:
             read_fallback.reset_counts()
-            await store.close()
 
     @pytest.mark.asyncio
     async def test_and_answers_once_it_is_across(self, tmp_path, monkeypatch):
@@ -270,17 +268,13 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         with no GROUP BY, which always returns exactly one row — mocking it
         empty tests the mock, not the code."""
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "h2.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_expenses_read.backfilled",
-                       new=AsyncMock(return_value=True)), \
-                 patch("core.pg_expenses_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_profit_analysis(*W)
-            fetch.assert_awaited()
-        finally:
-            await store.close()
+        store = DuckDBStore()
+        with patch("core.pg_expenses_read.backfilled",
+                   new=AsyncMock(return_value=True)), \
+             patch("core.pg_expenses_read.fetch",
+                   new=AsyncMock(return_value=[])) as fetch:
+            await store.get_profit_analysis(*W)
+        fetch.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_a_body_that_does_not_read_it_is_not_gated(
@@ -289,18 +283,14 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         """`manual_expenses` is replicated whole and the type dictionary is
         re-shipped every sync; neither has history to be missing."""
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "h3.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_expenses_read.backfilled",
-                       new=AsyncMock(return_value=False)) as gate, \
-                 patch("core.pg_expenses_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_expense_types()
-            fetch.assert_awaited()
-            gate.assert_not_awaited()
-        finally:
-            await store.close()
+        store = DuckDBStore()
+        with patch("core.pg_expenses_read.backfilled",
+                   new=AsyncMock(return_value=False)) as gate, \
+             patch("core.pg_expenses_read.fetch",
+                   new=AsyncMock(return_value=[])) as fetch:
+            await store.get_expense_types()
+        fetch.assert_awaited()
+        gate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_the_latch_only_ever_closes_forward(self):
@@ -366,16 +356,12 @@ class TestItDoesNotTakeTheDuckDbLock:
         self, tmp_path, monkeypatch,
     ):
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "ex.duckdb")
-        await store.connect()
-        try:
-            def boom(*_a, **_k):
-                raise AssertionError("the expense read reached for DuckDB")
+        store = DuckDBStore()
+        def boom(*_a, **_k):
+            raise AssertionError("the expense read reached for DuckDB")
 
-            with patch.object(type(store), "connection", boom), \
-                 patch("core.pg_expenses_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_expense_types()
-            assert "bronze.expense_types" in fetch.await_args.args[0]
-        finally:
-            await store.close()
+        with patch.object(type(store), "connection", boom), \
+             patch("core.pg_expenses_read.fetch",
+                   new=AsyncMock(return_value=[])) as fetch:
+            await store.get_expense_types()
+        assert "bronze.expense_types" in fetch.await_args.args[0]

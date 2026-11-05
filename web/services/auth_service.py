@@ -240,29 +240,10 @@ def create_session_data(auth_data: Dict[str, Any], role: str = "viewer") -> Dict
     }
 
 
-async def get_user_role(user_id: int) -> str:
-    """
-    Get user role from DuckDB.
-
-    Falls back to 'viewer' if user not found.
-    Hardcoded admins always get 'admin' role.
-    """
-    from core.permissions import is_hardcoded_admin
-    from core.duckdb_store import get_store
-
-    # Hardcoded admin fallback
-    if is_hardcoded_admin(user_id):
-        return "admin"
-
-    try:
-        store = await get_store()
-        user = await store.get_user(user_id)
-        if user:
-            return user.get("role", "viewer")
-    except Exception as e:
-        logger.warning(f"Error getting user role: {e}")
-
-    return "viewer"
+# `get_user_role` stood here until step 14's S14-18: the role out of DuckDB's
+# user list, imported by `web/routes/auth.py` and called by nothing (the stage
+# 5 entry-point walk listed it dead). The role comes with the session, from
+# `app.dashboard_users` (`check_user_access_async`).
 
 
 async def check_user_access_async(user_id: int, auth_data: Dict[str, Any] = None) -> Dict[str, Any]:

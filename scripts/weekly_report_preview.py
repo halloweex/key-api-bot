@@ -138,30 +138,21 @@ def fixture_report() -> WeeklyReport:
     )
 
 
-class PostgresOnly(RuntimeError):
-    """A reader asked for DuckDB. The preview reads Postgres alone."""
-
-
 def _store() -> Any:
-    """The store the jobs hand their readers, refusing to connect.
+    """The store the jobs hand their readers.
 
     Both reports take a store: the sales report's `fetch_*` are handed it
     and no longer ask it (step 14's S14-07), and the traffic report's reads
     are the store's own repository methods, which read Postgres alone (step
-    14's S14-05). The jobs get theirs from `get_store()`, which in web is a
-    store never connected. A script does not run web's start, so this is the
-    same store with the connect refused: the constructor touches no file, and
-    a reader that still reached for DuckDB would stop the preview here rather
-    than open one.
+    14's S14-05). The jobs get theirs from `get_store()`. Until S14-18 this
+    was the DuckDB store with its connect refused (`PostgresOnly`), so a
+    reader that still reached for DuckDB stopped the preview rather than
+    open the file; the store has no DuckDB half since, and its one
+    `connection()` refuses (`core.store.StoreRemoved`).
     """
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    class _PostgresOnlyStore(DuckDBStore):
-        async def connect(self, *, reopen: bool = True) -> None:
-            raise PostgresOnly(
-                "a reader asked for DuckDB; the preview reads Postgres alone")
-
-    return _PostgresOnlyStore()
+    return AnalyticsStore()
 
 
 def postgres_unready(report: str) -> Optional[str]:

@@ -51,13 +51,10 @@ def test_only_chain_3_declares_the_stand_in():
 
 @pytest.fixture
 def off_store(monkeypatch, tmp_path):
-    """The store as web holds it: KS_DUCKDB=off, never connected."""
-    from core import duckdb_switch
+    """The store as web holds it, its DuckDB connection a trap."""
     from core.duckdb_store import DuckDBStore
 
-    monkeypatch.setenv("KS_DUCKDB", "off")
-    duckdb_switch.configure_mode()
-    store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+    store = DuckDBStore()
     monkeypatch.setattr(store, "connection", MagicMock(
         side_effect=AssertionError("the getter opened DuckDB")))
     return store

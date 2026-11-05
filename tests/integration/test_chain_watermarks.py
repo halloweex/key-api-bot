@@ -40,7 +40,7 @@ async def pg_only(monkeypatch):
         monkeypatch.delenv(env, raising=False)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     await _clean(pool)
-    store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+    store = DuckDBStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("reached DuckDB")
@@ -139,8 +139,7 @@ class TestTheHourlyReplaceCannotRollItBack:
         for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", DSN)
-        store = DuckDBStore(db_path=tmp_path / "frozen.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
         await _clean(pool)
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -148,7 +147,6 @@ class TestTheHourlyReplaceCannotRollItBack:
             yield store, pool, monkeypatch
         await _clean(pool)
         await pool.close()
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_the_watermark_survives_and_the_freshness_check_is_quiet(
@@ -164,15 +162,11 @@ class TestTheHourlyReplaceCannotRollItBack:
         fresh = now - timedelta(minutes=10)
 
         # Before the switch: DuckDB owned both keys, and they stopped there.
-        # The store's setter writes Postgres alone since step 14's S14-11, so
-        # DuckDB's frozen stamps are written into its `sync_metadata` here, as
-        # the setter wrote them before the switch.
-        async with store.connection() as conn:
-            for key in ("offers", "stocks"):
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    [f"last_sync_{key}", frozen.isoformat()])
+        # The store's setter writes Postgres alone since step 14's S14-11, and
+        # since S14-18 there is no DuckDB to hold the frozen stamps: they are
+        # the rows Postgres's copy of the table hands the check (`frozen_rows`).
+        frozen_rows = {f"last_sync_{key}": frozen.isoformat()
+                       for key in ("offers", "stocks")}
 
         env.setenv("KS_WRITE_INVENTORY", "postgres")
         await store.set_last_sync_time("offers", fresh)
@@ -186,11 +180,7 @@ class TestTheHourlyReplaceCannotRollItBack:
 
         watermarks = await read_values(stood_down_sync_keys())
         # DuckDB's frozen rows, as the check meets them since step 14's
-        # S14-14: Postgres's copy of the table (`frozen_rows`).
-        async with store.connection() as conn:
-            frozen_rows = dict(conn.execute(
-                "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
-            ).fetchall())
+        # S14-14: Postgres's copy of the table (`frozen_rows`, above).
         issues = _freshness_check(now, chain_watermarks=watermarks, frozen_rows=frozen_rows)
         assert not [i for i in issues
                     if i.check_name in ("freshness_offers", "freshness_stocks")], issues

@@ -299,7 +299,7 @@ class TestTheService:
 
 
 def _admin_client() -> TestClient:
-    from tests.unit.duckdb_off_sweep_doors import hardcoded_admin, session_cookie
+    from tests.sessions import hardcoded_admin, session_cookie
     from web.main import app
 
     client = TestClient(app)

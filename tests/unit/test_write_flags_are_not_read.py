@@ -10,7 +10,7 @@ every chain writes Postgres — and S14-11 deleted the answers with the flags.
 What this holds:
 
 - rule 3: junk in any of the thirteen, or in all at once, imports web, runs
-  web's start (`configure_modes(web=True)`) and answers `/api/health` 200 —
+  web's start (`configure_modes()`) and answers `/api/health` 200 —
   in this process and in a fresh interpreter;
 - the `write_chains` block is `{chain: {sync_step?, pending?}}` for every
   registered chain, whatever the flags hold;
@@ -93,8 +93,8 @@ def web_with(monkeypatch):
             monkeypatch.delenv(name, raising=False)
         for name, value in values.items():
             monkeypatch.setenv(name, value)
-        configure_modes(web=True)
-        configure_modes(web=True)   # the scheduler's call, after the startup's
+        configure_modes()
+        configure_modes()   # the scheduler's call, after the startup's
         for value in vars(health).values():
             if isinstance(value, dict) and "expires_at" in value:
                 monkeypatch.setitem(value, "expires_at", 0)
@@ -143,8 +143,8 @@ def test_a_fresh_interpreter_imports_and_starts_with_junk_in_all_thirteen(tmp_pa
         f"for m in {modules!r}:\n"
         "    importlib.import_module(m)\n"
         "from core.runtime_modes import configure_modes\n"
-        "configure_modes(web=True)\n"
-        "configure_modes(web=True)\n"
+        "configure_modes()\n"
+        "configure_modes()\n"
         "print('ok')\n"
     )
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),

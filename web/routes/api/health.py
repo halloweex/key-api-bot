@@ -139,16 +139,12 @@ def _write_chains() -> dict:
     return {chain_name(chain): {} for chain in WRITE_CHAINS}
 
 
-def _duckdb_switch() -> dict:
-    """KS_DUCKDB as this process understood it, the error when it was not
-    understood (ran as `on`), and every open of the DuckDB file refused under
-    `off` — `{site: {count, last_at}}`, a site being the `module:function`
-    that asked. Local state, no I/O, no exception text: this endpoint is
-    public. The canary pages a non-empty `opened_while_off` CRITICAL and
-    writes the week of silence's watch from it (`core/duckdb_switch.py`)."""
-    from core import duckdb_switch
-
-    return duckdb_switch.health_block()
+# `_duckdb_switch()` — KS_DUCKDB as understood, and every open of the DuckDB
+# file refused under off — stood here until step 14's S14-18 deleted the
+# switch (`core/duckdb_switch.py`) and the `duckdb_switch` block with it.
+# Nothing in any process opens the file since; the canary's three pages over
+# the block (`duckdb_opened_while_off`, `duckdb_mode_invalid`,
+# `duckdb_off_held_back`) and its watch went with it.
 
 
 def _read_fallback_mode() -> dict:
@@ -506,7 +502,6 @@ async def health_check(request: Request):
         "derivation": await _derivation_block(),
         "write_chains": await _write_chains_block(),
         "read_fallback_mode": _read_fallback_mode(),
-        "duckdb_switch": _duckdb_switch(),
         "buyer_sync": await _buyer_sync_block(),
         "backups": _backups(),
     }

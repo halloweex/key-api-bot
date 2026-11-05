@@ -13,8 +13,9 @@ key-api-bot/
 ├── core/                         # Shared modules (bot + web), 43 files
 │   ├── config.py                # Shared configuration
 │   ├── keycrm.py                # Unified async KeyCRM client
-│   ├── duckdb_store.py          # The analytics store; repositories/ mix into it
-│   ├── repositories/            # Nine mixins composed into DuckDBStore
+│   ├── store.py                 # The analytics store (AnalyticsStore); no DuckDB in it
+│   ├── duckdb_store.py          # Its old name, a shim for one release (S14-18)
+│   ├── repositories/            # Nine mixins composed into AnalyticsStore
 │   ├── models.py                # Data models (Order, Product, Category, Buyer)
 │   ├── filters.py               # Date period parsing (DateRange, parse_period)
 │   ├── scheduler.py             # APScheduler jobs, addressed by string id
@@ -47,14 +48,13 @@ key-api-bot/
 │   └── static-v2/               # Built React app (generated, gitignored)
 │
 ├── scripts/                      # Utility scripts. Whole dir is COPYied into the
-│   │                            # web image — the compact sidecar runs from it.
-│   ├── compact_duckdb.py        # Host cron, Sunday 02:00 UTC. Do not touch.
-│   ├── weekly_compact.sh        # The cron entry itself
+│   │                            # web image. The DuckDB compaction
+│   │                            # (compact_duckdb.py, weekly_compact.sh) went in
+│   │                            # step 14's S14-18; the pinned image keeps it.
 │   ├── check_turbosms_signature.py  # Is TURBOSMS_WEBHOOK_SECRET the one the gateway signs with?
 │   └── utm_reclassify_dryrun.py # What a UTM reclassify would move; read-only, snapshots the verdicts
 │
 ├── deploy/                       # Reached only from host cron, never imported
-│   ├── daily_offsite.sh         # 02:45 daily — snapshot + ship off-site
 │   ├── offsite_check.sh         # 09:00 daily — freshness, in-app watchdog liveness
 │   ├── api_fingerprint.py       # sha256 of past-window API answers, before/after a deploy
 │   └── restore_from_export.py   # The only restore path, on the pinned image. Never delete.
@@ -1560,6 +1560,21 @@ returns to its natural size reads as growth a week later. The WARN standing on
 Cap what rebounds; only delete what stays deleted.
 
 ### A killed DuckDB writer, and what the next start used to lose
+
+**Since step 14's S14-18 none of the code below exists.** The store is
+`core.store.AnalyticsStore` — the nine mixins and the writers' doors, with no
+connection, no schema, no migrations (`core/migrations.py`,
+`core/duckdb_sequences.py`), no checkpoint, no backup, no FATAL bookkeeping
+and no counts; `core/duckdb_store.py` is a shim for one release
+(`DuckDBStore = AnalyticsStore`, `get_store`, `close_store`). The opener
+(`core/duckdb_switch.py`), the row-dump cuts (`core.observability`'s
+`cut_row_dumps`, `without_row_dump`, `RowDumpFilter`), `QueryTimeoutError`
+and its 504, and `StoreClosedError` went with it. `connection()` stays one
+release as a refusal: `StoreRemoved`, a `ReadUnavailable` naming `duckdb`,
+so a caller nobody found gets the counted 503 and the `read_refused` page,
+not an `AttributeError`. Nothing in any process opens the file: it stays on
+disk, unchanged, until the final stage. What follows is the history of the
+DuckDB half.
 
 DuckDB 1.5.5 drops index entries across a kill. The rows a killed writer left
 in its WAL are replayed into every `CREATE INDEX` index (not the PK/UNIQUE
@@ -4889,6 +4904,20 @@ tools still read the variable. The tripwire (`guard`, `open_file`,
 `opened_while_off`, `duckdb_opened_while_off`) stays until S14-18. History
 below.
 
+**Since S14-18 the switch itself is gone** (`core/duckdb_switch.py`): no
+process reads `KS_DUCKDB` in the code — only the host's `deploy/duckdb_env.sh`
+for `offsite_check.sh`'s frozen branch and the restore drill, and an image
+from before step 14 — and nothing in any process opens the file, because the
+store has no DuckDB half to open it with. `/api/health` publishes no
+`duckdb_switch` block, the canary's three pages over it
+(`duckdb_opened_while_off`, `duckdb_mode_invalid`, `duckdb_off_held_back`)
+went with it, and the bot stopped writing the week's watch
+(`watch:duckdb_switch` stays in `app.alert_series` as history). Keep
+`KS_DUCKDB=off` in `.env`: the host scripts and a rollback image read it. A
+junk value there changes nothing in web (`tests/unit/test_store_without_duckdb.py`).
+The stage 5 sweep that proved no path opened the file (`test_duckdb_off_*`)
+went with the last opener, after a green run on S14-18's base.
+
 **Off is a claim checked at web's start** (PR-2, `core/duckdb_off.py`,
 OD-S5-1 (a)): step 13 **in force** — `postgres` with every precondition met,
 not a way back that latched chains 3 and 5 refused, which stays `postgres`
@@ -5061,7 +5090,16 @@ still holds — the host scripts read `.env`, so the line stays
 `KS_DUCKDB=off` — and its way back is not a way back any more on its own:
 it is that image's way back, taken only after a rollback to
 `rollback-step14` (below). The archive tools it names run on the same
-pinned image ("The archive tools on a pinned image").
+pinned image ("The archive tools on a pinned image"). **Since step 14's
+S14-18 `scripts/weekly_compact.sh` and `deploy/daily_offsite.sh` are deleted**
+from the checkout, with the compaction (`scripts/compact_duckdb.py`,
+`deploy/compact_floor_check.py`) and the snapshot (`deploy/snapshot_export.py`,
+`core/snapshot_validation.py`, `deploy/offsite_parquet.sh`): their cron lines
+were retired on 2026-10-16, and the way back's step 3 below cannot be taken
+from this checkout at all — a rollback image's way back needs a checkout of
+the commit before S14-18. `deploy/duckdb_silence_check.sh --crontab` still
+names the two retired lines, so they can be confirmed gone, and no longer
+offers them back.
 
 **What PR-10 changed on the host**, which is what makes the order below safe:
 
@@ -5277,8 +5315,9 @@ any rollback to an image from before step 14"). A tag is never removed by the
 deploy's `docker image prune -f`; `:latest` moves with every deploy and
 carries no DuckDB from S14-19 on.
 
-So `deploy/restore-test.sh`, `deploy/daily_offsite.sh` and
-`deploy/ark_ship.sh` no longer default to `:latest`. They take their image
+So `deploy/restore-test.sh` and `deploy/ark_ship.sh` — and
+`deploy/daily_offsite.sh`, the nightly snapshot, until S14-18 deleted it —
+no longer default to `:latest`. They take their image
 from `BACKUP_RESTORE_IMAGE` (the Ark: `BACKUP_ARK_IMAGE`, else the same) in
 `deploy/backup.env`, and ask it before anything is fetched, linked or frozen
 (`deploy/archive_image.sh`): a tag that does not move (not `:latest`, not
@@ -5290,10 +5329,11 @@ step 3 sets the variable before it puts the snapshot's cron line back. Every
 container they start carries `--pull never`.
 
 **What is mounted into it imports only what it carries.** The drill mounts
-`restore_from_export.py`, the snapshot `snapshot_export.py` and
-`core/snapshot_validation.py`, the Ark `ark_freeze.py`, and the table-fate
+`restore_from_export.py`, the Ark `ark_freeze.py`, and the table-fate
 check's recipe the check and `core/duckdb_table_fates.py` — files from the
-checkout, run inside that pinned image. A name main gains after it is a name
+checkout, run inside that pinned image (the snapshot mounted
+`snapshot_export.py` and `core/snapshot_validation.py` until S14-18 deleted
+all three). A name main gains after it is a name
 the container does not have. `tests/unit/test_archive_image.py` derives the
 mounts from the scripts and their headers' recipes, read as the shell reads
 them (`${PWD}`, `$(pwd)`, variables, function arguments, the `DOCKER_RUN`
@@ -6105,6 +6145,17 @@ retail-status route now warns only on a replica that failed, not on one that
 was skipped.
 
 ### What becomes of every DuckDB table (stage 5's manifest)
+
+**Since step 14's S14-18 the manifest is a frozen literal** (`FATES`, its
+types and their vocabulary, standard library only). The schema, the
+compaction, the snapshot validator and the switches' readers it was walked
+against are deleted, and so are `duckdb_written()` and `STORE_SWITCHES`,
+with the two store predicates they were the last to ask
+(`pg_dashboard_users.user_store_is_postgres`, `core/pg_sms.py`). The test
+holds the literal consistent with itself and with the chains' `CHAIN_TABLES`,
+and `deploy/duckdb_table_fates_check.py` against a fixture file built from
+it; the check, on the pinned image, and the final stage are its readers.
+History below.
 
 `core/duckdb_table_fates.py` names every table and view `analytics.duckdb` can
 hold — the schema, a migration's scratch, and the names only the production
