@@ -105,8 +105,6 @@ async def stores(tmp_path, monkeypatch):
     from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
 
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
-    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
-    monkeypatch.setattr(read_fallback, "_mode_error", None)
     store = DuckDBStore(db_path=tmp_path / "forecast.duckdb")
     await store.connect()
 
@@ -666,37 +664,20 @@ class TestTheReadsFollowTheChain:
                     await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
         assert raised.value.surface == "goals"
         assert isinstance(raised.value.__cause__, ConnectionError)
-        assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
         assert read_fallback.refusals()["goals"]["count"] == 1
 
 
-# ─── The hourly replace ─────────────────────────────────────────────────────
+# ─── The flag put back ──────────────────────────────────────────────────────
 
 
-class TestTheHourlyReplaceCannotRollItBack:
-    @pytest.mark.asyncio
-    async def test_under_the_flag_the_four_tables_survive(self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        _flag(env)
-        await store.recalculate_goal_tables(include_weekly=True)
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        written = await _all_pg(pool, stamps=True)
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert set(TABLES) <= set(result.get("stood_down", [])), result
-        assert not set(TABLES) & set(result["replaced"]), result
-        assert await _all_pg(pool, stamps=True) == written
-
+class TestTheFlagPutBack:
     @pytest.mark.asyncio
     async def test_the_flag_put_back_moves_nothing(self, stores):
         """OD-19 (a): `KS_WRITE_FORECAST=duckdb` is not a rollback. Since step
         14's S14-11 it is not even a disagreement — nothing reads the flag,
-        so neither the copy nor `/api/health` says anything of it."""
-        from core.pg_operational import replicate_operational
+        so `/api/health` says nothing of it. Until S14-13 the hourly replace
+        was asked here too, and stood down for the four tables; it went with
+        `core.pg_operational`."""
         from web.routes.api.health import _write_chains
 
         store, pool, env = stores
@@ -709,9 +690,6 @@ class TestTheHourlyReplaceCannotRollItBack:
 
         assert len(await _pg(pool, SEASONAL)) == 12, "the flag moved the write back"
         assert await _all_duck(store) == before, "a second writer started in DuckDB"
-        result = await replicate_operational(store)
-        assert set(TABLES) <= set(result["stood_down"])
-        assert "chain_flag_mismatch" not in result
         assert _write_chains()[CHAIN] == {}
 
 

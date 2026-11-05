@@ -1,9 +1,6 @@
 """Tests for data-platform-fixes branch (ultra-audit STEP 5).
 
 Covers:
-- A5-1 / F3: refresh self-heal — a thrown pipeline error marks the warehouse
-  dirty (so the next scheduler tick rebuilds) and alerts, instead of leaving
-  durable cross-layer inconsistency silently; consecutive-failure bound.
 - A11-6: model-validation gate — an implausible model (high WAPE) is rejected
   before it overwrites the working model / feeds revenue_predictions; and
   negative/NaN predictions are never persisted.
@@ -16,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.duckdb_store import DuckDBStore, MAX_VALIDATION_RETRIES
+from core.duckdb_store import DuckDBStore
 from core.data_quality import _freshness_check, Severity
 
 
@@ -36,65 +33,9 @@ def _insert_order(conn, oid: int, buyer_id: int = 10):
     )
 
 
-# ─────────────────────────── A5-1 / F3 ───────────────────────────
-
-class TestRefreshSelfHeal:
-    @pytest.mark.asyncio
-    async def test_consecutive_failure_counter(self, tmp_path):
-        """Counts consecutive *errored* refreshes.
-
-        Validation failures have their own budget. They used to share this one,
-        which is how an OOM storm on 2026-08-02 spent the allowance meant for
-        repairing the damage the storm caused.
-        """
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            # oldest → newest. Most recent two threw.
-            for ts, err in [
-                ("2026-01-01", None),
-                ("2026-01-02", "boom"),
-                ("2026-01-03", None),
-                ("2026-01-04", "boom"),
-                ("2026-01-05", "boom"),
-            ]:
-                conn.execute(
-                    "INSERT INTO warehouse_refreshes "
-                    "(refreshed_at, trigger, validation_passed, error) "
-                    "VALUES (?, 'test', ?, ?)",
-                    [ts + "T00:00:00+03:00", err is None, err],
-                )
-        assert await store._count_consecutive_refresh_failures() == 2
-
-    @pytest.mark.asyncio
-    async def test_exception_stops_retry_after_max(self, tmp_path, monkeypatch):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            _insert_order(conn, oid=1)
-            # Seed MAX_VALIDATION_RETRIES+1 prior consecutive *errors* so the
-            # bound trips → no further dirty mark, CRITICAL alert instead.
-            for i in range(MAX_VALIDATION_RETRIES + 1):
-                conn.execute(
-                    "INSERT INTO warehouse_refreshes "
-                    "(refreshed_at, trigger, validation_passed, error) "
-                    "VALUES (?, 'test', FALSE, 'boom')",
-                    [f"2026-01-0{i+1}T00:00:00+03:00"],
-                )
-        alerts: list[tuple[str, str | None]] = []
-
-        async def fake_alert(msg, key=None):
-            alerts.append((msg, key))
-
-        monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
-        monkeypatch.setattr(
-            "core.duckdb_store.silver_select_sql", lambda *a, **k: "not valid sql ("
-        )
-
-        await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
-
-        is_dirty, _ = await store.consume_warehouse_dirty()
-        assert is_dirty is False, "must STOP retrying past the bound"
-        assert any("🚨" in msg for msg, _ in alerts)
-        assert any(key == "warehouse:refresh_errored_exhausted" for _, key in alerts)
+# A5-1 / F3, the DuckDB warehouse refresh's self-heal and its consecutive-
+# failure bound (`TestRefreshSelfHeal`), went with the refresh in step 14's
+# S14-15.
 
 
 # ─────────────────────────── A9-1 backup ───────────────────────────
@@ -153,27 +94,27 @@ class TestReturnStatusGroup:
                    VALUES (2, 4, 15, '999.00', '2026-01-15T10:00:00+03:00',
                            '2026-01-15T10:00:00+03:00', '2026-01-15T10:00:00+03:00', 11, NULL, NULL, NULL)""",
             )
-        await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
+        # The shared Silver projection and the Postgres Gold projection, both
+        # rendered for DuckDB (DuckDB's own rebuild went in step 14's S14-15).
+        from tests.silver_on_duckdb import derive_silver, gold_cells
+
+        await derive_silver(store)
         async with store.connection() as conn:
             is_ret = conn.execute(
                 "SELECT is_return FROM silver_orders WHERE id = 2"
             ).fetchone()[0]
-            rev = conn.execute(
-                "SELECT COALESCE(SUM(revenue),0) FROM gold_daily_revenue"
-            ).fetchone()[0]
+            rev = sum(cell["revenue"] for cell in gold_cells(conn).values())
         assert is_ret is True
         assert float(rev) == 100.0, "status-15 ₴999 order must be excluded from revenue"
 
 
 # ─────────────────────── A12-2 / A7-1 freshness ───────────────────────
 
-def _history(conn, now):
-    """A row in DuckDB's own `sync_metadata`, so the check is past its
-    fresh-install gate; the watermarks it judges are the chains'."""
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-        ["last_sync_orders", (now - timedelta(minutes=5)).isoformat()],
-    )
+def _history(now):
+    """A row of DuckDB's `sync_metadata` as Postgres copied it, so the check
+    is past its fresh-install gate; the watermarks it judges are the chains'.
+    (DuckDB's own row, read under `on`, until step 14's S14-14.)"""
+    return {"last_sync_orders": (now - timedelta(minutes=5)).isoformat()}
 
 
 def _moved(now, **stamps):
@@ -187,36 +128,27 @@ def _moved(now, **stamps):
 
 
 class TestFreshnessCheck:
-    @pytest.mark.asyncio
-    async def test_stale_catalog_fires_fresh_orders_pass(self, tmp_path):
-        store = await _make_store(tmp_path)
+    def test_stale_catalog_fires_fresh_orders_pass(self):
         now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
-        async with store.connection() as conn:
-            _history(conn, now)
-            # orders current; categories 45 days stale (the real incident).
-            issues = _freshness_check(conn, now=now, chain_watermarks=_moved(
-                now, orders=now - timedelta(minutes=5),
-                categories=now - timedelta(days=45)))
+        # orders current; categories 45 days stale (the real incident).
+        issues = _freshness_check(now=now, frozen_rows=_history(now), chain_watermarks=_moved(
+            now, orders=now - timedelta(minutes=5),
+            categories=now - timedelta(days=45)))
         names = {i.check_name for i in issues}
         assert "freshness_categories" in names
         assert "freshness_orders" not in names
 
-    @pytest.mark.asyncio
-    async def test_dead_orders_sync_is_critical(self, tmp_path):
-        store = await _make_store(tmp_path)
+    def test_dead_orders_sync_is_critical(self):
         now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
-        async with store.connection() as conn:
-            _history(conn, now)
-            issues = _freshness_check(conn, now=now, chain_watermarks=_moved(
-                now, orders=now - timedelta(hours=12)))
+        issues = _freshness_check(now=now, frozen_rows=_history(now), chain_watermarks=_moved(
+            now, orders=now - timedelta(hours=12)))
         orders = [i for i in issues if i.check_name == "freshness_orders"]
         assert orders and orders[0].severity == Severity.CRITICAL
 
-    @pytest.mark.asyncio
-    async def test_no_sync_history_is_bootstrap_no_issues(self, tmp_path):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            assert _freshness_check(conn) == []
+    def test_no_sync_history_is_bootstrap_no_issues(self):
+        """Nothing in Postgres at all — the copy read and empty, no chain
+        watermark: a fresh install, not a stall."""
+        assert _freshness_check(frozen_rows={}, chain_watermarks={}) == []
 
 
 # ─────────────────────────── A11-6 ───────────────────────────

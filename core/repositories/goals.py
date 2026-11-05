@@ -971,8 +971,8 @@ class GoalsMixin:
         `include_weekly=False` is the Monday job (seasonality and YoY, what it
         has always stored); `True` is `POST /goals/recalculate`, which stores
         the weekly weights too. Everything is read before anything is written,
-        so a read refused under `KS_READ_FALLBACK=off` — or any other failure
-        while computing — leaves every table as it was.
+        so a refused read — or any other failure while computing — leaves
+        every table as it was.
         """
         tables = await self._compute_goal_tables(include_weekly=include_weekly)
         await self._persist_goal_tables(tables)
@@ -1041,8 +1041,8 @@ class GoalsMixin:
 
             return actual_revenue + predicted_revenue
         except read_fallback.ReadUnavailable:
-            # A fallback refused (DN-20b, `KS_READ_FALLBACK=off`) is not a
-            # missing signal: it passes through, so the goal is not computed
+            # A refused read (DN-20b) is not a missing signal: it passes
+            # through, so the goal is not computed
             # from two signals while the third reads a store nobody writes.
             # It reaches the route, which answers 503 naming `goals`; DN-20a's
             # walk requires the decision to be written here, as for every

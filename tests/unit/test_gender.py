@@ -231,12 +231,16 @@ def test_every_table_is_non_empty():
 
 
 class TestTheDerivationRidesTheReplicationTick:
-    """Derived first, shipped second, in one tick.
+    """Derived first, in the hourly tick that kept the id
+    `replicate_operational`.
 
-    A copy that ran before the derivation would carry yesterday's verdict for a
-    buyer DuckDB decided an hour ago, and the daily reconciliation would then
-    report a difference the ordering created rather than a real drift. This is
-    `pg_gold`'s arrangement with `pg_silver` and the test that pins it.
+    Until step 14's S14-13 the tick then copied the operational tables out of
+    DuckDB (`core.pg_operational.replicate_operational`), and a copy that ran
+    before the derivation would have carried yesterday's verdict for a buyer
+    decided an hour ago — `pg_gold`'s arrangement with `pg_silver`. The copy
+    went with S14-13; what the tick runs after the derivation is the copy of
+    `data/bot.db`, and `derive_gender_pg` is the one writer of new verdicts,
+    so a tick without it stops them.
     """
 
     def test_the_runner_derives_before_it_replicates(self):
@@ -261,8 +265,10 @@ class TestTheDerivationRidesTheReplicationTick:
         # S14-11 (DuckDB's `derive_gender` went with the flag).
         assert "derive_gender_pg" in lines, "the tick no longer derives gender"
         assert "derive_gender" not in lines, "the tick derives in DuckDB again"
-        assert "replicate_operational" in lines
-        assert max(lines["derive_gender_pg"]) < min(lines["replicate_operational"])
+        assert "replicate_operational" not in lines, (
+            "the tick copies out of DuckDB again")
+        assert "replicate_bot_state" in lines
+        assert max(lines["derive_gender_pg"]) < min(lines["replicate_bot_state"])
 
     def test_the_cli_and_the_tick_share_one_implementation(self):
         """Two callers, one home — charter rule 1: both run chain 4's

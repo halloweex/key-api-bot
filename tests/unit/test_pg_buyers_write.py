@@ -33,13 +33,11 @@ class TestTheShape:
             "bronze.buyers", "bronze.buyer_contacts", "app.buyer_gender")
         assert chain.CHAIN_SYNC_KEYS == ("last_sync_buyers",)
 
-    def test_its_bronze_tables_are_the_mirrors_whole_unit(self):
-        """Whoever takes the buyers takes their contacts: the mirror writes
-        both in one transaction, and a chain that took one would leave the
-        mirror writing the other over it."""
-        from core.pg_buyers import BUYER_UNIT
-
-        assert set(BUYER_UNIT) <= set(chain.CHAIN_TABLES)
+    def test_its_bronze_tables_are_the_writers_whole_unit(self):
+        """Whoever takes the buyers takes their contacts: their one writer
+        (`core.pg_buyer_rows`) writes both in one transaction. The mirror's
+        `pg_buyers.BUYER_UNIT` said so until step 14's S14-13 deleted it."""
+        assert {"bronze.buyers", "bronze.buyer_contacts"} <= set(chain.CHAIN_TABLES)
 
     def test_its_watermark_is_left_to_the_canary(self):
         """`buyer_sync_stalled` already pages on the step's own state at 90
@@ -184,12 +182,15 @@ class TestTheCompletenessCheckFollowsTheChain:
     @pytest.mark.asyncio
     async def test_mirror_off_still_asks(self, flags, monkeypatch):
         """The chain writes Postgres whatever its flag says (S14-00), and the
-        landing mirror's flag is read for nothing."""
+        landing mirror's flag is read for nothing: since step 14's S14-13 the
+        check asks whenever there is a Postgres (`KS_PG_DSN`), which this test
+        names itself rather than inherit from whoever runs it."""
         from unittest.mock import AsyncMock
 
         from core.mirror_reconciliation import reconcile_buyer_completeness
 
         monkeypatch.setenv("KS_MIRROR_LANDING", "0")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         asked = AsyncMock(side_effect=RuntimeError("reached Postgres"))
         monkeypatch.setattr("core.pg.get_pool", asked)
         with pytest.raises(RuntimeError, match="reached Postgres"):
@@ -254,8 +255,6 @@ class TestTheHourlyRiderDerivesWhereTheChainWrites:
         pg = AsyncMock(return_value={"written": 0})
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.pg_buyers_write.derive_gender_pg", new=pg), \
-             patch("core.pg_operational.replicate_operational",
-                   new=AsyncMock(return_value={})), \
              patch("core.pg_bot_state.replicate_bot_state",
                    new=AsyncMock(return_value={})):
             await BackgroundScheduler()._run_replicate_operational()

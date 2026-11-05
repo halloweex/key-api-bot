@@ -101,8 +101,8 @@ class TestBuildDigest:
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
             issues=[
-                _row("headline_vs_line_items", 1184, "grand_total = 0 but 4,196,208.36 in line items"),
-                _row("orders_without_line_items", 523),
+                _row("pg_headline_vs_line_items", 1184, "grand_total = 0 but 4,196,208.36 in line items"),
+                _row("pg_orders_without_line_items", 523),
             ],
         )]
         msg = build_digest(sections)
@@ -114,8 +114,8 @@ class TestBuildDigest:
     def test_delta_against_the_previous_run(self):
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", 1184), _row("new_check", 7)],
-            previous_issues=[_row("headline_vs_line_items", 1182)],
+            issues=[_row("pg_headline_vs_line_items", 1184), _row("new_check", 7)],
+            previous_issues=[_row("pg_headline_vs_line_items", 1182)],
         )]
         msg = build_digest(sections)
         assert "1,184 (+2)" in msg
@@ -124,8 +124,8 @@ class TestBuildDigest:
     def test_a_standing_problem_reads_as_unchanged(self):
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("orders_without_line_items", 523)],
-            previous_issues=[_row("orders_without_line_items", 523)],
+            issues=[_row("pg_orders_without_line_items", 523)],
+            previous_issues=[_row("pg_orders_without_line_items", 523)],
         )]
         assert "(=)" in build_digest(sections)
 
@@ -159,7 +159,7 @@ class TestBuildDigest:
         arrives every day regardless stops being read on the day it matters."""
         sections = [DigestSection(
             layer="integrity", run=_run("PASS"), age_hours=2,
-            issues=[_row("goods_shipped_without_sale", 448, severity="INFO")],
+            issues=[_row("pg_goods_shipped_without_sale", 448, severity="INFO")],
         )]
         assert build_digest(sections) is None
 
@@ -167,8 +167,8 @@ class TestBuildDigest:
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
             issues=[
-                _row("headline_vs_line_items", 12),
-                _row("goods_shipped_without_sale", 448, severity="INFO"),
+                _row("pg_headline_vs_line_items", 12),
+                _row("pg_goods_shipped_without_sale", 448, severity="INFO"),
             ],
         )]
         msg = build_digest(sections)
@@ -196,8 +196,8 @@ class TestStandingFindingsGoQuiet:
     def _standing(self, count=414):
         return [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", count)],
-            previous_issues=[_row("headline_vs_line_items", count)],
+            issues=[_row("pg_headline_vs_line_items", count)],
+            previous_issues=[_row("pg_headline_vs_line_items", count)],
         )]
 
     def test_unchanged_warn_stays_quiet_the_day_after_it_was_sent(self):
@@ -229,8 +229,8 @@ class TestStandingFindingsGoQuiet:
         wait six days behind the cooldown of the number it grew from."""
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", 415)],
-            previous_issues=[_row("headline_vs_line_items", 414)],
+            issues=[_row("pg_headline_vs_line_items", 415)],
+            previous_issues=[_row("pg_headline_vs_line_items", 414)],
         )]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
@@ -240,8 +240,8 @@ class TestStandingFindingsGoQuiet:
     def test_a_new_check_beside_a_standing_one_is_news(self):
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", 414), _row("fk_orphans", 3)],
-            previous_issues=[_row("headline_vs_line_items", 414)],
+            issues=[_row("pg_headline_vs_line_items", 414), _row("fk_orphans", 3)],
+            previous_issues=[_row("pg_headline_vs_line_items", 414)],
         )]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
@@ -274,8 +274,8 @@ class TestStandingFindingsGoQuiet:
         """A week of silence does not turn blogger seeding into a problem."""
         sections = [DigestSection(
             layer="integrity", run=_run("PASS"), age_hours=2,
-            issues=[_row("goods_shipped_without_sale", 774, severity="INFO")],
-            previous_issues=[_row("goods_shipped_without_sale", 774, severity="INFO")],
+            issues=[_row("pg_goods_shipped_without_sale", 774, severity="INFO")],
+            previous_issues=[_row("pg_goods_shipped_without_sale", 774, severity="INFO")],
         )]
         assert build_digest(
             sections, last_sent_at=self.NOW - timedelta(days=30), now=self.NOW,

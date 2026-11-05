@@ -1,23 +1,26 @@
-"""DN-20c against a real PostgreSQL: a consumer under `off` reads a working
-Postgres, and answers a real outage itself.
+"""DN-20c against a real PostgreSQL: a consumer reads a working Postgres, and
+answers a real outage itself.
 
 `tests/unit/test_read_fallback_off_consumers.py` shows each answer with a
 pool that raises on first touch. What it cannot show is the half that would
-cost the business: that under `KS_READ_FALLBACK=off` the Monday traffic
-report, the goals job and the assistant simply *read* a Postgres that
-answers. An answer wired one step too early — a routing decision or an empty
-week taken for a refusal — would pass every unit test and stop both reports
-the day `off` is set, with a deferral in the log that looks exactly like the
-designed one.
+cost the business: that the Monday traffic report, the goals job and the
+assistant simply *read* a Postgres that answers. An answer wired one step too
+early — a routing decision or an empty week taken for a refusal — would pass
+every unit test and stop both reports, with a deferral in the log that looks
+exactly like the designed one.
 
-So the three consumers whose reads go through a router that used to fall
-back are run here, under `off`, against a live Postgres at the current head:
+So the three consumers whose reads go through a router that refuses are run
+here against a live Postgres at the current head:
 the pool is reached and nothing is refused. Then the same pool is closed — an
 outage asyncpg reports on its own — and each answers by name: the report
 defers with no ledger row, the goals job defers with nothing written, the
 tool returns `data_unavailable`. The consumers with no fallback at all
 (the weekly report, training, the index, the buyers step) meet a real
 outage exactly as before DN-20c and are not repeated here.
+
+Until step 14's S14-16 the fixture set `KS_READ_FALLBACK=off` and each test
+held that nothing fell back to DuckDB; nothing reads that variable since,
+and nothing counts such a read.
 """
 from __future__ import annotations
 
@@ -42,9 +45,9 @@ SWITCHES = {
 
 @pytest_asyncio.fixture
 async def live(monkeypatch):
-    """Every read switch unset but the three consumers' routers, a live
-    Postgres behind `core.pg.get_pool` that the test can count and close,
-    and `off` read the way web's startup reads it."""
+    """Every read switch unset but the three consumers' routers (none of
+    which is read since step 14's S14-07), and a live Postgres behind
+    `core.pg.get_pool` that the test can count and close."""
     from core import pg_expenses_read
 
     for name in [n for n in os.environ if n.startswith("KS_READ_")]:
@@ -58,11 +61,7 @@ async def live(monkeypatch):
     monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
     monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
 
-    saved = (read_fallback._mode, read_fallback._mode_error,
-             list(read_fallback._misconfigured))
     read_fallback.reset_counts()
-    monkeypatch.setenv("KS_READ_FALLBACK", "off")
-    read_fallback.configure_mode()
 
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     get_pool = AsyncMock(return_value=pool)
@@ -72,8 +71,6 @@ async def live(monkeypatch):
     finally:
         if not pool._closed:
             await pool.close()
-        read_fallback._mode, read_fallback._mode_error = saved[0], saved[1]
-        read_fallback._misconfigured = saved[2]
         read_fallback.reset_counts()
 
 
@@ -123,7 +120,6 @@ class TestTheTrafficReport:
             assert get_pool.await_count > 0, "the report never asked Postgres"
             assert result.get("reason") != read_fallback.READ_UNAVAILABLE, result
             assert read_fallback.refusals() == {}
-            assert read_fallback.counts() == {}
         finally:
             await store.close()
 
@@ -149,7 +145,6 @@ class TestTheTrafficReport:
                               **_refused("traffic")}
             assert sent == []
             marked.assert_not_awaited()
-            assert read_fallback.counts() == {}
         finally:
             await store.close()
 
@@ -262,6 +257,5 @@ class TestTheAssistant:
 
             assert result["error"] == DATA_UNAVAILABLE
             assert result["surface"] == "expenses"
-            assert read_fallback.counts() == {}
         finally:
             await store.close()

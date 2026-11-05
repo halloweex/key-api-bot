@@ -16,6 +16,10 @@
 -- watermark, `dq_stale:mirror_landing` the daily comparison. A series that
 -- fired and resolved is not a fail — one `mirror_stale` around the Sunday
 -- compaction is expected — but it is listed, to be recorded.
+--
+-- `derivation_mode_invalid` was watched too, until step 14's S14-15 deleted
+-- it with KS_PG_DERIVE: a step-14 web cannot fire it, and a series still
+-- `firing` under it is history an image from before step 14 left.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
@@ -27,7 +31,7 @@ watched AS (
     WHERE left(a.condition_key, 13) = 'warehouse_pg:'
        OR a.condition_key IN ('mirror_stale:silver.orders', 'mirror_stale:gold.daily_revenue',
                               'mirror_failing:silver.orders', 'mirror_failing:gold.daily_revenue',
-                              'derivation_mode_invalid', 'mirror_block_missing',
+                              'mirror_block_missing',
                               'integrity_check_raised', 'mirror_buckets_disagree',
                               'gold_rollup_mismatch', 'customer_profile_mismatch',
                               'dq_stale:mirror_landing')

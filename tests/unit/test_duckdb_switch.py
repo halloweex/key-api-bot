@@ -1159,8 +1159,8 @@ class TestTheStartup:
 class TestTheBootSync:
     """`init_and_sync` under off asks the store the orders are written to
     whether there is history, and never DuckDB's counts (stage 5, PR-1).
-    Under `on` the order is pinned in `test_warehouse_writer.py`
-    (settle, stats, sync)."""
+    (Under `on` the order — settle, stats, sync — was pinned in
+    `test_warehouse_writer.py` until step 14's S14-15 deleted the settle.)"""
 
     def _boot(self, monkeypatch, held):
         from core import sync_service as mod
@@ -1175,7 +1175,6 @@ class TestTheBootSync:
         monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
         monkeypatch.setattr(mod, "get_sync_service", AsyncMock(return_value=service))
         monkeypatch.setattr(mod, "init_meilisearch", AsyncMock(return_value=False))
-        monkeypatch.setattr(mod.warehouse_cutover, "settle_writer", AsyncMock())
         asyncio.run(mod.init_and_sync())
         store.get_stats.assert_not_awaited()
         store.orders_held.assert_awaited_once()
@@ -1199,15 +1198,39 @@ class TestTheFullSync:
     no-op is not one connection away from a CHECKPOINT (stage 5, PR-1)."""
 
     def _chunked(self, store):
-        from tests.unit.test_warehouse_writer import _service, _sync
+        from core import sync_service as sync_module
 
-        service = _service(store, orders=[{"id": 1, "status_id": 1}])
-        _sync(lambda: service.full_sync(days_back=45))
+        service = sync_module.SyncService(store)
+        service.sync_managers = AsyncMock(return_value=0)
+        service.sync_offers = AsyncMock(return_value=0)
+        service.sync_stocks = AsyncMock(return_value=0)
+        service._fetch_orders_with_date_filter = AsyncMock(
+            return_value=[{"id": 1, "status_id": 1}])
+        service._upsert_orders_with_expenses = AsyncMock(return_value=(1, 0))
+
+        class _Client:
+            async def paginate(self, endpoint, params=None, page_size=50):
+                if endpoint == "order":
+                    yield [{"id": 1, "status_id": 1}]
+
+        async def client():
+            return _Client()
+
+        with patch.object(sync_module, "get_async_client", new=client):
+            asyncio.run(service.full_sync(days_back=45))
 
     def _store(self):
-        from tests.unit.test_warehouse_writer import _FullSyncStore
-
-        store = _FullSyncStore()
+        """What `full_sync` asks of the store (the helpers of the deleted
+        `tests/unit/test_warehouse_writer.py`, which raised on the DuckDB
+        derivation `full_sync` no longer calls since step 14's S14-15)."""
+        store = MagicMock()
+        for name, value in (("upsert_categories", 0), ("upsert_expense_types", 0),
+                            ("upsert_products", 0), ("set_last_sync_time", None),
+                            ("refresh_sku_inventory_status", 0),
+                            ("record_sku_inventory_snapshot", False),
+                            ("get_latest_order_time", None),
+                            ("find_backdated_order_ids", [])):
+            setattr(store, name, AsyncMock(return_value=value))
         store.checkpoint = AsyncMock()
         return store
 
@@ -1297,31 +1320,22 @@ class TestWhatWebPublishes:
 
 class TestHealthUnderOff:
     """Stage 5, PR-3: under off the health endpoints do not reach for the
-    file. `/api/health` publishes `duckdb.status=off`, `migrations.status=off`
-    and no FATAL, and `duckdb` is not a cause of degradation — so the probe
-    the canary takes every 15 minutes, and the Docker healthcheck every 30 s,
-    are neither a site of the tripwire nor an outage. Under on every answer
-    is what it was; the tests of `health_check`, the FATAL and the ledger
-    hold that."""
-
-    @pytest.fixture
-    def stats_cache_empty(self, monkeypatch):
-        """A count an earlier request cached under on is not an answer under
-        off — and would hide a `get_stats` that still ran."""
-        from web.routes.api import health as health_routes
-
-        monkeypatch.setitem(health_routes._stats_cache, "data", None)
-        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
+    file, so the probe the canary takes every 15 minutes, and the Docker
+    healthcheck every 30 s, are neither a site of the tripwire nor an
+    outage. Until step 14's S14-17 `/api/health` published `duckdb.status=
+    off`, `migrations.status=off` and no FATAL here, `/health/detailed` a
+    `duckdb` component saying `off`, and `/api/duckdb/stats` answered
+    `{"status": "off"}`; under on the three asked the store. All of it went
+    in S14-17: no health endpoint names DuckDB's store whatever KS_DUCKDB
+    says."""
 
     def test_health_is_healthy_and_reaches_nothing(
-        self, admin_client, duckdb_off, stats_cache_empty,  # noqa: F811
+        self, admin_client, duckdb_off,  # noqa: F811
     ):
         """The design's proof: one `/api/health` under off opens nothing,
         reads healthy, and the canary judging that very payload pages neither
         `health_status` nor `duckdb_opened_while_off`, and the week's watch
-        says silent. Mutations: drop the `off` branch of the stats block
-        (`health_check` becomes a site, `degraded_by == ["duckdb"]`), or of
-        the ledger or the FATAL (each a site)."""
+        says silent."""
         response = admin_client.get("/api/health")
         assert response.status_code == 200, response.text
         health = response.json()
@@ -1329,10 +1343,7 @@ class TestHealthUnderOff:
         assert health["duckdb_switch"]["opened_while_off"] == {}
         assert health["status"] == "healthy", health["degraded_by"]
         assert health["degraded_by"] == []
-        assert health["duckdb"]["status"] == "off"
-        assert health["duckdb"]["fatal"] is None
-        assert health["duckdb"]["latency_ms"] is None
-        assert health["migrations"] == {"status": "off"}
+        assert "duckdb" not in health and "migrations" not in health
         assert not duckdb_off.exists()
 
         result = asyncio.run(_probe(health))
@@ -1341,48 +1352,20 @@ class TestHealthUnderOff:
         assert result.health_status == "healthy"
         assert result.duckdb_silent is True
 
-    def test_detailed_health_and_the_stats_route_say_off(
-        self, admin_client, duckdb_off, stats_cache_empty,  # noqa: F811
+    def test_detailed_health_has_no_duckdb_and_the_stats_route_is_gone(
+        self, admin_client, duckdb_off,  # noqa: F811
     ):
-        """`/health/detailed` reads healthy for DuckDB's part, and
-        `/api/duckdb/stats` answers `off` instead of an error naming the
-        refusal. Mutation: drop either `off` branch."""
+        """`/health/detailed` reads healthy with no DuckDB component, and
+        `GET /api/duckdb/stats` answers the JSON 404 of a route that is not
+        there. Mutation: put either back."""
         detailed = admin_client.get("/api/health/detailed").json()
-        assert detailed["components"]["duckdb"] == {"status": "off"}
+        assert "duckdb" not in detailed["components"]
         assert detailed["status"] == "healthy"
-        assert admin_client.get("/api/duckdb/stats").json() == {"status": "off"}
+        gone = admin_client.get("/api/duckdb/stats")
+        assert gone.status_code == 404 and gone.headers["content-type"].startswith(
+            "application/json"), gone.text
         assert duckdb_switch.opened() == {}
         assert not duckdb_off.exists()
-
-    def test_under_on_the_store_is_asked_as_ever(
-        self, admin_client, monkeypatch, stats_cache_empty,  # noqa: F811
-    ):
-        """The other side of every branch: under on the three answers come
-        from the store — its counts, its ledger, its FATAL marker — and a
-        store that cannot count still degrades health as `duckdb`."""
-        from web.routes.api import health as health_routes
-
-        store = MagicMock()
-        store.get_stats = AsyncMock(return_value={"orders": 7, "products": 3})
-        store.schema_status = MagicMock(return_value={"status": "ok", "applied": 9})
-        store.fatal_status = MagicMock(return_value=None)
-        monkeypatch.setattr(health_routes, "get_store", AsyncMock(return_value=store))
-        health = admin_client.get("/api/health").json()
-        assert health["duckdb"]["status"] == "connected"
-        assert health["duckdb"]["orders"] == 7
-        assert health["migrations"] == {"status": "ok", "applied": 9}
-        assert store.fatal_status.called
-        assert admin_client.get("/api/duckdb/stats").json() == {
-            "status": "connected", "orders": 7, "products": 3}
-        assert admin_client.get("/api/health/detailed").json()[
-            "components"]["duckdb"]["status"] == "connected"
-
-        store.get_stats = AsyncMock(side_effect=RuntimeError("cannot count"))
-        monkeypatch.setitem(health_routes._stats_cache, "data", None)
-        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
-        health = admin_client.get("/api/health").json()
-        assert health["duckdb"]["status"] == "error"
-        assert health["degraded_by"] == ["duckdb"]
 
 
 # ─── The canary ──────────────────────────────────────────────────────────────
@@ -1520,4 +1503,6 @@ class TestTheBotWritesTheWatch:
     def test_the_watch_key_is_not_an_alert(self):
         assert canary.DUCKDB_SWITCH_WATCH_KEY.startswith("watch:")
         assert canary.DUCKDB_SWITCH_WATCH_KEY not in REGISTRY
-        assert canary.DUCKDB_SWITCH_WATCH_GAP_S == canary.READ_FALLBACK_WATCH_GAP_S
+        # The read-fallback watch's gap, shared until step 14's S14-16
+        # stopped writing that watch: 35 minutes, as it was.
+        assert canary.DUCKDB_SWITCH_WATCH_GAP_S == 35 * 60

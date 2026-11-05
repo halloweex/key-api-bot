@@ -19,9 +19,10 @@ THE STATE IS DERIVED, NOT WRITTEN DOWN
 `apply_target_state` reads it out of the registries: every `KS_READ_*` switch
 the fallback walk finds, at the engine it names; every chain in
 `WRITE_CHAINS` at `postgres` and latched; every `STORE_SWITCHES` name at
-`postgres`; every precondition of step 13 met (`MET_ENV`, which
-`tests/unit/test_warehouse_writer.py` keeps true); `KS_READ_FALLBACK=off`;
-and `KS_DUCKDB=off`. It is applied through the real `configure_modes()` as web
+`postgres`; the variables production's web carries for step 13
+(`STEP13_ENV`: none of them is read since step 14's S14-15 deleted step 13's
+switch, and production still sets them); `KS_READ_FALLBACK=off`; and
+`KS_DUCKDB=off`. It is applied through the real `configure_modes()` as web
 calls it, and `assert_target_state` then asks every cached answer whether it
 got there. Since step 14's S14-00 those answers are constants — web runs off
 whatever `KS_DUCKDB` says, and off's verdict (`core/duckdb_off.py`) is gone —
@@ -148,8 +149,9 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # watermarks and marks read from the copy (PR-5), the writer's record
     # from its copy (PR-6).
     # ── the GET routes ──
-    # None since PR-8: `/api/warehouse/status` reads DuckDB's last refresh
-    # out of its Postgres copy, and `/api/summary?source_id=3` — Opencart,
+    # None since PR-8: `/api/warehouse/status` read DuckDB's last refresh
+    # out of its Postgres copy (and since step 14's S14-15 not at all), and
+    # `/api/summary?source_id=3` — Opencart,
     # no column in Gold — answers DuckDB's zeros without a connection.
     # ── the doors (PR-9) ──
     # None, in either flavour, the first time they were opened: every write
@@ -167,12 +169,18 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
 # answered 503 naming `duckdb`, and counted and paged by the tripwire like any
 # reach, because using a DuckDB lever during the week breaks the week. Exact
 # like the residual — a lever that stops reaching leaves the list — and
-# derived where it can be: only a door under `LEVER_PREFIX`, the one OD-S5-8
-# keeps under its old name until the code is deleted, may be listed at all.
+# derived where it can be: only a door under `LEVER_PREFIX` may be listed at
+# all — the prefix OD-S5-8 kept until the code was deleted, and step 14's
+# S14-17 renamed (below).
 #
 # (step, site) → reason. Empty: under the chains every `/api/duckdb/` door
 # routes its sync to Postgres, and none reaches the file (`TestTheLevers`).
-LEVER_PREFIX = "/api/duckdb/"
+# Since step 14's S14-17 the four are `/api/sync/…`, and the old names under
+# `/api/duckdb/` are aliases of the same functions, out of the schema
+# (tests/unit/test_sync_doors.py): the sweep opens each lever once, by its
+# new name (`duckdb_off_sweep_doors.write_routes`).
+LEVER_PREFIX = "/api/sync/"
+OLD_LEVER_PREFIX = "/api/duckdb/"
 DUCKDB_LEVERS: Dict[Tuple[str, str], str] = {}
 
 # ─── What the world outside feeds ────────────────────────────────────────────
@@ -182,8 +190,8 @@ DUCKDB_LEVERS: Dict[Tuple[str, str], str] = {}
 # Postgres and the world both answer, each of these process steps, which
 # write the orders KeyCRM serves, must have been served orders and have
 # written orders to Postgres; each DuckDB lever that syncs — every one under
-# `LEVER_PREFIX` but its read, `GET /api/duckdb/stats` — the same of whatever
-# it fetches (`TestTheLevers`). Steps, not jobs read off the scheduler: which
+# `LEVER_PREFIX`, whose one read, `GET /api/duckdb/stats`, went in step 14's
+# S14-17 — the same of whatever it fetches (`TestTheLevers`). Steps, not jobs read off the scheduler: which
 # of them writes what KeyCRM serves is a fact about its body.
 FED_BY_KEYCRM = ("boot:init_and_sync", "job:incremental_sync", "job:full_sync_weekly",
                  "job:order_gap_backfill", "job:order_status_refresh",
@@ -202,7 +210,8 @@ FED_BY_KEYCRM = ("boot:init_and_sync", "job:incremental_sync", "job:full_sync_we
 # changes nothing under `on` (the design's first rule), so it is listed with
 # its reason rather than changed here; changing it is a change of its own.
 KNOWN_FALSE_SUCCESS: Dict[str, str] = {
-    "POST /api/duckdb/refresh-statuses?background=false": (
+    # `/api/duckdb/refresh-statuses` until step 14's S14-17 renamed it.
+    "POST /api/sync/refresh-statuses?background=false": (
         "core/sync_service.py refresh_order_statuses catches KeyCRMConnectionError "
         "and KeyCRMError, logs, and returns stats {orders: 0}; old (9502d9bd), "
         "the same under on"),
@@ -224,18 +233,17 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool,
     `breaking` sets variables over that state just before it is read, and
     then nothing is asserted about it: the caller judges what the start
     made of the state with one thing wrong."""
-    from core import warehouse_cutover as wc
     from core.duckdb_table_fates import STORE_SWITCHES
     from core.runtime_modes import configure_modes
-    from tests.unit.test_read_fallback_http import _every_switch_on
-    from tests.unit.test_warehouse_writer import MET_ENV
 
-    for name, value in MET_ENV.items():
+    for name, value in STEP13_ENV.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
     if live:
         monkeypatch.setenv("KS_PG_DSN", DSN)
-    _every_switch_on(monkeypatch)
+    # Every read switch was set on its engine here until step 14's S14-16
+    # deleted the helper: none is read since S14-07, and the walk that found
+    # them finds none (`read_switch_modules()`).
     for name in STORE_SWITCHES:
         monkeypatch.setenv(name, "postgres")
     # Production's. Its fallback is SQLite, never DuckDB, so it is not one of
@@ -248,16 +256,10 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool,
     # The disk watchdog's directory and heartbeat, beside the file as in
     # production (S14-01: read from `core.paths.DATA_DIR`, not the store).
     monkeypatch.setattr("core.scheduler.DATA_DIR", data)
-    monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
     # Since S14-00 nothing at the start asks Postgres — not step 13's revision,
-    # not off's frozen facts — so nothing here stands in for them.
-    # The process-wide caches the modes are read into, put back afterwards.
-    from core import pg_derivation, pg_utm_parse
-
-    for module, names in ((pg_derivation, ("_mode", "_mode_error")),
-                          (pg_utm_parse, ("_mode", "_mode_error"))):
-        for name in names:
-            monkeypatch.setattr(module, name, getattr(module, name))
+    # not off's frozen facts — so nothing here stands in for them. (The
+    # derivation's and the UTM parse's mode caches were put back here until
+    # step 14's S14-15 removed them.)
     monkeypatch.setattr("core.sync_service._sync_service", None)
     for name, value in (breaking or {}).items():
         monkeypatch.setenv(name, value)
@@ -266,7 +268,32 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool,
         assert_target_state()
 
 
+# The step-13 variables production's web carries (`MET_ENV` of the deleted
+# `tests/unit/test_warehouse_writer.py`, with its readers spelled out: step
+# 13's `WAREHOUSE_READERS` went with `core/warehouse_cutover.py` in step 14's
+# S14-15). Nothing reads them since; the sweep sets them because production
+# does, so it sweeps the web production runs.
+STEP13_ENV = {
+    "KS_PG_DERIVE": "own",
+    "KS_DQ_PG_WAREHOUSE": "on",
+    "KS_UTM_PARSE": "postgres",
+    "KS_READ_FALLBACK": "off",
+    "KS_PG_DSN": "postgresql://ks_app:x@db:5432/ks",
+    **{name: "postgres" for name in (
+        "KS_READ_GOLD", "KS_READ_SILVER", "KS_READ_DASHBOARD", "KS_READ_REPORTS",
+        "KS_READ_MARKETING", "KS_READ_TRAFFIC", "KS_READ_EXPENSES", "KS_READ_MARGIN",
+        "KS_READ_GOALS", "KS_READ_INVENTORY", "KS_READ_WEEKLY",
+        "KS_READ_FORECAST_INPUT", "KS_READ_SEARCH_INDEX", "KS_READ_PRODUCTS_INTEL",
+        "KS_READ_LOOKUPS", "KS_READ_CHAT", "KS_READ_BUYER_SYNC", "KS_SMS_STORE")},
+    "KS_READ_COHORTS": "clickhouse",
+    "KS_CH_URL": "http://ch:8123",
+    "KS_GOALS_HISTORY": "silver",
+    "KS_WRITE_WAREHOUSE": "postgres",
+}
+
 # Step 13's record as production's copy holds it: what the live flavour seeds.
+# Nothing reads it since S14-15; it stays on production's disk for an image
+# from before step 14, so the seeded database holds it too.
 WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
                    "resolved": True, "resolved_at": "2026-10-01T06:00:01+00:00"}
 
@@ -274,13 +301,12 @@ WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
 def assert_target_state() -> None:
     """Every cached answer says the state was reached — and if one does not,
     which, rather than a sweep of some other state."""
-    from core import read_fallback, warehouse_cutover as wc
-
     assert duckdb_switch.value() == "off" and duckdb_switch.mode_error() is None
-    unmet = [u.key for u in wc.preconditions_unmet()]
-    assert wc.writes_postgres() and not unmet, f"step 13 unmet: {unmet}"
-    assert read_fallback.mode() == "off"
-    assert read_fallback.misconfigured() == [] and read_fallback.no_engine_routes() == []
+    # Step 13 in force: a fact of the code since step 14's S14-15, which
+    # deleted the switch this asked (`warehouse_cutover.preconditions_unmet`).
+    # The read fallback refuses: a fact of the code since S14-16, which
+    # deleted its mode and the configurations this asked
+    # (`read_fallback.mode`, `misconfigured`, `no_engine_routes`).
     # Every chain writes Postgres, asking nothing (step 14's S14-11 deleted
     # the registry's `chain_modes`, which this asked until then).
     assert duckdb_switch.held_back() == ()
@@ -810,7 +836,7 @@ class TestTheSweepUnderARefusingPostgres:
         for step in ("job:full_sync_weekly", "job:order_status_refresh"):
             assert orders_served(steps[step]["world"]), (step, steps[step])
             assert steps[step]["status"] != "ok", (step, steps[step])
-        door = "POST /api/duckdb/refresh-statuses?background=false"
+        door = "POST /api/sync/refresh-statuses?background=false"
         assert orders_served(down[DOORS]["steps"][door]["world"])
         assert down[DOORS]["statuses"][door] == 500
 
@@ -835,9 +861,10 @@ class TestTheSweepUnderARefusingPostgres:
         """PR-8, in the week's own state. The two routes that reached the
         file answered 503 naming `duckdb` until it (PR-1's handler); now the
         summary for a source with no column in Gold answers DuckDB's zeros,
-        and the warehouse status nests DuckDB's last refresh as `off` — from
-        its Postgres copy, so here, with Postgres refusing, as the error's
-        class. No route's refusal names `duckdb` any more — nor any door's.
+        and the warehouse status nested DuckDB's last refresh as `off` — from
+        its Postgres copy — until step 14's S14-15 left it the Postgres
+        derivation alone, here, with Postgres refusing, as the error. No
+        route's refusal names `duckdb` any more — nor any door's.
         Mutation: drop either `off` branch — the route is back in the list,
         and here."""
         from tests.unit.duckdb_off_sweep_run import PAID_BY_PR8
@@ -853,22 +880,23 @@ class TestTheSweepUnderARefusingPostgres:
                                         "totalReturns", "returnsRevenue")} == {
             "totalOrders": 0, "totalRevenue": 0, "avgCheck": 0,
             "totalReturns": 0, "returnsRevenue": 0}
-        frozen = result["bodies"]["/api/warehouse/status"]["duckdb_frozen"]
-        assert frozen["status"] == "off" and frozen["error"], frozen
+        status = result["bodies"]["/api/warehouse/status"]
+        assert set(status) == {"writer", "postgres"}, status
+        assert status["postgres"]["error"], status
 
     def test_health_says_off_and_is_healthy(self, run):
-        """PR-3, in the week's own state: the three health routes reach
-        nothing (none is in the list), `/api/health` reads healthy with no
-        cause, and DuckDB's block and ledger say `off` — with Postgres
-        refusing, so nothing else degrades it either. Mutation: drop the
-        `off` branch of `health_check`'s stats block — `degraded_by` would
-        read `["duckdb"]` here, beside its site in the list."""
+        """PR-3, in the week's own state: the health routes reach nothing
+        (none is in the list), and `/api/health` reads healthy with no cause
+        — with Postgres refusing, so nothing else degrades it either. Until
+        step 14's S14-17 DuckDB's block and ledger said `off` here, and a
+        third route, `GET /api/duckdb/stats`, answered `off`; all three went
+        in S14-17."""
         result = run[ROUTES]
-        for path in ("/api/health", "/api/health/detailed", "/api/duckdb/stats"):
+        for path in ("/api/health", "/api/health/detailed"):
             assert result["routes"][path] == 200, path
-        assert result["health"] == {
-            "status": "healthy", "degraded_by": [],
-            "duckdb": "off", "migrations": {"status": "off"}}
+        assert "/api/duckdb/stats" not in result["routes"]
+        assert result["health"] == {"status": "healthy", "degraded_by": [],
+                                    "blocks": []}
 
 
 class TestTheSweepUnderALivePostgres:
@@ -1110,7 +1138,9 @@ class TestTheLevers:
         result = swept(request, flavor)
         doors = {(m, e.path) for e in iter_endpoints(app)
                  if e.path.startswith(LEVER_PREFIX) for m in e.methods - {"HEAD"}}
-        assert len(doors) >= 5, doors          # stats, resync, refresh, two syncs
+        # resync, refresh, two syncs (and `GET /api/duckdb/stats` until step
+        # 14's S14-17 deleted it)
+        assert len(doors) >= 4, doors
         reached, opened = set(), set()
         for sweep in (ROUTES, DOORS):
             for step, entry in result[sweep]["steps"].items():
@@ -1120,10 +1150,27 @@ class TestTheLevers:
         assert opened == doors, sorted(doors - opened)
         assert reached == set(DUCKDB_LEVERS), sorted(reached ^ set(DUCKDB_LEVERS))
 
+    def test_the_old_names_are_aliases_the_sweep_does_not_open_twice(self):
+        """The four `/api/duckdb/` names are out of the schema and each the
+        function its `/api/sync/` name is, so the doors sweep skips them and
+        nothing else (`aliases`). Mutation: give an alias a function of its
+        own — it is no alias, and is opened."""
+        from tests.routes_helper import aliases
+        from tests.unit.duckdb_off_sweep_doors import write_routes
+        from web.main import app
+
+        old = aliases(app)
+        assert old == {("POST", OLD_LEVER_PREFIX + name) for name in (
+            "resync", "refresh-statuses", "sync-buyers", "sync-all-buyers")}, old
+        swept = {(m, e.path) for m, e in write_routes(app)}
+        assert not swept & old
+        assert {("POST", path.replace(OLD_LEVER_PREFIX, LEVER_PREFIX)) for _m, path in old} <= swept
+
     def test_every_lever_that_syncs_went_past_its_fetch(self, live):
-        """Every lever but the read (`GET /api/duckdb/stats`) syncs from
-        KeyCRM, and each step of each — its variants too, the inline run
-        behind `background=false` — answered 2xx, was served by KeyCRM and
+        """Every lever syncs from KeyCRM (the one read among them, `GET
+        /api/duckdb/stats`, went in step 14's S14-17), and each step of each
+        — its variants too, the inline run behind `background=false` —
+        answered 2xx, was served by KeyCRM and
         wrote to Bronze in Postgres. Until the world answered, the resync
         answered 500 at its first request, the background runs failed at
         their first fetch and the missing-buyers sync found nobody missing,
@@ -1150,7 +1197,7 @@ class TestTheLevers:
         assert not short, short
 
     def test_door_path_reads_every_step_shape(self):
-        assert door_path("POST /api/duckdb/resync") == ("POST", "/api/duckdb/resync")
+        assert door_path("POST /api/sync/resync") == ("POST", "/api/sync/resync")
         assert door_path("POST /api/x?background=false") == ("POST", "/api/x")
         assert door_path("viewer GET /api/summary") == ("GET", "/api/summary")
         assert door_path("admin GET /api/chat/stream") == ("GET", "/api/chat/stream")
@@ -1356,8 +1403,10 @@ class TestTheDoors:
     def test_every_door_is_read_off_the_app_and_none_falls_between(self):
         """The GET routes under /api/ (the routes sweep), the rest under
         /api/, the routes outside it and the sockets (the doors sweep) are
-        every endpoint the app has, each in one sweep."""
-        from tests.routes_helper import iter_endpoints
+        every endpoint the app has, each in one sweep — but the aliases, an
+        old name of a function the sweep opens by its new one (step 14's
+        S14-17; `test_the_old_names_are_aliases_the_sweep_does_not_open_twice`)."""
+        from tests.routes_helper import aliases, iter_endpoints
         from tests.unit import duckdb_off_sweep_doors as doors
         from tests.unit.test_read_fallback_http import swept_routes
         from web.main import app
@@ -1373,6 +1422,7 @@ class TestTheDoors:
         swept |= {(m, e.path) for m, e in doors.write_routes(app)}
         swept |= {(m, e.path) for m, e in doors.outside_routes(app)}
         swept |= {("WS", e.path) for e in doors.socket_routes(app)}
+        swept |= aliases(app)
         assert swept == every, (sorted(every - swept), sorted(swept - every))
         assert {e.path for e in doors.get_api_routes(app)} == {
             p for m, p in every if m == "GET" and p.startswith("/api/")}

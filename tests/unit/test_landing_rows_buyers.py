@@ -193,8 +193,10 @@ class TestTheDuckDBWriterFollowsTheContract:
     builds its SQL from the same tuple (below)."""
 
     def test_the_contract_has_one_home(self):
-        from core import pg_buyers
-        # The mirror builds its SQL from the same tuple the parser fills...
-        assert pg_buyers.BUYER_COLUMNS is landing_rows.BUYER_COLUMNS
-        # ...and nobody re-exports it: the comparison imports it from home.
-        assert not hasattr(pg_buyers, "CONTACT_COLUMNS")
+        from core import pg_buyer_rows
+        # The one writer of buyer rows builds its SQL from the same tuple the
+        # parser fills (the mirror, `core.pg_buyers`, did too until step 14's
+        # S14-13 deleted it)...
+        assert pg_buyer_rows.BUYER_COLUMNS is landing_rows.BUYER_COLUMNS
+        # ...and nobody re-exports the contacts' columns.
+        assert not hasattr(pg_buyer_rows, "CONTACT_COLUMNS")

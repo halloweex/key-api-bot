@@ -1,6 +1,6 @@
 -- O4 (chain 3) — every order the chain writes with revenue has its line items.
 --
--- Only under chain 3; the variables are O1's.
+-- Only under chain 3; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- The chain writes an order's header and its line items in one transaction
@@ -98,7 +98,7 @@ SELECT 'O4 half-written orders'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 3 still writes DuckDB (KS_WRITE_ORDERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 3 has not latched (see O1)'
+           WHEN 'pending' THEN 'not applicable: chain 3 has not latched'
            WHEN '1' THEN CASE
                WHEN since.at IS NULL THEN
                    'no owner row and no flip time, so nothing dates the chain''s writes: '
@@ -117,6 +117,6 @@ SELECT 'O4 half-written orders'::text AS "check",
                             'days before the flip (measured 2026-10-09)', agg.ledgered) END)
                ELSE 'every order written ' || since.said
                     || ' with revenue has its line items' END
-           ELSE format('orders_on=%s: see O1', flag.state)
+           ELSE format('orders_on=%s: KS_WRITE_ORDERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN agg CROSS JOIN since;

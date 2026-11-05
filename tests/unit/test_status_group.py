@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from core.data_quality import KNOWN_STATUS_IDS
+from core.pg_warehouse_dq import KNOWN_STATUS_IDS
 from core.duckdb_store import DuckDBStore
 from core.models import (
     LEGACY_STATUS_NAMES,
@@ -244,9 +244,11 @@ class TestTheColumnArrivesOnAnExistingDatabase:
                 ).fetchone()[0]
                 assert value is None
 
-            # And the Silver rule that reads the column now binds.
-            res = await store.refresh_warehouse_layers(trigger="manual")
-            assert res["status"] == "success"
+            # And the Silver rule that reads the column now binds — the shared
+            # projection, run as DuckDB's rebuild ran it until step 14's S14-15.
+            from tests.silver_on_duckdb import derive_silver
+
+            assert await derive_silver(store) == 1
             async with store.connection() as c:
                 assert c.execute(
                     "SELECT is_return FROM silver_orders WHERE id = 1"

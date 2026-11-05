@@ -253,33 +253,12 @@ def _a_fresh_sync_service(monkeypatch):
         monkeypatch.setattr(module, "_sync_service", None)
 
 
-@pytest.fixture(autouse=True)
-def _a_fresh_warehouse_writer(monkeypatch, tmp_path):
-    """Every test starts as a process that has read nothing and settled
-    nothing about the warehouse writer (DN-29).
-
-    `core/warehouse_cutover.py` caches, per process, the mode, the verdict on
-    its preconditions and what `settle_writer` found — including the hold that
-    stands the DuckDB checks down on the way back from Postgres. One test that
-    reached `init_and_sync` over a store recording `postgres` would otherwise
-    leave every later integrity scan in the session standing down. Put back
-    afterwards by monkeypatch, so a test's own setattr still wins inside it.
-    """
-    from core import warehouse_cutover as wc
-
-    for name, value in (("_value", None), ("_mode", None), ("_mode_error", None),
-                        ("_unmet", ()), ("_value_unmet", ()), ("_decided_for", None),
-                        ("_settled", False),
-                        ("_held", False), ("_held_since", None), ("_full_validated", False),
-                        ("_reclassify_needed", False),
-                        ("_writer_record", None), ("_settle_lock", None)):
-        monkeypatch.setattr(wc, name, value)
-    # Chain 5: the way back a start refused while a chain was latched.
-    monkeypatch.setattr(wc, "_way_back_refused", ())
-    # Stage 5, PR-6: the note a door's re-parse leaves under KS_DUCKDB=off,
-    # beside the DuckDB file — a decision, like the latch markers, so never
-    # the real `data/`, and never one test's note in the next one's start.
-    monkeypatch.setattr(wc, "UTM_MARKER", tmp_path / "warehouse-utm-reparsed-at")
+# `_a_fresh_warehouse_writer` stood here until step 14's S14-15: it reset the
+# per-process caches of `core/warehouse_cutover.py` (the mode, the verdict on
+# its preconditions, what `settle_writer` found, the way back's hold) and
+# redirected its UTM re-parse marker into `tmp_path`, so one test's start
+# never became the next one's. The module is deleted, and nothing in the
+# application writes `data/warehouse-utm-reparsed-at` any more.
 
 
 # `route_chains_to_duckdb` and `chains_on_duckdb` stood here until step 14's

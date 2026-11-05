@@ -1,6 +1,6 @@
 -- M2 (chain 5) — the classification keeps its shape, and its sync keeps moving.
 --
--- Only under chain 5; the variables are M1's.
+-- Only under chain 5; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- Under the chain Postgres is the only store of a classification an admin
@@ -106,7 +106,7 @@ SELECT 'M2 classification shape'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 5 still writes DuckDB (KS_WRITE_MANAGERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 5 has not latched (see M1)'
+           WHEN 'pending' THEN 'not applicable: chain 5 has not latched'
            WHEN '1' THEN CASE WHEN cardinality(p.listed) = 0 THEN
                format('%s manager(s), each with one open interval and an unbroken history; '
                       'last_sync_managers %s',
@@ -114,6 +114,6 @@ SELECT 'M2 classification shape'::text AS "check",
                       COALESCE((SELECT age_h::text || ' h old' FROM stamp WHERE present),
                                'not written yet, inside 30 min of the flip'))
                ELSE left(array_to_string(p.listed, '; '), 500) END
-           ELSE format('managers_on=%s: see M1', flag.state)
+           ELSE format('managers_on=%s: KS_WRITE_MANAGERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN problems p;

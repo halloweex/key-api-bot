@@ -1,7 +1,7 @@
 import { afterEach, describe, it, expect } from 'vitest'
 import i18n from '../../lib/i18n'
 import {
-  addDays, daysAgo, daysAgoRange, daysBetween, formatDay, formatDayRange, inclusiveDays,
+  addDays, daysAgo, daysAgoRange, daysBetween, formatDay, formatDayRange, formatSpan, inclusiveDays,
   isIsoDate, kyivToday, lastDays, rangeEnds,
 } from '../smsDates'
 
@@ -113,5 +113,22 @@ describe('the last N days', () => {
     expect(daysAgoRange(90, 180, TODAY)).toEqual({ from: '2026-04-21', to: '2026-07-20' })
     expect(daysBetween('2026-07-20', TODAY)).toBe(90)
     expect(daysBetween('2026-04-21', TODAY)).toBe(180)
+  })
+})
+
+describe('a period in words', () => {
+  it('says the month and the year once', async () => {
+    await i18n.changeLanguage('ru')
+    expect(plain(formatSpan('2026-10-01', '2026-10-31'))).toBe('1–31 октября 2026')
+    expect(plain(formatSpan('2026-08-31', '2026-09-30'))).toBe('31 августа – 30 сентября 2026')
+    expect(plain(formatSpan('2025-12-15', '2026-01-14'))).toBe('15 декабря 2025 – 14 января 2026')
+    expect(plain(formatSpan('2026-11-04', '2026-11-04'))).toBe('4 ноября 2026')
+  })
+
+  it('in English too', async () => {
+    await i18n.changeLanguage('en')
+    expect(formatSpan('2026-10-01', '2026-10-31')).toBe('October 1–31, 2026')
+    expect(formatSpan('2026-08-31', '2026-09-30')).toBe('August 31 – September 30, 2026')
+    expect(formatSpan('2025-12-15', '2026-01-14')).toBe('December 15, 2025 – January 14, 2026')
   })
 })

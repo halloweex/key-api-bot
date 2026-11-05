@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from core.duckdb_store import DuckDBStore
+from tests.silver_on_duckdb import derive_silver
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
@@ -53,7 +54,7 @@ async def _seed(store, *, with_uncatalogued: bool = True):
                 "INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold) "
                 "VALUES (4, 2, NULL, 'Gone from the catalog', 1, 250.0)"
             )
-    await store.refresh_warehouse_layers(trigger="manual")
+    await derive_silver(store)
 
 
 class TestTheLevel:
@@ -135,7 +136,7 @@ class TestTheLevel:
             await _seed(store)
             async with store.connection() as conn:
                 conn.execute("UPDATE orders SET status_id = 19 WHERE id = 2")
-            await store.refresh_warehouse_layers(trigger="manual")
+            await derive_silver(store)
 
             async with store.connection() as conn:
                 total = conn.execute(
@@ -153,25 +154,6 @@ class TestTheLevel:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_it_still_resolves_after_silver_is_rebuilt_from_scratch(self, tmp_path):
-        """`rebuild-silver` drops the table. DuckDB resolves a view by name at
-        query time, so it survives — but only as long as the shape does, which
-        is why Silver's DDL has exactly one home."""
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            from core.duckdb_store import SILVER_ORDERS_DDL, silver_select_sql
-            from core.sql_dialect import DUCKDB
-            async with store.connection() as conn:
-                conn.execute("DROP TABLE IF EXISTS silver_orders")
-                conn.execute(SILVER_ORDERS_DDL)
-                conn.execute(
-                    "INSERT INTO silver_orders SELECT " + silver_select_sql(DUCKDB)
-                    + " FROM orders o"
-                )
-                assert conn.execute(
-                    "SELECT COUNT(*) FROM silver_order_lines"
-                ).fetchone()[0] == 4
-        finally:
-            await store.close()
+    # `test_it_still_resolves_after_silver_is_rebuilt_from_scratch` stood here
+    # until step 14's S14-15 deleted DuckDB's half of `rebuild-silver`, the
+    # DROP and re-CREATE of `silver_orders` it was about.

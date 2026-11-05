@@ -170,24 +170,14 @@ class TestTheWiring:
             {"chain_watermarks", "chain_stamps"} <= {k.arg for k in c.keywords}
             for c in scan)
 
-    @pytest.mark.asyncio
-    async def test_the_scan_hands_them_to_the_check(self, tmp_path, monkeypatch):
-        from core.duckdb_store import DuckDBStore
-
+    def test_the_scan_hands_them_to_the_check(self, monkeypatch):
         seen = {}
 
-        def spy(conn, now=None, **kwargs):
+        def spy(now=None, **kwargs):
             seen.update(kwargs)
             return []
 
         monkeypatch.setattr(dq, "_freshness_check", spy)
-        store = DuckDBStore(db_path=tmp_path / "scan.duckdb")
-        await store.connect()
         stamps = {"last_sync_orders": "2026-10-29T04:59:00+00:00"}
-        try:
-            async with store.connection() as conn:
-                dq.check_internal_integrity(conn, chain_watermarks={},
-                                            chain_stamps=stamps)
-        finally:
-            await store.close()
+        dq.check_internal_integrity(chain_watermarks={}, chain_stamps=stamps)
         assert seen["chain_stamps"] is stamps

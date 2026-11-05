@@ -422,8 +422,8 @@ async def _seed_live_facts(dsn: str) -> None:
     `sync_metadata`, and that copy shipped after the owner rows."""
     import asyncpg
 
-    from core import chain_latch, warehouse_cutover as wc
-    from core.pg_operational import SYNC_METADATA_TABLE
+    from core import chain_latch
+    from core.pg_frozen_metadata import TABLE as SYNC_METADATA_TABLE
     from core.write_chains import WRITE_CHAINS
     from tests.unit.test_duckdb_off_sweep import WRITER_RESOLVED
 
@@ -440,7 +440,7 @@ async def _seed_live_facts(dsn: str) -> None:
                 "VALUES ('bronze.expenses', now(), now())")
             await conn.execute(
                 "INSERT INTO app.sync_metadata (key, value, updated_at) "
-                "VALUES ($1, $2, now())", wc.WRITER_KEY, json.dumps(WRITER_RESOLVED))
+                "VALUES ($1, $2, now())", "warehouse_writer", json.dumps(WRITER_RESOLVED))
             # Later than every owner row, which carry this transaction's now().
             await conn.execute(
                 "INSERT INTO meta.mirror_state (table_name, last_ok_at) "
@@ -809,10 +809,11 @@ def test_routes(state, sweep_network, sweep_world, production_host, monkeypatch)
     calls = asyncio.run(sweep())
     body = calls.bodies.get("GET /api/health")
     if isinstance(body, dict):
-        # What the canary judges the week's probe by (PR-3).
+        # What the canary judges the week's probe by (PR-3). (`duckdb` and
+        # `migrations`, the DuckDB block's status and the ledger, beside it
+        # until step 14's S14-17 took both out of the answer.)
         health.update(status=body.get("status"), degraded_by=body.get("degraded_by"),
-                      duckdb=(body.get("duckdb") or {}).get("status"),
-                      migrations=body.get("migrations"))
+                      blocks=sorted(k for k in ("duckdb", "migrations") if k in body))
     record.write(routes=routes, variants=variants,
                  surfaces={step[4:]: s for step, s in calls.surfaces.items()},
                  health=health,

@@ -253,7 +253,7 @@ def classify_traffic(utm_data: Dict[str, Any]) -> Tuple[str, str]:
 
 # The columns a parse writes for one order, in the order `utm_columns` returns
 # them: everything in `silver.order_utm` except the key and the two stamps.
-# `core.pg_order_utm.UTM_COLUMNS` is this with `order_id` in front and
+# `core.pg_utm_parse.UTM_COLUMNS` is this with `order_id` in front and
 # `parsed_at` behind, and a test holds the two together.
 UTM_VERDICT_COLUMNS: Tuple[str, ...] = (
     "utm_source", "utm_medium", "utm_campaign", "utm_content",

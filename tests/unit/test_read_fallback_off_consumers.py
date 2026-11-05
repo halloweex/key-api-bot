@@ -1,39 +1,32 @@
-"""DN-20c: under `KS_READ_FALLBACK=off`, a consumer no HTTP request waits for
-answers a refusal itself.
+"""DN-20c: a consumer no HTTP request waits for answers a refusal itself.
 
-DN-20b made a refusal a 503 for every HTTP route. Everything else that can
+A refusal is a 503 for every HTTP route (DN-20b). Everything else that can
 receive one — derived, not remembered, by `test_read_fallback_consumers.py`
 — gets an answer of its own here, run through the code the scheduler, the
 boot and the assistant actually call:
 
-- the two weekly reports **defer**: no message, no ledger row, the reason
-  and the surface in the job's result, and tomorrow's tick asks again;
-- the Monday goals job defers **whole**: its one routed read is asked first,
-  so a refusal leaves `seasonal_indices` and `growth_metrics` as they were
-  instead of half updated;
-- training is **skipped** and the previous model file is untouched — and
-  `POST /api/revenue/forecast/train` answers 503 like every other route,
-  where it used to answer 200 `"status": "error"`;
+- the weekly traffic report **defers**: no message, no ledger row, the
+  reason and the surface in the job's result, and tomorrow's tick asks
+  again;
+- the Monday goals job defers **whole**: a refusal at any of its reads
+  leaves `seasonal_indices` and `growth_metrics` as they were instead of
+  half updated;
 - the assistant's tools return a **named** `data_unavailable` result, which
   is what the model reads instead of numbers;
-- the search index and the buyers step **skip their step for the tick**,
-  watermark held, and the sync tick completes its other steps.
+- the readers with no fallback — the weekly sales report, the training
+  input, the search index, the boot — fail with their own error, as they
+  always have, and each consumer contains it the way it did.
 
-Each is shown with a Postgres pool that raises. Several of these consumers
-never had a fallback — the weekly report, training input, the buyers step
-and the index read Postgres or nothing — so the pool alone produces their own
-pre-existing failure, not a refusal; for those, the refusal comes from a
-switch naming Postgres with no `KS_PG_DSN` at all, the one route to DuckDB
-nothing else marks. Under `duckdb`, the default, each behaves exactly as it
-did before this change.
-
-Since step 14's S14-07 no reader consults a switch, so that route — and the
-tests that took it, a switch naming Postgres with no `KS_PG_DSN` — is gone:
-without a DSN the readers with no fallback fail with the pool's own error,
-the raising-pool case each keeps. A refusal still reaches these consumers
-from the routers that refuse — the traffic tab, `/goals` and its forecast,
-`/expenses` — and that is what is held here now. The goal tables are
+Each is shown with a Postgres pool that raises. A refusal reaches these
+consumers from the routers that refuse — the traffic tab, `/goals` and its
+forecast, `/expenses` — and that is what is held here. The goal tables are
 Postgres', as production writes them.
+
+Until step 14's S14-16 every test here also set `KS_READ_FALLBACK=off` and
+held that nothing was counted as a read answered from DuckDB; nothing reads
+that variable since, and nothing counts such a read. (S14-07 had already
+taken the refusals that came from a switch naming Postgres with no
+`KS_PG_DSN`.)
 """
 from __future__ import annotations
 
@@ -46,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core import read_fallback
-from tests.unit.test_read_fallback_http import _mode, stores  # noqa: F401 — fixture
+from tests.unit.test_read_fallback_http import stores  # noqa: F401 — fixture
 from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
     admin_client,
     fresh_read_fallback,
@@ -90,8 +83,8 @@ def _serve(monkeypatch, store) -> None:
 
 class TestWeeklyReport:
     """Its reads have no fallback — a Postgres failure raises, and the daily
-    tick is the retry. What `off` added was the switch with no address; it
-    went with the switch (step 14, S14-07)."""
+    tick is the retry. What `KS_READ_FALLBACK=off` added was the switch with
+    no address; it went with the switch (step 14, S14-07)."""
 
     async def _job(self, monkeypatch, tmp_path):
         """The job wired as the scheduler runs it, with nothing seeded: the
@@ -122,14 +115,12 @@ class TestWeeklyReport:
         monkeypatch.setattr(pg_weekly_ledger_write, "mark_sent", marked)
         try:
             monkeypatch.setenv("KS_READ_WEEKLY", "postgres")
-            _mode(monkeypatch, "off")
 
             with pytest.raises(OSError, match="connection refused"):
                 await scheduler._run_weekly_report()
 
             assert sent == []
             marked.assert_not_awaited()
-            assert read_fallback.counts() == {}
         finally:
             await store.close()
 
@@ -137,8 +128,8 @@ class TestWeeklyReport:
 # ─── The weekly traffic report ────────────────────────────────────────────
 
 class TestTrafficReport:
-    """Reads through the tab's own router, which falls back — so here the
-    raising pool itself is what `off` refuses."""
+    """Reads through the tab's own router, which refuses — so here the
+    raising pool itself is what is refused."""
 
     ADMINS = [111, 222]
 
@@ -195,7 +186,6 @@ class TestTrafficReport:
             scheduler, sent = self._wire(monkeypatch, store, tmp_path)
             marked = _ledger_answers(monkeypatch)
             monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
-            _mode(monkeypatch, "off")
 
             result = await scheduler._run_traffic_report()
 
@@ -203,7 +193,6 @@ class TestTrafficReport:
                               **_refused("traffic")}
             assert sent == []
             marked.assert_not_awaited()
-            assert read_fallback.counts() == {}
             assert read_fallback.refusals()["traffic"]["count"] >= 1
         finally:
             await store.close()
@@ -235,7 +224,6 @@ class TestSeasonalityJob:
         try:
             _serve(monkeypatch, store)
             written = _writer_recorded(monkeypatch)
-            _mode(monkeypatch, "off")
 
             result = await BackgroundScheduler()._run_seasonality_calc()
 
@@ -291,7 +279,6 @@ class TestSeasonalityJobRefusedAtEveryRead:
             store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the goals job")
             _serve(monkeypatch, store)
             monkeypatch.setattr("core.pg.require_revision", AsyncMock())
-            _mode(monkeypatch, "off")
             first = await BackgroundScheduler()._run_seasonality_calc()
             assert first["retail_months"] == 12
             # A week later every number would move.
@@ -356,9 +343,11 @@ def model(tmp_path, monkeypatch):
 
 class TestTraining:
     """The input gate has no fallback: a Postgres failure is `status: error`
-    and the model stands, as before. What `off` added was the switch with no
-    address, where the job skipped by name and the manual trigger answered
-    503; it went with the switch (step 14, S14-07)."""
+    and the model stands, as before. What `KS_READ_FALLBACK=off` added was
+    the switch with no address, where the job skipped by name and the manual
+    trigger answered 503; it went with the switch (step 14, S14-07). The
+    job's handler naming the refusal stays (S14-16), held by
+    `test_read_fallback_consumers.py`'s `KEPT_ANSWERS`."""
 
     @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_is_an_error_and_keeps_the_model(
@@ -369,7 +358,6 @@ class TestTraining:
         store = await _duck(tmp_path)
         try:
             _serve(monkeypatch, store)
-            _mode(monkeypatch, "off")
 
             result = await BackgroundScheduler()._run_revenue_prediction()
 
@@ -400,7 +388,6 @@ class TestAssistant:
         try:
             self._serve_tools(monkeypatch, store)
             monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
-            _mode(monkeypatch, "off")
 
             result = await execute_tool("list_expenses", {})
 
@@ -408,21 +395,19 @@ class TestAssistant:
             assert result["surface"] == "expenses"
             assert "Do not estimate" in result["message"]
             assert "connection refused" not in json.dumps(result)
-            assert read_fallback.counts() == {}
         finally:
             await store.close()
 
     @pytest.mark.asyncio
-    async def test_under_duckdb_a_failure_is_the_error_it_always_was(
+    async def test_a_failure_is_the_error_it_always_was(
         self, stores, monkeypatch,
     ):
         """The assistant's own reads have no fallback: a Postgres failure is
         `{"error": <text>}` to the model, as before — and since step 14's
-        S14-07, whatever `KS_READ_CHAT` or `KS_READ_FALLBACK` says. Only a
-        refusal is named."""
+        S14-07, whatever `KS_READ_CHAT` says (and since S14-16 nothing reads
+        `KS_READ_FALLBACK`, which this set to `duckdb`). Only a refusal is
+        named."""
         from core.chat_tools import execute_tool
-
-        _mode(monkeypatch, "duckdb")
 
         result = await execute_tool("get_revenue_summary", {"period": "week"})
 
@@ -456,7 +441,6 @@ class TestAssistant:
         # A tool whose router refuses: the expenses' (since step 14's S14-07
         # the revenue tools read Postgres with no fallback, and fail as they
         # always did).
-        _mode(monkeypatch, "off")
 
         service = cs.ChatService()
         conv_id = service.create_conversation(user_id=1)
@@ -506,7 +490,6 @@ class TestSearchIndex:
         store = await _duck(tmp_path)
         try:
             _sync_service(monkeypatch, store)
-            _mode(monkeypatch, "off")
 
             result = await BackgroundScheduler()._run_meilisearch_sync()
 
@@ -537,12 +520,10 @@ class TestSearchIndex:
             # Chain 1's rebuild, Postgres's since S14-00; not this test's.
             monkeypatch.setattr(store, "refresh_sku_inventory_status",
                                 AsyncMock(return_value=0))
-            monkeypatch.setattr(sync_mod.warehouse_cutover, "settle_writer", AsyncMock())
             monkeypatch.setattr(duckdb_switch, "is_off", lambda: True)
             service = _sync_service(monkeypatch, store)
             service.incremental_sync = AsyncMock(return_value={})
             monkeypatch.setattr(sync_mod, "init_meilisearch", AsyncMock(return_value=True))
-            _mode(monkeypatch, "off")
 
             with caplog.at_level(logging.WARNING):
                 await sync_mod.init_and_sync()

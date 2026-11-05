@@ -47,10 +47,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, FrozenSet, Sequence
 
-# The lever every ownership page names since step 14's S14-04 deleted the way
-# back (`core/rollback_lever.py` says why it reads as it does).
-from core.rollback_lever import ROLLBACK_LEVER
-
 
 class Kind(str, Enum):
     CONDITION = "condition"  # holds and can clear → lifecycle, may escalate
@@ -112,46 +108,24 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "dq_never:reconciliation_ch": _c("the layer's first successful run"),
     "dq_stale:reconciliation_ch": _c("a successful run inside the age limit"),
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
-    # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
-    "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),
-    # KS_READ_FALLBACK set to a value web did not understand (ran as duckdb,
-    # DN-20a). Not a stop: web is the only syncer.
-    "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
-    # A read this web process answered from DuckDB because its engine failed
-    # (OD-07). The counters are per process, so only a restart empties them;
-    # the page stands until then. The soak's F1 read it back out of the
-    # journal before KS_READ_FALLBACK=off, until step 14's S14-02 retired it.
-    "read_fallback_used": _c("web restarts and answers no read from DuckDB"),
-    # A read switch web serves from DuckDB on every request with nothing to
-    # count: an engine named without its address, or the cohorts' switch not
-    # naming ClickHouse (OD-07). `off` would refuse each one.
-    "read_routed_to_duckdb": _c("web restarts with every read switch addressed"),
-    # A read refused with a 503 under KS_READ_FALLBACK=off (DN-20b), recently.
-    # Not a fallback — nothing came from DuckDB — so never under that key.
+    # `derivation_mode_invalid` (a KS_PG_DERIVE web did not understand) went
+    # in step 14's S14-15 with the variable; the name is not reused (rule 15).
+    # The reads web answered from DuckDB paged under three names until step
+    # 14's S14-16 deleted what they judged — `core.read_fallback`'s counts,
+    # its mode and its routes, and `/api/health`'s `read_fallbacks` block:
+    # `read_fallback_mode_invalid` (a KS_READ_FALLBACK web did not
+    # understand), `read_fallback_used` (a read whose engine failed, answered
+    # from DuckDB, OD-07) and `read_routed_to_duckdb` (a read switch serving
+    # DuckDB uncounted). No read falls back since S14-00 and no switch routes
+    # one since S14-07. The names are not reused (rule 15).
+    # A read refused with a 503 because its engine failed (DN-20b), recently.
     "read_refused": _c("no read refused for thirty minutes"),
-    # KS_WRITE_WAREHOUSE set to a value web did not understand (ran as duckdb,
-    # DN-28). Not a stop: web is the only syncer.
-    "warehouse_mode_invalid": _c("web restarts with a valid KS_WRITE_WAREHOUSE"),
-    # KS_WRITE_WAREHOUSE=postgres with a precondition of the switch unmet: web
-    # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
-    "warehouse_preconditions_unmet": _c(
-        "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
-    # A start that would have run as duckdb after a flip — the way back —
-    # stayed postgres, because a latched write chain owns a table DuckDB
-    # derives from (`warehouse_cutover`, THE WAY BACK, REFUSED). Since step
-    # 14 no start takes the way back (S14-00) and nothing copies a chain back
-    # (S14-04), so a step-14 web publishes no refusal and the page resolves.
-    "warehouse_way_back_refused": _c(
-        "web restarts on a step-14 image, which never takes the way back; "
-        "nothing in this build copies a chain back to DuckDB. " + ROLLBACK_LEVER),
-    # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
-    # down past the canary's limit: a UTM parse that keeps raising, or no tick
-    # after a full one whose parse raised (DN-29).
-    "warehouse_hold_stuck": _c("a validated full DuckDB tick and a finished UTM parse"),
-    # KS_UTM_PARSE set to a value web did not understand, or to postgres
-    # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
-    "utm_parse_mode_invalid": _c(
-        "web restarts with a valid KS_UTM_PARSE, postgres only beside KS_PG_DERIVE=own"),
+    # Step 13's switch paged under five names until step 14's S14-15 deleted
+    # it (`core/warehouse_cutover.py`) with the `warehouse_writer_mode` and
+    # `utm_parse` blocks of /api/health that the canary judged them from:
+    # `warehouse_mode_invalid`, `warehouse_preconditions_unmet`,
+    # `warehouse_way_back_refused`, `warehouse_hold_stuck` and
+    # `utm_parse_mode_invalid`. The names are not reused (rule 15).
     # A path in web opened, or tried to open, the DuckDB file under
     # KS_DUCKDB=off — the week of silence's tripwire (OD-17 (a)). The counters
     # are per process, so only a restart empties them.
@@ -203,13 +177,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # Registered so the completeness test sees it; firing it is a bug.
     "unkeyed": _EVENT,
 
-    # ── warehouse validator and its escalation ladder (web, every 2 min) ──
-    "warehouse:validation_retrying": _c("a tick passes validation"),
-    "warehouse:validation_rebuilding": _c("a tick passes validation"),
-    "warehouse:validation_unfixed": _c("a tick passes validation"),
-    "warehouse:sales_type_partition": _c("Gold's known types cover Silver again"),
-    "warehouse:refresh_errored": _c("a refresh completes without raising"),
-    "warehouse:refresh_errored_exhausted": _c("a refresh completes without raising"),
+    # ── the warehouse ──
+    # DuckDB's warehouse validator and its escalation ladder (every 2 min)
+    # paged under six `warehouse:` conditions — validation_retrying,
+    # validation_rebuilding, validation_unfixed, sales_type_partition,
+    # refresh_errored, refresh_errored_exhausted — until step 14's S14-15
+    # deleted the rebuild, their one emitter (rule 8). It had not run since
+    # step 13. The names are not reused.
     # The Postgres derivation on its own signal (chain 2, KS_PG_DERIVE=own).
     # Its own group, so a DuckDB tick's clean pass cannot resolve them.
     "warehouse_pg:derive_failed": _c("a Postgres derivation completes"),
@@ -269,7 +243,7 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # A check that raised reported nothing; its findings are absent, not clean.
     "integrity_check_raised": _c("every integrity check completes again"),
     "mirror_never_shipped": _c("the table's first successful shipment"),
-    "mirror_backfill_pending": _c("the backfill finishes with nothing left"),
+    "mirror_backfill_pending": _c("the table's history is restored, backfilled_at set"),
     # `mirror_buckets_disagree` and `mirror_disabled` were the comparisons'
     # against DuckDB, deleted with them in step 14's S14-12.
     "mirror_failing": _c("failures_since_ok back to zero"),
@@ -365,12 +339,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the integrity job reads the chain's facts again"),
 
     # ── data-quality findings: Silver / Gold arcs ──
-    "silver_missing_rows": _c("the next rebuild carries the rows"),
-    "silver_orphan_rows": _c("the next rebuild drops the orphans"),
-    "silver_row_values": _c("the next rebuild recomputes the values"),
-    "gold_cell_values": _c("the next rebuild recomputes the cells"),
-    # `gold_missing_cells`, `gold_orphan_cells`: `compare_gold`'s, deleted
-    # with it in step 14's S14-12.
+    # `silver_missing_rows`, `silver_orphan_rows`, `silver_row_values` and
+    # `gold_cell_values`: the DuckDB integrity scan's, deleted with it in step
+    # 14's S14-14; `gold_missing_cells`, `gold_orphan_cells`: `compare_gold`'s,
+    # deleted with it in S14-12. None may be reused while an image from before
+    # step 14 is the rollback target (rule 15).
     "gold_rollup_mismatch": _c("fine rows add up to the roll-up again"),
     "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
 
@@ -383,7 +356,6 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_attribution_coverage_website": _c("website orders carry campaign tags again"),
     "pg_headline_vs_line_items": _c("never fully — the standing ones are certificates"),
     "pg_goods_shipped_without_sale": _c("by design it never fully clears"),
-    "pg_line_items_disagree": _c("both engines count the same line-item findings"),
     "pg_silver_arc_unwatched": _c("the twin reads Postgres Silver again"),
     "pg_attribution_coverage_unwatched": _c("the twin can tell a quiet week from a stopped mirror"),
     "pg_line_items_unwatched": _c("the twin reads Postgres line items again"),
@@ -391,8 +363,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_silver_row_values": _c("a Postgres derivation recomputes the values"),
     "pg_silver_row_values_unwatched": _c("the twin recomputes Postgres Silver again"),
     # DN-14: an orders write the derivation's mark did not see, judged from its
-    # journal; and the pairing record, one INFO per run — a fact about that
-    # run, which nothing clears.
+    # journal. (The pairing record, `pg_twin_pairing`, went in step 14's
+    # S14-14 with the comparisons `pg_line_items_disagree` and
+    # `pg_order_landing_disagree`, and the flag `pg_warehouse_dq_flag_invalid`.)
     "pg_signal_missed": _c("a day of derivation runs in which every orders write raised its mark"),
     "pg_derivation_signal_unwatched": _c("the twins read the derivation journal again"),
     # DN-23: the twins of DuckDB's checks over landing itself, read over
@@ -403,11 +376,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_value_domain_orders_status_id": _c("the unknown status ids are registered or gone"),
     "pg_value_domain_orders_source_id": _c("the unknown source ids are registered or gone"),
     "pg_status_group_vs_return_list": _c("the stored group and the legacy list agree in bronze"),
-    "pg_order_landing_disagree": _c("both engines count the same landing findings"),
     "pg_order_landing_unwatched": _c("the twins read bronze.orders and its line items again"),
-    "pg_twin_pairing": _EVENT,
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
-    "pg_warehouse_dq_flag_invalid": _c("web restarts with a valid KS_DQ_PG_WAREHOUSE"),
     # Every order the UTM parser reads has a current verdict in Postgres
     # (DN-16, mirror_landing). Read from Postgres alone, so it clears on
     # whichever store is parsing; nothing here repairs it.
@@ -446,16 +416,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "order_versions_empty": _c("the seed baseline lands"),
 
     # ── data-quality findings: business-shape checks ──
-    "orders_without_line_items": _c("halfwritten_repair re-fetches them"),
-    # A condition, not an event: it holds for as long as the website keeps
-    # sending orders without their UTM parameters, and it clears the day the
-    # template is fixed. Nothing here can repair it, so it must not resolve
-    # itself on a quiet pass.
-    "attribution_coverage_website": _c(
-        "the shop's order-comment template stopped sending utm_source/medium/campaign"),
-    "headline_vs_line_items": _c("never fully — the standing 436 are certificates"),
-    "status_group_vs_return_list": _c("the stored group and the legacy list agree"),
-    "goods_shipped_without_sale": _c("by design it never fully clears"),
+    # `orders_without_line_items`, `attribution_coverage_website`,
+    # `headline_vs_line_items`, `status_group_vs_return_list` and
+    # `goods_shipped_without_sale`: the DuckDB scan's, deleted in step 14's
+    # S14-14; their `pg_` twins above stand in. Not reused (rule 15).
     "inventory_snapshot_gaps": _c("cannot heal — a missed day is missed forever"),
 
     # ── self-heal trails (INFO riders on the digest, facts about past heals) ──
@@ -463,12 +427,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_history_selfhealed": _EVENT,
 }
 
-# Integrity checks whose names are generated from (table, column) call sites.
-# The completeness test extracts the actual call arguments from the AST, so a
-# new `_pk_uniqueness_check(conn, "offers")` fails the suite until its key is
-# added here — the registry stays the single place a human declared intent.
-for _table in ("orders", "order_products", "products", "buyers", "categories"):
-    REGISTRY[f"pk_uniqueness_{_table}"] = _c("the duplicate rows are gone")
+# The integrity checks named from (table, column) call sites —
+# `pk_uniqueness_*`, `fk_orphan_*`, `not_null_*`, `value_domain_*` — went with
+# the DuckDB scan in step 14's S14-14, and their names are not reused while
+# an image from before step 14 is the rollback target (rule 15).
 # The layers Postgres derives on its own signal (chain 2, KS_PG_DERIVE=own).
 # Web declares their age limit in /api/health and the canary judges whatever
 # declares one, so their keys are a family over `pg_derivation.DERIVED_TABLES`
@@ -485,11 +447,6 @@ REGISTRY["mirror_never:silver.order_utm"] = _c("the first successful parse in Po
 REGISTRY["mirror_stale:silver.order_utm"] = _c("a parse inside the age limit")
 REGISTRY["mirror_failing:silver.order_utm"] = _c("failures_since_ok back to zero")
 
-REGISTRY["fk_orphan_order_products_order_id"] = _c("the parent order lands or the orphans go")
-for _col in ("ordered_at", "source_id", "status_id"):
-    REGISTRY[f"not_null_orders_{_col}"] = _c("the null rows are repaired")
-for _col in ("source_id", "status_id"):
-    REGISTRY[f"value_domain_orders_{_col}"] = _c("the unknown values are mapped or fixed")
 for _entity in ("orders", "products", "buyers", "offers", "stocks",
                 "managers", "categories", "expense_types"):
     REGISTRY[f"freshness_{_entity}"] = _c("a sync moves the entity's watermark")
@@ -846,46 +803,13 @@ class AlertGate:
         `take_resolved` can take. A copy; reading it changes nothing."""
         return {key: entry.get("group") for key, entry in self._delivered.items()}
 
-    def mark_delivered(
-        self, group: str, mark: str, keys: "Sequence[str]", *, complete: bool,
-        now: "float | None" = None,
-    ) -> None:
-        """Say which of `group`'s delivered conditions one emitter inside it
-        was still reporting on its last pass: `mark` goes on each of `keys`
-        delivered under `group`. With `complete` the emitter reached a verdict
-        on everything it reports, so the mark comes off the group's other
-        entries — it verified those clear; without, marks are only added.
-
-        For a group whose emitters share condition names, where the key alone
-        cannot say whose page it is. The mark lives on the entry, so it is
-        persisted with it and goes with it when `take_resolved` pops it; an
-        entry `restore_delivered` puts back carries none, correctly — it was
-        taken because nothing in the run was reporting it."""
-        now = _time.time() if now is None else now
-        wanted = set(keys)
-        changed = False
-        for key, entry in self._delivered.items():
-            if entry.get("group") != group:
-                continue
-            marks = set(entry.get("marks") or ())
-            if key in wanted:
-                marks.add(mark)
-            elif complete:
-                marks.discard(mark)
-            else:
-                continue
-            if sorted(marks) != sorted(entry.get("marks") or ()):
-                entry["marks"] = sorted(marks)
-                changed = True
-        if changed:
-            self._dirty = True
-            self._save(now, force=True)
-
-    def delivered_marked(self, mark: str) -> "Dict[str, str | None]":
-        """`{condition_key: group}` for every delivered, unresolved condition
-        carrying `mark`. A copy; reading it changes nothing."""
-        return {key: entry.get("group") for key, entry in self._delivered.items()
-                if mark in (entry.get("marks") or ())}
+    # `mark_delivered` and `delivered_marked` stood here until step 14's
+    # S14-15: one emitter's mark on the delivered entries of a group whose
+    # emitters share condition names (step 13's retired comparisons in
+    # `dq_mirror_landing`, `warehouse_cutover.note_comparisons_reported`).
+    # Their last caller went with that module. The `marks` already on entries
+    # in `data/alert-gate-*.json` stay: an entry is loaded and saved whole, so
+    # a rewrite keeps them, and an image from before step 14 reads them.
 
     def take_resolved(
         self, group: str, still_firing: "Sequence[str]" = (),
@@ -933,18 +857,6 @@ def delivered_conditions() -> "Dict[str, str | None]":
     each was delivered under: what a `resolve_group` could announce. Local
     state, no I/O."""
     return _gate.delivered_groups()
-
-
-def mark_delivered(group: str, mark: str, keys: "Sequence[str]", *,
-                   complete: bool) -> None:
-    """`AlertGate.mark_delivered` on this process's gate. Local state."""
-    _gate.mark_delivered(group, mark, keys, complete=complete)
-
-
-def delivered_marked(mark: str) -> "Dict[str, str | None]":
-    """This process's delivered, unresolved conditions carrying `mark`, and
-    the group each was delivered under. Local state, no I/O."""
-    return _gate.delivered_marked(mark)
 
 
 async def raise_alert(
@@ -1087,8 +999,8 @@ async def resolve_group(
     notice per fired-cycle: taking a key out of the map is the idempotence.
 
     `note` is one more line under the list, for a resolve whose reason is not
-    a healthy pass — the warehouse group closed by the switch that retires its
-    only resolver (`core.warehouse_cutover.settle_writer`).
+    a healthy pass — the warehouse group closed by the switch that retired its
+    only resolver (step 13's `settle_writer`, deleted in step 14's S14-15).
 
     Returns admins reached (0: nothing to resolve, or nothing deliverable).
     """

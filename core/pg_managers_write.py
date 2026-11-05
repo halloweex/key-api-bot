@@ -6,8 +6,8 @@ endpoint defaults to `retail`. KeyCRM knows a manager's name, email and status,
 and nothing about whether they sell retail, wholesale, internally or to
 bloggers — only a human does, through `POST /api/managers/{id}/retail-status`.
 Until this chain DuckDB was where that decision lived and
-`core.pg_replication.replicate_managers` full-replaced both tables into
-Postgres out of it. Under `KS_WRITE_MANAGERS=postgres` (default `duckdb`) the
+`core.pg_replication.replicate_managers` (deleted in step 14's S14-13)
+full-replaced both tables into Postgres out of it. Under `KS_WRITE_MANAGERS=postgres` (default `duckdb`) the
 three writers write Postgres and DuckDB's copies freeze.
 
 THE THREE WRITERS, AND THE ONE ORDER THEY TAKE THEIR LOCKS IN
@@ -48,7 +48,7 @@ is: changing what it accepts changes production, and that is its own decision.
 THE DERIVATION SIGNAL
 
 Silver reads `is_retail` and the intervals, so `upsert_managers` and
-`set_manager_retail_status` raise it (`pg_derivation.mark_if_owned`) in their
+`set_manager_retail_status` raise it (`pg_derivation.mark`) in their
 own transactions. `update_manager_stats` does not: Silver reads none of the
 three stats columns. Today's `write_managers` raises it after every replicate,
 the one after the stats included — one Postgres Silver rebuild a day that
@@ -119,8 +119,14 @@ WRITE_ENV = "KS_WRITE_MANAGERS"
 # release is still read by the next.
 CHAIN = "pg_managers_write"
 
-# `pg_replication.MANAGER_UNIT`, whole: a classification is read against its
-# managers, never alone, so the two change hands as one (DN-22b).
+# The two tables, named once. They lived in `core.pg_replication`, beside the
+# classification copy, until step 14's S14-13 deleted it; `pg_warehouse_dq`
+# reads them from here.
+MANAGERS_TABLE = "bronze.managers"
+CLASSIFICATIONS_TABLE = "app.manager_classifications"
+
+# Both, whole: a classification is read against its managers, never alone,
+# so the two change hands as one (DN-22b).
 CHAIN_TABLES: Tuple[str, ...] = ("bronze.managers", "app.manager_classifications")
 
 # The one `sync_metadata` key that moves with it — what `sync_managers` stamps.
@@ -272,7 +278,7 @@ async def upsert_managers(rows: Sequence[Any], *, set_at: datetime) -> int:
     `ManagersRefused` without latching. An empty batch writes nothing and
     latches nothing.
     """
-    from core.pg_derivation import mark_if_owned
+    from core.pg_derivation import mark
 
     if set_at is None:
         raise ValueError("set_at must be supplied — it is the copy-back's clock")
@@ -337,7 +343,7 @@ async def upsert_managers(rows: Sequence[Any], *, set_at: datetime) -> int:
                 set_at,
             )
             # Silver reads `is_retail` and the intervals: it owes a rebuild.
-            await mark_if_owned(conn)
+            await mark(conn)
     return len(ordered)
 
 
@@ -412,7 +418,7 @@ async def set_manager_retail_status(
     (`ManagerNotFound`) — both before the latch — and a value Postgres would
     refuse (`ClassificationRefused`), before Postgres is asked anything.
     """
-    from core.pg_derivation import mark_if_owned
+    from core.pg_derivation import mark
 
     why = _classification_refusal(manager_id, is_retail, effective_from, set_by, note)
     if why:
@@ -482,7 +488,7 @@ async def set_manager_retail_status(
                 manager_id, is_retail)
             # `sales_type` is decided from these rows: Silver owes a rebuild,
             # raised in the decision's own transaction.
-            await mark_if_owned(conn)
+            await mark(conn)
     logger.info("Manager %s retail status set to %s from %s (Postgres)",
                 manager_id, is_retail, effective_from)
 

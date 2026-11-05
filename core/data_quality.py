@@ -30,11 +30,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
 from typing import (
-    AbstractSet, Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence,
-    Set, Tuple,
+    Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple,
 )
 
-from core import duckdb_switch
 from core.rollback_lever import ROLLBACK_LEVER
 
 logger = logging.getLogger(__name__)
@@ -316,150 +314,11 @@ def summarize_discrepancies(discrepancies: List[Discrepancy]) -> Dict[str, int]:
 
 # ─── Layer 1: Internal integrity checks ───────────────────────────────────────
 
-# Known order statuses (KeyCRM-defined; new IDs require explicit registration
-# so we don't silently accept upstream changes).
-# Verified against KeyCRM on 2026-08-09. Statuses 3, 4, 8, 10, 11, 18 and 24
-# were missing, so a perfectly ordinary parcel «Зібрано для самовивозу» (24)
-# would have been reported as an unknown status. Status 20 was listed under
-# "return/cancel family" and is nothing of the kind — it is «Прибув у
-# відділення», KeyCRM group 4, and it belongs to revenue. That comment cost
-# two sessions a phantom ₴265,230.78 discrepancy.
-KNOWN_STATUS_IDS = frozenset({
-    1,   # new
-    2,   # presence_confirmed
-    3,   # waiting_for_email_response
-    4,   # waiting_for_prepayment
-    8,   # delivered_to_delivery
-    9,   # delivered
-    10,  # departing
-    11,  # in_transit
-    12,  # completed
-    20,  # Прибув у відділення
-    24,  # Зібрано для самовивозу
-    # Lost / cancel group (KeyCRM status_group_id = 6) — excluded from revenue
-    15,  # not_available
-    18,  # did_not_arrange_price
-    19,  # canceled
-    21,  # Помилка доставки
-    22,  # Повернено
-    23,  # Повертається
-})
-
-# Known sources (active + deprecated). New source IDs from KeyCRM should
-# fire an integrity warning so we route them explicitly.
-KNOWN_SOURCE_IDS = frozenset({1, 2, 3, 4, 5})
-
-
-def _pk_uniqueness_check(conn, table: str, pk_col: str = "id") -> List[IntegrityIssue]:
-    """Verify PK column has no duplicates. DuckDB enforces PK constraints
-    at INSERT time but historic data from upserts before the constraint
-    existed can still violate.
-    """
-    row = conn.execute(
-        f'SELECT COUNT(*) - COUNT(DISTINCT "{pk_col}") FROM "{table}"'
-    ).fetchone()
-    dupes = int(row[0] or 0)
-    if dupes == 0:
-        return []
-    samples = conn.execute(f"""
-        SELECT "{pk_col}"
-        FROM "{table}"
-        GROUP BY "{pk_col}"
-        HAVING COUNT(*) > 1
-        LIMIT 10
-    """).fetchall()
-    return [IntegrityIssue(
-        check_name=f"pk_uniqueness_{table}",
-        table_name=table,
-        severity=Severity.CRITICAL,
-        count=dupes,
-        sample_ids=tuple(int(r[0]) for r in samples if r[0] is not None),
-        description=f"{dupes} duplicate {pk_col} value(s) in {table}",
-    )]
-
-
-def _fk_orphan_check(
-    conn,
-    child_table: str,
-    child_fk: str,
-    parent_table: str,
-    parent_pk: str = "id",
-) -> List[IntegrityIssue]:
-    """Verify every child.fk has a matching parent.pk."""
-    row = conn.execute(f"""
-        SELECT COUNT(*) FROM "{child_table}" c
-        WHERE c."{child_fk}" IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM "{parent_table}" p WHERE p."{parent_pk}" = c."{child_fk}"
-          )
-    """).fetchone()
-    orphans = int(row[0] or 0)
-    if orphans == 0:
-        return []
-    samples = conn.execute(f"""
-        SELECT DISTINCT c."{child_fk}" FROM "{child_table}" c
-        WHERE c."{child_fk}" IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM "{parent_table}" p WHERE p."{parent_pk}" = c."{child_fk}"
-          )
-        LIMIT 10
-    """).fetchall()
-    return [IntegrityIssue(
-        check_name=f"fk_orphan_{child_table}_{child_fk}",
-        table_name=child_table,
-        severity=Severity.CRITICAL,
-        count=orphans,
-        sample_ids=tuple(int(r[0]) for r in samples if r[0] is not None),
-        description=(
-            f"{orphans} {child_table}.{child_fk} value(s) reference "
-            f"non-existent {parent_table}.{parent_pk}"
-        ),
-    )]
-
-
-def _null_constraint_check(
-    conn, table: str, column: str, severity: Severity = Severity.CRITICAL,
-) -> List[IntegrityIssue]:
-    """Flag NULL values in columns that must be populated for analytics."""
-    row = conn.execute(
-        f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" IS NULL'
-    ).fetchone()
-    nulls = int(row[0] or 0)
-    if nulls == 0:
-        return []
-    return [IntegrityIssue(
-        check_name=f"not_null_{table}_{column}",
-        table_name=table,
-        severity=severity,
-        count=nulls,
-        description=f"{nulls} row(s) with NULL {column} in {table}",
-    )]
-
-
-def _value_domain_check(
-    conn, table: str, column: str, known_set: frozenset, severity: Severity,
-) -> List[IntegrityIssue]:
-    """Flag values that are not in the registered known domain."""
-    known_list = ", ".join(str(v) for v in sorted(known_set))
-    row = conn.execute(f"""
-        SELECT COUNT(*), STRING_AGG(DISTINCT CAST("{column}" AS VARCHAR), ',')
-        FROM "{table}"
-        WHERE "{column}" NOT IN ({known_list})
-    """).fetchone()
-    unknown = int(row[0] or 0)
-    if unknown == 0:
-        return []
-    unknown_vals = (row[1] or "")[:200]
-    return [IntegrityIssue(
-        check_name=f"value_domain_{table}_{column}",
-        table_name=table,
-        severity=severity,
-        count=unknown,
-        description=(
-            f"{unknown} row(s) in {table} have {column} not in known set "
-            f"{{{known_list}}}. Unknown values seen: {unknown_vals}"
-        ),
-    )]
+# `KNOWN_STATUS_IDS` and `KNOWN_SOURCE_IDS` stood here until step 14's
+# S14-14, with the four generic checks over DuckDB's landing that read them
+# (`_pk_uniqueness_check`, `_fk_orphan_check`, `_null_constraint_check`,
+# `_value_domain_check`). The ids moved, byte for byte, to
+# `core/pg_warehouse_dq.py`, whose order-landing twins are their one reader.
 
 
 # Per-entity freshness thresholds (hours) and the severity when breached.
@@ -491,7 +350,6 @@ JUDGED_BY_LAST_WRITE: FrozenSet[str] = frozenset({"orders"})
 
 
 def _freshness_check(
-    conn,
     now: Optional[datetime] = None,
     *,
     chain_watermarks: Optional[Dict[str, str]] = None,
@@ -530,22 +388,17 @@ def _freshness_check(
     brought none, or the inherited stand-in, which is frozen on both clocks —
     its value is judged, as before.
 
-    The read and the judgement are apart (`_judge_freshness`), because under
-    `KS_DUCKDB=off` DuckDB's `sync_metadata` is not read here at all: its
-    rows are `frozen_rows`, the same table as Postgres last copied it
+    DuckDB's `sync_metadata` is never read here: its rows are `frozen_rows`,
+    the same table as Postgres last copied it
     (`core.pg_frozen_metadata.frozen_sync_rows`, read by the async caller),
-    and `conn` is not touched. None there means the copy could not be read.
-    Under `on`, `frozen_rows` is not consulted and the read is DuckDB's, as
-    it always was (stage 5, PR-5).
+    and None there means the copy could not be read (`_judge_freshness`).
+    That was the `KS_DUCKDB=off` branch since stage 5's PR-5, and the only
+    one since step 14's S14-14, which deleted the read of DuckDB's own table
+    under `on` with the rest of the DuckDB scan: web has run `off` whatever
+    the variable says since S14-00.
     """
-    if duckdb_switch.is_off():
-        return _judge_freshness(frozen_rows, now, chain_watermarks=chain_watermarks,
-                                chain_stamps=chain_stamps, from_the_copy=True)
-    rows = conn.execute(
-        "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
-    ).fetchall()
-    return _judge_freshness(dict(rows), now, chain_watermarks=chain_watermarks,
-                            chain_stamps=chain_stamps)
+    return _judge_freshness(frozen_rows, now, chain_watermarks=chain_watermarks,
+                            chain_stamps=chain_stamps, from_the_copy=True)
 
 
 def _judge_freshness(
@@ -559,8 +412,9 @@ def _judge_freshness(
     """`_freshness_check`'s verdict over rows already read — pure.
 
     `rows` are `{key: value}` of DuckDB's `sync_metadata`, its `last_sync_*`
-    keys only. Under `on` they are DuckDB's own, read by `_freshness_check`,
-    and this is the judgement that always stood there.
+    keys only. With `from_the_copy` False they are DuckDB's own — what
+    `_freshness_check` read under `on` until step 14's S14-14; it hands
+    every call the copy since.
 
     `from_the_copy` is `KS_DUCKDB=off`: the rows are Postgres's copy of that
     table, and None means it could not be read. Two things then follow from
@@ -723,7 +577,6 @@ INVENTORY_CONTINUITY_WINDOW_DAYS = 30
 
 
 def _inventory_snapshot_continuity_check(
-    conn,
     now: Optional[datetime] = None,
     *,
     calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
@@ -835,149 +688,12 @@ def _inventory_snapshot_continuity_check(
     )]
 
 
-def _orders_without_line_items_check(
-    conn, severity: "Severity" = None, min_total: float = 0.01,
-) -> List[IntegrityIssue]:
-    """Flag orders that carry revenue but hold no line items at all.
-
-    An order billed for money must have sold something. When the header lands
-    and the products do not, every revenue figure is right and every product,
-    brand and category figure is short — and the order looks complete, so no
-    delta sync ever goes back for it. 552 orders were in this state as of
-    2026-08, worth ₴1,422,610.30, 437 of them from a single month.
-    """
-    severity = severity or Severity.WARN
-    row = conn.execute("""
-        SELECT COUNT(*), COALESCE(SUM(o.grand_total), 0)
-        FROM orders o
-        LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
-               ON li.order_id = o.id
-        WHERE li.order_id IS NULL AND o.grand_total >= ?
-    """, [min_total]).fetchone()
-    count = int(row[0] or 0)
-    if count == 0:
-        return []
-    sample = tuple(r[0] for r in conn.execute("""
-        SELECT o.id FROM orders o
-        LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
-               ON li.order_id = o.id
-        WHERE li.order_id IS NULL AND o.grand_total >= ?
-        ORDER BY o.grand_total DESC LIMIT 10
-    """, [min_total]).fetchall())
-    return [IntegrityIssue(
-        check_name="orders_without_line_items",
-        table_name="order_products",
-        severity=severity,
-        count=count,
-        sample_ids=sample,
-        description=(
-            f"{count} order(s) worth {float(row[1] or 0):,.2f} have no line "
-            "items. Revenue counts them, product/brand/category breakdowns "
-            "cannot. Repairable by re-fetching those ids from KeyCRM."
-        ),
-    )]
-
-def _attribution_coverage_check(
-    conn,
-    severity: "Severity" = None,
-    window_days: int = 7,
-    baseline_days: int = 28,
-    floor_pct: float = 15.0,
-    halved_against_baseline: float = 0.5,
-    min_orders: int = 40,
-    counts_out: Optional[Dict[str, int]] = None,
-) -> List[IntegrityIssue]:
-    """Are the website's orders still arriving with a campaign tag?
-
-    THE FAILURE THIS EXISTS FOR
-
-    On 2026-07-20/21 the Shopify order-comment template changed — its average
-    length went from ~700 to ~1350 characters — and from that day
-    `utm_source`, `utm_medium` and `utm_campaign` stopped appearing in it.
-    `utm_lang` and the pixel cookies kept coming, so nothing looked broken.
-    The share of website orders carrying a campaign tag fell from 34% to
-    5.5% and stayed there for **five weeks**, and nobody was told.
-
-    Nothing in this system could have told them, and that is the point worth
-    writing down. The reconciliations compare DuckDB against Postgres against
-    ClickHouse against KeyCRM — and every store faithfully recorded "no tag",
-    so they agreed perfectly. `validation_passed` counts rows and checksums
-    revenue, and revenue never moved: the orders kept coming, only their
-    labels stopped. The platform chart actively hid it, because pixel-only
-    orders were being counted as Facebook until 2026-09-09. Every guard here
-    watches whether data is transported faithfully; not one asked whether it
-    still means anything.
-
-    WHY THESE NUMBERS
-
-    Measured over the twelve complete retail weeks to 2026-09-06, the share
-    of source-4 orders carrying `utm_campaign` ran 34.3, 32.2, 29.3, 27.7,
-    24.0, 20.5 — then 8.2, 5.5, 9.1, 6.2, 5.5 through the outage, and 21.2 as
-    it partly recovered. A floor of 15% fires on the second week of the
-    outage and on none of the healthy ones.
-
-    The floor alone would miss a fall from 34% to 16%, which is the same
-    failure caught early, so a halving against the trailing 28 days fires
-    too. Both are WARN: nothing is corrupted and no repair exists here — the
-    fix is on the website — so this belongs in the 09:00 digest and not in a
-    page at 3am.
-
-    Website orders only (`source_id = 4`). An order taken by hand in the
-    Instagram inbox cannot carry a tag and never will, so including those
-    would measure the channel mix rather than the tagging.
-    """
-    severity = severity or Severity.WARN
-
-    def coverage(days_ago_from: int, days_ago_to: int) -> Tuple[int, int]:
-        row = conn.execute(f"""
-            SELECT COUNT(*),
-                   COALESCE(SUM(CASE WHEN u.utm_campaign IS NOT NULL
-                                     THEN 1 ELSE 0 END), 0)
-            FROM silver_orders s
-            LEFT JOIN silver_order_utm u ON u.order_id = s.id
-            WHERE s.source_id = 4
-              AND NOT s.is_return
-              AND s.is_active_source
-              AND s.order_date >= CURRENT_DATE - INTERVAL '{days_ago_from} days'
-              AND s.order_date <  CURRENT_DATE - INTERVAL '{days_ago_to} days'
-        """).fetchone()
-        return int(row[0] or 0), int(row[1] or 0)
-
-    # `counts_out` receives what was measured, finding or not: the Postgres
-    # twins' pairing record (DN-14) sets DuckDB's share beside Postgres', and
-    # on a healthy week this function files nothing to read it from.
-    orders, tagged = coverage(window_days, 0)
-    if counts_out is not None:
-        counts_out.update(orders=orders, tagged=tagged)
-    if orders < min_orders:
-        # Too few to say anything. A quiet week must not read as an outage.
-        return []
-
-    pct = tagged / orders * 100.0
-    base_orders, base_tagged = coverage(window_days + baseline_days, window_days)
-    if counts_out is not None:
-        counts_out.update(base_orders=base_orders, base_tagged=base_tagged)
-    base_pct = (base_tagged / base_orders * 100.0) if base_orders >= min_orders else None
-
-    below_floor = pct < floor_pct
-    halved = base_pct is not None and base_pct > 0 and pct < base_pct * halved_against_baseline
-    if not (below_floor or halved):
-        return []
-
-    trend = "" if base_pct is None else f" Over the previous {baseline_days} days it was {base_pct:.0f}%."
-    return [IntegrityIssue(
-        check_name="attribution_coverage_website",
-        table_name="silver_order_utm",
-        severity=severity,
-        count=orders - tagged,
-        description=(
-            f"{pct:.0f}% of website orders in the last {window_days} days "
-            f"carry a campaign tag ({tagged} of {orders})." + trend +
-            " Orders are arriving; their UTM parameters are not. Nothing "
-            "downstream can see this — every store copies the absence "
-            "faithfully and revenue is unaffected."
-        ),
-    )]
+# `_orders_without_line_items_check` and `_attribution_coverage_check` stood
+# here until step 14's S14-14: DuckDB's halves of `pg_orders_without_line_items`
+# and `pg_attribution_coverage_website`. What the twins read from them — the
+# `min_total` default, and the attribution thresholds the twin read out of
+# the signature — moved, byte for byte, to `core/pg_warehouse_dq.py`, with
+# the five-week outage the attribution check was written for.
 
 
 def classify_order_discrepancies(
@@ -1058,590 +774,54 @@ def classify_order_discrepancies(
     return out
 
 
-def _headline_vs_line_items_check(
-    conn, severity: "Severity" = None,
-) -> List[IntegrityIssue]:
-    """Flag completed orders billed at zero that still carry line items.
-
-    KeyCRM lets an order be saved with grand_total = 0 while its line items
-    stand. Revenue reads grand_total; the product, brand and category pages
-    read line items. The two therefore disagree by exactly these orders —
-    **418 of them, ₴865,918**, measured against the nightly backup on
-    2026-08-20 — and nothing said so.
-
-    That figure was misquoted as ₴4.16M across 1 177 orders from 2026-08-09
-    onward, including in the list of decisions waiting on the owner. It is this
-    same query with `internal` left in, and `internal` alone is 780 orders and
-    ₴3.37M of deliberate blogger seeding — already counted, as INFO, by
-    `_goods_shipped_without_sale_check`. Four fifths of the alarming number was
-    work behaving exactly as intended.
-
-    The "invoiced separately" reading is unsupported: none of the 418 has a
-    sibling order from the same buyer at a matching amount within 14 days.
-    Switching the product pages to line items would therefore not double count
-    — but nothing shows the money arrived either. Three quarters of the value
-    is the wholesale manager on Telegram, and the share of line-item value is
-    growing: 0.49 % (2024), 0.61 % (2025), 0.93 % (2026).
-
-    The gap is created upstream and cannot be fixed here, but it can stop being
-    invisible.
-
-    `internal` is excluded and counted separately by
-    `_goods_shipped_without_sale_check`: shipping product with no money owed
-    is that role's job, not a fault, and a check that reports intended work as
-    a defect is one people stop reading.
-    """
-    severity = severity or Severity.WARN
-    row = conn.execute("""
-        SELECT COUNT(*), COALESCE(SUM(li.amount), 0)
-        FROM silver_orders s
-        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
-              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
-        WHERE NOT s.is_return AND s.is_active_source
-          AND s.grand_total = 0 AND li.amount > 0
-          AND s.sales_type <> 'internal'
-    """).fetchone()
-    count = int(row[0] or 0)
-    if count == 0:
-        return []
-    amount = float(row[1] or 0)
-    sample = tuple(r[0] for r in conn.execute("""
-        SELECT s.id FROM silver_orders s
-        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
-              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
-        WHERE NOT s.is_return AND s.is_active_source
-          AND s.grand_total = 0 AND li.amount > 0
-          AND s.sales_type <> 'internal'
-        ORDER BY li.amount DESC LIMIT 10
-    """).fetchall())
-    return [IntegrityIssue(
-        check_name="headline_vs_line_items",
-        table_name="silver_orders",
-        severity=severity,
-        count=count,
-        sample_ids=sample,
-        description=(
-            f"{count} order(s) have grand_total = 0 but {amount:,.2f} in line "
-            "items. Revenue figures read grand_total and product/brand/category "
-            "figures read line items, so the two disagree by this amount."
-        ),
-    )]
-
-
-def _status_group_agreement_check(
-    conn, severity: "Severity" = None,
-) -> List[IntegrityIssue]:
-    """Compare KeyCRM's own status grouping against our hardcoded id list.
-
-    Revenue excludes the lost/cancel group. We learn that group from the
-    order payload now, but a hardcoded list of status ids still backs up rows
-    synced before the column existed — and a list can only describe the
-    statuses that existed when it was written. Status 20 appeared on
-    2026-07-09 and nothing noticed for a month.
-
-    This is the check that would have. It says nothing while the two agree,
-    and names the status the moment they part company.
-    """
-    from core.models import LOST_STATUS_GROUP_ID, OrderStatus
-
-    severity = severity or Severity.WARN
-    listed = tuple(int(s) for s in OrderStatus.return_statuses())
-    listed_sql = ", ".join(str(s) for s in listed)
-    rows = conn.execute(f"""
-        SELECT status_id, status_group_id, COUNT(*) AS n,
-               COALESCE(SUM(grand_total), 0) AS amount
-        FROM orders
-        WHERE status_group_id IS NOT NULL
-          AND (status_group_id = {LOST_STATUS_GROUP_ID})
-              <> (status_id IN ({listed_sql}))
-        GROUP BY status_id, status_group_id
-        ORDER BY amount DESC
-    """).fetchall()
-    if not rows:
-        return []
-
-    total = sum(int(r[2]) for r in rows)
-    amount = sum(float(r[3]) for r in rows)
-    detail = "; ".join(
-        f"status {int(r[0])} is KeyCRM group {int(r[1])} but our list says "
-        f"{'excluded' if int(r[0]) in listed else 'revenue'} "
-        f"({int(r[2])} orders, {float(r[3]):,.2f})"
-        for r in rows[:5]
-    )
-    return [IntegrityIssue(
-        check_name="status_group_vs_return_list",
-        table_name="orders",
-        severity=severity,
-        count=total,
-        sample_ids=tuple(int(r[0]) for r in rows[:10]),
-        description=(
-            f"{total} order(s) worth {amount:,.2f} are classified differently by "
-            f"KeyCRM's status group and by our status-id list. {detail}. "
-            "The group is the source's own answer; the list is our copy of it."
-        ),
-    )]
-
-
-def _goods_shipped_without_sale_check(
-    conn, severity: "Severity" = None,
-) -> List[IntegrityIssue]:
-    """Count product that left with no money attached — deliberately.
-
-    An influence manager ships cosmetics to bloggers: the order carries line
-    items and a grand_total of zero, forever. That is the job, not a fault,
-    which is why these orders are kept out of `headline_vs_line_items` — but
-    the amount is worth knowing. It is marketing spend measured at the price
-    the goods would otherwise have sold for, and until now nobody counted it.
-
-    INFO on purpose: it belongs in the daily digest as a figure, never as a
-    warning about something needing repair.
-    """
-    severity = severity or Severity.INFO
-    row = conn.execute("""
-        SELECT COUNT(*), COALESCE(SUM(li.amount), 0)
-        FROM silver_orders s
-        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
-              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
-        WHERE NOT s.is_return AND s.is_active_source
-          AND s.grand_total = 0 AND li.amount > 0
-          AND s.sales_type = 'internal'
-    """).fetchone()
-    count = int(row[0] or 0)
-    if count == 0:
-        return []
-    amount = float(row[1] or 0)
-    sample = tuple(r[0] for r in conn.execute("""
-        SELECT s.id FROM silver_orders s
-        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
-              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
-        WHERE NOT s.is_return AND s.is_active_source
-          AND s.grand_total = 0 AND li.amount > 0
-          AND s.sales_type = 'internal'
-        ORDER BY li.amount DESC
-        LIMIT 10
-    """).fetchall())
-    return [IntegrityIssue(
-        check_name="goods_shipped_without_sale",
-        table_name="silver_orders",
-        severity=severity,
-        count=count,
-        sample_ids=sample,
-        description=(
-            f"{count} internal order(s) shipped {amount:,.2f} of goods with no "
-            "sale attached — seeding and gifts, priced at what they would have "
-            "sold for. Expected, and counted here so it is a number rather "
-            "than a silence."
-        ),
-    )]
-
-
-# Every Gold column the rebuild writes, and how closely a recomputed value has
-# to match. Counts must be exact; money is DECIMAL(12,2) and avg_order_value is
-# a division, so both get a cent of slack.
-_GOLD_CELL_COLUMNS = (
-    ("revenue", 0.01),
-    ("orders_count", 0),
-    ("unique_customers", 0),
-    ("new_customers", 0),
-    ("returning_customers", 0),
-    ("instagram_revenue", 0.01),
-    ("telegram_revenue", 0.01),
-    ("shopify_revenue", 0.01),
-    ("instagram_orders", 0),
-    ("telegram_orders", 0),
-    ("shopify_orders", 0),
-    ("returns_count", 0),
-    ("returns_revenue", 0.01),
-    ("avg_order_value", 0.01),
-)
-
-
-def _gold_cell_values_check(
-    conn, severity: "Severity" = None, max_samples: int = 10,
-) -> List[IntegrityIssue]:
-    """Recompute every Gold cell from Silver and compare all fourteen columns.
-
-    The warehouse validation asserts three scalars and, since the cell guard,
-    that the *set* of (date, sales_type) cells matches. It says nothing about
-    thirteen of the fourteen values inside a cell: order counts, unique and
-    new and returning customers, per-source revenue and orders, returns,
-    average order value. PR #41 was a bug in exactly one of those columns —
-    the new-customer baseline — and it was found by eye.
-
-    Deliberately **report-only**, and placed here rather than inline in the
-    refresh to make that structural. Integrity findings never touch
-    `validation_passed`, so this cannot drive `mark_warehouse_dirty` and it
-    cannot start a rebuild loop: fourteen columns across ~2 000 cells failing
-    every two minutes on a 7 GB host is the outcome the design debate vetoed.
-    It runs with the rest of the integrity scan, four times a day, and reaches
-    a human through the daily digest.
-
-    What it cannot see: a lie that arrived from Bronze. Gold is rebuilt from
-    Silver in the same tick, so a consistent wrong value is reproduced on both
-    sides of this comparison. It covers rebuild faults and the unasserted
-    columns — nothing more. Reconciliation against KeyCRM is the only check
-    that sees the rest.
-    """
-    from core.duckdb_store import GOLD_REVENUE_SELECT_SQL
-
-    severity = severity or Severity.WARN
-    expected = GOLD_REVENUE_SELECT_SQL.format(date_filter="order_date IS NOT NULL")
-
-    diffs = []
-    for column, tolerance in _GOLD_CELL_COLUMNS:
-        if tolerance:
-            diffs.append(
-                f"ABS(COALESCE(e.{column}, 0) - COALESCE(g.{column}, 0)) > {tolerance}"
-            )
-        else:
-            diffs.append(f"COALESCE(e.{column}, -1) <> COALESCE(g.{column}, -1)")
-
-    rows = conn.execute(f"""
-        WITH expected AS ({expected})
-        SELECT e.date, e.sales_type,
-               {", ".join(f"e.{c} AS e_{c}, g.{c} AS g_{c}" for c, _ in _GOLD_CELL_COLUMNS)}
-        FROM expected e
-        JOIN gold_daily_revenue g
-          ON g.date = e.date AND g.sales_type = e.sales_type
-        WHERE {" OR ".join(diffs)}
-        ORDER BY e.date DESC
-        LIMIT ?
-    """, [max_samples]).fetchall()
-
-    if not rows:
-        return []
-
-    # Name the columns that actually moved, not just the cells.
-    offenders: Dict[str, int] = {}
-    for row in rows:
-        for idx, (column, tolerance) in enumerate(_GOLD_CELL_COLUMNS):
-            e_val, g_val = row[2 + idx * 2], row[3 + idx * 2]
-            if e_val is None and g_val is None:
-                continue
-            differs = (
-                abs(float(e_val or 0) - float(g_val or 0)) > tolerance
-                if tolerance else (e_val != g_val)
-            )
-            if differs:
-                offenders[column] = offenders.get(column, 0) + 1
-
-    worst = ", ".join(
-        f"{c} ({n})" for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])[:5]
-    )
-    return [IntegrityIssue(
-        check_name="gold_cell_values",
-        table_name="gold_daily_revenue",
-        severity=severity,
-        count=len(rows),
-        sample_ids=tuple(),
-        description=(
-            f"{len(rows)} Gold cell(s) disagree with a recompute from Silver "
-            f"(showing at most {max_samples}). Columns: {worst}. "
-            "Report only — Gold is rebuilt from Silver, so this catches rebuild "
-            "faults and the columns nothing else asserts, not a wrong value that "
-            "arrived from Bronze."
-        ),
-    )]
-
-
-# Every column a Silver row carries, and how closely a recomputed value has to
-# match. `grand_total` is DECIMAL(12,2) and gets a cent of slack; the rest are
-# ids, flags, dates and labels, where any difference is a difference. Those use
-# `IS DISTINCT FROM` rather than `<>`: a promocode going from NULL to a value,
-# or a buyer_first_order_date arriving, has to register, and `<>` answers NULL
-# to both.
-_SILVER_ROW_COLUMNS = (
-    ("source_id", 0),
-    ("status_id", 0),
-    ("grand_total", 0.01),
-    ("ordered_at", 0),
-    ("buyer_id", 0),
-    ("manager_id", 0),
-    ("order_date", 0),
-    ("is_return", 0),
-    ("sales_type", 0),
-    ("is_active_source", 0),
-    ("source_name", 0),
-    ("is_new_customer", 0),
-    ("buyer_first_order_date", 0),
-    ("promocode", 0),
-)
-
-
-def _silver_row_differs(column: str, tolerance: float) -> str:
-    """The predicate for one column of a recomputed row `r` against a stored
-    row `s`. Shared by this check and its Postgres twin, so the two cannot
-    disagree about what counts as a difference."""
-    if tolerance:
-        return f"ABS(COALESCE(r.{column}, 0) - COALESCE(s.{column}, 0)) > {tolerance}"
-    return f"r.{column} IS DISTINCT FROM s.{column}"
-
-
-# A row written to `orders` is not in Silver until the next warehouse refresh,
-# and that runs every two minutes. Anything inside this window is in flight,
-# not missing — without it the check fires on every sync. Outside it, seven
-# refreshes have had their chance, and a row still absent is absent.
-_SILVER_ARC_GRACE_MINUTES = 15
-
-
-def _silver_arc_check(
-    conn,
-    missing_severity: "Severity" = None,
-    drift_severity: "Severity" = None,
-    max_samples: int = 10,
-    grace_minutes: int = _SILVER_ARC_GRACE_MINUTES,
-) -> List[IntegrityIssue]:
-    """Rebuild every Silver row from landing and compare it to the stored one.
-
-    The arc had exactly one instrument, and it counts. `row_count_match` in
-    the warehouse validation asserts
-    `COUNT(*) FROM orders == COUNT(*) FROM silver_orders`, and it joins
-    `validation_passed`, so it drives the self-heal: a plainly missing Silver
-    row makes the count disagree, the warehouse is marked dirty and the next
-    rebuild restores it. That much already worked, and this check does not
-    replace it.
-
-    Three things a count cannot do:
-
-    - **Say which rows.** The count's answer is a full rebuild of everything.
-      Three named ids tell you whether the loss is systematic or a one-off.
-    - **Notice two faults cancelling.** One row missing and one ghost keeps
-      `COUNT(*)` equal on both sides, and every scalar and the cell guard
-      stay green.
-    - **See a row present on both sides and wrong.** Nothing in the warehouse
-      validation compares a Silver row's *values* against landing at all.
-
-    That third one is the live risk, and it is structural rather than
-    hypothetical. `silver_mode` has been incremental for its entire recorded
-    history — `full` has never once been written — and an incremental rebuild
-    only rewrites rows inside its scope. So when landing moves and the row is
-    not in scope, Silver keeps the old values indefinitely; and when the
-    projection itself changes on a deploy, the new rule reaches only the rows
-    something later happens to touch. PR #101 changed `is_active_source`, and
-    nothing in this file could have said whether that fix reached every row
-    or only the rows that were rebuilt afterwards. This can.
-
-    Three findings, because three different things go wrong and each has its
-    own runbook:
-
-    - ``silver_missing_rows`` — landing holds the order, Silver does not. Its
-      money is absent from every dashboard number. CRITICAL, and named rather
-      than counted: if the self-heal is working this never fires, so when it
-      does the ids are the whole story.
-    - ``silver_orphan_rows``  — Silver holds a row landing does not. A ghost,
-      inflating the numbers instead of shorting them.
-    - ``silver_row_values``   — both sides hold the row and disagree on at
-      least one of fourteen columns. The one the count cannot reach.
-
-    Report-only in the same structural sense as the Gold check: an integrity
-    finding cannot reach `validation_passed`, so none of this can start a
-    rebuild loop.
-
-    What it cannot see is what the Gold check cannot see either — a lie that
-    arrived from KeyCRM, and a projection that is wrong in the same way on
-    both sides. Silver is recomputed here with the *current*
-    `silver_select_sql` over current landing, so this answers "does stored
-    Silver match what the rule says today", not "is the rule right".
-    Reconciliation against KeyCRM remains the only check that sees the latter.
-    """
-    from core.duckdb_store import silver_recompute_ctes
-    from core.sql_dialect import DUCKDB
-
-    missing_severity = missing_severity or Severity.CRITICAL
-    drift_severity = drift_severity or Severity.WARN
-    issues: List[IntegrityIssue] = []
-
-    # f-string, not a parameter: DuckDB rejects `INTERVAL ? MINUTE`. The value
-    # is a function argument, never user input.
-    settled = (
-        "(o.synced_at IS NULL OR "
-        f"o.synced_at < now() - INTERVAL '{int(grace_minutes)} minutes')"
-    )
-
-    # ── landing has it, Silver does not ──
-    row = conn.execute(f"""
-        SELECT COUNT(*), COALESCE(SUM(o.grand_total), 0)
-        FROM orders o
-        LEFT JOIN silver_orders s ON s.id = o.id
-        WHERE s.id IS NULL AND {settled}
-    """).fetchone()
-    missing_count = int(row[0] or 0)
-    if missing_count:
-        sample = tuple(r[0] for r in conn.execute(f"""
-            SELECT o.id
-            FROM orders o
-            LEFT JOIN silver_orders s ON s.id = o.id
-            WHERE s.id IS NULL AND {settled}
-            ORDER BY o.grand_total DESC
-            LIMIT {int(max_samples)}
-        """).fetchall())
-        issues.append(IntegrityIssue(
-            check_name="silver_missing_rows",
-            table_name="silver_orders",
-            severity=missing_severity,
-            count=missing_count,
-            sample_ids=sample,
-            description=(
-                f"{missing_count} order(s) worth {float(row[1] or 0):,.2f} sit in "
-                f"landing with no Silver row after {int(grace_minutes)} minutes. "
-                "Every dashboard number is short by that much. A warehouse "
-                "refresh repairs it; if refreshes are running and it persists, "
-                "the incremental rebuild's scope is losing rows."
-            ),
-        ))
-
-    # ── Silver has it, landing does not ──
-    row = conn.execute("""
-        SELECT COUNT(*), COALESCE(SUM(s.grand_total), 0)
-        FROM silver_orders s
-        LEFT JOIN orders o ON o.id = s.id
-        WHERE o.id IS NULL
-    """).fetchone()
-    orphan_count = int(row[0] or 0)
-    if orphan_count:
-        sample = tuple(r[0] for r in conn.execute("""
-            SELECT s.id
-            FROM silver_orders s
-            LEFT JOIN orders o ON o.id = s.id
-            WHERE o.id IS NULL
-            ORDER BY s.grand_total DESC
-            LIMIT ?
-        """, [int(max_samples)]).fetchall())
-        issues.append(IntegrityIssue(
-            check_name="silver_orphan_rows",
-            table_name="silver_orders",
-            severity=drift_severity,
-            count=orphan_count,
-            sample_ids=sample,
-            description=(
-                f"{orphan_count} Silver row(s) worth {float(row[1] or 0):,.2f} "
-                "have no order behind them in landing. They inflate every "
-                "number that reads Silver. No grace window applies — Silver is "
-                "only ever written from landing, so a ghost is never in flight."
-            ),
-        ))
-
-    # ── both hold the row, and disagree ──
-    #
-    # Pass 2 is recomputed as well, from the recomputed rows rather than from
-    # stored Silver — `silver_recompute_ctes` says why. One text for this check
-    # and its Postgres twin (`core/pg_warehouse_dq.py`), so the two cannot ask
-    # different questions of the same rule.
-    diffs = [_silver_row_differs(column, tolerance)
-             for column, tolerance in _SILVER_ROW_COLUMNS]
-
-    rows = conn.execute(f"""
-        WITH {silver_recompute_ctes(DUCKDB)}
-        SELECT r.id,
-               {", ".join(f"r.{c} AS r_{c}, s.{c} AS s_{c}" for c, _ in _SILVER_ROW_COLUMNS)}
-        FROM recomputed r
-        JOIN silver_orders s ON s.id = r.id
-        JOIN orders o ON o.id = r.id
-        WHERE {settled} AND ({" OR ".join(diffs)})
-        ORDER BY r.id DESC
-        LIMIT {int(max_samples)}
-    """).fetchall()
-
-    if rows:
-        # Name the columns that actually moved, not just the rows.
-        offenders: Dict[str, int] = {}
-        for row in rows:
-            for idx, (column, tolerance) in enumerate(_SILVER_ROW_COLUMNS):
-                r_val, s_val = row[1 + idx * 2], row[2 + idx * 2]
-                if r_val is None and s_val is None:
-                    continue
-                differs = (
-                    abs(float(r_val or 0) - float(s_val or 0)) > tolerance
-                    if tolerance else (r_val != s_val)
-                )
-                if differs:
-                    offenders[column] = offenders.get(column, 0) + 1
-
-        worst = ", ".join(
-            f"{c} ({n})" for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])[:5]
-        )
-        issues.append(IntegrityIssue(
-            check_name="silver_row_values",
-            table_name="silver_orders",
-            severity=drift_severity,
-            count=len(rows),
-            sample_ids=tuple(int(r[0]) for r in rows),
-            description=(
-                f"{len(rows)} Silver row(s) disagree with a recompute from "
-                f"landing (showing at most {max_samples}). Columns: {worst}. "
-                "Report only — a value that was already wrong in landing is "
-                "reproduced on both sides here and compares equal; only "
-                "reconciliation against KeyCRM sees that."
-            ),
-        ))
-
-    return issues
+# `_headline_vs_line_items_check`, `_status_group_agreement_check`,
+# `_goods_shipped_without_sale_check`, `_gold_cell_values_check` and
+# `_silver_arc_check` stood here until step 14's S14-14 — the DuckDB checks
+# over Silver, Gold and the order tables, stood down since step 13 and
+# chain 3. Their Postgres twins are `core/pg_warehouse_dq.py`'s, and
+# `_SILVER_ROW_COLUMNS` and `_silver_row_differs`, which the row-values twin
+# renders with, moved there byte for byte. Gold's recompute is ClickHouse's
+# (`ch_silver.compare_gold_cells`) and `pg_gold_internal_check`'s.
 
 
 def check_internal_integrity(
-    conn,
     *,
     inventory_calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
     chain_watermarks: Optional[Dict[str, str]] = None,
     chain_stamps: Optional[Dict[str, str]] = None,
     frozen_sync_rows: Optional[Mapping[str, str]] = None,
     raised_out: Optional[List[str]] = None,
-    pairing_out: Optional[Dict[str, Dict[str, int]]] = None,
-    stood_down: Optional[AbstractSet[str]] = None,
 ) -> List[IntegrityIssue]:
-    """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
+    """The Layer-1 checks this module still runs: the sync watermarks'
+    freshness and the per-SKU snapshot calendar, both judged over facts the
+    integrity job pre-read from Postgres. Returns list of issues (empty =
+    clean). Pure: no connection, no I/O.
 
-    `chain_stamps` is when each of `chain_watermarks`' rows was last
-    written, which the freshness check judges in place of a value that is
-    the source's clock (`JUDGED_BY_LAST_WRITE`).
+    `chain_watermarks` and `chain_stamps` are `meta.chain_watermarks`' values
+    and when each row was last written, which the freshness check judges in
+    place of a value that is the source's clock (`JUDGED_BY_LAST_WRITE`).
+    `frozen_sync_rows` is DuckDB's `sync_metadata` as Postgres last copied it
+    (`_freshness_check`). `inventory_calendar` is
+    `core.pg_inventory_write.read_snapshot_calendar`'s answer.
 
-    `frozen_sync_rows` is what the freshness check judges under
-    `KS_DUCKDB=off` in place of DuckDB's `sync_metadata`: its `last_sync_*`
-    rows as Postgres last copied them (`_freshness_check`). Not read under
-    `on`.
-
-    `pairing_out`, when given, receives what a check measured where its
-    findings alone would not say it — today the attribution counts, under the
-    guard's name — for the Postgres twins' pairing record.
-
-    `stood_down` names guarded checks that do not run at all — the DuckDB
-    checks over Silver, Gold and UTM once Postgres alone derives them
-    (`core.warehouse_cutover.stood_down_duckdb_checks()`, which is what None
-    asks). A stood-down check is not a raised one: it files nothing, is not
-    named in `integrity_check_raised`, and its conditions are not held — the
-    Postgres twins open their own. That would announce a delivered page of
-    theirs "✅ Resolved" with nobody looking, so the switch does not happen
-    while one is open (`retired_conditions_clear` in
-    `core.warehouse_cutover`, which says why holding them was the worse
-    answer). Empty unless `KS_WRITE_WAREHOUSE=postgres` switched with every
-    precondition met, or the way back is still holding (DN-29) — and, under
-    `KS_DUCKDB=off`, `DUCKDB_OFF_STOOD_DOWN` besides (stage 5, PR-7).
-
-    Cheap by design: only DB scans, no external I/O. Suitable for running
-    every few hours alongside the heavier reconciliation job.
-
-    Adding new checks: follow the per-check function pattern so each is
-    individually testable with a fixture DuckDB.
+    Until step 14's S14-14 this was the DuckDB scan — PK uniqueness, the
+    orphan, NULL and domain checks, KeyCRM's status group against the return
+    list, the line-item checks, the landing→Silver arc, attribution coverage
+    and the Gold recompute — every one of them stood down in production since
+    step 13 and chain 3, under a connection that refused (`KS_DUCKDB=off`).
+    Their Postgres twins (`core/pg_warehouse_dq.py`) and the chain
+    invariants (`core/pg_chain_invariants.py`) are judged by the integrity
+    job beside this, outside it.
     """
     issues: List[IntegrityIssue] = []
 
-    # A check that raises is named, never swallowed. Seven checks here read
-    # tables that "may not exist yet on a fresh DB", and each used to catch
-    # everything at DEBUG — so a dropped, renamed or moved Silver/Gold/UTM
-    # table made its check vanish while the run persisted as a clean success.
-    # Stage 4 stands checks down and moves tables; every one of those steps
-    # relies on a raising check being seen. `error_message` is not touched:
-    # the other checks ran, and the layer's age, the canary and paging stay
-    # exactly where they were.
+    # A check that raises is named, never swallowed: a dropped, renamed or
+    # moved table must not make its check vanish while the run persists as a
+    # clean success. `error_message` is not touched: the other checks ran,
+    # and the layer's age, the canary and paging stay where they were.
     raised: List[str] = []
-    if stood_down is None:
-        from core.warehouse_cutover import stood_down_duckdb_checks
-
-        stood_down = stood_down_duckdb_checks() | duckdb_off_stood_down()
 
     def guarded(name: str, run) -> List[IntegrityIssue]:
-        if name in stood_down:
-            return []
         try:
             return run()
         except Exception as exc:  # noqa: BLE001 — named in `integrity_check_raised`
@@ -1652,108 +832,17 @@ def check_internal_integrity(
                 raised_out.append(name)
             return []
 
-    def landing(name: str, run) -> List[IntegrityIssue]:
-        """A check over the order tables, by its finding's name. Not guarded —
-        a raise still fails the scan, as it always has — but skipped once
-        chain 3 writes the orders to Postgres (`ORDER_LANDING_CHECKS`): it
-        would compare a frozen DuckDB, and DN-23's twins stand in alone."""
-        return [] if name in stood_down else run()
-
-    # PK uniqueness on critical tables. The three no chain's stand-down takes
-    # stay bare calls, skipped by their finding's name only when stood down —
-    # today only under `KS_DUCKDB=off` (`DUCKDB_OFF_STOOD_DOWN`); under `on`
-    # they run as they always have. Bare, not handed on as lambdas: what off
-    # stands down with no twin is read out of these calls (a test), and so is
-    # what `off`'s verdict waits on before the first run that skips them.
-    issues += landing("pk_uniqueness_orders",
-                      lambda: _pk_uniqueness_check(conn, "orders", "id"))
-    issues += landing("pk_uniqueness_order_products",
-                      lambda: _pk_uniqueness_check(conn, "order_products", "id"))
-    if "pk_uniqueness_products" not in stood_down:
-        issues += _pk_uniqueness_check(conn, "products", "id")
-    if "pk_uniqueness_buyers" not in stood_down:
-        issues += _pk_uniqueness_check(conn, "buyers", "id")
-    if "pk_uniqueness_categories" not in stood_down:
-        issues += _pk_uniqueness_check(conn, "categories", "id")
-
-    # FK orphans (DuckDB doesn't enforce FK; we validate manually).
-    issues += landing("fk_orphan_order_products_order_id", lambda: _fk_orphan_check(
-        conn, "order_products", "order_id", "orders", "id"))
-
-    # NULL constraints — required for analytics queries to work.
-    issues += landing("not_null_orders_ordered_at",
-                      lambda: _null_constraint_check(conn, "orders", "ordered_at"))
-    issues += landing("not_null_orders_source_id",
-                      lambda: _null_constraint_check(conn, "orders", "source_id"))
-    issues += landing("not_null_orders_status_id",
-                      lambda: _null_constraint_check(conn, "orders", "status_id"))
-
-    # Value domains — surface upstream changes (new KeyCRM status/source IDs).
-    issues += landing("value_domain_orders_status_id", lambda: _value_domain_check(
-        conn, "orders", "status_id", KNOWN_STATUS_IDS, Severity.WARN,
-    ))
-
-    # Our copy of "what counts as revenue" against KeyCRM's own grouping.
-    issues += guarded("status_group_agreement",
-                      lambda: _status_group_agreement_check(conn))
-    issues += landing("value_domain_orders_source_id", lambda: _value_domain_check(
-        conn, "orders", "source_id", KNOWN_SOURCE_IDS, Severity.WARN,
-    ))
-
     # Freshness — catch silent sync-pipeline stalls (e.g. categories 45d stale).
-    issues += _freshness_check(conn, chain_watermarks=chain_watermarks,
+    issues += _freshness_check(chain_watermarks=chain_watermarks,
                                chain_stamps=chain_stamps,
                                frozen_rows=frozen_sync_rows)
-
-    # Cross-metric consistency — revenue and product pages read different
-    # columns, so orders billed at zero make them disagree without saying so.
-    issues += guarded("headline_vs_line_items",
-                      lambda: _headline_vs_line_items_check(conn))
-
-    # The landing→Silver arc. Everything above reads landing in isolation and
-    # everything below reads Silver→Gold; this is the arc between them, which
-    # had nothing on it at all. Incremental rebuilds only touch rows in scope,
-    # and `silver_mode` has never once been `full`, so a row that fell out of
-    # scope stayed wrong while every other check reported clean.
-    issues += guarded("silver_arc", lambda: _silver_arc_check(conn))
-
-    # The first check here that reads the *meaning* of the data rather than
-    # the fidelity of its copying. Everything above proves rows moved intact;
-    # this asks whether they still say anything. See the docstring for the
-    # five-week outage that nothing else could have seen.
-    issues += guarded("attribution_coverage",
-                      lambda: _attribution_coverage_check(
-                          conn, counts_out=None if pairing_out is None
-                          else pairing_out.setdefault("attribution_coverage", {})))
-
-    # Fourteen Gold columns against a recompute from Silver. Report-only by
-    # construction: an integrity finding cannot reach validation_passed.
-    issues += guarded("gold_cell_values", lambda: _gold_cell_values_check(conn))
-
-    # The same shape, deliberately: goods leaving with no sale is the whole
-    # job of an influence manager. Counted, not warned about.
-    issues += guarded("goods_shipped_without_sale",
-                      lambda: _goods_shipped_without_sale_check(conn))
-
-    # An order with revenue and no products is a half-written order. The header
-    # makes it look complete, so nothing goes back for it on its own.
-    issues += landing("orders_without_line_items",
-                      lambda: _orders_without_line_items_check(conn))
 
     # A missed inventory snapshot is the one loss here with no second chance:
     # the API serves current stock, so yesterday's is gone the moment yesterday
     # is. Twenty-five days went missing in 2026 without anything saying so.
     issues += guarded("inventory_snapshot_continuity",
                       lambda: _inventory_snapshot_continuity_check(
-                          conn, calendar=inventory_calendar))
-
-    # Deliberately NOT here: the invariants over the tables a write chain has
-    # taken to Postgres (`core/pg_chain_invariants.py`, DN-07). They are facts
-    # about tables DuckDB no longer writes, so their verdict must not depend on
-    # DuckDB being readable — and this function runs under the DuckDB
-    # connection, where a raise would take every chain finding of the run with
-    # it and hold back the page. The integrity job judges them beside the
-    # Postgres twins instead, outside this call.
+                          calendar=inventory_calendar))
 
     if raised:
         issues.append(IntegrityIssue(
@@ -1779,73 +868,12 @@ def check_internal_integrity(
 # check never re-examined is a recovery nobody verified. Keyed by the name
 # `check_internal_integrity` guards each check under; a test derives every
 # tuple from the check_name values the check itself emits, so the two cannot
-# drift.
+# drift. The DuckDB checks' entries went with them in step 14's S14-14, and
+# `ORDER_LANDING_CHECKS` and `DUCKDB_OFF_STOOD_DOWN`, the sets chain 3 and
+# `KS_DUCKDB=off` stood them down by, with them.
 GUARDED_CHECK_CONDITIONS: Dict[str, Tuple[str, ...]] = {
-    "status_group_agreement": ("status_group_vs_return_list",),
-    "headline_vs_line_items": ("headline_vs_line_items",),
-    "silver_arc": ("silver_missing_rows", "silver_orphan_rows", "silver_row_values"),
-    "attribution_coverage": ("attribution_coverage_website",),
-    "gold_cell_values": ("gold_cell_values",),
-    "goods_shipped_without_sale": ("goods_shipped_without_sale",),
     "inventory_snapshot_continuity": ("inventory_snapshot_gaps",),
 }
-
-
-# The checks over the order tables that stand down once chain 3 writes the
-# orders to Postgres (`core.pg_orders_write.landing_checks_stood_down`, folded
-# into `warehouse_cutover.stood_down_duckdb_checks()`): every one reads DuckDB's
-# `orders` or `order_products`, which the chain freezes. Each name is the one
-# `check_internal_integrity` skips it under — the finding's own name for the
-# checks that run bare, the guard's for `status_group_agreement` — so the
-# integrity job's `duckdb_looked` leaves them out and DN-23's Postgres twins
-# stand in rather than compare against a frozen copy.
-ORDER_LANDING_CHECKS: FrozenSet[str] = frozenset({
-    "pk_uniqueness_orders",
-    "pk_uniqueness_order_products",
-    "fk_orphan_order_products_order_id",
-    "not_null_orders_ordered_at",
-    "not_null_orders_source_id",
-    "not_null_orders_status_id",
-    "value_domain_orders_status_id",
-    "value_domain_orders_source_id",
-    "status_group_agreement",
-    "orders_without_line_items",
-})
-
-
-# The DuckDB integrity checks that stand down under `KS_DUCKDB=off` with no
-# Postgres twin (stage 5, PR-7; owner's decision OD-S5-5). Each reads a table
-# a write chain has taken to Postgres — products and categories (chain 6),
-# buyers (chain 4) — so DuckDB's copy is frozen, and Postgres declares
-# `PRIMARY KEY (id)` on all three: a duplicate there is refused at the
-# INSERT, which is the guarantee the check exists to verify in DuckDB, where
-# historic upserts predate the constraint. The finding's name is the check's
-# and the condition's, so this set is also what such a page is held under:
-# a page of theirs delivered before the switch has no check left to clear it
-# (the `off` verdict's `retired_pages_clear`, PR-2, read through
-# `core.duckdb_off.retired_conditions` — the images before step 14's; S14-00
-# deleted that module and its verdict). It is exactly the scan's bare
-# `_pk_uniqueness_check` calls, the ones no chain's stand-down hands on as a
-# lambda — a test reads it out of `check_internal_integrity` by that rule, the
-# one the verdict read its retired conditions by, so wrapping the three again
-# would have emptied the verdict's set while this one stood. Held to the scan
-# by `tests/unit/test_duckdb_off_jobs.py`, and to the set the images before
-# step 14 compute, as a literal, by `tests/unit/test_rollback_condition_names.py`. Every other check over DuckDB
-# already stands down in the target state — Silver, Gold and UTM with step 13,
-# the order tables with chain 3 — and the freshness check and the snapshot
-# continuity read Postgres; the integrity job hands the scan a connection that
-# refuses (`duckdb_switch.RefusedConnection`), so a check that still reaches
-# for the file is counted where it reached.
-DUCKDB_OFF_STOOD_DOWN: FrozenSet[str] = frozenset({
-    "pk_uniqueness_products",
-    "pk_uniqueness_buyers",
-    "pk_uniqueness_categories",
-})
-
-
-def duckdb_off_stood_down() -> FrozenSet[str]:
-    """`DUCKDB_OFF_STOOD_DOWN` under `KS_DUCKDB=off`, nothing under `on`."""
-    return DUCKDB_OFF_STOOD_DOWN if duckdb_switch.is_off() else frozenset()
 
 
 def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -> List[str]:
@@ -2123,16 +1151,18 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # Two layers share this check name — orders and, since revision 0020,
     # expenses — and REMEDIATION keys on the name alone, so the lever has to
     # name the table it applies to rather than assume one of them.
+    # Since step 14's S14-13 there is no backfill route: Postgres is the
+    # store of record, so a table without its history is restored from the
+    # nightly dump, which carries `meta.mirror_state.backfilled_at` with it.
     ("mirror_backfill_pending",
-     "POST /api/mirror/backfill/<orders|expenses> for the table named, "
-     "then wait for 07:30"),
+     "Restore the table named from the nightly Postgres dump; "
+     "never set backfilled_at by hand"),
     # `mirror_stood_down`, `order_owner_row_without_marker` and
     # `owner_row_without_marker` had their lines here until step 14's S14-12
     # deleted the comparisons that filed them.
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
-    ("silver_", "Survived two ticks = real. POST /api/warehouse/refresh (both engines under KS_PG_DERIVE=own)"),
     ("gold_", "POST /api/warehouse/refresh rebuilds Silver and Gold — Postgres too under KS_PG_DERIVE=own"),
     ("customer_profile_", "Rebuilt on the same tick; survives one — suspect Silver"),
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
@@ -2175,7 +1205,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("chain_buyer_orphan_rows",
      "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
     ("chain_buyer_contact_missing",
-     "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
+     "POST /api/sync/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
     # Chain 3's orders: an order and its costs are written together, so an
     # orphaned cost is an order refused or a write that went round the chain.
     ("chain_expense_orphans",
@@ -2224,40 +1254,22 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Read the report job's result in /api/jobs and write_chains.<chain>.pending in /api/health; never insert the row by hand unless the message went out"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
-    ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
-    # No lever in this repository: the tags stop arriving at the website, so
-    # the fix is the order-comment template and nothing here can repair it.
-    ("attribution_coverage_",
-     "Not ours to repair: check the shop's order-comment template still writes utm_source/medium/campaign"),
-    ("pk_uniqueness_", "Duplicate primary key — a human with a query only"),
-    ("fk_orphan_", "Re-sync the parent first; never delete the children"),
-    ("not_null_", "Find the sync path that wrote it, then fix the rows"),
-    ("value_domain_", "The reader assuming the domain is at risk, not the row"),
-    ("headline_vs_line_items", "Standing (certificates); the signal is growth, not level"),
-    ("goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),
     # The Postgres twins (step 8a). The lever depends on who derives.
     ("pg_silver_", "Postgres Silver: under KS_PG_DERIVE=own POST /api/warehouse/refresh; under piggyback it follows the DuckDB tick"),
     ("pg_attribution_coverage_", "Not ours to repair: check the shop's order-comment template; rule out a stale silver.order_utm copy first"),
     ("pg_headline_vs_line_items", "Standing (certificates); the signal is growth, not level"),
     ("pg_goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),
-    ("pg_line_items_disagree", "One engine's Silver or line items differ: compare the two stores for the named finding"),
-    ("pg_warehouse_", "The Postgres twins did not look: read the reason, then check KS_PG_DSN, PG_LAYER_LOCK holders and KS_DQ_PG_WAREHOUSE"),
-    # DN-16. One lever per cause, in the order that separates the causes;
-    # the reasons ride in the findings' descriptions
-    # (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS`), because this is the
-    # single "→" line of a Telegram alert. A comment Postgres holds and DuckDB
-    # lost is first, because no parse or ship can reach it: the parser reads
-    # DuckDB. Its lever is the copy in bronze.orders, which covers a purge and
-    # a restore alike — not `POST /api/traffic/backfill-utm`, which re-fetches
-    # from KeyCRM the NULL a purge stored, skips it, and reports success.
-    # Then the watermark, read before anything ships: a successful ship
-    # clears `last_error`. Then the one lever that ships with nothing marked
-    # dirty; `POST /api/warehouse/refresh` never ships this table at all.
-    # All of this is KS_UTM_PARSE=duckdb; under postgres the line is
-    # `REMEDIATION_UTM_PARSED_IN_POSTGRES`'s below.
+    ("pg_warehouse_", "The Postgres twins did not look: read the reason, then check KS_PG_DSN and PG_LAYER_LOCK holders"),
+    # The two findings that page (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS`
+    # carries the reasons, because this is the single "→" line of a Telegram
+    # alert). The parse writes every failure into its watermark row before it
+    # raises, and both routes run it. Until step 14's S14-15 this line was
+    # `KS_UTM_PARSE`'s to choose: under `duckdb` it sent the reader to copy a
+    # comment into DuckDB and to the ship, and `REMEDIATION_UTM_PARSED_IN_POSTGRES`
+    # held this line, which `remediation_for` swapped in under `postgres`.
     ("pg_order_utm_",
-     "manager_comment in fingerprint? Copy it to DuckDB from bronze.orders. "
-     "Else read meta.mirror_state for silver.order_utm. Then POST /api/traffic/refresh"),
+     "Read meta.mirror_state for silver.order_utm: the parse writes its error there. "
+     "Then POST /api/traffic/refresh or /api/warehouse/refresh"),
     ("buyers_without_verdict",
      "Grep web's log for 'gender derivation failed'; unless chain 4 writes the buyers, read meta.mirror_state for app.buyer_gender"),
     ("buyers_missing_for_orders", "Read buyer_sync in /api/health: the step's failures and retry window"),
@@ -2286,12 +1298,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("pg_not_null_", "Find the writer that sent bronze.orders a row with no ordered_at, then re-fetch the ids"),
     ("pg_value_domain_", "A new KeyCRM id: check its status group, then register it in KNOWN_STATUS_IDS/KNOWN_SOURCE_IDS"),
     ("pg_status_group_vs_return_list", "The source's status group wins over the legacy list"),
-    ("pg_order_landing_disagree",
-     "One landing differs: compare orders/order_products with bronze.* for the named check; 07:30 names the rows"),
     ("pg_order_landing_unwatched",
      "The Postgres twins did not read bronze.orders: read the reason in the finding"),
-    ("pg_twin_pairing", "A record, not a fault: parse the JSON to compare the two engines"),
-    ("status_group_vs_return_list", "The source's status group wins over the legacy list"),
     # The canary's, not a check's: a backup marker past its limit (S14-00).
     ("backup_evidence_stale",
      "On the host run the script named: deploy/pg_pitr_drill.sh, "
@@ -2309,23 +1317,6 @@ DEFAULT_REMEDIATION = (
     "No lever written down — see CLAUDE.md «How a failure reaches a human», add one"
 )
 
-# DN-19. Under KS_UTM_PARSE=postgres the `pg_order_utm_` levers above are
-# wrong twice over. The parser reads bronze.orders itself, so copying a
-# comment into DuckDB moves nothing. And `POST /api/warehouse/refresh` does
-# reach the table: under KS_PG_DERIVE=own its derivation's last step is the
-# parse. What is left is the parse's own watermark row, where it records every
-# failure before it raises, and the two routes that run it. `remediation_for`
-# puts these in place of the entries with the same prefix while the mode is
-# postgres. Under the default the table above is read unchanged, byte for
-# byte. The reasons ride in the findings' descriptions, as above
-# (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS_POSTGRES`).
-REMEDIATION_UTM_PARSED_IN_POSTGRES: Tuple[Tuple[str, str], ...] = (
-    ("pg_order_utm_",
-     "Read meta.mirror_state for silver.order_utm: the parse writes its error there. "
-     "Then POST /api/traffic/refresh or /api/warehouse/refresh"),
-)
-
-
 # Что находка значит для читателя — по-русски, коротко. Имя проверки в
 # скобках остаётся ключом для поиска; без перевода алерт говорит на языке
 # кода, а страница, которую не понять за три секунды, — шум.
@@ -2342,15 +1333,11 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
     "mirror_failing": "mirror failing",
-    "orders_without_line_items": "orders without line items",
-    "headline_vs_line_items": "order total ≠ line items",
-    "goods_shipped_without_sale": "shipments without a sale",
     "pg_silver_missing_rows": "orders missing from Postgres Silver",
     "pg_silver_orphan_rows": "ghost rows in Postgres Silver",
     "pg_attribution_coverage_website": "website orders lost their tags (Postgres)",
     "pg_headline_vs_line_items": "order total ≠ line items (Postgres)",
     "pg_goods_shipped_without_sale": "shipments without a sale (Postgres)",
-    "pg_line_items_disagree": "engines count line items differently",
     "pg_silver_arc_unwatched": "Postgres Silver not examined",
     "pg_attribution_coverage_unwatched": "Postgres attribution not examined",
     "pg_line_items_unwatched": "Postgres line items not examined",
@@ -2364,18 +1351,13 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_value_domain_orders_status_id": "unknown order status (Postgres)",
     "pg_value_domain_orders_source_id": "unknown order source (Postgres)",
     "pg_status_group_vs_return_list": "status group ≠ return list (Postgres)",
-    "pg_order_landing_disagree": "engines' order landings differ",
     "pg_order_landing_unwatched": "Postgres order landing not examined",
-    "pg_twin_pairing": "both engines' numbers, recorded",
     "pg_warehouse_unwatched": "Postgres twins did not look",
-    "pg_warehouse_dq_flag_invalid": "KS_DQ_PG_WAREHOUSE not understood",
     "pg_order_utm_missing": "orders with no traffic verdict (Postgres)",
     "pg_order_utm_stale": "traffic verdict older than its order (Postgres)",
     "pg_order_utm_in_flight": "traffic verdicts still on their way",
     "buyers_without_verdict": "buyers with no gender verdict",
     "buyers_missing_for_orders": "orders whose buyer never arrived",
-    "gold_cell_values": "Gold cells differ",
-    "silver_row_values": "Silver differs between engines",
     "order_versions_stalled": "version archive went silent",
     "ch_engines_gold_mismatch": "two engines' Gold differ",
     "ch_silver_roundtrip": "ClickHouse copy differs",
@@ -2395,35 +1377,20 @@ def human_check_name(name: str) -> str:
     return f"{label} ({name})" if label else name
 
 
-def remediation_for(
-    check_names: Iterable[str], *, utm_parsed_in_postgres: Optional[bool] = None,
-) -> List[str]:
+def remediation_for(check_names: Iterable[str]) -> List[str]:
     """The distinct "what to do" lines for a set of check names.
 
     Longest prefix wins, so `mirror_never_shipped` gets its own sentence
     rather than the generic `mirror_` one. Deduplicated and order-stable: an
     alert naming eight `fk_orphan_*` checks should say the one useful thing
-    once.
-
-    `utm_parsed_in_postgres` picks `REMEDIATION_UTM_PARSED_IN_POSTGRES` over
-    the entries it names. None, which is what every alert passes, reads the
-    cached `KS_UTM_PARSE` mode: set once at boot by `configure_modes()`, so
-    this reads configuration and nothing that changes while web runs.
+    once. Pure since step 14's S14-15, which removed the `KS_UTM_PARSE` mode
+    it read to pick the `pg_order_utm_` line.
     """
-    if utm_parsed_in_postgres is None:
-        from core import pg_utm_parse
-
-        utm_parsed_in_postgres = pg_utm_parse.parses_in_postgres()
-    table = REMEDIATION
-    if utm_parsed_in_postgres:
-        swapped = dict(REMEDIATION_UTM_PARSED_IN_POSTGRES)
-        table = tuple((prefix, swapped.get(prefix, line)) for prefix, line in REMEDIATION)
-
     lines: List[str] = []
     for name in check_names:
         best = ""
         chosen = DEFAULT_REMEDIATION
-        for prefix, line in table:
+        for prefix, line in REMEDIATION:
             if name.startswith(prefix) and len(prefix) > len(best):
                 best, chosen = prefix, line
         if chosen not in lines:
@@ -2436,17 +1403,19 @@ def machine_attempts_note(now: Optional[datetime] = None) -> Optional[str]:
 
     Rule 5 of the charter: an alert must not *trigger* a repair, but it owes
     the reader the count. Without it the honest reading of a CRITICAL is "and
-    nothing is being done", which is false for every mirror finding — the
-    hourly ids-diffs have usually already re-shipped rows by the time the
-    07:30 comparison speaks.
+    nothing is being done", which was false for every mirror finding — the
+    hourly ids-diffs had usually already re-shipped rows by the time the
+    07:30 comparison spoke.
 
-    Reads the two in-process heal ledgers. Returns None when neither has run,
-    which is the common case and must not produce an empty line.
+    Reads the in-process heal ledger of the ClickHouse archive. Returns None
+    when it has not run, which is the common case and must not produce an
+    empty line. The buyers' ledger (`core.pg_buyers`, the buyers ids-diff)
+    was the other until step 14's S14-13 deleted the diff with the module.
     """
     reference = now or datetime.now(timezone.utc)
     parts: List[str] = []
     for label, module in (
-        ("buyers", "core.pg_buyers"), ("archive", "core.ch_history"),
+        ("archive", "core.ch_history"),
     ):
         try:
             heal = importlib.import_module(module).last_heal
@@ -2479,9 +1448,9 @@ def format_alert_message(
 
     Формат — ответ на прямую правку владельца 30.08: «коротко — ясно и по
     сути». Обоснования рычагов живут в CLAUDE.md; детали — в журнале и у
-    агента-диагноста, который приходит вторым сообщением. Чистая функция —
-    кроме режима `KS_UTM_PARSE`, закэшированного при старте: он выбирает
-    рычаг находок `pg_order_utm_` (`remediation_for`).
+    агента-диагноста, который приходит вторым сообщением. Чистая функция
+    (режим `KS_UTM_PARSE`, выбиравший рычаг находок `pg_order_utm_`, ушёл в
+    S14-15 шага 14).
 
     Пример:
         🚨 <b>Сверка копий: строки расходятся между копиями — 891</b>

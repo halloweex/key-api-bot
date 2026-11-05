@@ -1,8 +1,8 @@
-"""Where a refusal goes when no swept HTTP request is waiting for it
-(DN-20b), and where it stops (DN-20c).
+"""Every consumer no swept HTTP request is waiting for answers a refusal
+itself (DN-20c): where a refusal goes, and where it stops.
 
-Under `KS_READ_FALLBACK=off` a router raises `ReadUnavailable`, and one place
-raises for every caller. An HTTP GET route turns it into a 503 naming the
+A router whose engine fails raises `ReadUnavailable` (`read_fallback.refuse`),
+whatever any variable says. An HTTP GET route turns it into a 503 naming the
 surface, and `tests/unit/test_read_fallback_http.py` proves that for every
 such route by running it. Everything else that can reach a refusing router
 answers it itself (DN-20c) — `test_read_fallback_off_consumers.py` runs each
@@ -14,7 +14,8 @@ before `calculate_yoy_growth` ran, leaving the shared goal tables half
 updated. It now asks that read first.
 
 So the list is derived here. The walk starts at every function that refuses —
-a call to `fall_back`, `no_address` or `no_engine` — and follows callers up
+a call to `read_fallback.refuse` (until step 14's S14-16 also `fall_back`,
+`no_address`, `no_engine` and `chain_refusal`) — and follows callers up
 through the repository until it reaches an **entry point**: a function a
 scheduler, an executor, an HTTP route or a script's `__main__` invokes by
 reference — nothing in the repository calls it, or something hands it on as
@@ -83,13 +84,26 @@ What it cannot see is a call by `getattr` or through a dispatch table.
 if a consumer ever hides behind a table the walk cannot read, it shows up as
 the function that owns the table, which is still the right place to answer.
 
-ONLY WEB, THE SCHEDULER AND THREE SCRIPTS CAN REFUSE AT ALL
+THE KEPT ANSWERS
 
-A refusal happens only in a process that read `KS_READ_FALLBACK`, and that is
-whoever calls `core.runtime_modes.configure_modes()`: web's startup, the
-scheduler's start, and the scripts that call it themselves. The bot never
-does — it has no routers to refuse — so `bot/` is outside the walk, and a test
-below fails the day it starts to.
+The scheduler's, the sync's, the chat's and the forecast's handlers that name
+`ReadUnavailable` stay alive though since step 14's S14-07 no refusal reaches
+some of them (`KEPT_ANSWERS`): the plan keeps every one through S14-16, and a
+refusal that reaches one again finds an answer already there. Each is held
+to still hold its handler, and the HTTP rule that a handler naming the
+refusal must raise it exempts exactly these.
+
+A SCRIPT IS A PERSON AT A TERMINAL, AND THE BOT REFUSES NOTHING
+
+Until S14-16 a refusal happened only in a process that read
+`KS_READ_FALLBACK` — whoever called `core.runtime_modes.configure_modes()`.
+It happens wherever a router's engine fails now, so the rule is said by what
+a process is instead. A script in `scripts/` is run by somebody watching it:
+a refusal reaches them as the exception it is, naming its surface, and it is
+not one of DN-20c's consumers, which answer for a job nobody watches. The
+scripts that reach one are derived and pinned (`SCRIPT_ENTRIES`), so a new
+one is seen. And no function of `bot/` reaches a refusal at all — it has no
+routers — which a test below derives, so `bot/` stays outside the walk.
 """
 from __future__ import annotations
 
@@ -105,22 +119,18 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 WALKED = ("core", "web", "scripts")
-REFUSERS = {"fall_back", "no_address", "no_engine"}
-# A read of a table a write chain owns refuses its Postgres failure under
-# either mode (chain 7b-3's reads; `read_fallback.chain_refusal`).
-REFUSERS |= {"chain_refusal"}
-# A router with no DuckDB tail refuses its one engine's failure (step 14,
-# S14-05). Qualified, because a route's own validation helper is called
-# `refuse` too (`web/routes/api/customers.py`) and refuses nothing.
+# A router refuses its one engine's failure (step 14, S14-05). Qualified,
+# because a route's own validation helper is called `refuse` too
+# (`web/routes/api/customers.py`) and refuses nothing. The bare names that
+# refused too — `fall_back`, `no_address`, `no_engine`, `chain_refusal` —
+# went in S14-16.
 QUALIFIED_REFUSERS = {("read_fallback", "refuse")}
 
 
 def _names_a_refusal(call: ast.Call) -> bool:
     f = call.func
-    if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
-            and (f.value.id, f.attr) in QUALIFIED_REFUSERS):
-        return True
-    return (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)) in REFUSERS
+    return (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+            and (f.value.id, f.attr) in QUALIFIED_REFUSERS)
 # A receiver the store is reached through: `store`, `self.store`,
 # `self._store`, `get_store()`, `(await get_store())`.
 STORE_RECEIVER = re.compile(r"(^|[._])store$|get_store\(\)")
@@ -196,9 +206,11 @@ ANSWERS = {
 # The named answers step 14's S14-07 left with no refusal to answer: the
 # readers behind them stopped asking a switch (`no_address`), and with no
 # fallback they fail with their own error, which these handlers never named.
-# The plan keeps them until S14-16 ("they must stay alive"), so they are
-# pinned: the HTTP rule that a handler naming the refusal must raise it
-# exempts exactly these, and only while the entries below alone reach them.
+# The plan keeps them through S14-16 ("they must stay alive": the
+# scheduler's, the sync's and the forecast's here; the chat's tools still
+# answer one, in `UNSWEPT_STOPS`), so they are pinned: the HTTP rule that a
+# handler naming the refusal must raise it exempts exactly these, and only
+# while the entries below alone reach them.
 KEPT_ANSWERS = {
     "core/scheduler.py:BackgroundScheduler._run_weekly_report",
     "core/scheduler.py:BackgroundScheduler._run_revenue_prediction",
@@ -232,6 +244,15 @@ UNSWEPT_STOPS = {
 # found to be something else. Derived and compared: a call to a name two
 # classes define, on a receiver the walk cannot type, lands here first, which
 # is how the assistant's routes were missed (`service.chat(...)`).
+# The scripts' entries that reach a refusal: each is run by a person at a
+# terminal, who gets the refusal as the exception it is, naming its surface
+# (see "A SCRIPT IS A PERSON AT A TERMINAL"). Derived and compared: a new one
+# is the moment to decide whether it is really somebody's terminal. The
+# preview renders the traffic report through the tab's router.
+SCRIPT_ENTRIES = {
+    "scripts/weekly_report_preview.py:main",
+}
+
 UNRESOLVED_NAMESAKES = {
     # KeyCRM's API client, not the store's `get_categories`.
     "core/keycrm.py:SyncKeyCRMClient._get: client.get_categories",
@@ -597,30 +618,23 @@ def _routes(graph: Graph):
     return routes
 
 
-def configures_the_mode(tree: ast.AST) -> bool:
-    """The module reads KS_READ_FALLBACK itself — calls `configure_modes()`
-    (or the mode's own `configure_mode()`). A process that never does runs
-    under `duckdb` whatever the variable says, and cannot refuse."""
-    return any(
-        isinstance(n, ast.Call)
-        and (n.func.attr if isinstance(n.func, ast.Attribute)
-             else getattr(n.func, "id", None)) in ("configure_modes", "configure_mode")
-        for n in ast.walk(tree))
+def script_entries(graph: Graph) -> Set[str]:
+    """The entries in `scripts/` that reach a refusal."""
+    return {fn.key for fn in entry_points(graph) if fn.rel.startswith("scripts/")}
 
 
 def classify(graph: Graph):
     """(swept routes reached, other routes reached, non-HTTP entries).
 
-    A script is its own process: its entries count only if it configures the
-    mode. `scripts/weekly_report_preview.py` reaches the weekly report's
-    router and never reads KS_READ_FALLBACK, so it cannot be refused."""
+    A script is a person at a terminal, not a consumer (`SCRIPT_ENTRIES`).
+    Until step 14's S14-16 its entries counted when it configured
+    KS_READ_FALLBACK, which nothing reads since."""
     from tests.unit.test_read_fallback_http import NETWORK_ROUTES
 
     routes = _routes(graph)
     swept, unswept, consumers = set(), set(), set()
     for fn in entry_points(graph):
-        if (fn.rel.startswith("scripts/")
-                and not configures_the_mode(graph.trees[fn.rel])):
+        if fn.rel.startswith("scripts/"):
             continue
         served = routes.get(fn)
         if not served:
@@ -959,7 +973,8 @@ class TestEveryConsumerAnswers:
         """`KEPT_ANSWERS` is not a second list of consumers: none of them is
         on a refusal's path. A refusal that reached one again would make it
         a consumer, derived above — and it belongs in `ANSWERS` then, with
-        the stop it has. Each still holds its handler, which S14-16 keeps."""
+        the stop it has. Each still holds its handler: the plan's risk for
+        S14-16 is exactly these going dead, and S14-16 keeps them."""
         index = {fn.key: fn for fn in graph.functions}
         reaching = set(graph.reaching)
         for key in KEPT_ANSWERS:
@@ -1055,28 +1070,23 @@ class TestTheContainmentRule:
 
 
 class TestOnlyTheseProcessesRefuse:
-    def test_a_script_that_never_configures_the_mode_is_not_a_consumer(self, graph):
-        """Non-vacuity for the rule in `classify`: the preview script does
-        reach a refusing router, and it is left out only because it never
-        reads the mode — the day it calls `configure_modes`, it is listed."""
-        entries = {fn.key for fn in entry_points(graph)}
-        assert "scripts/weekly_report_preview.py:main" in entries
-        assert not configures_the_mode(graph.trees["scripts/weekly_report_preview.py"])
-        assert configures_the_mode(graph.trees["scripts/backfill_utm.py"])
+    def test_the_scripts_that_reach_a_refusal_are_the_ones_written_down(self, graph):
+        """A script is run by a person, who gets a refusal as the exception
+        it is. The ones that reach one are derived: the preview renders the
+        traffic report through the tab's router. Until step 14's S14-16 it
+        was left out because it never read KS_READ_FALLBACK; nothing does
+        now, and it is left out because a person runs it."""
+        assert script_entries(graph) == SCRIPT_ENTRIES
 
-    def test_the_bot_never_configures_the_mode(self):
-        """`bot/` is outside the walk because it cannot refuse: it never reads
-        KS_READ_FALLBACK, so `refusing()` is False there for good. The day it
-        calls `configure_modes`, its callers belong in the walk."""
-        offenders = []
-        for rel, tree in _parse(("bot",)).items():
-            for n in ast.walk(tree):
-                if isinstance(n, ast.Call):
-                    name = (n.func.attr if isinstance(n.func, ast.Attribute)
-                            else getattr(n.func, "id", None))
-                    if name in ("configure_modes", "configure_mode"):
-                        offenders.append(f"{rel}:{n.lineno}")
-        assert not offenders, offenders
+    def test_no_function_of_the_bot_reaches_a_refusal(self):
+        """`bot/` is outside the walk because it reaches no router: derived
+        over the bot and `core/` together. Until S14-16 this said the bot
+        never configured KS_READ_FALLBACK; a refusal no longer waits for a
+        mode, so the walk itself is asked. The day one does, its callers
+        belong in the walk."""
+        graph = build_graph(("bot", "core"))
+        assert not {fn.key for fn in graph.reaching if fn.rel.startswith("bot/")}
+        assert any(fn.rel.startswith("bot/") for fn in graph.functions)
 
 
 # ─── The walk seen to bite ────────────────────────────────────────────────

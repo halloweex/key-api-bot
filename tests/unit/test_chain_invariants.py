@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import os
 import textwrap
 from contextlib import ExitStack
 from datetime import date, datetime, timedelta, timezone
@@ -948,7 +949,7 @@ class TestTheWiring:
         from core import pg_warehouse_dq
 
         others |= set(pg_warehouse_dq.UNWATCHED_NAMES.values())
-        others |= {pg_warehouse_dq.WHOLE_UNWATCHED, pg_warehouse_dq.FLAG_INVALID}
+        others.add(pg_warehouse_dq.WHOLE_UNWATCHED)
         assert others and not {n for n in others if n.startswith(inv.PREFIX)}
 
     def test_the_window_follows_the_continuity_check(self):
@@ -1161,6 +1162,63 @@ class TestTheLatchsTwoCopies:
         (tmp_path / "owners" / "pg_orders_write").unlink()
         assert chain_latch.latched("pg_orders_write")      # the cache still says so
         assert chain_latch.markers_on_disk() == {}
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root lists a directory whatever its mode")
+    @pytest.mark.parametrize("mode", [0o000, 0o300, 0o600],
+                             ids=["no-access", "no-read", "no-search"])
+    def test_a_directory_that_cannot_be_read_raises(self, monkeypatch, tmp_path, mode):
+        """The real read, not a hand-built fact: `Path.glob('*')` and
+        `Path.exists()` swallow the PermissionError and answered "no
+        markers", so every chain with owner rows read as a lost marker — a
+        false CRITICAL with a restore instruction — and the `OSError` branch
+        in `read_facts` could not be reached. Mutation: list with
+        `MARKER_DIR.glob('*')` again."""
+        owners = tmp_path / "owners"
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", owners)
+        _latch("pg_orders_write")
+        owners.chmod(mode)
+        try:
+            with pytest.raises(OSError):
+                chain_latch.markers_on_disk()
+        finally:
+            owners.chmod(0o700)
+        assert set(chain_latch.markers_on_disk()) == {"pg_orders_write"}
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root lists a directory whatever its mode")
+    def test_a_parent_that_cannot_be_searched_raises_too(self, monkeypatch, tmp_path):
+        """`Path.exists()` reads False on 3.14 for any OSError, so a `data/`
+        that cannot be searched also read as "no markers". Only a directory
+        that is really not there is the empty answer."""
+        parent = tmp_path / "data"
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", parent / "owners")
+        _latch("pg_orders_write")
+        parent.chmod(0o600)
+        try:
+            with pytest.raises(OSError):
+                chain_latch.markers_on_disk()
+        finally:
+            parent.chmod(0o700)
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "absent")
+        assert chain_latch.markers_on_disk() == {}
+
+    def test_a_marker_removed_after_the_listing_is_gone_not_blindness(
+            self, monkeypatch, tmp_path):
+        """Removed between the listing and its stamp: the answer is the one a
+        later read would give, not an unreadable directory."""
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "owners")
+        _latch("pg_orders_write")
+        _latch("pg_buyers_write")
+        stamp_of = chain_latch._stamp_of
+
+        def vanished(path):
+            if path.name == "pg_buyers_write":
+                path.unlink()
+            return stamp_of(path)
+
+        monkeypatch.setattr(chain_latch, "_stamp_of", vanished)
+        assert set(chain_latch.markers_on_disk()) == {"pg_orders_write"}
 
     def test_the_job_that_judged_it_no_longer_does(self):
         """It left `dq_mirror_landing` with `reconcile_operational`; nothing

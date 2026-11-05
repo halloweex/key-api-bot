@@ -369,7 +369,6 @@ class TestTheSelectionsFollow:
         monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
         monkeypatch.setattr(mod, "get_sync_service", AsyncMock(return_value=service))
         monkeypatch.setattr(mod, "init_meilisearch", AsyncMock(return_value=False))
-        monkeypatch.setattr(mod.warehouse_cutover, "settle_writer", AsyncMock())
         await mod.init_and_sync()
         service.full_sync.assert_not_awaited()
         service.incremental_sync.assert_awaited_once()
@@ -604,13 +603,9 @@ class TestTheSearchCursorMovesWithTheChain:
 
         chain_latch.latch(pow_.CHAIN)
         now = datetime.now(UTC)
-        async with duck.connection() as conn:
-            for key in ("orders", "meilisearch_pg"):
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    [f"last_sync_{key}", (now - timedelta(minutes=5)).isoformat()])
-            issues = dq._freshness_check(conn, now)            # no chain_watermarks
+        rows = {f"last_sync_{key}": (now - timedelta(minutes=5)).isoformat()
+                for key in ("orders", "meilisearch_pg")}
+        issues = dq._freshness_check(now, frozen_rows=rows)   # no chain_watermarks
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
         # Since S14-00 every chain's keys are moved, so every one with a
         # threshold is named — the search cursor still never is.
@@ -859,12 +854,13 @@ class TestTheDefaultShipsWhatMainShipped:
     `pg_landing._write_order_rows`, which chain 3 split out of `write_orders`.
     The data was identical, the statements were not: the savepoint around the
     derivation mark was opened whether or not derivation is owned (the
-    chain-3 review)."""
+    chain-3 review). Since step 14's S14-15 derivation is always owned — the
+    `owns()` the writer asked went with KS_PG_DERIVE — so the mark and its
+    savepoint are always there, once."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("owned", [False, True])
-    async def test_the_mark_s_savepoint_only_where_there_is_a_mark(self, owned, monkeypatch):
-        """Mutation: open the savepoint whatever `owns()` says."""
+    async def test_the_mark_runs_in_one_savepoint_of_its_own(self, monkeypatch):
+        """Mutation: drop the savepoint, or mark twice."""
         from core import pg_derivation, pg_landing, pg_order_versions
 
         marked = []
@@ -873,7 +869,6 @@ class TestTheDefaultShipsWhatMainShipped:
             marked.append(layer)
             return True
 
-        monkeypatch.setattr(pg_derivation, "owns", lambda: owned)
         monkeypatch.setattr(pg_derivation, "mark", mark)
         monkeypatch.setattr(pg_order_versions, "capture_versions", AsyncMock(return_value=0))
 
@@ -903,5 +898,5 @@ class TestTheDefaultShipsWhatMainShipped:
         await pg_landing._write_order_rows(
             conn, [tuple(r) for r in landed.orders], [tuple(p) for p in landed.products],
             replace_products=True, version_kind="change")
-        assert conn.savepoints == (1 if owned else 0)
-        assert marked == ([pg_derivation.LAYER] if owned else [])
+        assert conn.savepoints == 1
+        assert marked == [pg_derivation.LAYER]

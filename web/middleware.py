@@ -29,8 +29,13 @@ logger = get_logger(__name__)
 DEFAULT_REQUEST_TIMEOUT = 30.0
 SLOW_ENDPOINT_TIMEOUT = 300.0  # For heavy analytics endpoints (tune can take minutes)
 
-# Endpoints that get extended timeout
+# Endpoints that get extended timeout. The two sync levers by both their
+# names: `/api/sync/…` since step 14's S14-17, and the `/api/duckdb/…` alias
+# they keep until step 14's final stage — a path left out here is answered 504
+# at 30 s while its handler runs on.
 SLOW_ENDPOINTS = {
+    "/api/sync/resync",
+    "/api/sync/refresh-statuses",
     "/api/duckdb/resync",
     "/api/duckdb/refresh-statuses",
     "/api/goals/recalculate",

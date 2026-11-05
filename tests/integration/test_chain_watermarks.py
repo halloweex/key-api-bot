@@ -2,8 +2,10 @@
 
 Through the store's own `get_last_sync_time`/`set_last_sync_time` — the calls
 the sync makes — on a DuckDBStore whose `connection` raises where a key must not
-reach DuckDB. Then the case that decided the design: the hourly replace of
-`app.sync_metadata` runs for real, and the watermark is still there.
+reach DuckDB. Then the case that decided the design: DuckDB's frozen stamps
+stand beside the moved keys, and the watermark read is Postgres's. (Until step
+14's S14-13 the hourly replace of `app.sync_metadata` ran for real here; it
+went with `core.pg_operational`.)
 """
 from __future__ import annotations
 
@@ -154,7 +156,6 @@ class TestTheHourlyReplaceCannotRollItBack:
     ):
         from core.data_quality import _freshness_check
         from core.pg_chain_watermarks import read_values
-        from core.pg_operational import replicate_operational
         from core.write_chains import sync_keys as stood_down_sync_keys
 
         store, pool, env = both_stores
@@ -177,18 +178,19 @@ class TestTheHourlyReplaceCannotRollItBack:
         await store.set_last_sync_time("offers", fresh)
         await store.set_last_sync_time("stocks", fresh)
 
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        async with pool.acquire() as conn:
-            copied = await conn.fetchval(
-                "SELECT value FROM app.sync_metadata WHERE key = 'last_sync_offers'")
-        assert copied == frozen.isoformat(), "the replace did not run"
+        # The hourly replace of `app.sync_metadata` ran here until step 14's
+        # S14-13 deleted it with `core.pg_operational`; DuckDB's frozen stamps
+        # still stand beside the moved keys, and are not what is read.
         assert await store.get_last_sync_time("offers") == fresh
         assert await store.get_last_sync_time("stocks") == fresh
 
         watermarks = await read_values(stood_down_sync_keys())
+        # DuckDB's frozen rows, as the check meets them since step 14's
+        # S14-14: Postgres's copy of the table (`frozen_rows`).
         async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks=watermarks)
+            frozen_rows = dict(conn.execute(
+                "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
+            ).fetchall())
+        issues = _freshness_check(now, chain_watermarks=watermarks, frozen_rows=frozen_rows)
         assert not [i for i in issues
                     if i.check_name in ("freshness_offers", "freshness_stocks")], issues

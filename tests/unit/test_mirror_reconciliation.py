@@ -28,15 +28,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 from core.data_quality import (
     DIGEST_MAX_AGE_HOURS,
     WATCHED_LAYERS,
     Severity,
 )
+from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
 from core.mirror_reconciliation import (
-    CATEGORIES_SPEC,
     MIRROR_LAYER,
-    PRODUCTS_SPEC,
+    MirroredTable,
     compare_table,
     configured,
 )
@@ -44,8 +46,21 @@ from core.mirror_reconciliation import (
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 LAST_OK = NOW - timedelta(hours=4)
 
-PRODUCTS = PRODUCTS_SPEC
-CATEGORIES = CATEGORIES_SPEC
+# The catalogue's two specs, as `core.mirror_reconciliation` declared them
+# until step 14's S14-13 deleted them with their last reader (the catalogue
+# carry). `compare_table` stays — `reconcile_bot_state` runs it — and these
+# are the shapes its tests were written against.
+PRODUCTS = MirroredTable(
+    pg_table="bronze.products",
+    dk_table="products",
+    columns=tuple(PRODUCT_COLUMNS),
+    numeric=("price",),
+)
+CATEGORIES = MirroredTable(
+    pg_table="bronze.categories",
+    dk_table="categories",
+    columns=tuple(CATEGORY_COLUMNS),
+)
 
 
 def _watermark(last_ok_at=LAST_OK, failures=0, last_error=None):
@@ -257,6 +272,62 @@ class TestTheKillSwitch:
         assert configured() is False
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
         assert configured() is True
+
+
+class TestThePostgresAloneChecksAskForAPostgres:
+    """Step 14's S14-13 re-gated the four checks that asked
+    `pg_landing.enabled()` — the landing mirror, deleted there — on
+    `configured()`: they read Postgres alone, so a Postgres is what they
+    need. Without `KS_PG_DSN` each answers nothing and asks nothing (a
+    morning's run on a laptop must not persist a failed layer); with it, each
+    reaches Postgres whatever `KS_MIRROR_LANDING` says. Mutation: put
+    `if not pg_landing.enabled()` back in any of them, and the first test
+    fails for it."""
+
+    CHECKS = (
+        "reconcile_order_utm_completeness",
+        "reconcile_buyer_completeness",
+        "reconcile_bot_state",
+        "reconcile_order_versions",
+    )
+
+    @staticmethod
+    def _call(name, tmp_path):
+        import core.mirror_reconciliation as mr
+
+        if name == "reconcile_bot_state":
+            db = tmp_path / "bot.db"
+            db.touch()
+            return getattr(mr, name)(db)
+        return getattr(mr, name)()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", CHECKS)
+    async def test_without_a_postgres_it_asks_nothing(self, name, monkeypatch, tmp_path):
+        from unittest.mock import AsyncMock
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_BOT_STORE", "sqlite")
+        asked = AsyncMock(side_effect=AssertionError("reached Postgres"))
+        monkeypatch.setattr("core.pg.get_pool", asked)
+        assert await self._call(name, tmp_path) == []
+        asked.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mirror", ["0", "off", "garbage", ""])
+    @pytest.mark.parametrize("name", CHECKS)
+    async def test_with_one_it_asks_whatever_the_mirror_flag_says(
+            self, name, mirror, monkeypatch, tmp_path):
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+        monkeypatch.setenv("KS_MIRROR_LANDING", mirror)
+        monkeypatch.setenv("KS_BOT_STORE", "sqlite")
+        asked = AsyncMock(side_effect=RuntimeError("reached Postgres"))
+        monkeypatch.setattr("core.pg.get_pool", asked)
+        with pytest.raises(RuntimeError, match="reached Postgres"):
+            await self._call(name, tmp_path)
+        asked.assert_awaited_once()
 
 
 class TestWiring:

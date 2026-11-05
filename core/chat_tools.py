@@ -537,8 +537,8 @@ async def execute_tool(name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": f"Unknown tool: {name}"}
 
     except read_fallback.ReadUnavailable as exc:
-        # Under KS_READ_FALLBACK=off a read DuckDB would have answered is
-        # refused instead (DN-20c). A tool runs inside a conversation, where
+        # A read whose engine fails is refused (DN-20c). A tool runs inside
+        # a conversation, where
         # a 503 cannot be sent, so the model is told in a result of its own
         # — named, so it says the numbers are unavailable rather than
         # retrying or estimating them, and never a store's older figures.

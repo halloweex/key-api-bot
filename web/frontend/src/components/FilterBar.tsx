@@ -13,6 +13,10 @@ import { filtersForPath } from '../utils/pageFilters'
 // category, brand and promocode.
 export function FilterBar() {
   const applies = filtersForPath(useRouter())
+  // The funnel on /traffic reads the period alone, and an empty row would
+  // still take its gap under the period.
+  const others = (['salesType', 'sourceId', 'categoryId', 'brand', 'promocode'] as const)
+    .some((name) => applies.has(name))
 
   return (
     <div className="flex flex-col gap-3 sm:gap-4">
@@ -22,13 +26,15 @@ export function FilterBar() {
       </div>
 
       {/* Other filters - 2-column grid on mobile, flex on larger screens */}
-      <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
-        <SalesTypeFilter />
-        {applies.has('sourceId') && <SourceFilter />}
-        {applies.has('categoryId') && <CategoryFilter />}
-        {applies.has('brand') && <BrandFilter />}
-        {applies.has('promocode') && <PromocodeFilter />}
-      </div>
+      {others && (
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
+          {applies.has('salesType') && <SalesTypeFilter />}
+          {applies.has('sourceId') && <SourceFilter />}
+          {applies.has('categoryId') && <CategoryFilter />}
+          {applies.has('brand') && <BrandFilter />}
+          {applies.has('promocode') && <PromocodeFilter />}
+        </div>
+      )}
     </div>
   )
 }

@@ -1422,8 +1422,8 @@ class PredictionService:
             }
 
         except read_fallback.ReadUnavailable:
-            # Under KS_READ_FALLBACK=off the input gate refused a read DuckDB
-            # would have answered (DN-20c). It is the first read, so nothing
+            # The input gate refused a read whose engine failed (DN-20c). It
+            # is the first read, so nothing
             # has been trained, saved or predicted, and the previous model
             # stands. Raised rather than answered here: `train` is shared by
             # the scheduler's job, which defers and says so in its result,
