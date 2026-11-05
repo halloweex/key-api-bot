@@ -130,6 +130,22 @@ class InventoryStepState:
 # How long the tick waits to stamp `bronze.orders` failing in Postgres, and
 # for `last_sync_orders` out of it.
 ORDERS_FAILURE_RECORD_TIMEOUT_S = 5
+
+# The step's own statement for the healthy tick after a failure (L4-03). Only
+# a write of an order zeroes `failures_since_ok` (`pg_landing._WATERMARK_OK`),
+# and a healthy tick that finds nothing changed writes nothing — so one failed
+# step left `bronze.orders` failing, and the canary paging
+# `mirror_failing:bronze.orders`, until an order next changed (overnight, hours).
+# `last_ok_at` is not moved: it keeps meaning "the last write", which
+# `mirror_stale` and the soak's S0 judge. `WATERMARK_OK_SQL` is the writers'
+# and stays theirs.
+ORDERS_FAILURE_CLEAR_SQL = """
+UPDATE meta.mirror_state
+   SET failures_since_ok = 0,
+       last_error        = NULL,
+       last_attempted_at = now()
+ WHERE table_name = $1 AND failures_since_ok > 0
+"""
 ORDERS_WATERMARK_TIMEOUT_S = 10
 
 
@@ -395,6 +411,9 @@ class SyncService:
         # may try again after a failure (a `time.monotonic()` instant).
         self.inventory_step = InventoryStepState()
         self._inventory_retry_at = 0.0
+        # Whether `meta.mirror_state` may still hold an order-step failure:
+        # unknown at a start, so asked once (`_clear_orders_failure`).
+        self._orders_failure_may_stand = True
         # The KeyCRM error the last offers or stocks fetch ended on, for the
         # step's published class (`sync_offers` answers None and logs it).
         self._inventory_keycrm_error: Optional[BaseException] = None
@@ -905,6 +924,38 @@ class SyncService:
         """The `sync_step` entry of chain 3 on /api/health."""
         return self.orders_step.published()
 
+    async def _clear_orders_failure(self) -> None:
+        """After an order step that succeeded, idle included: `meta.mirror_state`
+        stops saying `bronze.orders` is failing (`ORDERS_FAILURE_CLEAR_SQL`).
+
+        Asked once per process (a failure recorded before a restart is still
+        there) and after each failure this process recorded, never on every
+        tick. Best effort and bounded the way `_record_orders_failure` is; a
+        clear that did not land is asked again on the next healthy tick."""
+        if not getattr(self, "_orders_failure_may_stand", True):
+            return
+
+        async def clear() -> None:
+            from core.pg import get_pool
+            from core.pg_landing import ORDERS_TABLE
+
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(ORDERS_FAILURE_CLEAR_SQL, ORDERS_TABLE)
+
+        task = asyncio.ensure_future(clear())
+        try:
+            await asyncio.wait_for(asyncio.shield(task), ORDERS_FAILURE_RECORD_TIMEOUT_S)
+            self._orders_failure_may_stand = False
+        except asyncio.TimeoutError:
+            logger.warning("Order step's recorded failure not cleared in "
+                           "meta.mirror_state within %ss",
+                           ORDERS_FAILURE_RECORD_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 — best effort, asked again next tick
+            logger.debug("Order step's recorded failure not cleared: %s", e)
+        finally:
+            task.cancel()
+
     async def _record_orders_failure(self, exc: BaseException) -> None:
         """`mirror_failing`'s fast signal, which the sync's mirror gave before
         chain 3 took the tables (DN-22b): `meta.mirror_state` says
@@ -914,6 +965,7 @@ class SyncService:
         refuses cannot hold the tick. The class only: the text is a driver's."""
         from core.pg_landing import ORDERS_TABLE, _record_failure
 
+        self._orders_failure_may_stand = True
         task = asyncio.ensure_future(_record_failure(ORDERS_TABLE, type(exc).__name__))
         try:
             await asyncio.wait_for(asyncio.shield(task), ORDERS_FAILURE_RECORD_TIMEOUT_S)
@@ -1451,6 +1503,7 @@ class SyncService:
             try:
                 changed_ids = await self._orders_step(client, stats)
                 self.orders_step.succeeded(refused=self._last_refused)
+                await self._clear_orders_failure()
             except KeyCRMError:
                 raise
             except Exception as exc:
