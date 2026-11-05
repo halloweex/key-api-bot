@@ -12,22 +12,23 @@
 -- raising while the copy is fresh), and how often it did is what this reads.
 -- Run it on the host before the change that pages on the layer is merged.
 -- Until then the host's checkout does not have this file: feed it from a
--- checkout on stdin to the same psql `deploy/stage4_soak.sh` runs, as
+-- checkout on stdin to the same psql `deploy/daily_soak.sh` runs, as
 -- `ks_readonly` with `default_transaction_read_only=on`.
 --
 -- THE SAME QUESTIONS AS 20, ONE DIFFERENCE IN WHAT COUNTS AS A SUCCESS
 -- Everything but `layer_runs` and the label is
--- 20_reconciliation_pg_history.sql, held identical by a test, so the three questions, the silence arithmetic and
--- the treatment of a stale copy are the ones documented there. What differs
+-- 20_reconciliation_pg_history.sql, held identical by a test, so the three
+-- questions and the silence arithmetic are the ones documented there. What differs
 -- is `ok`: the arm gates a ClickHouse copy more than 3 h old instead of
 -- comparing it, and until the OD-08 review wrote that run as a success —
 -- error NULL, a WARN `ch_reconcile_pending` beside it. The canary no longer
 -- counts such a run (it is written with `error_message` now), so neither does
 -- this: the history is judged as the canary that ships with it would judge it.
 --
--- THE EVIDENCE IS A COPY
--- As in 20: the journal reaches Postgres through the hourly
--- `replicate_operational`; a copy 75 min old or more, or failing, is UNKNOWN.
+-- THE JOURNAL IS READ, NOT A COPY OF IT
+-- As in 20: chain 9 writes the journal in Postgres, so a silence past the
+-- limit now is a FAIL (until step 14's S14-20 a stale hourly copy of it made
+-- this UNKNOWN).
 --
 -- WHAT A FAIL MEANS
 -- A day with no run that compared, a silence past the limit, or a CRITICAL
@@ -40,37 +41,6 @@ WITH clock AS (
 ),
 limits AS (
     SELECT interval '30 hours' AS canary_max_age
-),
-journal AS (
-    -- Chain 9 (OD-02 (c)): once KS_WRITE_DQ_JOURNAL moves the journal's writer
-    -- to Postgres, these rows are the journal itself, not an hourly copy. The
-    -- copy stands down with the chain, so its `last_ok_at` freezes and would
-    -- make this check UNKNOWN for ever. Direct is the flag the script read,
-    -- or the latch's owner row, which outranks the flag (OD-19 (a)).
-    SELECT (:'dq_journal_direct' = '1'
-            OR EXISTS (SELECT 1 FROM meta.chain_watermarks
-                       WHERE key = 'owner:app.data_quality_runs')) AS direct
-),
-dq_copy AS (
-    SELECT CASE
-               WHEN journal.direct THEN NULL
-               WHEN s.table_name IS NULL THEN
-                   'app.data_quality_runs has never been copied into Postgres'
-               WHEN s.failures_since_ok > 0 THEN
-                   format('the hourly copy of app.data_quality_* is failing (%s in a row): %s',
-                          s.failures_since_ok,
-                          left(regexp_replace(COALESCE(s.last_error, ''), '\s+', ' ', 'g'), 160))
-               WHEN s.last_ok_at IS NULL THEN
-                   'the copy of app.data_quality_* has never succeeded'
-               WHEN clock.now - s.last_ok_at >= interval '75 minutes' THEN
-                   format('the copy of app.data_quality_* is %s min old (limit 75)',
-                          floor(extract(epoch FROM clock.now - s.last_ok_at) / 60))
-           END AS stale,
-           -- Direct: the journal is as current as the read.
-           CASE WHEN journal.direct THEN clock.now ELSE s.last_ok_at END AS last_ok_at
-    FROM clock
-    CROSS JOIN journal
-    LEFT JOIN meta.mirror_state s ON s.table_name = 'app.data_quality_runs'
 ),
 today AS (
     SELECT (clock.now AT TIME ZONE 'Europe/Kyiv')::date AS kday FROM clock
@@ -140,57 +110,46 @@ agg AS (
            (SELECT count(*) FROM runs WHERE ok) AS n_ok
 ),
 judged AS (
-    SELECT agg.*, dq_copy.stale, dq_copy.last_ok_at, clock.now AS clock_now, span.starts,
+    SELECT agg.*, clock.now AS clock_now, span.starts,
            limits.canary_max_age AS lim, newest.at AS newest_at,
            longest.since AS longest_since, longest.until AS longest_until,
            longest.length AS longest_length,
            longest.length > limits.canary_max_age AS silence_too_long,
            -- With no success at all, the silence still running began, for
            -- this window, when the window did.
-           dq_copy.last_ok_at - COALESCE(newest.at, span.starts)
-               > limits.canary_max_age AS silent_at_copy,
            clock.now - COALESCE(newest.at, span.starts)
                > limits.canary_max_age AS silent_now
-    FROM agg CROSS JOIN dq_copy CROSS JOIN clock CROSS JOIN span
+    FROM agg CROSS JOIN clock CROSS JOIN span
          CROSS JOIN limits CROSS JOIN newest
          LEFT JOIN longest ON true
 )
 SELECT 'reconciliation_ch history'::text AS "check",
        CASE
-           WHEN stale IS NOT NULL THEN 'UNKNOWN'
            WHEN days_without_ok IS NOT NULL OR max_critical > 0
-                OR silence_too_long OR silent_at_copy THEN 'FAIL'
-           WHEN silent_now THEN 'UNKNOWN'
+                OR silence_too_long OR silent_now THEN 'FAIL'
            ELSE 'PASS'
        END AS verdict,
-       CASE
-           WHEN stale IS NOT NULL THEN stale || '; re-run after the next replication'
-           ELSE format('%s successful run(s) since %s Kyiv; %s, %s (the canary pages past %s h)%s%s%s%s%s',
-                       n_ok,
-                       to_char(starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
-                       COALESCE('the longest silence '
-                                || round(extract(epoch FROM longest_length) / 3600, 1) || ' h',
-                                'no silence ended in the window'),
-                       COALESCE('the last success '
-                                || round(extract(epoch FROM clock_now - newest_at) / 3600, 1) || ' h ago',
-                                'no successful run on record'),
-                       floor(extract(epoch FROM lim) / 3600),
-                       COALESCE('; no successful run on ' || days_without_ok, ''),
-                       COALESCE('; CRITICAL on ' || critical_days, ''),
-                       CASE WHEN silence_too_long THEN
-                           format('; silent for %s h, from %s to %s Kyiv',
-                                  round(extract(epoch FROM longest_length) / 3600, 1),
-                                  to_char(longest_since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
-                                  to_char(longest_until AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
-                       ELSE '' END,
-                       CASE WHEN silent_at_copy AND newest_at IS NOT NULL THEN
-                           format('; no success since %s Kyiv, %s h before the copy was taken',
-                                  to_char(newest_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
-                                  round(extract(epoch FROM last_ok_at - newest_at) / 3600, 1))
-                       ELSE '' END,
-                       CASE WHEN silent_now AND NOT silent_at_copy THEN
-                           format('; the copy taken at %s Kyiv cannot say whether a run landed since, and without one the silence is past the limit now; re-run after the next replication',
-                                  to_char(last_ok_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
-                       ELSE '' END)
-       END AS detail
+       format('%s successful run(s) since %s Kyiv; %s, %s (the canary pages past %s h)%s%s%s%s',
+              n_ok,
+              to_char(starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
+              COALESCE('the longest silence '
+                       || round(extract(epoch FROM longest_length) / 3600, 1) || ' h',
+                       'no silence ended in the window'),
+              COALESCE('the last success '
+                       || round(extract(epoch FROM clock_now - newest_at) / 3600, 1) || ' h ago',
+                       'no successful run on record'),
+              floor(extract(epoch FROM lim) / 3600),
+              COALESCE('; no successful run on ' || days_without_ok, ''),
+              COALESCE('; CRITICAL on ' || critical_days, ''),
+              CASE WHEN silence_too_long THEN
+                  format('; silent for %s h, from %s to %s Kyiv',
+                         round(extract(epoch FROM longest_length) / 3600, 1),
+                         to_char(longest_since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
+                         to_char(longest_until AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
+              ELSE '' END,
+              CASE WHEN silent_now AND newest_at IS NOT NULL THEN
+                  format('; no success since %s Kyiv, %s h ago',
+                         to_char(newest_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
+                         round(extract(epoch FROM clock_now - newest_at) / 3600, 1))
+              ELSE '' END) AS detail
 FROM judged;

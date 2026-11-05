@@ -1,12 +1,13 @@
 -- I2 (chain 1) — the chain's own sync watermarks keep moving.
 --
--- Only under KS_WRITE_INVENTORY=postgres; the variables are deploy/stage4_soak.sh's.
---
 -- WHY IT EXISTS
--- Under the Postgres writer, `last_sync_offers` and `last_sync_stocks` live in
--- `meta.chain_watermarks` (revision 0032) rather than DuckDB's sync_metadata.
--- A writer that stopped would leave them standing still and the inventory tab
--- quietly aging, because I1 only proves the copy stayed away.
+-- `last_sync_offers` and `last_sync_stocks` live in `meta.chain_watermarks`
+-- (revision 0032), written by chain 1, the inventory's only writer. A writer
+-- that stopped would leave them standing still and the inventory tab quietly
+-- aging, and nothing else on this report would say so.
+--
+-- It judged only under KS_WRITE_INVENTORY=postgres or chain 1's latch until
+-- step 14's S14-20: every chain writes Postgres since S14-00.
 --
 -- WHAT A FAIL MEANS
 -- A key is missing, or has not moved for 75 min: the inventory sync is not
@@ -14,9 +15,6 @@
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
-),
-flag AS (
-    SELECT :'inventory_on'::text AS state
 ),
 wanted (key) AS (
     VALUES ('last_sync_offers'), ('last_sync_stocks')
@@ -37,14 +35,6 @@ agg AS (
     FROM judged
 )
 SELECT 'I2 inventory watermarks'::text AS "check",
-       CASE flag.state
-           WHEN '0' THEN 'PASS'
-           WHEN '1' THEN CASE WHEN agg.n > 0 THEN 'FAIL' ELSE 'PASS' END
-           ELSE 'UNKNOWN'
-       END AS verdict,
-       CASE flag.state
-           WHEN '0' THEN 'not applicable: chain 1 still writes DuckDB (KS_WRITE_INVENTORY is not postgres and no latch marker)'
-           WHEN '1' THEN agg.listed || ' (limit 75 min)'
-           ELSE format('inventory_on=%s: KS_WRITE_INVENTORY not understood, or not read from the web container', flag.state)
-       END AS detail
-FROM flag CROSS JOIN agg;
+       CASE WHEN agg.n > 0 THEN 'FAIL' ELSE 'PASS' END AS verdict,
+       agg.listed || ' (limit 75 min)' AS detail
+FROM agg;

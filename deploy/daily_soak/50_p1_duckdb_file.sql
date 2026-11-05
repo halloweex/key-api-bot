@@ -1,21 +1,21 @@
 -- P1 — the DuckDB file, as the hourly hash recorded it (OD-17 (a)).
 --
 -- WHY IT EXISTS
--- The week of silence is seven days in which nothing opened the DuckDB file,
--- and "web opens DuckDB" and "the file hash changes" are two of its four
--- breaches. The tripwire (KS_DUCKDB=off, paged by the canary) sees what web opens;
--- this sees the file itself, so it also catches what runs outside web: a
--- one-off container started with KS_DUCKDB=on, the weekly compaction, a
--- script run by hand. `deploy/duckdb_silence_check.sh` hashes the file and
--- its .wal from the host crontab, hourly, and keeps one record under
--- /root/duckdb-silence; deploy/stage4_soak.sh reads that record with
--- `--status` — it hashes nothing and writes nothing — and hands it here as
--- psql variables, so the judgement and its clock live in SQL and are tested
--- against a real server like every other check.
+-- The DuckDB file has not changed since 2026-10-16, and the final stage
+-- deletes it only on that evidence (the step-14 plan's Z2). Since step 14 no
+-- image built from main opens it (S14-00, S14-18, S14-19), so what could still
+-- change it runs outside web: an image from before step 14 brought back, a
+-- one-off container, a script run by hand. `deploy/duckdb_silence_check.sh`
+-- hashes the file and its .wal from the host crontab, hourly, and keeps one
+-- record under /root/duckdb-silence; deploy/daily_soak.sh reads that record
+-- with `--status` — it hashes nothing and writes nothing — and hands it here
+-- as psql variables, so the judgement and its clock live in SQL and are
+-- tested against a real server like every other check.
+--
+-- It judged the file only under KS_DUCKDB=off, and called it not applicable
+-- under `on`, until step 14's S14-20: a step-14 web runs `off` on any value.
 --
 -- THE VARIABLES
---   duckdb_off                 1 when web's KS_DUCKDB is `off`, 0 when it is
---                              `on` or unset, invalid, or unknown (web down)
 --   duckdb_file_last           the last recorded verdict: UNCHANGED, CHANGED,
 --                              BASELINE, MISSING; `none` when there is no
 --                              record, `error` when it could not be read
@@ -27,19 +27,17 @@
 --
 -- WHAT EACH VERDICT MEANS
 -- FAIL: the record says the file is MISSING, or a check inside the day found
--- it missing and it has come back since — whatever KS_DUCKDB says, because
--- deleting the file is a DROP and none may happen before the owner's week
--- after full completion (OD-11 (a)), and for the hours it was gone nothing
--- vouched for it, however unchanged its bytes came back — or, under off, the
--- content changed at the last check or inside the day. UNKNOWN: under off, no
--- record, a record not written for over 3 h (the cron runs hourly), or one
--- that began inside the day. PASS: under on, not applicable — web writes the
--- file all day; under off, the same bytes since a moment over a day ago.
+-- it missing and it has come back since — deleting the file is a DROP and none
+-- may happen before the owner's week after full completion (OD-11 (a)), and
+-- for the hours it was gone nothing vouched for it, however unchanged its
+-- bytes came back — or the content changed at the last check or inside the
+-- day. UNKNOWN: no record, a record not written for over 3 h (the cron runs
+-- hourly), or one that began inside the day. PASS: the same bytes since a
+-- moment over a day ago.
 --
 -- WHAT IT CANNOT SEE
 -- A change and its exact reversal between two hourly checks; and anything that
--- opened the file read-only, which changes no byte. The tripwire is the
--- detector for web's opens; this one is for writes from anywhere.
+-- opened the file read-only, which changes no byte.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
@@ -49,8 +47,7 @@ limits AS (
            interval '3 hours' AS record_max_age
 ),
 rec AS (
-    SELECT NULLIF(:'duckdb_off', '') AS duckdb_off,
-           NULLIF(:'duckdb_file_last', '') AS last,
+    SELECT NULLIF(:'duckdb_file_last', '') AS last,
            NULLIF(:'duckdb_file_since_reason', '') AS since_reason,
            CASE WHEN :'duckdb_file_since' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
                 THEN (:'duckdb_file_since')::text::timestamptz END AS since,
@@ -81,8 +78,6 @@ verdicts AS (
 SELECT 'P1 DuckDB file'::text AS "check",
        CASE
            WHEN fail_missing OR fail_was_missing THEN 'FAIL'
-           WHEN duckdb_off = 'unknown' THEN 'UNKNOWN'
-           WHEN duckdb_off IS DISTINCT FROM '1' THEN 'PASS'
            WHEN NOT readable OR stale THEN 'UNKNOWN'
            WHEN fail_changed THEN 'FAIL'
            WHEN since_in_day OR last = 'BASELINE' THEN 'UNKNOWN'
@@ -103,16 +98,9 @@ SELECT 'P1 DuckDB file'::text AS "check",
                       || 'may happen before the owner''s week after full completion (OD-11 (a)); '
                       || 'find what moved it',
                       to_char(missing_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
-           WHEN duckdb_off = 'unknown' THEN
-               'web is not running, so whether KS_DUCKDB is off cannot be read'
-           WHEN duckdb_off IS DISTINCT FROM '1' THEN
-               'not applicable: KS_DUCKDB is not off, and web writes the file all day'
-               || CASE WHEN readable THEN format(' (record: %s since %s Kyiv)', last,
-                       to_char(since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
-                       ELSE '' END
            WHEN last IS NULL OR last = 'none' THEN
                'no record of the file''s hash: install deploy/duckdb_silence_check.sh in '
-               || 'the host crontab (hourly) at the start of the week of silence'
+               || 'the host crontab (hourly); it stays until the file is deleted'
            WHEN NOT readable THEN
                format('the record could not be read (%s): ask deploy/duckdb_silence_check.sh '
                       || 'for its status on the host', last)
@@ -122,7 +110,8 @@ SELECT 'P1 DuckDB file'::text AS "check",
                       floor(extract(epoch FROM record_max_age) / 3600))
            WHEN fail_changed THEN
                format('the DuckDB file changed: first seen at %s Kyiv (checked hourly). Something '
-                      || 'wrote it while KS_DUCKDB was off; find what, and the week starts again',
+                      || 'wrote it, and no image built from main can; find what before the '
+                      || 'final stage deletes the file',
                       to_char(since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
            WHEN since_in_day OR last = 'BASELINE' THEN
                format('recorded only since %s Kyiv, %s h of the %s; re-run once the record '

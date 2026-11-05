@@ -4,13 +4,15 @@
 P1 reads the file's hash record the hourly host cron keeps
 (deploy/duckdb_silence_check.sh) and must say FAIL on the breach it exists to
 catch, PASS next to it, and UNKNOWN where nobody can say the day was watched.
-The harness is `test_stage4_soak_sql.py`'s: one rolled back transaction per
+The harness is `test_daily_soak_sql.py`'s: one rolled back transaction per
 scenario, a read-only check, a fixed Wednesday noon in Kyiv in 2030.
 
 P2, P3 and P4 — the rollback levers, the 14-day parallel period and the week
 of silence — and F1, the read-fallback week, were retired with their tests at
 step 14's S14-02: the owner closed both clocks on 2026-10-20. P1 stays until
-the file is deleted.
+the file is deleted. It judged the file only under KS_DUCKDB=off until S14-20,
+which took the gate out with the others (a step-14 web runs `off` on any
+value); the tests of `on`, `invalid` and `unknown` went with it.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.integration.test_stage4_soak_sql import (  # noqa: F401  (pool is a fixture)
+from tests.integration.test_daily_soak_sql import (  # noqa: F401  (pool is a fixture)
     NOW, SQL_DIR, _uncommented, ago, check, needs_pg, pool, scenario, verdict,
 )
 
@@ -33,7 +35,7 @@ def z(dt: datetime) -> str:
 
 def record(*, last="UNCHANGED", since=None, reason="baseline", checked=None,
            missing=None) -> dict:
-    """psql variables as deploy/stage4_soak.sh hands over a file record."""
+    """psql variables as deploy/daily_soak.sh hands over a file record."""
     return {"duckdb_file_last": last,
             "duckdb_file_since": z(since or ago(days=8)),
             "duckdb_file_since_reason": reason,
@@ -66,36 +68,29 @@ class TestTheFileReadsWhatTheCodeWrites:
 @needs_pg
 class TestP1DuckDBFile:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("off, last, expected, words", [
-        ("0", "none", "PASS", "not applicable"),
-        ("0", "UNCHANGED", "PASS", "not applicable"),
-        ("invalid", "CHANGED", "PASS", "not applicable"),
-        ("unknown", "UNCHANGED", "UNKNOWN", "web is not running"),
-        ("1", "none", "UNKNOWN", "no record of the file's hash"),
-        ("1", "error", "UNKNOWN", "could not be read"),
+    @pytest.mark.parametrize("last, expected, words", [
+        ("none", "UNKNOWN", "no record of the file's hash"),
+        ("error", "UNKNOWN", "could not be read"),
     ])
-    async def test_the_mode_and_the_record(self, pool, off, last, expected, words):
+    async def test_the_record(self, pool, last, expected, words):
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off=off, **record(last=last))
+            v, detail = await verdict(conn, P1, **record(last=last))
         assert (v, words in detail) == (expected, True), detail
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("off", ["0", "1", "unknown"])
-    async def test_a_missing_file_fails_whatever_the_switch(self, pool, off):
+    async def test_a_missing_file_fails(self, pool):
         """Deleting the file is a DROP (OD-11 (a))."""
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off=off, **record(last="MISSING"))
+            v, detail = await verdict(conn, P1, **record(last="MISSING"))
         assert v == "FAIL" and "OD-11" in detail, detail
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("off", ["0", "1", "unknown"])
-    async def test_a_missing_episode_fails_the_day_it_ends_in(self, pool, off):
+    async def test_a_missing_episode_fails_the_day_it_ends_in(self, pool):
         """The file moved away for two checks and back byte for byte: the
         record reads UNCHANGED since its baseline, and only `missing_at` says
         it was gone (review of 02.10). Mutation: drop `fail_was_missing`."""
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off=off,
-                                      **record(missing=ago(hours=3)))
+            v, detail = await verdict(conn, P1, **record(missing=ago(hours=3)))
         assert v == "FAIL", detail
         assert "was missing at a check inside the day (last 05.06 09:00 Kyiv)" in detail
         assert "OD-11" in detail
@@ -105,40 +100,40 @@ class TestP1DuckDBFile:
         """P1 is the day's question: an episode over a day ago failed the day
         it ended in, and does not fail this one."""
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off="1",
+            v, detail = await verdict(conn, P1, 
                                       **record(missing=ago(hours=25)))
         assert v == "PASS" and "the same bytes since" in detail, detail
 
     @pytest.mark.asyncio
     async def test_the_same_bytes_for_over_a_day_pass(self, pool):
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off="1", **record())
+            v, detail = await verdict(conn, P1, **record())
         assert v == "PASS", detail
         assert "the same bytes since 28.05 12:00 Kyiv (192 h)" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_change_fails_at_the_check_and_through_the_day(self, pool):
         async with scenario(pool) as conn:
-            v, _ = await verdict(conn, P1, duckdb_off="1",
+            v, _ = await verdict(conn, P1, 
                                  **record(last="CHANGED", since=ago(minutes=20), reason="change"))
         assert v == "FAIL"
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off="1",
+            v, detail = await verdict(conn, P1, 
                                       **record(since=ago(hours=5), reason="change"))
         assert v == "FAIL" and "first seen at 05.06 07:00 Kyiv" in detail, detail
         async with scenario(pool) as conn:
-            v, _ = await verdict(conn, P1, duckdb_off="1",
+            v, _ = await verdict(conn, P1, 
                                  **record(since=ago(hours=25), reason="change"))
         assert v == "PASS"
 
     @pytest.mark.asyncio
     async def test_a_record_younger_than_the_day_is_unknown(self, pool):
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off="1",
+            v, detail = await verdict(conn, P1, 
                                       **record(since=ago(hours=5)))
         assert v == "UNKNOWN" and "recorded only since 05.06 07:00 Kyiv" in detail, detail
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off="1",
+            v, detail = await verdict(conn, P1, 
                                       **record(last="BASELINE", since=ago(minutes=20)))
         assert v == "UNKNOWN" and "recorded only since" in detail, detail
 
@@ -146,10 +141,10 @@ class TestP1DuckDBFile:
     async def test_the_staleness_limit_is_exact(self, pool):
         """The cron runs hourly; three hours to the second is alive."""
         async with scenario(pool) as conn:
-            v, _ = await verdict(conn, P1, duckdb_off="1", **record(checked=ago(hours=3)))
+            v, _ = await verdict(conn, P1, **record(checked=ago(hours=3)))
         assert v == "PASS"
         async with scenario(pool) as conn:
-            v, detail = await verdict(conn, P1, duckdb_off="1",
+            v, detail = await verdict(conn, P1, 
                                       **record(checked=ago(hours=3, seconds=1)))
         assert v == "UNKNOWN" and "the hourly cron is not running" in detail, detail
 
@@ -159,10 +154,10 @@ class TestP1DuckDBFile:
 @needs_pg
 class TestEveryVariantRuns:
     VARIANTS = (
-        {"duckdb_off": "1", **record()},
-        {"duckdb_off": "invalid", "duckdb_file_last": "error"},
-        {"duckdb_off": "unknown", "duckdb_file_last": "none"},
-        {"duckdb_off": "1", "duckdb_file_last": "MISSING", "duckdb_file_since": "garbage",
+        {**record()},
+        {"duckdb_file_last": "error"},
+        {"duckdb_file_last": "none"},
+        {"duckdb_file_last": "MISSING", "duckdb_file_since": "garbage",
          "duckdb_file_checked_at": "", "duckdb_file_since_reason": ""},
     )
 

@@ -2,7 +2,7 @@
 --
 -- WHY IT EXISTS
 -- `app.manual_expenses` has no other copy since KS_WRITE_EXPENSES=postgres:
--- DuckDB stopped receiving the rows and the hourly copy stands down (E1). The
+-- DuckDB stopped receiving the rows, and step 14 deleted the hourly copy. The
 -- Postgres writer supplies `created_at` explicitly because the column has no
 -- default (core/pg_expenses_write.py, `add_expense`); a writer that forgot it
 -- would record every typed expense with no time at all, and nothing would

@@ -18,7 +18,7 @@
 -- exactly production's state with zero rows. So this reads the sequence
 -- relation itself, which needs its owner or a superuser. The owner is `ks_app`
 -- (migrations run as it), the narrower of the two, and it reaches the local
--- socket without a password. deploy/stage4_soak.sh starts every session with
+-- socket without a password. deploy/daily_soak.sh starts every session with
 -- `default_transaction_read_only=on`, this one included, so the owner's
 -- transaction is read-only like everybody else's.
 --

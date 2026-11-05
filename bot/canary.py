@@ -95,7 +95,7 @@ DQ_MAX_AGE_S = {
     # DN-21's opt-in rested on what the stage-4 soak checked on 18.09: a
     # successful run on each of the 14 days before that, none CRITICAL. That
     # counted calendar days, not the silence this limit measures; the check
-    # asks both now (deploy/stage4_soak/20_reconciliation_pg_history.sql).
+    # asks both now (deploy/daily_soak/20_reconciliation_pg_history.sql).
     # A web with no Postgres configured never writes the layer
     # (`_reconcile_postgres` returns None — silence, not a clean run), so such
     # a host now pages `dq_never:reconciliation_pg`; production web always

@@ -8,7 +8,7 @@
 -- radius; this check is still the fastest way to see the shape again, and it
 -- is the first thing to run after any .env edit, deploy or recreate.
 --
--- The other half is the log grep in deploy/stage4_soak.sh — a failing job
+-- The other half is the log grep in deploy/daily_soak.sh — a failing job
 -- writes a line long before it moves a watermark.
 --
 -- WHAT A FAIL MEANS
@@ -21,7 +21,7 @@
 -- (bot/canary.py, MIRROR_MAX_AGE_S) — so a night-time age says nothing.
 --
 -- `soak.now` exists for the tests, which need a wall clock they can set.
--- deploy/stage4_soak.sh never sets it, so this is now().
+-- deploy/daily_soak.sh never sets it, so this is now().
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now

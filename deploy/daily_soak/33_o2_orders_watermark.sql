@@ -1,15 +1,16 @@
 -- O2 (chain 3) — the order step's watermark lives in Postgres and keeps being written.
 --
--- Only under chain 3; the variables are deploy/stage4_soak.sh's.
+-- It judged only under chain 3 (KS_WRITE_ORDERS=postgres latched, or its
+-- latch) until step 14's S14-20: every chain writes Postgres since S14-00.
 --
 -- WHY IT EXISTS
--- Under the chain `last_sync_orders` lives in `meta.chain_watermarks`. The
+-- `last_sync_orders` lives in `meta.chain_watermarks`. The
 -- order step reads it before the fetch — its window starts 24 h before it —
 -- and writes it after every page it lands; it is the only writer of orders
 -- there is. A step that stopped leaves new orders landing nowhere, and a
 -- setter that wrote somewhere else leaves DuckDB's frozen stamp standing in
 -- for the absent key (`CHAIN_WATERMARK_INHERITS_DUCKDB`): a window that grows
--- by a minute on every tick. O1 only proves the copies stayed away.
+-- by a minute on every tick. Nothing else on this report would say so.
 --
 -- HOW IT DECIDES
 -- The row's `updated_at`, not its value. The value is KeyCRM's newest
@@ -28,7 +29,7 @@
 -- stricter than the page would FAIL it (chain 3's review: this was 90). Over
 -- 105, to the second — a test derives the number from the canary's constants
 -- and checks it against the canary itself. Missing is a FAIL unless the
--- handover (the owner rows, else the given flip time) is under 105 minutes old.
+-- handover (the owner rows) is under 105 minutes old.
 --
 -- WHAT A FAIL MEANS
 -- Missing, not a timestamp, or not rewritten for 105 minutes: read
@@ -37,10 +38,6 @@
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
-),
-flag AS (
-    SELECT :'orders_on'::text AS state,
-           NULLIF(:'orders_flip_at', '')::timestamptz AS flip_at
 ),
 owner AS (
     SELECT min(updated_at) AS at
@@ -58,36 +55,26 @@ judged AS (
            pg_input_is_valid(mark.value, 'timestamptz') AS readable,
            floor(extract(epoch FROM clock.now - mark.stamped_at) / 60)::bigint AS age_min,
            clock.now - mark.stamped_at > interval '105 minutes' AS stale,
-           COALESCE(owner.at, flag.flip_at) IS NOT NULL
-               AND clock.now - COALESCE(owner.at, flag.flip_at) < interval '105 minutes'
+           owner.at IS NOT NULL
+               AND clock.now - owner.at < interval '105 minutes'
                AS just_flipped
-    FROM mark CROSS JOIN clock CROSS JOIN flag CROSS JOIN owner
+    FROM mark CROSS JOIN clock CROSS JOIN owner
 )
 SELECT 'O2 orders watermark'::text AS "check",
-       CASE flag.state
-           WHEN '0' THEN 'PASS'
-           WHEN 'pending' THEN 'PASS'
-           WHEN '1' THEN CASE
-               WHEN NOT j.present THEN CASE WHEN j.just_flipped THEN 'PASS' ELSE 'FAIL' END
-               WHEN NOT j.readable OR j.stale THEN 'FAIL'
-               ELSE 'PASS' END
-           ELSE 'UNKNOWN'
-       END AS verdict,
-       CASE flag.state
-           WHEN '0' THEN 'not applicable: chain 3 still writes DuckDB (KS_WRITE_ORDERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 3 has not latched'
-           WHEN '1' THEN CASE
-               WHEN NOT j.present AND j.just_flipped THEN
-                   'last_sync_orders not written yet, inside 105 min of the handover'
-               WHEN NOT j.present THEN
-                   'last_sync_orders is not in meta.chain_watermarks: no order step has completed '
-                   'under the chain, and DuckDB''s frozen stamp is where its window starts'
-               WHEN NOT j.readable THEN
-                   format('last_sync_orders holds %s, which is not a timestamp', left(j.value, 60))
-               ELSE format('last_sync_orders rewritten %s min ago (limit 105); KeyCRM''s newest change %s Kyiv',
-                           j.age_min,
-                           to_char(j.value::timestamptz AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
-               END
-           ELSE format('orders_on=%s: KS_WRITE_ORDERS not understood, or not read from the web container', flag.state)
-       END AS detail
-FROM flag CROSS JOIN judged j;
+       CASE
+           WHEN NOT j.present THEN CASE WHEN j.just_flipped THEN 'PASS' ELSE 'FAIL' END
+           WHEN NOT j.readable OR j.stale THEN 'FAIL'
+           ELSE 'PASS' END AS verdict,
+       CASE
+           WHEN NOT j.present AND j.just_flipped THEN
+               'last_sync_orders not written yet, inside 105 min of the handover'
+           WHEN NOT j.present THEN
+               'last_sync_orders is not in meta.chain_watermarks: no order step has completed '
+               'under the chain, and DuckDB''s frozen stamp is where its window starts'
+           WHEN NOT j.readable THEN
+               format('last_sync_orders holds %s, which is not a timestamp', left(j.value, 60))
+           ELSE format('last_sync_orders rewritten %s min ago (limit 105); KeyCRM''s newest change %s Kyiv',
+                       j.age_min,
+                       to_char(j.value::timestamptz AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
+           END AS detail
+FROM judged j;
