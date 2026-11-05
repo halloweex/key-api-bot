@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.326
+
+- Share bars start on one line, and a small share is a bar, not a dot
+- WIP: S14-18 review — the boot and the hourly job keep their proofs
+- WIP: S14-18 review — rule 5's guard reads Python and shell, deploy/ included
+- WIP: S14-19 — CLAUDE.md: the images carry no DuckDB, and what holds it
+- WIP: S14-19 — the images carry no duckdb: an AST walk of every code tree, every module imported with the driver absent, the dev line pinned
+- WIP: S14-19 — duckdb out of requirements.txt and requirements.lock, its own line in requirements-dev.txt
+
+
 ## 3.0.325
 
 - WIP: S14-18 — the basedpyright baseline shrinks by 53 with the store's DuckDB half
