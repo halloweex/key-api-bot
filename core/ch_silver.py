@@ -278,8 +278,8 @@ def compare_gold_cells(
     columns = GOLD_COLUMNS
     avg_i = columns.index("avg_order_value")
 
-    missing = sorted((k for k in want if k not in got), )
-    extra = sorted((k for k in got if k not in want), )
+    missing = sorted((k for k in want if k not in got), key=_cell_order)
+    extra = sorted((k for k in got if k not in want), key=_cell_order)
     differing = []
     detail = ""
     for k, pg_row in want.items():
