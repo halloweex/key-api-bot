@@ -412,12 +412,17 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-08-14 (`d81b194`): 1297 passed, 7 deselected, 39s.**
-Any change that lowers the passing count is a regression until explained.
+**Baseline as of 2026-11-05 (step 14's S14-20), with the store up: 9 288
+passed, 10 skipped, in about 12 minutes** — the skips are ClickHouse (6), no
+real gpg on the machine (3) and one TIMESTAMPTZ case. Any change that lowers
+the passing count is a regression until explained. (It was 1 297 passed on
+2026-08-14 without a store, and 3 771 with one on 2026-09-08.)
 
 **CI runs the suite against a real PostgreSQL** since 2026-09-08. Without one,
 every differential test — the ones proving DuckDB and Postgres answer the same
-question the same way — skipped itself on `KS_PG_DSN`, so **60 checks never
+question the same way, and since step 14 Postgres the same as DuckDB's answers
+recorded on their fixtures (`tests/integration/golden/`) — skipped itself on
+`KS_PG_DSN`, so **60 checks never
 ran on a pull request**, including all 20 guarding the /traffic port. That tab
 reads Postgres in production behind a silent fallback to DuckDB, so a query
 broken in one engine only would have kept the page working and left an ERROR
@@ -426,8 +431,8 @@ in a log nobody reads. `.github/workflows/ci.yml` now starts
 `services:` block starts *before* the checkout that would supply those
 scripts), applies `alembic upgrade head`, and **fails the job if any test
 still skips for want of PostgreSQL** — the arrangement breaking silently is
-the state it replaced. Baseline with the store up: **3 771 passed, 8 skipped**
-(ClickHouse, which CI still has no container for). `tests/unit/test_ci_workflow.py`
+the state it replaced. ClickHouse still has no container in CI, so its
+differential tests skip there. `tests/unit/test_ci_workflow.py`
 pins all of it, including that the image matches `docker-compose.yml` and
 `deploy/gate_with_stores.sh`.
 
@@ -3237,4 +3242,4 @@ file used to read "clean".
 
 ---
 
-*Last updated: 2026-10-09*
+*Last updated: 2026-11-05 (step 14, S14-20)*
