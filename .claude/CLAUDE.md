@@ -249,7 +249,7 @@ meta ──── the store's own bookkeeping
 - `app.manager_classifications` - Who sells retail, wholesale or internally, as of when; only a human knows
 - `app.revenue_predictions`, `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`, `app.revenue_goals` - The forecast and the goals
 - `app.data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
-- `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items; skipped for 30 days so a repair job cannot loop on them forever
+- `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items, so a repair job cannot loop on them forever. The two kinds are skipped differently (`core/pg_orders_read.py`): an id the gap scan found absent upstream is never asked for again (`order_id_gaps` excludes every ledgered id, whatever its age), while an order KeyCRM served without line items is re-fetched by the half-written repair once its `checked_at` is 30 days old (`MISS_RETRY_DAYS`), and each such re-fetch that comes back empty restamps it
 - `app.weekly_report_sends` / `app.traffic_report_sends` - one row per week delivered; what keeps a daily job to one message a week and makes a missed Monday recoverable
 - `app.dashboard_users`, `app.role_permissions` - Access (see "Which tabs one person may open"); `app.authorized_users`, `app.user_preferences` - the bot's
 - `app.sms_campaigns`, `app.sms_campaign_members`, `app.sms_dlr_events`, `app.marketing_optouts` - The SMS campaigns, their rosters, delivery reports and opt-outs
@@ -2324,8 +2324,14 @@ derived, переезд стоит одну пересборку.
 Шаг 4 (копия голда) превзойдён и оставлен фолбэком. Часовой `ch_sync` теперь:
 `core/ch_silver.py` отгружает **silver целиком** (staging + EXCHANGE, копия —
 допуск ноль на круге) и **деривит gold внутри ClickHouse** из этого silver;
-`core/ch_history.py` дописывает `history.order_versions` поверх собственного
-`MAX(id)` (append-only, курсора нет — вотермарка читается из самого CH).
+`core/ch_history.py` дописывает в `history.order_versions` разность множеств
+id — всё, что есть в `app.order_versions` и чего нет в копии (`ship_history`:
+append-only, курсора нет, а не «поверх собственного `MAX(id)`»: BIGSERIAL
+коммитится не по порядку, и отгрузка выше `MAX(id)` навсегда пропустила бы
+версию, закоммиченную после большей). Строка, потерянная копией ниже её
+`MAX(id)`, поэтому доезжает следующей же отгрузкой, с WARNING в логе и
+INFO `ch_history_selfhealed` в суточной сверке следующих 24 ч (память
+процесса: перезапуск web её теряет).
 
 **Третьего диалекта мер нет** — и это снимает возражение И1: `GOLD_MEASURES`
 написаны как `COUNT(DISTINCT CASE WHEN …)` / `COALESCE(SUM(CASE …), 0)`, и
