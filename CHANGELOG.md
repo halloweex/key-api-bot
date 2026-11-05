@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.328
+
+- WIP: S14-20 — CLAUDE.md: the test baseline taken again, the date
+- WIP: S14-20 — CLAUDE.md: stages 4-5 compressed into the history of the DuckDB exit, the Postgres schema, the refusal as it is; the week's runbook tests hold its history
+- WIP: S14-20 — comments in the files that name DuckDB only in text say it was, not is (appendix B)
+- WIP: S14-20 — the review minors of S14-11..S14-18: the managers fake, the doors' shared limits, the lever and soak texts, the host scripts' and docs' stale pointers
+- WIP: S14-20 — the slow-writer derivation proved on a synthetic mixin, the write-flag walk reads bare and indirect reads, the compose grace and the twins' comments say what is left
+- WIP: S14-20 — deploy/daily_soak.sh, Postgres only: no gate on a flag, a latch, KS_DUCKDB or a flip time; the agent routes warehouse_pg:* and its runbooks know DuckDB is an archive
+- WIP: S14-20 — docstrings say what the latch's two directions are since S14-12; the expenses refusal names the dump; the hourly job's display name
+
+
 ## 3.0.327
 
 
