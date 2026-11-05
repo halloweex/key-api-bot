@@ -148,7 +148,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union, cast
 
 logger = logging.getLogger(__name__)
 
@@ -1421,9 +1421,11 @@ def check_pg_warehouse(
     judges = {
         "silver_arc": lambda: _silver_arc_check(facts.silver_arc),
         "attribution": lambda: _attribution_check(facts.attribution, facts.watermark),
-        "line_items": lambda: _line_items_check(facts.line_items),
+        # Narrowed for the checker: a group in `blind` is skipped below, so
+        # what is judged is the group's own facts.
+        "line_items": lambda: _line_items_check(cast(LineItems, facts.line_items)),
         "derivation_signal": lambda: _signal_check(facts.derivation_signal),
-        "order_landing": lambda: _order_landing_check(facts.order_landing),
+        "order_landing": lambda: _order_landing_check(cast(OrderLanding, facts.order_landing)),
         "silver_row_values": lambda: _row_values_check(facts.silver_row_values),
     }
     for group, judge in judges.items():
