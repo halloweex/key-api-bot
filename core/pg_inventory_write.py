@@ -226,17 +226,41 @@ async def _ensure_movement_id_floor(conn) -> None:
 # whole catalogue of stock, so every offer kept its old quantity and no
 # movement was recorded, every hour, until somebody read the log (L1-06).
 # Revision 0013's and 0029's column types.
+#
+# Only what Postgres refuses, never more: a row refused here is a row main
+# wrote, so the refusals below are asyncpg 0.31's own encoders written out,
+# and `tests/integration/test_inventory_refusal_matches_postgres.py` holds
+# each verdict to what the server answers for the same value. What they miss
+# reaches Postgres and is written row by row (`_is_data_error`); what they
+# refuse that Postgres would take is a stock row lost every hour (AR-01: a
+# quantity of 3.0, which asyncpg writes as 3, was refused as "not an integer").
 
 _INT32 = (-2 ** 31, 2 ** 31 - 1)
 _MONEY = (12, 2)
 
 
+def _as_int4(value: Any) -> int:
+    """The integer asyncpg sends for `value` into an INTEGER column, or the
+    error it raises (TypeError, ValueError, OverflowError). Its encoder
+    (`pgproto/codecs/int.pyx`, `int4_encode`): anything but an int whose type
+    has `__int__` goes through `int()` — so 3.0 is 3, 1.5 is 1, True is 1 and
+    NaN or an infinity raise — and the result through `PyLong_AsLong`, which
+    takes an `__index__` and refuses everything else, text included."""
+    import operator
+
+    if type(value) is not int and hasattr(type(value), "__int__"):
+        value = int(value)
+    return operator.index(value)
+
+
 def _int_refusal(column: str, value: Any) -> Optional[str]:
     if value is None:
         return f"{column} is NULL"
-    if isinstance(value, bool) or not isinstance(value, int):
-        return f"{column} is a {type(value).__name__}, not an integer"
-    if not _INT32[0] <= value <= _INT32[1]:
+    try:
+        sent = _as_int4(value)
+    except (TypeError, ValueError, OverflowError):
+        return f"{column} is a {type(value).__name__} asyncpg cannot send as an integer"
+    if not _INT32[0] <= sent <= _INT32[1]:
         return f"{column} is outside its integer range"
     return None
 
@@ -256,17 +280,33 @@ def _text_refusal(column: str, value: Any) -> Optional[str]:
 
 
 def _money_refusal(column: str, value: Any) -> Optional[str]:
-    """`pg_numeric.refusal`, a numeric string read as the number it is."""
-    from decimal import Decimal, InvalidOperation
+    """Why Postgres would refuse `value` in a nullable NUMERIC(12,2).
 
-    from core.pg_numeric import refusal
+    asyncpg sends `Decimal(value)` for anything that is not a Decimal (its
+    `numeric_encode_binary`): a numeric string is its number, True is 1, a
+    float is its exact binary value. The server then rounds half away from
+    zero to two places and refuses what does not fit, an infinity included —
+    and stores NaN, which `pg_numeric.refusal` refuses on purpose for the
+    chains that compared with DuckDB's DECIMAL. Not this one: main wrote a NaN
+    cost, so the refusal does not lose the row for it."""
+    from decimal import ROUND_HALF_UP, Decimal
 
-    if isinstance(value, str):
-        try:
-            value = Decimal(value)
-        except InvalidOperation:
-            return f"{column} is text that is not a number"
-    return refusal(column, value, *_MONEY, nullable=True)
+    if value is None:
+        return None
+    try:
+        sent = value if isinstance(value, Decimal) else Decimal(value)
+    except (TypeError, ValueError, ArithmeticError):
+        return f"{column} is a {type(value).__name__} asyncpg cannot send as a number"
+    if sent.is_nan():
+        return None
+    precision, scale = _MONEY
+    digits = precision - scale
+    # The magnitude first: `quantize` raises on a number too long for the
+    # decimal context (1e30), and an infinity has no magnitude to compare.
+    if sent.is_infinite() or sent.adjusted() >= digits or abs(sent.quantize(
+            Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP)) >= 10 ** digits:
+        return f"{column} does not fit NUMERIC({precision},{scale})"
+    return None
 
 
 def stock_refusal(stock: Any) -> Optional[str]:

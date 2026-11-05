@@ -79,11 +79,12 @@ class TestAStockRowPostgresWouldRefuse:
         {"reserve": None},
         {"quantity": "two"},
         {"price": 10 ** 11},                 # over NUMERIC(12,2)
-        {"purchased_price": float("nan")},
+        {"purchased_price": float("inf")},   # no infinity fits NUMERIC(12,2)
+        {"quantity": float("nan")},          # asyncpg cannot send it as an integer
         {"sku": "NUL\x00"},
         {"id": 2 ** 31},                     # outside INTEGER: never the base row
     ], ids=["null-quantity", "null-reserve", "text-quantity", "price-overflow",
-            "nan-cost", "nul-sku", "id-overflow"])
+            "inf-cost", "nan-quantity", "nul-sku", "id-overflow"])
     async def test_the_other_offers_still_move(self, pool, bad):
         """Mutation: drop `stock_refusal` from `upsert_stocks` — the batch
         raises and the four good offers keep 3."""
@@ -105,6 +106,50 @@ class TestAStockRowPostgresWouldRefuse:
         del row["quantity"], row["reserve"]
         assert await inv.upsert_stocks([row]) == (1, 0)
         assert (await _quantities(pool))[BASE] == 0
+
+
+class TestAValuePostgresTakes:
+    """What asyncpg writes is written, as main wrote it (AR-01). A quantity
+    KeyCRM serves as 3.0 or 1.5 goes into the INTEGER as 3 and 1, True as 1;
+    a NaN cost is stored, Postgres' NUMERIC holding NaN. The refusal used to
+    turn these away as "not an integer" or "not a finite number", and a
+    catalogue served that way froze every SKU's stock."""
+
+    @pytest.mark.asyncio
+    async def test_a_float_quantity_is_stored_as_the_integer_asyncpg_sends(self, pool):
+        """Mutation: refuse a float in `_int_refusal` — (0, 0) and nothing
+        stored, the reviewer's reproduction."""
+        written, moved = await inv.upsert_stocks([
+            _stock(0, quantity=3.0),
+            _stock(1, quantity=1.5, reserve=0.0),
+            _stock(2, quantity=True),
+        ])
+        assert (written, moved) == (3, 3)
+        async with pool.acquire() as conn:
+            stored = [tuple(r) for r in await conn.fetch(
+                "SELECT id, quantity, reserve FROM bronze.offer_stocks "
+                "WHERE id = ANY($1::int[]) ORDER BY id", IDS)]
+        assert stored == [(BASE, 3, 0), (BASE + 1, 1, 0), (BASE + 2, 1, 0)]
+
+    @pytest.mark.asyncio
+    async def test_a_nan_cost_is_stored(self, pool):
+        """Mutation: refuse NaN in `_money_refusal` — (0, 0)."""
+        assert await inv.upsert_stocks(
+            [_stock(0, purchased_price=float("nan"))]) == (1, 1)
+        async with pool.acquire() as conn:
+            cost = await conn.fetchval(
+                "SELECT purchased_price::text FROM bronze.offer_stocks WHERE id = $1", BASE)
+        assert cost == "NaN"
+
+    @pytest.mark.asyncio
+    async def test_a_float_product_id_is_an_offer(self, pool):
+        rows = [OfferRow(BASE, 701.0, "A"), OfferRow(BASE + 1, True, "B")]  # type: ignore[arg-type]
+        assert await inv.upsert_offers(rows) == 2
+        async with pool.acquire() as conn:
+            held = [tuple(r) for r in await conn.fetch(
+                "SELECT id, product_id FROM bronze.offers WHERE id = ANY($1::int[]) "
+                "ORDER BY id", IDS)]
+        assert held == [(BASE, 701), (BASE + 1, 1)]
 
 
 class TestAValuePostgresRefusesThatNothingForesaw:
