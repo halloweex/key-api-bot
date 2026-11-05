@@ -41,11 +41,11 @@ class TestRemediationLookup:
         """Half the check names are built at runtime; an exact-name table
         would silently miss every one of them."""
         for name in (
-            "fk_orphan_order_products_order_id",
-            "pk_uniqueness_orders",
-            "not_null_orders_grand_total",
-            "value_domain_orders_source_id",
+            "pg_fk_orphan_order_products_order_id",
+            "pg_not_null_orders_ordered_at",
+            "pg_value_domain_orders_source_id",
             "freshness_orders",
+            "freshness_expense_types",
         ):
             assert remediation_for([name]) != [DEFAULT_REMEDIATION], name
 
@@ -58,12 +58,12 @@ class TestRemediationLookup:
     def test_one_useful_thing_said_once(self):
         """Eight orphan checks in one alert are still one lever."""
         assert len(remediation_for([
-            "fk_orphan_a_b", "fk_orphan_c_d", "fk_orphan_e_f",
+            "pg_fk_orphan_a_b", "pg_fk_orphan_c_d", "pg_fk_orphan_e_f",
         ])) == 1
 
     def test_order_is_stable_and_follows_the_issues(self):
-        assert remediation_for(["silver_missing_rows", "gold_cell_values"]) == list(
-            reversed(remediation_for(["gold_cell_values", "silver_missing_rows"]))
+        assert remediation_for(["pg_silver_missing_rows", "gold_rollup_mismatch"]) == list(
+            reversed(remediation_for(["gold_rollup_mismatch", "pg_silver_missing_rows"]))
         )
 
     def test_the_archive_is_never_told_to_repair_itself(self):
@@ -142,10 +142,10 @@ class TestTheAlertBody:
 
     def test_the_lever_is_last_because_it_is_what_gets_acted_on(self):
         msg = format_alert_message(
-            "integrity", Severity.CRITICAL, [_issue("pk_uniqueness_orders")], [],
+            "integrity", Severity.CRITICAL, [_issue("pg_fk_orphan_order_products_order_id")], [],
         )
         body, _, tail = msg.partition("→ ")
-        assert "pk_uniqueness_orders" in body
+        assert "pg_fk_orphan_order_products_order_id" in body
         assert tail.strip()
 
     def test_info_asks_nobody_to_do_anything(self):

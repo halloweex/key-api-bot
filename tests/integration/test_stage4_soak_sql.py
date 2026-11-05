@@ -42,7 +42,7 @@ REPO = Path(__file__).resolve().parents[2]
 SQL_DIR = REPO / "deploy" / "stage4_soak"
 FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
-VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0",
+VARIABLES = {"inventory_on": "0", "inventory_flip_at": "",
              "buyers_on": "0", "buyers_flip_at": "",
              "buyers_override_floor": "", "dq_journal_direct": "0",
              # The DuckDB file (P1, OD-17 (a)); tests/integration/test_stage5_soak_sql.py.
@@ -342,19 +342,19 @@ async def dq_issue(conn, run_id, check_name, *, table="silver.orders", count=1,
 @needs_pg
 class TestEveryCheckRuns:
     VARIANTS = (
-        {"inventory_on": "0", "dq_pg_warehouse_on": "0", "buyers_on": "0"},
-        {"inventory_on": "1", "dq_pg_warehouse_on": "1",
+        {"inventory_on": "0", "buyers_on": "0"},
+        {"inventory_on": "1",
          "inventory_flip_at": "2030-06-01 10:00+03",
          "buyers_on": "1", "buyers_flip_at": "2030-06-01 10:30+03",
          "buyers_override_floor": "0",
          "orders_on": "1", "orders_flip_at": "2030-06-01 11:00+03"},
-        {"inventory_on": "1", "dq_pg_warehouse_on": "1", "buyers_on": "1",
+        {"inventory_on": "1", "buyers_on": "1",
          "orders_on": "1"},
-        {"inventory_on": "invalid", "dq_pg_warehouse_on": "invalid", "buyers_on": "invalid",
+        {"inventory_on": "invalid", "buyers_on": "invalid",
          "orders_on": "invalid"},
-        {"inventory_on": "unknown", "dq_pg_warehouse_on": "unknown", "buyers_on": "unknown",
+        {"inventory_on": "unknown", "buyers_on": "unknown",
          "orders_on": "unknown"},
-        {"inventory_on": "0", "dq_pg_warehouse_on": "0", "buyers_on": "held",
+        {"inventory_on": "0", "buyers_on": "held",
          "orders_on": "pending"},
         {"managers_on": "pending", "orders_on": "pending"},
         # Chain 9's journal (OD-02 (c)): every state the script can pass.
@@ -647,13 +647,6 @@ class TestStaleEvidenceIsUnknown:
         assert v == "UNKNOWN", detail
 
     @pytest.mark.asyncio
-    async def test_a_copy_two_hours_old_makes_pairing_unknown(self, pool):
-        async with scenario(pool) as conn:
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(hours=2))
-            v, detail = await verdict(conn, "21_pairing.sql", dq_pg_warehouse_on="1")
-        assert v == "UNKNOWN", detail
-
-    @pytest.mark.asyncio
     async def test_no_copy_row_at_all_is_unknown(self, pool):
         async with scenario(pool) as conn:
             await conn.execute(
@@ -804,86 +797,6 @@ class TestADirectJournalIsNotGatedOnTheCopy:
                                copied=self.FROZEN["ok_at"])
             v, detail = await verdict(conn, name, dq_journal_direct="1")
         assert v == "FAIL", detail
-
-    @pytest.mark.asyncio
-    async def test_pairing_judges_the_run(self, pool):
-        async with scenario(pool) as conn:
-            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
-            await dq_run(conn, DQ_RUN_IDS[1], layer="integrity", started_at=ago(hours=5))
-            await dq_issue(conn, DQ_RUN_IDS[1], "pg_line_items_disagree")
-            stale_v, _ = await verdict(conn, "21_pairing.sql", dq_pg_warehouse_on="1")
-            v, detail = await verdict(conn, "21_pairing.sql", dq_pg_warehouse_on="1",
-                                      dq_journal_direct="1")
-        assert stale_v == "UNKNOWN"
-        assert v == "FAIL" and "pg_line_items_disagree" in detail, detail
-
-
-@needs_pg
-class TestPairing:
-    FILE = "21_pairing.sql"
-
-    async def _fresh_integrity_run(self, conn):
-        await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
-        await dq_run(conn, DQ_RUN_IDS[1], layer="integrity", started_at=ago(hours=5))
-
-    @pytest.mark.asyncio
-    async def test_twin_line_items_absent_while_duckdb_looked_passes(self, pool):
-        async with scenario(pool) as conn:
-            await self._fresh_integrity_run(conn)
-            await dq_issue(conn, DQ_RUN_IDS[1], "headline_vs_line_items")
-            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
-        assert v == "PASS", detail
-
-    @pytest.mark.asyncio
-    async def test_line_items_disagreeing_fails(self, pool):
-        async with scenario(pool) as conn:
-            await self._fresh_integrity_run(conn)
-            await dq_issue(conn, DQ_RUN_IDS[1], "headline_vs_line_items")
-            await dq_issue(conn, DQ_RUN_IDS[1], "pg_line_items_disagree")
-            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
-        assert v == "FAIL" and "pg_line_items_disagree" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_landing_twins_absent_while_duckdb_looked_passes(self, pool):
-        """DN-23: DuckDB's landing findings stand; the twins compared."""
-        async with scenario(pool) as conn:
-            await self._fresh_integrity_run(conn)
-            await dq_issue(conn, DQ_RUN_IDS[1], "orders_without_line_items", count=40)
-            await dq_issue(conn, DQ_RUN_IDS[1], "value_domain_orders_status_id")
-            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
-        assert v == "PASS", detail
-
-    @pytest.mark.asyncio
-    async def test_order_landing_disagreeing_fails(self, pool):
-        async with scenario(pool) as conn:
-            await self._fresh_integrity_run(conn)
-            await dq_issue(conn, DQ_RUN_IDS[1], "pg_order_landing_disagree")
-            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
-        assert v == "FAIL" and "pg_order_landing_disagree" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_order_landing_unwatched_fails(self, pool):
-        async with scenario(pool) as conn:
-            await self._fresh_integrity_run(conn)
-            await dq_issue(conn, DQ_RUN_IDS[1], "pg_order_landing_unwatched")
-            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
-        assert v == "FAIL" and "pg_order_landing_unwatched" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_a_duckdb_finding_without_its_twin_fails(self, pool):
-        async with scenario(pool) as conn:
-            await self._fresh_integrity_run(conn)
-            await dq_issue(conn, DQ_RUN_IDS[1], "silver_missing_rows", count=3)
-            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
-        assert v == "FAIL" and "pg_silver_missing_rows absent" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_the_flag_off_is_not_applicable(self, pool):
-        async with scenario(pool) as conn:
-            await self._fresh_integrity_run(conn)
-            await dq_issue(conn, DQ_RUN_IDS[1], "silver_missing_rows", count=3)
-            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="0")
-        assert v == "PASS" and detail.startswith("not applicable"), detail
 
 
 @needs_pg

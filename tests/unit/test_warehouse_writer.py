@@ -277,26 +277,8 @@ class TestTheRevisionReadItself:
         assert facts.revision_error == "ConnectionDoesNotExistError"
 
 
-class TestWhatStandsDown:
-
-
-    def test_a_held_scan_skips_the_checks_over_frozen_tables(self, tmp_path, monkeypatch):
-        from core import data_quality as dq
-
-        monkeypatch.setattr(wc, "_held", True)
-        for fn in ("_silver_arc_check", "_attribution_coverage_check",
-                   "_gold_cell_values_check", "_headline_vs_line_items_check",
-                   "_goods_shipped_without_sale_check"):
-            monkeypatch.setattr(dq, fn, MagicMock(side_effect=AssertionError(fn)))
-        store = _store(tmp_path)
-        try:
-            async def scan():
-                async with store.connection() as conn:
-                    return dq.check_internal_integrity(conn)
-            issues = asyncio.run(scan())
-        finally:
-            asyncio.run(store.close())
-        assert "integrity_check_raised" not in {i.check_name for i in issues}
+# `TestWhatStandsDown` held a held scan to skipping the DuckDB checks over
+# frozen tables until step 14's S14-14 deleted the checks and the scan.
 
 
 # ─── Nothing of DuckDB's derivation runs under postgres ──────────────────────
@@ -900,30 +882,13 @@ class TestAHoldThatDoesNotEndIsSaid:
         assert spec_for("warehouse_hold_stuck").kind is Kind.CONDITION
 
 
-# ─── The retired Gold comparison's own conditions hold the switch ────────────
-
-
-class TestTheRetiredComparisonsConditions:
-    def test_they_are_what_compare_gold_named(self):
-        """Read out of `compare_gold`'s source until step 14's S14-12 deleted
-        it; frozen since, as the names an image from before step 14 holds
-        (rule 15)."""
-        assert wc.RETIRED_COMPARISON_CONDITIONS == frozenset(
-            {"gold_missing_cells", "gold_orphan_cells", "gold_cell_values"})
-        assert "gold_rollup_mismatch" not in wc.retired_conditions()
-
-    def test_an_open_page_under_one_holds_the_switch(self):
-        """`gold_cell_values`, the one of them that is also the integrity
-        check's name and so still a registered condition. `gold_missing_cells`
-        and `gold_orphan_cells` left the REGISTRY with `compare_gold` in step
-        14's S14-12, so no page can be delivered under them any more."""
-        from core.alerting import _gate, is_condition
-
-        _gate.note_delivered_conditions(["gold_cell_values"], "dq:mirror_landing")
-        facts = asyncio.run(wc.gather_facts({}))
-        assert facts.open_retired == {"gold_cell_values": "dq:mirror_landing"}
-        assert not is_condition("gold_missing_cells")
-        assert not is_condition("gold_orphan_cells")
+# ─── The retired Gold comparison's own conditions held the switch ───────────
+#
+# `TestTheRetiredComparisonsConditions` held `RETIRED_COMPARISON_CONDITIONS`
+# and the page it held the switch over until step 14's S14-14 deleted the set
+# with `retired_conditions()` and the `retired_conditions_clear`
+# precondition; `tests/unit/test_rollback_condition_names.py` keeps the names
+# unreused.
 
 
 # ─── The retired comparisons' shared names: marked, not retired by name ──────
@@ -982,7 +947,6 @@ class TestTheRetiredComparisonsSharedNames:
         _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
         _mirror_run({"reconcile_order_versions": [
             _critical("mirror_row_values", "bronze.orders")]})
-        assert wc.open_retired_conditions() == {}
         assert _gate.delivered_marked(wc.COMPARISON_MARK) == {}
 
     def test_the_job_does_not_call_the_marker(self):

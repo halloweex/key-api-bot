@@ -19,7 +19,6 @@ import textwrap
 from datetime import datetime, timedelta, timezone
 
 import pytest
-import pytest_asyncio
 
 from core.data_quality import _freshness_check, check_internal_integrity
 from core.duckdb_store import DuckDBStore
@@ -36,24 +35,20 @@ def flags(monkeypatch):
     return monkeypatch
 
 
-@pytest_asyncio.fixture
-async def frozen_duckdb(tmp_path):
-    """Every entity freshly synced in DuckDB except the chain's two, which
-    stopped 60 h ago — the state DuckDB is in two and a half days after the
-    switch. The threshold for both is 48 h."""
-    store = DuckDBStore(db_path=tmp_path / "wm.duckdb")
-    await store.connect()
+@pytest.fixture
+def frozen_duckdb():
+    """DuckDB's `sync_metadata` as Postgres copied it (`app.sync_metadata`):
+    every entity freshly synced except the chain's two, which stopped 60 h
+    ago — the state DuckDB was in two and a half days after the switch. The
+    threshold for both is 48 h. Since step 14's S14-14 the check reads only
+    the copy; until then these were DuckDB's own rows, read under `on`."""
     now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        for entity in ENTITIES:
-            stamp = now - (timedelta(hours=60) if entity in ("offers", "stocks")
-                           else timedelta(minutes=5))
-            conn.execute(
-                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                [f"last_sync_{entity}", stamp.isoformat()])
-    yield store, now
-    await store.close()
+    rows = {}
+    for entity in ENTITIES:
+        stamp = now - (timedelta(hours=60) if entity in ("offers", "stocks")
+                       else timedelta(minutes=5))
+        rows[f"last_sync_{entity}"] = stamp.isoformat()
+    return rows, now
 
 
 def _names(issues):
@@ -85,45 +80,38 @@ class TestWhichKeysHaveMoved:
 
 
 class TestTheFreshnessCheckFollowsTheWatermarks:
-    @pytest.mark.asyncio
-    async def test_under_the_flag_the_frozen_copy_is_not_judged(
+    def test_under_the_flag_the_frozen_copy_is_not_judged(
         self, flags, frozen_duckdb,
     ):
-        store, now = frozen_duckdb
+        rows, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks=_moved(now))
+        issues = _freshness_check(now, chain_watermarks=_moved(now), frozen_rows=rows)
         assert issues == []
 
-    @pytest.mark.asyncio
-    async def test_under_the_flag_a_stale_postgres_stamp_is_a_stall(
+    def test_under_the_flag_a_stale_postgres_stamp_is_a_stall(
         self, flags, frozen_duckdb,
     ):
         """What makes the test above mean something: the values are read, not
         merely skipped. Only offers is stale here, and only offers is named."""
-        store, now = frozen_duckdb
+        rows, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks=_moved(
-                now, last_sync_offers=(now - timedelta(hours=50)).isoformat()))
+        issues = _freshness_check(now, frozen_rows=rows, chain_watermarks=_moved(
+            now, last_sync_offers=(now - timedelta(hours=50)).isoformat()))
         assert _names(issues) == ["freshness_offers"]
         assert issues[0].count == 50
 
-    @pytest.mark.asyncio
-    async def test_a_key_postgres_never_received_is_named_where_it_is_missing(
+    def test_a_key_postgres_never_received_is_named_where_it_is_missing(
         self, flags, frozen_duckdb,
     ):
         """DuckDB's frozen copy must not stand in for a watermark Postgres lacks."""
-        store, now = frozen_duckdb
+        rows, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks=_moved(
-                now, last_sync_stocks=None))
+        issues = _freshness_check(now, frozen_rows=rows, chain_watermarks=_moved(
+            now, last_sync_stocks=None))
         assert _names(issues) == ["freshness_stocks"]
         assert "meta.chain_watermarks" in issues[0].description
 
-    @pytest.mark.asyncio
-    async def test_not_even_a_fresh_frozen_copy_stands_in_for_chain_1(
+    def test_not_even_a_fresh_frozen_copy_stands_in_for_chain_1(
         self, flags, frozen_duckdb,
     ):
         """The test above cannot tell "never synced" from a frozen stamp judged
@@ -131,38 +119,32 @@ class TestTheFreshnessCheckFollowsTheWatermarks:
         either reading files `freshness_stocks`. Here DuckDB's stamp is fresh,
         and chain 1 — which does not declare `CHAIN_WATERMARK_INHERITS_DUCKDB`
         (chain 6a does) — must still be told Postgres has no key."""
-        store, now = frozen_duckdb
+        rows, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        async with store.connection() as conn:
-            conn.execute("UPDATE sync_metadata SET value = ? WHERE key = 'last_sync_stocks'",
-                         [(now - timedelta(minutes=5)).isoformat()])
-            issues = _freshness_check(conn, now, chain_watermarks=_moved(
-                now, last_sync_stocks=None))
+        rows["last_sync_stocks"] = (now - timedelta(minutes=5)).isoformat()
+        issues = _freshness_check(now, frozen_rows=rows, chain_watermarks=_moved(
+            now, last_sync_stocks=None))
         assert _names(issues) == ["freshness_stocks"]
         assert "never synced" in issues[0].description
 
-    @pytest.mark.asyncio
-    async def test_called_without_them_it_says_it_is_not_watching(
+    def test_called_without_them_it_says_it_is_not_watching(
         self, flags, frozen_duckdb,
     ):
         """Neither judging the frozen copy nor going quiet: one WARN that names
         the unwatched syncs, and nothing about them either way."""
-        store, now = frozen_duckdb
+        rows, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        async with store.connection() as conn:
-            issues = _freshness_check(conn, now)
+        issues = _freshness_check(now, frozen_rows=rows)
         assert _names(issues) == ["sync_watermarks_unwatched"]
         assert "offers" in issues[0].description and "stocks" in issues[0].description
 
-    @pytest.mark.asyncio
-    async def test_the_integrity_scan_hands_them_through(self, flags, frozen_duckdb):
-        store, now = frozen_duckdb
+    def test_the_integrity_scan_hands_them_through(self, flags, frozen_duckdb):
+        rows, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
         fresh = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-        async with store.connection() as conn:
-            handed = check_internal_integrity(conn, chain_watermarks={
-                "last_sync_offers": fresh, "last_sync_stocks": fresh})
-            not_handed = check_internal_integrity(conn)
+        handed = check_internal_integrity(frozen_sync_rows=rows, chain_watermarks={
+            "last_sync_offers": fresh, "last_sync_stocks": fresh})
+        not_handed = check_internal_integrity(frozen_sync_rows=rows)
         assert not {"freshness_offers", "freshness_stocks",
                     "sync_watermarks_unwatched"} & set(_names(handed))
         assert "sync_watermarks_unwatched" in _names(not_handed)

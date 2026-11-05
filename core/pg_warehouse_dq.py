@@ -4,8 +4,17 @@ The integrity scan checks Silver in DuckDB: the landing→Silver arc, website
 attribution coverage, and the two line-item findings. When DuckDB stops deriving
 (step 13) every one of those reads a frozen table: the arc pages four times a day
 for rows that are fine, and attribution goes vacuously green. The replacements
-must be proven equal on live data first, so they run beside the DuckDB checks,
-behind `KS_DQ_PG_WAREHOUSE`, and are compared before anything stands alone.
+must be proven equal on live data first, so they ran beside the DuckDB checks,
+behind `KS_DQ_PG_WAREHOUSE`, and were compared before anything stood alone.
+
+**Since step 14's S14-14 they are the integrity checks of Silver, Gold, UTM
+and the order tables**: the DuckDB scan is deleted, so nothing compares and
+every twin stands in, as each had since step 13 and chain 3 stood the DuckDB
+checks down. The flag, the comparisons (`pg_line_items_disagree`,
+`pg_order_landing_disagree`) and the pairing record (`pg_twin_pairing`) went
+with it; what the twins read from the DuckDB checks — the known ids, the
+Silver row comparison and two checks' thresholds — moved here byte for byte.
+The bullets below are the design as it was built.
 
 The design was written and attacked before this was built (`.planning`, step 8
 spec and two critics). What this module takes from it:
@@ -33,10 +42,11 @@ spec and two critics). What this module takes from it:
   READ snapshot alone could still catch an emptied Silver. The derivation and
   the DuckDB tick wait for this lock while holding the heavy lock the sync needs,
   so the hold is capped at HOLD_BUDGET_S whatever Postgres is doing.
-- **Line items compare, not repeat.** While DuckDB's own headline and goods
-  checks look, the twins do not file a second standing row each; they file
-  `pg_line_items_disagree` when the engines differ by more than the orders still
-  in flight. Only when DuckDB did not look does the twin stand in for it.
+- **Line items compared, not repeated** (until S14-14). While DuckDB's own
+  headline and goods checks looked, the twins did not file a second standing
+  row each; they filed `pg_line_items_disagree` when the engines differed by
+  more than the orders still in flight. Only when DuckDB did not look did the
+  twin stand in for it — every run since step 13, and the only way since.
 
 Step 8b adds the fourth group, **`pg_silver_row_values`**: every Silver row
 recomputed from bronze and compared with what is stored. Silver is rebuilt
@@ -91,7 +101,7 @@ detector the design asked for and nobody built.
   `first_tick` is not judged: before DN-05b a boot sync wrote with no mark by
   design, and that run is what covered it. Postgres against its own journal,
   not against DuckDB.
-- **`pg_twin_pairing`**, one INFO finding per run whose description is JSON:
+- **`pg_twin_pairing`** (until S14-14), one INFO finding per run whose description is JSON:
   both engines' arc, attribution and line-item numbers side by side, and what
   `check_pg_warehouse` would file for the same facts standing alone
   (`duckdb_looked` empty). The line-item twins never file while DuckDB looks —
@@ -112,8 +122,8 @@ unnoticed for a month).
   like the line items: before it every count below DuckDB's is history not yet
   carried, not a finding.
 - **Compare while DuckDB looks, stand in when it does not** — the line-item
-  rule. Five of DuckDB's six run bare in `check_internal_integrity`
-  (`DUCKDB_BARE_CHECKS`): a raise there fails the scan, so the scan finishing
+  rule, until S14-14; standing in since. Five of DuckDB's six run bare in `check_internal_integrity`
+  (`DUCKDB_BARE_CHECKS`, until S14-14): a raise there fails the scan, so the scan finishing
   is their looking. A difference beyond the orders in flight is
   `pg_order_landing_disagree`. A CRITICAL twin whose rows still stand while
   it compares holds its `pg_` condition: a page it delivered on a run DuckDB
@@ -132,19 +142,15 @@ every digest (OD-05).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union, cast
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_DQ_PG_WAREHOUSE"
-_VALID = ("off", "on")
 
 # How long to wait for PG_LAYER_LOCK — a derivation or a ClickHouse ship holds
 # it — and how long this may then hold it, pool acquire included.
@@ -183,23 +189,141 @@ WEBSITE_SOURCE_ID = 4
 # a morning, so a miss must stand in every run for a day to be read at all.
 SIGNAL_LOOKBACK_H = 24
 
-# The pairing record's shape. Bumped when a key changes meaning or joins, so a
-# soak reading a week of records can tell which rows it may compare. 2: the
-# order-landing twins (DN-23), and `duckdb.looked` naming DuckDB's bare checks.
-PAIRING_VERSION = 2
+
+# ─── What the twins took from the DuckDB scan ────────────────────────────────
+#
+# Moved here byte for byte in step 14's S14-14, which deleted the DuckDB checks
+# they were read out of (`core/data_quality.py`): the known ids, the Silver
+# row comparison, and the thresholds the attribution and landing twins read
+# from the DuckDB checks' signatures. `tests/unit/test_pg_warehouse_dq.py`
+# holds each to a literal of what it rendered before the move.
+
+# Known order statuses (KeyCRM-defined; new IDs require explicit registration
+# so we don't silently accept upstream changes).
+# Verified against KeyCRM on 2026-08-09. Statuses 3, 4, 8, 10, 11, 18 and 24
+# were missing, so a perfectly ordinary parcel «Зібрано для самовивозу» (24)
+# would have been reported as an unknown status. Status 20 was listed under
+# "return/cancel family" and is nothing of the kind — it is «Прибув у
+# відділення», KeyCRM group 4, and it belongs to revenue. That comment cost
+# two sessions a phantom ₴265,230.78 discrepancy.
+KNOWN_STATUS_IDS = frozenset({
+    1,   # new
+    2,   # presence_confirmed
+    3,   # waiting_for_email_response
+    4,   # waiting_for_prepayment
+    8,   # delivered_to_delivery
+    9,   # delivered
+    10,  # departing
+    11,  # in_transit
+    12,  # completed
+    20,  # Прибув у відділення
+    24,  # Зібрано для самовивозу
+    # Lost / cancel group (KeyCRM status_group_id = 6) — excluded from revenue
+    15,  # not_available
+    18,  # did_not_arrange_price
+    19,  # canceled
+    21,  # Помилка доставки
+    22,  # Повернено
+    23,  # Повертається
+})
+
+# Known sources (active + deprecated). New source IDs from KeyCRM should
+# fire an integrity warning so we route them explicitly.
+KNOWN_SOURCE_IDS = frozenset({1, 2, 3, 4, 5})
 
 
-def flag() -> Tuple[bool, Optional[str]]:
-    """`(enabled, error)`: `(True, None)`, a constant since step 14's S14-00.
+# Every column a Silver row carries, and how closely a recomputed value has to
+# match. `grand_total` is DECIMAL(12,2) and gets a cent of slack; the rest are
+# ids, flags, dates and labels, where any difference is a difference. Those use
+# `IS DISTINCT FROM` rather than `<>`: a promocode going from NULL to a value,
+# or a buyer_first_order_date arriving, has to register, and `<>` answers NULL
+# to both.
+_SILVER_ROW_COLUMNS = (
+    ("source_id", 0),
+    ("status_id", 0),
+    ("grand_total", 0.01),
+    ("ordered_at", 0),
+    ("buyer_id", 0),
+    ("manager_id", 0),
+    ("order_date", 0),
+    ("is_return", 0),
+    ("sales_type", 0),
+    ("is_active_source", 0),
+    ("source_name", 0),
+    ("is_new_customer", 0),
+    ("buyer_first_order_date", 0),
+    ("promocode", 0),
+)
 
-    `KS_DQ_PG_WAREHOUSE=on` has been production's value since step 13 made it
-    a precondition, and with DuckDB deriving nothing the twins are the only
-    checks of Silver, Gold and UTM — so no value of the variable may turn
-    them off. It is read for nothing; `pg_warehouse_dq_flag_invalid` has
-    nothing left to fire on and goes in S14-14. Until S14-00 an unknown value
-    was off with the error to report, `KS_PG_DERIVE`'s rule.
-    """
-    return True, None
+
+def _silver_row_differs(column: str, tolerance: float) -> str:
+    """The predicate for one column of a recomputed row `r` against a stored
+    row `s`. Shared by this check and its Postgres twin, so the two cannot
+    disagree about what counts as a difference."""
+    if tolerance:
+        return f"ABS(COALESCE(r.{column}, 0) - COALESCE(s.{column}, 0)) > {tolerance}"
+    return f"r.{column} IS DISTINCT FROM s.{column}"
+
+
+# `_attribution_coverage_check`'s defaults — read off its signature by the
+# twin until S14-14, so the two could not drift apart; there is one check
+# now. Why these numbers, in the DuckDB check's own words:
+#
+# Are the website's orders still arriving with a campaign tag?
+#
+# THE FAILURE THIS EXISTS FOR
+#
+# On 2026-07-20/21 the Shopify order-comment template changed — its average
+# length went from ~700 to ~1350 characters — and from that day
+# `utm_source`, `utm_medium` and `utm_campaign` stopped appearing in it.
+# `utm_lang` and the pixel cookies kept coming, so nothing looked broken.
+# The share of website orders carrying a campaign tag fell from 34% to
+# 5.5% and stayed there for **five weeks**, and nobody was told.
+#
+# Nothing in this system could have told them, and that is the point worth
+# writing down. The reconciliations compare DuckDB against Postgres against
+# ClickHouse against KeyCRM — and every store faithfully recorded "no tag",
+# so they agreed perfectly. `validation_passed` counts rows and checksums
+# revenue, and revenue never moved: the orders kept coming, only their
+# labels stopped. The platform chart actively hid it, because pixel-only
+# orders were being counted as Facebook until 2026-09-09. Every guard here
+# watches whether data is transported faithfully; not one asked whether it
+# still means anything.
+#
+# WHY THESE NUMBERS
+#
+# Measured over the twelve complete retail weeks to 2026-09-06, the share
+# of source-4 orders carrying `utm_campaign` ran 34.3, 32.2, 29.3, 27.7,
+# 24.0, 20.5 — then 8.2, 5.5, 9.1, 6.2, 5.5 through the outage, and 21.2 as
+# it partly recovered. A floor of 15% fires on the second week of the
+# outage and on none of the healthy ones.
+#
+# The floor alone would miss a fall from 34% to 16%, which is the same
+# failure caught early, so a halving against the trailing 28 days fires
+# too. Both are WARN: nothing is corrupted and no repair exists here — the
+# fix is on the website — so this belongs in the 09:00 digest and not in a
+# page at 3am.
+#
+# Website orders only (`source_id = 4`). An order taken by hand in the
+# Instagram inbox cannot carry a tag and never will, so including those
+# would measure the channel mix rather than the tagging.
+_ATTRIBUTION_DEFAULTS: Dict[str, Any] = {
+    "window_days": 7,
+    "baseline_days": 28,
+    "floor_pct": 15.0,
+    "halved_against_baseline": 0.5,
+    "min_orders": 40,
+}
+
+# `_orders_without_line_items_check`'s `min_total`: an order billed at least
+# this much with no line item is the finding.
+_WITHOUT_ITEMS_MIN_TOTAL = 0.01
+
+
+# `flag()` and `ENV` stood here until step 14's S14-14: `KS_DQ_PG_WAREHOUSE`,
+# a constant `on` since S14-00. The twins are the only checks of Silver, Gold
+# and UTM, so nothing may turn them off, and the variable is read by nothing
+# here (step 13's readiness still reports it, until S14-15).
 
 
 def floor_seconds() -> int:
@@ -372,47 +496,27 @@ class Facts:
 GROUPS = ("silver_arc", "attribution", "line_items", "derivation_signal",
           "order_landing", "silver_row_values")
 
-# The order-landing twins (DN-23), one per DuckDB finding they pair with:
-# `(DuckDB's guard, DuckDB's finding, the twin's condition)`. The guard decides
-# whether the twin compares (DuckDB looked) or stands in (it did not).
-# `status_group_agreement` is the name `check_internal_integrity` guards its
-# check under; the other five run bare there, so their guard is the finding's
-# own name, and the scan finishing is their looking.
-LANDING_TWINS: Tuple[Tuple[str, str, str], ...] = (
-    ("orders_without_line_items", "orders_without_line_items",
-     "pg_orders_without_line_items"),
-    ("fk_orphan_order_products_order_id", "fk_orphan_order_products_order_id",
-     "pg_fk_orphan_order_products_order_id"),
-    ("not_null_orders_ordered_at", "not_null_orders_ordered_at",
-     "pg_not_null_orders_ordered_at"),
-    ("value_domain_orders_status_id", "value_domain_orders_status_id",
-     "pg_value_domain_orders_status_id"),
-    ("value_domain_orders_source_id", "value_domain_orders_source_id",
-     "pg_value_domain_orders_source_id"),
-    ("status_group_agreement", "status_group_vs_return_list",
-     "pg_status_group_vs_return_list"),
+# The order-landing twins (DN-23), in the order they file. Until step 14's
+# S14-14 each was paired with the DuckDB finding it stood in for, and
+# compared against it while DuckDB looked; the DuckDB checks are gone, so
+# the twins always stand in.
+LANDING_TWINS: Tuple[str, ...] = (
+    "pg_orders_without_line_items",
+    "pg_fk_orphan_order_products_order_id",
+    "pg_not_null_orders_ordered_at",
+    "pg_value_domain_orders_status_id",
+    "pg_value_domain_orders_source_id",
+    "pg_status_group_vs_return_list",
 )
 
-# The DuckDB checks above that `check_internal_integrity` runs bare, outside
-# `guarded`: the integrity job adds them to `duckdb_looked` whenever the scan
-# finished, since a raise from any of them would have failed it. A test
-# derives each from its call site.
-DUCKDB_BARE_CHECKS: FrozenSet[str] = frozenset({
-    "orders_without_line_items", "fk_orphan_order_products_order_id",
-    "not_null_orders_ordered_at", "value_domain_orders_status_id",
-    "value_domain_orders_source_id",
-})
-
-# Each guard and the conditions its twin emits — `data_quality.GUARDED_CHECK_CONDITIONS`'
+# Each group and the conditions its twin emits — `data_quality.GUARDED_CHECK_CONDITIONS`'
 # shape, for the same use: what a blind run must hold rather than resolve.
 GUARD_CONDITIONS: Dict[str, Tuple[str, ...]] = {
     "silver_arc": ("pg_silver_missing_rows", "pg_silver_orphan_rows"),
     "attribution": ("pg_attribution_coverage_website",),
-    "line_items": ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale",
-                   "pg_line_items_disagree"),
+    "line_items": ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale"),
     "derivation_signal": ("pg_signal_missed",),
-    "order_landing": tuple(twin for _g, _d, twin in LANDING_TWINS) + (
-        "pg_order_landing_disagree",),
+    "order_landing": LANDING_TWINS,
     "silver_row_values": ("pg_silver_row_values",),
 }
 UNWATCHED_NAMES: Dict[str, str] = {
@@ -424,7 +528,6 @@ UNWATCHED_NAMES: Dict[str, str] = {
     "silver_row_values": "pg_silver_row_values_unwatched",
 }
 WHOLE_UNWATCHED = "pg_warehouse_unwatched"
-FLAG_INVALID = "pg_warehouse_dq_flag_invalid"
 
 
 def all_conditions() -> FrozenSet[str]:
@@ -629,7 +732,6 @@ def _row_values_sql() -> str:
     the snapshot did not hold takes the absolute windows on `changed_at`: in
     flight, then waiting, then *abandoned*.
     """
-    from core.data_quality import _SILVER_ROW_COLUMNS, _silver_row_differs
     from core.pg_managers_write import CLASSIFICATIONS_TABLE, MANAGERS_TABLE
     from core.sql_dialect import POSTGRES
     from core.warehouse_sql import silver_recompute_ctes
@@ -738,14 +840,10 @@ async def _read_silver_arc(conn, grace: int, page_after: int) -> SilverArc:
 
 
 async def _read_attribution(conn, watermark: Watermark) -> Union[Attribution, Unwatched]:
-    from core.data_quality import _attribution_coverage_check
-    import inspect
-
     if not watermark.backfilled:
         return Unwatched("bronze.orders history is not backfilled (meta.mirror_state.backfilled_at)")
-    defaults = inspect.signature(_attribution_coverage_check).parameters
-    window = defaults["window_days"].default
-    span = window + defaults["baseline_days"].default
+    window = _ATTRIBUTION_DEFAULTS["window_days"]
+    span = window + _ATTRIBUTION_DEFAULTS["baseline_days"]
     row = await conn.fetchrow(_ATTRIBUTION_SQL, watermark.today, window, span,
                               WEBSITE_SOURCE_ID)
     return Attribution(int(row[0]), int(row[1]), int(row[2]), int(row[3]))
@@ -786,21 +884,17 @@ async def _read_order_landing(conn, watermark: Watermark, grace: int) -> Union[O
     bronze holds a delta, and every count set beside DuckDB's would differ by
     history not yet carried rather than by anything wrong.
 
-    Every threshold is DuckDB's own, read from where DuckDB reads it and bound
-    as a parameter: `min_total` from `_orders_without_line_items_check`'s
-    signature, the known ids from `data_quality`, the return list and the
+    Every threshold is the DuckDB check's, bound as a parameter:
+    `_WITHOUT_ITEMS_MIN_TOTAL` and the known ids above (read from the DuckDB
+    checks until step 14's S14-14 moved them here), the return list and the
     lost/cancel group from `core.models`."""
-    import inspect
     from decimal import Decimal
 
-    from core.data_quality import (
-        KNOWN_SOURCE_IDS, KNOWN_STATUS_IDS, _orders_without_line_items_check,
-    )
     from core.models import LOST_STATUS_GROUP_ID, OrderStatus
 
     if not watermark.backfilled:
         return Unwatched("bronze.orders history is not backfilled (meta.mirror_state.backfilled_at)")
-    min_total = inspect.signature(_orders_without_line_items_check).parameters["min_total"].default
+    min_total = _WITHOUT_ITEMS_MIN_TOTAL
     w = await conn.fetchrow(_WITHOUT_ITEMS_SQL, Decimal(str(min_total)), grace)
     o = await conn.fetchrow(_ORPHAN_ITEMS_SQL)
     h = await conn.fetchrow(_HEADERS_SQL, sorted(KNOWN_STATUS_IDS), sorted(KNOWN_SOURCE_IDS))
@@ -825,7 +919,6 @@ async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
     items: Silver is derived from whatever bronze holds, history or not, so a
     partial bronze still has a Silver that must match it."""
     from core import pg_silver
-    from core.data_quality import _SILVER_ROW_COLUMNS
     from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
 
     # The margin is DROPPED_MARK_MARGIN, for its two reasons: a writer outside
@@ -971,15 +1064,6 @@ def _unwatched_issue(group: str, reason: str):
         severity=Severity.WARN, count=1,
         description=(f"The Postgres twin '{group}' could not look this run: {reason}. "
                      f"{held} are held as they were, not cleared."))
-
-
-def flag_invalid_issue(error: str):
-    from core.data_quality import Severity
-
-    return _issue(
-        check_name=FLAG_INVALID, table_name="(postgres twins)",
-        severity=Severity.WARN, count=1,
-        description=f"{error}. The Postgres twins did not run; their conditions are held, not cleared.")
 
 
 def _silver_arc_check(arc: SilverArc) -> list:
@@ -1137,13 +1221,11 @@ def _signal_check(journal: DerivationJournal) -> list:
 
 
 def _attribution_check(att: Attribution, watermark: Watermark) -> list:
-    """The DuckDB check's verdict over Postgres' counts — its thresholds read
-    from its own signature, so the two cannot drift apart."""
-    import inspect
+    """The DuckDB check's verdict over Postgres' counts, at its thresholds
+    (`_ATTRIBUTION_DEFAULTS`)."""
+    from core.data_quality import Severity
 
-    from core.data_quality import Severity, _attribution_coverage_check
-
-    d = {k: p.default for k, p in inspect.signature(_attribution_coverage_check).parameters.items()}
+    d = _ATTRIBUTION_DEFAULTS
     if att.orders < d["min_orders"]:
         landing_bad = (watermark.landing_failures > 0 or watermark.landing_age_s is None
                        or watermark.landing_age_s > LANDING_MAX_AGE_S)
@@ -1173,23 +1255,15 @@ def _attribution_check(att: Attribution, watermark: Watermark) -> list:
                      "are not."))]
 
 
-def _line_items_check(li: LineItems, watermark: Watermark, *,
-                      duckdb_issues: Sequence, duckdb_looked: FrozenSet[str]) -> list:
+def _line_items_check(li: LineItems) -> list:
+    """The line-item twins. Until step 14's S14-14 they compared with
+    DuckDB's own checks while those looked, filing `pg_line_items_disagree`
+    when the engines differed; since step 13 DuckDB never looked, and they
+    always stood in."""
     from core.data_quality import Severity
 
-    counts = {i.check_name: i.count for i in duckdb_issues}
-    issues, differ = [], []
-
-    def compare(duck_name: str, n: int) -> bool:
-        """True when DuckDB looked, so the twin compares instead of standing in."""
-        if duck_name not in duckdb_looked:
-            return False
-        duck = counts.get(duck_name, 0)
-        if abs(n - duck) > watermark.in_flight:
-            differ.append(f"{duck_name}: Postgres {n}, DuckDB {duck}")
-        return True
-
-    if not compare("headline_vs_line_items", li.headline) and li.headline:
+    issues = []
+    if li.headline:
         issues.append(_issue(
             check_name="pg_headline_vs_line_items", table_name="silver.orders",
             severity=Severity.WARN, count=li.headline, sample_ids=li.headline_sample,
@@ -1197,7 +1271,7 @@ def _line_items_check(li: LineItems, watermark: Watermark, *,
                          f"{li.headline_amount:,.2f} in line items. Revenue figures read "
                          "grand_total and product/brand/category figures read line items, "
                          "so the two disagree by this amount.")))
-    if not compare("goods_shipped_without_sale", li.goods) and li.goods:
+    if li.goods:
         issues.append(_issue(
             check_name="pg_goods_shipped_without_sale", table_name="silver.orders",
             severity=Severity.INFO, count=li.goods, sample_ids=li.goods_sample,
@@ -1205,38 +1279,16 @@ def _line_items_check(li: LineItems, watermark: Watermark, *,
                          f"{li.goods_amount:,.2f} of goods with no sale attached — seeding "
                          "and gifts. Expected, and counted so it is a number rather than "
                          "a silence.")))
-    if differ:
-        issues.append(_issue(
-            check_name="pg_line_items_disagree", table_name="silver.orders",
-            severity=Severity.WARN, count=len(differ),
-            description=("The engines count line-item findings differently by more than the "
-                         f"{watermark.in_flight} order(s) still in flight: " + "; ".join(differ)
-                         + ". One store's Silver or line items differ from the other's.")))
     return issues
 
 
-def landing_counts(ol: OrderLanding) -> Dict[str, int]:
-    """Postgres' count for each DuckDB finding the landing twins pair with,
-    keyed by DuckDB's name and counted as DuckDB counts it — every order, in
-    flight or not, because DuckDB's check has no grace. What the engines are
-    compared on, and what the pairing record carries."""
-    return {
-        "orders_without_line_items": ol.without_items + ol.without_items_in_flight,
-        "fk_orphan_order_products_order_id": ol.orphan_items,
-        "not_null_orders_ordered_at": ol.null_ordered_at,
-        "value_domain_orders_status_id": ol.unknown_status,
-        "value_domain_orders_source_id": ol.unknown_source,
-        "status_group_vs_return_list": sum(n for _s, _g, n, _a in ol.status_groups),
-    }
-
-
 def _landing_findings(ol: OrderLanding) -> Dict[str, Any]:
-    """What each landing twin files standing in for DuckDB, by condition; a
-    twin with nothing to report is absent. DuckDB's severities: a line item
+    """What each landing twin files, by condition; a twin with nothing to
+    report is absent. DuckDB's severities: a line item
     with no order and an order with no date are CRITICAL there, the rest WARN.
     Only the settled orders without line items are filed — those in flight are
     named in the description and counted nowhere."""
-    from core.data_quality import KNOWN_SOURCE_IDS, KNOWN_STATUS_IDS, Severity
+    from core.data_quality import Severity
     from core.models import OrderStatus
 
     grace = silver_grace_minutes()
@@ -1306,64 +1358,34 @@ def _landing_findings(ol: OrderLanding) -> Dict[str, Any]:
     return out
 
 
-def _order_landing_check(ol: OrderLanding, watermark: Watermark, *,
-                         duckdb_issues: Sequence, duckdb_looked: FrozenSet[str],
-                         held_out: Optional[List[str]] = None) -> list:
-    """The landing twins: per DuckDB guard, compare where it looked and stand
-    in where it did not — the line-item rule.
-
-    Comparing, a twin files nothing of its own, and the engines disagree when
-    their counts differ by more than the orders in flight. A twin that would
-    page standing alone goes to `held_out`: the rows are still there — DuckDB
-    files them under its own name this run, or the engines disagree — and a
-    `pg_` page delivered on a run DuckDB could not look must not be announced
-    resolved while Postgres still holds them. Only a CRITICAL is held, since
-    only a CRITICAL is ever delivered to be resolved.
-    """
-    from core.data_quality import Severity
-
-    duck: Dict[str, int] = {}
-    for issue in duckdb_issues:
-        duck[issue.check_name] = duck.get(issue.check_name, 0) + int(issue.count)
-    pg, alone = landing_counts(ol), _landing_findings(ol)
-    issues, differ = [], []
-    for guard, name, twin in LANDING_TWINS:
-        if guard not in duckdb_looked:
-            if twin in alone:
-                issues.append(alone[twin])
-            continue
-        if abs(pg[name] - duck.get(name, 0)) > watermark.in_flight:
-            differ.append(f"{name}: Postgres {pg[name]}, DuckDB {duck.get(name, 0)}")
-        if (twin in alone and alone[twin].severity == Severity.CRITICAL
-                and held_out is not None):
-            held_out.append(twin)
-    if differ:
-        issues.append(_issue(
-            check_name="pg_order_landing_disagree", table_name="bronze.orders",
-            severity=Severity.WARN, count=len(differ),
-            description=("The engines' landing checks count differently by more than the "
-                         f"{watermark.in_flight} order(s) still in flight: " + "; ".join(differ)
-                         + ". One store's orders or line items differ from the other's.")))
-    return issues
+def _order_landing_check(ol: OrderLanding) -> list:
+    """The landing twins, in `LANDING_TWINS` order. Until step 14's S14-14,
+    per DuckDB check they compared where it looked — filing
+    `pg_order_landing_disagree` when the engines' counts differed, and
+    holding a CRITICAL twin's condition while DuckDB filed the rows under its
+    own name — and stood in where it did not. Since chain 3 DuckDB never
+    looked, so they stood in every run, as they do now."""
+    alone = _landing_findings(ol)
+    return [alone[twin] for twin in LANDING_TWINS if twin in alone]
 
 
 def check_pg_warehouse(
-    facts: Optional[Facts], *, duckdb_issues: Sequence = (),
-    duckdb_looked: FrozenSet[str] = frozenset(),
+    facts: Optional[Facts], *,
     raised_out: Optional[List[str]] = None,
     held_out: Optional[List[str]] = None,
 ) -> list:
     """The twins over pre-read facts. Pure; never raises.
 
-    `duckdb_looked` are the DuckDB guard names that ran this scan (empty when
-    the DuckDB half failed), `DUCKDB_BARE_CHECKS` among them when it finished.
     A twin whose raise is caught files its group's unwatched finding, and its
-    guard name goes to `raised_out`. `held_out` receives the conditions of
-    every group that could not look; of the row-values group when it looked
-    but held rows it could not judge; and of each landing twin that compared
-    while Postgres still holds what it would page on — only those: the collapsed
+    group's name goes to `raised_out`. `held_out` receives the conditions of
+    every group that could not look, and of the row-values group when it
+    looked but held rows it could not judge — only those: the collapsed
     finding is one line, but a group read clean in the same run still
     announces its recovery.
+
+    `duckdb_issues` and `duckdb_looked` went in step 14's S14-14 with the
+    DuckDB scan they described: production passed none and nothing since
+    step 13, so every twin stood in.
     """
     from core.data_quality import Severity
 
@@ -1396,17 +1418,14 @@ def check_pg_warehouse(
         (g, u), = blind.items()
         issues.append(_unwatched_issue(g, u.reason))
 
-    landing_held: List[str] = []
     judges = {
         "silver_arc": lambda: _silver_arc_check(facts.silver_arc),
         "attribution": lambda: _attribution_check(facts.attribution, facts.watermark),
-        "line_items": lambda: _line_items_check(
-            facts.line_items, facts.watermark,
-            duckdb_issues=duckdb_issues, duckdb_looked=duckdb_looked),
+        # Narrowed for the checker: a group in `blind` is skipped below, so
+        # what is judged is the group's own facts.
+        "line_items": lambda: _line_items_check(cast(LineItems, facts.line_items)),
         "derivation_signal": lambda: _signal_check(facts.derivation_signal),
-        "order_landing": lambda: _order_landing_check(
-            facts.order_landing, facts.watermark, duckdb_issues=duckdb_issues,
-            duckdb_looked=duckdb_looked, held_out=landing_held),
+        "order_landing": lambda: _order_landing_check(cast(OrderLanding, facts.order_landing)),
         "silver_row_values": lambda: _row_values_check(facts.silver_row_values),
     }
     for group, judge in judges.items():
@@ -1426,150 +1445,23 @@ def check_pg_warehouse(
         # for them is held rather than announced resolved after a restart.
         if group == "silver_row_values" and facts.silver_row_values.held:
             hold(group)
-        # Landing twins that compared while Postgres still holds their rows:
-        # DuckDB's name carries the finding this run, not a recovery of theirs.
-        if group == "order_landing" and held_out is not None:
-            held_out.extend(landing_held)
     return issues
 
 
-# ─── The pairing record (DN-14) ───────────────────────────────────────────────
-#
-# What each engine measured, keyed by DuckDB's finding name so the two sides
-# read across: `(DuckDB's guard, DuckDB's finding)`. A DuckDB number is its
-# finding's count when the guard looked — nothing filed is 0 — and None when it
-# did not look, which is not the same as 0. The landing twins' (DN-23) follow,
-# their Postgres numbers counted as DuckDB counts them (`landing_counts`).
-_PAIRED_DUCKDB = (
-    ("silver_arc", "silver_missing_rows"),
-    ("silver_arc", "silver_orphan_rows"),
-    ("silver_arc", "silver_row_values"),
-    ("headline_vs_line_items", "headline_vs_line_items"),
-    ("goods_shipped_without_sale", "goods_shipped_without_sale"),
-) + tuple((guard, name) for guard, name, _twin in LANDING_TWINS)
-_DUCKDB_ATTRIBUTION_GUARD = "attribution_coverage"
+# The pairing record (DN-14), `pg_twin_pairing`, stood here until step 14's
+# S14-14: one INFO a run with both engines' numbers side by side, for the
+# soak's Pairing check (`deploy/stage4_soak/21_pairing.sql`, deleted with it).
+# With no DuckDB scan there is no second side to record.
 
 
-def _coverage(counts: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Orders, tagged and the share, for the window and the baseline before it.
-    A share over no orders is None, never 0 %."""
-    if not counts or counts.get("orders") is None:
-        return None
+def unverified_pg_conditions(held: Sequence[str] = ()) -> List[str]:
+    """What the twins' part of the run could not verify: exactly the
+    conditions of the groups that could not look (`held`, from
+    `check_pg_warehouse(held_out=)`).
 
-    def pct(orders, tagged):
-        return None if not orders or tagged is None else round(tagged / orders * 100.0, 2)
-
-    orders, tagged = counts.get("orders"), counts.get("tagged")
-    base_orders, base_tagged = counts.get("base_orders"), counts.get("base_tagged")
-    return {"orders": orders, "tagged": tagged, "pct": pct(orders, tagged),
-            "base_orders": base_orders, "base_tagged": base_tagged,
-            "base_pct": pct(base_orders, base_tagged)}
-
-
-def _pairing(facts: Optional[Facts], duckdb_issues: Sequence,
-             duckdb_looked: FrozenSet[str],
-             duckdb_attribution: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    counts: Dict[str, int] = {}
-    for issue in duckdb_issues:
-        counts[issue.check_name] = counts.get(issue.check_name, 0) + int(issue.count)
-    duckdb: Dict[str, Any] = {"looked": sorted(duckdb_looked)}
-    for guard, name in _PAIRED_DUCKDB:
-        duckdb[name] = counts.get(name, 0) if guard in duckdb_looked else None
-    duckdb["attribution"] = (_coverage(duckdb_attribution)
-                             if _DUCKDB_ATTRIBUTION_GUARD in duckdb_looked else None)
-
-    postgres: Dict[str, Any] = {name: None for _, name in _PAIRED_DUCKDB}
-    postgres["attribution"] = None
-    unwatched: Dict[str, str] = {}
-    in_flight = None
-    if facts is None or facts.whole is not None:
-        unwatched["*"] = "facts were not read" if facts is None else facts.whole.reason
-    else:
-        in_flight = facts.watermark.in_flight
-        for group in GROUPS:
-            value = getattr(facts, group)
-            if isinstance(value, Unwatched):
-                unwatched[group] = value.reason
-        arc, li, rv, att = (facts.silver_arc, facts.line_items, facts.silver_row_values,
-                            facts.attribution)
-        if isinstance(facts.order_landing, OrderLanding):
-            postgres.update(landing_counts(facts.order_landing))
-        if isinstance(arc, SilverArc):
-            postgres["silver_missing_rows"] = arc.missing
-            postgres["silver_orphan_rows"] = arc.orphans
-        if isinstance(rv, RowValues):
-            postgres["silver_row_values"] = rv.reported + rv.held
-        if isinstance(li, LineItems):
-            postgres["headline_vs_line_items"] = li.headline
-            postgres["goods_shipped_without_sale"] = li.goods
-        if isinstance(att, Attribution):
-            postgres["attribution"] = _coverage(
-                {"orders": att.orders, "tagged": att.tagged,
-                 "base_orders": att.base_orders, "base_tagged": att.base_tagged})
-    postgres["unwatched"] = unwatched
-
-    # The shadow: the same facts judged as if DuckDB had not looked at all,
-    # which is how the twins will run once it stops deriving (step 13). Pure,
-    # so it reads nothing; its findings are recorded here and filed nowhere.
-    standalone = {issue.check_name: issue.count for issue in check_pg_warehouse(
-        facts, duckdb_issues=(), duckdb_looked=frozenset())}
-    return {"version": PAIRING_VERSION, "in_flight": in_flight,
-            "duckdb": duckdb, "postgres": postgres, "standalone": standalone}
-
-
-def pairing_record(
-    facts: Optional[Facts], *, duckdb_issues: Sequence = (),
-    duckdb_looked: FrozenSet[str] = frozenset(),
-    duckdb_attribution: Optional[Mapping[str, Any]] = None,
-):
-    """INFO `pg_twin_pairing`: both engines' numbers for one integrity run,
-    as JSON in the description, for the soak to parse. Never raises.
-
-    - `duckdb` and `postgres` carry the arc counts, attribution coverage,
-      line-item counts and (since version 2) the six order-landing counts each
-      engine measured, under DuckDB's names. A DuckDB guard that did not look
-      is None, and a Postgres group that could not look is None with its
-      reason under `postgres.unwatched`.
-    - `standalone` is what `check_pg_warehouse` files for these facts with
-      `duckdb_looked` empty — names and counts. While DuckDB looks, the
-      line-item and landing twins compare and file nothing of their own, so
-      this is the only record that `pg_headline_vs_line_items`,
-      `pg_orders_without_line_items` and the rest would find what DuckDB
-      finds. Its `pg_orders_without_line_items` leaves the orders in flight
-      out, where `postgres.orders_without_line_items` counts them as DuckDB
-      does.
-    - `in_flight` is the tolerance the soak compares counts within.
-
-    One INFO row a run: it never pages, and a digest shows it as one line.
-    `duckdb_attribution` is the counts `_attribution_coverage_check` measured
-    (`check_internal_integrity(pairing_out=)`).
+    Until step 14's S14-14 it also took `ran` and `flag_invalid`: a
+    `KS_DQ_PG_WAREHOUSE` nobody understood held everything, and the twins
+    switched off held nothing. The flag has been a constant `on` since
+    S14-00, so the twins always run.
     """
-    from core.data_quality import Severity
-
-    try:
-        body = _pairing(facts, duckdb_issues, duckdb_looked, duckdb_attribution)
-    except Exception as exc:  # noqa: BLE001 — a record that could not be built says so
-        logger.error("Postgres twin pairing record not built: %s: %s", type(exc).__name__, exc)
-        body = {"version": PAIRING_VERSION, "error": f"{type(exc).__name__}: {exc}"}
-    return _issue(
-        check_name="pg_twin_pairing", table_name="(postgres twins)",
-        severity=Severity.INFO, count=1,
-        description=json.dumps(body, sort_keys=True, default=str))
-
-
-def unverified_pg_conditions(*, ran: bool, flag_invalid: bool, held: Sequence[str] = ()) -> List[str]:
-    """What the twins' part of the run could not verify.
-
-    - **Ran:** exactly the conditions of the groups that could not look (`held`,
-      from `check_pg_warehouse(held_out=)`).
-    - **Flag not understood:** everything — the twins were meant to run and did
-      not, so nothing about them is known.
-    - **Flag off:** nothing. Switched off on purpose is stood down, not blind: a
-      page delivered while they were on resolves once rather than standing for
-      as long as the flag stays off. Found reviewing #215.
-    """
-    if flag_invalid:
-        return sorted(all_conditions())
-    if not ran:
-        return []
     return sorted(set(held))

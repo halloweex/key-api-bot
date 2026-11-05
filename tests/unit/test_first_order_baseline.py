@@ -7,7 +7,6 @@ business booked as acquisition, overstating new customers by 3.9% across 2025.
 """
 from datetime import date
 
-import duckdb
 import pytest
 
 from core.duckdb_store import DuckDBStore
@@ -127,54 +126,3 @@ class TestDeadTableIsGone:
         finally:
             await store.close()
 
-
-class TestHeadlineVsLineItems:
-    def test_zero_billed_orders_with_line_items_are_reported(self):
-        from core.data_quality import _headline_vs_line_items_check
-
-        conn = duckdb.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE silver_orders (id BIGINT, grand_total DOUBLE,
-                                        is_return BOOLEAN, is_active_source BOOLEAN,
-                                        sales_type VARCHAR DEFAULT 'retail');
-            CREATE TABLE order_products (order_id BIGINT, price_sold DOUBLE, quantity INTEGER);
-            INSERT INTO silver_orders (id, grand_total, is_return, is_active_source) VALUES (1, 0.0, FALSE, TRUE), (2, 500.0, FALSE, TRUE);
-            INSERT INTO order_products VALUES (1, 100.0, 3), (2, 250.0, 2);
-        """)
-        issues = _headline_vs_line_items_check(conn)
-
-        assert len(issues) == 1
-        assert issues[0].count == 1
-        assert issues[0].sample_ids == (1,)
-        assert "300.00" in issues[0].description
-        conn.close()
-
-    def test_clean_data_reports_nothing(self):
-        from core.data_quality import _headline_vs_line_items_check
-
-        conn = duckdb.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE silver_orders (id BIGINT, grand_total DOUBLE,
-                                        is_return BOOLEAN, is_active_source BOOLEAN,
-                                        sales_type VARCHAR DEFAULT 'retail');
-            CREATE TABLE order_products (order_id BIGINT, price_sold DOUBLE, quantity INTEGER);
-            INSERT INTO silver_orders (id, grand_total, is_return, is_active_source) VALUES (1, 300.0, FALSE, TRUE);
-            INSERT INTO order_products VALUES (1, 100.0, 3);
-        """)
-        assert _headline_vs_line_items_check(conn) == []
-        conn.close()
-
-    def test_returns_and_inactive_sources_are_out_of_scope(self):
-        from core.data_quality import _headline_vs_line_items_check
-
-        conn = duckdb.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE silver_orders (id BIGINT, grand_total DOUBLE,
-                                        is_return BOOLEAN, is_active_source BOOLEAN,
-                                        sales_type VARCHAR DEFAULT 'retail');
-            CREATE TABLE order_products (order_id BIGINT, price_sold DOUBLE, quantity INTEGER);
-            INSERT INTO silver_orders (id, grand_total, is_return, is_active_source) VALUES (1, 0.0, TRUE, TRUE), (2, 0.0, FALSE, FALSE);
-            INSERT INTO order_products VALUES (1, 100.0, 3), (2, 100.0, 3);
-        """)
-        assert _headline_vs_line_items_check(conn) == []
-        conn.close()

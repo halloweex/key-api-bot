@@ -131,7 +131,9 @@ JUNK = "junk-s14"
 # `KS_GOALS_HISTORY` refusal with its health block and canary check.
 RETIRED = {"goals_history": "S14-07",
            # S14-11 deleted the registry's per-chain answer with the flags.
-           "chain_modes": "S14-11"}
+           "chain_modes": "S14-11",
+           # S14-14 deleted KS_DQ_PG_WAREHOUSE's reader, a constant `on`.
+           "pg_twins_flag": "S14-14"}
 
 # The same for single fields, by their path in a capture. S14-09 deleted chain
 # 3's, 6's and 6a's routing answers the capture asks of the modules themselves
@@ -161,6 +163,12 @@ RETIRED_FIELDS = {
     # answer to which layer that arm wrote.
     ("warehouse_cutover", "warehouse_checks_stand_down"): "S14-12",
     ("chains", "pg_orders_write", "stood_down_layers"): "S14-12",
+    # S14-14 deleted the DuckDB integrity scan, and with it the sets its
+    # checks stood down by: step 13's (published by `status()` too) and
+    # chain 3's.
+    ("warehouse_cutover", "stood_down_duckdb_checks"): "S14-14",
+    ("warehouse_cutover", "status", "stood_down_duckdb_checks"): "S14-14",
+    ("chains", "pg_orders_write", "landing_checks_stood_down"): "S14-14",
 }
 _S14_11_HEALTH_FIELDS = ("env", "mode", "error", "latched", "mismatch",
                          "unmet_precondition", "shadow", "preflight")
@@ -732,9 +740,8 @@ EXPECTED = json.loads(r"""
 """)
 
 # S14-11's per-chain retirements, read off the literal: every routing
-# answer under `chains` (chain 3's two stand-down sets went in S14-12 and go
-# in S14-14)
-# and every flag field of each `write_chains` entry.
+# answer under `chains` (chain 3's two stand-down sets went in S14-12 and
+# S14-14) and every flag field of each `write_chains` entry.
 for _name, _entry in EXPECTED["chains"].items():
     for _field in _entry:
         if _field not in ("stood_down_layers", "landing_checks_stood_down"):
@@ -992,7 +999,6 @@ def capture() -> dict:
     out["warehouse_cutover"] = {
         "mode": wc.mode(), "value": wc.value(), "error": wc.mode_error(),
         "writes_postgres": wc.writes_postgres(), "duckdb_derives": wc.duckdb_derives(),
-        "stood_down_duckdb_checks": sorted(wc.stood_down_duckdb_checks()),
         "preconditions_unmet": [u.key for u in wc.preconditions_unmet()],
         "way_back_refused": list(wc.way_back_refused()),
         "held": wc.held(), "held_for_s": wc.held_for_s(),
@@ -1001,8 +1007,13 @@ def capture() -> dict:
         "status": {k: status[k] for k in (
             "variable", "value", "mode", "error", "switch_built", "preconditions_unmet",
             "writer", "held", "held_since", "reclassify_needed",
-            "stood_down_duckdb_checks", "way_back_refused")},
+            "stood_down_duckdb_checks", "way_back_refused") if k in status},
     }
+    # Deleted in S14-14 (`RETIRED_FIELDS`, `RETIRED`); asked where they still
+    # exist, by name, so the capture still runs against the trees before it.
+    stood = getattr(wc, "stood_down_duckdb_checks", None)
+    if stood is not None:
+        out["warehouse_cutover"]["stood_down_duckdb_checks"] = sorted(stood())
     # Deleted in S14-12 (`RETIRED_FIELDS`); asked where it still exists, by
     # name, so the capture still runs against the trees before it.
     stand_down = getattr(wc, "warehouse_checks_stand_down", None)
@@ -1017,7 +1028,9 @@ def capture() -> dict:
                             "refusing": read_fallback.refusing(),
                             "misconfigured": read_fallback.misconfigured(),
                             "no_engine": read_fallback.no_engine_routes()}
-    out["pg_twins_flag"] = list(pg_warehouse_dq.flag())
+    twins_flag = getattr(pg_warehouse_dq, "flag", None)
+    if twins_flag is not None:
+        out["pg_twins_flag"] = list(twins_flag())
     out["mirror"] = {"enabled": pg_landing.enabled(),
                      "mirror_on": pg_landing.mirror_on(os.environ.get("KS_MIRROR_LANDING"))}
     out["stores"] = {"user_store_is_postgres": pg_dashboard_users.user_store_is_postgres(),
@@ -1046,8 +1059,9 @@ def capture() -> dict:
     if hasattr(pg_forecast_write, "_routes_postgres"):
         chains["pg_forecast_write"]["_routes_postgres"] = getattr(
             pg_forecast_write, "_routes_postgres")(log=False)
-    chains["pg_orders_write"].update(
-        landing_checks_stood_down=sorted(pg_orders_write.landing_checks_stood_down()))
+    landing = getattr(pg_orders_write, "landing_checks_stood_down", None)
+    if landing is not None:
+        chains["pg_orders_write"]["landing_checks_stood_down"] = sorted(landing())
     # Deleted in S14-12 (`RETIRED_FIELDS`); asked where it still exists, so
     # the capture still runs against the trees before it.
     layers = getattr(pg_orders_write, "stood_down_layers", None)

@@ -67,7 +67,7 @@ async def pg(monkeypatch):
 
 def _issue(count: int, severity=Severity.WARN):
     return IntegrityIssue(
-        check_name="headline_vs_line_items", table_name="silver_orders",
+        check_name="pg_headline_vs_line_items", table_name="silver_orders",
         severity=severity, count=count, sample_ids=(1, 2),
         description=f"{count} order(s) have grand_total = 0",
     )

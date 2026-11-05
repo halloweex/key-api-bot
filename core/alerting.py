@@ -365,12 +365,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the integrity job reads the chain's facts again"),
 
     # ── data-quality findings: Silver / Gold arcs ──
-    "silver_missing_rows": _c("the next rebuild carries the rows"),
-    "silver_orphan_rows": _c("the next rebuild drops the orphans"),
-    "silver_row_values": _c("the next rebuild recomputes the values"),
-    "gold_cell_values": _c("the next rebuild recomputes the cells"),
-    # `gold_missing_cells`, `gold_orphan_cells`: `compare_gold`'s, deleted
-    # with it in step 14's S14-12.
+    # `silver_missing_rows`, `silver_orphan_rows`, `silver_row_values` and
+    # `gold_cell_values`: the DuckDB integrity scan's, deleted with it in step
+    # 14's S14-14; `gold_missing_cells`, `gold_orphan_cells`: `compare_gold`'s,
+    # deleted with it in S14-12. None may be reused while an image from before
+    # step 14 is the rollback target (rule 15).
     "gold_rollup_mismatch": _c("fine rows add up to the roll-up again"),
     "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
 
@@ -383,7 +382,6 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_attribution_coverage_website": _c("website orders carry campaign tags again"),
     "pg_headline_vs_line_items": _c("never fully — the standing ones are certificates"),
     "pg_goods_shipped_without_sale": _c("by design it never fully clears"),
-    "pg_line_items_disagree": _c("both engines count the same line-item findings"),
     "pg_silver_arc_unwatched": _c("the twin reads Postgres Silver again"),
     "pg_attribution_coverage_unwatched": _c("the twin can tell a quiet week from a stopped mirror"),
     "pg_line_items_unwatched": _c("the twin reads Postgres line items again"),
@@ -391,8 +389,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_silver_row_values": _c("a Postgres derivation recomputes the values"),
     "pg_silver_row_values_unwatched": _c("the twin recomputes Postgres Silver again"),
     # DN-14: an orders write the derivation's mark did not see, judged from its
-    # journal; and the pairing record, one INFO per run — a fact about that
-    # run, which nothing clears.
+    # journal. (The pairing record, `pg_twin_pairing`, went in step 14's
+    # S14-14 with the comparisons `pg_line_items_disagree` and
+    # `pg_order_landing_disagree`, and the flag `pg_warehouse_dq_flag_invalid`.)
     "pg_signal_missed": _c("a day of derivation runs in which every orders write raised its mark"),
     "pg_derivation_signal_unwatched": _c("the twins read the derivation journal again"),
     # DN-23: the twins of DuckDB's checks over landing itself, read over
@@ -403,11 +402,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_value_domain_orders_status_id": _c("the unknown status ids are registered or gone"),
     "pg_value_domain_orders_source_id": _c("the unknown source ids are registered or gone"),
     "pg_status_group_vs_return_list": _c("the stored group and the legacy list agree in bronze"),
-    "pg_order_landing_disagree": _c("both engines count the same landing findings"),
     "pg_order_landing_unwatched": _c("the twins read bronze.orders and its line items again"),
-    "pg_twin_pairing": _EVENT,
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
-    "pg_warehouse_dq_flag_invalid": _c("web restarts with a valid KS_DQ_PG_WAREHOUSE"),
     # Every order the UTM parser reads has a current verdict in Postgres
     # (DN-16, mirror_landing). Read from Postgres alone, so it clears on
     # whichever store is parsing; nothing here repairs it.
@@ -446,16 +442,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "order_versions_empty": _c("the seed baseline lands"),
 
     # ── data-quality findings: business-shape checks ──
-    "orders_without_line_items": _c("halfwritten_repair re-fetches them"),
-    # A condition, not an event: it holds for as long as the website keeps
-    # sending orders without their UTM parameters, and it clears the day the
-    # template is fixed. Nothing here can repair it, so it must not resolve
-    # itself on a quiet pass.
-    "attribution_coverage_website": _c(
-        "the shop's order-comment template stopped sending utm_source/medium/campaign"),
-    "headline_vs_line_items": _c("never fully — the standing 436 are certificates"),
-    "status_group_vs_return_list": _c("the stored group and the legacy list agree"),
-    "goods_shipped_without_sale": _c("by design it never fully clears"),
+    # `orders_without_line_items`, `attribution_coverage_website`,
+    # `headline_vs_line_items`, `status_group_vs_return_list` and
+    # `goods_shipped_without_sale`: the DuckDB scan's, deleted in step 14's
+    # S14-14; their `pg_` twins above stand in. Not reused (rule 15).
     "inventory_snapshot_gaps": _c("cannot heal — a missed day is missed forever"),
 
     # ── self-heal trails (INFO riders on the digest, facts about past heals) ──
@@ -463,12 +453,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_history_selfhealed": _EVENT,
 }
 
-# Integrity checks whose names are generated from (table, column) call sites.
-# The completeness test extracts the actual call arguments from the AST, so a
-# new `_pk_uniqueness_check(conn, "offers")` fails the suite until its key is
-# added here — the registry stays the single place a human declared intent.
-for _table in ("orders", "order_products", "products", "buyers", "categories"):
-    REGISTRY[f"pk_uniqueness_{_table}"] = _c("the duplicate rows are gone")
+# The integrity checks named from (table, column) call sites —
+# `pk_uniqueness_*`, `fk_orphan_*`, `not_null_*`, `value_domain_*` — went with
+# the DuckDB scan in step 14's S14-14, and their names are not reused while
+# an image from before step 14 is the rollback target (rule 15).
 # The layers Postgres derives on its own signal (chain 2, KS_PG_DERIVE=own).
 # Web declares their age limit in /api/health and the canary judges whatever
 # declares one, so their keys are a family over `pg_derivation.DERIVED_TABLES`
@@ -485,11 +473,6 @@ REGISTRY["mirror_never:silver.order_utm"] = _c("the first successful parse in Po
 REGISTRY["mirror_stale:silver.order_utm"] = _c("a parse inside the age limit")
 REGISTRY["mirror_failing:silver.order_utm"] = _c("failures_since_ok back to zero")
 
-REGISTRY["fk_orphan_order_products_order_id"] = _c("the parent order lands or the orphans go")
-for _col in ("ordered_at", "source_id", "status_id"):
-    REGISTRY[f"not_null_orders_{_col}"] = _c("the null rows are repaired")
-for _col in ("source_id", "status_id"):
-    REGISTRY[f"value_domain_orders_{_col}"] = _c("the unknown values are mapped or fixed")
 for _entity in ("orders", "products", "buyers", "offers", "stocks",
                 "managers", "categories", "expense_types"):
     REGISTRY[f"freshness_{_entity}"] = _c("a sync moves the entity's watermark")

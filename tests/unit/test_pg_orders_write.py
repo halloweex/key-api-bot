@@ -604,13 +604,9 @@ class TestTheSearchCursorMovesWithTheChain:
 
         chain_latch.latch(pow_.CHAIN)
         now = datetime.now(UTC)
-        async with duck.connection() as conn:
-            for key in ("orders", "meilisearch_pg"):
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    [f"last_sync_{key}", (now - timedelta(minutes=5)).isoformat()])
-            issues = dq._freshness_check(conn, now)            # no chain_watermarks
+        rows = {f"last_sync_{key}": (now - timedelta(minutes=5)).isoformat()
+                for key in ("orders", "meilisearch_pg")}
+        issues = dq._freshness_check(now, frozen_rows=rows)   # no chain_watermarks
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
         # Since S14-00 every chain's keys are moved, so every one with a
         # threshold is named — the search cursor still never is.

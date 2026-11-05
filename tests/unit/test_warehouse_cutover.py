@@ -110,40 +110,11 @@ class TestAnUnknownValueIsSeen:
         assert spec_for("warehouse_mode_invalid").kind is Kind.CONDITION
 
 
-# ─── What stands down ────────────────────────────────────────────────────────
-
-
-class TestWhatStandsDown:
-
-
-    def test_each_is_a_name_the_scan_guards_a_check_under(self):
-        """A name the scan does not guard under would stand nothing down."""
-        from core.data_quality import GUARDED_CHECK_CONDITIONS
-
-        assert wc.STOOD_DOWN_WHEN_POSTGRES <= set(GUARDED_CHECK_CONDITIONS)
-
-    def test_no_check_over_landing_stands_down(self):
-        """The switch freezes Silver, Gold and UTM, not `orders`: the landing
-        checks stay up until chains 3, 4 and 6."""
-        from core import pg_warehouse_dq as twins
-
-        landing = {g for g, _d, _t in twins.LANDING_TWINS} | twins.DUCKDB_BARE_CHECKS
-        assert not wc.STOOD_DOWN_WHEN_POSTGRES & landing
-
-    def test_each_has_its_postgres_replacement(self):
-        """Stood down only where something on the Postgres side asks the same
-        question: the twins' group, or the standalone Gold check."""
-        from core import mirror_reconciliation, pg_warehouse_dq as twins
-
-        replacement = {
-            "silver_arc": "silver_arc",
-            "attribution_coverage": "attribution",
-            "headline_vs_line_items": "line_items",
-            "goods_shipped_without_sale": "line_items",
-        }
-        for guard in wc.STOOD_DOWN_WHEN_POSTGRES - {"gold_cell_values"}:
-            assert replacement[guard] in twins.GROUPS
-        assert callable(mirror_reconciliation.pg_gold_internal_check)
+# ─── What stood down ─────────────────────────────────────────────────────────
+#
+# `TestWhatStandsDown` held `STOOD_DOWN_WHEN_POSTGRES` to the scan's guard
+# names and to the twins' groups until step 14's S14-14 deleted the DuckDB
+# checks, the set and `stood_down_duckdb_checks()` with them.
 
 
 # ─── The preconditions ───────────────────────────────────────────────────────
@@ -193,9 +164,6 @@ def _breaking(key: str):
         facts = dataclasses.replace(MET_FACTS, revision="0032_manual_goal_ids")
     elif key == "expenses_backfilled":
         facts = dataclasses.replace(MET_FACTS, expenses_backfilled=False)
-    elif key == "retired_conditions_clear":
-        facts = dataclasses.replace(
-            MET_FACTS, open_retired={"silver_missing_rows": "dq:integrity"})
     elif key == "od10_doors":
         facts = dataclasses.replace(MET_FACTS, od10_doors=A_DOOR)
     else:
@@ -234,8 +202,9 @@ class TestTheEvaluator:
                 "cohorts_clickhouse", "ch_url"} <= set(KEYS)
         assert {f"reader:{name}" for name in wc.WAREHOUSE_READERS} <= set(KEYS)
         assert "reader:KS_READ_TRAFFIC" in KEYS   # the UTM reader
-        # And the review's: no page open under a check the switch retires.
-        assert "retired_conditions_clear" in KEYS
+        # The review's — no page open under a check the switch retires —
+        # went with the DuckDB checks it waited on in step 14's S14-14.
+        assert "retired_conditions_clear" not in KEYS
 
     def test_with_nothing_met_it_names_exactly_the_published_list(self):
         """Both directions at once: an item the evaluator checks but the
@@ -246,8 +215,7 @@ class TestTheEvaluator:
         unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0",
                                            "KS_WRITE_WAREHOUSE": "postgress"}, wc.Facts(
             revision="0000_somebody_elses", required_revision=REQUIRED_REVISION,
-            expenses_backfilled=False,
-            open_retired=None, open_retired_error="x", od10_doors=A_DOOR))
+            expenses_backfilled=False, od10_doors=A_DOOR))
         assert [u.key for u in unmet] == BREAKABLE
 
     def test_it_reads_values_as_the_modules_do(self):
@@ -259,8 +227,7 @@ class TestTheEvaluator:
             revision_error="not asked: KS_PG_DSN is not set"))
         assert [u.key for u in unmet] == [
             k for k in KEYS
-            if k not in ("value_understood", "mirror_landing",
-                         "retired_conditions_clear", "od10_doors",
+            if k not in ("value_understood", "mirror_landing", "od10_doors",
                          # not asked: no DSN, so `pg_revision` names it
                          "expenses_backfilled")]
 
@@ -329,7 +296,10 @@ class TestTheModesAreReadAsTheirOwnModulesReadThem:
         assert (wc.READ_FALLBACK, "off") == (read_fallback.ENV, read_fallback.OFF)
         assert (wc.UTM_PARSE, "postgres") == (pg_utm_parse.ENV, pg_utm_parse.POSTGRES)
         assert (wc.PG_DERIVE, "own") == (pg_derivation.ENV, pg_derivation.OWN)
-        assert wc.PG_TWINS == pg_warehouse_dq.ENV and "on" in pg_warehouse_dq._VALID
+        # `pg_warehouse_dq.ENV` went with the twins' flag in step 14's
+        # S14-14; the readiness still reports the variable, until S14-15.
+        assert wc.PG_TWINS == "KS_DQ_PG_WAREHOUSE"
+        assert not hasattr(pg_warehouse_dq, "flag")
         assert dict(wc.PRECONDITIONS)["read_fallback_off"] == f"{read_fallback.ENV}=off"
 
 
@@ -444,98 +414,12 @@ class TestEveryReadSwitchIsDecided:
         assert wc.COHORTS not in self._declared()
 
 
-# ─── A page under a retired check holds the switch ───────────────────────────
-
-
-class TestAPageUnderARetiredCheckHoldsTheSwitch:
-    """A stood-down check is not a raised one, so the first integrity run under
-    the switch holds none of its conditions and announces every page it had
-    delivered "✅ Resolved" — a recovery no check looked at. The switch waits
-    for there to be none (`retired_conditions_clear`) rather than holding them
-    for as long as Postgres derives."""
-
-    def test_they_are_the_stood_down_checks_conditions(self):
-        """And, since DN-29 retires `reconcile_gold` with them, the Gold
-        comparison's own two."""
-        assert wc.retired_conditions() == {
-            "silver_missing_rows", "silver_orphan_rows", "silver_row_values",
-            "attribution_coverage_website", "gold_cell_values",
-            "headline_vs_line_items", "goods_shipped_without_sale",
-            "gold_missing_cells", "gold_orphan_cells"}
-
-    @staticmethod
-    def _still_firing(tmp_path, monkeypatch, mode):
-        """What the integrity job holds as firing, every stood-down check
-        raising if it is called at all — as one over a frozen table may."""
-        from core import data_quality as dq
-        from core.duckdb_store import DuckDBStore
-        from core.scheduler import BackgroundScheduler
-
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
-                    "KS_DQ_PG_WAREHOUSE"):
-            monkeypatch.delenv(env, raising=False)
-        monkeypatch.setattr(wc, "_mode", mode)
-        for fn in ("_silver_arc_check", "_attribution_coverage_check",
-                   "_gold_cell_values_check", "_headline_vs_line_items_check",
-                   "_goods_shipped_without_sale_check"):
-            monkeypatch.setattr(dq, fn, lambda *_a, **_k: (_ for _ in ()).throw(
-                RuntimeError("frozen")))
-        store = DuckDBStore(db_path=tmp_path / f"{mode}.duckdb")
-        asyncio.run(store.connect())
-        scheduler = BackgroundScheduler()
-        monkeypatch.setattr(scheduler, "_send_dq_alert_throttled",
-                            AsyncMock(return_value=True))
-        resolve = AsyncMock(return_value=0)
-        try:
-            with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
-                 patch("core.alerting.resolve_group", resolve):
-                asyncio.run(scheduler._run_dq_integrity())
-        finally:
-            asyncio.run(store.close())
-        (call,) = [c for c in resolve.await_args_list
-                   if c.args and c.args[0] == "dq:integrity"]
-        return set(call.kwargs["still_firing"])
-
-
-    @staticmethod
-    def _unmet(**delivered):
-        from core.alerting import _gate
-
-        for key, group in delivered.items():
-            _gate.note_delivered_conditions([key], group)
-        facts = asyncio.run(wc.gather_facts({}))
-        return [u for u in wc.evaluate_preconditions(MET_ENV, facts)
-                if u.key == "retired_conditions_clear"]
-
-    def test_a_delivered_page_under_one_holds_it_and_is_named(self):
-        (u,) = self._unmet(silver_missing_rows="dq:integrity")
-        assert "silver_missing_rows (dq:integrity)" in u.detail
-
-    def test_whatever_group_delivered_it(self):
-        """`gold_cell_values` is also the mirror-landing Gold comparison's,
-        which DN-29 retires in the job itself."""
-        (u,) = self._unmet(gold_cell_values="dq:mirror_landing")
-        assert "gold_cell_values" in u.detail
-
-    def test_a_page_a_check_that_stays_up_owns_is_not_its_business(self):
-        assert self._unmet(inventory_snapshot_gaps="dq:integrity",
-                           pg_silver_missing_rows="dq:integrity") == []
-
-    def test_once_announced_resolved_it_holds_nothing(self):
-        from core.alerting import _gate
-
-        _gate.note_delivered_conditions(["silver_row_values"], "dq:integrity")
-        assert set(_gate.take_resolved("dq:integrity")) == {"silver_row_values"}
-        assert self._unmet() == []
-
-    def test_an_unreadable_gate_is_unmet_by_its_class(self):
-        with patch("core.alerting.delivered_conditions",
-                   side_effect=RuntimeError("state at /secret/path")):
-            facts = asyncio.run(wc.gather_facts({}))
-        assert facts.open_retired is None and facts.open_retired_error == "RuntimeError"
-        (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
-                if u.key == "retired_conditions_clear"]
-        assert "RuntimeError" in u.detail and "/secret/path" not in u.detail
+# ─── A page under a retired check held the switch ────────────────────────────
+#
+# `TestAPageUnderARetiredCheckHoldsTheSwitch` held `retired_conditions_clear`
+# until step 14's S14-14 deleted the precondition with the stood-down checks
+# it waited on and `retired_conditions()`; the names are kept unreused by
+# `tests/unit/test_rollback_condition_names.py`.
 
 
 # ─── Gathering and publishing ────────────────────────────────────────────────
@@ -702,7 +586,7 @@ class TestGatheringTheFacts:
         assert not hasattr(write_chains, "_chain_state")
         assert not hasattr(write_chains, "chain_modes")
         facts = asyncio.run(wc.gather_facts({}))
-        assert facts.open_retired_error is None
+        assert facts.od10_doors == wc.OD10_DOORS
 
 
 class TestReadiness:
@@ -729,7 +613,7 @@ class TestReadiness:
         assert body["preconditions_met"] is False
         assert [u["key"] for u in body["unmet"]] == ["utm_parse_postgres"]
         assert body["preconditions"] == KEYS
-        assert body["stood_down_duckdb_checks"] == sorted(wc.stood_down_duckdb_checks())
+        assert "stood_down_duckdb_checks" not in body          # S14-14
 
     def test_all_met_says_so_and_a_readiness_switches_nothing(self, fresh):
         fresh.configure_mode()

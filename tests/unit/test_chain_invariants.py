@@ -949,7 +949,7 @@ class TestTheWiring:
         from core import pg_warehouse_dq
 
         others |= set(pg_warehouse_dq.UNWATCHED_NAMES.values())
-        others |= {pg_warehouse_dq.WHOLE_UNWATCHED, pg_warehouse_dq.FLAG_INVALID}
+        others.add(pg_warehouse_dq.WHOLE_UNWATCHED)
         assert others and not {n for n in others if n.startswith(inv.PREFIX)}
 
     def test_the_window_follows_the_continuity_check(self):

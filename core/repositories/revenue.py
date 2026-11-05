@@ -894,7 +894,7 @@ class RevenueMixin:
         The two do not add up to each other and are not meant to: retail goods
         come to ₴57.7M against ₴56.9M of revenue, and 99.4% of that ₴0.8M gap
         is gift certificates, whose goods were paid for when the certificate
-        was sold. See `_headline_vs_line_items_check`.
+        was sold. See `pg_headline_vs_line_items` (`core/pg_warehouse_dq.py`).
 
         The bug this replaced was not that both exist. It was that
         `use_products` also switched on `promocode` — an order-level filter —

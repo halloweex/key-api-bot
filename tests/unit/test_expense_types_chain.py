@@ -272,25 +272,21 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
     NOW = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)   # a Thursday
 
     def _duckdb(self, expense_types_age_h):
-        import duckdb
+        """DuckDB's `sync_metadata` as Postgres copied it — the rows the check
+        reads since step 14's S14-14 (DuckDB's own table until then)."""
         from datetime import timedelta
 
-        conn = duckdb.connect()
-        conn.execute("CREATE TABLE sync_metadata "
-                     "(key VARCHAR PRIMARY KEY, value VARCHAR, updated_at TIMESTAMP)")
         # Everything else fresh, so the only thing that can be said is about
         # the dictionary.
-        for entity in ("orders", "products", "buyers", "offers", "stocks",
-                       "managers", "categories"):
-            conn.execute("INSERT INTO sync_metadata VALUES (?, ?, now())",
-                         [f"last_sync_{entity}", (self.NOW - timedelta(minutes=5)).isoformat()])
+        rows = {f"last_sync_{entity}": (self.NOW - timedelta(minutes=5)).isoformat()
+                for entity in ("orders", "products", "buyers", "offers", "stocks",
+                               "managers", "categories")}
         if expense_types_age_h is not None:
-            conn.execute("INSERT INTO sync_metadata VALUES (?, ?, now())",
-                         ["last_sync_expense_types",
-                          (self.NOW - timedelta(hours=expense_types_age_h)).isoformat()])
-        return conn
+            rows["last_sync_expense_types"] = (
+                self.NOW - timedelta(hours=expense_types_age_h)).isoformat()
+        return rows
 
-    def _judge(self, flags, conn, marks):
+    def _judge(self, flags, rows, marks):
         """Since S14-00 every chain is on Postgres, so every other chain's key
         is judged from `meta.chain_watermarks`: fresh there, as production's
         are, so the only thing that can be said is about the dictionary."""
@@ -302,7 +298,7 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
         others = {key: fresh for key in write_chains.sync_keys()
                   if key != "last_sync_expense_types"}
         return [(i.check_name, i.severity.value, i.count, i.description)
-                for i in _freshness_check(conn, self.NOW,
+                for i in _freshness_check(self.NOW, frozen_rows=rows,
                                           chain_watermarks={**others, **marks})]
 
     def test_neither_this_chain_nor_chain_1_declares_it(self):

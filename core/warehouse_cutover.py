@@ -42,9 +42,9 @@ needed in place; DN-29 is the switch.
   the `warehouse_refresh` job is not registered, every production call of
   `refresh_warehouse_layers` is skipped (a test walks them), the DuckDB half of
   rebuild-silver is skipped, and `mark_warehouse_dirty` is a no-op. The DuckDB
-  checks over Silver, Gold and UTM stand down (`stood_down_duckdb_checks`), as
-  do the three mirror-landing comparisons that set DuckDB's Silver, Gold and
-  UTM against Postgres'.
+  checks over Silver, Gold and UTM stood down (`stood_down_duckdb_checks`), as
+  did the three mirror-landing comparisons that set DuckDB's Silver, Gold and
+  UTM against Postgres' — deleted in step 14's S14-14 and S14-12.
 - **The writer is recorded** in DuckDB's `sync_metadata` under
   `warehouse_writer` by `settle_writer`, once per process before the boot sync.
   The first start under `postgres` records it and closes the `warehouse` alert
@@ -87,10 +87,10 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from core import duckdb_switch
 from core.paths import DATA_DIR
@@ -189,84 +189,18 @@ def duckdb_derives() -> bool:
     return not writes_postgres()
 
 
-# ─── What stands down ────────────────────────────────────────────────────────
+# ─── What stood down ─────────────────────────────────────────────────────────
 #
-# The names `check_internal_integrity` guards each check under. Each reads a
-# DuckDB table the switch freezes — `silver_orders`, `gold_daily_revenue`,
-# `silver_order_utm` — and each has its replacement on the Postgres side: the
-# arc, attribution and line-item twins (`core/pg_warehouse_dq.py`), and for the
-# Gold recompute, which a same-engine rerun would only check against itself,
-# ClickHouse's `compare_gold_cells` and `pg_gold_internal_check`.
-#
-# Not here: the checks over landing (`orders`, `order_products`), which the
-# switch does not freeze — chains 3, 4 and 6 move those. And not the three
-# mirror-landing comparisons that set DuckDB's Silver and Gold against
-# Postgres', which DN-29 retires in the job itself.
-#
-# Stood down is not raised: the scan does not report these through
-# `raised_out`, so on the first run under the stand-down a page one of them
-# delivered would be announced "✅ Resolved" with no check looking at it. The
-# switch therefore waits for there to be none — `retired_conditions_clear`
-# below — rather than holding them: nothing will ever re-examine a retired
-# check's condition, so a held page would stand open for as long as Postgres
-# derives. The twins open their own series under their `pg_` names.
-STOOD_DOWN_WHEN_POSTGRES: FrozenSet[str] = frozenset({
-    "silver_arc",
-    "attribution_coverage",
-    "gold_cell_values",
-    "headline_vs_line_items",
-    "goods_shipped_without_sale",
-})
+# `STOOD_DOWN_WHEN_POSTGRES` and `stood_down_duckdb_checks()` stood here until
+# step 14's S14-14: the five DuckDB integrity checks over Silver, Gold and UTM
+# that did not run while Postgres alone derived them (with chain 3's ten over
+# the order tables), and that the twins stood in for. S14-14 deleted the
+# checks, so nothing stands down; so did `retired_conditions()` and the
+# `retired_conditions_clear` precondition, which held the switch while a page
+# one of them delivered was still open. The names they reported are not
+# reused until the images before step 14 retire
+# (`tests/unit/test_rollback_condition_names.py`, rule 15).
 
-
-def stood_down_duckdb_checks() -> FrozenSet[str]:
-    """The DuckDB integrity checks that do not run, and that the twins do not
-    compare against: since S14-00 always the set production stood down on
-    2026-10-21 — the five over Silver, Gold and UTM and chain 3's ten over
-    the order tables (`pg_orders_write.landing_checks_stood_down`, a constant
-    too). One answer for both, because the integrity job reads it once for
-    the scan and for `duckdb_looked`."""
-    from core import pg_orders_write
-
-    return STOOD_DOWN_WHEN_POSTGRES | pg_orders_write.landing_checks_stood_down()
-
-
-# ─── What the stood-down checks leave behind ─────────────────────────────────
-#
-# `_resolve_dq_layer` holds a condition only when a check in the run raised or
-# said it was not watching; a stood-down check did neither, so every page it
-# delivered resolves on the first run after the switch — a recovery nobody
-# verified (the silent-green attack on PR 13, DUCKDB_EXIT_CHAIN2_DESIGN.md).
-# Two answers were open. Holding those conditions, as for a raised check, is
-# the worse one: nothing re-examines a retired check again, so the page would
-# stand open for as long as Postgres derives — in the digest's tail every
-# morning, escalated once — and could only resolve on a rollback. The switch
-# waits instead, while the DuckDB check still runs and can clear it, so the
-# last verdict a retired check gives is a verified one.
-#
-# Read from the Alert Gate's delivered map, not from `app.alert_series`: the
-# map is what `resolve_group` takes from and announces, so it is exact. The
-# ledger is a copy that can disagree both ways — its fired row is written
-# fire-and-forget, so a delivered page can be missing from it, which is the
-# case that matters; and a gate re-armed by `reset_gate` leaves a series
-# firing there that no resolve can close until it fires again — a clean check
-# never does — which would hold the switch for good over a page the stand-down
-# cannot announce.
-
-
-# The conditions `compare_gold` alone reports, which DN-29 retires with
-# `reconcile_gold`: on `dq:mirror_landing` a page of theirs would be announced
-# resolved by the first run after the switch exactly as a stood-down integrity
-# check's would. `gold_cell_values` is also the integrity check's name.
-# `tests/unit/test_warehouse_writer.py` read the set out of `compare_gold`'s
-# source until step 14's S14-12 deleted it; frozen since, as the names an
-# image from before step 14 holds (rule 15). `gold_rollup_mismatch` is not
-# here: `pg_gold_internal_check` goes on asking it.
-RETIRED_COMPARISON_CONDITIONS: FrozenSet[str] = frozenset({
-    "gold_missing_cells",
-    "gold_orphan_cells",
-    "gold_cell_values",
-})
 
 # The comparisons in `dq_mirror_landing` that DN-29 retired, by the name the
 # job ran each under — none of them in this build since step 14's S14-12,
@@ -311,35 +245,6 @@ def note_comparisons_reported(reported, *, complete: bool) -> None:
 
     mark_delivered(f"dq:{MIRROR_LAYER}", COMPARISON_MARK, sorted(reported),
                    complete=complete)
-
-
-def retired_conditions() -> FrozenSet[str]:
-    """The conditions the stood-down checks report, from the table the
-    integrity job holds a raised check's conditions by — one source, so a
-    condition added to a stood-down check is covered here too — and those
-    only the retired Gold comparison reports."""
-    from core.data_quality import GUARDED_CHECK_CONDITIONS
-
-    return frozenset(condition for guard in STOOD_DOWN_WHEN_POSTGRES
-                     for condition in GUARDED_CHECK_CONDITIONS[guard]) \
-        | RETIRED_COMPARISON_CONDITIONS
-
-
-def open_retired_conditions() -> Dict[str, Optional[str]]:
-    """`{condition: group}` for every page under a retired condition that was
-    delivered and not yet announced resolved, in this process's Alert Gate —
-    the one `resolve_group` would announce from. Whatever group delivered it:
-    DN-29 retires the mirror-landing comparisons too, and `gold_cell_values` is
-    one of theirs. And every page the retired comparisons were still
-    reporting under a name they share (`COMPARISON_MARK`). Local state, no
-    I/O; raises only if the gate cannot be read, which `gather_facts` reports
-    as unmet."""
-    from core.alerting import delivered_conditions, delivered_marked
-
-    retired = retired_conditions()
-    return {**{key: group for key, group in delivered_conditions().items()
-               if key in retired},
-            **delivered_marked(COMPARISON_MARK)}
 
 
 # ─── The doors OD-10 has not yet decided ─────────────────────────────────────
@@ -424,8 +329,6 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
     ("ch_url", f"{CH_URL} set"),
     ("od10_doors", "every DuckDB-only door reading Silver ported or retired "
                    "(OD-10)"),
-    ("retired_conditions_clear", "no delivered page open under a condition "
-                                 "only a stood-down check re-examines"),
 )
 
 # How long the readiness waits for Postgres to say its revision. A status page
@@ -462,8 +365,7 @@ class Unmet:
 class Facts:
     """What the environment cannot say. `revision` is what Postgres answered,
     None with `revision_error` when it could not be asked or did not answer.
-    `open_retired` is None with `open_retired_error` when the Alert Gate could
-    not be read. `od10_doors` is `OD10_DOORS`, handed in so the evaluator
+    `od10_doors` is `OD10_DOORS`, handed in so the evaluator
     stays pure over what it is given. `expenses_backfilled` is whether
     `bronze.expenses` has its history (`EXPENSES_HISTORY`), None with
     `expenses_backfill_error` when it was not asked or not answered — asked
@@ -476,8 +378,6 @@ class Facts:
     expenses_backfilled: Optional[bool] = None
     expenses_backfill_error: Optional[str] = None
     expenses_history_row: bool = True
-    open_retired: Optional[Mapping[str, Optional[str]]] = field(default_factory=dict)
-    open_retired_error: Optional[str] = None
     od10_doors: Tuple[Tuple[str, str], ...] = ()
 
 
@@ -567,17 +467,6 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
          f"switch — {'; '.join(label for _where, label in facts.od10_doors)}. "
          "Port or retire each (OD-10): after the switch they answer from a "
          "Silver as old as the flip, and after a compaction from none.")
-
-    if facts.open_retired is None:
-        need("retired_conditions_clear", False,
-             f"the Alert Gate could not be read: {facts.open_retired_error}")
-    else:
-        pages = ", ".join(f"{key} ({group or 'no group'})"
-                          for key, group in sorted(facts.open_retired.items()))
-        need("retired_conditions_clear", not facts.open_retired,
-             f"page(s) open under a check the switch stands down — {pages}. "
-             "The first run after it would announce them resolved with no check "
-             "looking; let the DuckDB checks clear them first.")
     return unmet
 
 
@@ -701,25 +590,17 @@ async def _read_postgres(env: Mapping[str, str], *,
 
 
 def _local_facts() -> Dict[str, Any]:
-    """The facts this process holds itself — the Alert Gate's delivered map
-    and the OD-10 doors. No I/O, so never behind the bound Postgres is read
-    under: a start that could not reach Postgres must not also report these
-    as unread, naming preconditions nobody failed. Never raises.
+    """The facts this process holds itself — the OD-10 doors. No I/O, so
+    never behind the bound Postgres is read under: a start that could not
+    reach Postgres must not also report these as unread, naming
+    preconditions nobody failed. Never raises.
 
     The write-chain registry was one of them until chain 7b-4: step 13 asked
     which chain had moved a table the DN-12 goal bridge read out of DuckDB.
-    The bridge is deleted, and with it the question."""
-    open_retired: Optional[Mapping[str, Optional[str]]]
-    open_retired_error = None
-    try:
-        open_retired = open_retired_conditions()
-    except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
-        logger.error("cutover readiness: the Alert Gate could not be read: %s: %s",
-                     type(exc).__name__, exc)
-        open_retired, open_retired_error = None, type(exc).__name__
-
-    return {"open_retired": open_retired, "open_retired_error": open_retired_error,
-            "od10_doors": OD10_DOORS}
+    The bridge is deleted, and with it the question. The Alert Gate's
+    delivered map was the other until step 14's S14-14, for
+    `retired_conditions_clear`, which went with the checks it waited on."""
+    return {"od10_doors": OD10_DOORS}
 
 
 async def gather_facts(env: Optional[Mapping[str, str]] = None, *,
@@ -1405,7 +1286,6 @@ def status() -> Dict[str, Any]:
         "held": _held,
         "held_since": _held_since.isoformat() if _held and _held_since else None,
         "reclassify_needed": _reclassify_needed,
-        "stood_down_duckdb_checks": sorted(stood_down_duckdb_checks()),
         "way_back_refused": list(way_back_refused()),
     }
 

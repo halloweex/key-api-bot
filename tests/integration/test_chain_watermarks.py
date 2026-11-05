@@ -185,7 +185,12 @@ class TestTheHourlyReplaceCannotRollItBack:
         assert await store.get_last_sync_time("stocks") == fresh
 
         watermarks = await read_values(stood_down_sync_keys())
+        # DuckDB's frozen rows, as the check meets them since step 14's
+        # S14-14: Postgres's copy of the table (`frozen_rows`).
         async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks=watermarks)
+            frozen_rows = dict(conn.execute(
+                "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
+            ).fetchall())
+        issues = _freshness_check(now, chain_watermarks=watermarks, frozen_rows=frozen_rows)
         assert not [i for i in issues
                     if i.check_name in ("freshness_offers", "freshness_stocks")], issues

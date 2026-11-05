@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from core.data_quality import KNOWN_STATUS_IDS
+from core.pg_warehouse_dq import KNOWN_STATUS_IDS
 from core.duckdb_store import DuckDBStore
 from core.models import (
     LEGACY_STATUS_NAMES,

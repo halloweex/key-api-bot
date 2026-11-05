@@ -1953,7 +1953,16 @@ class BackgroundScheduler:
             return False
 
     async def _run_dq_integrity(self) -> Dict[str, Any]:
-        """Layer-1 integrity scan. Pure DB reads, no external I/O."""
+        """Layer-1 integrity scan. Postgres reads only, no external I/O.
+
+        Since step 14's S14-14 it opens no DuckDB connection at all: the
+        freshness and snapshot-continuity checks judge facts read from
+        Postgres here, the Postgres twins (`core/pg_warehouse_dq.py`) are the
+        checks of Silver, Gold, UTM and the order tables, and the chain
+        invariants watch the tables the chains write. Until then a DuckDB
+        scan ran first — under `KS_DUCKDB=off`, production's since
+        2026-10-16, over a connection that refused, with every check that
+        would have reached for the file stood down."""
         from datetime import datetime, timedelta, timezone
         from core.data_quality import (
             Severity,
@@ -1964,23 +1973,19 @@ class BackgroundScheduler:
             machine_attempts_note,
             overall_severity,
         )
-        from core.duckdb_store import get_store
 
         with correlation_context() as corr_id:
             started_at = datetime.now(timezone.utc)
             logger.info("DQ Layer-1 integrity scan starting")
 
-            store = await get_store()
             error_message = None
             issues = []
 
-            # The continuity check over `inventory_sku_history` follows the
-            # writer, and it runs inside a sync function. This is the one
-            # caller that knows which engine owns the table, so it reads the
-            # facts and hands them over; everything else in the scan reads
-            # DuckDB through `conn` as before. A read that fails leaves the
-            # calendar None, and the check then says out loud that it is not
-            # watching rather than reporting gaps it cannot see.
+            # The continuity check over `inventory_sku_history` runs inside a
+            # sync function, so this reads its facts and hands them over. A
+            # read that fails leaves the calendar None, and the check then
+            # says out loud that it is not watching rather than reporting
+            # gaps it cannot see.
             inventory_calendar = None
             try:
                 from core.data_quality import INVENTORY_CONTINUITY_WINDOW_DAYS
@@ -2013,113 +2018,58 @@ class BackgroundScheduler:
                     "chain watermarks unreadable, freshness check will report "
                     "the moved syncs unwatched: %s", e)
 
-            # Under KS_DUCKDB=off, DuckDB's own `sync_metadata` rows — the
-            # inherited stamps and the bootstrap gate — are read as Postgres
-            # last copied them, for the same reason (stage 5, PR-5). A read
-            # that fails leaves them None, and the check names what it then
-            # cannot judge rather than reading the file.
+            # DuckDB's own `sync_metadata` rows — the inherited stamps and the
+            # bootstrap gate — are read as Postgres last copied them, for the
+            # same reason (stage 5, PR-5; under every mode since step 14's
+            # S14-14). A read that fails leaves them None, and the check names
+            # what it then cannot judge rather than reading the file.
             frozen_sync_rows = None
-            from core import duckdb_switch
-
-            duckdb_off = duckdb_switch.is_off()
-            if duckdb_off:
-                try:
-                    from core.pg_frozen_metadata import frozen_sync_rows as read_copy
-                    frozen_sync_rows = await read_copy()
-                except Exception as e:
-                    logger.error(
-                        "app.sync_metadata unreadable, freshness check will "
-                        "report what it rests on unwatched: %s", e)
-
-            # The DuckDB checks over Silver, Gold and UTM that do not run while
-            # Postgres alone derives them (DN-28). Read once, so the scan and
-            # `duckdb_looked` below agree on one answer: a check the scan
-            # skipped is one the twins must stand in for, not compare against.
-            # Empty unless Postgres alone derives, or the way back holds (DN-29).
-            from core.warehouse_cutover import stood_down_duckdb_checks
-
-            stood_down = stood_down_duckdb_checks()
-            # Under KS_DUCKDB=off the DuckDB half stands down rather than
-            # fails (stage 5, PR-7): the three checks with no twin join the
-            # stood-down set (OD-S5-5), the freshness check and the snapshot
-            # continuity judge what Postgres holds, and the scan is handed a
-            # connection that refuses — so nothing opens the file, the run
-            # carries no `error_message`, and a check that still reaches for
-            # it is counted where it reached. The twins stand in alone.
-            if duckdb_off:
-                from core.data_quality import DUCKDB_OFF_STOOD_DOWN
-
-                stood_down = stood_down | DUCKDB_OFF_STOOD_DOWN
-            raised_checks: list = []
-            duckdb_measured: Dict[str, Dict[str, int]] = {}
             try:
-                async with (duckdb_switch.refused_connection() if duckdb_off
-                            else store.connection()) as conn:
-                    issues = check_internal_integrity(
-                        conn, inventory_calendar=inventory_calendar,
-                        chain_watermarks=chain_watermarks,
-                        chain_stamps=chain_stamps,
-                        frozen_sync_rows=frozen_sync_rows,
-                        raised_out=raised_checks, pairing_out=duckdb_measured,
-                        stood_down=stood_down)
+                from core.pg_frozen_metadata import frozen_sync_rows as read_copy
+                frozen_sync_rows = await read_copy()
+            except Exception as e:
+                logger.error(
+                    "app.sync_metadata unreadable, freshness check will "
+                    "report what it rests on unwatched: %s", e)
+
+            raised_checks: list = []
+            try:
+                issues = check_internal_integrity(
+                    inventory_calendar=inventory_calendar,
+                    chain_watermarks=chain_watermarks,
+                    chain_stamps=chain_stamps,
+                    frozen_sync_rows=frozen_sync_rows,
+                    raised_out=raised_checks)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ integrity scan raised")
 
-            # Chain 2 step 8a: the Postgres twins of the Silver checks, beside the
-            # DuckDB ones, behind KS_DQ_PG_WAREHOUSE. Outside the DuckDB lock and
-            # after the DuckDB half whatever it did — their facts are read here
-            # and judged purely, so a DuckDB fault cannot discard a Postgres
-            # finding. `core/pg_warehouse_dq.py` has the design. Step 8b's
-            # recompute of Silver from bronze (`pg_silver_row_values`) and
-            # DN-14's reading of the derivation journal (`pg_signal_missed`)
-            # are groups in the same read and budget; they compare Postgres
-            # with Postgres, so `duckdb_looked` does not reach them. DN-23's
-            # landing twins do compare, and five of the six DuckDB checks they
-            # pair with run bare in the scan: a raise there fails it, so the
-            # scan finishing is their looking (`DUCKDB_BARE_CHECKS`).
+            # The Postgres twins (chain 2 step 8a, `core/pg_warehouse_dq.py`
+            # has the design): the checks of Silver, Gold, UTM and the order
+            # tables. Their facts are read here and judged purely, after the
+            # checks above whatever they did, so a fault there cannot discard
+            # a Postgres finding. Step 8b's recompute of Silver from bronze
+            # (`pg_silver_row_values`), DN-14's reading of the derivation
+            # journal (`pg_signal_missed`) and DN-23's landing twins are
+            # groups in the same read and budget. Until step 14's S14-14 they
+            # ran beside the DuckDB checks they replaced, compared with them
+            # while those looked, and recorded both engines' numbers in an
+            # INFO pairing row each run.
             from core import pg_warehouse_dq
-            from core.data_quality import GUARDED_CHECK_CONDITIONS
 
-            pg_on, pg_flag_error = pg_warehouse_dq.flag()
-            pg_issues: list = []
             pg_held: list = []
-            pg_ran = pg_on and not pg_flag_error
-            if pg_flag_error:
-                logger.error(pg_flag_error)
-                pg_issues = [pg_warehouse_dq.flag_invalid_issue(pg_flag_error)]
-            elif pg_on:
-                # What DuckDB looked at this scan: nothing when it failed; else
-                # every guard less the ones that raised and the ones stood down.
-                # A stood-down guard counted as looked would have the line-item
-                # twins compare against a count nobody took, and never file.
-                # Nothing under KS_DUCKDB=off, where the DuckDB half stood
-                # down whole: what the scan judged there it read from Postgres.
-                duckdb_looked = (frozenset() if error_message or duckdb_off else
-                                 (frozenset(GUARDED_CHECK_CONDITIONS)
-                                  | pg_warehouse_dq.DUCKDB_BARE_CHECKS)
-                                 - frozenset(raised_checks) - stood_down)
-                try:
-                    pg_facts = await pg_warehouse_dq.read_facts()
-                except Exception as e:  # noqa: BLE001 — it promises not to; if it does, it is blindness
-                    logger.exception("Postgres twins' read raised")
-                    pg_facts = pg_warehouse_dq.Facts.blind(f"{type(e).__name__}: {e}")
-                pg_issues = pg_warehouse_dq.check_pg_warehouse(
-                    pg_facts, duckdb_issues=issues, duckdb_looked=duckdb_looked,
-                    held_out=pg_held)
-                # DN-14: both engines' numbers for this run, and what the twins
-                # would file standing alone — one INFO row the soak parses.
-                # Built from what was already read; it asks nobody anything.
-                pg_issues.append(pg_warehouse_dq.pairing_record(
-                    pg_facts, duckdb_issues=issues, duckdb_looked=duckdb_looked,
-                    duckdb_attribution=duckdb_measured.get("attribution_coverage")))
+            try:
+                pg_facts = await pg_warehouse_dq.read_facts()
+            except Exception as e:  # noqa: BLE001 — it promises not to; if it does, it is blindness
+                logger.exception("Postgres twins' read raised")
+                pg_facts = pg_warehouse_dq.Facts.blind(f"{type(e).__name__}: {e}")
+            pg_issues = pg_warehouse_dq.check_pg_warehouse(pg_facts, held_out=pg_held)
 
             # The standing watch on the tables a write chain has taken to
-            # Postgres (DN-07), here beside the twins and for their reason: these
-            # are Postgres facts about tables DuckDB no longer writes, so they
-            # are read and judged after the DuckDB half whatever it did — never
-            # inside `check_internal_integrity`, where a DuckDB fault would
-            # discard every one of them and hold back the page. No flag: every
+            # Postgres (DN-07), here beside the twins and for their reason:
+            # they are read and judged after the checks above whatever those
+            # did — never inside `check_internal_integrity`, where a fault
+            # would discard every one of them and hold back the page. No flag: every
             # chain is watched (since step 14's S14-11; until then who was
             # watched was `chain_modes()`'s answer). Neither call raises; a failure comes back as
             # `chain_invariants_unwatched`, which holds every condition. The
@@ -2155,10 +2105,9 @@ class BackgroundScheduler:
                 logger.exception(f"DQ integrity persist failed: {e}")
 
             sev = overall_severity(issues, [])
-            # A failed DuckDB half leaves `issues` holding only the Postgres
-            # side's findings — the twins' and the chain invariants' — and a
-            # CRITICAL among them still pages: they did look, and their verdict
-            # does not depend on DuckDB's.
+            # A failed scan above leaves `issues` holding only the twins' and
+            # the chain invariants' findings, and a CRITICAL among them still
+            # pages: they did look, and their verdict does not depend on it.
             pg_critical = any(i.severity == Severity.CRITICAL for i in pg_issues)
             chain_critical = any(i.severity == Severity.CRITICAL for i in chain_issues)
             if sev == Severity.CRITICAL and (
@@ -2176,16 +2125,15 @@ class BackgroundScheduler:
                 )
             from core.data_quality import unverified_conditions
 
-            pg_unverified = pg_warehouse_dq.unverified_pg_conditions(
-                ran=pg_ran, flag_invalid=bool(pg_flag_error), held=pg_held)
+            pg_unverified = pg_warehouse_dq.unverified_pg_conditions(pg_held)
             await self._resolve_dq_layer(
                 "integrity", issues, error_message,
                 unverified=(unverified_conditions(raised_checks, issues)
                             + pg_unverified + chain_unverified))
-            if error_message and pg_ran:
-                # The DuckDB half failed, so its conditions stay unknown — but
+            if error_message:
+                # The scan above failed, so its conditions stay unknown — but
                 # the twins did look, and a pg_* page they now see clear must
-                # not wait for DuckDB to recover before it is announced.
+                # not wait for it to recover before it is announced.
                 try:
                     from core.alerting import resolve_group
 
@@ -2198,12 +2146,11 @@ class BackgroundScheduler:
                     logger.warning(f"DQ resolve for the Postgres twins failed: {e}")
             if error_message and chain_facts.watched:
                 # The same for the chain invariants, whenever a chain is watched
-                # — they looked, whatever DuckDB did. A blind read holds every
-                # condition through `chain_unverified`, so this can only clear
-                # what was re-examined. With no chain watched, nothing looked
-                # this run, and a page left over from a chain that has since
-                # stood down clears on the next run whose DuckDB half finishes,
-                # as the twins' pages do when their flag is off.
+                # — they looked, whatever the scan above did. A blind read holds
+                # every condition through `chain_unverified`, so this can only
+                # clear what was re-examined. With no chain watched, nothing
+                # looked this run, and a leftover page clears on the next run
+                # whose scan above finishes.
                 try:
                     from core.alerting import resolve_group
 

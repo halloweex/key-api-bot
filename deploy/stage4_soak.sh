@@ -127,7 +127,9 @@ latch_state() {
 
 INVENTORY_ON="$(flag_state KS_WRITE_INVENTORY postgres duckdb)"
 INVENTORY_LATCHED="$(latch_state pg_inventory_write)"
-DQ_PG_WAREHOUSE_ON="$(flag_state KS_DQ_PG_WAREHOUSE on off)"
+# `dq_pg_warehouse_on` (KS_DQ_PG_WAREHOUSE) went in step 14's S14-14 with
+# 21_pairing.sql, its one reader: the DuckDB checks the twins were paired
+# with are deleted.
 INVENTORY_FLIP_AT="${SOAK_INVENTORY_FLIP_AT:-}"
 
 # Chain 4 (`pg_buyers_write`) has one more state than chain 1: its flag moves
@@ -295,7 +297,6 @@ run_check() {
             -v ON_ERROR_STOP=1 \
             -v inventory_on="$INVENTORY_ON" \
             -v inventory_flip_at="$INVENTORY_FLIP_AT" \
-            -v dq_pg_warehouse_on="$DQ_PG_WAREHOUSE_ON" \
             -v buyers_on="$BUYERS_ON" \
             -v buyers_flip_at="$BUYERS_FLIP_AT" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
@@ -344,7 +345,7 @@ fi
 
 # ── the table ─────────────────────────────────────────────────────────────────
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
-echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
+echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo "  dq_journal_direct=$DQ_JOURNAL_DIRECT (KS_WRITE_DQ_JOURNAL)"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
 echo "  managers_on=$MANAGERS_ON (KS_WRITE_MANAGERS)${MANAGERS_NOTE}${MANAGERS_FLIP_AT:+, managers flip at $MANAGERS_FLIP_AT}"
