@@ -1,47 +1,35 @@
-"""DN-20a: every read that falls back to DuckDB is counted, and found by a walk.
+"""No read falls back to DuckDB, and every router refuses — found by a walk.
 
-`core.read_fallback.fall_back` is the one place a fallback is counted and
-logged. What makes it the *one* place is the walk below, which reads `core/`
-and `web/` for the three shapes a fallback to DuckDB takes rather than
-trusting a list of routers — a list only ever guards the routers somebody was
-already thinking about, and `pg_expenses_read.backfilled()` is the proof: it
-served DuckDB for weeks under log text no grep for "falling back to DuckDB"
-could find, because it was neither a router nor a gate.
+Every router reads one engine and refuses its failure through
+`core.read_fallback.refuse`, which counts the refusal and hands back the
+`ReadUnavailable` an HTTP route answers 503 naming the surface. What makes
+that hold everywhere is the walk below, which reads `core/` and `web/` for the
+shapes a read reaching DuckDB took rather than trusting a list of routers — a
+list only ever guards the routers somebody was already thinking about, and
+`pg_expenses_read.backfilled()` is the proof: it served DuckDB for weeks under
+log text no grep for "falling back to DuckDB" could find, because it was
+neither a router nor a gate.
 
-THE THREE SHAPES, AND WHAT EACH MUST DO
+THE SHAPES, AND WHAT EACH MUST DO
 
 1. **A log call saying "falling back to DuckDB"** (docstrings are not calls,
-   so they do not count). The handler it sits in must call `fall_back` or
-   re-raise. After this change the only such call left is `fall_back`'s own.
+   so they do not count). None may stand where a failure is handled without
+   being raised again: there is no DuckDB left to fall back to.
 2. **An `X.enabled() and X.available()` gate** — the shape every read switch
-   uses to choose an engine. In the gate's function, every except handler that
-   carries on toward DuckDB — it falls through past its `try`, or reads DuckDB
-   itself — must call `fall_back` or re-raise. A handler that *returns* ends
-   the function; in `sync_to_meilisearch` that is "skip the step", not DuckDB.
+   used to choose an engine. None is left since step 14's S14-07, and none
+   may come back: a gate anywhere is a violation.
 3. **Any except handler in a function that reaches another engine's read** —
    `get_pool`, a `*_run` router, or a function of a read-switch module — under
-   `core/repositories/` or `core/pg_*_read*.py`. Here a handler that returns
-   is judged too: `backfilled()` returns False and `_pg_gold_summary` returns
-   None, and it is the *caller* that then reads DuckDB — invisible from the
-   handler, so every handler in that scope has to decide.
+   `core/repositories/` or `core/pg_*_read*.py`. A handler that returns is
+   judged too: `backfilled()` returned False and `_pg_gold_summary` None, and
+   it was the *caller* that then read DuckDB — invisible from the handler, so
+   every handler in that scope has to decide: re-raise, or say in the same
+   `try` what `ReadUnavailable` means.
 
-"Re-raise" includes deciding for `ReadUnavailable` in the same `try`: that is
-what DN-20b and DN-20c raise from `fall_back`, and a broad handler around a
-router must not turn the refusal into a quiet answer.
-
-4. **Every gate asks whether its switch has an address** (DN-20b). The
-   function holding an `X.enabled() and X.available()` gate must call
-   `read_fallback.no_address(surface, X)` with that same `X` — or
-   `no_engine`, the cohorts' stronger form. That is the one route to DuckDB
-   no exception marks: the switch names Postgres, no DSN is set, and the gate
-   is simply false. Under `duckdb` the call does nothing; under `off` it
-   refuses, so a lost DSN line is a 503 and not frozen numbers.
-
-5. **A router with no DuckDB tail refuses every engine failure** (step 14,
-   S14-05). A `_*_run` router under `core/repositories/` with no gate and
-   no DuckDB tail left — `_traffic_run`, `_margin_run`, `_intel_run`,
-   `_reports_run`, `_marketing_run` and `_lookups_run` first, the
-   dashboard's `_dashboard_run` since S14-06 — or any function there that
+5. **A router refuses every engine failure** (step 14, S14-05). A `_*_run`
+   router under `core/repositories/` — `_traffic_run`, `_margin_run`,
+   `_intel_run`, `_reports_run`, `_marketing_run` and `_lookups_run` first,
+   the dashboard's `_dashboard_run` since S14-06 — or any function there that
    calls `refuse` at all (the dashboard's `_pg_gold_summary`,
    `_pg_gold_series`, `_pg_silver` and `get_manager_sales_365d`), must run
    every engine call
@@ -54,15 +42,13 @@ router must not turn the refusal into a quiet answer.
    500; a handler that falls back, returns or raises something else would
    lose the surface or the count.
 
-A read-switch module is one whose `ENV` names a `KS_READ_*` variable, found by
-walking `core/` — not listed either.
+Rule 4 asked every gate whether its switch had an address
+(`read_fallback.no_address`), until step 14's S14-16 deleted it: no gate is
+left to ask. Rules 1 to 3 counted a fallback through `read_fallback.fall_back`
+until then; it is deleted too, so re-raising is the only decision left.
 
-Two fallbacks are deliberately not counted per request, and each has another
-answer: a gate whose switch is on and whose engine has no address
-(`KS_READ_GOLD=postgres` without `KS_PG_DSN`) is a configuration, published at
-startup under `read_fallback_mode.misconfigured` — and, under `off`, refused
-by rule 4; and `backfilled()` answering "no history yet" is a correct routing
-decision, not a failure.
+A read-switch module is one whose `ENV` names a `KS_READ_*` variable, found by
+walking `core/` — not listed either. None is left since S14-07.
 """
 from __future__ import annotations
 
@@ -83,17 +69,16 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 WALKED = ("core", "web")
 FALLBACK_TEXT = re.compile(r"falling back to DuckDB", re.IGNORECASE)
 # What a handler that carries on toward DuckDB looks like when it reads it
-# itself. Deliberately loose: a false positive costs a `fall_back` decision
-# somebody has to write, a false negative costs a silent fallback.
+# itself. Deliberately loose: a false positive costs a decision somebody has
+# to write, a false negative costs a silent fallback.
 DUCKDB_READS = {"connection", "get_store", "_fetch_one", "_fetch_all"}
-EXITS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
 
 
 # ─── The walk ──────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Site:
-    rule: str          # "log" | "gate" | "handler" | "address"
+    rule: str          # "log" | "gate" | "handler" | "refuse"
     path: str
     line: int
     function: str
@@ -138,11 +123,11 @@ def _mentions_read_unavailable(handler: ast.ExceptHandler) -> bool:
 
 
 def _decides(handler: ast.ExceptHandler, try_node: ast.Try) -> bool:
-    """The handler counts its fallback, re-raises, or the `try` it belongs to
-    has already said what `ReadUnavailable` means."""
+    """The handler re-raises, or the `try` it belongs to has already said
+    what `ReadUnavailable` means. (Counting a fallback through
+    `read_fallback.fall_back` was the other answer until step 14's S14-16
+    deleted it.)"""
     for n in _own_nodes(handler):
-        if isinstance(n, ast.Call) and _call_name(n) == "fall_back":
-            return True
         if isinstance(n, ast.Raise):
             return True
     for earlier in try_node.handlers:
@@ -163,41 +148,12 @@ def _handlers(fn: ast.AST) -> List[tuple]:
     return out
 
 
-def _carries_on_to_duckdb(handler: ast.ExceptHandler) -> bool:
-    if not handler.body or not isinstance(handler.body[-1], EXITS):
-        return True
-    return any(isinstance(n, ast.Call) and _call_name(n) in DUCKDB_READS
-               for n in _own_nodes(handler))
-
-
 def _is_gate(node: ast.AST) -> bool:
     if not (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And)):
         return False
     called = {_call_name(n) for v in node.values for n in ast.walk(v)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     return {"enabled", "available"} <= called
-
-
-def _gate_switches(gate: ast.AST) -> Set[str]:
-    """The names a gate calls `enabled()` on — `pg_traffic_read`, `pg_index`."""
-    return {n.func.value.id for n in ast.walk(gate)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "enabled" and isinstance(n.func.value, ast.Name)}
-
-
-def _asks_for_an_address(fn: ast.AST, switches: Set[str]) -> bool:
-    """`fn` calls `no_address(<surface>, X)` for a switch X its gate consults,
-    or `no_engine`, which refuses whatever the switch says."""
-    for n in _own_nodes(fn):
-        if not isinstance(n, ast.Call):
-            continue
-        name = _call_name(n)
-        if name == "no_engine":
-            return True
-        if (name == "no_address" and len(n.args) >= 2
-                and isinstance(n.args[1], ast.Name) and n.args[1].id in switches):
-            return True
-    return False
 
 
 def _string_parts(node: ast.AST) -> List[str]:
@@ -276,6 +232,8 @@ def _in_handler_scope(relpath: str) -> bool:
 # Rule 5. What a router with no tail may not reach: DuckDB through the store,
 # and the gate's or the fallback's machinery, which belong to the old shape.
 TAIL_READS = {"connection", "_fetch_one", "_fetch_all", "execute"}
+# The old shape's names: the gate's, and `read_fallback`'s fallback machinery,
+# deleted in step 14's S14-16 — a call of one there would not even resolve.
 OLD_SHAPE = {"fall_back", "no_address", "no_engine", "enabled", "available"}
 BROAD = {"Exception", "BaseException"}
 
@@ -433,30 +391,20 @@ def walk_source(source: str, relpath: str, switches: Set[str]) -> List[Site]:
             continue
         fn = enclosing(call, (ast.FunctionDef, ast.AsyncFunctionDef))
         name = getattr(fn, "name", "<module>")
-        if relpath == "core/read_fallback.py" and name == "fall_back":
-            continue  # the one uniform line
         handler = enclosing(call, (ast.ExceptHandler,))
         if handler is not None and (fn is None or enclosing(handler, (
                 ast.FunctionDef, ast.AsyncFunctionDef)) is fn):
             ok = _decides(handler, try_of(handler))
         else:
-            ok = fn is not None and any(
-                isinstance(n, ast.Call) and _call_name(n) == "fall_back"
-                for n in _own_nodes(fn))
+            ok = False
         sites.append(Site("log", relpath, call.lineno, name, ok))
 
-    # 2. An enabled()-and-available() gate.
+    # 2. An enabled()-and-available() gate: none may stand (S14-07). (Rule
+    # 4, its address, went with `no_address` in S14-16.)
     for gate in (n for n in ast.walk(tree) if _is_gate(n)):
         fn = enclosing(gate, (ast.FunctionDef, ast.AsyncFunctionDef))
-        if fn is None:
-            sites.append(Site("gate", relpath, gate.lineno, "<module>", False))
-            continue
-        judged = [(h, t) for h, t in _handlers(fn) if _carries_on_to_duckdb(h)]
-        ok = all(_decides(h, t) for h, t in judged)
-        sites.append(Site("gate", relpath, gate.lineno, fn.name, ok))
-        # 4. The same gate, asked whether its switch has an address.
-        sites.append(Site("address", relpath, gate.lineno, fn.name,
-                          _asks_for_an_address(fn, _gate_switches(gate))))
+        sites.append(Site("gate", relpath, gate.lineno,
+                          getattr(fn, "name", "<module>"), False))
 
     # 3. Every handler in a function that reaches another engine's read.
     if _in_handler_scope(relpath):
@@ -521,8 +469,8 @@ class TestTheWalk:
         bad = sorted(f"{s.rule} {s.path}:{s.line} in {s.function}"
                      for s in sites if not s.ok)
         assert not bad, (
-            "a read that can fall back to DuckDB without core.read_fallback."
-            "fall_back counting it, and without re-raising: " + "; ".join(bad))
+            "a read that can fall back to DuckDB, or a router that does not "
+            "refuse its engine's failure: " + "; ".join(bad))
 
     def test_the_routers_with_no_tail_are_found_and_refuse(self, sites):
         """Rule 5's non-vacuity: the six routers step 14's S14-05 took the
@@ -574,12 +522,12 @@ class TestTheWalk:
         and the last — `/expenses`, `/inventory`, `/goals`, the cohorts, the
         training frame, the weekly report, the assistant, the buyer-sync
         selection and the search index — with S14-07. No gate is left, and
-        none may come back: rule 4's address question has no caller. What
-        rule 3 still finds is the handlers around the engines in the reader
-        modules (`backfilled()` among them), and rule 5 holds every router."""
+        none may come back (rule 4, its address question, went with
+        `no_address` in S14-16). What rule 3 still finds is the handlers
+        around the engines in the reader modules (`backfilled()` among
+        them), and rule 5 holds every router."""
         gates = {(s.path, s.function) for s in sites if s.rule == "gate"}
         assert gates == set(), sorted(gates)
-        assert {s for s in sites if s.rule == "address"} == set()
         handlers = [s for s in sites if s.rule == "handler"]
         assert len(handlers) >= 1, handlers
         refusing = {(s.path, s.function) for s in sites if s.rule == "refuse"}
@@ -598,17 +546,14 @@ class TestTheWalk:
 
     def test_every_counted_surface_is_a_literal(self, sites):
         """A surface is a key in /api/health, so it must be readable from the
-        code — never computed from a flag or an exception. The refusals
-        (`no_address`, `no_engine`) are keys there too, under `off`."""
+        code — never computed from a flag or an exception. Since step 14's
+        S14-16 `refuse` is the one call that counts one."""
         surfaces = set()
         for top in WALKED:
             for path in (REPO / top).rglob("*.py"):
                 for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                    if (isinstance(n, ast.Call) and n.args and (
-                            _call_name(n) in (
-                                "fall_back", "no_address", "no_engine",
-                                "chain_refusal")
-                            or _is_read_fallback_refuse(n))):
+                    if (isinstance(n, ast.Call) and n.args
+                            and _is_read_fallback_refuse(n)):
                         arg = n.args[0]
                         if isinstance(arg, ast.Constant):
                             surfaces.add(arg.value)
@@ -646,35 +591,21 @@ class TestTheRules:
         )
         assert ("log", False) in self._ok(src, "core/somewhere.py")
 
-    def test_a_gate_whose_handler_falls_through_must_count(self):
+    def test_any_gate_is_found(self):
+        """Rule 2 since step 14's S14-16: a gate is a read switch choosing an
+        engine, and none is left — whatever its handlers do. (Until then a
+        gate whose handler counted its fallback through `fall_back`, or
+        ended the step, passed.)"""
         src = (
             "async def f(self):\n"
             "    if pg_x_read.enabled() and pg_x_read.available():\n"
             "        try:\n"
             "            return await pg_x_read.fetch()\n"
             "        except Exception:\n"
-            "            pass\n"
-            "    async with self.connection() as conn:\n"
-            "        return conn.execute('x').fetchall()\n"
+            "            raise\n"
+            "    return None\n"
         )
         assert self._ok(src, "core/somewhere.py") == [("gate", False)]
-        counted = src.replace("            pass\n",
-                              "            read_fallback.fall_back('x', None)\n")
-        assert self._ok(counted, "core/somewhere.py") == [("gate", True)]
-
-    def test_a_gate_whose_handler_ends_the_step_is_not_a_fallback(self):
-        """`sync_to_meilisearch`'s shape: the handler returns, nothing after it
-        reads DuckDB, and outside the handler scope that is the end of it."""
-        src = (
-            "async def f(self):\n"
-            "    try:\n"
-            "        use_pg = pg_x_read.enabled() and pg_x_read.available()\n"
-            "        return await (pg_x_read.fetch() if use_pg else g())\n"
-            "    except Exception as e:\n"
-            "        logger.error('sync error: %s', e)\n"
-            "        return {}\n"
-        )
-        assert self._ok(src, "core/sync_service.py") == [("gate", True)]
 
     def test_a_handler_returning_a_sentinel_is_judged_in_scope(self):
         """`backfilled()`'s shape: False from the handler, DuckDB in the caller."""
@@ -706,50 +637,6 @@ class TestTheRules:
         without = src.replace("    except read_fallback.ReadUnavailable:\n"
                               "        raise\n", "")
         assert self._ok(without) == [("handler", False)]
-
-    def test_a_gate_must_ask_whether_its_switch_has_an_address(self):
-        """Rule 4 (DN-20b): the gate is false when the switch names Postgres
-        and no DSN is set, and DuckDB answers with nothing to count."""
-        src = (
-            "async def f(self):\n"
-            "    if pg_x_read.enabled() and pg_x_read.available():\n"
-            "        return await pg_x_read.fetch()\n"
-            "    async with self.connection() as conn:\n"
-            "        return conn.execute('x').fetchall()\n"
-        )
-        assert self._ok(src, "core/somewhere.py", rules=("address",)) == [
-            ("address", False)]
-        asked = src.replace(
-            "    if pg_x_read", "    read_fallback.no_address('x', pg_x_read)\n"
-                              "    if pg_x_read")
-        assert self._ok(asked, "core/somewhere.py", rules=("address",)) == [
-            ("address", True)]
-
-    def test_the_address_asked_for_is_the_gates_own_switch(self):
-        """A copied line naming another tab's switch asks the wrong question:
-        this gate's switch could be the one without an address."""
-        src = (
-            "async def f(self):\n"
-            "    read_fallback.no_address('x', pg_y_read)\n"
-            "    if pg_x_read.enabled() and pg_x_read.available():\n"
-            "        return await pg_x_read.fetch()\n"
-            "    return None\n"
-        )
-        assert self._ok(src, "core/somewhere.py", rules=("address",)) == [
-            ("address", False)]
-
-    def test_no_engine_answers_rule_four(self):
-        """The cohorts' form: refused whatever the switch says."""
-        src = (
-            "async def f(self):\n"
-            "    if ch_x.enabled() and ch_x.available():\n"
-            "        return await ch_x.fetch()\n"
-            "    else:\n"
-            "        read_fallback.no_engine('cohorts', 'no clickhouse')\n"
-            "    return None\n"
-        )
-        assert self._ok(src, "core/somewhere.py", rules=("address",)) == [
-            ("address", True)]
 
     # Rule 5: a router with no tail.
     REFUSING = (
@@ -898,167 +785,15 @@ class TestTheRules:
 
 @pytest.fixture
 def fresh_read_fallback(monkeypatch):
-    """The module's caches, restored after the test; counts start from zero.
-    (`configure_modes` set the derivation mode too until step 14's S14-15
-    removed it.)"""
-    before = (read_fallback._mode, read_fallback._mode_error,
-              list(read_fallback._misconfigured), list(read_fallback._unreported),
-              read_fallback._configured)
+    """The refusal counts start from zero and are forgotten after the test,
+    and every `KS_READ_*` is unset — none is read since step 14's S14-07, so
+    a test that sets one asks nothing of it. (The fixture saved and restored
+    the mode's caches until S14-16 deleted them.)"""
     for name in [n for n in __import__("os").environ if n.startswith("KS_READ_")]:
         monkeypatch.delenv(name, raising=False)
-    read_fallback._mode, read_fallback._mode_error = None, None
-    read_fallback._misconfigured = []
-    read_fallback._unreported = []
-    read_fallback._configured = False
     read_fallback.reset_counts()
     yield read_fallback
-    read_fallback._mode, read_fallback._mode_error = before[0], before[1]
-    read_fallback._misconfigured, read_fallback._unreported = before[2], before[3]
-    read_fallback._configured = before[4]
     read_fallback.reset_counts()
-
-
-class TestMisconfiguredReads:
-    def test_a_switch_naming_postgres_without_a_dsn_is_published(
-        self, fresh_read_fallback, monkeypatch, caplog,
-    ):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        monkeypatch.setenv("KS_READ_INVENTORY", "duckdb")
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            fresh_read_fallback.configure_mode()
-        assert fresh_read_fallback.misconfigured() == [
-            "KS_READ_GOLD=postgres without KS_PG_DSN"]
-        assert "KS_READ_GOLD=postgres without KS_PG_DSN" in caplog.text
-
-    def test_a_configure_that_does_not_report_leaves_the_line_to_the_report(
-        self, fresh_read_fallback, monkeypatch, caplog,
-    ):
-        """`configure_modes()` configures without reporting and reports after
-        stage 5's verdict, which decides what the line says. The cause is
-        logged once, by the report, and a later configure does not log it
-        again. Mutation: drop a cause the second unreported configure no
-        longer finds new."""
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            fresh_read_fallback.configure_mode(report=False)
-            fresh_read_fallback.configure_mode(report=False)
-            assert "KS_READ_GOLD" not in caplog.text
-            fresh_read_fallback.report_misconfigured()
-            fresh_read_fallback.configure_mode()
-            fresh_read_fallback.report_misconfigured()
-        lines = [r.getMessage() for r in caplog.records if "KS_READ_GOLD" in r.getMessage()]
-        # Refused: since step 14's S14-00 the mode is `off` whatever
-        # KS_READ_FALLBACK says, and the line says what this process does.
-        assert lines == ["KS_READ_GOLD=postgres without KS_PG_DSN — no read of "
-                         "that engine can succeed, whatever the flag says: a "
-                         "tab's is refused (KS_READ_FALLBACK=off). Set the "
-                         "address; unsetting the flag only hides this line."], lines
-
-    def test_clickhouse_needs_its_url(self, fresh_read_fallback, monkeypatch):
-        monkeypatch.delenv("KS_CH_URL", raising=False)
-        monkeypatch.setenv("KS_READ_COHORTS", "clickhouse")
-        fresh_read_fallback.configure_mode()
-        assert fresh_read_fallback.misconfigured() == [
-            "KS_READ_COHORTS=clickhouse without KS_CH_URL"]
-
-    def test_with_the_address_nothing_is_published(self, fresh_read_fallback, monkeypatch):
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        monkeypatch.setenv("KS_CH_URL", "http://ch:8123")
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        monkeypatch.setenv("KS_READ_COHORTS", "clickhouse")
-        fresh_read_fallback.configure_mode()
-        assert fresh_read_fallback.misconfigured() == []
-
-    def test_every_read_switch_set_is_covered(self, fresh_read_fallback, monkeypatch):
-        """The check scans the environment by prefix, so any switch set is
-        covered, a retired one included — production's `.env` keeps them
-        for the images before step 14. No module reads one since step 14's
-        S14-07 (`TestTheWalk.test_the_read_switches_are_found_not_listed`),
-        so the names are written out here; `misconfigured` goes in S14-16."""
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.delenv("KS_CH_URL", raising=False)
-        envs = {"KS_READ_EXPENSES": "postgres", "KS_READ_INVENTORY": "postgres",
-                "KS_READ_GOALS": "postgres", "KS_READ_COHORTS": "clickhouse"}
-        for name, engine in envs.items():
-            monkeypatch.setenv(name, engine)
-        fresh_read_fallback.configure_mode()
-        published = {line.split("=", 1)[0] for line in fresh_read_fallback.misconfigured()}
-        assert published == set(envs)
-
-    def test_every_published_switch_is_refused_under_off(
-        self, fresh_read_fallback, monkeypatch, caplog,
-    ):
-        """What is published under `misconfigured` and what `no_address`
-        refuses are one rule, so under `off` the two lists are the same list
-        — shown on stand-in switches, Postgres and ClickHouse, since no
-        module of `core/` carries one after step 14's S14-07. Both go in
-        S14-16."""
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.delenv("KS_CH_URL", raising=False)
-        modules = []
-        for name, engine in (("standin_pg", "postgres"), ("standin_ch", "clickhouse")):
-            module = type(name, (), {"ENV": f"KS_READ_{name.upper()}", "__name__": name})
-            monkeypatch.setenv(module.ENV, engine)
-            modules.append(module)
-        monkeypatch.setenv("KS_READ_FALLBACK", "off")
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            fresh_read_fallback.configure_mode()
-        assert "a tab's is refused (KS_READ_FALLBACK=off)" in caplog.text
-        for module in modules:
-            with pytest.raises(fresh_read_fallback.ReadUnavailable):
-                fresh_read_fallback.no_address(module.__name__, module)
-        assert set(fresh_read_fallback.refusals()) == {m.__name__ for m in modules}
-        assert len(fresh_read_fallback.misconfigured()) == len(modules)
-
-
-class TestNoAddress:
-    """`no_address`: refused under `off` only, and only for a switch naming an
-    engine this process has no address for (DN-20b). No reader calls it
-    since step 14's S14-07 — `/inventory`'s and the cohorts' switches were
-    the last read — so it is held on stand-ins until S14-16 removes it."""
-
-    PG = type("standin_pg", (), {"ENV": "KS_READ_STANDIN_PG"})
-    CH = type("standin_ch", (), {"ENV": "KS_READ_STANDIN_CH"})
-
-    def test_under_off_only_the_unaddressed_switch_is_refused(
-        self, fresh_read_fallback, monkeypatch, caplog,
-    ):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.delenv("KS_CH_URL", raising=False)
-        monkeypatch.setenv("KS_READ_FALLBACK", "off")
-        fresh_read_fallback.configure_mode()
-
-        # Unset, or naming DuckDB: routing, never refused here.
-        fresh_read_fallback.no_address("standin", self.PG)
-        monkeypatch.setenv(self.PG.ENV, "duckdb")
-        fresh_read_fallback.no_address("standin", self.PG)
-        assert fresh_read_fallback.refusals() == {}
-
-        # Naming Postgres with no DSN: refused, and the log says which switch.
-        monkeypatch.setenv(self.PG.ENV, "postgres")
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            with pytest.raises(fresh_read_fallback.ReadUnavailable) as raised:
-                fresh_read_fallback.no_address("standin", self.PG)
-        assert raised.value.surface == "standin"
-        assert "KS_READ_STANDIN_PG=postgres without KS_PG_DSN" in caplog.text
-        assert "falling back to DuckDB" not in caplog.text
-        assert ": None" not in caplog.text
-        assert fresh_read_fallback.refusals()["standin"]["count"] == 1
-
-        # With the address the gate will ask Postgres: nothing to refuse.
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        fresh_read_fallback.no_address("standin", self.PG)
-        assert fresh_read_fallback.refusals()["standin"]["count"] == 1
-
-        # ClickHouse by its own address.
-        monkeypatch.setenv(self.CH.ENV, "clickhouse")
-        with pytest.raises(fresh_read_fallback.ReadUnavailable):
-            fresh_read_fallback.no_address("standin_ch", self.CH)
-        monkeypatch.setenv("KS_CH_URL", "http://ch:8123")
-        fresh_read_fallback.no_address("standin_ch", self.CH)
-        assert fresh_read_fallback.refusals()["standin_ch"]["count"] == 1
 
 
 # ─── backfilled(): the site nobody's grep found ────────────────────────────
@@ -1086,7 +821,7 @@ class TestBackfilledCounts:
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
             assert await _fresh.backfilled() is False
             assert await _fresh.backfilled() is False
-        assert "expenses" not in read_fallback.counts()
+        assert "expenses" not in read_fallback.refusals()
 
 
 # ─── The one handler around a router: ReadUnavailable passes through ───────
@@ -1114,54 +849,6 @@ class TestTheForecastSignalLetsARefusalThrough:
              patch.object(GoalsMixin, "_forecast_actual_revenue",
                           new=AsyncMock(return_value=0.0)):
             assert await store._get_ml_forecast_total(2025, 3, "retail") == 0.0
-
-
-# ─── The canary ────────────────────────────────────────────────────────────
-
-class TestTheCanary:
-    def test_an_error_is_a_failure_key(self):
-        from bot.canary import check_read_fallback_mode
-
-        payload = {"read_fallback_mode": {
-            "mode": "duckdb", "error": "KS_READ_FALLBACK='of' is not one of ('duckdb', 'off')",
-            "misconfigured": []}}
-        assert [k for k, _ in check_read_fallback_mode(payload)] == [
-            "read_fallback_mode_invalid"]
-
-    def test_absent_or_clean_is_quiet(self):
-        from bot.canary import check_read_fallback_mode
-
-        assert check_read_fallback_mode({}) == []
-        assert check_read_fallback_mode({"read_fallback_mode": {
-            "mode": "off", "error": None, "misconfigured": []}}) == []
-
-    @pytest.mark.asyncio
-    async def test_the_wiring_warns(self):
-        """Not only the judge: a typo reaches a failure key and a warn, and
-        names its lever."""
-        from datetime import datetime, timezone
-
-        import httpx
-
-        from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-
-        payload = _healthy_payload()
-        payload["read_fallback_mode"] = {
-            "mode": "duckdb", "error": "KS_READ_FALLBACK='of' is not one of ('duckdb', 'off')",
-            "misconfigured": []}
-
-        def handler(request):
-            return httpx.Response(200, json=payload)
-
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(handler) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                result = await canary.run_canary(DASHBOARD, client=client)
-        assert result.severity == "warn"
-        assert result.failure_keys == ["read_fallback_mode_invalid"]
-        assert "KS_READ_FALLBACK" in canary._what_to_do(result)
 
 
 # ─── Through the app ───────────────────────────────────────────────────────
@@ -1195,14 +882,11 @@ def admin_client(monkeypatch):
 class TestThroughTheApp:
 
     def test_nothing_fell_back_is_an_empty_block(self, admin_client, fresh_read_fallback):
+        """Since step 14's S14-16 the block is the refusals alone, and
+        `read_fallbacks` — the reads answered from DuckDB, none since S14-00
+        — is gone. Mutation: publish `mode`, `misconfigured` or the old
+        block again."""
         health = admin_client.get("/api/health").json()
-        assert health["read_fallbacks"] == {}
-        # `fresh_read_fallback` unsets every KS_READ_*. Until step 14's S14-07
-        # that left the cohorts on DuckDB — a route `off` refused, published
-        # under `no_engine`; they ask ClickHouse whatever the switch says
-        # now, so nothing is published. Since S14-00 the mode is `off`
-        # whatever KS_READ_FALLBACK says, so the block carries its refusals.
-        assert health["read_fallback_mode"] == {
-            "mode": "off", "error": None, "misconfigured": [], "refused": {},
-            "no_engine": []}
+        assert "read_fallbacks" not in health
+        assert health["read_fallback_mode"] == {"refused": {}}
 
