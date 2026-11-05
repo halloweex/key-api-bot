@@ -56,30 +56,13 @@ from core.pg_orders_write import UpsertResult  # noqa: F401 — the re-export
 logger = logging.getLogger(__name__)
 
 
-# Warehouse self-heal bound: how many consecutive failed/errored refreshes we
-# keep auto-retrying (mark dirty → next scheduler tick) before we STOP the loop
-# and escalate loudly. Prevents both the old silent-idle dead-end (wrong data
-# served until the weekly full_sync) and an unbounded retry spin on a
-# deterministic data bug.
-MAX_VALIDATION_RETRIES = 3
-
-# Once the retry budget is spent we stop rebuilding on every scheduler tick, but
-# "stop" used to mean forever — the Gold layer stayed wrong until a human acted
-# or the weekly full_sync came round. On 2026-08-02 that was five days. A full
-# rebuild every six hours is cheap enough to be worth the chance that the damage
-# was transient, and rare enough not to spin on a deterministic data bug.
-STUCK_REBUILD_COOLDOWN_SECONDS = 6 * 60 * 60
-
 # DuckDB's own memory ceiling, independent of the container's mem_limit. Keep it
 # below what the container allows: Python, pandas frames and the Meili sync all
 # draw from the same budget, and a container OOM-kill is worse than a DuckDB
 # spill to temp_directory.
 DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
 
-# Above this many freshly-parsed UTM orders, resolving their dates costs more
-# than the full traffic rebuild it would save, so we just rebuild everything.
-# A parse this large is a backfill or a first run, not a steady-state tick.
-UTM_DATE_LOOKUP_LIMIT = 5000
+
 
 
 def _memory_limit() -> str:
@@ -216,9 +199,9 @@ SILVER_ORDER_LINES_VIEW_SQL = (
 #
 # They live in `core/warehouse_sql.py` since step 14's S14-01, so that a
 # Postgres derivation renders them without importing this module and the
-# `duckdb` driver with it. Re-exported here as the same objects for one
-# release: this module's own rebuild and `GOLD_REVENUE_SELECT_SQL` read them,
-# and so do callers that have not moved yet.
+# `duckdb` driver with it. Re-exported here as the same objects until this
+# module goes (S14-18), for callers that have not moved yet; this module's own
+# rebuild, their last reader here, went in S14-15.
 from core.warehouse_sql import (
     GOLD_MEASURES,
     _GOLD_EARNING_ROWS,
@@ -231,54 +214,13 @@ from core.warehouse_sql import (
     silver_select_sql,
 )
 
-# DuckDB only. These are what the `source_id` dimension replaces, kept exactly
-# as they were: the parallel period compares the two stores, and rewriting the
-# side being compared against is how a migration stops proving anything.
-#
-# Note they filter on `source_id`, never on `is_active_source` — which is the
-# same set today, since 1, 2 and 4 are all in REVENUE_SOURCE_IDS.
-GOLD_SOURCE_MEASURES: "Dict[str, str]" = {
-    f"{name}_{suffix}": (
-        f"COALESCE(SUM(CASE WHEN NOT is_return AND source_id = {sid} THEN grand_total END), 0)"
-        if suffix == "revenue" else
-        f"COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = {sid} THEN id END)"
-    )
-    for suffix in ("revenue", "orders")
-    for name, sid in (("instagram", 1), ("telegram", 2), ("shopify", 4))
-}
-
-# `gold_daily_revenue` is written by a **positional** INSERT — no column list —
-# so this is the table's DDL order and nothing may reorder it. A test compares
-# it against the columns DuckDB actually reports for the table.
-DUCKDB_GOLD_COLUMNS: "Tuple[str, ...]" = (
-    "date", "sales_type",
-    "revenue", "orders_count", "unique_customers", "new_customers",
-    "returning_customers",
-    "instagram_revenue", "telegram_revenue", "shopify_revenue",
-    "instagram_orders", "telegram_orders", "shopify_orders",
-    "returns_count", "returns_revenue", "avg_order_value",
-)
-
-
-def gold_select_items(columns: "Sequence[str]") -> str:
-    """`<expr> AS <name>` for each measure, in the order given.
-
-    `date` and `sales_type` are dimensions and are emitted by the caller: only
-    Postgres has a third one, and only DuckDB has the six source columns.
-    """
-    both = {**GOLD_MEASURES, **GOLD_SOURCE_MEASURES}
-    return ",\n".join(f"    {both[c]} AS {c}" for c in columns)
-
-
-GOLD_REVENUE_SELECT_SQL = (
-    "\nSELECT\n"
-    "    order_date AS date,\n"
-    "    sales_type,\n"
-    + gold_select_items(DUCKDB_GOLD_COLUMNS[2:])
-    + "\nFROM silver_orders\n"
-    "WHERE {date_filter}\n"
-    "GROUP BY order_date, sales_type\n"
-)
+# DuckDB's own Gold — `GOLD_SOURCE_MEASURES` (the six channel columns the
+# `source_id` dimension replaced), `DUCKDB_GOLD_COLUMNS` (the table's DDL
+# order, for a positional INSERT), `gold_select_items` and
+# `GOLD_REVENUE_SELECT_SQL` — stood here until step 14's S14-15 deleted
+# the DuckDB rebuild that rendered them. The table's DDL stays in
+# `_init_schema` until the schema goes (S14-18): the compaction's phase 2
+# and the inventory views are still built from it.
 
 
 class DuckDBStore(
@@ -296,11 +238,6 @@ class DuckDBStore(
     - Fast analytical queries
     - Thread offloading to avoid blocking asyncio event loop
     """
-
-    # Monotonic timestamp of the last full rebuild attempted after the per-tick
-    # retry budget ran out. Class-level default so instances built without
-    # __init__ still read cleanly.
-    _last_stuck_rebuild: "float | None" = None
 
     # FatalExceptions this store has seen, for /api/health; None until one.
     # Class-level for the same reason.
@@ -1697,637 +1634,12 @@ class DuckDBStore(
         logger.info("Inventory analytics views created")
 
     # ─── Warehouse Layer Refresh ─────────────────────────────────────────────
-
-    async def refresh_warehouse_layers(
-        self,
-        trigger: str = "manual",
-        changed_order_ids: list[int] | None = None,
-    ) -> Dict[str, Any]:
-        """Rebuild Silver and Gold warehouse layers from Bronze tables.
-
-        Silver is always fully rebuilt (37K rows, <1s). Gold is rebuilt
-        incrementally when changed_order_ids is provided (only affected dates),
-        or fully otherwise.
-
-        Args:
-            trigger: What triggered the refresh
-            changed_order_ids: Order IDs that changed (for incremental Gold rebuild)
-
-        Returns:
-            Dict with refresh stats and validation results
-        """
-        import time
-        start_time = time.perf_counter()
-        error_msg = None
-
-        # Silver's shape lives at module level — see silver_select_sql above.
-        # It used to be built here and copied into web/routes/api/admin.py,
-        # which is how the two drifted apart in under a day.
-        _silver_select_cols = silver_select_sql(_DUCKDB_DIALECT)
-        _silver_pass2_sql = silver_pass2_sql
-
-        try:
-            # ── Step 1: Silver layer ──
-            # Incremental rebuild scopes writes to changed orders + cascade
-            # (other orders of the same buyers, since is_new_customer depends on
-            # the buyer's MIN(order_date) across all their orders).
-            #
-            # Falls back to full rebuild when:
-            #   (a) silver < 95% of orders — post-compact recovery, baseline rebuild
-            #   (b) no changed_order_ids — manual trigger, startup, drift retry
-            #   (c) cascade scope > 50% of orders — full is cheaper at that point
-            silver_scope_ids: list[int] = []
-            silver_affected_buyers: list[int] = []
-            silver_mode = "full"
-
-            async with self.connection() as conn:
-                silver_count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
-                orders_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-                silver_populated = orders_count > 0 and silver_count >= orders_count * 0.95
-
-                if changed_order_ids and silver_populated:
-                    ph = ",".join("?" * len(changed_order_ids))
-                    ids = list(changed_order_ids)
-                    # Affected buyers = NEW (orders) ∪ OLD (silver) — covers buyer reassignment
-                    silver_affected_buyers = [r[0] for r in conn.execute(f"""
-                        SELECT DISTINCT b FROM (
-                            SELECT buyer_id AS b FROM orders
-                            WHERE id IN ({ph}) AND buyer_id IS NOT NULL
-                            UNION
-                            SELECT buyer_id AS b FROM silver_orders
-                            WHERE id IN ({ph}) AND buyer_id IS NOT NULL
-                        )
-                    """, ids + ids).fetchall()]
-                    # Scope = changed_ids ∪ all orders of affected buyers (cascade).
-                    # UNION over BOTH orders and silver_orders so DELETE catches
-                    # orphan silver rows (orders deleted via the admin purge,
-                    # retired by OD-10, or H3 bronze promotion). Without the
-                    # silver-side branch, an
-                    # orphan tied to an affected buyer would never get cleaned —
-                    # full rebuild used to wipe these implicitly via DELETE *.
-                    if silver_affected_buyers:
-                        bph = ",".join("?" * len(silver_affected_buyers))
-                        silver_scope_ids = [r[0] for r in conn.execute(f"""
-                            SELECT id FROM orders        WHERE id IN ({ph})
-                            UNION
-                            SELECT id FROM orders        WHERE buyer_id IN ({bph})
-                            UNION
-                            SELECT id FROM silver_orders WHERE id IN ({ph})
-                            UNION
-                            SELECT id FROM silver_orders WHERE buyer_id IN ({bph})
-                        """, ids + silver_affected_buyers + ids + silver_affected_buyers).fetchall()]
-                    else:
-                        # No buyer cascade. list(ids) covers both sides:
-                        # DELETE removes silver rows for these ids (cleans orphans),
-                        # INSERT only re-adds rows that exist in orders.
-                        silver_scope_ids = list(ids)
-                    # Guardrail: large scope → full rebuild is cheaper
-                    if len(silver_scope_ids) > orders_count * 0.5:
-                        silver_scope_ids = []
-                        silver_affected_buyers = []
-                    elif silver_scope_ids:
-                        silver_mode = f"incremental_{len(silver_scope_ids)}"
-
-                # Dates these rows occupy BEFORE they are rewritten. Gold is
-                # rebuilt per date, and the dates a row leaves are not the dates
-                # it arrives at: move an order from the 1st to the 5th and only
-                # the 5th gets recomputed, so the 1st keeps the revenue too and
-                # the money is counted twice. An order deleted upstream is worse
-                # — after the DELETE its date is nowhere to be found, so Gold
-                # keeps it until the next full rebuild.
-                silver_old_dates: set = set()
-                if silver_mode != "full" and silver_scope_ids:
-                    sph = ",".join("?" * len(silver_scope_ids))
-                    silver_old_dates = {
-                        r[0] for r in conn.execute(
-                            f"SELECT DISTINCT order_date FROM silver_orders "
-                            f"WHERE id IN ({sph})",
-                            silver_scope_ids,
-                        ).fetchall()
-                        if r[0] is not None
-                    }
-
-                conn.execute("BEGIN TRANSACTION")
-                try:
-                    if silver_mode != "full":
-                        sph = ",".join("?" * len(silver_scope_ids))
-                        conn.execute(
-                            f"DELETE FROM silver_orders WHERE id IN ({sph})",
-                            silver_scope_ids,
-                        )
-                        conn.execute(f"""
-                            INSERT INTO silver_orders
-                            SELECT {_silver_select_cols}
-                            FROM orders o
-                            WHERE o.id IN ({sph})
-                        """, silver_scope_ids)
-                        if silver_affected_buyers:
-                            bph = ",".join("?" * len(silver_affected_buyers))
-                            conn.execute(
-                                _silver_pass2_sql(buyer_filter=bph,
-                                                  dialect=_DUCKDB_DIALECT),
-                                silver_affected_buyers + silver_affected_buyers,
-                            )
-                    else:
-                        conn.execute("DELETE FROM silver_orders")
-                        conn.execute(f"""
-                            INSERT INTO silver_orders
-                            SELECT {_silver_select_cols}
-                            FROM orders o
-                        """)
-                        conn.execute(_silver_pass2_sql(dialect=_DUCKDB_DIALECT))
-                    conn.execute("COMMIT")
-                except Exception:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    raise
-
-            # ── Determine affected dates for incremental Gold rebuild ──
-            # Gold follows Silver's decision. A full Silver rebuild with a
-            # partial Gold one is how Gold ends up holding rows no Silver row
-            # supports: the guardrail branch above and the post-compact
-            # recovery path both rewrite every Silver row, and a Gold rebuild
-            # scoped to the changed ids would leave every other date as it was.
-            affected_dates: set[date] | None = None
-            if silver_mode != "full" and silver_scope_ids:
-                async with self.connection() as conn:
-                    # Dates these rows occupy now. silver_scope_ids already
-                    # carries the buyer cascade, so one scope drives Silver and
-                    # Gold and the two cannot disagree about what changed.
-                    sph = ",".join("?" * len(silver_scope_ids))
-                    rows = conn.execute(f"""
-                        SELECT DISTINCT order_date FROM silver_orders
-                        WHERE id IN ({sph})
-                    """, silver_scope_ids).fetchall()
-                    new_dates = {r[0] for r in rows if r[0] is not None}
-
-                # Where they were ∪ where they are.
-                affected_dates = silver_old_dates | new_dates
-
-                if not affected_dates:
-                    affected_dates = None  # Fall back to full rebuild
-
-            # ── Step 2: Gold daily revenue (lock acquired + released) ──
-            # Single SQL template for both incremental and full rebuild
-            _GOLD_REVENUE_SQL = "INSERT INTO gold_daily_revenue\n" + GOLD_REVENUE_SELECT_SQL
-
-            gold_revenue_rows = 0
-            async with self.connection() as conn:
-                conn.execute("BEGIN TRANSACTION")
-                try:
-                    if affected_dates:
-                        date_params = list(affected_dates)
-                        date_placeholders = ",".join("?" * len(date_params))
-                        conn.execute(f"DELETE FROM gold_daily_revenue WHERE date IN ({date_placeholders})", date_params)
-                        conn.execute(_GOLD_REVENUE_SQL.format(date_filter=f"order_date IN ({date_placeholders})"), date_params)
-                    else:
-                        conn.execute("DELETE FROM gold_daily_revenue")
-                        conn.execute(_GOLD_REVENUE_SQL.format(date_filter="order_date IS NOT NULL"))
-                    gold_revenue_rows = conn.execute("SELECT COUNT(*) FROM gold_daily_revenue").fetchone()[0]
-                    conn.execute("COMMIT")
-                except Exception:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    raise
-
-            # ── Step 4: Validation + audit log ──
-            needs_full_retry = False
-            validation_alert: str | None = None
-            # Names the condition for the throttle. The message text cannot:
-            # it carries the checksums and the attempt number, so it differs
-            # on every one of the 30 ticks an hour a standing failure produces.
-            validation_alert_key: str | None = None
-            partition_alert: str | None = None
-            async with self.connection() as conn:
-                # The known-types sum is written with a literal tuple because
-                # DuckDB will not parameterise an IN list; the values come from
-                # a module constant, never from a request.
-                known_types_sql = ", ".join(f"'{t}'" for t in KNOWN_SALES_TYPES)
-                checksums = conn.execute(f"""
-                    SELECT
-                        (SELECT COUNT(*) FROM orders) AS bronze_orders,
-                        (SELECT COUNT(*) FROM silver_orders) AS silver_rows,
-                        (SELECT COALESCE(SUM(grand_total), 0) FROM silver_orders
-                         WHERE NOT is_return AND is_active_source) AS silver_revenue,
-                        (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue) AS gold_revenue,
-                        (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue
-                         WHERE sales_type IN ({known_types_sql})) AS gold_revenue_known,
-                """).fetchone()
-
-                bronze_orders = checksums[0]
-                silver_rows = checksums[1]
-                silver_revenue = float(checksums[2])
-                gold_revenue = float(checksums[3])
-                gold_revenue_known = float(checksums[4])
-
-                checksum_match = abs(silver_revenue - gold_revenue) < 0.01
-                row_count_match = bronze_orders == silver_rows
-
-                # THE PRODUCT CHECKSUM IS GONE, AND THAT IS NOT A GAP LEFT OPEN
-                #
-                # `validation_passed` carried a fourth check: the sum of
-                # `gold_daily_products.product_revenue` against the same sum
-                # taken over the order lines. Both sides existed because the
-                # layer did. It has no readers left — three tabs and the weekly
-                # report each moved to the order-lines level, finding the
-                # numbers identical — so it is retired, and a check whose
-                # subject is gone cannot be kept by comparing its source to
-                # itself.
-                #
-                # What that check protected has gone with it: a defect in a
-                # layer nobody reads harms nobody. This is the opposite of the
-                # traffic case one change ago, where the retired comparison was
-                # proving a claim about the *replacement*.
-
-                # ── Cell guard ──
-                # Gold holds one row per (date, sales_type) and is built from
-                # Silver by GROUP BY, so the two sets of cells must be equal.
-                # The scalar checksums cannot see it when they are not: on the
-                # three backups taken during the August incident there were
-                # 100 → 90 → 84 mismatched cells and *zero* value mismatches —
-                # every one was a cell Gold was missing, while the sums agreed.
-                # Two anti-joins over an indexed pair of columns; ~7 ms.
-                missing_cells = conn.execute("""
-                    SELECT COUNT(*) FROM (
-                        SELECT DISTINCT order_date AS d, sales_type AS t FROM silver_orders
-                        EXCEPT
-                        SELECT date, sales_type FROM gold_daily_revenue
-                    )
-                """).fetchone()[0]
-                extra_cells = conn.execute("""
-                    SELECT COUNT(*) FROM (
-                        SELECT date AS d, sales_type AS t FROM gold_daily_revenue
-                        EXCEPT
-                        SELECT DISTINCT order_date, sales_type FROM silver_orders
-                    )
-                """).fetchone()[0]
-                cells_match = (missing_cells == 0 and extra_cells == 0)
-                if not cells_match:
-                    logger.error(
-                        f"Gold cell mismatch: {missing_cells} missing, "
-                        f"{extra_cells} orphaned (silver_rows={silver_rows})"
-                    )
-
-                # A missing cell is a rebuild fault, and a rebuild is what
-                # fixes it — so this joins the flag that drives the self-heal,
-                # unlike the partition assertion below, which reports a
-                # condition no rebuild can repair.
-                validation_passed = (
-                    checksum_match and row_count_match
-                    and cells_match
-                )
-
-                # ── Partition assertion (P2-2) ──
-                # The three checksums above sum every sales_type, while every
-                # dashboard endpoint defaults to Query("retail"). A fourth
-                # value — or a NULL — would therefore balance the checksums
-                # perfectly and show up nowhere. Comparing the KNOWN types
-                # against the Silver total is what notices; the subtraction
-                # also catches NULL, which `NOT IN (...)` silently would not.
-                #
-                # Deliberately NOT part of validation_passed: that flag drives
-                # mark_warehouse_dirty → a full rebuild every two minutes, and
-                # a rebuild cannot fix a sales_type the code does not know
-                # about. This reports; a human classifies.
-                partition_exhaustive = abs(silver_revenue - gold_revenue_known) < 0.01
-                if not partition_exhaustive:
-                    unknown = conn.execute(f"""
-                        SELECT sales_type, COALESCE(SUM(revenue), 0) AS revenue
-                        FROM gold_daily_revenue
-                        WHERE sales_type IS NULL
-                           OR sales_type NOT IN ({known_types_sql})
-                        GROUP BY sales_type
-                        ORDER BY revenue DESC
-                    """).fetchall()
-                    detail = ", ".join(
-                        f"{row[0] if row[0] is not None else 'NULL'}=₴{float(row[1]):,.2f}"
-                        for row in unknown
-                    ) or "no rows — Gold is short of Silver"
-                    logger.error(
-                        f"sales_type partition not exhaustive: silver={silver_revenue:.2f} "
-                        f"known-types gold={gold_revenue_known:.2f}; {detail}"
-                    )
-                    partition_alert = (
-                        "🚨 <b>Gold: revenue in an unknown sales_type — "
-                        "no page shows it</b>\n"
-                        f"{detail}\n"
-                        "→ A type outside retail/b2b/internal; check the managers"
-                    )
-
-                if not validation_passed:
-                    # Count consecutive PRIOR failures (this run's row not yet
-                    # written). Keep self-healing (mark dirty → full retry on the
-                    # next scheduler tick) up to MAX_VALIDATION_RETRIES, then STOP
-                    # the loop and escalate LOUDLY. The old code went silently idle
-                    # on the 2nd consecutive failure, leaving the Gold layer serving
-                    # wrong revenue until the weekly full_sync, with no alert.
-                    #
-                    # Errored rows are skipped rather than counted: an OOM says
-                    # nothing about whether Gold reconciles, and on 2026-08-02 a
-                    # storm of seven of them spent the entire budget before the
-                    # truncated Gold it caused was ever seen — the self-heal was
-                    # disarmed by the very event it exists to recover from.
-                    prior_failures = conn.execute(
-                        "SELECT validation_passed FROM warehouse_refreshes "
-                        "WHERE error IS NULL "
-                        "ORDER BY refreshed_at DESC LIMIT ?",
-                        [MAX_VALIDATION_RETRIES + 1],
-                    ).fetchall()
-                    consecutive = 0
-                    for (vp,) in prior_failures:
-                        if vp is False:
-                            consecutive += 1
-                        else:
-                            break
-
-                    detail = (
-                        f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
-                        f"cells: {missing_cells} missing/{extra_cells} orphaned, "
-                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match})"
-                    )
-
-                    if consecutive < MAX_VALIDATION_RETRIES:
-                        logger.warning(
-                            f"Warehouse validation failed — scheduling full retry "
-                            f"(consecutive={consecutive}): {detail}"
-                        )
-                        needs_full_retry = True
-                        validation_alert = (
-                            f"⚠️ <b>Warehouse: validation failed "
-                            f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES})</b>\n"
-                            f"{detail}\n"
-                            "→ Nothing yet: retries every 2 min; you'll hear at "
-                            f"{MAX_VALIDATION_RETRIES}/{MAX_VALIDATION_RETRIES}"
-                        )
-                        validation_alert_key = "warehouse:validation_retrying"
-                    elif self._claim_stuck_rebuild_slot():
-                        hours = STUCK_REBUILD_COOLDOWN_SECONDS // 3600
-                        logger.error(
-                            f"Warehouse validation failed {consecutive}x consecutively — "
-                            f"per-tick retry stopped; attempting one full rebuild: {detail}"
-                        )
-                        needs_full_retry = True
-                        validation_alert = (
-                            f"🚨 <b>Warehouse: validation failing ×{consecutive}, "
-                            "Gold may be wrong</b>\n"
-                            f"{detail}\n"
-                            f"→ Full rebuild running (the last auto lever); "
-                            f"back in {hours}h if it fails"
-                        )
-                        validation_alert_key = "warehouse:validation_rebuilding"
-                    else:
-                        logger.error(
-                            f"Warehouse validation failed {consecutive}x consecutively — "
-                            f"full rebuild already attempted this period: {detail}"
-                        )
-                        validation_alert = (
-                            f"🚨 <b>Warehouse: ×{consecutive} and the rebuild "
-                            "did not help — human needed</b>\n"
-                            f"{detail}\n"
-                            "→ Machine exhausted; tick history in warehouse_refreshes"
-                        )
-                        validation_alert_key = "warehouse:validation_unfixed"
-
-                duration_ms = (time.perf_counter() - start_time) * 1000
-
-                _audit_values = [
-                    trigger, round(duration_ms, 2),
-                    # `gold_products_rows` stays NULL from here on. The column
-                    # holds 74k rows of history and is not dropped; a 0 would
-                    # read as "built nothing", and the truth is that there is
-                    # no such layer any more.
-                    bronze_orders, silver_rows, gold_revenue_rows, None,
-                    round(silver_revenue, 2), round(gold_revenue, 2),
-                    checksum_match, validation_passed, None,
-                ]
-                _audit_cols = (
-                    "refreshed_at, trigger, duration_ms, bronze_orders, silver_rows, "
-                    "gold_revenue_rows, gold_products_rows, silver_revenue_checksum, "
-                    "gold_revenue_checksum, checksum_match, validation_passed, error"
-                )
-                try:
-                    conn.execute(
-                        f"INSERT INTO warehouse_refreshes ({_audit_cols}, silver_mode) "
-                        f"VALUES (CURRENT_TIMESTAMP, {', '.join('?' * len(_audit_values))}, ?)",
-                        _audit_values + [silver_mode],
-                    )
-                except Exception:
-                    # The column may not exist yet: a deploy can reach this line
-                    # before its migration lands, and losing the audit row is a
-                    # worse outcome than losing one field of it. This is the
-                    # 2026-08-09 failure mode written down as a fallback rather
-                    # than left to be rediscovered.
-                    conn.execute(
-                        f"INSERT INTO warehouse_refreshes ({_audit_cols}) "
-                        f"VALUES (CURRENT_TIMESTAMP, {', '.join('?' * len(_audit_values))})",
-                        _audit_values,
-                    )
-
-            # Mark dirty OUTSIDE the connection block to avoid deadlock
-            # (mark_warehouse_dirty also acquires self._lock via self.connection())
-            if needs_full_retry:
-                await self.mark_warehouse_dirty(None)
-            if validation_alert:
-                await self._send_warehouse_alert(validation_alert, validation_alert_key)
-            if partition_alert:
-                await self._send_warehouse_alert(
-                    partition_alert, "warehouse:sales_type_partition",
-                )
-
-            # Step 04: a tick that came back clean announces the recovery of
-            # whatever this group had announced — validation, partition, and
-            # the errored-refresh pair alike. Silence after an alert used to
-            # be indistinguishable from the throttle holding it, and this
-            # validator once stood failing for three straight weeks.
-            try:
-                from core.alerting import resolve_group
-
-                still = []
-                if validation_alert:
-                    still.append(validation_alert_key)
-                if partition_alert:
-                    still.append("warehouse:sales_type_partition")
-                await resolve_group("warehouse", still_firing=still)
-            except Exception as e:
-                logger.warning(f"Warehouse resolve failed: {e}")
-
-            incremental_info = ""
-            if affected_dates:
-                incremental_info = f", gold_dates={len(affected_dates)}"
-
-            logger.info(
-                f"Warehouse layers refreshed ({trigger}): "
-                f"silver={silver_rows} ({silver_mode}), gold_rev={gold_revenue_rows}, "
-                f"duration={duration_ms:.0f}ms, valid={validation_passed}"
-                f"{incremental_info}"
-            )
-
-            # ── UTM/Traffic layers (after main refresh completes) ──
-            utm_count = 0
-            utm_parsed = False
-            try:
-                utm_order_ids = await self.refresh_utm_silver_layer()
-                utm_count = len(utm_order_ids)
-                utm_parsed = True
-
-                # The traffic Gold is gone, and only the UTM Silver above
-                # remains. That layer is read — `/traffic` folds it against
-                # `silver_orders` on both engines — and it is shipped to
-                # Postgres. The Gold over it was read by nobody after the tab
-                # moved, and was still being DELETE+INSERTed here every two
-                # minutes: 5,874 rows rewritten ~720 times a day into the file
-                # whose growth is the reason `_traffic_rebuild_dates` and the
-                # incremental path existed at all.
-            except Exception as utm_error:
-                # Non-critical for *this* refresh — revenue does not read the
-                # UTM level, so the tick still reports success — but no longer
-                # silent downstream. The parser has recorded the failure on the
-                # store (`last_utm_parse_error`), and while it stands
-                # `ship_order_utm` refuses to copy the table to Postgres: a
-                # parse that raised between two write batches leaves exactly
-                # the partial table that `/traffic` would otherwise read as
-                # orders turned organic. That covers the deferred ship in
-                # `_run_warehouse_refresh` too, which runs with a synthetic
-                # success and no parse of its own.
-                logger.warning(
-                    f"UTM layer refresh failed — Postgres keeps its previous "
-                    f"copy until a parse succeeds: {utm_error}"
-                )
-
-            # The way back from `KS_WRITE_WAREHOUSE=postgres` (DN-29): a full
-            # tick that validates, and a UTM parse that finished — in it or in
-            # a later tick — end the hold on the DuckDB checks and record
-            # DuckDB as the writer again. Nothing at all unless this process
-            # is holding.
-            try:
-                from core import warehouse_cutover
-
-                await warehouse_cutover.note_refresh(
-                    self, silver_mode=silver_mode, validation_passed=validation_passed,
-                    utm_parsed=utm_parsed)
-            except Exception as e:
-                # Held a little longer, never a failed tick. Later ticks are
-                # incremental once this one's flag is cleared, so another full
-                # one is asked for, or the hold would outlive the reason for it.
-                logger.error(f"Warehouse writer hold not released: {e}")
-                try:
-                    await self.mark_warehouse_dirty(None)
-                except Exception as mark_err:
-                    logger.error(f"Warehouse writer hold: full re-mark failed: {mark_err}")
-
-            return {
-                "status": "success",
-                "trigger": trigger,
-                "duration_ms": round(duration_ms, 2),
-                "bronze_orders": bronze_orders,
-                "silver_rows": silver_rows,
-                "gold_revenue_rows": gold_revenue_rows,
-                "checksum_match": checksum_match,
-                "validation_passed": validation_passed,
-                "utm_orders_parsed": utm_count,
-            }
-
-        except Exception as e:
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            error_msg = str(e)
-            logger.error(f"Warehouse refresh failed ({trigger}): {e}", exc_info=True)
-
-            # Log failure to audit table
-            try:
-                async with self.connection() as conn:
-                    conn.execute("""
-                        INSERT INTO warehouse_refreshes
-                            (refreshed_at, trigger, duration_ms, validation_passed, error)
-                        VALUES (CURRENT_TIMESTAMP, ?, ?, FALSE, ?)
-                    """, [trigger, round(duration_ms, 2), error_msg])
-            except Exception:
-                pass
-
-            # A5-1 self-heal: an exception here can mean a DURABLE cross-layer
-            # inconsistency on disk — e.g. the Gold-revenue transaction committed
-            # (Step 2) but the Gold-products transaction (Step 3) threw, or the
-            # process was OOM-killed between them. Each step is its own
-            # BEGIN/COMMIT, so the layers are left from different points in time
-            # and validation never ran. Mark dirty so the next scheduler tick does
-            # a full rebuild and reconciles, bounded by the same consecutive-failure
-            # escalation as validation failures (the audit row above is already
-            # counted). Previously this path returned without marking dirty, so the
-            # inconsistency persisted silently until the weekly full_sync.
-            try:
-                consecutive = await self._count_consecutive_refresh_failures()
-                if consecutive <= MAX_VALIDATION_RETRIES:
-                    await self.mark_warehouse_dirty(None)
-                    await self._send_warehouse_alert(
-                        f"⚠️ <b>Warehouse: refresh crashed "
-                        f"(attempt {consecutive}/{MAX_VALIDATION_RETRIES})</b>\n"
-                        f"{error_msg}\n→ Self-heals: full rebuild next tick",
-                        "warehouse:refresh_errored",
-                    )
-                else:
-                    await self._send_warehouse_alert(
-                        f"🚨 <b>Warehouse: refresh crashing ×{consecutive}, "
-                        f"auto-retry stopped</b>\n{error_msg}\n"
-                        "→ Human needed: Gold may be cross-inconsistent",
-                        "warehouse:refresh_errored_exhausted",
-                    )
-            except Exception as heal_err:
-                logger.error(f"Failed to schedule warehouse self-heal: {heal_err}")
-
-            return {
-                "status": "error",
-                "trigger": trigger,
-                "duration_ms": round(duration_ms, 2),
-                "error": error_msg,
-            }
-
-    async def get_warehouse_status(self) -> Dict[str, Any]:
-        """Get warehouse layer status for admin monitoring."""
-        async with self.connection() as conn:
-            # Last refresh info
-            last = conn.execute("""
-                SELECT refreshed_at, trigger, duration_ms, bronze_orders, silver_rows,
-                       gold_revenue_rows, gold_products_rows, checksum_match, validation_passed
-                FROM warehouse_refreshes
-                ORDER BY id DESC
-                LIMIT 1
-            """).fetchone()
-
-            # Count refreshes in last hour
-            recent_count = conn.execute("""
-                SELECT COUNT(*) FROM warehouse_refreshes
-                WHERE refreshed_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'
-            """).fetchone()
-
-            if last:
-                return {
-                    "last_refresh": last[0].isoformat() if last[0] else None,
-                    "last_trigger": last[1],
-                    "last_duration_ms": float(last[2]) if last[2] else None,
-                    "bronze_orders": last[3],
-                    "silver_rows": last[4],
-                    "gold_revenue_rows": last[5],
-                    "gold_products_rows": last[6],
-                    "checksum_match": last[7],
-                    "validation_passed": last[8],
-                    "recent_refreshes": recent_count[0] if recent_count else 0,
-                }
-            else:
-                return {
-                    "last_refresh": None,
-                    "last_trigger": None,
-                    "last_duration_ms": None,
-                    "bronze_orders": 0,
-                    "silver_rows": 0,
-                    "gold_revenue_rows": 0,
-                    "gold_products_rows": 0,
-                    "checksum_match": None,
-                    "validation_passed": None,
-                    "recent_refreshes": 0,
-                }
+    #
+    # `refresh_warehouse_layers` (DuckDB's Silver and Gold rebuild, its
+    # validation and the cell guard) and `get_warehouse_status` stood here
+    # until step 14's S14-15. DuckDB has derived nothing since step 13
+    # (2026-10-09); Postgres alone derives (`core/pg_warehouse_derive`'s job
+    # in the scheduler), and `/api/warehouse/status` reports that.
 
     async def get_last_sync_time(self, key: str = "orders") -> Optional[datetime]:
         """Get last sync timestamp for incremental updates — from
@@ -2383,125 +1695,12 @@ class DuckDBStore(
 
         await set_value(full_key, timestamp.isoformat())
 
-    async def mark_warehouse_dirty(self, changed_order_ids: list[int] | None = None) -> None:
-        """Set dirty flag so the warehouse refresh job picks it up.
+    # `mark_warehouse_dirty`, `peek_warehouse_dirty`, `clear_warehouse_dirty`
+    # and `consume_warehouse_dirty` — the flag DuckDB's warehouse tick
+    # read — stood here until step 14's S14-15. A no-op since step 13: the
+    # Postgres derivation is owed through `meta.derivation_signal`, which
+    # the writers raise in their own transactions (`core.pg_derivation`).
 
-        A no-op while Postgres alone derives (`KS_WRITE_WAREHOUSE=postgres`,
-        DN-29): nothing peeks or clears the flag then — the job is not
-        registered — so every mark would only grow a list nobody reads. The
-        list pending at the switch is abandoned as it stands, and the way back
-        marks the warehouse dirty in full (`warehouse_cutover.settle_writer`).
-        """
-        from core import warehouse_cutover
-
-        if not warehouse_cutover.duckdb_derives():
-            return
-        import json
-        value = json.dumps(changed_order_ids) if changed_order_ids else "full"
-        async with self.connection() as conn:
-            # Merge with existing dirty state (another sync may have run before refresh)
-            existing = conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = 'warehouse_dirty'"
-            ).fetchone()
-            if existing and existing[0]:
-                old = existing[0]
-                if old == "full" or value == "full":
-                    value = "full"
-                else:
-                    # Merge ID lists
-                    old_ids = json.loads(old)
-                    new_ids = changed_order_ids or []
-                    merged = list(set(old_ids + new_ids))
-                    value = json.dumps(merged)
-            conn.execute("""
-                INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
-                VALUES ('warehouse_dirty', ?, CURRENT_TIMESTAMP)
-            """, [value])
-
-    # `mark_catalog_dirty` and `_consume_catalog_dirty` stood here.
-    #
-    # They existed for one consumer: `gold_daily_products` was the only rebuilt
-    # table that joined the catalogue, so a product or offer change had to
-    # widen *its* scope to every date while everything else kept the scope the
-    # orders gave it. The flag lived in `sync_metadata` under
-    # `warehouse_catalog_dirty`, and the sync raised it.
-    #
-    # The layer is retired, so the flag has nothing to decide. The key is left
-    # in `sync_metadata` on databases that carry it — one stale row, read by
-    # nobody, and removing rows is not what this change is for.
-
-
-
-    async def peek_warehouse_dirty(self) -> tuple[bool, list[int] | None, Any]:
-        """Read the dirty flag without clearing it.
-
-        Returns (is_dirty, changed_ids_or_None, marked_at). `marked_at` is the
-        row's `updated_at`, which every `mark_*` bumps; hand it back to
-        `clear_warehouse_dirty` once the work is done, and a marker that landed
-        in between makes the clear a no-op so the next tick redoes the union.
-
-        The refresh job used to *consume* the flag first and work second, so a
-        kill or a shutdown cancellation mid-refresh lost the ids for good: the
-        next sync found the same Bronze rows unchanged and never re-marked
-        them, and nothing rebuilt Silver/Gold for that batch until the 05:15
-        refresh happened to cover it.
-        """
-        import json
-        async with self.connection() as conn:
-            result = conn.execute(
-                "SELECT value, updated_at FROM sync_metadata WHERE key = 'warehouse_dirty'"
-            ).fetchone()
-            if not result or not result[0]:
-                return False, None, None
-            value, marked_at = result
-            if value == "full":
-                return True, None, marked_at
-            return True, json.loads(value), marked_at
-
-    async def clear_warehouse_dirty(self, marked_at: Any) -> bool:
-        """Clear the flag `peek_warehouse_dirty` returned — and only that one.
-
-        Conditioned on the stamp, so ids merged in during the refresh survive
-        to the next tick. Returns whether anything was cleared.
-        """
-        if marked_at is None:
-            return False
-        async with self.connection() as conn:
-            before = conn.execute(
-                "SELECT COUNT(*) FROM sync_metadata "
-                "WHERE key = 'warehouse_dirty' AND updated_at = ?",
-                [marked_at],
-            ).fetchone()[0]
-            if not before:
-                return False
-            conn.execute(
-                "DELETE FROM sync_metadata WHERE key = 'warehouse_dirty' AND updated_at = ?",
-                [marked_at],
-            )
-            return True
-
-    async def consume_warehouse_dirty(self) -> tuple[bool, list[int] | None]:
-        """Atomically read and clear the dirty flag. Returns (is_dirty, changed_ids_or_None).
-
-        Consume-then-do. The refresh job no longer uses it (see
-        `peek_warehouse_dirty`); it stays for callers that want the flag gone
-        regardless of what happens next.
-        """
-        import json
-        async with self.connection() as conn:
-            result = conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = 'warehouse_dirty'"
-            ).fetchone()
-            if not result or not result[0]:
-                return False, None
-            conn.execute("DELETE FROM sync_metadata WHERE key = 'warehouse_dirty'")
-            value = result[0]
-            if value == "full":
-                return True, None
-            return True, json.loads(value)
-
-    # ─── Chain 3's selections and its misses, in Postgres ──────────────────
-    #
     # Every repair job chooses its work by reading the order tables, and
     # chain 3 writes those to Postgres alone. Until step 14's S14-09 each of
     # these asked `_orders_in_postgres()` first and read DuckDB otherwise; that
@@ -2575,44 +1774,6 @@ class DuckDBStore(
         from core import pg_orders_read
 
         return await pg_orders_read.halfwritten_among(ids)
-
-    def _claim_stuck_rebuild_slot(self) -> bool:
-        """Take the one full-rebuild attempt allowed per cooldown, if it is free.
-
-        Kept in process memory rather than in the database, so that a restart
-        re-arms it. A deploy or a container restart is the moment someone is
-        most likely to have just changed something that makes the rebuild work —
-        raising the memory ceiling, for instance — and making them wait out the
-        cooldown to find out would be perverse.
-        """
-        now = time.monotonic()
-        last = self._last_stuck_rebuild
-        if last is not None and (now - last) < STUCK_REBUILD_COOLDOWN_SECONDS:
-            return False
-        self._last_stuck_rebuild = now
-        return True
-
-    async def _count_consecutive_refresh_failures(self) -> int:
-        """How many of the most-recent refreshes threw, in a row.
-
-        Counts *errored* rows only. Validation failures are a separate budget
-        with its own counter — conflating them let a burst of one exhaust the
-        allowance meant for the other. Used to bound the self-heal retry loop so
-        a deterministic failure doesn't spin a full rebuild every tick forever.
-        """
-        async with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT error FROM warehouse_refreshes "
-                "ORDER BY refreshed_at DESC LIMIT ?",
-                [MAX_VALIDATION_RETRIES + 2],
-            ).fetchall()
-        consecutive = 0
-        for (err,) in rows:
-            if err is not None:
-                consecutive += 1
-            else:
-                break
-        return consecutive
 
     async def _send_warehouse_alert(
         self, message: str, key: "str | None" = None,
@@ -2974,10 +2135,9 @@ class DuckDBStore(
 
         `sales_type` is materialised into silver_orders by one CASE at rebuild
         time, so a classification that is not followed by a rebuild changes
-        nothing a reader can see. Marking the warehouse dirty here rather than
-        in the route makes that true for every caller, not just the one that
-        remembered — the route has always done it, and the method has always
-        let anyone else forget.
+        nothing a reader can see. The writer raises the derivation signal in
+        the decision's own transaction (`pg_managers_write`), so that is true
+        for every caller, not just the one that remembered.
 
         **Forward-dated, not retroactive.** The open interval is closed at
         `effective_from` and a new one opened, so orders before that date keep
@@ -3002,9 +2162,9 @@ class DuckDBStore(
             effective_from = datetime.now(ZoneInfo(DISPLAY_TIMEZONE)).date()
 
         # Chain 5: the decision is written where it is derived, in one
-        # Postgres transaction that also raises the derivation signal — and
-        # then the DuckDB mark below, which is a no-op since DuckDB derives
-        # nothing (DN-29). A backdate behind the manager's latest change is
+        # Postgres transaction that also raises the derivation signal. (The
+        # DuckDB warehouse mark that followed it, a no-op since step 13, went
+        # with the flag in step 14's S14-15.) A backdate behind the manager's latest change is
         # refused there (`BackdateBehindLatest`, OD-C5-1 (a)). DuckDB's own
         # path — one transaction closing the open interval and opening the
         # new one — went with the flag in step 14's S14-11.
@@ -3015,7 +2175,6 @@ class DuckDBStore(
         await pg_managers_write.set_manager_retail_status(
             manager_id, is_retail, effective_from, set_by, note,
             set_at=datetime.now(timezone.utc))
-        await self.mark_warehouse_dirty(None)
 
     async def get_all_managers(self) -> List[Dict[str, Any]]:
         """Get all managers with their statistics.

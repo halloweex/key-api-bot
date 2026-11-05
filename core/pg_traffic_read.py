@@ -52,7 +52,7 @@ opposite of `/sms`, where after its switch the two stores genuinely differ and
 answering from the stale one would look perfectly ordinary.
 
 The freshness this depends on is not the hourly one. `silver.order_utm` rides
-the Silver tick (`core/pg_order_utm.py`) because a UTM row that has not arrived
+the derivation (`core/pg_utm_parse.py`) because a UTM row that has not arrived
 does not read as missing — it falls through the `COALESCE` to `organic` and
 moves the split on the chart. `app.manual_expenses` does ride the hourly job,
 which it can afford twice over: it holds zero rows in production, and an ad

@@ -17,7 +17,13 @@
  * other tab. This is deliberately not a survey of all eight: /traffic is the
  * one that was measured. Narrowing another page means checking its endpoints
  * first, and the mechanism is here for whoever does.
+ *
+ * /traffic is three sections (`utils/trafficTabs`), and they differ: the
+ * site funnel is read from Google Analytics, which sees the website and
+ * nothing of a CRM order's sales type or source, so `/api/traffic/funnel`
+ * takes the period alone. The other two read the CRM and take all three.
  */
+import { trafficTabFor, type TrafficTab } from './trafficTabs'
 
 export type FilterName =
   | 'period'
@@ -31,12 +37,13 @@ const ALL: readonly FilterName[] = [
   'period', 'salesType', 'sourceId', 'categoryId', 'brand', 'promocode',
 ]
 
-// Keyed by pathname, both the /v2 and the bare form the router accepts.
-const BY_PATH: Record<string, readonly FilterName[]> = {
-  '/traffic': ['period', 'salesType', 'sourceId'],
-  '/v2/traffic': ['period', 'salesType', 'sourceId'],
+const TRAFFIC: Record<TrafficTab, readonly FilterName[]> = {
+  funnel: ['period'],
+  sales: ['period', 'salesType', 'sourceId'],
+  campaigns: ['period', 'salesType', 'sourceId'],
 }
 
 export function filtersForPath(path: string): ReadonlySet<FilterName> {
-  return new Set(BY_PATH[path] ?? ALL)
+  const section = trafficTabFor(path)
+  return new Set(section ? TRAFFIC[section] : ALL)
 }

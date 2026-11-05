@@ -1,10 +1,10 @@
 """A file that is a decision, written whole or not at all.
 
-The write-chain latch markers (`core.chain_latch`), the report ledgers' spool
-(`core.report_ledger.spool`) and the UTM re-parse marker
-(`core.warehouse_cutover`) are each read as a decision by the next process —
-a chain that owns its tables, a week already delivered, a re-parse owed — so a
-half-written one is worse than none, and a rename or an unlink that never
+The write-chain latch markers (`core.chain_latch`) and the report ledgers'
+spool (`core.report_ledger.spool`) — and, until step 14's S14-15 deleted its
+writer with `core.warehouse_cutover`, the UTM re-parse marker — are each read
+as a decision by the next process — a chain that owns its tables, a week
+already delivered, a re-parse owed — so a half-written one is worse than none, and a rename or an unlink that never
 reached the disk is undone by the next power cut.
 
 These were `chain_latch._write_marker` and `chain_latch._fsync_dir` until

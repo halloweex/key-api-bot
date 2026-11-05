@@ -9,19 +9,9 @@ outside the partition would balance them perfectly while appearing nowhere.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
 import pytest
 
 from core.duckdb_constants import KNOWN_SALES_TYPES
-from core.duckdb_store import DuckDBStore
-
-
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await s.connect()
-    return s
 
 
 # P2-1, a classification that survives the next sync, is chain 5's writer's
@@ -31,82 +21,10 @@ async def _make_store(tmp_path: Path) -> DuckDBStore:
 
 # ─── P2-2: the partition has to be exhaustive ───────────────────────────────
 
-def _insert_order(conn, oid: int, manager_id, total: float, when: datetime):
-    conn.execute(
-        "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
-        "buyer_id, manager_id) VALUES (?, 1, 1, ?, ?, 1, ?)",
-        [oid, total, when, manager_id],
-    )
-
-
-class TestPartitionAssertion:
-    @pytest.mark.asyncio
-    async def test_a_healthy_warehouse_reports_an_exhaustive_partition(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            when = datetime.now(timezone.utc) - timedelta(days=1)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, None, 1000.0, when)       # retail (NULL manager)
-                _insert_order(conn, 2, 15, 2000.0, when)         # b2b
-                _insert_order(conn, 3, 34, 3000.0, when)         # internal
-
-            alerts: list[tuple[str, str | None]] = []
-
-            async def fake_alert(msg, key=None):
-                alerts.append((msg, key))
-
-            store._send_warehouse_alert = fake_alert
-            res = await store.refresh_warehouse_layers(trigger="manual")
-
-            assert res["status"] != "error"
-            assert not any(k == "warehouse:sales_type_partition" for _, k in alerts)
-
-            async with store.connection() as conn:
-                by_type = dict(conn.execute(
-                    "SELECT sales_type, SUM(revenue) FROM gold_daily_revenue "
-                    "GROUP BY sales_type"
-                ).fetchall())
-            assert set(by_type) <= set(KNOWN_SALES_TYPES)
-            assert sum(by_type.values()) == pytest.approx(6000.0)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_revenue_outside_the_partition_alerts(self, tmp_path, monkeypatch):
-        """A sales_type the code does not list balances every existing checksum.
-
-        Simulated by narrowing the known set rather than by widening the CASE:
-        the effect on the assertion is identical, and Gold is rebuilt from
-        Silver inside the very call under test, so an injected value would not
-        survive to be seen.
-        """
-        store = await _make_store(tmp_path)
-        try:
-            when = datetime.now(timezone.utc) - timedelta(days=1)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, None, 1000.0, when)   # retail
-                _insert_order(conn, 2, 34, 500.0, when)      # 'internal'
-
-            alerts: list[tuple[str, str | None]] = []
-
-            async def fake_alert(msg, key=None):
-                alerts.append((msg, key))
-
-            store._send_warehouse_alert = fake_alert
-            monkeypatch.setattr(
-                "core.duckdb_store.KNOWN_SALES_TYPES", ("retail", "b2b"),
-            )
-            res = await store.refresh_warehouse_layers(trigger="manual")
-
-            # The existing checksums are blind to it: the totals still balance,
-            # so validation passes and nothing is marked dirty.
-            assert res["validation_passed"] is True
-
-            partition = [(m, k) for m, k in alerts if k == "warehouse:sales_type_partition"]
-            assert partition, "revenue outside the partition must be reported"
-            assert "internal=₴500.00" in partition[0][0]
-        finally:
-            await store.close()
+# `TestPartitionAssertion` stood here until step 14's S14-15: the DuckDB
+# warehouse rebuild's `warehouse:sales_type_partition` report (Gold's known
+# sales types against Silver's total), deleted with the rebuild. DuckDB has
+# derived nothing since step 13.
 
 
 class TestSalesTypeSurfacesAgree:

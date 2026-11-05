@@ -17,7 +17,6 @@ import ast
 import pathlib
 
 
-from core import pg_derivation
 from core.runtime_modes import configure_modes
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -45,16 +44,16 @@ class TestConfigureModes:
         self, monkeypatch,
     ):
         """S14-00: whatever the environment says — here nothing at all — web's
-        two calls answer production's modes, and the same twice."""
+        two calls answer production's modes, and the same twice. S14-15
+        removed the three it no longer configures (KS_PG_DERIVE, KS_UTM_PARSE,
+        KS_WRITE_WAREHOUSE): their modules have no mode — and S14-16
+        KS_READ_FALLBACK, whose module has none either."""
         for name in ("KS_DUCKDB", "KS_PG_DERIVE", "KS_READ_FALLBACK", "KS_UTM_PARSE",
                      "KS_WRITE_WAREHOUSE"):
             monkeypatch.delenv(name, raising=False)
         first = configure_modes(web=True)
         second = configure_modes(web=True)
-        assert first == second == {
-            "KS_DUCKDB": "off", "KS_PG_DERIVE": "own", "KS_READ_FALLBACK": "off",
-            "KS_UTM_PARSE": "postgres", "KS_WRITE_WAREHOUSE": "postgres"}
-        assert pg_derivation.owns() and pg_derivation.mode_error() is None
+        assert first == second == {"KS_DUCKDB": "off"}
 
     def test_a_script_still_reads_ks_duckdb(self, monkeypatch):
         """Not web: the variable decides as before — the archive tools in the
@@ -72,7 +71,7 @@ class TestConfigureModes:
             if any(isinstance(n, ast.FunctionDef) and n.name == "configure_mode"
                    for n in tree.body):
                 defining.add(".".join(path.relative_to(REPO).with_suffix("").parts))
-        assert "core.pg_derivation" in defining, "the walk is not looking"
+        assert "core.duckdb_switch" in defining, "the walk is not looking"
 
         tree = _parse("core/runtime_modes.py")
         imported = {alias.asname or alias.name: f"{n.module}.{alias.name}"
@@ -129,16 +128,14 @@ class TestTheSchedulerStillConfigures:
 # would route by its flag alone. `core.gender_backfill` is deliberately not a
 # writer module — its preview reads and writes nothing.
 WRITER_MODULES = frozenset({
-    "core.sync_service", "core.pg_landing", "core.pg_backfill",
-    "core.pg_buyers", "core.pg_replication", "core.pg_buyers_write",
+    "core.sync_service", "core.pg_landing", "core.pg_buyers_write",
     # Chain 3: which store an order goes to is chosen from the latch marker
     # too, so a script reaching its writers must have loaded it.
     "core.pg_orders_write",
 })
 WRITER_CALLS = frozenset({
     "upsert_orders", "upsert_managers", "upsert_buyers", "write_orders",
-    "mirror_orders", "mirror_buyers", "backfill_orders", "backfill_buyers",
-    "replicate_managers", "ship_orders_by_id", "derive_gender", "derive_gender_pg",
+    "derive_gender", "derive_gender_pg",
     "upsert_orders_with_expenses", "record_backfill_misses",
     "restore_manager_comments",
 })

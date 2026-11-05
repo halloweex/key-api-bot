@@ -28,7 +28,6 @@ survives only because their id is hardcoded. Hence a second table, and hence
 from __future__ import annotations
 
 import ast
-import inspect
 import pathlib
 import re
 from pathlib import Path
@@ -49,36 +48,8 @@ REPOSITORY = REPO / "core" / "repositories" / "users.py"
 # ─── the copy, and when it must not run ──────────────────────────────────────
 
 
-class TestTheReplicationStandsDown:
-    @pytest.mark.asyncio
-    async def test_it_refuses_once_postgres_is_the_writer(self, monkeypatch):
-        """The single worst outcome available: an hourly full replace out of a
-        frozen DuckDB would roll back every approval and role change made
-        since the switch, once an hour, looking healthy in between."""
-        monkeypatch.setenv("KS_USER_STORE", "postgres")
-        from unittest.mock import patch
-
-        with patch("core.mirror_reconciliation.configured", return_value=True):
-            out = await duf.replicate_dashboard_users(object())
-        assert "skipped" in out and "no longer the writer" in out["skipped"]
-
-    @pytest.mark.asyncio
-    async def test_without_a_dsn_it_does_nothing(self, monkeypatch):
-        monkeypatch.delenv("KS_USER_STORE", raising=False)
-        from unittest.mock import patch
-
-        with patch("core.mirror_reconciliation.configured", return_value=False):
-            out = await duf.replicate_dashboard_users(object())
-        assert out == {"skipped": "KS_PG_DSN is not set"}
-
-    @pytest.mark.asyncio
-    async def test_the_comparison_stands_down_with_it(self, monkeypatch):
-        """Otherwise every approval made after the switch reads as a
-        discrepancy the check itself created."""
-        monkeypatch.setenv("KS_USER_STORE", "postgres")
-        from core.mirror_reconciliation import reconcile_dashboard_users
-
-        assert await reconcile_dashboard_users(object()) == []
+# `TestTheReplicationStandsDown` held `replicate_dashboard_users` to nothing
+# under the switch and without a DSN, until step 14's S14-13 deleted it.
 
 
 # ─── the column contract, both ends ──────────────────────────────────────────
@@ -127,18 +98,6 @@ class TestTheColumnsAgree:
         assert declared, "parsed no columns out of the migration"
         missing = set(duf.USER_COLUMNS) - declared
         assert not missing, f"shipped and not declared: {sorted(missing)}"
-
-    @pytest.mark.asyncio
-    async def test_duckdb_has_everything_read(self, tmp_path):
-        store = DuckDBStore(db_path=tmp_path / "u.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                have = {r[0] for r in conn.execute("DESCRIBE users").fetchall()}
-        finally:
-            await store.close()
-        missing = set(duf.USER_COLUMNS) - have
-        assert not missing, f"read from DuckDB and not there: {sorted(missing)}"
 
     def test_bookkeeping_is_not_shared(self):
         """Two correct copies differ on when each of them wrote the row."""
@@ -348,11 +307,6 @@ class TestTheTwoListsAreNotConfusedForEachOther:
             "the session should reach the list through the store, not name a "
             "table — the switch is what chooses the engine"
         )
-
-    def test_the_replicator_copies_the_dashboards_list(self):
-        body = inspect.getsource(duf.replicate_dashboard_users)
-        assert "FROM users" in body
-        assert "authorized_users" not in body
 
 
 # ─── the matrix followed the list ────────────────────────────────────────────

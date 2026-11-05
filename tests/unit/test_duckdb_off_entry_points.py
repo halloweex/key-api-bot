@@ -74,10 +74,10 @@ OPENERS = {"connection", "connect"}
 # exits and messages).
 # `scripts/backfill_gender.py:main` was one until step 14's S14-11 deleted
 # its `--duckdb` preview and DuckDB write path: it reaches Postgres alone.
+# `scripts/backfill_utm.py:backfill_utm` was one until S14-15: its re-parse
+# took the (unconnected) store for the way back's note, which went with step
+# 13's switch.
 HOST_ENTRIES: Dict[str, str] = {
-    "scripts/backfill_utm.py:backfill_utm": (
-        "re-parses in Postgres alone under step 13 (PR-6); the store is "
-        "unconnected under off"),
     "scripts/compact_duckdb.py:main": (
         "the Sunday compaction's sidecar; refused under off before the "
         "driver runs, its cron line retired at the start of the week"),
@@ -85,9 +85,10 @@ HOST_ENTRIES: Dict[str, str] = {
 
 # Entries no production code calls. Kept, not deleted: OD-11 forbids
 # nothing here, but deleting code is stage 5's last step, not its first.
+# `SyncService.sync_today` was one until step 14's S14-15 took its DuckDB
+# warehouse refresh out: it still has no caller (S14-18 deletes it), but it
+# no longer reaches the file, so the walk does not find it.
 DEAD_ENTRIES: Dict[str, str] = {
-    "core/sync_service.py:SyncService.sync_today": (
-        "no production caller; tests drive it as one of the three sync paths"),
     "web/services/auth_service.py:get_user_role": (
         "imported by web/routes/auth.py and never called; the design names "
         "it for deletion at stage 5"),
@@ -302,7 +303,7 @@ class TestEveryWayIn:
 
     def test_the_walk_finds_the_ways_in(self, kinds):
         """Non-vacuity, by kind and by name: the routes, the jobs, web's
-        start, and the callables the mirror job and the routes hand on."""
+        start, and the callables the routes hand on."""
         count = defaultdict(int)
         for kind in kinds.values():
             count[kind] += 1
@@ -311,17 +312,37 @@ class TestEveryWayIn:
         # assistant and the index stopped reaching the file (112 after it
         # alone), and S14-08 took the seventeen /sms and access routes below
         # off it (118 after it alone): 95 with both, S14-10 three more (92),
-        # and S14-11's chains seven more (85). Each step-14 PR that removes a
-        # DuckDB branch shrinks this; the floor is only that the walk still
-        # finds the ways in, not a count to keep.
-        assert count["door"] >= 85, dict(count)
-        assert count["held"] >= 10, dict(count)
+        # and S14-11's chains seven more (85), S14-12's mirror-landing job
+        # one more (84), S14-13's mirrors and copies six more (78): the four
+        # `POST /api/mirror/backfill/*` routes, the hourly job, which asks the
+        # store no more, and `sync_all_buyers`, which reached the file only
+        # through the name `run` it shares with the orders backfill's
+        # background `run()`; S14-14's integrity job one more (77), which
+        # opens no DuckDB connection, refused or not; S14-15's step 13 nine
+        # more (68): the warehouse status, refresh and rebuild-silver routes,
+        # the UTM refresh, reclassify and backfill routes, the retail-status
+        # route (its store method's dirty mark), the derivation tick (its
+        # settle of the recorded writer) and the DuckDB warehouse tick;
+        # S14-17's `GET /api/duckdb/stats` one more (67), deleted with its
+        # counts. Each step-14 PR that removes a DuckDB branch shrinks
+        # this; the floor is only that the walk still finds the ways in, not
+        # a count to keep. The mirror job's comparisons and lambdas were ten
+        # of the eleven callables held until S14-12; the eleventh, the orders
+        # backfill's background `run()`, went with its route in S14-13, so
+        # nothing that reaches the file is held any more. The branch stays in
+        # `classify` for the next one; an entry it failed to hold would read
+        # `unexplained` and fail the test above.
+        assert count["door"] >= 67, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
-        assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_integrity"] == "door"
+        # The integrity job reaches the file no more (S14-14); the 05:30
+        # reconciliation still does, through the unconnected store.
+        assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_reconciliation"] == "door"
+        assert "core/scheduler.py:BackgroundScheduler._run_dq_integrity" not in kinds
         assert kinds["web/routes/websocket.py:dashboard_websocket"] == "door"
         assert kinds["web/routes/auth.py:require_admin"] == "door"
-        assert kinds["core/mirror_reconciliation.py:reconcile_operational"] == "held"
-        assert kinds["core/scheduler.py:BackgroundScheduler.read_duckdb"] == "held"
+        assert "web/routes/api/admin.py:run" not in kinds
+        # The mirror-landing job compares nothing against DuckDB since S14-12.
+        assert "core/scheduler.py:BackgroundScheduler._run_dq_mirror_landing" not in kinds
 
     def test_sms_and_access_reach_no_file(self, kinds):
         """Step 14's S14-08: `_sms_tx`, `_sms_run`, the audience, `_users_run`

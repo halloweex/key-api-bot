@@ -1,6 +1,6 @@
 -- O3 (chain 3) — the order-version archive is still being written.
 --
--- Only under chain 3; the variables are O1's.
+-- Only under chain 3; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- `app.order_versions` is not a chain table and has no copy anywhere: KeyCRM
@@ -77,11 +77,11 @@ SELECT 'O3 order versions'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 3 still writes DuckDB (KS_WRITE_ORDERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 3 has not latched (see O1)'
+           WHEN 'pending' THEN 'not applicable: chain 3 has not latched'
            WHEN '1' THEN CASE WHEN cardinality(p.listed) = 0 THEN
                format('newest version %s Kyiv, %s in 24 h, every order covered',
                       to_char(f.newest AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'), f.recent)
                ELSE left(array_to_string(p.listed, '; '), 500) END
-           ELSE format('orders_on=%s: see O1', flag.state)
+           ELSE format('orders_on=%s: KS_WRITE_ORDERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN problems p CROSS JOIN facts f;

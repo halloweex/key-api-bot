@@ -13,14 +13,14 @@ Three shapes this replaces, each measured:
 
 Since step 14's S14-00 chain 4 writes the buyers, a constant, so DuckDB's
 portions and their mirroring are no path production takes: those tests, and
-the refusal of a flag nobody can read, went with it.
+the refusal of a flag nobody can read, went with it. Since S14-13
+`mirror_buyers` itself is gone (`core.pg_buyers`), and with it the walk that
+held it to no caller.
 """
 from __future__ import annotations
 
-import ast
 import asyncio
 import time
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,39 +28,9 @@ import pytest
 from core.duckdb_store import DuckDBStore
 from core.models import Buyer
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
 def _buyers(n, *, base=1, name="Покупець"):
     return [Buyer.from_api({"id": base + i, "full_name": f"{name} {i}",
                             "phone": [f"+3805{i:08d}"]}) for i in range(n)]
-
-
-class TestTheMirrorHasOneCallSite:
-    def test_nothing_calls_mirror_buyers_any_more(self):
-        """Walks the tree rather than naming files: a second call site added
-        anywhere is the regression, wherever it is added."""
-        sites = set()
-        for top in ("core", "web", "bot", "scripts", "deploy"):
-            for path in (ROOT / top).rglob("*.py"):
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-                owner = {}
-                for fn in ast.walk(tree):
-                    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        for node in ast.walk(fn):
-                            owner.setdefault(id(node), fn.name)
-                for node in ast.walk(tree):
-                    if not isinstance(node, ast.Call):
-                        continue
-                    f = node.func
-                    name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
-                    if name == "mirror_buyers":
-                        rel = path.relative_to(ROOT).as_posix()
-                        sites.add((rel, owner.get(id(node))))
-        # None since step 14's S14-11: DuckDB's `upsert_buyers` mirrored each
-        # portion it wrote, and its DuckDB tail went with `KS_WRITE_BUYERS`.
-        # `mirror_buyers` itself goes with the mirrors in S14-13.
-        assert sites == set(), sites
 
 
 class TestPortions:
@@ -162,7 +132,7 @@ class TestTheRoutes:
         monkeypatch.setattr(admin, "_sync_all_buyers", body)
         monkeypatch.setattr(admin, "get_store", AsyncMock(return_value=MagicMock()))
 
-        r = _client().post("/api/duckdb/sync-all-buyers")
+        r = _client().post("/api/sync/sync-all-buyers")
 
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "started"
@@ -175,7 +145,7 @@ class TestTheRoutes:
         running.done.return_value = False
         monkeypatch.setattr(admin, "_BACKGROUND_TASKS", {running})
 
-        r = _client().post("/api/duckdb/sync-all-buyers")
+        r = _client().post("/api/sync/sync-all-buyers")
 
         assert r.status_code == 409, r.text
 
@@ -186,7 +156,7 @@ class TestTheRoutes:
         monkeypatch.setattr(admin, "HEAVY_LOCK_WAIT_S", 0.05)
         monkeypatch.setattr(get_scheduler(), "_heavy_job_lock", _FakeLock())
 
-        r = _client().post("/api/duckdb/sync-buyers")
+        r = _client().post("/api/sync/sync-buyers")
 
         assert r.status_code == 409, r.text
 
@@ -196,5 +166,5 @@ class TestTheRoutes:
         from web import middleware
         from web.routes.api import admin
 
-        assert "/api/duckdb/sync-buyers" not in middleware.SLOW_ENDPOINTS
+        assert "/api/sync/sync-buyers" not in middleware.SLOW_ENDPOINTS
         assert admin.HEAVY_LOCK_WAIT_S < middleware.DEFAULT_REQUEST_TIMEOUT

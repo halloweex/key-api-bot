@@ -184,11 +184,6 @@ def _latch_every_chain():
         chain_latch.latch(chain_name(chain))
 
 
-class _NoConn:
-    def execute(self, *_a, **_k):
-        raise AssertionError("the freshness check read DuckDB under off")
-
-
 def _names(issues):
     return sorted(i.check_name for i in issues)
 
@@ -198,14 +193,15 @@ class TestTheFreshnessCheck:
             self, flags, duckdb_off):
         """Every chain latched, Postgres holding all but the inherited key
         (chain 3's; chains 6 and 6a inherited too until step 14's S14-09):
-        the copy stands in for it, at the same threshold. Mutation: read
-        `conn` under off."""
+        the copy stands in for it, at the same threshold. (Until step 14's
+        S14-14 the check was also handed a DuckDB connection it must not
+        read under off; it takes none since.)"""
         _latch_every_chain()
         inherited = ("orders",)
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS
                               if e not in inherited})
         frozen = _rows(**{**ALL_FRESH, "orders": timedelta(hours=7)})
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+        issues = dq._freshness_check(NOW, chain_watermarks=watermarks,
                                      frozen_rows=frozen)
         assert _names(issues) == ["freshness_orders"]
         assert "as Postgres copied it" in issues[0].description
@@ -220,7 +216,7 @@ class TestTheFreshnessCheck:
         _latch_every_chain()
         gone = ("products", "categories", "expense_types")
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS if e not in gone})
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+        issues = dq._freshness_check(NOW, chain_watermarks=watermarks,
                                      frozen_rows=_rows(**ALL_FRESH))
         assert _names(issues) == [f"freshness_{e}" for e in sorted(gone)]
         assert all("never synced" in i.description for i in issues)
@@ -230,7 +226,7 @@ class TestTheFreshnessCheck:
         _latch_every_chain()
         watermarks = _rows(**ALL_FRESH)
         frozen = _rows(**{e: timedelta(days=30) for e in dq.FRESHNESS_THRESHOLDS})
-        assert dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+        assert dq._freshness_check(NOW, chain_watermarks=watermarks,
                                    frozen_rows=frozen) == []
 
     def test_under_off_the_bootstrap_gate_reads_postgres(self, flags, duckdb_off):
@@ -239,10 +235,10 @@ class TestTheFreshnessCheck:
         Mutation: gate on the copy alone — a copy holding no `last_sync_*`
         would silence every watermark Postgres holds."""
         _latch_every_chain()
-        assert dq._freshness_check(_NoConn(), NOW, chain_watermarks={},
+        assert dq._freshness_check(NOW, chain_watermarks={},
                                    frozen_rows={}) == []
         stale = _rows(offers=timedelta(hours=60))
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=stale,
+        issues = dq._freshness_check(NOW, chain_watermarks=stale,
                                      frozen_rows={})
         assert "freshness_offers" in _names(issues)
 
@@ -259,7 +255,7 @@ class TestTheFreshnessCheck:
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS
                               if e not in ("orders", "categories")})
         watermarks["last_sync_offers"] = (NOW - timedelta(hours=60)).isoformat()
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+        issues = dq._freshness_check(NOW, chain_watermarks=watermarks,
                                      frozen_rows=None)
         assert _names(issues) == ["freshness_categories", "freshness_offers",
                                   "sync_watermarks_unwatched"]
@@ -271,7 +267,7 @@ class TestTheFreshnessCheck:
 
     def test_under_off_nothing_read_at_all_is_unwatched_whole(self, flags, duckdb_off):
         _latch_every_chain()
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+        issues = dq._freshness_check(NOW, chain_watermarks=None,
                                      frozen_rows=None)
         assert _names(issues) == ["sync_watermarks_unwatched"]
         assert issues[0].count == len(dq.FRESHNESS_THRESHOLDS)
@@ -283,7 +279,7 @@ class TestTheFreshnessCheck:
         that did not look. Mutation: hold only `stood_down_sync_keys()` (the
         rule `on` derives the hold by) — no key is moved, so nothing is held,
         and `_resolve_dq_layer` clears a delivered `freshness_buyers` page."""
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+        issues = dq._freshness_check(NOW, chain_watermarks=None,
                                      frozen_rows=None)
         (unwatched,) = issues
         everything = sorted(f"freshness_{e}" for e in dq.FRESHNESS_THRESHOLDS)
@@ -298,7 +294,7 @@ class TestTheFreshnessCheck:
 
         from core.scheduler import BackgroundScheduler
 
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+        issues = dq._freshness_check(NOW, chain_watermarks=None,
                                      frozen_rows=None)
         resolve = AsyncMock(return_value=0)
         with patch("core.alerting.resolve_group", resolve):
@@ -446,9 +442,9 @@ class TestTheLedgerAdoptsNothingUnderOff:
 
 class TestTheModule:
     def test_one_spelling_of_the_table(self):
-        from core.pg_operational import SYNC_METADATA_TABLE
-
-        assert pg_frozen_metadata.TABLE == SYNC_METADATA_TABLE
+        """`core.pg_operational.SYNC_METADATA_TABLE` was its other spelling
+        until step 14's S14-13 deleted the copy; this is the one left."""
+        assert pg_frozen_metadata.TABLE == "app.sync_metadata"
 
     def test_it_reads_and_never_writes(self):
         """Nothing here may write the copy: its one writer stands down under

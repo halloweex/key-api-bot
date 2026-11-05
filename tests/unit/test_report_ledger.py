@@ -89,7 +89,7 @@ _LEDGER_NAMES = {"already_sent", "mark_sent", "fetch_sent"}
 _ALLOWED = {"core/report_ledger.py",
             "core/pg_weekly_ledger_write.py", "core/pg_traffic_ledger_write.py"}
 _SQL_ALLOWED = _ALLOWED | {
-    "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
+    "core/migrations.py", "core/mirror_reconciliation.py",
     "core/pg_chain_invariants.py", "core/snapshot_validation.py",
     "core/duckdb_store.py",
 }

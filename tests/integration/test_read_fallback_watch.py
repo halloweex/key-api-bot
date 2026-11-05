@@ -1,13 +1,16 @@
 """The canary's watch row, written by the real statement on a real Postgres.
 
-`core.alert_archive._WATCH_SQL` keeps one row, `watch:read_fallbacks` in
-`app.alert_series`, that says since when every probe read `/api/health`'s
-`read_fallbacks` empty (OD-07). Its arithmetic is all in the statement — a
-continuing run, an unread tail that restarts it (from the last probe to the
-new web process's start, read from `uptime_seconds`), a fallback that restarts
-it at itself —
-so it is held here by executing it, against rows seeded where the clock can be
-set: `now()` is fixed inside a transaction, so the row is seeded relative to it
+`core.alert_archive._WATCH_SQL` keeps one row per watch in `app.alert_series`
+that says since when every probe read its block clean. It was written for
+`watch:read_fallbacks` (OD-07: since when every probe read `/api/health`'s
+`read_fallbacks` empty), which the bot wrote until step 14's S14-16 and is
+history now; the same statement writes `watch:duckdb_switch`, the week of
+silence's watch (OD-17 (a)), and this holds it under that key. Its
+arithmetic is all in the statement — a continuing run, an unread tail that
+restarts it (from the last probe to the new web process's start, read from
+`uptime_seconds`), a dirty probe that restarts it at itself — so it is held
+here by executing it, against rows seeded where the clock can be set:
+`now()` is fixed inside a transaction, so the row is seeded relative to it
 and the statement then runs once, in the same rolled-back transaction.
 
 And the row must stay what the archive says it is: an event-kind record nothing
@@ -25,14 +28,14 @@ import pytest_asyncio
 
 asyncpg = pytest.importorskip("asyncpg")
 
-from bot.canary import READ_FALLBACK_WATCH_GAP_S, READ_FALLBACK_WATCH_KEY  # noqa: E402
+from bot.canary import DUCKDB_SWITCH_WATCH_GAP_S, DUCKDB_SWITCH_WATCH_KEY  # noqa: E402
 from core import alert_archive  # noqa: E402
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
-KEY = READ_FALLBACK_WATCH_KEY
-GAP = float(READ_FALLBACK_WATCH_GAP_S)
+KEY = DUCKDB_SWITCH_WATCH_KEY
+GAP = float(DUCKDB_SWITCH_WATCH_GAP_S)
 
 
 @pytest_asyncio.fixture
@@ -121,7 +124,7 @@ class TestTheRun:
         could have come and gone with its counters unread."""
         async with tx(pool) as conn:
             await seed(conn, since_min=170 * 60,
-                       last_min=READ_FALLBACK_WATCH_GAP_S / 60 + 1, probes=680)
+                       last_min=DUCKDB_SWITCH_WATCH_GAP_S / 60 + 1, probes=680)
             row = await probe(conn, clean=True)
         assert (row["fired_count"], row["since_s"], row["last_s"]) == (1, 0, 0)
 
@@ -159,7 +162,7 @@ class TestTheRun:
     @pytest.mark.asyncio
     async def test_the_limit_is_the_tail_and_it_is_inclusive(self, pool):
         """A tail of exactly the gap keeps the run; one second more does not."""
-        limit_min = READ_FALLBACK_WATCH_GAP_S / 60
+        limit_min = DUCKDB_SWITCH_WATCH_GAP_S / 60
         async with tx(pool) as conn:
             await seed(conn, since_min=500, last_min=limit_min + 5, probes=30)
             row = await probe(conn, clean=True, uptime_min=5)

@@ -129,8 +129,9 @@ BOUNDED_VALIDATORS = frozenset({
 EXEMPT = {
     ("GET", "/api/tg-bot/activity", "days"):
         "checked against tg_bot_service.WINDOWS in the body; sent to ks-tg-bot over HTTP",
-    ("POST", "/api/mirror/backfill/orders", "max_chunks"):
-        "a loop bound in Python, never a statement parameter",
+    ("POST", "/api/sync/resync", "days"):
+        "the KeyCRM fetch window, computed in Python; never a statement parameter",
+    # The same function under the name it keeps until step 14's final stage.
     ("POST", "/api/duckdb/resync", "days"):
         "the KeyCRM fetch window, computed in Python; never a statement parameter",
 }

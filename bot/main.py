@@ -431,25 +431,18 @@ def main() -> None:
             return
 
         from bot.canary import (
-            DUCKDB_SWITCH_WATCH_GAP_S, DUCKDB_SWITCH_WATCH_KEY,
-            READ_FALLBACK_WATCH_GAP_S, READ_FALLBACK_WATCH_KEY, defer_flaky,
+            DUCKDB_SWITCH_WATCH_GAP_S, DUCKDB_SWITCH_WATCH_KEY, defer_flaky,
         )
         from core.alert_archive import record_watch
         from core.alerting import raise_alert, resolve_group
 
-        # The watch over reads answered from DuckDB (OD-07), on every probe that
-        # read the block, whatever else it found and whether or not it pages:
-        # the soak before KS_READ_FALLBACK=off tells a clean week from one
-        # nobody watched by this row. Web's uptime tells the process it read
-        # last time from a new one. Fire-and-forget, never raises.
-        if result.read_fallbacks_clean is not None:
-            record_watch(
-                READ_FALLBACK_WATCH_KEY, clean=result.read_fallbacks_clean,
-                gap_s=READ_FALLBACK_WATCH_GAP_S,
-                web_uptime_s=result.web_uptime_s,
-            )
-        # The week of silence's watch (OD-17 (a)), on the same terms — but only
-        # while web runs KS_DUCKDB=off: under `on`, today, nothing is written.
+        # The week of silence's watch (OD-17 (a)), on every probe that read the
+        # switch block under KS_DUCKDB=off, whatever else it found and whether
+        # or not it pages. Web's uptime tells the process it read last time
+        # from a new one. Fire-and-forget, never raises. (The watch over reads
+        # answered from DuckDB, `watch:read_fallbacks`, was written beside it
+        # until step 14's S14-16; its row stays in `app.alert_series` as
+        # history.)
         if result.duckdb_silent is not None:
             record_watch(
                 DUCKDB_SWITCH_WATCH_KEY, clean=result.duckdb_silent,

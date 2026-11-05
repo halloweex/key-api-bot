@@ -1,6 +1,6 @@
 -- I4 (chain 1) — the daily snapshots and first_seen_at survive the flip.
 --
--- Only under KS_WRITE_INVENTORY=postgres; the variables are I1's.
+-- Only under KS_WRITE_INVENTORY=postgres; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- `sku_inventory_status.first_seen_at` is carried forward out of the table's
@@ -83,6 +83,6 @@ SELECT 'I4 inventory snapshots'::text AS "check",
                       CASE WHEN flag.flip_at IS NULL THEN '; no flip time given, first_seen_at not judged'
                            ELSE format('; %s SKU(s) first seen since the flip', status.since_flip) END,
                       COALESCE('; bad days: ' || agg.bad_days, ''))
-           ELSE format('inventory_on=%s: see I1', flag.state)
+           ELSE format('inventory_on=%s: KS_WRITE_INVENTORY not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN status LEFT JOIN agg ON true;

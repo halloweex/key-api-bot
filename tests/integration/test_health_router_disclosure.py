@@ -38,9 +38,10 @@ handler scrubs the store's error on purpose ("don't leak DuckDB exception text
 below, put ``str(e)`` from the very same failure into ``migrations.error``.
 That endpoint faces the open internet — Docker, nginx and an external uptime
 monitor poll it, so it is in ``PUBLIC_API_PATHS`` — and the string carries the
-container's database path, a pid and the user it runs as. ``migrations.failed``
-is untouched: publishing *which migration* failed and why is the ledger's whole
-purpose, and it is pinned by tests/unit/test_schema_migrations.py.
+container's database path, a pid and the user it runs as. Since step 14's
+S14-17 the endpoint does not ask the DuckDB store at all — the ``duckdb``
+block and the ``migrations`` ledger went — so a store that cannot be opened
+neither leaks into it nor degrades it.
 
 Sessions are forged the same way as tests/integration/test_security_hardening.py
 and tests/integration/test_traffic_permissions.py, and the TestClient is built
@@ -313,21 +314,19 @@ class TestPublicHealthCarriesNoExceptionText:
     @pytest.fixture
     def broken_store(self, monkeypatch):
         """A store that cannot be opened, reporting the way DuckDB reports it."""
-        import web.routes.api.health as health_mod
-
         detail = (
             'IO Error: Could not set lock on file "/app/data/analytics.duckdb": '
             "Conflicting lock is held in /usr/local/bin/python (PID 41) by user root."
         )
+        asked = []
 
         async def _raise():
+            asked.append(True)
             raise RuntimeError(detail)
 
-        monkeypatch.setattr(health_mod, "get_store", _raise)
         monkeypatch.setattr("core.duckdb_store.get_store", _raise)
-        health_mod._stats_cache.update(data=None, expires_at=0)
-        yield detail
-        health_mod._stats_cache.update(data=None, expires_at=0)
+        monkeypatch.setattr("web.routes.api._deps.get_store", _raise)
+        yield asked
 
     def test_anonymous_caller_gets_no_database_path(self, client, broken_store):
         response = client.get("/api/health")
@@ -338,9 +337,13 @@ class TestPublicHealthCarriesNoExceptionText:
             assert fragment not in body, \
                 f"the public health endpoint published {fragment!r}: {body}"
 
-    def test_the_degraded_verdict_still_reaches_the_canary(self, client, broken_store):
-        """Scrubbing the sentence must not cost the signal — bot/canary.py
-        judges `status`, and a null ledger status is what says 'ask the logs'."""
+    def test_the_store_is_not_asked_and_degrades_nothing(self, client, broken_store):
+        """Step 14's S14-17: the `duckdb` block, the ledger and their three
+        causes went, so `status` and `degraded_by` — which bot/canary.py,
+        Docker and the deploy's gate read — are `healthy` and `[]` whatever
+        the DuckDB store would say, and nothing asks it. Mutation: put either
+        block back — the store is asked, and fails."""
         body = client.get("/api/health").json()
-        assert body["status"] == "degraded"
-        assert body["migrations"]["status"] == "unknown"
+        assert body["status"] == "healthy" and body["degraded_by"] == []
+        assert "duckdb" not in body and "migrations" not in body
+        assert broken_store == []

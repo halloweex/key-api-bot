@@ -56,12 +56,13 @@ def collect_static_check_names() -> set:
                     if kw.arg == "check_name" and _const_str(kw.value) is not None:
                         names.add(kw.value.value)
     # The Postgres twins name their blindness findings from module constants,
-    # one per guard plus the collapsed and invalid-flag forms — a declared
-    # family, like disk's and memory's.
+    # one per guard plus the collapsed form — a declared family, like disk's
+    # and memory's. (The invalid-flag form went with `KS_DQ_PG_WAREHOUSE`'s
+    # reader in step 14's S14-14.)
     from core import pg_warehouse_dq
 
     names |= set(pg_warehouse_dq.UNWATCHED_NAMES.values())
-    names |= {pg_warehouse_dq.WHOLE_UNWATCHED, pg_warehouse_dq.FLAG_INVALID}
+    names.add(pg_warehouse_dq.WHOLE_UNWATCHED)
     # The chain invariants name theirs from module constants too, for the same
     # reason: the check functions read them, so a literal in the finding and a
     # literal in `CONDITIONS` would be two places to change.
@@ -72,23 +73,11 @@ def collect_static_check_names() -> set:
     return names
 
 
-def collect_generated_check_names() -> set:
-    """Integrity checks named from (table, column) at their call sites."""
-    patterns = {
-        "_pk_uniqueness_check": "pk_uniqueness_{0}",
-        "_fk_orphan_check": "fk_orphan_{0}_{1}",
-        "_null_constraint_check": "not_null_{0}_{1}",
-        "_value_domain_check": "value_domain_{0}_{1}",
-    }
-    names = set()
-    for node in ast.walk(_parse("core/data_quality.py")):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id in patterns):
-            args = [a.value for a in node.args[1:]
-                    if isinstance(a, ast.Constant) and isinstance(a.value, str)]
-            names.add(patterns[node.func.id].format(*args))
-    assert names, "the integrity call sites moved — update the collector"
-    return names
+# `collect_generated_check_names` read the DuckDB scan's (table, column) call
+# sites — `_pk_uniqueness_check`, `_fk_orphan_check`, `_null_constraint_check`,
+# `_value_domain_check` — until step 14's S14-14 deleted them with the scan.
+# Nothing generates a check name from call arguments any more;
+# `tests/unit/test_rollback_condition_names.py` holds the families unregistered.
 
 
 def collect_freshness_names() -> set:
@@ -258,7 +247,7 @@ def collect_canary_check_keys() -> set:
 
 
 def emittable() -> set:
-    return (collect_static_check_names() | collect_generated_check_names()
+    return (collect_static_check_names()
             | collect_freshness_names() | collect_literal_send_keys()
             | collect_family_keys() | collect_canary_keys())
 

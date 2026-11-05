@@ -1,43 +1,35 @@
-"""The mirror: the same KeyCRM payload, written to Postgres as well.
+"""The order tables' writer and the stamps of `meta.mirror_state`.
 
-Step 05's first write. DuckDB stays the system of record for the entire
-parallel period — nothing reads Postgres, no dashboard depends on it, and the
-read switch is a later step entirely. What this establishes is that the two
-stores can be kept in step at all, on tables whose loss costs one resync.
+Step 05's first write was a mirror: the same KeyCRM payload written to
+Postgres beside DuckDB. Step 14's S14-13 deleted the mirror's half of this
+module — `_mirror`, `mirror_categories`, `mirror_products`,
+`mirror_expenses`, `mirror_orders`, the catalogue carry and the stand-down
+helpers every shipper out of DuckDB asked — with the shippers themselves
+(`pg_backfill`, `pg_expense_backfill`, `pg_buyers`, `pg_replication`,
+`pg_operational`). What is left is what the write chains run:
+`_write_order_rows` and `_write_rows` (chain 3), `WATERMARK_OK_SQL` (chain 6
+and every derived layer's stamp) and `_record_failure`, byte for byte as they
+were.
 
-THE FAILURE POLICY IS THE WHOLE DESIGN
+THE FAILURE POLICY
 
-A failed Postgres write must not break the sync. DuckDB is what the business
-looks at, KeyCRM is what it is built from, and a mirror that can stop either is
-worse than no mirror — charter rule 8, the step leaves the system working.
-
-But it must not be silent. That is the 2026-08-09 shape exactly: an `ALTER`
-failed inside `try/except` with a DEBUG log, the code read the column anyway,
-and a one-off became a rebuild every two minutes for hours. So a failure here
-is caught, counted, logged at ERROR, written to the watermark when the database
-is reachable enough to take it, and published on `/api/health`.
+A failure is caught, counted, logged at ERROR, written to the watermark when
+the database is reachable enough to take it, and published on `/api/health`.
+That is the 2026-08-09 lesson: an `ALTER` failed inside `try/except` with a
+DEBUG log, the code read the column anyway, and a one-off became a rebuild
+every two minutes for hours.
 
 WHY A WATERMARK AND NOT JUST A COUNTER
 
-`meta.mirror_state` is what lets the daily reconciliation tell **"not shipped
-yet"** from **"shipped wrong"**. Without it every lag reads as a discrepancy,
-and the first week of a mirror is nothing but lag. `last_ok_at` and
-`last_attempted_at` are both kept: equal means healthy, and the gap between
-them is how long this table has been behind.
-
-THE PARSE IS SHARED, THE WRITE IS NOT
-
-Both stores read the payload through `core.landing_rows` — one home for the
-rule (charter rule 1). The parse runs twice over a thousand dicts, which costs
-microseconds and buys the guarantee that neither store can drift into its own
-reading of a brand.
+`meta.mirror_state` is what tells **"not written yet"** from **"written
+wrong"**. `last_ok_at` and `last_attempted_at` are both kept: equal means
+healthy, and the gap between them is how long this table has been behind.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 # At module level, unlike the other `core.pg_*` imports here, because
 # `write_orders` names one of its constants in a default argument. Safe: that
@@ -46,69 +38,11 @@ from core import pg_order_versions as order_versions
 
 logger = logging.getLogger(__name__)
 
-# One deploy turns the mirror off, which is charter rule 6's rollback. It is ON
-# by default on purpose: a safety mechanism nobody exercises is not a safety
-# mechanism, and this repository has the scar — a Redis client lived here for
-# months without executing in any environment and was then blamed, in an audit,
-# for the dashboard's latency.
-MIRROR_ENV = "KS_MIRROR_LANDING"
 
-
-def mirror_on(value: Optional[str] = None) -> bool:
-    """Whether a `KS_MIRROR_LANDING` value turns the mirror on: True, for any
-    value, a constant since step 14's S14-00.
-
-    Production leaves the variable unset, which has always meant on, and step
-    13 made "the landing mirror on" one of its preconditions. Every shipper
-    out of DuckDB already stands down on the write chains' ownership, so what
-    this still gates is the orders writer and the stamps of
-    `meta.mirror_state`. Last consumers: the shippers and backfills in
-    `pg_landing`, `pg_backfill`, `pg_buyers`, `pg_expense_backfill` and the
-    scheduler's ids-diffs, and step 13's `evaluate_preconditions` — they go in
-    S14-13 and S14-15. Until S14-00: unset was on, and "0", "false", "no" or
-    an empty value turned it off."""
-    return True
-
-
-def enabled() -> bool:
-    """`mirror_on()`: True, a constant since S14-00."""
-    return mirror_on()
-
-
-@dataclass
-class MirrorOutcome:
-    """What one mirroring attempt did. Never raises; this is the report."""
-    table: str
-    rows: int = 0
-    ok: bool = False
-    skipped: Optional[str] = None      # why it did not run, if it did not
-    error: Optional[str] = None
-
-    @property
-    def attempted(self) -> bool:
-        return self.skipped is None
-
-
-# Process-local, for /api/health. The watermark in Postgres is the durable
-# record; this is what can still be reported when Postgres is the thing that is
-# down.
-_failures: Dict[str, int] = {}
-_last_error: Dict[str, str] = {}
-
-
-def health() -> Dict[str, Any]:
-    """Mirror state as `/api/health` shows it, readable with Postgres down."""
-    return {
-        "enabled": enabled(),
-        "failures": dict(_failures),
-        "last_error": dict(_last_error),
-    }
-
-
-def reset_health() -> None:
-    """Test seam. Production has one process and no reason to call this."""
-    _failures.clear()
-    _last_error.clear()
+# `mirror_on()` and `enabled()` stood here until step 14's S14-15: whether
+# `KS_MIRROR_LANDING` turned the landing mirror on, a constant True since
+# S14-00. Their last consumer was step 13's `evaluate_preconditions`, deleted
+# with `core/warehouse_cutover.py`; nothing ships out of DuckDB since S14-13.
 
 
 _UPSERT = """
@@ -140,19 +74,6 @@ ON CONFLICT (table_name) DO UPDATE SET
 WATERMARK_OK_SQL = _WATERMARK_OK
 
 
-def _record_ok(table: str, rows: int) -> None:
-    _failures.pop(table, None)
-    _last_error.pop(table, None)
-    logger.info("mirror: %s ok, %d row(s)", table, rows)
-
-
-def _record_error(table: str, rows: int, detail: str) -> None:
-    _failures[table] = _failures.get(table, 0) + 1
-    _last_error[table] = detail
-    # ERROR, not DEBUG. The whole point.
-    logger.error("mirror: %s failed after %d row(s): %s", table, rows, detail)
-
-
 def _statement(table: str, columns: Sequence[str]) -> str:
     cols = ", ".join(columns)
     vals = ", ".join(f"${i}" for i in range(1, len(columns) + 1))
@@ -161,21 +82,6 @@ def _statement(table: str, columns: Sequence[str]) -> str:
     # statement saying what it means.
     sets = ", ".join(f"{c} = EXCLUDED.{c}" for c in columns if c != "id")
     return _UPSERT.format(table=table, cols=cols, vals=vals, sets=sets)
-
-
-async def _write(table: str, columns: Sequence[str], rows: Sequence[tuple]) -> None:
-    """Upsert rows and move the watermark, in one transaction.
-
-    One transaction on purpose: a watermark claiming a success that did not
-    happen is worse than no watermark, because the reconciliation would then
-    read a real gap as "already shipped".
-    """
-    from core.pg import get_pool
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await _write_rows(conn, table, columns, rows)
 
 
 async def _write_rows(conn, table: str, columns: Sequence[str],
@@ -230,365 +136,6 @@ async def _record_failure(table: str, error: str) -> bool:
         return False
 
 
-# ─── Who writes these tables: the question every shipper asks first ──────────
-#
-# DN-22a asked it on the order paths, DN-22b on every other path that ships a
-# DuckDB copy (or a KeyCRM payload DuckDB also receives) into `bronze.*` and
-# `app.*`: the catalogue, the order-level expenses, the buyers and the manager
-# classification, with their backfills, hourly ids-diffs, admin backfill routes
-# and daily comparisons. A write chain that takes one of these tables puts rows
-# in Postgres that DuckDB never sees, and each of those paths would otherwise
-# ship DuckDB's copy over them — or, for the comparisons, report every one of
-# them as a discrepancy the check itself created.
-#
-# `unit` is the tables one shipper writes in one transaction. Ownership passes
-# for a unit as a whole — whoever takes the buyers takes their contacts, and a
-# classification without its managers is not a classification — so a shipper
-# stands down on any of its unit, and `tests/unit/test_write_chains.py` derives
-# the units from what each writer writes and fails on a chain that splits one.
-
-
-def tables_stood_down(unit: Sequence[str]) -> FrozenSet[str]:
-    """Which of `unit` a write chain has taken — the local answer. Never raises.
-
-    Every table of `unit` a registered chain declares, a constant since step
-    14's S14-11: every chain writes Postgres, so every declared table is
-    held. Until then it asked the marker and the flag of only the chains that
-    declared one of these tables (`write_chains.stood_down_among`, deleted
-    with the flags). Since #280 registered chains 3, 5 and 6 a chain declares
-    each of them. Last consumers: the mirrors, backfills and copies of
-    `pg_landing`, `pg_buyers`, `pg_replication`, `pg_backfill` and
-    `pg_expense_backfill`, and the daily comparisons — they go in S14-12 and
-    S14-13.
-
-    This is the only answer the **sync's mirrors** take — `_mirror` and,
-    until step 14's S14-09, the orders mirror in DuckDB's `upsert_orders` —
-    because they were the write path, once a minute, and a Postgres read there
-    is the one `writes_postgres()` exists to avoid. Since S14-09 DuckDB's
-    order writer is gone, `mirror_expenses` has no caller, and `_mirror` is
-    reached from the weekly full sync alone (`mirror_categories`,
-    `mirror_products`); the mirror's half of this module goes in S14-13.
-    Everything else that is about to hold a pool asks this first and
-    `tables_stood_down_or_owned` next, the buyers mirror and the
-    classification copy included (`sync_reads_the_owner_rows`).
-    """
-    from core.write_chains import chain_tables
-
-    return chain_tables() & frozenset(unit)
-
-
-def sync_reads_the_owner_rows(unit: Sequence[str]) -> bool:
-    """Does the sync's shipper of `unit` stand down on the owner rows too?
-
-    True for the buyers (`pg_buyers.mirror_buyers`) and the classification
-    (`pg_replication.replicate_managers`), which read them after the local
-    answer since the DN-22b review: the classification copy is a full replace
-    run a few times a day, and on the local answer alone a lost marker let it
-    delete a human's interval in Postgres the first time it ran. False for
-    everything `_mirror` ships, which keeps the local answer alone, and for
-    the order tables, whose per-tick mirror kept it alone until step 14's
-    S14-09 deleted that mirror's caller.
-
-    The comparisons read this to say which of the two is true when only the
-    owner rows name a unit — a shipper that has stopped (INFO; the latch
-    itself is `chain_latch_disagrees`' or `chain_owner_unregistered`'s page)
-    or one still writing over the chain's rows (CRITICAL). A unit it does not
-    know reads as still shipping, the louder answer.
-    `tests/unit/test_write_chains.py` checks each claim against what the
-    shipper then does.
-    """
-    from core.pg_buyers import BUYER_UNIT
-    from core.pg_replication import MANAGER_UNIT
-
-    return frozenset(unit) in (frozenset(BUYER_UNIT), frozenset(MANAGER_UNIT))
-
-
-def owned_among(owners: Mapping[str, str], unit: Sequence[str]) -> FrozenSet[str]:
-    """All of `unit` when an owner row claims any of it, else nothing. Pure.
-
-    An owner row counts through the chain that declares it (`claimed_tables`)
-    and also as itself: after an image rollback to a build older than the
-    chain, no chain here declares the table and `claimed_tables` alone would
-    hand it back to DuckDB — the lost-marker case arrived at by another road.
-    Takes the rows already read, so a caller asking about several units asks
-    Postgres once and cannot get two answers in one run.
-    """
-    from core import chain_latch
-
-    whole = frozenset(unit)
-    owned = chain_latch.owned_tables(owners) & whole
-    return whole if owned else frozenset()
-
-
-async def tables_stood_down_or_owned(pool, unit: Sequence[str]) -> FrozenSet[str]:
-    """`tables_stood_down(unit)`, and what the owner rows in Postgres say.
-
-    DN-06's rule (`chain_latch.claimed_chains`): anything already holding a
-    Postgres connection stands down on either copy of the latch, because the
-    marker lives on a bind mount and a lost `./data` would otherwise make the
-    chain's rows look like DuckDB's again. Asked after `require_revision()` —
-    the owner rows live in `meta.chain_watermarks` (revision 0032) — and it
-    raises whatever `read_owners` raises: an owner row that could not be read
-    is not an owner row that is absent, and every caller lets the error through
-    to its own failure handling.
-    """
-    from core import chain_latch
-
-    owners = await chain_latch.read_owners(pool)
-    return tables_stood_down(unit) | owned_among(owners, unit)
-
-
-def shipping_units() -> tuple:
-    """Every unit of more than one table, one per writer that writes them in
-    one transaction. `tests/unit/test_write_chains.py` derives the same list
-    from the writers themselves and fails when the two disagree."""
-    from core.pg_buyers import BUYER_UNIT
-    from core.pg_replication import MANAGER_UNIT
-
-    return (ORDER_UNIT, BUYER_UNIT, MANAGER_UNIT)
-
-
-def unit_of(table: str) -> tuple:
-    """The unit `table` changes hands with — itself, when it ships alone."""
-    for unit in shipping_units():
-        if table in unit:
-            return tuple(unit)
-    return (table,)
-
-
-def stood_down_reason(moved) -> str:
-    """The one sentence every stood-down path reports, so a log, a job result
-    and a route's 409 say the same thing about the same state."""
-    return "stood down: a write chain owns " + ", ".join(sorted(moved))
-
-
-async def _mirror(table: str, columns: Sequence[str], rows: List[tuple]) -> MirrorOutcome:
-    out = MirrorOutcome(table=table, rows=len(rows))
-
-    if not enabled():
-        out.skipped = f"{MIRROR_ENV} is off"
-        return out
-
-    # The catalogue and the order-level expenses, from every sync site that
-    # ships them (DN-22b): once a write chain owns the table, its writer puts
-    # rows in Postgres DuckDB never sees, and this upsert would write DuckDB's
-    # copy over them. Skipped rather than failed — nothing is recorded against
-    # the watermark, because nothing went wrong — and asked on the local answer
-    # alone, since this ran on the sync's own tick (since step 14's S14-09 it is
-    # reached from the weekly full sync alone).
-    moved = tables_stood_down((table,))
-    if moved:
-        out.skipped = stood_down_reason(moved)
-        logger.info("mirror: %s; %d row(s) not shipped out of DuckDB",
-                    out.skipped, len(rows))
-        return out
-
-    try:
-        await _write(table, columns, rows)
-    except Exception as exc:
-        detail = f"{type(exc).__name__}: {exc}"
-        out.error = detail
-        _record_error(table, len(rows), detail)
-        await _record_failure(table, detail)
-        return out
-
-    out.ok = True
-    _record_ok(table, len(rows))
-    return out
-
-
-async def mirror_categories(payloads: List[Dict[str, Any]]) -> MirrorOutcome:
-    from core.landing_rows import CATEGORY_COLUMNS, category_rows
-
-    rows = [tuple(r) for r in category_rows(payloads)]
-    return await _mirror("bronze.categories", CATEGORY_COLUMNS, rows)
-
-
-async def mirror_products(payloads: List[Dict[str, Any]]) -> MirrorOutcome:
-    from core.landing_rows import PRODUCT_COLUMNS, product_rows
-
-    rows = [tuple(r) for r in product_rows(payloads)]
-    return await _mirror("bronze.products", PRODUCT_COLUMNS, rows)
-
-
-async def mirror_expenses(orders_with_expenses: List[Dict[str, Any]]) -> MirrorOutcome:
-    """The order-level costs carried by a batch of orders.
-
-    **A delta, like orders and unlike the catalogue** — it ships what this sync
-    fetched, not the whole 15,020 rows — so, like orders, it needs a backfill
-    to carry history across and its comparison must be gated until that has
-    run. `core/pg_expense_backfill.py` is that backfill.
-
-    **Upserted, never deleted-and-reinserted.** That is the opposite of line
-    items, and the difference is the id: an expense carries KeyCRM's own id,
-    which is stable, whereas a line item's is `order_id * 1000 + position` and
-    therefore shifts when a basket shrinks. Nothing here leaves a `…002`
-    behind.
-
-    An expense KeyCRM has *removed* from an order is therefore kept, exactly as
-    DuckDB keeps it — the two stores agree, which is what the comparison
-    measures. Whether either should keep it is a question about the sync, and
-    the same one `feedback_never_delete_retired_products` answers for products.
-    """
-    from core.landing_rows import EXPENSE_COLUMNS, expense_rows
-
-    rows = [tuple(r) for r in expense_rows(orders_with_expenses)]
-    return await _mirror("bronze.expenses", EXPENSE_COLUMNS, rows)
-
-
-# ─── The catalogue rows no mirror can ship again (chain 6, OD-15) ────────────
-#
-# `upsert_products` never deletes, so DuckDB keeps every product KeyCRM ever
-# served, and the mirror — fed by KeyCRM payloads — ships only what is served
-# today. A product KeyCRM retired before the mirror existed is therefore in
-# DuckDB and nowhere else: product 1055, last synced 2026-06-13, is the whole
-# 1,004-against-1,003 gap the daily comparison files as `mirror_retired_rows`.
-# Once chain 6 writes the catalogue to Postgres, DuckDB's copy freezes and that
-# row would be named by DuckDB alone for as long as anything still read it —
-# and a Postgres read of an order line on it already shows no name or brand.
-#
-# The owner's decision (OD-15 (a)) is to carry it, and every other row the
-# comparison calls retired, before the flip. This is that carry, and a human
-# runs it: it changes what Postgres holds.
-#
-# THE SELECTION IS THE COMPARISON'S OWN RULE
-#
-# A row DuckDB holds and Postgres does not is retired when DuckDB last wrote it
-# at or before the mirror's last whole-catalogue success (`compare_table`'s
-# branch, `synced <= last_ok_at`): the mirror shipped everything KeyCRM served
-# after that, so KeyCRM no longer serves it. Anything written after it is in
-# flight — or lost, past the comparison's grace — and is not carried: the next
-# mirror ships it if KeyCRM still serves it, and if not, the next comparison
-# names it. One rule, so the carry cannot disagree with the check that named
-# the row.
-#
-# THE CARRIED ROW STILL READS AS RETIRED
-#
-# It lands with `mirrored_at` before `meta.mirror_state.last_ok_at` — DuckDB's
-# own stamp, or a microsecond before the watermark when that is later — and
-# the watermark is not touched: this is not a whole catalogue, and only a whole
-# catalogue may move it. So under chain 6's rule (`mirrored_at` below the last
-# full write's `last_ok_at` is retired) the row is still what it was.
-# `ON CONFLICT DO NOTHING`: a row the mirror shipped meanwhile is served, and
-# the mirror's copy wins.
-
-class CatalogueCarryRefused(RuntimeError):
-    """The carry did not run: the mirror is off, or a write chain owns one of
-    the catalogue tables. Nothing was read from DuckDB and nothing written."""
-
-
-def retired_rows(
-    rows: Mapping[Any, tuple],
-    synced: Mapping[Any, Any],
-    held: FrozenSet[Any],
-    last_ok_at,
-) -> "tuple[List[Any], List[Any]]":
-    """`(retired, in_flight)`: the keys DuckDB holds and Postgres does not,
-    split by `compare_table`'s rule against the mirror's last success. Pure.
-
-    A missing DuckDB stamp counts as retired, as it does there; a naive one is
-    read as UTC, as it is there."""
-    from datetime import timezone
-
-    held = set(held)
-    retired: List[Any] = []
-    in_flight: List[Any] = []
-    for key in sorted(rows.keys() - held):
-        stamp = synced.get(key)
-        if stamp is not None and stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
-        if stamp is None or stamp <= last_ok_at:
-            retired.append(key)
-        else:
-            in_flight.append(key)
-    return retired, in_flight
-
-
-async def carry_retired_catalogue(store, *, dry_run: bool = True) -> Dict[str, Dict[str, Any]]:
-    """Carry into Postgres the catalogue rows only DuckDB holds and KeyCRM no
-    longer serves. Dry run by default: it says what it would carry.
-
-    Refuses (`CatalogueCarryRefused`) with the mirror off, and on either copy
-    of the latch for either table: after chain 6's flip, a row only DuckDB
-    holds is the copy-back handover's business, not this lever's. Per table it
-    returns `would_carry`, `carried` (0 on a dry run), `in_flight` and the
-    first ten `ids`; a table the mirror has never shipped whole is `refused`,
-    because nothing can be called retired against no watermark.
-    """
-    from datetime import timedelta, timezone
-
-    from core.mirror_reconciliation import (
-        CATEGORIES_SPEC, PRODUCTS_SPEC, fetch_duckdb_rows, fetch_watermarks,
-    )
-
-    if not enabled():
-        raise CatalogueCarryRefused(f"{MIRROR_ENV} is off; nothing was carried")
-    specs = (PRODUCTS_SPEC, CATEGORIES_SPEC)
-    for spec in specs:
-        moved = tables_stood_down(unit_of(spec.pg_table))
-        if moved:
-            raise CatalogueCarryRefused(stood_down_reason(moved))
-
-    from core.pg import get_pool, require_revision
-
-    pool = await get_pool()
-    await require_revision()
-    # The owner rows too: this holds a pool, and a lost marker leaves only them
-    # to say the catalogue changed hands (DN-06).
-    for spec in specs:
-        moved = await tables_stood_down_or_owned(pool, unit_of(spec.pg_table))
-        if moved:
-            raise CatalogueCarryRefused(stood_down_reason(moved))
-
-    # DuckDB first, and its lock released before any Postgres await.
-    async with store.connection() as conn:
-        duck = {spec.pg_table: fetch_duckdb_rows(conn, spec) for spec in specs}
-    marks = await fetch_watermarks(pool)
-
-    out: Dict[str, Dict[str, Any]] = {}
-    for spec in specs:
-        table = spec.pg_table
-        rows, synced = duck[table]
-        last_ok_at = (marks.get(table) or {}).get("last_ok_at")
-        result: Dict[str, Any] = {"would_carry": 0, "carried": 0, "in_flight": 0,
-                                  "ids": [], "last_ok_at": None}
-        out[table] = result
-        if last_ok_at is None:
-            result["refused"] = (
-                f"meta.mirror_state has no successful shipment of {table}: "
-                "nothing can be told retired from in flight against no watermark")
-            continue
-        result["last_ok_at"] = last_ok_at.isoformat()
-        async with pool.acquire() as conn:
-            held = frozenset(r["id"] for r in await conn.fetch(f"SELECT id FROM {table}"))
-        retired, in_flight = retired_rows(rows, synced, held, last_ok_at)
-        result.update(would_carry=len(retired), in_flight=len(in_flight),
-                      ids=retired[:10])
-        if dry_run or not retired:
-            continue
-        columns = tuple(spec.columns)
-        sql = (
-            f"INSERT INTO {table} ({', '.join(columns)}, mirrored_at) "
-            f"VALUES ({', '.join(f'${i}' for i in range(1, len(columns) + 2))}) "
-            "ON CONFLICT (id) DO NOTHING"
-        )
-        before = last_ok_at - timedelta(microseconds=1)
-        carried = 0
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                for key in retired:
-                    stamp = synced.get(key)
-                    if stamp is not None and stamp.tzinfo is None:
-                        stamp = stamp.replace(tzinfo=timezone.utc)
-                    mirrored_at = before if stamp is None else min(stamp, before)
-                    status = await conn.execute(sql, *rows[key], mirrored_at)
-                    carried += int(status.rsplit(" ", 1)[-1])
-        result["carried"] = carried
-        logger.info("catalogue carry: %d of %d retired row(s) carried into %s, "
-                    "ids %s", carried, len(retired), table, retired[:10])
-    return out
-
-
 # ─── Orders ───────────────────────────────────────────────────────────────────
 #
 # Two tables, one transaction, and three things the catalogue never had to
@@ -623,86 +170,6 @@ async def carry_retired_catalogue(store, *, dry_run: bool = True) -> Dict[str, D
 
 ORDERS_TABLE = "bronze.orders"
 ORDER_PRODUCTS_TABLE = "bronze.order_products"
-# What `write_orders` writes in one transaction, and so what changes hands as
-# one — see `tables_stood_down`.
-ORDER_UNIT = (ORDERS_TABLE, ORDER_PRODUCTS_TABLE)
-
-
-def order_tables_stood_down() -> FrozenSet[str]:
-    """Which of the two order tables a write chain has taken. Never raises.
-
-    Every path that ships orders out of DuckDB asks this first (DN-22a): the
-    ids-diff and header-only repair in `core/pg_backfill.py`, the hourly diff,
-    the admin backfill, and the daily bucket comparison — and the sync's
-    mirror in `DuckDBStore.upsert_orders`, until step 14's S14-09 deleted that
-    writer. None of them asked before, so a chain that
-    registered `bronze.orders` would have had DuckDB overwriting the rows its
-    new writer put there — and, worse, `write_orders` archiving each overwrite
-    in `app.order_versions` as a change that never happened, in the one table
-    nothing can delete from.
-
-    **Either table stands both down, because ownership of the order tables
-    passes as a unit.** A chain that takes over the headers takes their line
-    items with it, so a chain declaring either table declares both — a
-    registry invariant `tests/unit/test_write_chains.py` walks `WRITE_CHAINS`
-    for. Standing both down on either is that invariant held defensively, and
-    not a property of the shipping: the two tables are written apart, since
-    `write_orders`' core with `replace_products=False` writes headers alone
-    every day — from the 05:15 status refresh, through chain 3's writer, and
-    from the comment backfills' `pg_orders_write.restore_manager_comments`
-    (through `ship_orders_by_id` until step 14's S14-09).
-
-    Asked BEFORE `write_orders` and never inside it. The capture's contract is
-    that the version and the row it describes land together or neither does
-    (`core/pg_order_versions.py`), and a refusal raised from inside that
-    transaction would be the mirror's to swallow — the rows lost to Postgres
-    over a question that could have been asked outside it.
-    """
-    return tables_stood_down(ORDER_UNIT)
-
-
-async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
-    """`order_tables_stood_down()`, and what the owner rows in Postgres say.
-
-    For the order paths that already hold a pool: the ids-diff and its
-    header-only repair, the hourly diff, the comment ship (`ship_orders_by_id`,
-    with no caller since step 14's S14-09) and the bucket comparison. The
-    local answer reads the markers, and the markers live on a
-    bind mount — an older `./data` snapshot or a rebuilt data directory loses
-    them while Postgres keeps the owner rows and the rows they were taken for.
-    The flag then routes to DuckDB again, the local answer says nothing has
-    changed hands, and a backfill ships DuckDB's copy over rows only Postgres
-    holds, archiving every overwrite as an order change. DN-06's rule
-    (`chain_latch.claimed_chains`): anything already holding a Postgres
-    connection stands down on either copy — the union `replicate_operational`
-    and `reconcile_operational` already take, out of the same query.
-
-    The sync's mirror in `DuckDBStore.upsert_orders` kept the local answer
-    alone — the write path, once a minute, where a Postgres read is the one
-    `writes_postgres()` exists to avoid — until step 14's S14-09 deleted that
-    writer.
-
-    Asked after `require_revision()`, as those two ask it: the owner rows live
-    in `meta.chain_watermarks` (revision 0032), so a database behind the code
-    breaks as `SchemaVersionError` rather than as a missing table. It raises
-    whatever `read_owners` raises, and every caller lets it through to its own
-    failure handling, which is also what those two do with this read: an owner
-    row that could not be read is not an owner row that is absent, and
-    answering "nothing owned" on a read error would hand the tables back to
-    DuckDB at the one moment nothing can be verified.
-
-    **An owner row counts whether or not this build knows its chain.**
-    `claimed_tables` expands an owner row through the registered chains, and
-    only through them: after an image rollback to a build older than the
-    orders chain, `owner:bronze.orders` names a chain nobody here declares and
-    would be ignored — the lost-marker case again, arrived at by another road.
-    So an owner row naming an order table is read as itself too, and either
-    order table owned stands both down, the unit rule above held where no
-    chain is left to say it.
-    """
-    return await tables_stood_down_or_owned(pool, ORDER_UNIT)
-
-
 # Every column except `manager_comment`, which has the COALESCE above.
 _ORDER_UPSERT = """
 INSERT INTO bronze.orders
@@ -905,69 +372,11 @@ async def _write_order_rows(
     # Chain 2: Postgres owes a rebuild of what it derives from these rows.
     # Last, and in a savepoint of its own — no mark without the rows, no rows
     # without the mark — and unable to cost the transaction anything, the
-    # order versions above included: see `core/pg_derivation.py`. A no-op
-    # unless KS_PG_DERIVE=own, and without it no savepoint is opened either:
-    # the one around the mark exists only for the mark, and with derivation
-    # not owned every shipment out of DuckDB paid a SAVEPOINT and a RELEASE
-    # for nothing (the chain-3 review: the default sends what main sent).
+    # order versions above included: see `core/pg_derivation.py`. Postgres
+    # derives on its own signal unconditionally since step 14's S14-15, which
+    # removed `KS_PG_DERIVE` and the `owns()` this asked first.
     if orders:
-        from core.pg_derivation import mark_if_owned, owns
+        from core.pg_derivation import mark
 
-        if owns():
-            async with conn.transaction():
-                await mark_if_owned(conn)
-
-
-async def mirror_orders(
-    orders: Sequence[Any],
-    products: Sequence[Any],
-    *,
-    replace_products: bool = True,
-) -> List[MirrorOutcome]:
-    """Mirror order headers and their line items. Never raises.
-
-    Takes rows, not payloads: its caller, `DuckDBStore.upsert_orders`, had
-    already parsed them through `core.landing_rows` and — more importantly —
-    had already decided which ones it wrote. The mirror shipped that decision
-    rather than making its own, so the two stores could not disagree about
-    what a sync did.
-
-    It does not ask `order_tables_stood_down()`; its one caller did, before
-    calling it, and `tests/unit/test_write_chains.py` walks for any new caller
-    that does not. **Since step 14's S14-09 nothing calls it**: that caller,
-    `DuckDBStore.upsert_orders`, went with chain 3's DuckDB half, and this
-    goes with the mirror's half of this module in S14-13 (the walk holds it
-    to having no caller until then).
-    """
-    tables = [ORDERS_TABLE] + ([ORDER_PRODUCTS_TABLE] if replace_products else [])
-    counts = {ORDERS_TABLE: len(orders), ORDER_PRODUCTS_TABLE: len(products)}
-    outcomes = [
-        MirrorOutcome(table=t, rows=counts[t]) for t in tables
-    ]
-
-    if not enabled():
-        for out in outcomes:
-            out.skipped = f"{MIRROR_ENV} is off"
-        return outcomes
-
-    if not orders:
-        # Nothing to ship is not a success: moving the watermark here would
-        # date-stamp a shipment that did not happen.
-        for out in outcomes:
-            out.skipped = "no rows"
-        return outcomes
-
-    try:
-        await write_orders(orders, products, replace_products=replace_products)
-    except Exception as exc:
-        detail = f"{type(exc).__name__}: {exc}"
-        for out in outcomes:
-            out.error = detail
-            _record_error(out.table, out.rows, detail)
-            await _record_failure(out.table, detail)
-        return outcomes
-
-    for out in outcomes:
-        out.ok = True
-        _record_ok(out.table, out.rows)
-    return outcomes
+        async with conn.transaction():
+            await mark(conn)

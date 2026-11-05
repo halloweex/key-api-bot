@@ -202,9 +202,9 @@ class TestTheLayerAges:
         """The bug this exists for: 57 failed runs in a row read as 'ran recently'."""
         old = datetime.now(timezone.utc) - timedelta(days=3)
         recent = datetime.now(timezone.utc) - timedelta(minutes=5)
-        await _run(old, layer="reconciliation")
-        await _run(recent, layer="reconciliation", error_message="429 Too Many Attempts")
-        recon = (await dq_journal.last_success_ages_pg())["reconciliation"]
+        await _run(old, layer="reconciliation_pg")
+        await _run(recent, layer="reconciliation_pg", error_message="429 Too Many Attempts")
+        recon = (await dq_journal.last_success_ages_pg())["reconciliation_pg"]
         assert recon["age_seconds"] > 2 * 86400
         returned = datetime.fromisoformat(recon["last_success_at"])
         assert abs((returned - old).total_seconds()) < 1
@@ -217,7 +217,9 @@ class TestTheLayerAges:
         assert set(ages) == set(WATCHED_LAYERS)
         assert ages["integrity"]["age_seconds"] is not None
         assert ages["integrity"]["age_seconds"] < 60
-        assert ages["reconciliation"] == {"last_success_at": None, "age_seconds": None}
+        assert ages["reconciliation_pg"] == {"last_success_at": None, "age_seconds": None}
+        # The 05:30 job's DuckDB layer left the watched ones in step 14's S14-12.
+        assert "reconciliation" not in ages
 
     @pytest.mark.asyncio
     async def test_warn_and_critical_runs_still_count_as_fresh(self, pool):
@@ -288,7 +290,7 @@ class TestTheDigestBaselineIsWhatYouLastRead:
 
     @pytest.mark.asyncio
     async def test_a_layer_that_runs_once_a_day_is_unaffected(self, pool):
-        """`mirror_landing` and `reconciliation` fire once daily, so their
+        """`mirror_landing` and `reconciliation_pg` fire once daily, so their
         previous run already *is* the previous digest."""
         base = datetime(2026, 9, 13, 4, 30, tzinfo=timezone.utc)   # 07:30 Kyiv
         ids = [await _run(base + timedelta(days=i), layer="mirror_landing",

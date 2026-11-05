@@ -1,6 +1,6 @@
 -- O5 (chain 3) — what is true of the order tables on their own.
 --
--- Only under chain 3; the variables are O1's.
+-- Only under chain 3; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- The daily comparisons against DuckDB stand down for these tables once the
@@ -54,13 +54,13 @@ SELECT 'O5 orders integrity'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 3 still writes DuckDB (KS_WRITE_ORDERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 3 has not latched (see O1)'
+           WHEN 'pending' THEN 'not applicable: chain 3 has not latched'
            WHEN '1' THEN format(
                '%s expense(s) older than a day with no order%s, %s ledger row(s) with no checked_at',
                f.orphan_expenses,
                CASE WHEN f.orphan_expenses > 0
                     THEN ' (e.g. ' || left(f.orphan_sample::text, 100) || ')' ELSE '' END,
                f.null_checked)
-           ELSE format('orders_on=%s: see O1', flag.state)
+           ELSE format('orders_on=%s: KS_WRITE_ORDERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN facts f;

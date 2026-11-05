@@ -412,7 +412,6 @@ class TestTheReadsFollowTheChain:
                     await read()
                 assert raised.value.surface == "goals"
                 assert isinstance(raised.value.__cause__, ConnectionError)
-        assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
         assert read_fallback.refusals()["goals"]["count"] == 2
 
     @pytest.mark.asyncio
@@ -440,32 +439,7 @@ class TestTheReadsFollowTheChain:
                 await store.get_marketing_report(2026, 8)
         assert raised.value.surface == "marketing"
         assert isinstance(raised.value.__cause__, ConnectionError)
-        assert "marketing" not in read_fallback.counts(), "it fell back to DuckDB"
         assert read_fallback.refusals()["marketing"]["count"] == 1
-
-
-class TestTheHourlyReplaceCannotRollItBack:
-    """The most dangerous state for a write chain, proven end to end, and the
-    control that gives the survival its meaning — `replicate_operational`
-    never raises, so "the goal survived" alone could pass for a run that
-    quietly did nothing."""
-
-    @pytest.mark.asyncio
-    async def test_under_the_flag_the_typed_goal_survives(self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        env.setenv("KS_WRITE_GOALS", "postgres")
-        await store.set_goal("monthly", 2_000_000.0)
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert GOALS in result.get("stood_down", []), result
-        assert GOALS not in result["replaced"], result
-        assert float((await _pg_goals(pool))["monthly"][1]) == 2_000_000.0
-        goals = await store.get_goals()
-        assert goals["monthly"]["amount"] == 2_000_000.0
 
 
 class TestTheFlagGoesBackWithoutTheCopyBack:
@@ -473,8 +447,9 @@ class TestTheFlagGoesBackWithoutTheCopyBack:
     back to `duckdb` is a disagreement, not a rollback."""
 
     @pytest.mark.asyncio
-    async def test_the_writes_stay_in_postgres_and_the_replace_stays_down(self, stores):
-        from core.pg_operational import replicate_operational
+    async def test_the_writes_stay_in_postgres(self, stores):
+        """Until step 14's S14-13 the hourly replace was run here too, and
+        stood down for the table; it went with `core.pg_operational`."""
         from web.routes.api.health import _write_chains
 
         store, pool, env = stores
@@ -489,20 +464,8 @@ class TestTheFlagGoesBackWithoutTheCopyBack:
         assert await _duck_goals(store) == {}, "a second writer started in DuckDB"
         assert (await store.get_goals())["weekly"]["amount"] == 400_000.0
 
-        result = await replicate_operational(store)
-        assert "error" not in result, result
-        assert GOALS in result["stood_down"]
-        assert set(await _pg_goals(pool)) == {"monthly", "weekly"}
-        # Since step 14's S14-11 the flag is read by nothing: the copy files
-        # no mismatch and stamps no failure on the chain's table (until then
-        # `chain_flag_mismatch` and "owned by Postgres since …"), and
-        # `/api/health` publishes nothing of it.
-        assert "chain_flag_mismatch" not in result
-        async with pool.acquire() as conn:
-            state = await conn.fetchrow(
-                "SELECT failures_since_ok, last_error FROM meta.mirror_state "
-                "WHERE table_name = $1", GOALS)
-        assert state is None or not state["failures_since_ok"], dict(state or {})
+        # Since step 14's S14-11 the flag is read by nothing: `/api/health`
+        # publishes nothing of it (until then `chain_flag_mismatch`).
         assert _write_chains()[CHAIN] == {}
 
 

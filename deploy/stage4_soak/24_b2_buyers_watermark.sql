@@ -1,6 +1,6 @@
 -- B2 (chain 4) — the buyers step's own watermark keeps moving.
 --
--- Only under chain 4; the variables are B1's.
+-- Only under chain 4; the variables are deploy/stage4_soak.sh's.
 --
 -- WHY IT EXISTS
 -- Under the chain `last_sync_buyers` lives in `meta.chain_watermarks` and the
@@ -50,7 +50,7 @@ SELECT 'B2 buyers watermark'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 4 still writes DuckDB (KS_WRITE_BUYERS is not postgres and no latch marker)'
-           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB (see B1)'
+           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB'
            WHEN '1' THEN CASE
                WHEN NOT j.present AND j.just_flipped THEN
                    'last_sync_buyers not written yet, inside 90 min of the flip'
@@ -59,6 +59,6 @@ SELECT 'B2 buyers watermark'::text AS "check",
                WHEN j.age_min IS NULL THEN
                    format('last_sync_buyers holds %s, which is not a timestamp', left(j.value, 60))
                ELSE format('last_sync_buyers moved %s min ago (limit 90)', j.age_min) END
-           ELSE format('buyers_on=%s: see B1', flag.state)
+           ELSE format('buyers_on=%s: KS_WRITE_BUYERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN judged j;

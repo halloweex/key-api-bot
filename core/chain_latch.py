@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, FrozenSet, Mapping, Optional, Sequence
@@ -150,6 +150,34 @@ def _stamp_of(path: Path) -> str:
         logger.warning("chain latch: %s is unreadable (%s); using its mtime", path, exc)
     return datetime.fromtimestamp(
         path.stat().st_mtime, timezone.utc).isoformat()
+
+
+def markers_on_disk() -> Dict[str, str]:
+    """`{chain: latched_at}` for every marker on disk now, read afresh and
+    never into the cache: the standing watch asks whether a marker is still
+    there (`chain_latch_disagrees` in `core.pg_chain_invariants`), and the
+    cache would answer for the moment the process started. A directory that
+    does not exist holds no marker; one that cannot be read raises `OSError`
+    — an unreadable directory is not a lost marker, and the caller says it
+    could not look.
+
+    Listed with `os.scandir`, never `Path.glob` or `Path.exists`: both
+    swallow the `PermissionError` of a directory that cannot be listed (3.12
+    and 3.14 alike) and answer "nothing here", which turned every chain with
+    owner rows into a false CRITICAL lost marker. A marker removed between the
+    listing and its stamp is gone, which is what the caller asks."""
+    try:
+        with os.scandir(MARKER_DIR) as entries:
+            names = sorted(entry.name for entry in entries if entry.is_file())
+    except FileNotFoundError:
+        return {}
+    found: Dict[str, str] = {}
+    for name in names:
+        try:
+            found[name] = _stamp_of(MARKER_DIR / name)
+        except FileNotFoundError:
+            continue
+    return found
 
 
 def _cache() -> Dict[str, str]:
@@ -333,44 +361,14 @@ def unregistered_owned_tables(owners: Mapping[str, str]) -> Dict[str, str]:
     return {table: at for table, at in owners.items() if table not in declared}
 
 
-# ─── A chain that stamps the mirror's watermark itself ──────────────────────
+# ─── A chain that stamped the mirror's watermark itself ─────────────────────
 #
-# The daily comparison reads `meta.mirror_state.last_ok_at` after the owner
-# row as a shipment out of DuckDB over the chain's rows
-# (`chain_shipper_overwrote`, the stage-4 plan's E1). That holds for a chain
-# whose writer never stamps the watermark, and it does not hold for one that
-# does: chain 6 stamps it on every write by design (OD-15 (a)), and from
-# 2026-10-10 every morning's comparison paged the chain's own hourly writes as
-# a shipment over them, CRITICAL, with "restore from the nightly dump" as its
-# lever. So a chain whose writer stamps it declares the tables
-# (`CHAIN_STAMPS_MIRROR_STATE`), and a chain that also keeps a record of its own
-# write instants hands E1 the watermark and the record together
-# (`read_mirror_stamps(conn)`, answering in this shape). A chain that declares
-# the tables and keeps no record is not judged by E1 on them: its writes and a
-# shipment's look alike, and saying otherwise every morning would be noise.
-# `tests/unit/test_chain_mirror_stamps.py` walks every registered chain for a
-# writer that stamps the watermark and holds the declaration to it.
-
-
-@dataclass(frozen=True)
-class MirrorStamp:
-    """One table's `meta.mirror_state.last_ok_at` and the chain's record of its
-    own write instants, read in ONE statement. Two reads would let a chain
-    write land between them, leaving a watermark the record no longer carries —
-    which reads exactly like a shipment.
-
-    `last_ok_us` is that instant in whole microseconds since the epoch, worked
-    out by Postgres with the record's own arithmetic, so the two compare as
-    integers whatever the session renders. `stamps` is empty when the chain has
-    kept no record of the table yet — then no instant is the chain's. Never the
-    record's `previous`: that is the watermark as the chain's last write found
-    it, which after a shipment is the shipment's own instant. `unreadable` says
-    why a record nobody can parse was not read; then nothing it would have said
-    is known, and nothing is taken to be the chain's."""
-    last_ok_at: Optional[datetime]
-    last_ok_us: Optional[int]
-    stamps: FrozenSet[int] = frozenset()
-    unreadable: Optional[str] = None
+# The daily comparison read `meta.mirror_state.last_ok_at` after the owner row
+# as a shipment out of DuckDB over the chain's rows (`chain_shipper_overwrote`,
+# the stage-4 plan's E1), and a chain whose writer stamps the watermark itself
+# handed it the watermark and its record of its own write instants together
+# (`MirrorStamp`, chain 6's `read_mirror_stamps`). Step 14's S14-12 deleted the
+# comparison and both.
 
 
 # ─── The lock-out a flip waited for — until step 14's S14-11 ──────────────────

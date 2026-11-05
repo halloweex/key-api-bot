@@ -13,7 +13,6 @@ from core.utm_classify import (
     organic_detail,
     parse_utm_from_comment,
     tab_platform,
-    utm_columns,
 )
 from core import read_fallback
 
@@ -71,133 +70,18 @@ class TrafficMixin:
     # The parser and the classifier live in `core.utm_classify` since DN-15:
     # they are pure, and the reclassify dry run and the Postgres parse need them
     # without a store in hand. Bound here as the same functions, not wrappers,
-    # so `TrafficMixin._classify_traffic` still answers for existing callers and
-    # a test that patches the method on `DuckDBStore` still reaches the parse
-    # below, which looks them up through `self`.
+    # so `TrafficMixin._classify_traffic` still answers for existing callers.
     _parse_utm_from_comment = staticmethod(parse_utm_from_comment)
     _classify_traffic = staticmethod(classify_traffic)
 
-    _UTM_BATCH_SIZE = 1000
-
-    # How the last parse in this process ended: None when it finished, or when
-    # none has run yet, and the error text when it raised. Read by
-    # `core.pg_order_utm.ship_order_utm`, which will not copy a table that a
-    # parse may have left half-written.
-    #
-    # A class default and not an `__init__` assignment, because this is a mixin
-    # and `DuckDBStore.__init__` does not know about it; the parser sets it on
-    # the instance, and the store is a process singleton, so the instance is
-    # the process.
-    last_utm_parse_error: Optional[str] = None
-
-    async def refresh_utm_silver_layer(self) -> set[int]:
-        """Parse UTM data from orders and populate silver_order_utm table.
-
-        Processes in batches of _UTM_BATCH_SIZE, releasing the DB lock
-        between batches so health checks and other queries aren't blocked.
-
-        Returns:
-            The ids of the orders parsed. Callers take ``len()`` for the
-            count.
-
-            They were once needed whole: `refresh_warehouse_layers` used them
-            to work out which dates the traffic Gold had to be rebuilt for,
-            and returning only a count is what forced a full rebuild of that
-            table ~240 times a day. That layer is retired, so the ids are now
-            just the honest return value of a parser.
-
-        **Records its own outcome in `last_utm_parse_error`, here rather than
-        in `refresh_warehouse_layers`.** The warehouse tick is one of five
-        callers — the traffic refresh, the reclassify, the `manager_comment`
-        backfill endpoint and `scripts/backfill_utm.py` are the others — and
-        the tick swallows the error while the rest do not. A flag written only
-        by the tick would miss a reclassify whose DELETE committed and whose
-        re-parse raised, which is the most partial this table ever gets. It
-        would also refuse wrongly the other way: a reclassify that finished
-        after a failed tick has put every row back, and a flag only the tick
-        can clear would keep refusing its ship until the next dirty tick.
-
-        A finished parse is a complete table, which is what makes clearing
-        the flag on success sound: the predicate below selects every order
-        with a comment and no current row, so when it returns there is none
-        left. The one thing it cannot see is a DELETE running beside it on
-        another path, and that is what the shipper's row-count guard is for.
-        """
-        try:
-            parsed = await self._parse_utm_into_silver()
-        except BaseException as exc:
-            # `BaseException`, so a cancelled parse counts. A shutdown or a
-            # `wait_for` that cancels between two write batches leaves exactly
-            # the partial table an exception does, and `CancelledError` is not
-            # an `Exception`. Re-raised untouched either way.
-            self.last_utm_parse_error = f"{type(exc).__name__}: {exc}"
-            raise
-        self.last_utm_parse_error = None
-        return parsed
-
-    async def _parse_utm_into_silver(self) -> set[int]:
-        """The parse itself; `refresh_utm_silver_layer` is the entry point."""
-        # Step 1: fetch IDs + comments that need parsing (short lock)
-        async with self.connection() as conn:
-            orders = conn.execute("""
-                SELECT o.id, o.manager_comment, o.updated_at
-                FROM orders o
-                LEFT JOIN silver_order_utm u ON u.order_id = o.id
-                WHERE o.manager_comment IS NOT NULL
-                  AND o.manager_comment != ''
-                  AND (
-                      u.order_id IS NULL
-                      OR o.updated_at > u.parsed_at
-                  )
-            """).fetchall()
-
-        if not orders:
-            return set()
-
-        # Step 2: parse UTM in Python — no lock held
-        # `parsed_at` is the order's `updated_at` as it was when the comment
-        # was read — not the wall clock at write time. The lock is released
-        # between the read above and the write below, so a comment rewritten
-        # by the sync in between used to be stamped with a *later* parse time
-        # than its own `updated_at`, and the predicate above never picked it
-        # up again. Stamped with the value it was parsed from, a later change
-        # still compares greater.
-        #
-        # The row itself is `utm_columns`, the one place its shape is written —
-        # including the NULLs for a comment with no tracking data, which let
-        # the readers' COALESCE fall through to the source-based defaults. The
-        # reclassify dry run builds the same row to compare against, and a row
-        # built twice is two shapes the first time either is edited.
-        utm_rows = []
-        for order_id, comment, updated_at in orders:
-            utm_rows.append((
-                order_id,
-                *utm_columns(
-                    comment,
-                    parse=self._parse_utm_from_comment,
-                    classify=self._classify_traffic,
-                ),
-                updated_at,
-            ))
-
-        # Step 3: write in batches, releasing lock between each
-        total = 0
-        for i in range(0, len(utm_rows), self._UTM_BATCH_SIZE):
-            batch = utm_rows[i : i + self._UTM_BATCH_SIZE]
-            async with self.connection() as conn:
-                conn.executemany("""
-                    INSERT OR REPLACE INTO silver_order_utm
-                        (order_id, utm_source, utm_medium, utm_campaign, utm_content,
-                         utm_term, utm_lang, fbp, fbc, ttp, fbclid,
-                         traffic_type, platform, parsed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
-                """, batch)
-            total += len(batch)
-
-        num_batches = (len(utm_rows) + self._UTM_BATCH_SIZE - 1) // self._UTM_BATCH_SIZE
-        logger.info(f"Parsed UTM data for {total} orders ({num_batches} batches)")
-        return {order_id for order_id, _, _ in orders}
-
+    # DuckDB's own UTM parse stood here until step 14's S14-15 —
+    # `refresh_utm_silver_layer`, `_parse_utm_into_silver`, `_UTM_BATCH_SIZE`
+    # and `last_utm_parse_error`, which the copy out of DuckDB read before it
+    # shipped. Its callers went with step 13's switch: the DuckDB warehouse
+    # tick, and the DuckDB halves of the four UTM doors. Postgres parses the
+    # table itself (`core/pg_utm_parse.py`), and its parse was held to
+    # DuckDB's over the golden fixtures before this one went
+    # (`tests/integration/golden/utm_parse.json`).
 
     async def get_traffic_analytics(
         self,

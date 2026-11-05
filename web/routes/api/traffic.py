@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
-from core import ga4, warehouse_cutover
+from core import ga4
 from core.pg_utm_parse import reparse_router
 from web.services import dashboard_service, ga4_funnel_service
 from web.routes.auth import require_admin
@@ -299,32 +299,14 @@ async def refresh_traffic_data(
     request: Request,
     user: dict = Depends(require_admin),
 ):
-    """Force refresh UTM and traffic layers (admin only)."""
-    store = await get_store()
+    """Parse the UTM verdicts that are new or changed, now (admin only).
 
-    if not warehouse_cutover.duckdb_derives():
-        # KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres alone parses.
-        parsed = await _parse_in_postgres_alone(store, full=False, door="Refresh")
-        return {"success": True, "utm_orders_parsed": int(parsed.get("parsed") or 0),
-                "engine": "postgres"}
-
-    try:
-        utm_count = len(await store.refresh_utm_silver_layer())
-        # And on to Postgres, which is what the tab reads. These endpoints do
-        # not mark the warehouse dirty, so without this the reclassification
-        # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. The router ships DuckDB's parse, or
-        # under KS_UTM_PARSE=postgres parses in Postgres what is new; never
-        # raises — see `core/pg_utm_parse.py`.
-        await reparse_router(store)
-
-        return {
-            "success": True,
-            "utm_orders_parsed": utm_count,
-        }
-    except Exception as e:
-        logger.error(f"Traffic refresh failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Refresh failed: {e}")
+    Postgres alone parses (`parse_incremental_locked`, through the router).
+    Until step 14's S14-15 this ran DuckDB's parse first while DuckDB
+    derived; since step 13 it parsed in Postgres alone, as now."""
+    parsed = await _parse_in_postgres(full=False, door="Refresh")
+    return {"success": True, "utm_orders_parsed": int(parsed.get("parsed") or 0),
+            "engine": "postgres"}
 
 
 @router.post("/traffic/reclassify")
@@ -344,11 +326,11 @@ async def reclassify_traffic(
     served the "warming up" page. The application still finished and returned
     200. Read the outcome in the log, not in the response:
 
-        docker compose logs web | grep -E "Parsed UTM data for|reclassify"
+        docker compose logs web | grep -E "Order UTM parsed in Postgres|reclassify"
 
-    A successful run prints `Parsed UTM data for N orders (M batches)`, then
-    `Request completed ... 200`. It printed a `Refreshed gold_daily_traffic`
-    line between the two until that layer was retired.
+    A successful run prints `Order UTM parsed in Postgres (full): …`, then
+    `Request completed ... 200`. (DuckDB's parse printed `Parsed UTM data for
+    N orders (M batches)` until step 14's S14-15 deleted it.)
 
     Left synchronous on purpose. `backfill-utm` next door is a background task
     with a status endpoint, and copying that shape here would buy a subsystem
@@ -358,66 +340,26 @@ async def reclassify_traffic(
     answer.
 
     A client that hangs up does not stop the work, and the tab does not see
-    the middle of it. DuckDB *is* inconsistent for those minutes — the DELETE
-    commits on its own connection and the re-parse writes in batches of a
-    thousand on theirs — but the page reads Postgres, and Postgres keeps the
-    previous complete copy until `reparse_router` replaces the whole table at
-    the end: shipped from DuckDB by `ship_after_reparse`, or under
-    KS_UTM_PARSE=postgres re-parsed by `parse_full` in one transaction. So the
-    window is invisible from the screen rather than merely short.
+    the middle of it: `parse_full` replaces the whole table in one
+    transaction, so a reader sees the old verdicts or the new ones.
 
-    Under KS_WRITE_WAREHOUSE=postgres (DN-29) DuckDB is neither emptied nor
-    re-parsed: `parse_full` is the whole of the work, and the record notes it
-    so the way back re-parses DuckDB's verdicts too.
+    Postgres alone re-parses. Until step 14's S14-15 the door noted the
+    re-parse for a way back from step 13 first — in DuckDB's recorded writer,
+    or under KS_DUCKDB=off in `data/warehouse-utm-reparsed-at` — so that an
+    image from before step 14, taking the way back, would re-parse DuckDB's
+    verdicts too. Step 13's switch is gone, and the note with it; the marker
+    already on disk is left as it is.
     """
-    store = await get_store()
-
-    if not warehouse_cutover.duckdb_derives():
-        parsed = await _parse_in_postgres_alone(store, full=True, door="Reclassify")
-        return {"success": True, "utm_records": int(parsed.get("rows") or 0),
-                "engine": "postgres"}
-
-    try:
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_order_utm")
-
-        utm_count = len(await store.refresh_utm_silver_layer())
-        # And on to Postgres, which is what the tab reads. These endpoints do
-        # not mark the warehouse dirty, so without this the reclassification
-        # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. `full`: everything was re-parsed, so
-        # under KS_UTM_PARSE=postgres the table is replaced whole — the only
-        # way a rule change reaches orders whose `updated_at` has not moved.
-        # Never raises — see `core/pg_utm_parse.py`.
-        await reparse_router(store, full=True)
-
-        return {
-            "success": True,
-            "utm_records": utm_count,
-        }
-    except Exception as e:
-        logger.error(f"Traffic reclassify failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Reclassify failed: {e}")
+    parsed = await _parse_in_postgres(full=True, door="Reclassify")
+    return {"success": True, "utm_records": int(parsed.get("rows") or 0),
+            "engine": "postgres"}
 
 
-async def _parse_in_postgres_alone(store, *, full: bool, door: str) -> dict:
-    """A door's re-parse under KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres
-    alone, because DuckDB derives no UTM verdict there and a DuckDB failure
-    must not stand between the operator and the table /traffic reads. The
-    router's answer is then the door's answer — there is no DuckDB half that
-    succeeded for it to report instead — so an error is a 500 and a refused
-    full parse a 409. `full` is the reclassify's: noted in the recorded writer
-    first (`warehouse_cutover.note_utm_reparsed_in_postgres`), a note DuckDB
-    fails to take logged and never in the way."""
-    if full:
-        try:
-            await warehouse_cutover.note_utm_reparsed_in_postgres(store)
-        except Exception as exc:  # noqa: BLE001 — the retired engine; logged
-            logger.error(
-                "%s: DuckDB did not take the note that its UTM verdicts are now "
-                "older than the rules; the way back will not re-parse them: %s",
-                door, exc, exc_info=True)
-    parsed = await reparse_router(store, full=full)
+async def _parse_in_postgres(*, full: bool, door: str) -> dict:
+    """A door's re-parse, in Postgres. The router's answer is the door's
+    answer — an error is a 500 and a refused full parse a 409. `full` is the
+    reclassify's."""
+    parsed = await reparse_router(full=full)
     if "error" in parsed or "skipped" in parsed:
         raise HTTPException(
             status_code=500,
@@ -477,7 +419,6 @@ async def _run_backfill_postgres(days: int):
     from core.keycrm import get_async_client
     from core.scheduler import get_scheduler
 
-    store = await get_store()
     client = await get_async_client()
     tz = ZoneInfo("Europe/Kyiv")
     try:
@@ -529,7 +470,7 @@ async def _run_backfill_postgres(days: int):
             await asyncio.sleep(3)
 
         remaining_null = await pg_orders_read.null_comment_count()
-        parsed = await reparse_router(store)
+        parsed = await reparse_router()
         pg_parse_error = parsed.get("error") or parsed.get("skipped")
         _backfill_status.update(running=False, result={
             "status": "partial" if failed_chunks or pg_parse_error else "success",

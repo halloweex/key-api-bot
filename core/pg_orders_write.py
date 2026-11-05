@@ -163,26 +163,12 @@ CHAIN_TABLES: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses",
     "app.order_backfill_misses")
 
-# The tables whose `meta.mirror_state.last_ok_at` this chain's own writer
-# stamps: `pg_landing._write_order_rows` and `_write_rows` run the mirror's
-# statement, and the canary's `mirror_stale:bronze.orders` and
-# `order_versions_stalled` keep their meaning under the chain only because they
-# do (module docstring). Not the misses, which are written with no watermark.
-#
-# This chain keeps no record of its own instants (chain 6's `writes:<table>`),
-# so the daily comparison cannot tell its writes from a shipment's here and
-# does not judge these three for `chain_shipper_overwrote`
-# (`core.chain_latch.MirrorStamp`). Decided rather than owed: no shipper
-# reaches these tables while the chain is latched — DuckDB's order writers
-# are gone (step 14's S14-09), and every other order shipper stands down on
-# the marker and the owner rows (DN-22a, DN-22b) — and with the marker lost
-# `chain_latch_disagrees` and `order_owner_row_without_marker` say so,
-# CRITICAL, for as long as it lasts. A record would add little besides: the
-# chain moves these watermarks on every tick that writes an order or its
-# costs, so a stamp not its own would seldom survive to the morning's
-# comparison.
-CHAIN_STAMPS_MIRROR_STATE: Tuple[str, ...] = (
-    "bronze.orders", "bronze.order_products", "bronze.expenses")
+# This chain's own writer stamps `meta.mirror_state.last_ok_at` on the three
+# bronze tables (`pg_landing._write_order_rows` and `_write_rows` run the
+# mirror's statement), and the canary's `mirror_stale:bronze.orders` and
+# `order_versions_stalled` keep their meaning only because they do (module
+# docstring). It declared them (`CHAIN_STAMPS_MIRROR_STATE`) for the daily
+# comparison's `chain_shipper_overwrote`, which step 14's S14-12 deleted.
 
 # The `sync_metadata` keys that move with it. The store's getter and setter
 # route both through `core.write_chains.chain_for_sync_key` to
@@ -211,7 +197,9 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders", "last_sync_meilisearch_p
 # Not judged by `core.pg_chain_invariants`: `last_sync_orders` holds KeyCRM's
 # newest `updated_at`, not a sync time, and stands still overnight by design,
 # and the search cursor stands still whenever nothing is mirrored.
-# Freshness stays with `freshness_orders` and the order step's own health.
+# Freshness stays with `freshness_orders` — which judges when the step last
+# wrote the row, never this value (`data_quality.JUDGED_BY_LAST_WRITE`) —
+# and the order step's own health.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 # Absent from Postgres until the first tick after the flip writes it, and
 # `last_sync_orders` is where the order step's window STARTS. Read as absent
@@ -261,51 +249,22 @@ ACQUIRE_TIMEOUT_S = 10
 # seen. What the move stood down stays named below until its readers go.
 
 
-def landing_checks_stood_down() -> frozenset:
-    """The DuckDB integrity checks over the order tables that do not run once
-    this chain has moved: on a frozen DuckDB they would compare old orders,
-    and DN-23's Postgres twins stand in alone. Always the ten
-    (`ORDER_LANDING_CHECKS`), a constant since step 14's S14-00 — otherwise
-    they would knock on the refused DuckDB connection and page
-    `duckdb_opened_while_off`. Never raises."""
-    from core.data_quality import ORDER_LANDING_CHECKS
-
-    return ORDER_LANDING_CHECKS
+# `landing_checks_stood_down()` and `retired_conditions()` stood here until
+# step 14's S14-14: the ten DuckDB integrity checks over the order tables that
+# did not run once this chain had moved, and the conditions only they
+# reported. S14-14 deleted the checks; the names are not reused while an image
+# from before step 14 is the rollback target
+# (`tests/unit/test_rollback_condition_names.py`, rule 15). DN-23's Postgres
+# twins in `core/pg_warehouse_dq.py` are the checks of those tables.
 
 
-def retired_conditions() -> frozenset:
-    """The conditions only the stood-down landing checks report — what nothing
-    re-examines after the flip. A check that runs bare reports under its own
-    name; `status_group_agreement` under its guard's conditions. The DuckDB
-    arm of `dq_reconciliation` retires a whole group instead
-    (`RECONCILIATION_GROUP`)."""
-    from core.data_quality import GUARDED_CHECK_CONDITIONS, ORDER_LANDING_CHECKS
-
-    return frozenset(c for name in ORDER_LANDING_CHECKS
-                     for c in GUARDED_CHECK_CONDITIONS.get(name, (name,)))
-
-
-# The DuckDB arm of `dq_reconciliation` pages under this group, and stands
-# down under the chain (`stood_down_layers`).
-RECONCILIATION_GROUP = "dq:reconciliation"
-
-# The data-quality layers that stop being written once the chain has moved.
-# `reconciliation` is DuckDB's own arm of the 05:30 job: against a DuckDB that
-# no longer receives orders, every order created since the flip would read
-# MISSING and every status change STATUS_DRIFT — a CRITICAL page each morning,
-# and a repair that re-fetches them all from KeyCRM, 200 a day for ever. Its
-# Postgres arm, `reconciliation_pg`, is the comparison against the source that
-# stays, and the repair is driven from it.
-STOOD_DOWN_LAYERS = frozenset({"reconciliation"})
-
-
-def stood_down_layers() -> frozenset:
-    """The layers neither written, paged on, caught up nor digested since the
-    chain moved: `{"reconciliation"}`, a constant since step 14's S14-00 —
-    until then an exception here opened into the empty set. Never raises —
-    the canary's block, the catch-up and the digest all ask. Last consumers:
-    those three and `dq_reconciliation` — S14-12."""
-    return STOOD_DOWN_LAYERS
+# The DuckDB arm of `dq_reconciliation` paged under `dq:reconciliation`
+# (`RECONCILIATION_GROUP`), and its layer `reconciliation` was neither written,
+# paged on, caught up nor digested since the chain moved
+# (`STOOD_DOWN_LAYERS`, `stood_down_layers()`). Step 14's S14-12 deleted the
+# arm, the layer and the three names with it; the Postgres arm,
+# `reconciliation_pg`, is the comparison against the source, and drives the
+# repair.
 
 
 # `writes_postgres` stood here until step 14's S14-11: a constant since
@@ -682,6 +641,23 @@ async def record_backfill_misses(misses: Mapping[int, str]) -> int:
                 "checked_at = EXCLUDED.checked_at, reason = EXCLUDED.reason",
                 rows)
     return len(rows)
+
+
+# Said by a caller that restores comments from outside the web container,
+# where the scheduler's heavy-job lock does not exist: a CLI runs in its own
+# process, so `get_scheduler()._heavy_job_lock` there would be a brand-new
+# lock guarding nothing. `tests/unit/test_heavy_lock_coverage.py` accepts
+# this constant in place of the lock, which is why it is a constant a script
+# prints rather than a sentence in a docstring. It lived in `core.pg_backfill`
+# until step 14's S14-13 deleted that module; the sentence was about a DuckDB
+# UPDATE shipped to Postgres, and is about this chain's write now.
+WEB_MUST_BE_STOPPED = (
+    "Stop the web container before running this. It restores order comments "
+    "in Postgres without the scheduler's heavy-job lock, which lives in the "
+    "web process and cannot be taken from here — and a sync tick landing "
+    "between the read and the write leaves Postgres holding the older copy, "
+    "with the version archive recording a transition that never happened."
+)
 
 
 async def restore_manager_comments(comments: Mapping[int, str]) -> List[int]:

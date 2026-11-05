@@ -27,7 +27,7 @@ import pytest_asyncio
 
 from core import chain_latch, pg_catalogue_write as chain
 from core import pg_chain_invariants as inv
-from core import read_fallback, warehouse_cutover, write_chains
+from core import write_chains
 from core.landing_rows import CategoryRow, ProductRow, category_rows, product_rows
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -45,24 +45,20 @@ CATEGORIES = [{"id": 10, "name": "Care", "parent_id": None},
 @pytest.fixture
 def flags(monkeypatch):
     """No chain's variable set, nothing latched (conftest points the marker
-    directory at this test's tmp_path), and the read fallback as it is in
-    production today."""
+    directory at this test's tmp_path). (The read fallback's mode was set
+    here too until step 14's S14-16 deleted it.)"""
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
-    for name in warehouse_cutover.WAREHOUSE_READERS:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(read_fallback, "_mode", "duckdb")
     return monkeypatch
 
 
 @pytest.fixture
 def met(flags):
     """Every precondition of the flip met, as the environment says it: chain 1
-    on Postgres, the fallback off, every warehouse reader on Postgres."""
+    on Postgres. (Every warehouse reader on Postgres too, from step 13's
+    list, until step 14's S14-15 deleted it, and the fallback off until
+    S14-16 deleted its mode: nothing reads those switches.)"""
     flags.setenv("KS_WRITE_INVENTORY", "postgres")
-    flags.setattr(read_fallback, "_mode", "off")
-    for name in warehouse_cutover.WAREHOUSE_READERS:
-        flags.setenv(name, "postgres")
     return flags
 
 
@@ -187,25 +183,6 @@ class TestTheRegistrySeesIt:
         assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.sync_keys()
 
 
-    def test_each_table_is_a_unit_of_its_own(self):
-        """`_mirror` ships each alone, so neither drags another table down."""
-        from core.pg_landing import unit_of
-
-        for table in chain.CHAIN_TABLES:
-            assert unit_of(table) == (table,)
-
-    def test_the_mirror_stands_down_for_both(self, flagged):
-        import asyncio
-
-        from core import pg_landing
-
-        flagged.setenv(pg_landing.MIRROR_ENV, "1")
-        out = asyncio.run(pg_landing.mirror_products(PRODUCTS))
-        assert out.skipped and "bronze.products" in out.skipped
-        out = asyncio.run(pg_landing.mirror_categories(CATEGORIES))
-        assert out.skipped and "bronze.categories" in out.skipped
-
-
 class TestTheSearchCursorIsNotTheCatalogues:
     """OD-15: `last_sync_meilisearch_pg` moves with whichever of chains 3 and
     6 lands last, and that is chain 3. Declared here, a catalogue rollback
@@ -226,12 +203,14 @@ class TestTheSearchCursorIsNotTheCatalogues:
     SEARCH_KEYS = {"last_sync_meilisearch_pg", "last_sync_meilisearch"}
 
     def test_no_chain_declares_it_unless_it_owns_an_order_table(self):
-        from core.pg_landing import ORDER_UNIT
+        # The two order tables (`pg_landing.ORDER_UNIT` until step 14's
+        # S14-13 deleted the shipping units).
+        order_tables = {"bronze.orders", "bronze.order_products"}
 
         for c in write_chains.WRITE_CHAINS:
             declared = set(getattr(c, "CHAIN_SYNC_KEYS", ())) & self.SEARCH_KEYS
             if declared:
-                assert set(ORDER_UNIT) & set(c.CHAIN_TABLES), (
+                assert order_tables & set(c.CHAIN_TABLES), (
                     write_chains.chain_name(c), declared)
 
     def test_the_catalogue_does_not(self):
@@ -435,8 +414,6 @@ async def _full_sync(store):
         return _Client()
 
     with patch.object(sync_module, "get_async_client", new=_client), \
-         patch.object(sync_module, "mirror_categories", new=AsyncMock()), \
-         patch.object(sync_module, "mirror_products", new=AsyncMock()), \
          patch("core.pg_landing._record_failure", new=AsyncMock(return_value=True)) as rec:
         return await service.full_sync(days_back=30), rec
 
@@ -497,7 +474,6 @@ def _tick(monkeypatch, store, *, upsert_products=None):
             yield PRODUCTS
 
     monkeypatch.setattr(mod, "get_async_client", AsyncMock(return_value=_KeyCRM()))
-    monkeypatch.setattr(mod, "mirror_products", AsyncMock())
     svc = SyncService(store=store)
     svc._should_skip_sync = lambda: (False, None)
     svc._fetch_orders_with_date_filter = AsyncMock(return_value=[])

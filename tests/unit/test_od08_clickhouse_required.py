@@ -25,25 +25,25 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from core import ch_silver, warehouse_cutover
+from core import ch_silver
 from core.data_quality import IntegrityIssue, Severity
 
 
 UNWATCHED = "gold_values_unwatched"
 
 
+# `duckdb_derives` and `postgres_alone` set step 13's mode one way or the
+# other (`core/warehouse_cutover.py`) to show that nothing here read it. The
+# module went in step 14's S14-15; the two names stay as fixtures that do
+# nothing, so each test still says which state it was written for.
 @pytest.fixture
-def duckdb_derives(monkeypatch):
-    """Production today: DuckDB derives, and its Gold is compared."""
-    monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-    monkeypatch.setattr(warehouse_cutover, "_held", False)
+def duckdb_derives():
+    """A state no step-14 build is in; nothing here ever read it."""
 
 
 @pytest.fixture
-def postgres_alone(monkeypatch):
-    """After step 13: Postgres alone derives."""
-    monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
-    monkeypatch.setattr(warehouse_cutover, "_held", False)
+def postgres_alone():
+    """After step 13: Postgres alone derives — the only state there is."""
 
 
 def _names(issues):
@@ -135,39 +135,30 @@ class TestTheComparisonNamesItsOwnBlindness:
         assert _names(issues) == ["ch_engines_gold_mismatch"]
 
 
-class TestItsSeverityFollowsWhoElseLooks:
-    """Mutation: make `gold_unwatched_severity` return WARN unconditionally
-    and the two CRITICAL tests fail; CRITICAL unconditionally, the WARN one."""
+class TestItIsAlwaysCritical:
+    """`gold_values_unwatched` was WARN while DuckDB's Gold was still compared
+    against Postgres' and CRITICAL once it was not
+    (`gold_unwatched_severity`, on `warehouse_checks_stand_down`). Step 13
+    stood that comparison down for good and step 14's S14-12 deleted it with
+    the predicate: ClickHouse's derivation is the only independent check of
+    Gold, so a run without it is CRITICAL whatever else holds. Mutation: let
+    the severity read any mode again."""
 
-    def test_critical_once_postgres_alone_derives(self, postgres_alone):
+    def test_critical_and_says_why(self, postgres_alone):
         issue = ch_silver.gold_values_unwatched("x")
         assert issue.severity is Severity.CRITICAL
         assert "no second engine checked" in issue.description
 
-    def test_unreadable_predicate_is_critical_and_still_files(self, monkeypatch):
-        """Mutation: let the predicate's raise escape and this raises."""
-        def boom():
-            raise RuntimeError("cannot tell")
-
-        monkeypatch.setattr(warehouse_cutover, "warehouse_checks_stand_down", boom)
-        assert ch_silver.gold_values_unwatched("x").severity is Severity.CRITICAL
-
-    def test_same_predicate_the_job_stands_reconcile_gold_down_on(self):
-        """The severity must follow what the job actually did, so it reads the
-        job's own predicate — never a second opinion of it."""
+    def test_no_predicate_is_read(self):
         import ast
         import inspect
         import textwrap
-        from core.scheduler import BackgroundScheduler
 
-        def calls(fn):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-            return {n.func.attr for n in ast.walk(tree)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-
-        predicate = "warehouse_checks_stand_down"
-        assert predicate in calls(ch_silver.gold_unwatched_severity)
-        assert predicate in calls(BackgroundScheduler._run_dq_mirror_landing)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(ch_silver.gold_values_unwatched)))
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert "warehouse_cutover" not in names
+        assert not hasattr(ch_silver, "gold_unwatched_severity")
 
 
 # ─── The job files what the comparison cannot ───────────────────────────────
