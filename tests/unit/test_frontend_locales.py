@@ -60,8 +60,10 @@ VOCABULARIES = {
     # channel when it is neither organic nor an ad platform.
     "traffic.firstChannel.": list(FIRST_CHANNEL_OTHER),
     # The GA4 funnel block on /traffic names its traffic types and its steps
-    # by interpolation (`traffic.funnelType.${key}`, `traffic.funnelStep.${step}`).
+    # by interpolation (`traffic.funnelType.${key}`, `traffic.funnelStep.${step}`),
+    # and says under each type what it holds (`traffic.funnelTypeDesc.${key}`).
     "traffic.funnelType.": list(FUNNEL_TYPES),
+    "traffic.funnelTypeDesc.": list(FUNNEL_TYPES),
     "traffic.funnelStep.": list(FUNNEL_STEPS),
 }
 
