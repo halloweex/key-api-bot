@@ -5,7 +5,7 @@ Uses DuckDB as the primary data source for fast, persistent queries.
 No in-memory caching needed - DuckDB queries are <10ms.
 """
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 
 from core.duckdb_store import get_store
@@ -17,6 +17,34 @@ logger = logging.getLogger(__name__)
 def parse_period(period: Optional[str], start_date: Optional[str], end_date: Optional[str]) -> Tuple[str, str]:
     """Parse period shortcut or dates into (start_date, end_date) tuple."""
     return _parse_period_core(period, start_date, end_date).as_str_tuple()
+
+
+def stack_forecast_on_actuals(
+    start: date, revenue: List[float], predictions: List[Dict[str, Any]],
+) -> Dict[str, float]:
+    """The trend's forecast badge: what the chart's bars add up to.
+
+    `revenue` is the trend's daily series, one value a day from `start`. A
+    day stands at its actual, and a day with a forecast at the larger of its
+    actual and its forecast: the chart stacks `max(0, forecast − actual)` on
+    the day's actual (`useRevenueTrendChartData`). So today's revenue so far
+    is not counted again inside its full-day forecast, a day that already
+    beat its forecast adds nothing, and the week counts the days behind it.
+    Until 2026-11-05 the month's badge added today's actual to its whole
+    forecast — ₴116 546 twice on 2026-11-04 — and the week's held only the
+    days from today on.
+    """
+    actual = {(start + timedelta(days=i)).isoformat(): float(v or 0)
+              for i, v in enumerate(revenue)}
+    actual_to_date = round(sum(actual.values()), 2)
+    remaining = round(sum(
+        max(0.0, float(p["predicted_revenue"]) - actual.get(p["date"], 0.0))
+        for p in predictions), 2)
+    return {
+        "actual_to_date": actual_to_date,
+        "predicted_remaining": remaining,
+        "predicted_total": round(actual_to_date + remaining, 2),
+    }
 
 
 def _parse_dates(start_date: str, end_date: str) -> Tuple[date, date]:
