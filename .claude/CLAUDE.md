@@ -119,12 +119,15 @@ the file.
 # bot/config.py
 DEFAULT_TIMEZONE = "Europe/Kyiv"
 RETURN_STATUS_IDS = [15, 18, 19, 21, 22, 23]   # KeyCRM lost/cancel group (6)
-SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify'}
+SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify', 5: 'Виставка'}
 
 # core/duckdb_constants.py
 B2B_MANAGER_ID = 15                             # the wholesale manager
 RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]  # seeds managers.is_retail for NEW rows only
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
+EXHIBITION_SOURCE_ID = 5                        # the fair: sales_type exhibition, whoever staffed it
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)             # what we pull from KeyCRM and reconcile
+REVENUE_SOURCE_IDS = (1, 2, 4, 5)               # what counts as revenue (is_active_source)
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 ```
 
 ## API Endpoints
@@ -261,9 +264,9 @@ ClickHouse holds a second copy of Silver and derives its own Gold from it
 (`core/ch_silver.py`, hourly `ch_sync`), the archive of order versions
 (`history.order_versions`) and the cohorts' reads.
 
-**Source filtering:**
-- Included: Instagram (1), Telegram (2), Shopify (4)
-- Excluded: Opencart (3) - deprecated
+**Source filtering** (`REVENUE_SOURCE_IDS`, materialised as Silver's `is_active_source`):
+- Included: Instagram (1), Telegram (2), Shopify (4), Виставка (5) — the exhibition, its own `sales_type`
+- Excluded: Opencart (3) - deprecated; still synced and reconciled (`SYNCED_SOURCE_IDS`), never revenue
 
 ## Deployment
 
@@ -627,11 +630,17 @@ projection (`core.warehouse_sql.silver_select_sql`, derived by
 13), and every dashboard endpoint defaults to `Query("retail")`:
 
 ```
+source_id = EXHIBITION_SOURCE_ID (5)      → exhibition (the fair, whoever staffed it)
 manager_id IS NULL                        → retail    (Shopify, no manager)
 manager_id = B2B_MANAGER_ID               → b2b       (the wholesale manager)
 manager_id in managers.is_retail = TRUE   → retail
 otherwise                                 → internal
 ```
+
+The exhibition branch is first on purpose: the fair was staffed by a retail
+manager, so a manager-based rule would pull a one-off channel into the retail
+trend it would distort. It counts as revenue (source 5 is in
+`REVENUE_SOURCE_IDS`) and is not gated like `internal`.
 
 **Retail is a fixed list of retail managers and b2b is the wholesale manager;
 nobody else is mixed into either.** `internal` is everyone else — staff whose
