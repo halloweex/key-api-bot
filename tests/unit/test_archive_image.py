@@ -177,15 +177,17 @@ class TestProbe:
         assert done.returncode == 0, done.stderr
         assert done.stdout.strip().splitlines()[-1] == duckdb.__version__
 
-    def test_the_version_is_the_one_the_lock_installs_today(self):
-        """1.5.5 wrote every archive; the lock still installs it until step
-        14's S14-19. Mutation: bump one without the other while both exist."""
+    def test_the_version_is_the_one_the_dev_lock_installs(self):
+        """1.5.5 wrote every archive. Since step 14's S14-19 the images'
+        lock installs no driver, and the dev lock installs this one for the
+        host tools' tests. Mutation: bump one without the other."""
         text = LIBRARY.read_text()
         assert re.search(r'^ARCHIVE_DUCKDB_VERSION="1\.5\.5"$', text, re.M)
         assert re.search(rf'^ARCHIVE_PINNED_IMAGE="{re.escape(PINNED)}"$', text, re.M)
         lock = (REPO / "requirements.lock").read_text()
-        pinned = re.findall(r"^duckdb==(\S+)$", lock, re.M)
-        assert pinned in ([], ["1.5.5"]), pinned
+        assert re.findall(r"^duckdb==(\S+)$", lock, re.M) == []
+        dev = (REPO / "requirements-dev.lock").read_text()
+        assert re.findall(r"^duckdb==(\S+)$", dev, re.M) == ["1.5.5"]
 
 
 # ── what is mounted into the pinned image ────────────────────────────────────
