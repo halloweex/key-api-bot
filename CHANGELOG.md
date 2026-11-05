@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.320
+
+- WIP: S14-14 — the walks' non-vacuity examples and the digest's sample names follow the scan out
+- WIP: S14-14 — the twins' judges narrow their groups; the baseline shrinks by 14
+- WIP: S14-14 — two attribution verdicts carried to the twin; the logger test kept
+- WIP: S14-14 — CLAUDE.md: the integrity scan's paragraphs say it reads Postgres only
+- WIP: S14-14 — the tests follow the integrity scan to Postgres
+- WIP: S14-14 — the integrity scan reads Postgres only; the DuckDB checks, their stand-downs and the pairing go
+
+
 ## 3.0.319
 
 - WIP: S14-13 — the entry walk and the gender tick test follow the copies out
