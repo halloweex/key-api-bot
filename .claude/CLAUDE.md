@@ -186,8 +186,19 @@ of theirs (`include_comparison=False`, the four dates and both periods
 null), and the page hides the change column of the organic block. The page
 asks the trend `granularity=monthly` for it: one bar a month, labelled
 `MM.YYYY`, never a comparison or a forecast — by day it is a thousand bars
-whose `dd.mm` repeats every year. The GA4 funnel sees 14 months of it and
-says so; the CRM's order count beside it starts at GA4's `earliest` too.
+whose `dd.mm` repeats every year. `/api/customers/insights` takes the same
+`granularity` for its AOV trend, a month's AOV being its revenue over its
+orders (never a mean of daily AOVs; `core.filters.by_month` folds both), and
+the traffic trend's additive days are folded on the page
+(`utils/trafficTrend.trafficByMonth`). The GA4 funnel sees 14 months of it and
+says so; the CRM's order count beside it starts at GA4's `earliest` too. Nine
+digits of hryvnia do not fit a narrow tile: `StatCard` takes a
+`shortFormatter` (`formatCurrencyShort`, `₴108 млн`) and shows it only when the
+full figure, measured on a hidden copy, does not fit — the full one stays in
+the tooltip and the label. The marketing report's range gives its start a year
+when the two differ (`formatReportRange`). Its «Кол-во клиентов» sums Gold's
+daily distinct buyers, which over the whole history reads 42 620 against the
+dashboard's 19 293 people — a known difference, the owner's to decide.
 
 `start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
 `core/filters.parse_period`, and only as a pair: one alone is ignored, and a

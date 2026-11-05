@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { TrendingUp, TrendingDown, Minus, ChevronDown } from 'lucide-react'
 import { useAnimatedNumber } from '../hooks/useAnimatedNumber'
 import type { IconComponent } from './icons'
@@ -14,6 +14,10 @@ export interface StatCardProps {
   value: number
   /** Function to format the value for display */
   formatter: (value: number) => string
+  /** The value in fewer characters (`formatCurrencyShort`), shown only when
+   *  the full figure does not fit the card — the whole history is nine
+   *  digits of hryvnia. The full figure stays in the tooltip and the label. */
+  shortFormatter?: (value: number) => string
   /** Optional icon to display on the left. Sized by the card itself. */
   icon?: IconComponent
   /** Optional subtitle below the value */
@@ -83,12 +87,44 @@ const iconBgStyles: Record<StatCardVariant, string> = {
   cyan: 'bg-cyan-200/60',
 }
 
+const VALUE_TEXT = 'text-lg sm:text-xl lg:text-2xl font-bold tracking-tight'
+
+// Whether the full figure fits its row beside the trend. Measured on a hidden
+// copy of the final figure, never on the animated one (it grows from the last
+// value), and again whenever the card is resized. Where nothing can be
+// measured — no ResizeObserver, no layout — it fits.
+function useFullFigureFits(
+  row: RefObject<HTMLDivElement | null>,
+  full: RefObject<HTMLSpanElement | null>,
+  trend: RefObject<HTMLSpanElement | null>,
+  text: string,
+  enabled: boolean,
+): boolean {
+  const [fits, setFits] = useState(true)
+  useLayoutEffect(() => {
+    const rowEl = row.current
+    const fullEl = full.current
+    if (!enabled || !rowEl || !fullEl) return
+    const measure = () => {
+      const beside = trend.current ? trend.current.offsetWidth + 8 : 0  // gap-2
+      setFits(fullEl.offsetWidth + beside <= rowEl.clientWidth)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(rowEl)
+    return () => observer.disconnect()
+  }, [row, full, trend, text, enabled])
+  return !enabled || fits
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const StatCard = memo(function StatCard({
   label,
   value,
   formatter,
+  shortFormatter,
   icon: Icon,
   subtitle,
   detail,
@@ -103,7 +139,14 @@ export const StatCard = memo(function StatCard({
 }: StatCardProps) {
   const trendKey = trend === 1 ? 'up' : trend === -1 ? 'down' : 'neutral'
   const showTrend = trend !== undefined && trend !== 0 && trendValue !== undefined
-  const animatedDisplay = useAnimatedNumber(value, formatter, animationDuration)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const fullRef = useRef<HTMLSpanElement>(null)
+  const trendRef = useRef<HTMLSpanElement>(null)
+  const fullText = formatter(value)
+  const fits = useFullFigureFits(rowRef, fullRef, trendRef, `${fullText}|${showTrend}`, !!shortFormatter)
+  const shortened = !fits && !!shortFormatter
+  const animatedDisplay = useAnimatedNumber(
+    value, shortened ? shortFormatter : formatter, animationDuration)
 
   return (
     <div
@@ -138,17 +181,31 @@ export const StatCard = memo(function StatCard({
             <h3 className="text-xs lg:text-sm text-slate-600 font-medium mb-1 flex items-center gap-1">{label}{labelExtra}</h3>
 
             {/* Value with animation */}
-            <div className={`flex items-baseline gap-2 ${Icon ? "" : "justify-center"} min-w-0`}>
+            <div
+              ref={rowRef}
+              className={`relative overflow-hidden flex items-baseline gap-2 ${Icon ? "" : "justify-center"} min-w-0`}
+            >
               <span
                 aria-live="polite"
-                className={`text-lg sm:text-xl lg:text-2xl font-bold tracking-tight truncate ${variantStyles[variant]}`}
+                title={shortened ? fullText : undefined}
+                className={`${VALUE_TEXT} truncate ${variantStyles[variant]}`}
               >
                 {animatedDisplay}
               </span>
+              {shortFormatter && (
+                <span
+                  ref={fullRef}
+                  aria-hidden="true"
+                  className={`${VALUE_TEXT} invisible absolute left-0 top-0 whitespace-nowrap pointer-events-none`}
+                >
+                  {fullText}
+                </span>
+              )}
 
               {/* Trend indicator */}
               {showTrend && (
                 <span
+                  ref={trendRef}
                   className={`flex items-center gap-0.5 text-xs font-medium ${trendStyles[trendKey]}`}
                   aria-label={`${trendKey === 'up' ? 'Increased' : 'Decreased'} by ${trendValue}%`}
                 >

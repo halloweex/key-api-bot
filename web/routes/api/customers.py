@@ -76,6 +76,7 @@ async def get_customer_insights(
     brand: Optional[str] = Query(None),
     promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    granularity: str = Query("daily", description="daily, or monthly: the AOV trend one point a month"),
     _gate=Depends(require_permission("dashboard")),
 ):
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
@@ -85,13 +86,15 @@ async def get_customer_insights(
         brand = validate_brand_name(brand)
         promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
+        if granularity not in ("daily", "monthly"):
+            raise ValidationError("granularity", "Must be one of: daily, monthly", granularity)
         start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return await dashboard_service.get_customer_insights(
         start, end, brand=brand, source_id=source_id, sales_type=sales_type,
-        promocode=promocode,
+        promocode=promocode, granularity=granularity,
     )
 
 

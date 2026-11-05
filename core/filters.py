@@ -5,7 +5,7 @@ Shared between bot and web services to avoid duplication.
 """
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from core.exceptions import ValidationError
@@ -246,3 +246,25 @@ def has_comparison(period: Optional[str]) -> bool:
     this rather than naming the shortcut.
     """
     return period != "all_time"
+
+
+def by_month(
+    start: date, end: date, daily: Dict[date, Tuple[float, int]],
+) -> List[Tuple[str, float, int]]:
+    """Every calendar month the range touches, oldest first, as
+    `(MM.YYYY, revenue, orders)` summed over its days inside the range.
+
+    `daily` maps a day to its `(revenue, orders)`; a day it lacks is zero, so
+    a month with no orders is still a point. The first and last month hold
+    only their days in range. What `granularity=monthly` answers — the whole
+    history by day is a thousand points whose `dd.mm` repeats every year.
+    """
+    months: Dict[str, List[float]] = {}
+    current = start
+    while current <= end:
+        revenue, orders = daily.get(current, (0.0, 0))
+        bucket = months.setdefault(current.strftime("%m.%Y"), [0.0, 0])
+        bucket[0] += revenue
+        bucket[1] += orders
+        current += timedelta(days=1)
+    return [(label, revenue, int(orders)) for label, (revenue, orders) in months.items()]

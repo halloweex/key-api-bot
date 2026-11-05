@@ -141,6 +141,8 @@ export interface CustomerInsightsResponse {
   }
   aovTrend: {
     labels: string[]
+    /** Present only for month buckets: labels are `MM.YYYY`. */
+    granularity?: 'monthly'
     datasets: Array<{
       label: string
       data: number[]
