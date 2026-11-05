@@ -513,9 +513,7 @@ def _sync(coro_fn):
     async def client():
         return _Client()
 
-    with patch.object(sync_module, "get_async_client", new=client), \
-         patch.object(sync_module, "mirror_categories", new=AsyncMock()), \
-         patch.object(sync_module, "mirror_products", new=AsyncMock()):
+    with patch.object(sync_module, "get_async_client", new=client):
         return asyncio.run(coro_fn())
 
 

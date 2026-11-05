@@ -2,9 +2,9 @@
 # Stage 4 soak report: every check in the soak checklist, one command, one table.
 #
 # The soak checks are the only detectors for a lost derivation mark (D4, D5),
-# stale Silver rows (D7), the chain-8 stand-down (E1) and a halted order intake
-# (S0), and the one daily verdict on the DuckDB file's hash (P1, until the
-# file is deleted), and they have to run every day for weeks. Run by hand
+# stale Silver rows (D7) and a halted order intake (S0), and the one daily
+# verdict on the DuckDB file's hash (P1, until the file is deleted), and they
+# have to run every day for weeks. Run by hand
 # from a checklist
 # they drift: a query pasted from yesterday's terminal, a precondition skipped
 # on a busy morning. So each check is a file under deploy/stage4_soak/ that
@@ -16,6 +16,11 @@
 # license. Kept, they would have turned UNKNOWN every day once the canary's
 # watch rows stop being written, and an UNKNOWN that is always there hides
 # the new one.
+#
+# E1, I1, B1, H1, M1 and O1 (the hourly copies and mirrors out of DuckDB
+# stayed stood down for each chain's tables) are gone since step 14's S14-13,
+# which deleted the copies and mirrors themselves: there is nothing left to
+# stand down.
 #
 # THREE VERDICTS, AND THE THIRD IS THE POINT
 # PASS and FAIL are the obvious two. UNKNOWN is a check that could not see:
@@ -38,11 +43,11 @@
 #   deploy/stage4_soak.sh
 #   SOAK_INVENTORY_FLIP_AT='2026-10-01 10:00+03' deploy/stage4_soak.sh
 #   SOAK_BUYERS_FLIP_AT='2026-10-01 10:30+03' SOAK_BUYERS_OVERRIDE_FLOOR=0 deploy/stage4_soak.sh
-# The second form is for chain 1's flip day; see 15_i1_inventory_copy_stood_down.sql.
-# The third is chain 4's: the flip time, and how many human overrides of a
-# gender verdict there were that day (25_b3_gender_coverage.sql).
-# Chain 5's flip day: SOAK_MANAGERS_FLIP_AT='<latch time>' (30_m1_managers_copy_stood_down.sql).
-# Chain 3's flip day: SOAK_ORDERS_FLIP_AT='<latch time>' (32_o1_orders_copies_stood_down.sql).
+# The second form is for chain 1's flip day (17_i3, 18_i4). The third is chain
+# 4's: the flip time, and how many human overrides of a gender verdict there
+# were that day (25_b3_gender_coverage.sql).
+# Chain 5's flip day: SOAK_MANAGERS_FLIP_AT='<latch time>' (31_m2_classification_shape.sql).
+# Chain 3's flip day: SOAK_ORDERS_FLIP_AT='<latch time>' (33_o2, 35_o4).
 #
 # Exit: 0 when every check passes, 1 on any FAIL, 2 when nothing failed but at
 # least one check is UNKNOWN.
@@ -99,9 +104,7 @@ flag_state() {
 # KS_WRITE_* says (owner decision OD-19 (a)), so a report that read the flag
 # alone would call the chain "not applicable" in the one state the latch exists
 # for: latched, and the variable put back by an operator expecting a rollback.
-# Every I-check would then be a PASS about a chain nobody is watching, I1 —
-# which asks whether the hourly copy is overwriting the six inventory tables —
-# included.
+# Every I-check would then be a PASS about a chain nobody is watching.
 #
 # The marker file is what routes the writes, so it is what is read, by its
 # path rather than through /api/health: no HTTP, no session, and it answers
@@ -122,18 +125,6 @@ latch_state() {
     fi
 }
 
-# When the markers were read, taken before the first of them. A marker found
-# missing is read here, and the owner rows beside it are read by the SQL some
-# thirty psql sessions later, so a chain that takes its latch in between — the
-# first write on flip day, minutes after the start — would read as a lost
-# marker: a healthy first write takes the marker and only then claims the
-# owner rows, dated by its transaction's `now()`. So O1 and M1 read owner rows
-# dated after this moment as a latch taken during the report, UNKNOWN, and
-# only older ones as the marker lost. The host's clock is Postgres's: a
-# container has no clock of its own. To the second, truncated, so it can only
-# err early, and early reads a latch in that second as UNKNOWN, never FAIL.
-MARKERS_READ_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
 INVENTORY_ON="$(flag_state KS_WRITE_INVENTORY postgres duckdb)"
 INVENTORY_LATCHED="$(latch_state pg_inventory_write)"
 DQ_PG_WAREHOUSE_ON="$(flag_state KS_DQ_PG_WAREHOUSE on off)"
@@ -143,7 +134,7 @@ INVENTORY_FLIP_AT="${SOAK_INVENTORY_FLIP_AT:-}"
 # the writes only once every reader of the buyers reads Postgres
 # (`unmet_precondition`), so "postgres, not latched, a reader on duckdb" is a
 # chain HELD on DuckDB. Reported as `held` rather than 1, or B2–B5 would judge
-# a chain that never moved and B1 would pass it. The readers are asked by exact
+# a chain that never moved. The readers are asked by exact
 # name, like every flag here, and trimmed and lower-cased the way their parsers
 # read them.
 BUYERS_ON="$(flag_state KS_WRITE_BUYERS postgres duckdb)"
@@ -172,9 +163,8 @@ fi
 # are verdicts only web holds (the goal bridge, a code constant, was one until
 # chain 7b-4). So a flag that says
 # postgres on a chain that has not latched is `pending` — the first tick after
-# the flip writes, and latches, within a minute — and M1 names where web
-# publishes why it is held. Latched outranks the flag, as everywhere here. A
-# latch taken while this report runs is M1's UNKNOWN, by MARKERS_READ_AT.
+# the flip writes, and latches, within a minute. Latched outranks the flag,
+# as everywhere here.
 MANAGERS_ON="$(flag_state KS_WRITE_MANAGERS postgres duckdb)"
 MANAGERS_LATCHED="$(latch_state pg_managers_write)"
 MANAGERS_FLIP_AT="${SOAK_MANAGERS_FLIP_AT:-}"
@@ -192,11 +182,9 @@ fi
 # lockout, step 13, chain 1, the backup evidence, no page the stand-down
 # retires — are read in web, and a process that found one unmet stays held
 # until it restarts. So a flag that says postgres on a chain that has not
-# latched is `pending`, and O1 names where web publishes why. It latches on
-# its first write, the first order KeyCRM changes after the start: minutes, in
-# the day — so on flip day it can latch while this report runs, which O1
-# reads by MARKERS_READ_AT as UNKNOWN. The latch outranks the flag, as
-# everywhere here.
+# latched is `pending`. It latches on its first write, the first order KeyCRM
+# changes after the start: minutes, in the day. The latch outranks the flag,
+# as everywhere here.
 ORDERS_ON="$(flag_state KS_WRITE_ORDERS postgres duckdb)"
 ORDERS_LATCHED="$(latch_state pg_orders_write)"
 ORDERS_FLIP_AT="${SOAK_ORDERS_FLIP_AT:-}"
@@ -220,23 +208,6 @@ DQ_JOURNAL_DIRECT="$(flag_state KS_WRITE_DQ_JOURNAL postgres duckdb)"
 if [ "$(latch_state pg_dq_journal_write)" = "1" ]; then
     DQ_JOURNAL_DIRECT=1
 fi
-
-# The other three shadow chains (OD-02 (c)): chain 10's samples and the two
-# report ledgers, 11a and 11b. Read as chain 9 is — the flag, outranked by the
-# latch — and judged by H1 (the hourly copy stood down for their tables), which
-# takes chain 9's state from DQ_JOURNAL_DIRECT. H2, the 07:30 comparison of
-# the two copies, went with the DuckDB copy in step 14's S14-10.
-shadow_state() {
-    local state
-    state="$(flag_state "$1" postgres duckdb)"
-    if [ "$(latch_state "$2")" = "1" ]; then
-        state=1
-    fi
-    echo "$state"
-}
-WATCHDOGS_ON="$(shadow_state KS_WRITE_WATCHDOGS pg_watchdog_write)"
-WEEKLY_LEDGER_ON="$(shadow_state KS_WRITE_WEEKLY_LEDGER pg_weekly_ledger_write)"
-TRAFFIC_LEDGER_ON="$(shadow_state KS_WRITE_TRAFFIC_LEDGER pg_traffic_ledger_write)"
 
 # The latch wins, exactly as `writes_postgres()` resolves it — including over
 # `invalid`, because a latched chain with a misspelt variable goes on writing
@@ -327,17 +298,12 @@ run_check() {
             -v dq_pg_warehouse_on="$DQ_PG_WAREHOUSE_ON" \
             -v buyers_on="$BUYERS_ON" \
             -v buyers_flip_at="$BUYERS_FLIP_AT" \
-            -v buyers_held_by="$BUYERS_HELD_BY" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
             -v managers_on="$MANAGERS_ON" \
             -v managers_flip_at="$MANAGERS_FLIP_AT" \
             -v orders_on="$ORDERS_ON" \
             -v orders_flip_at="$ORDERS_FLIP_AT" \
-            -v markers_read_at="$MARKERS_READ_AT" \
             -v dq_journal_direct="$DQ_JOURNAL_DIRECT" \
-            -v watchdogs_on="$WATCHDOGS_ON" \
-            -v weekly_ledger_on="$WEEKLY_LEDGER_ON" \
-            -v traffic_ledger_on="$TRAFFIC_LEDGER_ON" \
             -v duckdb_off="$DUCKDB_OFF" \
             -v duckdb_file_last="$FILE_LAST" \
             -v duckdb_file_since="$FILE_SINCE" \
@@ -380,7 +346,6 @@ fi
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo "  dq_journal_direct=$DQ_JOURNAL_DIRECT (KS_WRITE_DQ_JOURNAL)"
-echo "  watchdogs_on=$WATCHDOGS_ON (KS_WRITE_WATCHDOGS), weekly_ledger_on=$WEEKLY_LEDGER_ON (KS_WRITE_WEEKLY_LEDGER), traffic_ledger_on=$TRAFFIC_LEDGER_ON (KS_WRITE_TRAFFIC_LEDGER)"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
 echo "  managers_on=$MANAGERS_ON (KS_WRITE_MANAGERS)${MANAGERS_NOTE}${MANAGERS_FLIP_AT:+, managers flip at $MANAGERS_FLIP_AT}"
 echo "  orders_on=$ORDERS_ON (KS_WRITE_ORDERS)${ORDERS_NOTE}${ORDERS_FLIP_AT:+, orders flip at $ORDERS_FLIP_AT}"

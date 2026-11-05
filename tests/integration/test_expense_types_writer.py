@@ -216,19 +216,15 @@ async def _full_sync(store, payload):
         return client
 
     with patch.object(sync_module, "get_async_client", new=_get_client), \
-         patch.object(sync_module, "mirror_categories", new=AsyncMock()), \
-         patch.object(sync_module, "mirror_products", new=AsyncMock()), \
          patch.object(store, "refresh_warehouse_layers", new=AsyncMock()):
         return await service.full_sync(days_back=30)
 
 
-class TestTheFullSyncAndTheHourlyReplace:
+class TestTheFullSync:
     @pytest.mark.asyncio
-    async def test_under_the_flag_a_full_sync_writes_postgres_and_the_replace_leaves_it(
-        self, stores,
-    ):
-        from core.pg_operational import replicate_operational
-
+    async def test_under_the_flag_a_full_sync_writes_postgres(self, stores):
+        """Until step 14's S14-13 the hourly replace was run after it, and
+        left the table alone; the replace went with `core.pg_operational`."""
         store, pool, env = stores
         env.setenv(chain.WRITE_ENV, "postgres")
 
@@ -244,13 +240,6 @@ class TestTheFullSyncAndTheHourlyReplace:
         async with store.connection() as conn:
             assert conn.execute(
                 "SELECT value FROM sync_metadata WHERE key = ?", [KEY]).fetchone() is None
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert TABLE in result.get("stood_down", []), result
-        assert TABLE not in result["replaced"], result
-        assert len(await _pg_rows(pool)) == 27, "the hourly replace rolled it back"
 
 
 # ─── the standing watch, on the real table ───────────────────────────────────

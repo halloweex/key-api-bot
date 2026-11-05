@@ -15,7 +15,7 @@ S14-00 — and kept a DuckDB walk (an UPDATE of `orders` and a ship of the
 changed rows to `bronze.orders`) for the answer it no longer gave.
 
 **Stop the web container first** — see `WEB_MUST_BE_STOPPED` in
-`core/pg_backfill.py`, which this logs at startup: the scheduler's heavy-job
+`core/pg_orders_write.py`, which this logs at startup: the scheduler's heavy-job
 lock lives in that process and cannot be taken from here.
 
 Usage:
@@ -46,7 +46,7 @@ DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
 
 async def backfill_utm(days_back: int = 730, force_ship: bool = False):
-    from core.pg_backfill import WEB_MUST_BE_STOPPED
+    from core.pg_orders_write import WEB_MUST_BE_STOPPED
     from core.runtime_modes import configure_modes
 
     # Said out loud, once, at the top. The admin endpoint next door does this
@@ -192,7 +192,7 @@ async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
 if __name__ == "__main__":
     # The warning is logged at startup too, but by then the operator has
     # already typed the command; `--help` is where they are still deciding.
-    from core.pg_backfill import WEB_MUST_BE_STOPPED
+    from core.pg_orders_write import WEB_MUST_BE_STOPPED
 
     parser = argparse.ArgumentParser(
         description="Backfill UTM data from KeyCRM",

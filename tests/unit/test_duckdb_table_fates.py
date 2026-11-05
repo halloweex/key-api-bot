@@ -1257,9 +1257,7 @@ class TestTheCompactionAgrees:
         an event. Marking one KEYCRM or COMPUTED takes it out of the
         must-travel-off-site rule above (review, mutation M14: stock_movements
         IRREPLACEABLE → KEYCRM survived the whole file)."""
-        from core import pg_operational
-
-        appended = {a.dk_table for a in pg_operational._APPEND_ABOVE}
+        appended = set(_APPENDED_ABOVE_A_WATERMARK)
         assert {"stock_movements", "inventory_sku_history"} <= appended
         loose = sorted(f"{n}: {FATES[n].origin}" for n in appended
                        if FATES[n].origin != IRREPLACEABLE)
@@ -1319,25 +1317,52 @@ class TestTheCompactionAgrees:
 
 # ─── 3. successors ───────────────────────────────────────────────────────────
 
-def _from_table(source: str) -> str:
-    """A shipper's DuckDB source is a table, or a subquery over one
-    (`sync_metadata` ships without its transient keys)."""
-    if re.fullmatch(r"[a-z_]+", source):
-        return source
-    match = re.search(r"\bFROM\s+([a-z_]+)", source, re.IGNORECASE)
-    assert match, f"cannot read the table a shipper reads from: {source!r}"
-    return match.group(1)
-
-
 def _bot_db_tables() -> Set[str]:
     """bot.db's tables, from its own DDL. The bot-state comparison pairs them
     with Postgres in the same spec shape the DuckDB tables use."""
     return set(duckdb_names(walk_ddl(("bot",))))
 
 
+# What `core/pg_operational.py` stated, frozen at the commit before step 14's
+# S14-13 deleted it (f8022009): the DuckDB tables its hourly copy replaced
+# whole, and those it appended above a Postgres watermark, with where each
+# went. The manifest (`FATES`) was held to them while the copy existed, and
+# still is — a literal now, so the deletion cannot quietly shrink the check.
+_REPLACED_WHOLE: Tuple[Tuple[str, str], ...] = (
+    ("buyer_gender", "app.buyer_gender"),
+    ("data_dir_samples", "app.data_dir_samples"),
+    ("data_quality_diffs", "app.data_quality_diffs"),
+    ("data_quality_issues", "app.data_quality_issues"),
+    ("data_quality_runs", "app.data_quality_runs"),
+    ("disk_samples", "app.disk_samples"),
+    ("expense_types", "bronze.expense_types"),
+    ("growth_metrics", "app.growth_metrics"),
+    ("inventory_history", "app.inventory_history"),
+    ("manual_expenses", "app.manual_expenses"),
+    ("memory_samples", "app.memory_samples"),
+    ("offer_stocks", "bronze.offer_stocks"),
+    ("offers", "bronze.offers"),
+    ("order_backfill_misses", "app.order_backfill_misses"),
+    ("revenue_goals", "app.revenue_goals"),
+    ("revenue_predictions", "app.revenue_predictions"),
+    ("seasonal_indices", "app.seasonal_indices"),
+    ("sku_inventory_status", "app.sku_inventory_status"),
+    ("sync_metadata", "app.sync_metadata"),
+    ("traffic_report_sends", "app.traffic_report_sends"),
+    ("weekly_patterns", "app.weekly_patterns"),
+    ("weekly_report_sends", "app.weekly_report_sends"),
+)
+_APPENDED_ABOVE_A_WATERMARK: Tuple[str, ...] = (
+    "inventory_sku_history", "reconciliation_log", "stock_movements",
+    "warehouse_refreshes",
+)
+_APPENDED_PAIRS: Tuple[Tuple[str, str], ...] = tuple(
+    (dk, f"app.{dk}") for dk in _APPENDED_ABOVE_A_WATERMARK)
+
+
 def _stated_pairings() -> Set[Tuple[str, str]]:
-    """Every (DuckDB table, Postgres table) the code already states."""
-    from core import pg_operational
+    """Every (DuckDB table, Postgres table) the code states, and what the
+    hourly copy stated until S14-13 (`_REPLACED_WHOLE`, `_APPENDED_PAIRS`)."""
     from core.sql_dialect import DUCKDB, POSTGRES, Dialect, inventory_view_selects
 
     pairs = set()
@@ -1348,8 +1373,8 @@ def _stated_pairings() -> Set[Tuple[str, str]]:
             pairs.add((dk, pg))
     pairs.update(zip((n for n, _ in inventory_view_selects(DUCKDB)),
                      (n for n, _ in inventory_view_selects(POSTGRES))))
-    pairs.update((_from_table(dk), pg) for pg, dk, *_ in pg_operational._FULL_REPLACE)
-    pairs.update((a.dk_table, a.pg_table) for a in pg_operational._APPEND_ABOVE)
+    pairs.update(_REPLACED_WHOLE)
+    pairs.update(_APPENDED_PAIRS)
     for path in _py_files(("core",)):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):

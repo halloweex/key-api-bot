@@ -220,16 +220,6 @@ class TestAWriteReachesPostgresAtOnce:
             assert not calls & {"replicate_after_manual_expense", "connection"}, fn.name
         assert seen == set(self.WRITES)
 
-    @pytest.mark.asyncio
-    async def test_it_never_raises(self):
-        from core.pg_operational import replicate_after_manual_expense
-
-        with patch("core.mirror_reconciliation.configured", return_value=True), \
-             patch("core.pg_operational.replicate_operational",
-                   new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-            out = await replicate_after_manual_expense(AsyncMock())
-        assert "error" in out
-
 
 class TestHistoryMustBeAcrossBeforePostgresAnswers:
     """The mechanism that replaces "run the backfill first".

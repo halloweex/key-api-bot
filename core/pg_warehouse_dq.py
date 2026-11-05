@@ -630,7 +630,7 @@ def _row_values_sql() -> str:
     flight, then waiting, then *abandoned*.
     """
     from core.data_quality import _SILVER_ROW_COLUMNS, _silver_row_differs
-    from core.pg_replication import CLASSIFICATIONS_TABLE, MANAGERS_TABLE
+    from core.pg_managers_write import CLASSIFICATIONS_TABLE, MANAGERS_TABLE
     from core.sql_dialect import POSTGRES
     from core.warehouse_sql import silver_recompute_ctes
 

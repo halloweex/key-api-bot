@@ -524,9 +524,7 @@ class TestTheStoreRoutes:
         with patch.object(pg_managers_write, "update_manager_stats",
                           new=AsyncMock(return_value=4)), \
                 patch.object(pg_managers_write, "upsert_managers",
-                             new=AsyncMock(return_value=2)) as upsert, \
-                patch("core.pg_replication.replicate_managers",
-                      new=AsyncMock(side_effect=AssertionError("no replica"))):
+                             new=AsyncMock(return_value=2)) as upsert:
             assert await store.update_manager_stats() == 4
             assert await store.upsert_managers(
                 [{"id": 1, "name": "A"}, {"id": 2, "full_name": "B"}]) == 2
@@ -887,27 +885,26 @@ class TestTheRoute:
         assert res.status_code == 409 and "2026-03-01" in res.json()["detail"]
 
     def test_a_postgres_failure_under_the_chain_is_503(self, route, flags):
-        from unittest.mock import AsyncMock, patch
-
         from core import chain_latch, pg_managers_write
 
         chain_latch.latch(pg_managers_write.CHAIN)
         store = _RouteStore(OSError("connection refused"))
-        with patch("core.pg_replication.replicate_managers", new=AsyncMock()):
-            res = route(store).post(self.PATH)
+        res = route(store).post(self.PATH)
         assert res.status_code == 503 and "OSError" in res.json()["detail"]
         assert "connection refused" not in res.text
 
 
-    def test_under_the_chain_the_replica_says_it_stood_down(self, route, flags, monkeypatch):
+    def test_under_the_chain_nothing_is_copied_after_the_write(self, route, flags):
+        """Until step 14's S14-13 the route called the classification copy
+        after the write and answered its `{"skipped": "stood down: …"}` as
+        `replica`; the copy and the key went with `core.pg_replication`."""
         from core import chain_latch, pg_managers_write
 
-        monkeypatch.setenv("KS_MIRROR_LANDING", "on")
         chain_latch.latch(pg_managers_write.CHAIN)
         store = _RouteStore()
         res = route(store).post(self.PATH)
         assert res.status_code == 200, res.text
-        assert "stood down" in (res.json()["replica"]["skipped"] or "")
+        assert "replica" not in res.json()
 
 
 # ─── The standing watch, judged ─────────────────────────────────────────────
@@ -1083,8 +1080,9 @@ _BARE = r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:managers|manager_classifications)(?![
 
 # Every function that names them, with the function that routes it and the
 # question that function asks: the DuckDB half of a store method behind the
-# chain's own answer, the boot seed behind the latch, and the replica's read
-# behind the stand-down. A new site fails until it is added here with its
+# chain's own answer and the boot seed behind the latch (the replica's read
+# behind the stand-down, `pg_replication.read_managers`, until step 14's
+# S14-13 deleted the copy). A new site fails until it is added here with its
 # router — the review's probe (`FROM managers` in a new module) is one.
 # The three store methods that named the tables bare in their DuckDB branch
 # (`upsert_managers`, `set_manager_retail_status`, `get_all_managers`, routed
@@ -1093,7 +1091,6 @@ _BARE = r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:managers|manager_classifications)(?![
 _BARE_SITES = {
     ("core/migrations.py", "_m0006_seed_manager_classifications"):
         ("_m0006_seed_manager_classifications", "latched"),
-    ("core/pg_replication.py", "read_managers"): ("replicate_managers", "tables_stood_down"),
 }
 
 

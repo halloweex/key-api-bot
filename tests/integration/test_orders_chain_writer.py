@@ -395,23 +395,6 @@ class TestTheMissesLedger:
         assert (row["checked_at"], row["reason"]) == (stamp, "not_in_keycrm")
         assert await _duckdb_counts(store) == (0, 0, 0, 0)
 
-    @pytest.mark.asyncio
-    async def test_the_hourly_copy_leaves_a_ledger_the_chain_owns(self, stores):
-        """DuckDB's frozen ledger is not shipped over the chain's."""
-        from core.pg_operational import replicate_operational
-
-        store, pool, _env = stores
-        await store.record_backfill_misses({BASE: "chain"})
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO order_backfill_misses (order_id, checked_at, reason) "
-                "VALUES (?, CURRENT_TIMESTAMP, 'frozen')", [BASE + 1])
-        await replicate_operational(store, full=True)
-        async with pool.acquire() as conn:
-            rows = {r["order_id"]: r["reason"] for r in await conn.fetch(
-                "SELECT order_id, reason FROM app.order_backfill_misses")}
-        assert rows == {BASE: "chain"}
-
 
 class TestTheCommentRestore:
     @pytest.mark.asyncio

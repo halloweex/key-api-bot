@@ -92,9 +92,6 @@ class TestTheRest:
         assert "SELECT o.id, o.manager_comment, o.updated_at" in src
         assert "COALESCE(?, CURRENT_TIMESTAMP)" in src
 
-    def test_the_classification_endpoint_reports_its_replica(self):
-        from web.routes.api import admin
-
-        src = inspect.getsource(admin)
-        assert 'replica = await replicate_managers(store)' in src
-        assert '"replica": replica' in src
+    # `test_the_classification_endpoint_reports_its_replica` held the
+    # retail-status route to answering the classification copy's result, until
+    # step 14's S14-13 deleted the copy (`core.pg_replication`) and the key.

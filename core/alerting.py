@@ -269,7 +269,7 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # A check that raised reported nothing; its findings are absent, not clean.
     "integrity_check_raised": _c("every integrity check completes again"),
     "mirror_never_shipped": _c("the table's first successful shipment"),
-    "mirror_backfill_pending": _c("the backfill finishes with nothing left"),
+    "mirror_backfill_pending": _c("the table's history is restored, backfilled_at set"),
     # `mirror_buckets_disagree` and `mirror_disabled` were the comparisons'
     # against DuckDB, deleted with them in step 14's S14-12.
     "mirror_failing": _c("failures_since_ok back to zero"),

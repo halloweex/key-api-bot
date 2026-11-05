@@ -423,7 +423,7 @@ async def _seed_live_facts(dsn: str) -> None:
     import asyncpg
 
     from core import chain_latch, warehouse_cutover as wc
-    from core.pg_operational import SYNC_METADATA_TABLE
+    from core.pg_frozen_metadata import TABLE as SYNC_METADATA_TABLE
     from core.write_chains import WRITE_CHAINS
     from tests.unit.test_duckdb_off_sweep import WRITER_RESOLVED
 

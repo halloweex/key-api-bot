@@ -1,6 +1,6 @@
 -- B3 (chain 4) — every buyer has a verdict, and no human decision was lost.
 --
--- Only under chain 4; the variables are B1's, plus:
+-- Only under chain 4; the variables are deploy/stage4_soak.sh's, plus:
 --   buyers_override_floor  how many verdicts a human had set on flip day
 --                          (SOAK_BUYERS_OVERRIDE_FLOOR), else empty
 --
@@ -50,12 +50,12 @@ SELECT 'B3 buyers verdicts'::text AS "check",
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 4 still writes DuckDB (KS_WRITE_BUYERS is not postgres and no latch marker)'
-           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB (see B1)'
+           WHEN 'held' THEN 'not applicable: chain 4 is held on DuckDB'
            WHEN '1' THEN format(
                '%s buyer(s) written over 90 min ago with no verdict; %s human override(s)%s',
                f.without_verdict, f.overrides,
                CASE WHEN flag.floor IS NULL THEN ' (no floor given)'
                     ELSE format(' against %s on flip day', flag.floor) END)
-           ELSE format('buyers_on=%s: see B1', flag.state)
+           ELSE format('buyers_on=%s: KS_WRITE_BUYERS not understood, or not read from the web container', flag.state)
        END AS detail
 FROM flag CROSS JOIN facts f;

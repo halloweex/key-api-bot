@@ -10,9 +10,10 @@ The design's 2.3. Under `off` the jobs below no longer reach for the file:
   verdict with no `error_message` and the twins stand in alone;
 - the mirror landing reads DuckDB only for what survives the stand-down, which
   under chains 5 and 6 is nothing;
-- the hourly operational copy and its daily comparison stand down for the
-  three tables no chain owns, which freeze as history (`DUCKDB_HISTORY_TABLES`,
-  OD-S5-4), and neither opens DuckDB with nothing left to read;
+- the hourly operational copy and its daily comparison stood down for the
+  three tables no chain owns, which froze as history (`DUCKDB_HISTORY_TABLES`,
+  OD-S5-4), until step 14's S14-12 and S14-13 deleted both; the hourly job
+  that kept the copy's id asks no store;
 - `dq_reconciliation` needed nothing beyond the unconnected store (chain 3
   took its DuckDB arm) — held here so it stays so.
 
@@ -27,7 +28,6 @@ names the mutation it catches.
 from __future__ import annotations
 
 import ast
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -36,12 +36,7 @@ import pytest
 
 from core import duckdb_switch
 from core import data_quality as dq
-from core import pg_operational
 from core.duckdb_store import DuckDBStore
-from core.pg_operational import (
-    DUCKDB_HISTORY_TABLES, _APPEND_ABOVE, _FULL_REPLACE, _tables_to_ship,
-    replicate_operational, stood_down_under_off,
-)
 from tests.unit.test_duckdb_off_sweep import target_state  # noqa: F401 — fixture
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
 
@@ -326,172 +321,47 @@ class TestTheIntegrityJobUnderOff:
         assert duckdb_switch.opened() == {}
 
 
-# ─── The mirror landing ──────────────────────────────────────────────────────
+# ─── The hourly job ──────────────────────────────────────────────────────────
 
 
-class _Pool:
-    """Answers the owner rows; every other read is empty. Counts acquires."""
-
-    def __init__(self, owners=None):
-        self.owners = owners or {}
-        self.acquired = 0
-
-    @asynccontextmanager
-    async def _acquire(self):
-        self.acquired += 1
-        yield self
-
-    def acquire(self):
-        return self._acquire()
-
-    async def fetch(self, sql, *args):
-        # The chain's mirror stamps (#291's `read_mirror_stamps`) join
-        # meta.chain_watermarks too, but to meta.mirror_state: no stamps here.
-        if "meta.mirror_state" in sql:
-            return []
-        if "meta.chain_watermarks" in sql:
-            return [{"key": f"owner:{t}", "value": v} for t, v in self.owners.items()]
-        return []
-
-    async def fetchval(self, sql, *args):
-        return None
-
-
-@pytest.fixture
-def postgres(monkeypatch):
-    """Postgres answering through `_Pool`, the mirror switched on."""
-    from core import pg_landing
-
-    monkeypatch.delenv(pg_landing.MIRROR_ENV, raising=False)
-    monkeypatch.setattr("core.pg.require_revision", AsyncMock())
-
-    def install(pool):
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=pool))
-        return pool
-
-    return install
-
-
-# `TestTheLandingIsReadOnlyForWhatSurvives` held the landing comparison
-# (`reconcile_mirror`) to reading DuckDB only for what survived the stand-down
-# — nothing in the target state — until step 14's S14-12 deleted it.
-
-
-# ─── The operational copy ────────────────────────────────────────────────────
-
-
-class _Conn:
-    """What the copy writes, in order."""
-
-    def __init__(self):
-        self.touched = []
-
-    async def fetchval(self, sql, *args):
-        return None
-
-    @asynccontextmanager
-    async def _tx(self):
-        yield
-
-    def transaction(self):
-        return self._tx()
-
-    async def execute(self, sql, *args):
-        self.touched.append(sql)
-
-    async def executemany(self, sql, rows):
-        self.touched.append(sql)
-
-
-class _CopyPool:
-    def __init__(self, conn):
-        self.conn = conn
-
-    @asynccontextmanager
-    async def _acq(self):
-        yield self.conn
-
-    def acquire(self):
-        return self._acq()
-
-
-class _NeverOpened:
-    def connection(self):
-        raise AssertionError("the operational copy opened DuckDB")
-
-
-@pytest.fixture
-def copy_lock(monkeypatch):
-    import asyncio
-
-    monkeypatch.setattr(pg_operational, "OPERATIONAL_REPLICATION_LOCK", asyncio.Lock())
-
-
-async def _copy(store, owners, stamps):
-    conn = _Conn()
-    with patch("core.mirror_reconciliation.configured", return_value=True), \
-         patch("core.pg.get_pool", new=AsyncMock(return_value=_CopyPool(conn))), \
-         patch("core.pg.require_revision", new=AsyncMock()), \
-         patch("core.chain_latch.read_owners", new=AsyncMock(return_value=owners)), \
-         patch("core.pg_landing._record_failure", new=stamps):
-        return await replicate_operational(store), conn
-
-
-class TestTheHistoryTables:
-    def test_they_are_exactly_the_copied_tables_no_chain_owns(self):
-        """Derived both ways: every table this job copies is either a chain's
-        or history. A table added to the copy and owned by no chain fails
-        here, so whether it freezes under off is decided rather than
-        inherited. Mutation: drop one from `DUCKDB_HISTORY_TABLES`."""
-        ships = set(_tables_to_ship(frozenset()))
-        assert ships == {*(t for t, _d, _c, _o in _FULL_REPLACE),
-                         *(s.pg_table for s in _APPEND_ABOVE)}
-        assert ships - _owned_by_chains() == set(DUCKDB_HISTORY_TABLES)
-        assert not set(DUCKDB_HISTORY_TABLES) & _owned_by_chains()
-
-    def test_in_the_target_state_under_off_nothing_is_left_to_ship(
-            self, target_state):  # noqa: F811
-        """The design's proof: `_tables_to_ship` over what the copy stands
-        down — every chain's tables and the history — is empty."""
-        from core.write_chains import chain_tables
-
-        assert _tables_to_ship(chain_tables() | stood_down_under_off()) == ()
-
-
-class TestTheOperationalCopyUnderOff:
+class TestTheHourlyJobUnderOff:
     @pytest.mark.asyncio
-    async def test_in_the_target_state_it_opens_nothing_and_writes_nothing(
-            self, target_state, copy_lock):  # noqa: F811
-        """Mutation: drop `stood_down_under_off()` from the copy — the three
-        history tables are read out of a DuckDB that is not there, the copy
-        fails every hour and stamps them (the sweep's `replicate_operational`
-        row); or drop the empty-read branch — the store is opened for nothing."""
-        stamps = AsyncMock(return_value=True)
-        result, conn = await _copy(_NeverOpened(), _every_owner_row(), stamps)
-        assert "error" not in result, result
-        assert result["replaced"] == {} and result["appended"] == {}
-        assert set(DUCKDB_HISTORY_TABLES) <= set(result["stood_down"])
-        assert conn.touched == []
-        stamps.assert_not_awaited()
+    async def test_it_derives_the_gender_and_copies_the_bot_without_the_store(
+            self, target_state):  # noqa: F811
+        """`replicate_operational` keeps its id; since step 14's S14-13 its
+        body is the gender derivation and the bot's state, neither of which
+        asks the store. Until then the operational copy was here, standing
+        down for every chain's tables and the three history tables under off
+        (`DUCKDB_HISTORY_TABLES`, OD-S5-4), with the tests that it opened
+        nothing; the copy went with `core.pg_operational`. Mutation: ask the
+        store, or drop the derivation — new buyers would get no verdict."""
+        from core.scheduler import BackgroundScheduler
+
+        derive = AsyncMock(return_value={"decided": 2})
+        bot = AsyncMock(return_value={"skipped": "KS_BOT_STORE=postgres"})
+        with patch("core.pg_buyers_write.derive_gender_pg", new=derive), \
+             patch("core.pg_bot_state.replicate_bot_state", new=bot), \
+             patch("core.duckdb_store.get_store",
+                   new=AsyncMock(side_effect=AssertionError("the store was asked"))):
+            result = await BackgroundScheduler()._run_replicate_operational()
+        assert result == {"gender": {"decided": 2},
+                          "bot_state": {"skipped": "KS_BOT_STORE=postgres"}}
+        derive.assert_awaited_once()
+        bot.assert_awaited_once()
         assert duckdb_switch.opened() == {}
 
     @pytest.mark.asyncio
-    async def test_a_table_left_to_copy_is_refused_counted_and_stamped(
-            self, target_state, copy_lock, monkeypatch):  # noqa: F811
-        """Not frozen in silence: a table no chain owns that is not history is
-        still read out of DuckDB under off, and the refusal is counted where
-        it happened and stamped on that table's watermark."""
-        from core.pg_operational import RECONCILIATION_LOG_TABLE
+    async def test_a_failed_derivation_does_not_cost_the_bot_its_copy(
+            self, target_state):  # noqa: F811
+        from core.scheduler import BackgroundScheduler
 
-        monkeypatch.setattr(pg_operational, "DUCKDB_HISTORY_TABLES", tuple(
-            t for t in DUCKDB_HISTORY_TABLES if t != RECONCILIATION_LOG_TABLE))
-        stamps = AsyncMock(return_value=True)
-        result, conn = await _copy(DuckDBStore(), _every_owner_row(), stamps)
-        assert "DuckDBOpenedWhileOff" in result["error"]
-        assert [c.args[0] for c in stamps.await_args_list] == [RECONCILIATION_LOG_TABLE]
-        assert list(duckdb_switch.opened()) == [
-            "core.pg_operational:replicate_operational"]
-        assert conn.touched == []
+        bot = AsyncMock(return_value={"rows": 3})
+        with patch("core.pg_buyers_write.derive_gender_pg",
+                   new=AsyncMock(side_effect=RuntimeError("pg down"))), \
+             patch("core.pg_bot_state.replicate_bot_state", new=bot):
+            result = await BackgroundScheduler()._run_replicate_operational()
+        assert result["gender"] == {"error": "RuntimeError: pg down"}
+        assert result["bot_state"] == {"rows": 3}
 
 
 # ─── The operational comparison ──────────────────────────────────────────────

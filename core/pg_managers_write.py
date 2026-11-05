@@ -6,8 +6,8 @@ endpoint defaults to `retail`. KeyCRM knows a manager's name, email and status,
 and nothing about whether they sell retail, wholesale, internally or to
 bloggers — only a human does, through `POST /api/managers/{id}/retail-status`.
 Until this chain DuckDB was where that decision lived and
-`core.pg_replication.replicate_managers` full-replaced both tables into
-Postgres out of it. Under `KS_WRITE_MANAGERS=postgres` (default `duckdb`) the
+`core.pg_replication.replicate_managers` (deleted in step 14's S14-13)
+full-replaced both tables into Postgres out of it. Under `KS_WRITE_MANAGERS=postgres` (default `duckdb`) the
 three writers write Postgres and DuckDB's copies freeze.
 
 THE THREE WRITERS, AND THE ONE ORDER THEY TAKE THEIR LOCKS IN
@@ -119,8 +119,14 @@ WRITE_ENV = "KS_WRITE_MANAGERS"
 # release is still read by the next.
 CHAIN = "pg_managers_write"
 
-# `pg_replication.MANAGER_UNIT`, whole: a classification is read against its
-# managers, never alone, so the two change hands as one (DN-22b).
+# The two tables, named once. They lived in `core.pg_replication`, beside the
+# classification copy, until step 14's S14-13 deleted it; `pg_warehouse_dq`
+# reads them from here.
+MANAGERS_TABLE = "bronze.managers"
+CLASSIFICATIONS_TABLE = "app.manager_classifications"
+
+# Both, whole: a classification is read against its managers, never alone,
+# so the two change hands as one (DN-22b).
 CHAIN_TABLES: Tuple[str, ...] = ("bronze.managers", "app.manager_classifications")
 
 # The one `sync_metadata` key that moves with it — what `sync_managers` stamps.

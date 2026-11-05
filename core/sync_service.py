@@ -30,10 +30,6 @@ from core.events import (
     emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
-from core.pg_landing import (
-    mirror_categories,
-    mirror_products,
-)
 from core import duckdb_switch, read_fallback, warehouse_cutover
 from bot.config import DEFAULT_TIMEZONE
 
@@ -1290,9 +1286,10 @@ class SyncService:
                 # and its fault stops the catalogue only — on a boot with no
                 # orders held, aborting here would cost the whole history.
                 await self._catalogue_full_sync_failed(stats, "categories", exc)
-            # Step 05. Same payloads, read through the same `landing_rows`;
-            # never raises, so a Postgres fault cannot stop a sync.
-            await mirror_categories(categories)
+            # Chain 6 writes the catalogue to Postgres above. Until step 14's
+            # S14-13 the landing mirror shipped the same payload after it
+            # (`pg_landing.mirror_categories`), standing down since the chain
+            # owned the table; it went with the mirror.
 
             try:
                 stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
@@ -1312,22 +1309,16 @@ class SyncService:
                     "its watermark stays where it was and the sync carries on",
                     stats["expense_types_error"], exc_info=True,
                 )
-            # Not mirrored from here. KeyCRM serves this dictionary only to the
-            # weekly full sync, so a payload-fed mirror would leave Postgres
-            # empty for up to a week — and `/expenses` renders the breakdown by
-            # *name*, so that is a collapsed chart and an empty filter, not a
-            # freshness detail. It rides the hourly `replicate_operational`
-            # instead, out of DuckDB, which holds it every minute of that week.
-            # `bronze.offer_stocks` sits in that family for the same reason.
-            # Under chain 6a the write above IS the Postgres write, and the
-            # hourly copy stands down for it (`core/pg_expense_types_write.py`).
+            # Under chain 6a the write above IS the Postgres write
+            # (`core/pg_expense_types_write.py`). Until it, the dictionary
+            # rode the hourly copy out of DuckDB, which went in step 14's
+            # S14-13.
 
             try:
                 stats["products"] = await self.store.upsert_products(products)
                 await self.store.set_last_sync_time("products")
             except Exception as exc:
                 await self._catalogue_full_sync_failed(stats, "products", exc)
-            await mirror_products(products)
 
             # Sync orders with expenses - in chunks to avoid pagination limit (100 pages × 50 = 5000 orders max)
             # IMPORTANT: Save each chunk immediately to preserve progress on timeout/crash

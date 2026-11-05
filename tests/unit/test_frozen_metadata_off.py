@@ -446,9 +446,9 @@ class TestTheLedgerAdoptsNothingUnderOff:
 
 class TestTheModule:
     def test_one_spelling_of_the_table(self):
-        from core.pg_operational import SYNC_METADATA_TABLE
-
-        assert pg_frozen_metadata.TABLE == SYNC_METADATA_TABLE
+        """`core.pg_operational.SYNC_METADATA_TABLE` was its other spelling
+        until step 14's S14-13 deleted the copy; this is the one left."""
+        assert pg_frozen_metadata.TABLE == "app.sync_metadata"
 
     def test_it_reads_and_never_writes(self):
         """Nothing here may write the copy: its one writer stands down under

@@ -103,369 +103,6 @@ async def refresh_order_statuses(
         raise HTTPException(status_code=500, detail=f"Status refresh failed: {str(e)}")
 
 
-# ─── Postgres mirror ───────────────────────────────────────────────────────────
-
-@router.post("/mirror/backfill/orders")
-@limiter.limit("2/hour")
-async def backfill_mirror_orders(
-    request: Request,
-    chunk_size: int = Query(2000, ge=100, le=10000),
-    max_chunks: Optional[int] = Query(None, ge=1, description="Cap one invocation"),
-    background: bool = Query(True, description="Run detached (recommended)"),
-    admin: dict = Depends(require_admin),
-):
-    """Ship the orders Postgres is missing. Idempotent; safe to re-run.
-
-    Step 05. The sync mirrored only what it wrote (DuckDB's order writer,
-    deleted in step 14's S14-09), so Postgres started at the last few minutes
-    of activity with 46,446 orders of history behind it. This closes that gap,
-    computing the difference fresh on every call rather than remembering a
-    cursor — interrupt it and the next run resumes by definition.
-
-    Foreground for a capped run you want to watch; background for the whole
-    thing, which takes minutes and would otherwise sit on an HTTP request.
-
-    409 once a write chain owns either order table (DN-22a). Answered here,
-    before anything starts, because the background form would otherwise say
-    "started" and leave the refusal in a log line nobody reads.
-
-    On either copy of the latch, as the backfill itself asks: the local
-    answer first, then — with the mirror on, so the backfill would go on to
-    read Postgres anyway — the owner rows, after `require_revision()`. A lost
-    marker leaves only the owner rows to say the tables moved, and asking
-    just the local answer here answered "started" to a run the backfill then
-    refused. An owner read that fails is a 503, never "started": nothing can
-    be verified, and the run it would start would fail the same read in the
-    background.
-
-    And 409 with the mirror switched off, before any of that and without
-    asking Postgres anything: `backfill_orders` refuses a run with
-    `KS_MIRROR_LANDING` off, so the background form answered "started" to a
-    run that then raised into the web log, and the foreground form a 500.
-    """
-    from core.pg_backfill import backfill_orders
-    from core.pg_landing import (
-        enabled, order_tables_stood_down, order_tables_stood_down_or_owned,
-    )
-
-    if not enabled():
-        raise HTTPException(
-            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was started")
-
-    moved = order_tables_stood_down()
-    if not moved:
-        from core.pg import get_pool, require_revision
-
-        try:
-            pool = await get_pool()
-            await require_revision()
-            moved = await order_tables_stood_down_or_owned(pool)
-        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-            logger.error("Mirror backfill: cannot read who owns the order "
-                         "tables: %s: %s", type(e).__name__, e)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Cannot tell whether a write chain owns the order tables, "
-                    f"so nothing was started: {type(e).__name__}: {e}"
-                ),
-            ) from e
-    if moved:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped out of DuckDB; a backfill would overwrite rows only "
-                "Postgres holds and archive each overwrite as an order change."
-            ),
-        )
-
-    store = await get_store()
-
-    async def run():
-        try:
-            from core.scheduler import get_scheduler
-
-            return await backfill_orders(
-                store, chunk_size=chunk_size, max_chunks=max_chunks,
-                lock=get_scheduler()._heavy_job_lock,
-            )
-        except asyncio.CancelledError:
-            logger.warning("Mirror backfill was cancelled")
-            raise
-        except Exception as e:
-            logger.error(f"Mirror backfill failed: {e}", exc_info=True)
-            raise
-
-    if background:
-        task = asyncio.create_task(run(), name="mirror_backfill_orders")
-        # A strong reference, or the loop may collect the task mid-flight.
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
-        task.add_done_callback(
-            lambda t: logger.error(f"Mirror backfill failed: {t.exception()}")
-            if not t.cancelled() and t.exception() else None
-        )
-        return {
-            "status": "started",
-            "message": "Backfill running in background",
-            "note": "Progress is in the web log; re-run to see what is left.",
-        }
-
-    try:
-        return {"status": "success", "stats": await run()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
-
-
-@router.post("/mirror/backfill/expenses")
-@limiter.limit("2/hour")
-async def backfill_mirror_expenses(
-    request: Request,
-    chunk_size: int = Query(1000, ge=100, le=10000),
-    admin: dict = Depends(require_admin),
-):
-    """Ship the order-level expenses Postgres is missing. Idempotent.
-
-    Revision 0020. `mirror_expenses` shipped what a sync fetched (nothing has
-    called it since step 14's S14-09), so after the first deploy Postgres held
-    the last few days against DuckDB's 15,020 rows — and until this has run,
-    `reconcile_expenses` reports one
-    `mirror_backfill_pending` and suppresses the row-level comparison, because
-    before it every expense older than the mirror looks exactly like a lost
-    one.
-
-    Foreground, unlike the orders backfill: 15,020 narrow rows is seconds
-    rather than minutes, so a detached task would only make the result harder
-    to read.
-
-    409 once a write chain owns `bronze.expenses` (DN-22b), asked here before
-    anything starts, as the orders route asks: the local answer first, then
-    the owner rows after `require_revision()`. The backfill refuses that state
-    itself, but as a raise, which this route used to turn into a 500 reading
-    "Backfill failed" — about a run that must not happen, not one that broke.
-    An owner read that fails is a 503: nothing can be verified.
-    """
-    from core.pg_expense_backfill import EXPENSES_UNIT, backfill_expenses
-    from core.pg_landing import tables_stood_down, tables_stood_down_or_owned
-
-    moved = tables_stood_down(EXPENSES_UNIT)
-    if not moved:
-        from core.pg import get_pool, require_revision
-
-        try:
-            pool = await get_pool()
-            await require_revision()
-            moved = await tables_stood_down_or_owned(pool, EXPENSES_UNIT)
-        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-            logger.error("Expense backfill: cannot read who owns "
-                         "bronze.expenses: %s: %s", type(e).__name__, e)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Cannot tell whether a write chain owns bronze.expenses, "
-                    f"so nothing was started: {type(e).__name__}: {e}"
-                ),
-            ) from e
-    if moved:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped out of DuckDB; a backfill would overwrite rows only "
-                "Postgres holds."
-            ),
-        )
-
-    store = await get_store()
-    try:
-        return {"status": "success", "stats": await backfill_expenses(
-            store, chunk_size=chunk_size,
-        )}
-    except Exception as e:
-        logger.error(f"Expense backfill failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
-
-
-@router.post("/mirror/backfill/catalogue")
-@limiter.limit("5/minute")
-async def backfill_mirror_catalogue(
-    request: Request,
-    dry_run: bool = Query(True, description="Say what would be carried; write nothing"),
-    admin: dict = Depends(require_admin),
-):
-    """Carry the catalogue rows only DuckDB holds into Postgres — the ones the
-    daily comparison calls retired (`mirror_retired_rows`; product 1055).
-    A dry run by default. Chain 6's pre-flip lever (OD-15 (a)).
-
-    Foreground: production carries about one row. The carried rows keep a
-    `mirrored_at` before the mirror's last whole-catalogue success, so they
-    still read as retired, and `meta.mirror_state` is not touched
-    (`core.pg_landing.carry_retired_catalogue`).
-
-    The expenses route's order, for its reasons: 409 with the mirror off,
-    before Postgres is asked anything; 409 once a write chain owns either
-    table, on the local answer and then on the owner rows after
-    `require_revision()`; 503 when the owner rows cannot be read.
-    """
-    from core.pg_landing import (
-        CatalogueCarryRefused, carry_retired_catalogue, enabled,
-        tables_stood_down, tables_stood_down_or_owned,
-    )
-
-    if not enabled():
-        raise HTTPException(
-            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was carried")
-
-    catalogue = ("bronze.products", "bronze.categories")
-    moved = frozenset().union(*(tables_stood_down((t,)) for t in catalogue))
-    if not moved:
-        from core.pg import get_pool, require_revision
-
-        try:
-            pool = await get_pool()
-            await require_revision()
-            for table in catalogue:
-                moved |= await tables_stood_down_or_owned(pool, (table,))
-        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-            logger.error("Catalogue carry: cannot read who owns the catalogue: "
-                         "%s: %s", type(e).__name__, e)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Cannot tell whether a write chain owns the catalogue, so "
-                    f"nothing was carried: {type(e).__name__}: {e}"
-                ),
-            ) from e
-    if moved:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped by the mirror; a row only DuckDB holds stays there, "
-                "since nothing in a step-14 image carries it (the copy-back "
-                "and its handover went with S14-04)."
-            ),
-        )
-
-    store = await get_store()
-    try:
-        stats = await carry_retired_catalogue(store, dry_run=dry_run)
-    except CatalogueCarryRefused as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except Exception as e:
-        logger.error(f"Catalogue carry failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Carry failed: {e}")
-    return {"status": "dry_run" if dry_run else "success", "stats": stats}
-
-
-@router.post("/mirror/backfill/buyers")
-@limiter.limit("2/hour")
-async def backfill_mirror_buyers(
-    request: Request,
-    chunk_size: int = Query(2000, ge=100, le=10000),
-    admin: dict = Depends(require_admin),
-):
-    """Re-ship every buyer DuckDB holds, with its contacts, into Postgres.
-
-    The lever chain 4's handover names before the flip (decision 5): the
-    hourly ids-diff ships only buyers Postgres is missing, so a buyer on both
-    sides that differs, or a contact only Postgres holds, stays until this
-    rewrites them — `pg_buyers.reship_buyers` says what it does and costs.
-
-    Detached, like `sync-all-buyers`: ~20 000 buyers with a DELETE of each
-    one's contacts is minutes, and a request held that long is answered 504 by
-    the app's own 30 s timeout while the handler keeps writing. Each portion
-    takes the heavy-job lock, waited for boundedly, so it lands between two
-    sync ticks; a lock that stays busy stops the run, and running it again
-    finishes it. The outcome is logged as `Buyer reship:`.
-
-    Idempotent. Refused before anything starts, the other two backfills'
-    arrangement: 409 with the mirror off, 409 while a reship is running (the
-    slot is claimed before the first await, so two requests at once start
-    one), 409 once a write chain
-    owns the buyers or their contacts — asked of the local answer and then of
-    the owner rows after `require_revision()` — and 503 when the owner read
-    fails, because nothing can be verified.
-    """
-    from core.pg_buyers import BUYER_UNIT, reship_buyers
-    from core.pg_landing import enabled, tables_stood_down, tables_stood_down_or_owned
-
-    if not enabled():
-        raise HTTPException(
-            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was started")
-    # Checked and claimed with no await between the two, so two requests in
-    # the same second cannot both pass: the task only exists after the owner
-    # read below, and the review showed a double click starting two reships
-    # through that gap. Released when the run ends or this request refuses.
-    if _RESHIP_SLOT["claimed"] or any(
-            t.get_name() == "reship_buyers" and not t.done() for t in _BACKGROUND_TASKS):
-        raise HTTPException(status_code=409, detail="A buyer reship is already running")
-    _RESHIP_SLOT["claimed"] = True
-    try:
-        moved = tables_stood_down(BUYER_UNIT)
-        if not moved:
-            from core.pg import get_pool, require_revision
-
-            try:
-                pool = await get_pool()
-                await require_revision()
-                moved = await tables_stood_down_or_owned(pool, BUYER_UNIT)
-            except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-                logger.error("Buyer reship: cannot read who owns the buyers: %s: %s",
-                             type(e).__name__, e)
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "Cannot tell whether a write chain owns the buyers, so "
-                        f"nothing was started: {type(e).__name__}: {e}"
-                    ),
-                ) from e
-        if moved:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"{', '.join(sorted(moved))} is written by a write chain, not "
-                    "shipped out of DuckDB; a reship would overwrite rows only "
-                    "Postgres holds."
-                ),
-            )
-
-        store = await get_store()
-
-        async def run():
-            try:
-                result = await reship_buyers(
-                    store, chunk=chunk_size,
-                    portion_guard=lambda: _heavy_lock(SYNC_ALL_LOCK_WAIT_S),
-                )
-                logger.info(f"Buyer reship: {result}")
-                return result
-            except Exception as e:
-                logger.error(f"Buyer reship failed: {type(e).__name__}: {e}", exc_info=True)
-                raise
-
-        task = asyncio.create_task(run(), name="reship_buyers")
-        # A strong reference, or the loop may collect the task mid-flight.
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
-        task.add_done_callback(_release_reship_slot)
-    except BaseException:
-        _RESHIP_SLOT["claimed"] = False
-        raise
-    return {"status": "started", "message": "Buyer reship started; see web's log "
-            "for 'Buyer reship:'"}
-
-
-# Whether a request has claimed a reship that has not finished. A dict, so the
-# route and the task's callback share it without a `global`.
-_RESHIP_SLOT = {"claimed": False}
-
-
-def _release_reship_slot(_task) -> None:
-    _RESHIP_SLOT["claimed"] = False
-
-
 # ─── Warehouse ─────────────────────────────────────────────────────────────────
 
 @router.get("/warehouse/status")
@@ -521,8 +158,6 @@ async def _duckdb_refresh_status(store) -> dict:
 
     if not duckdb_switch.is_off():
         return await store.get_warehouse_status()
-    from core.pg_operational import REFRESHES_TABLE
-
     try:
         last, recent = await asyncio.wait_for(
             _read_frozen_refreshes(), _FROZEN_STATUS_TIMEOUT_S)
@@ -537,10 +172,15 @@ async def _duckdb_refresh_status(store) -> dict:
 # A status page answers; a Postgres that hangs costs this block, not the page.
 _FROZEN_STATUS_TIMEOUT_S = 5
 
+# DuckDB's `warehouse_refreshes` as the hourly copy last shipped it, history
+# since the week of silence (OD-S5-4). Spelled here since step 14's S14-13
+# deleted `core.pg_operational`, which named it `REFRESHES_TABLE`.
+REFRESHES_TABLE = "app.warehouse_refreshes"
+
 
 async def _read_frozen_refreshes():
     """The last row and the last hour's count: DuckDB's two statements, over
-    the copy (`core.pg_operational.REFRESHES_TABLE`)."""
+    the copy (`REFRESHES_TABLE`)."""
     from core.pg import get_pool
 
     pool = await get_pool()
@@ -854,9 +494,9 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
     region for every buyer — which moves `customer_profile.city` and the SMS
     audience's city filter. That is a decision, not a test.
 
-    Answers at once and runs in the background, like /mirror/backfill/orders:
-    the fetch alone takes minutes, and a request held that long was answered
-    504 by the app's own 30 s timeout while the handler kept writing behind it,
+    Answers at once and runs in the background: the fetch alone takes
+    minutes, and a request held that long was answered 504 by the app's own
+    30 s timeout while the handler kept writing behind it,
     with its result thrown away. The outcome is logged as `Full buyer sync:`.
     See `_sync_all_buyers` for what one run does.
     """
@@ -1104,28 +744,15 @@ async def set_manager_retail_status(
         raise HTTPException(status_code=503, detail=(
             "The classification is written to Postgres, which did not answer; "
             f"nothing was stored ({type(exc).__name__})"))
-    # Step 05. This endpoint is the whole reason the classification cannot be
-    # re-derived on the other side, so Postgres is updated here rather than
-    # waiting for the daily manager sync — otherwise Silver computed in
-    # Postgres would carry yesterday's answer for up to a day.
-    from core.pg_replication import replicate_managers
-
-    replica = await replicate_managers(store)
-    if replica and replica.get("error"):
-        # The classification is stored and the warehouse marked dirty; only
-        # the Postgres copy is behind, until the next manager sync. Said in
-        # the response rather than discovered in the 09:00 digest. A copy
-        # that was skipped — the mirror off, or a write chain owning the
-        # tables (DN-22b) — did not fail, and its reason is in `replica`.
-        logger.warning("Manager %s classified, but the Postgres replica failed: %s",
-                       manager_id, replica.get("error"))
-
+    # Chain 5's writer is the Postgres write, so nothing is copied after it.
+    # Until step 14's S14-13 `replicate_managers` was called here and its
+    # answer returned as `replica` — `{"skipped": "stood down: …"}` ever since
+    # chain 5 owned the two tables; the copy and the key went with it.
     logger.info(
         "Manager %s retail status set to %s from %s by admin %s",
         manager_id, is_retail, effective_from or "today", admin.get("user_id"),
     )
     return {
-        "replica": replica,
         "status": "ok",
         "manager_id": manager_id,
         "is_retail": is_retail,

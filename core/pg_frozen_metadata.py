@@ -25,14 +25,15 @@ stamps are never fetched), and `last_sync_categories` and
 `last_sync_expense_types` move only on the Sunday full sync, so Postgres may
 lack them for a week after a flip. So all three read **`app.sync_metadata`
 in Postgres** — the hourly full copy of the same DuckDB table
-(`core/pg_operational.py`, `SYNC_METADATA_SOURCE`). Once every chain is
+(`core/pg_operational.py`, `SYNC_METADATA_SOURCE`, until step 14's S14-13
+deleted it; the copy has been history since the week of silence). Once every chain is
 latched, DuckDB's values for those keys no longer move, so the copy equals
 the original — provided it ran after the last latch, which is the `off`
 verdict's `sync_metadata_copied` key (PR-2), not this module's to judge.
 
-Reads only, and only the copy: nothing here writes `app.sync_metadata`, whose
-one writer stands down under `off` with the rest of what is copied out of
-DuckDB (PR-7). The first two callers are behind `duckdb_switch.is_off()`;
+Reads only, and only the copy: nothing writes `app.sync_metadata` — its one
+writer stood down under `off` with the rest of what was copied out of DuckDB
+(PR-7), and went in step 14's S14-13. The first two callers are behind `duckdb_switch.is_off()`;
 the digest's beat asks the copy in either mode.
 """
 from __future__ import annotations
@@ -40,8 +41,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Iterable, Optional
 
-# The table, named once. `core.pg_operational.SYNC_METADATA_TABLE` is its
-# writer's spelling; a test holds the two to one string.
+# The table, named once. `core.pg_operational.SYNC_METADATA_TABLE` was its
+# writer's spelling until step 14's S14-13 deleted the writer.
 TABLE = "app.sync_metadata"
 
 _READ_KEYS = f"SELECT key, value FROM {TABLE} WHERE key = ANY($1::text[])"
