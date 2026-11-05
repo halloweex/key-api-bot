@@ -23,6 +23,7 @@ from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
     ViberMessage, count_segments,
 )
+from web.csv_cells import text_cell
 from web.routes.auth import has_permission, require_permission
 from web.services import dashboard_service
 from ._deps import (
@@ -847,11 +848,12 @@ async def export_sms_segments_csv(
     for c in rows:
         writer.writerow([
             c["buyerId"],
-            c["fullName"],
+            # Typed by the customer: never a formula in the spreadsheet (L3-07).
+            text_cell(c["fullName"]),
             # E.164 — what SMS gateways expect, and Excel keeps it as text
             # instead of mangling a 12-digit number into scientific notation.
             f"+{c['phone']}",
-            c["city"] or "",
+            text_cell(c["city"] or ""),
             c["tier"],
             c["assignment"],
             c["orders"],
@@ -868,7 +870,7 @@ async def export_sms_segments_csv(
             c["lastOrderId"] or "",
             c["lastOrderTotal"],
             c["lastOrderItemCount"],
-            c["lastOrderItems"] or "",
+            text_cell(c["lastOrderItems"] or ""),
         ])
 
     # Name the file after what is in it: several tiers join with a dash, so a
