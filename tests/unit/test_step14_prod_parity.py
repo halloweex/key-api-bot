@@ -145,7 +145,12 @@ RETIRED = {"goals_history": "S14-07",
            "mirror": "S14-15",
            "warehouse_writer_mode": "S14-15",
            "utm_parse": "S14-15",
-           "derivation": "S14-15"}
+           "derivation": "S14-15",
+           # S14-16 deleted the read fallback's mode and the configurations it
+           # published (`mode`, `mode_error`, `refusing`, `misconfigured`,
+           # `no_engine_routes`); the block's fields on `/api/health` are
+           # `RETIRED_FIELDS`', since the block itself stays, as `{refused}`.
+           "read_fallback": "S14-16"}
 
 # The same for single fields, by their path in a capture. S14-09 deleted chain
 # 3's, 6's and 6a's routing answers the capture asks of the modules themselves
@@ -186,6 +191,13 @@ RETIRED_FIELDS = {
     **{(call, name): "S14-15"
        for call in ("configure_modes", "configure_modes_again")
        for name in ("KS_PG_DERIVE", "KS_UTM_PARSE", "KS_WRITE_WAREHOUSE")},
+    # S14-16 stopped configuring KS_READ_FALLBACK, and `/api/health`'s
+    # `read_fallback_mode` keeps only `refused`, which the capture never
+    # asked (a count, not a constant).
+    **{(call, "KS_READ_FALLBACK"): "S14-16"
+       for call in ("configure_modes", "configure_modes_again")},
+    **{("health", "read_fallback_mode", name): "S14-16"
+       for name in ("mode", "error", "misconfigured", "no_engine")},
 }
 _S14_11_HEALTH_FIELDS = ("env", "mode", "error", "latched", "mismatch",
                          "unmet_precondition", "shadow", "preflight")
@@ -1032,10 +1044,11 @@ def capture() -> dict:
         out["pg_utm_parse"] = {name: getattr(pg_utm_parse, fn)() for name, fn in (
             ("mode", "mode"), ("parses_in_postgres", "parses_in_postgres"),
             ("error", "mode_error"))}
-    out["read_fallback"] = {"mode": read_fallback.mode(), "error": read_fallback.mode_error(),
-                            "refusing": read_fallback.refusing(),
-                            "misconfigured": read_fallback.misconfigured(),
-                            "no_engine": read_fallback.no_engine_routes()}
+    # Deleted in S14-16 (`RETIRED`), asked by name where it still exists.
+    if hasattr(read_fallback, "misconfigured"):
+        out["read_fallback"] = {name: getattr(read_fallback, fn)() for name, fn in (
+            ("mode", "mode"), ("error", "mode_error"), ("refusing", "refusing"),
+            ("misconfigured", "misconfigured"), ("no_engine", "no_engine_routes"))}
     twins_flag = getattr(pg_warehouse_dq, "flag", None)
     if twins_flag is not None:
         out["pg_twins_flag"] = list(twins_flag())
@@ -1294,14 +1307,18 @@ def test_the_literal_is_what_production_published(production):
     production(markers=True)
     health = capture()["health"]
     assert health["status_code"] == 200
+    kept = _without_retired({"health": health})["health"]
+    live = _without_retired({"health": H0})["health"]
     for block in ("duckdb_switch", "read_fallback_mode"):
-        assert health[block] == H0[block], block
+        assert kept[block] == live[block], block
     for block in RETIRED:
         assert health.get(block) is None, f"{block} went with {RETIRED[block]}"
     for path, pr in RETIRED_FIELDS.items():
         if path[0] == "health":
-            entry = health[path[1]][path[2]]
-            assert entry.get(path[3]) is None, f"{'.'.join(path)} went with {pr}"
+            node = health
+            for step in path[1:-1]:
+                node = node[step]
+            assert node.get(path[-1]) is None, f"{'.'.join(path)} went with {pr}"
     for name, entry in H0["write_chains"].items():
         published = health["write_chains"][name]
         kept = {k: v for k, v in entry.items()

@@ -46,13 +46,14 @@ class TestConfigureModes:
         """S14-00: whatever the environment says — here nothing at all — web's
         two calls answer production's modes, and the same twice. S14-15
         removed the three it no longer configures (KS_PG_DERIVE, KS_UTM_PARSE,
-        KS_WRITE_WAREHOUSE): their modules have no mode."""
+        KS_WRITE_WAREHOUSE): their modules have no mode — and S14-16
+        KS_READ_FALLBACK, whose module has none either."""
         for name in ("KS_DUCKDB", "KS_PG_DERIVE", "KS_READ_FALLBACK", "KS_UTM_PARSE",
                      "KS_WRITE_WAREHOUSE"):
             monkeypatch.delenv(name, raising=False)
         first = configure_modes(web=True)
         second = configure_modes(web=True)
-        assert first == second == {"KS_DUCKDB": "off", "KS_READ_FALLBACK": "off"}
+        assert first == second == {"KS_DUCKDB": "off"}
 
     def test_a_script_still_reads_ks_duckdb(self, monkeypatch):
         """Not web: the variable decides as before — the archive tools in the
@@ -70,7 +71,7 @@ class TestConfigureModes:
             if any(isinstance(n, ast.FunctionDef) and n.name == "configure_mode"
                    for n in tree.body):
                 defining.add(".".join(path.relative_to(REPO).with_suffix("").parts))
-        assert "core.read_fallback" in defining, "the walk is not looking"
+        assert "core.duckdb_switch" in defining, "the walk is not looking"
 
         tree = _parse("core/runtime_modes.py")
         imported = {alias.asname or alias.name: f"{n.module}.{alias.name}"

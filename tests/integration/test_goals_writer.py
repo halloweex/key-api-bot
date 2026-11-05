@@ -412,7 +412,6 @@ class TestTheReadsFollowTheChain:
                     await read()
                 assert raised.value.surface == "goals"
                 assert isinstance(raised.value.__cause__, ConnectionError)
-        assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
         assert read_fallback.refusals()["goals"]["count"] == 2
 
     @pytest.mark.asyncio
@@ -440,7 +439,6 @@ class TestTheReadsFollowTheChain:
                 await store.get_marketing_report(2026, 8)
         assert raised.value.surface == "marketing"
         assert isinstance(raised.value.__cause__, ConnectionError)
-        assert "marketing" not in read_fallback.counts(), "it fell back to DuckDB"
         assert read_fallback.refusals()["marketing"]["count"] == 1
 
 

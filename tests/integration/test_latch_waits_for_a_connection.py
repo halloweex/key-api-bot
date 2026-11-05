@@ -56,7 +56,7 @@ from core import (  # noqa: E402 — the shadow chains' block
     pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
     pg_weekly_ledger_write,
 )
-from core import pg_forecast_write, read_fallback
+from core import pg_forecast_write
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -434,14 +434,12 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
-    # Chain 7b-3's four preconditions (none routes anything since step 14): its inputs on Postgres, and the
-    # fallback off as configured. The goal history then reads an empty
+    # Chain 7b-3's four preconditions (none routes anything since step 14): its inputs on Postgres
+    # (and the fallback off, which nothing reads since S14-16). The goal history then reads an empty
     # `silver.orders`, which still writes a placeholder growth row.
     monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
-    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
-    monkeypatch.setattr(read_fallback, "_mode_error", None)
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
