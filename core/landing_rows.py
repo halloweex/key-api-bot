@@ -41,7 +41,9 @@ back because of it.
 """
 from __future__ import annotations
 
+import decimal
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import (
     Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple,
@@ -457,10 +459,32 @@ ORDER_COLUMNS = OrderRow._fields
 ORDER_PRODUCT_COLUMNS = OrderProductRow._fields
 
 
-class LandedOrders(NamedTuple):
-    """One walk over a page of orders, both tables' worth of rows."""
+@dataclass(frozen=True)
+class LandedOrders:
+    """One walk over a page of orders, both tables' worth of rows.
+
+    `refused` is `(payload id, reason)` for every payload that could not be
+    parsed at all — a line item's `price_sold` null, a `grand_total` that is
+    not a number. Those orders are in neither list: one such payload used to
+    raise out of the parse and take the whole page with it, so the order step
+    failed on every tick and `last_sync_orders` never moved past it (L1-01).
+
+    It was a NamedTuple of the two lists, and `orders, products =
+    landed_orders(...)` still unpacks: `__iter__` yields exactly those two.
+    """
     orders: List[OrderRow]
     products: List[OrderProductRow]
+    refused: Tuple[Tuple[Any, str], ...] = ()
+
+    def __iter__(self):
+        return iter((self.orders, self.products))
+
+
+# What a malformed payload raises in `Order.from_api` and the shaping after it
+# (`float(None)`, `int("abc")`, `None["id"]`, `"x".get(...)`). Anything else is
+# a defect in this module, not in the payload, and still raises.
+_UNPARSEABLE = (TypeError, ValueError, KeyError, AttributeError,
+                decimal.InvalidOperation, ArithmeticError)
 
 
 def order_row(order: "Order") -> OrderRow:
@@ -518,14 +542,23 @@ def landed_orders(
 
     orders: List[OrderRow] = []
     products: List[OrderProductRow] = []
+    refused: List[Tuple[Any, str]] = []
     for payload in payloads:
-        order = Order.from_api(payload)
-        if not order.ordered_at:
+        # Each payload on its own: one KeyCRM order the parse cannot read is
+        # that order refused, never the page (`LandedOrders.refused`).
+        try:
+            order = Order.from_api(payload)
+            if not order.ordered_at:
+                continue
+            header = order_row(order)
+            lines = order_product_rows(order) if with_products else []
+        except _UNPARSEABLE as exc:
+            oid = payload.get("id") if isinstance(payload, dict) else None
+            refused.append((oid, f"unparseable: {type(exc).__name__}: {exc}"))
             continue
-        orders.append(order_row(order))
-        if with_products:
-            products.extend(order_product_rows(order))
-    return LandedOrders(orders=orders, products=products)
+        orders.append(header)
+        products.extend(lines)
+    return LandedOrders(orders=orders, products=products, refused=tuple(refused))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

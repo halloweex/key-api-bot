@@ -141,6 +141,11 @@ class UpsertResult:
     skipped_unchanged: int      # rows already in the desired state
     failed: int                 # rows rejected by a constraint/transaction error
     deferred_to_full_sync: int = 0  # unknown ids a header-only refresh left for a full writer
+    # `(order id, reason)` for every refused order whose id is an integer —
+    # unparseable, refused before the latch, or refused by Postgres. `failed`
+    # counts these and any payload with no usable id. The repairs read it to
+    # ledger a refused id rather than ask KeyCRM for it again (L1-10).
+    refused: Tuple[Tuple[int, str], ...] = ()
 
     def __len__(self) -> int:
         return self.count
@@ -490,6 +495,13 @@ def _one_by_one(orders, expenses) -> List[Tuple[List[Any], List[Any]]]:
     return groups
 
 
+def _int_or_none(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 async def upsert_orders_with_expenses(
     payloads: Sequence[Dict[str, Any]], *,
     force_update: bool = False,
@@ -503,29 +515,71 @@ async def upsert_orders_with_expenses(
     `changed_ids` what was written, `failed` what Postgres would refuse.
     """
     from core import pg_landing
-    from core.landing_rows import EXPENSE_COLUMNS, expense_rows, landed_orders
+    from core.landing_rows import (
+        _UNPARSEABLE, EXPENSE_COLUMNS, expense_rows, landed_orders)
     from core.pg_order_versions import CHANGE
 
     landed = landed_orders(list(payloads), with_products=not skip_products)
+    # A payload the parse could not read at all is refused here, by id, with
+    # its expenses: before this it raised out of the parse, failed the order
+    # step on every tick and held `last_sync_orders` behind it (L1-01).
+    refusals: Dict[int, str] = {}
+    unidentified = 0
+    for oid, why in landed.refused:
+        logger.error("orders: order %r not written to Postgres: %s", oid, why)
+        if _int_or_none(oid) is None:
+            unidentified += 1
+        else:
+            refusals[int(oid)] = why
     # One row per order, the last one given — the DuckDB DataFrame's rule; the
-    # API repeats an order across paginated pages.
-    latest = {int(r.id): r for r in landed.orders if r.id is not None}
+    # API repeats an order across paginated pages. A refused id is refused in
+    # every copy; an id that is not a number cannot be written at all.
+    latest = {}
+    for r in landed.orders:
+        oid = _int_or_none(r.id)
+        if oid is None:
+            if r.id is not None:
+                logger.error("orders: order %r not written to Postgres: "
+                             "unparseable: the id is not an integer", r.id)
+                unidentified += 1
+            continue
+        if oid not in refusals:
+            latest[oid] = r
     # Every fetched order's expenses, as `upsert_expenses_batch` was handed
     # them, deduplicated by id keeping the last (`INSERT OR REPLACE`'s outcome).
-    expenses = {e.id: e for e in expense_rows(
-        [p for p in payloads if p.get("expenses")]) if e.id is not None}
+    # Parsed order by order, for the same reason as the headers.
+    parsed_expenses = []
+    for p in payloads:
+        if not isinstance(p, dict) or not p.get("expenses"):
+            continue
+        if _int_or_none(p.get("id")) in refusals:
+            continue
+        try:
+            parsed_expenses.extend(expense_rows([p]))
+        except _UNPARSEABLE as exc:
+            why = f"unparseable expenses: {type(exc).__name__}: {exc}"
+            logger.error("orders: order %r not written to Postgres: %s", p.get("id"), why)
+            oid = _int_or_none(p.get("id"))
+            if oid is None:
+                unidentified += 1
+            else:
+                refusals[oid] = why
+                latest.pop(oid, None)
+    expenses = {e.id: e for e in parsed_expenses
+                if e.id is not None and _int_or_none(e.order_id) not in refusals}
 
     lines: Dict[int, List[Any]] = {}
     for p in landed.products:
-        lines.setdefault(int(p.order_id), []).append(p)
-    refused: List[int] = []
+        line_order = _int_or_none(p.order_id)
+        if line_order is not None:
+            lines.setdefault(line_order, []).append(p)
     orders = []
     for row in latest.values():
         why = order_refusal(row) or next(
             filter(None, (product_refusal(p) for p in lines.get(int(row.id), ()))), None)
         if why:
             logger.error("orders: order %r not written to Postgres: %s", row.id, why)
-            refused.append(int(row.id))
+            refusals[int(row.id)] = why
         else:
             orders.append(row)
     kept_expenses = []
@@ -535,9 +589,16 @@ async def upsert_orders_with_expenses(
             logger.error("orders: expense %r not written to Postgres: %s", row.id, why)
         else:
             kept_expenses.append(row)
+
+    def failed() -> int:
+        return len(refusals) + unidentified
+
+    def refused() -> Tuple[Tuple[int, str], ...]:
+        return tuple(refusals.items())
+
     if not orders and not kept_expenses:
         return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0,
-                            failed=len(refused)), 0
+                            failed=failed(), refused=refused()), 0
 
     written: List[int] = []
     skipped: List[int] = []
@@ -552,7 +613,8 @@ async def upsert_orders_with_expenses(
             skipped, deferred = idle
             return UpsertResult(
                 count=len(skipped), changed_ids=[], skipped_unchanged=len(skipped),
-                failed=len(refused), deferred_to_full_sync=deferred), 0
+                failed=failed(), deferred_to_full_sync=deferred,
+                refused=refused()), 0
         # Inside the acquire, not before it: an acquire that ends without a
         # connection is a write that never reached Postgres (`_latch`).
         stamp = _latch()
@@ -599,7 +661,8 @@ async def upsert_orders_with_expenses(
                         else f"expense(s) {[c.id for c in costs]!r}")
                 logger.error("orders: %s refused by Postgres: %s",
                              name, type(exc).__name__)
-                refused.extend(int(r.id) for r in batch)
+                for r in batch:
+                    refusals[int(r.id)] = f"Postgres refused: {type(exc).__name__}"
                 continue
             written += [int(r.id) for r in to_write]
             skipped += s
@@ -610,11 +673,11 @@ async def upsert_orders_with_expenses(
         "Upserted %d/%d orders to Postgres (written=%d, skipped_unchanged=%d%s%s)",
         len(written) + len(skipped), len(latest), len(written), len(skipped),
         f", deferred_to_full_sync={deferred}" if deferred else "",
-        f", refused={len(refused)}" if refused else "")
+        f", refused={failed()}" if failed() else "")
     return UpsertResult(
         count=len(written) + len(skipped), changed_ids=written,
-        skipped_unchanged=len(skipped), failed=len(refused),
-        deferred_to_full_sync=deferred), expense_count
+        skipped_unchanged=len(skipped), failed=failed(),
+        deferred_to_full_sync=deferred, refused=refused()), expense_count
 
 
 async def record_backfill_misses(misses: Mapping[int, str]) -> int:
