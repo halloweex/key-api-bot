@@ -680,7 +680,15 @@ _SMS_SEGMENTS_BODY = """
                     CASE WHEN os.purchased_price > 0
                          THEN os.purchased_price * l.quantity END AS line_cogs
                 FROM {order_lines} l
-                LEFT JOIN {offer_stocks} os ON os.sku = l.sku
+                -- One cost row per SKU: only an offer's id is unique in
+                -- offer_stocks, and a SKU on two offers repeated its lines,
+                -- both costs and all. The same source as margin's `_SKU_COST`.
+                LEFT JOIN (
+                    SELECT sku, MAX(purchased_price) AS purchased_price
+                    FROM {offer_stocks}
+                    WHERE sku IS NOT NULL
+                    GROUP BY sku
+                ) os ON os.sku = l.sku
                 WHERE l.buyer_id IS NOT NULL
                   AND NOT l.is_return
                   -- Same revenue definition the Gold layer uses: deprecated

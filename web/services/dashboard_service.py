@@ -81,6 +81,7 @@ async def get_revenue_trend(
         sales_type=sales_type,
         compare_type=compare_type,
         promocode=promocode,
+        granularity=granularity,
     )
 
 

@@ -25,6 +25,7 @@ import { RevenueTrendLegend } from './RevenueTrendLegend'
 import { RevenueTrendGradients } from './RevenueTrendGradients'
 import { RevenueTrendActions } from './RevenueTrendActions'
 import { RevenueTrendInfo } from './RevenueTrendInfo'
+import { hasComparison as periodCompares } from '../utils/periodDates'
 
 export const RevenueTrendChart = memo(function RevenueTrendChart() {
   const { t } = useTranslation()
@@ -55,7 +56,8 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
   // chart is answering a different question, and the numbers step by ~1.5%
   // because gift-certificate goods were paid for before this order.
   const showsGoods = data?.measure === 'goods_value'
-  const chartTitle = t(showsGoods ? 'chart.goodsTrend' : 'chart.revenueTrend')
+  const baseTitle = t(showsGoods ? 'chart.goodsTrend' : 'chart.revenueTrend')
+  const chartTitle = data?.granularity === 'monthly' ? `${baseTitle} · ${t('chart.byMonth')}` : baseTitle
 
   return (
     <ChartContainer
@@ -80,6 +82,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
           growthData={growthData}
           isLoading={isLoading}
           compareType={compareType}
+          canCompare={periodCompares(period)}
           onCompareTypeChange={setCompareType}
           t={t}
         />

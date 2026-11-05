@@ -57,6 +57,7 @@ class TestShortcuts:
         ("last_month", "2026-09-01", "2026-09-30"),
         ("last_7_days", "2026-10-15", "2026-10-21"),
         ("last_28_days", "2026-09-24", "2026-10-21"),
+        ("all_time", "2023-12-02", "2026-10-21"),
     ])
     def test_each_shortcut(self, period, start, end):
         assert _parse(period).as_str_tuple() == (start, end)
