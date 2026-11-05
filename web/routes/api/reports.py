@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 
+from core.filters import has_comparison
 from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
@@ -65,7 +66,8 @@ async def get_marketing_summary(
 
     store = await get_store()
     return await store.get_marketing_report_by_dates(
-        start_dt, end_dt, st, category_id=category_id, brand=brand)
+        start_dt, end_dt, st, category_id=category_id, brand=brand,
+        include_comparison=has_comparison(period))
 
 
 # ─── Ukrainian month names for CSV export ────────────────────────────────
@@ -121,9 +123,11 @@ async def export_marketing_csv(
     start_dt = _datetime.strptime(start, "%Y-%m-%d").date()
     end_dt = _datetime.strptime(end, "%Y-%m-%d").date()
 
+    compared = has_comparison(period)
     store = await get_store()
     report = await store.get_marketing_report_by_dates(
-        start_dt, end_dt, st, category_id=category_id, brand=brand)
+        start_dt, end_dt, st, category_id=category_id, brand=brand,
+        include_comparison=compared)
 
     def _fmt_range(sd: str, ed: str) -> str:
         if sd == ed:
@@ -131,8 +135,6 @@ async def export_marketing_csv(
         return f"{sd} — {ed}"
 
     cur_label = _fmt_range(report["start_date"], report["end_date"])
-    prev_label = _fmt_range(report["prev_start_date"], report["prev_end_date"])
-    yoy_label = _fmt_range(report["yoy_start_date"], report["yoy_end_date"])
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -151,7 +153,10 @@ async def export_marketing_csv(
     # Section 1: General Sales
     writer.writerow(["1. ЗАГАЛЬНІ ПРОДАЖІ"])
     has_goal = report["general_sales"]["monthly_goal"] is not None
-    header = ["Показник", cur_label, prev_label, "Зміна, %", yoy_label, "Зміна YoY"]
+    header = ["Показник", cur_label]
+    if compared:
+        header += [_fmt_range(report["prev_start_date"], report["prev_end_date"]), "Зміна, %",
+                   _fmt_range(report["yoy_start_date"], report["yoy_end_date"]), "Зміна YoY"]
     if has_goal:
         header.append("Ціль місяця")
     writer.writerow(header)
@@ -167,9 +172,11 @@ async def export_marketing_csv(
     ]
     for label, key, fmt, show_goal in general_rows:
         cur = report["general_sales"]["current"][key]
-        prev = report["general_sales"]["previous"][key]
-        yoy = report["general_sales"]["year_ago"][key]
-        row = [label, fmt(cur), fmt(prev), _fmt_pct_change(cur, prev), fmt(yoy), _fmt_pct_change(cur, yoy)]
+        row = [label, fmt(cur)]
+        if compared:
+            prev = report["general_sales"]["previous"][key]
+            yoy = report["general_sales"]["year_ago"][key]
+            row += [fmt(prev), _fmt_pct_change(cur, prev), fmt(yoy), _fmt_pct_change(cur, yoy)]
         if has_goal:
             row.append(_fmt_goal(report["general_sales"]["monthly_goal"]) if show_goal else "")
         writer.writerow(row)

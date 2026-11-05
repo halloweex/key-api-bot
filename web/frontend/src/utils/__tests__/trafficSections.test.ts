@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { filtersForPath } from '../pageFilters'
-import { periodDates } from '../periodDates'
+import { hasComparison, periodDates } from '../periodDates'
 import { trafficPath, trafficTabFor, TRAFFIC_TABS } from '../trafficTabs'
 import { isUnder } from '../../hooks/useRouter'
 
@@ -65,6 +65,13 @@ describe('the period in dates, as the server counts it', () => {
     expect(periodDates('last_month', null, null, today)).toEqual({ start: '2026-10-01', end: '2026-10-31' })
     expect(periodDates('last_7_days', null, null, today)).toEqual({ start: '2026-10-29', end: '2026-11-04' })
     expect(periodDates('last_28_days', null, null, today)).toEqual({ start: '2026-10-08', end: '2026-11-04' })
+    expect(periodDates('all_time', null, null, today)).toEqual({ start: '2023-12-02', end: '2026-11-04' })
+  })
+
+  it('compares every period but the whole history', () => {
+    expect(hasComparison('all_time')).toBe(false)
+    expect(hasComparison('month')).toBe(true)
+    expect(hasComparison('custom')).toBe(true)
   })
 
   it('starts the week on Monday when today is Sunday, and last month across a new year', () => {

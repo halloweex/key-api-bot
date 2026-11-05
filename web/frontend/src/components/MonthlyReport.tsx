@@ -80,8 +80,9 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
   prevLabel, yoyLabel,
 }: {
   current: MarketingMonthStats
-  previous: MarketingMonthStats
-  yearAgo: MarketingMonthStats
+  /** Null, with `yearAgo`, for a period with nothing before it (`all_time`). */
+  previous: MarketingMonthStats | null
+  yearAgo: MarketingMonthStats | null
   monthlyGoal: number | null
   prevLabel: string
   yoyLabel: string
@@ -100,10 +101,14 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
               <tr className="border-b border-slate-200 text-left">
                 <th className="py-2.5 px-3 font-semibold text-slate-600">{t('marketing.metric')}</th>
                 <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('marketing.currentPeriod')}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{prevLabel}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('marketing.change')}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{yoyLabel}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('marketing.changeYoY')}</th>
+                {previous && yearAgo && (
+                  <>
+                    <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{prevLabel}</th>
+                    <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('marketing.change')}</th>
+                    <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{yoyLabel}</th>
+                    <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('marketing.changeYoY')}</th>
+                  </>
+                )}
                 {monthlyGoal != null && (
                   <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">{t('marketing.monthGoal')}</th>
                 )}
@@ -112,26 +117,28 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
             <tbody>
               {GENERAL_ROWS.map((row) => {
                 const curVal = current[row.key]
-                const prevVal = previous[row.key]
-                const yoyVal = yearAgo[row.key]
                 return (
                   <tr key={row.key} className="border-b border-slate-100 hover:bg-slate-50/50">
                     <td className="py-2.5 px-3 font-medium text-slate-800">{t(row.labelKey)}</td>
                     <td className="py-2.5 px-3 text-right tabular-nums font-semibold text-slate-900">
                       {row.format(curVal)}
                     </td>
-                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden sm:table-cell">
-                      {row.format(prevVal)}
-                    </td>
-                    <td className={`py-2.5 px-3 text-right tabular-nums font-medium hidden sm:table-cell ${changeColor(curVal, prevVal)}`}>
-                      {pctChange(curVal, prevVal)}
-                    </td>
-                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden lg:table-cell">
-                      {row.format(yoyVal)}
-                    </td>
-                    <td className={`py-2.5 px-3 text-right tabular-nums font-medium hidden lg:table-cell ${changeColor(curVal, yoyVal)}`}>
-                      {pctChange(curVal, yoyVal)}
-                    </td>
+                    {previous && yearAgo && (
+                      <>
+                        <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden sm:table-cell">
+                          {row.format(previous[row.key])}
+                        </td>
+                        <td className={`py-2.5 px-3 text-right tabular-nums font-medium hidden sm:table-cell ${changeColor(curVal, previous[row.key])}`}>
+                          {pctChange(curVal, previous[row.key])}
+                        </td>
+                        <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden lg:table-cell">
+                          {row.format(yearAgo[row.key])}
+                        </td>
+                        <td className={`py-2.5 px-3 text-right tabular-nums font-medium hidden lg:table-cell ${changeColor(curVal, yearAgo[row.key])}`}>
+                          {pctChange(curVal, yearAgo[row.key])}
+                        </td>
+                      </>
+                    )}
                     {monthlyGoal != null && (
                       <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden md:table-cell">
                         {row.showGoal ? formatGoal(monthlyGoal, t) : ''}
@@ -261,8 +268,10 @@ export const MonthlyReport = memo(function MonthlyReport() {
     if (!data) return { periodLabel: '', prevLabel: '', yoyLabel: '' }
     return {
       periodLabel: formatDateRange(data.start_date, data.end_date),
-      prevLabel: formatDateRange(data.prev_start_date, data.prev_end_date),
-      yoyLabel: formatDateRange(data.yoy_start_date, data.yoy_end_date),
+      prevLabel: data.prev_start_date && data.prev_end_date
+        ? formatDateRange(data.prev_start_date, data.prev_end_date) : '',
+      yoyLabel: data.yoy_start_date && data.yoy_end_date
+        ? formatDateRange(data.yoy_start_date, data.yoy_end_date) : '',
     }
   }, [data])
 

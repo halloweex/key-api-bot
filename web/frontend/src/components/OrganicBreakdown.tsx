@@ -7,6 +7,8 @@ import { InfoPopover } from './InfoPopover'
 import { ShareBar } from './ShareBar'
 import { Wrapper } from './Wrapper'
 import { useTrafficAnalytics, useTrafficOrganic } from '../hooks/useApi'
+import { useFilterStore } from '../store/filterStore'
+import { hasComparison } from '../utils/periodDates'
 import { formatCurrency, formatDate, formatNumber, formatPercent } from '../utils/formatters'
 import type { OrganicChannel, OrganicChannelDetail, OrganicChannelKey } from '../types/api'
 
@@ -128,11 +130,14 @@ const DetailLabel = memo(function DetailLabel({ detail }: { detail: OrganicChann
 const ChannelRows = memo(function ChannelRows({
   row,
   organicRevenue,
+  compared,
   open,
   onToggle,
 }: {
   row: OrganicChannel
   organicRevenue: number
+  /** False for a period with nothing before it: no change column. */
+  compared: boolean
   open: boolean
   onToggle: (channel: string) => void
 }) {
@@ -141,6 +146,7 @@ const ChannelRows = memo(function ChannelRows({
   const share = organicRevenue > 0 ? (row.revenue / organicRevenue) * 100 : 0
   const expandable = row.details_total > 0
   const more = row.details_total - row.details.length
+  const cols = compared ? 7 : 6
 
   return (
     <Fragment>
@@ -182,13 +188,15 @@ const ChannelRows = memo(function ChannelRows({
           {row.orders > 0 ? formatCurrency(row.revenue / row.orders) : '—'}
         </Td>
         <Td align="right" tabular hideBelow="md">{formatNumber(row.new_customers)}</Td>
-        <Td align="right" tabular hideBelow="sm">
-          <ChangeValue change={changeOf(row.revenue, row.previous.revenue)} />
-        </Td>
+        {compared && (
+          <Td align="right" tabular hideBelow="sm">
+            <ChangeValue change={changeOf(row.revenue, row.previous.revenue)} />
+          </Td>
+        )}
       </Tr>
       {open && row.details.length > 0 && (
         <Tr hover={false}>
-          <Td colSpan={7}>
+          <Td colSpan={cols}>
             <span className="block pl-6 sm:pl-10 text-[11px] uppercase tracking-wide text-slate-400">
               {t('traffic.organicDetailHeader')}
             </span>
@@ -217,12 +225,12 @@ const ChannelRows = memo(function ChannelRows({
           </Td>
           <Td hideBelow="lg" />
           <Td hideBelow="md" />
-          <Td hideBelow="sm" />
+          {compared && <Td hideBelow="sm" />}
         </Tr>
       ))}
       {open && more > 0 && (
         <Tr hover={false}>
-          <Td colSpan={7}>
+          <Td colSpan={cols}>
             <span className="block pl-6 sm:pl-10 text-xs text-slate-400">
               {t('traffic.organicMoreDetails', { value: formatNumber(more) })}
             </span>
@@ -238,6 +246,7 @@ const ChannelRows = memo(function ChannelRows({
 export const OrganicBreakdown = memo(function OrganicBreakdown() {
   const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useTrafficOrganic()
+  const compared = hasComparison(useFilterStore((s) => s.period))
   // Same filters, so its total is the denominator of "share of all revenue" —
   // and it is already in the cache for the cards at the top of the tab.
   const { data: analytics } = useTrafficAnalytics()
@@ -326,11 +335,13 @@ export const OrganicBreakdown = memo(function OrganicBreakdown() {
             <span className="text-sm text-slate-600 tabular-nums">
               {t('traffic.newCustomersCount', { value: formatNumber(totals.new_customers) })}
             </span>
-            <span className="text-sm text-slate-600">
-              {t('traffic.organicVsPrevious', {
-                value: changeText(changeOf(totals.revenue, data.previous_totals.revenue), t),
-              })}
-            </span>
+            {compared && (
+              <span className="text-sm text-slate-600">
+                {t('traffic.organicVsPrevious', {
+                  value: changeText(changeOf(totals.revenue, data.previous_totals.revenue), t),
+                })}
+              </span>
+            )}
           </Wrapper>
 
           <DataTable variant="feature">
@@ -342,7 +353,7 @@ export const OrganicBreakdown = memo(function OrganicBreakdown() {
                 <Th hideBelow="sm">{t('traffic.organicColShare')}</Th>
                 <Th align="right" hideBelow="lg">{t('traffic.organicColAvgOrder')}</Th>
                 <Th align="right" hideBelow="md">{t('traffic.organicColNewCustomers')}</Th>
-                <Th align="right" hideBelow="sm">{t('traffic.organicColChange')}</Th>
+                {compared && <Th align="right" hideBelow="sm">{t('traffic.organicColChange')}</Th>}
               </Tr>
             </thead>
             <tbody>
@@ -351,6 +362,7 @@ export const OrganicBreakdown = memo(function OrganicBreakdown() {
                   key={row.channel}
                   row={row}
                   organicRevenue={totals.revenue}
+                  compared={compared}
                   open={open.has(row.channel)}
                   onToggle={onToggle}
                 />
@@ -358,12 +370,14 @@ export const OrganicBreakdown = memo(function OrganicBreakdown() {
             </tbody>
           </DataTable>
 
-          <p className="text-xs text-slate-400">
-            {t('traffic.organicPreviousPeriod', {
-              start: formatDate(data.previous_period.start),
-              end: formatDate(data.previous_period.end),
-            })}
-          </p>
+          {compared && (
+            <p className="text-xs text-slate-400">
+              {t('traffic.organicPreviousPeriod', {
+                start: formatDate(data.previous_period.start),
+                end: formatDate(data.previous_period.end),
+              })}
+            </p>
+          )}
         </Wrapper>
       )}
     </ChartContainer>
