@@ -1636,10 +1636,11 @@ uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
 cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
 checkpoint (~7 s at 900 MB) — ~67 s for an ordinary request. **Not for a slow
 one**: the eight `SLOW_ENDPOINTS` (`web/middleware.py`) get 300 s, uvicorn
-drains them too, and three write DuckDB (`/api/duckdb/resync`,
-`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`; `/api/goals/recalculate`
-and `/api/revenue/forecast/train` wrote it too until step 14's S14-11 took
-chain 7b-3's DuckDB branch). The list was kept by hand and named three;
+drains them too, and none writes DuckDB since step 14's S14-15: the resync
+and the status refresh reached DuckDB's warehouse rebuild and the reclassify
+its `silver_order_utm`, all deleted there (`/api/goals/recalculate` and
+`/api/revenue/forecast/train` wrote it too until S14-11 took chain 7b-3's
+DuckDB branch). The list was kept by hand and named three;
 it is derived from the code now (`test_web_stop_grace.py` walks each handler
 to a store method executing a write). One in flight at a stop is killed. Covering them (~340 s) would leave a deploy — pull, stop,
 migrate, the 180 s health gate — no margin inside its 10-minute ssh timeout,

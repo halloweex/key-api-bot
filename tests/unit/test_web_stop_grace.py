@@ -15,8 +15,9 @@ Docker's default is 10 s, and web's shutdown waits on three things in turn:
 
 About 67 s for an ordinary request, and 120 s covers it. **A request to one
 of `SLOW_ENDPOINTS` is not covered**: they get `SLOW_ENDPOINT_TIMEOUT` (300 s),
-uvicorn drains them too, and three write DuckDB (`SLOW_DUCKDB_WRITERS`, derived
-from the code by `test_the_slow_writers_are_derived_from_the_code`). One
+uvicorn drains them too, and none writes DuckDB since step 14's S14-15
+(`SLOW_DUCKDB_WRITERS`, derived from the code by
+`test_the_slow_writers_are_derived_from_the_code`; three did until then). One
 in flight at a stop keeps web draining past the grace, and Docker kills it.
 Covering them would take ~340 s of grace, and with the same margin the
 ordinary case gets, a deploy — pull, stop, migrate, a 180 s health gate —
@@ -64,13 +65,14 @@ KNOWN_SLOW_ENDPOINTS = {
 # nothing checked it (batch-E). Those two — the recalculation and the
 # training, which wrote the goal and forecast tables to DuckDB while chain
 # 7b-3's flag could say duckdb — write Postgres alone since step 14's S14-11
-# (`MOVED_TO_POSTGRES`).
-SLOW_DUCKDB_WRITERS = {
-    "/api/duckdb/resync",
-    "/api/duckdb/refresh-statuses",
-    "/api/traffic/reclassify",
-}
-MOVED_TO_POSTGRES = {"/api/goals/recalculate", "/api/revenue/forecast/train"}
+# (`MOVED_TO_POSTGRES`). The other three — the resync and the status refresh,
+# through DuckDB's warehouse rebuild, and the reclassify, through DELETE FROM
+# silver_order_utm — reach no DuckDB write since S14-15 deleted the rebuild,
+# DuckDB's UTM parse and the doors' DuckDB halves.
+SLOW_DUCKDB_WRITERS: set = set()
+MOVED_TO_POSTGRES = {"/api/goals/recalculate", "/api/revenue/forecast/train",
+                     "/api/duckdb/resync", "/api/duckdb/refresh-statuses",
+                     "/api/traffic/reclassify"}
 
 
 def _seconds(value: str) -> int:
@@ -206,7 +208,9 @@ def test_the_slow_writers_are_derived_from_the_code():
 
 def test_the_goal_and_forecast_doors_write_postgres_alone():
     """Step 14's S14-11: the recalculation and the training reach chain
-    7b-3's writer and no DuckDB statement. Until then they reached DuckDB
+    7b-3's writer and no DuckDB statement (and since S14-15 the resync, the
+    status refresh and the reclassify, which reached DuckDB's warehouse
+    rebuild or its UTM table). Until then they reached DuckDB
     through `_SEASONAL_UPSERT_SQL`, a module constant, from a mixin method —
     the shape the review's omission had, which the derivation was held to
     see. Mutation: give either a DuckDB branch again."""

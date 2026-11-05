@@ -127,6 +127,10 @@ class TestTheGraceFollowsTheFloor:
         from core import mirror_reconciliation as mr
 
         monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        # A Postgres to compare against (`configured()`), never reached: the
+        # pool is a mock. Without it the check stands down and the test read
+        # the DSN of whatever environment it ran in.
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://unused@127.0.0.1:1/none")
         seen = {}
 
         async def _fake_row(conn, *, now, grace_minutes, max_samples):
@@ -325,6 +329,10 @@ class TestUnderThePostgresParse:
         from core import mirror_reconciliation as mr
 
         monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        # A Postgres to compare against (`configured()`), never reached: the
+        # pool is a mock. Without it the check stands down and the test read
+        # the DSN of whatever environment it ran in.
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://unused@127.0.0.1:1/none")
 
         async def _fake_row(conn, *, now, grace_minutes, max_samples):
             return _row(missing=1, missing_ids=[7], missing_since=SINCE)

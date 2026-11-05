@@ -394,23 +394,24 @@ class TestTheResolveNote:
     """`resolve_group(note=...)`: one more line under the list. Its one caller
     was step 13's settle, which closed the `warehouse` group once on the
     switch; kept as the Gate's own behaviour (moved here from the deleted
-    `tests/unit/test_warehouse_writer.py`)."""
+    `tests/unit/test_warehouse_writer.py`, on a condition still registered:
+    the `warehouse:` ones it used went with DuckDB's validator)."""
 
     def test_it_is_one_more_line_under_the_list(self):
         from core.alerting import _gate, resolve_group
 
-        _gate.note_delivered_conditions(["warehouse:refresh_errored"], "warehouse")
+        _gate.note_delivered_conditions(["warehouse_pg:derive_failed"], "warehouse_pg")
         with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=True)), \
              patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
-            asyncio.run(resolve_group("warehouse", note="retired"))
+            asyncio.run(resolve_group("warehouse_pg", note="retired"))
         text = send.await_args.args[0]
         assert text.startswith("✅ Resolved:") and text.endswith("\nretired")
 
     def test_without_it_nothing_changes(self):
         from core.alerting import _gate, resolve_group
 
-        _gate.note_delivered_conditions(["warehouse:refresh_errored"], "warehouse")
+        _gate.note_delivered_conditions(["warehouse_pg:derive_failed"], "warehouse_pg")
         with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=True)), \
              patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
-            asyncio.run(resolve_group("warehouse"))
-        assert send.await_args.args[0].splitlines()[-1].startswith("• warehouse:")
+            asyncio.run(resolve_group("warehouse_pg"))
+        assert send.await_args.args[0].splitlines()[-1].startswith("• warehouse_pg:")

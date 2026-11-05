@@ -32,8 +32,15 @@ def test_the_manual_status_refresh_holds_the_lock():
 
 def test_the_manual_warehouse_refresh_holds_the_lock():
     """Interleaved with the two-minute job it produced false validation
-    failures and raced its fired/resolved notices."""
-    assert "_heavy_job_lock" in _source(admin, "refresh_warehouse")
+    failures and raced its fired/resolved notices. Since step 14's S14-15
+    the route runs the Postgres derivation alone, which takes the lock
+    itself (`_run_pg_derivation`), so the route must not hold it around the
+    call — `asyncio.Lock` is not reentrant."""
+    src = _source(admin, "refresh_warehouse")
+    assert "_derive_postgres_now" in src and "_heavy_job_lock" not in src
+    assert "_run_pg_derivation" in _source(admin, "_derive_postgres_now")
+    derive = inspect.getsource(scheduler_module.BackgroundScheduler._run_pg_derivation)
+    assert "async with self._heavy_job_lock:" in derive
 
 
 # `test_the_backfill_route_passes_the_lock` held `POST
