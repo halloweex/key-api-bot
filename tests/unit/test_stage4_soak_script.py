@@ -189,8 +189,7 @@ class TestS0LogHalf:
         assert run.code == 1, run.out
         assert run.rows["S0 order intake (log)"][0] == "FAIL"
         assert not [c for c in run.calls if c.startswith("logs")]
-        assert all("inventory_on=unknown " in c and "dq_pg_warehouse_on=unknown" in c
-                   for c in run.psql)
+        assert all("inventory_on=unknown " in c for c in run.psql)
 
     def test_no_web_container_at_all_is_unknown(self, tmp_path):
         run = _run(tmp_path, FAKE_WEB="missing")
@@ -223,16 +222,21 @@ class TestWhatTheScriptPromises:
         assert not [c for c in healthy.calls if "Config.Env" in c]
 
     def test_unset_flags_are_zero(self, healthy):
-        assert all("inventory_on=0 " in c and "dq_pg_warehouse_on=0" in c for c in healthy.psql)
+        assert all("inventory_on=0 " in c for c in healthy.psql)
 
     def test_set_flags_are_read_the_way_the_application_reads_them(self, tmp_path):
-        run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY=" Postgres ", FAKE_KS_DQ_PG_WAREHOUSE="on")
-        assert all("inventory_on=1 " in c and "dq_pg_warehouse_on=1" in c for c in run.psql)
+        run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY=" Postgres ")
+        assert all("inventory_on=1 " in c for c in run.psql)
 
     def test_values_nobody_understands_are_invalid(self, tmp_path):
-        run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY="postgress", FAKE_KS_DQ_PG_WAREHOUSE="yes")
-        assert all("inventory_on=invalid " in c and "dq_pg_warehouse_on=invalid" in c
-                   for c in run.psql)
+        run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY="postgress")
+        assert all("inventory_on=invalid " in c for c in run.psql)
+
+    def test_the_twins_flag_is_no_longer_asked_or_passed(self, healthy):
+        """`dq_pg_warehouse_on` went in step 14's S14-14 with 21_pairing.sql,
+        its one reader. Mutation: ask `KS_DQ_PG_WAREHOUSE` again."""
+        assert not [c for c in healthy.calls if "KS_DQ_PG_WAREHOUSE" in c]
+        assert not [c for c in healthy.psql if "dq_pg_warehouse_on" in c]
 
     def test_the_latch_outranks_the_flag(self, tmp_path):
         """The state DN-06 exists for: chain 1 has written Postgres, so it goes

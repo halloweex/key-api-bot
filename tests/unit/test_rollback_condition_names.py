@@ -24,13 +24,14 @@ retired (Z3).
     duckdb_off.retired_conditions()          off's three pk checks + compare_shadow
     pg_orders_write.retired_conditions()     chain 3's ten landing checks
 
-Since S14-00 this code still computes the first and the third, and the second
-is deleted with `core/duckdb_off.py`; while a source stands, the literal must
-equal it. From S14-14 on, none of these may be in REGISTRY or be emitted at
-all — the DuckDB checks that emit them today go before that. The four
-`shadow_*` names went first: S14-10 deleted `compare_shadow`, their one
-emitter, with their REGISTRY and REMEDIATION entries, and the literal keeps
-them.
+S14-00 deleted the second with `core/duckdb_off.py`; the first and the third
+were computed by this code until S14-14, and the literal was held equal to
+them while they stood. The four `shadow_*` names went first: S14-10 deleted
+`compare_shadow`, their one emitter, with their REGISTRY and REMEDIATION
+entries. S14-14 deleted the DuckDB integrity scan, the emitter of all the
+rest, with the two sets' sources, so from S14-14 on none of these is in
+REGISTRY, has a REMEDIATION line or a human name, or is emitted at all —
+and the literal keeps them.
 """
 from __future__ import annotations
 
@@ -68,18 +69,15 @@ ALL_RETIRED = frozenset().union(*ROLLBACK_RETIRED.values())
 
 
 class TestTheLiteralIsTheRollbackImages:
-    def test_step_13s_set_while_its_source_stands(self):
-        from core import warehouse_cutover
+    def test_the_sources_are_gone_and_the_mark_stays(self):
+        """The two sets' sources went with the DuckDB scan in S14-14; the
+        literal is what they computed. `COMPARISON_MARK` stays until S14-15,
+        and is one of the marks the images before step 14 read as retired."""
+        from core import pg_orders_write, warehouse_cutover
 
-        assert (warehouse_cutover.retired_conditions()
-                == ROLLBACK_RETIRED["warehouse_cutover.retired_conditions"])
+        assert not hasattr(warehouse_cutover, "retired_conditions")
+        assert not hasattr(pg_orders_write, "retired_conditions")
         assert warehouse_cutover.COMPARISON_MARK in ROLLBACK_MARKS
-
-    def test_chain_3s_set_while_its_source_stands(self):
-        from core import pg_orders_write
-
-        assert (pg_orders_write.retired_conditions()
-                == ROLLBACK_RETIRED["pg_orders_write.retired_conditions"])
 
     def test_the_retired_group_is_paged_by_nothing(self):
         """`dq:reconciliation` was the group of the 05:30 job's DuckDB arm
@@ -98,39 +96,44 @@ class TestTheLiteralIsTheRollbackImages:
         assert not [k for k in REGISTRY if k.endswith(f":{layer}")]
         assert not hasattr(pg_orders_write, "RECONCILIATION_GROUP")
 
-    def test_compare_golds_names_went_with_it(self):
-        """`gold_missing_cells` and `gold_orphan_cells` had one emitter,
-        `compare_gold`, deleted in step 14's S14-12 with their REGISTRY
-        entries; `gold_cell_values` is also the integrity check's name and
-        stays registered until S14-14. Mutation: put either back."""
+    def test_no_retired_name_is_registered_or_emitted(self):
+        """Rule 15 from S14-14 on: every name the images before step 14
+        retire is out of REGISTRY, has no REMEDIATION line of its own and no
+        human name, and no module in `core/`, `web/` or `bot/` hands it to a
+        `check_name=`. Mutation: put back any DuckDB check, or one of their
+        REGISTRY entries."""
         from core.alerting import REGISTRY
+        from core.data_quality import HUMAN_CHECK_NAMES, REMEDIATION
 
-        gone = {"gold_missing_cells", "gold_orphan_cells"}
-        assert gone <= ROLLBACK_RETIRED["warehouse_cutover.retired_conditions"]
         emitted = set().union(*(_check_names_in(path)
-                                for path in sorted((ROOT / "core").glob("*.py"))))
-        assert not gone & emitted
-        assert not gone & set(REGISTRY)
+                                for tree in ("core", "web", "bot")
+                                for path in sorted((ROOT / tree).rglob("*.py"))))
+        assert not ALL_RETIRED & emitted, sorted(ALL_RETIRED & emitted)
+        assert not ALL_RETIRED & set(REGISTRY), sorted(ALL_RETIRED & set(REGISTRY))
+        assert not ALL_RETIRED & {prefix for prefix, _ in REMEDIATION}
+        assert not ALL_RETIRED & set(HUMAN_CHECK_NAMES)
 
-    def test_offs_set_is_what_its_sources_emitted(self):
-        """`core/duckdb_off.py` is gone (S14-00); its set was the scan's
-        three stood-down pk checks, still emitted by the code that stays
-        until S14-14, and `compare_shadow`'s four conditions, which S14-10
-        deleted with their emitter: no module emits a `shadow_*` name, and
-        none is registered. Mutation: put `compare_shadow` back, or one of
-        its names in REGISTRY."""
+    def test_no_generated_family_can_build_one(self):
+        """The scan named four families from (table, column) call sites —
+        `pk_uniqueness_*`, `fk_orphan_*`, `not_null_*`, `value_domain_*` — and
+        every retired name of theirs came from one. No REGISTRY key and no
+        REMEDIATION prefix starts a family any more, so none can come back by
+        a generated name. Mutation: register `pk_uniqueness_offers`."""
         from core.alerting import REGISTRY
-        from core.data_quality import DUCKDB_OFF_STOOD_DOWN, REMEDIATION
+        from core.data_quality import REMEDIATION
 
+        families = ("pk_uniqueness_", "fk_orphan_", "not_null_", "value_domain_")
+        assert not [k for k in REGISTRY if k.startswith(families)]
+        assert not [p for p, _ in REMEDIATION if p.startswith(families)]
+
+    def test_offs_set_had_the_scans_three_pk_checks_and_compare_shadows_four(self):
+        """`core/duckdb_off.py`'s set: the scan's three stood-down pk checks
+        (`DUCKDB_OFF_STOOD_DOWN`, deleted in S14-14) and `compare_shadow`'s
+        four conditions (S14-10)."""
         off = ROLLBACK_RETIRED["duckdb_off.retired_conditions"]
-        assert DUCKDB_OFF_STOOD_DOWN == {c for c in off if c.startswith("pk_uniqueness_")}
-        shadow = {c for c in off if c.startswith("shadow_")}
-        assert len(shadow) == 4
-        emitted = set().union(*(_check_names_in(path)
-                                for path in sorted((ROOT / "core").glob("*.py"))))
-        assert not shadow & emitted
-        assert not shadow & set(REGISTRY)
-        assert not shadow & {prefix for prefix, _ in REMEDIATION}
+        assert {c for c in off if c.startswith("pk_uniqueness_")} == {
+            "pk_uniqueness_products", "pk_uniqueness_buyers", "pk_uniqueness_categories"}
+        assert len({c for c in off if c.startswith("shadow_")}) == 4
 
 
 def _check_names_in(path: Path) -> set:
@@ -167,8 +170,8 @@ class TestNoCheckThatStaysTakesOne:
 
         names = {c for conditions in twins.GUARD_CONDITIONS.values() for c in conditions}
         names |= set(twins.UNWATCHED_NAMES.values())
-        names |= {twins.WHOLE_UNWATCHED, twins.FLAG_INVALID}
-        names |= {twin for _guard, _detail, twin in twins.LANDING_TWINS}
+        names.add(twins.WHOLE_UNWATCHED)
+        names |= set(twins.LANDING_TWINS)
         assert not names & ALL_RETIRED
 
     def test_the_canary_pages_under_none(self):

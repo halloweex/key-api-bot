@@ -12,19 +12,9 @@ import ast
 import inspect
 import textwrap
 
-import pytest
-import pytest_asyncio
 
+from core import data_quality
 from core.data_quality import check_internal_integrity
-from core.duckdb_store import DuckDBStore
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
-    await s.connect()
-    yield s
-    await s.close()
 
 
 def _raised(issues):
@@ -32,10 +22,26 @@ def _raised(issues):
 
 
 class TestARaisingCheckIsNamed:
-    @pytest.mark.asyncio
-    async def test_a_clean_database_raises_nothing(self, store):
-        async with store.connection() as conn:
-            assert _raised(check_internal_integrity(conn)) == []
+    def test_clean_facts_raise_nothing(self):
+        """Since step 14's S14-14 the scan reads no store: it judges the
+        facts it is handed. (Until then: a clean, empty DuckDB.)"""
+        assert _raised(check_internal_integrity(
+            inventory_calendar=(None, frozenset()), chain_watermarks={},
+            chain_stamps={}, frozen_sync_rows={})) == []
+
+    def test_a_check_that_raises_is_named_and_its_conditions_held(self, monkeypatch):
+        def boom(*_a, **_k):
+            raise KeyError("inventory_sku_history")
+
+        monkeypatch.setattr(data_quality, "_inventory_snapshot_continuity_check", boom)
+        raised: list = []
+        issues = check_internal_integrity(
+            inventory_calendar=(None, frozenset()), chain_watermarks={},
+            chain_stamps={}, frozen_sync_rows={}, raised_out=raised)
+        (finding,) = _raised(issues)
+        assert "inventory_snapshot_continuity (KeyError)" in finding.description
+        assert raised == ["inventory_snapshot_continuity"]
+        assert data_quality.unverified_conditions(raised, issues) == ["inventory_snapshot_gaps"]
 
 
 class TestTheGuardHasOneHome:

@@ -167,13 +167,11 @@ class TestReturnStatusGroup:
 
 # ─────────────────────── A12-2 / A7-1 freshness ───────────────────────
 
-def _history(conn, now):
-    """A row in DuckDB's own `sync_metadata`, so the check is past its
-    fresh-install gate; the watermarks it judges are the chains'."""
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-        ["last_sync_orders", (now - timedelta(minutes=5)).isoformat()],
-    )
+def _history(now):
+    """A row of DuckDB's `sync_metadata` as Postgres copied it, so the check
+    is past its fresh-install gate; the watermarks it judges are the chains'.
+    (DuckDB's own row, read under `on`, until step 14's S14-14.)"""
+    return {"last_sync_orders": (now - timedelta(minutes=5)).isoformat()}
 
 
 def _moved(now, **stamps):
@@ -187,36 +185,27 @@ def _moved(now, **stamps):
 
 
 class TestFreshnessCheck:
-    @pytest.mark.asyncio
-    async def test_stale_catalog_fires_fresh_orders_pass(self, tmp_path):
-        store = await _make_store(tmp_path)
+    def test_stale_catalog_fires_fresh_orders_pass(self):
         now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
-        async with store.connection() as conn:
-            _history(conn, now)
-            # orders current; categories 45 days stale (the real incident).
-            issues = _freshness_check(conn, now=now, chain_watermarks=_moved(
-                now, orders=now - timedelta(minutes=5),
-                categories=now - timedelta(days=45)))
+        # orders current; categories 45 days stale (the real incident).
+        issues = _freshness_check(now=now, frozen_rows=_history(now), chain_watermarks=_moved(
+            now, orders=now - timedelta(minutes=5),
+            categories=now - timedelta(days=45)))
         names = {i.check_name for i in issues}
         assert "freshness_categories" in names
         assert "freshness_orders" not in names
 
-    @pytest.mark.asyncio
-    async def test_dead_orders_sync_is_critical(self, tmp_path):
-        store = await _make_store(tmp_path)
+    def test_dead_orders_sync_is_critical(self):
         now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
-        async with store.connection() as conn:
-            _history(conn, now)
-            issues = _freshness_check(conn, now=now, chain_watermarks=_moved(
-                now, orders=now - timedelta(hours=12)))
+        issues = _freshness_check(now=now, frozen_rows=_history(now), chain_watermarks=_moved(
+            now, orders=now - timedelta(hours=12)))
         orders = [i for i in issues if i.check_name == "freshness_orders"]
         assert orders and orders[0].severity == Severity.CRITICAL
 
-    @pytest.mark.asyncio
-    async def test_no_sync_history_is_bootstrap_no_issues(self, tmp_path):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            assert _freshness_check(conn) == []
+    def test_no_sync_history_is_bootstrap_no_issues(self):
+        """Nothing in Postgres at all — the copy read and empty, no chain
+        watermark: a fresh install, not a stall."""
+        assert _freshness_check(frozen_rows={}, chain_watermarks={}) == []
 
 
 # ─────────────────────────── A11-6 ───────────────────────────

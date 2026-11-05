@@ -8,10 +8,8 @@ complete.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import duckdb
 import pytest
 
-from core.data_quality import Severity, _orders_without_line_items_check
 from core.sync_service import SyncService
 
 
@@ -125,94 +123,6 @@ class TestRepairOrders:
         assert result == {"requested": 0, "attempted": 0, "repaired": 0,
                           "failed": 0, "remaining": 0, "failures": {}}
         client.get_order.assert_not_awaited()
-
-
-class TestOrdersWithoutLineItemsCheck:
-    @pytest.fixture
-    def conn(self):
-        c = duckdb.connect(":memory:")
-        c.execute("""
-            CREATE TABLE orders (id BIGINT, grand_total DECIMAL(12,2));
-            CREATE TABLE order_products (order_id BIGINT, quantity INTEGER);
-        """)
-        yield c
-        c.close()
-
-    def test_reports_orders_with_revenue_and_no_products(self, conn):
-        conn.execute("""
-            INSERT INTO orders VALUES (1, 500.00), (2, 300.00), (3, 100.00);
-            INSERT INTO order_products VALUES (3, 1);
-        """)
-        issues = _orders_without_line_items_check(conn)
-
-        assert len(issues) == 1
-        assert issues[0].count == 2
-        assert issues[0].check_name == "orders_without_line_items"
-        assert issues[0].severity == Severity.WARN
-        assert issues[0].sample_ids == (1, 2)
-        assert "800.00" in issues[0].description
-
-    def test_zero_value_orders_are_not_flagged(self, conn):
-        """An order billed at nothing having sold nothing is coherent."""
-        conn.execute("INSERT INTO orders VALUES (1, 0.00)")
-
-        assert _orders_without_line_items_check(conn) == []
-
-    def test_clean_data_reports_nothing(self, conn):
-        conn.execute("""
-            INSERT INTO orders VALUES (1, 500.00);
-            INSERT INTO order_products VALUES (1, 2);
-        """)
-
-        assert _orders_without_line_items_check(conn) == []
-
-    def test_an_order_with_several_lines_counts_once(self, conn):
-        conn.execute("""
-            INSERT INTO orders VALUES (1, 500.00), (2, 200.00);
-            INSERT INTO order_products VALUES (1, 1), (1, 2), (1, 3);
-        """)
-        issues = _orders_without_line_items_check(conn)
-
-        assert issues[0].count == 1
-        assert issues[0].sample_ids == (2,)
-
-
-class TestIntegrityScanSurvivesAMissingTable:
-    """`/warehouse/rebuild-silver` DROPs silver_orders; the 6-hourly scan can
-    land inside that window. The handler written to tolerate it referenced a
-    logger the module never imported, so it raised NameError and took the whole
-    scan down with it — including every check that had nothing to do with
-    silver_orders."""
-
-    def test_no_silver_orders_table_is_tolerated(self):
-        import duckdb
-
-        from core.data_quality import check_internal_integrity
-
-        conn = duckdb.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE orders (id BIGINT, ordered_at TIMESTAMPTZ,
-                                 source_id INTEGER, status_id INTEGER,
-                                 grand_total DOUBLE);
-            CREATE TABLE order_products (id BIGINT, order_id BIGINT,
-                                         product_id BIGINT, price_sold DOUBLE,
-                                         quantity INTEGER);
-            CREATE TABLE products (id BIGINT);
-            CREATE TABLE buyers (id BIGINT);
-            CREATE TABLE categories (id BIGINT);
-            CREATE TABLE sync_metadata (key VARCHAR, value VARCHAR);
-        """)
-
-        issues = check_internal_integrity(conn)
-
-        assert isinstance(issues, list)
-        conn.close()
-
-    def test_the_module_has_a_logger(self):
-        """The bug was a name that did not exist, so name it in a test."""
-        import core.data_quality as dq
-
-        assert hasattr(dq, "logger")
 
 
 class TestTheWriteRunsUnderTheHeavyLock:
