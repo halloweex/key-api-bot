@@ -43,9 +43,9 @@ WHAT IT READS, AND WHY FROM POSTGRES
 (the stored verdicts) and `silver.orders` (date, amount, sales type, the
 return flag), in ONE read-only REPEATABLE READ transaction, so the verdicts,
 the comments and the snapshot are one instant. It is the store the tab reads,
-and `bronze.orders` is what step 9's parser will read. The DuckDB reclassify
-reads DuckDB's `orders`, which the mirror keeps identical and the daily
-comparison checks.
+and `bronze.orders` is what the Postgres parser reads (step 9; the only parser
+since step 14's S14-15, which deleted the DuckDB reclassify over DuckDB's
+`orders`).
 
 That instant comes AFTER the three tables are locked. Every Silver tick
 `TRUNCATE`s `silver.orders` and `silver.order_utm` under ACCESS EXCLUSIVE, and

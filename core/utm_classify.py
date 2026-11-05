@@ -3,10 +3,11 @@
 `manager_comment` is free text, and what a chart on /traffic calls an order —
 paid Facebook, organic Instagram, a pixel with no channel — is decided here, by
 regexes over that text and then a chain of rules. Nothing else in the system
-computes it: `silver_order_utm` in DuckDB stores what this returned when it
-last looked, `silver.order_utm` in Postgres is a copy of that, and revision
-0018 explains why a SQL re-derivation would be a second classifier that drifts
-from the first.
+computes it: `silver.order_utm` in Postgres stores what this returned when it
+last looked (Postgres's own parse since KS_UTM_PARSE=postgres; until then a
+copy of DuckDB's `silver_order_utm`, whose parse step 14's S14-15 deleted), and
+revision 0018 explains why a SQL re-derivation would be a second classifier
+that drifts from the first.
 
 WHY IT IS A MODULE AND NOT TWO METHODS ON THE MIXIN
 
@@ -272,8 +273,8 @@ def utm_columns(
     """The row a parse writes for `comment`, as `UTM_VERDICT_COLUMNS`.
 
     One place for the shape, because two readers build it and must build the
-    same one: the DuckDB parse writes it, and the reclassify dry run compares
-    against it. The shape has one rule that is not obvious from the two
+    same one: the Postgres parse writes it (the DuckDB parse did, until step
+    14's S14-15), and the reclassify dry run compares against it. The shape has one rule that is not obvious from the two
     functions above: a comment with no tracking data at all is written as
     NULLs, *not* as `classify_traffic({})`'s `('unknown', 'unattributed')`.
     The NULLs are what let the readers' `COALESCE` fall through to the

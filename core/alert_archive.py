@@ -361,7 +361,8 @@ async def write_resolved_now(keys, message, delivered) -> bool:
 
 # ─── The digest's tail (step 06) ────────────────────────────────────────────
 #
-# The digest's *delta* stays on data_quality_issues in DuckDB — the review's
+# The digest's *delta* stays on data_quality_issues (in DuckDB then; in
+# Postgres since chain 9, the only store since step 14) — the review's
 # finding 24: a ledger-based delta answers a different question from a
 # different store, and a metric defined twice drifts. What the archive
 # contributes is the part only it knows: which conditions stand firing right

@@ -20,7 +20,9 @@
 # WHY THERE IS A POSTGRES HERE
 #
 # The differential tests — the ones proving DuckDB and PostgreSQL answer the
-# same question the same way — skip themselves when `KS_PG_DSN` is unset, and
+# same question the same way; since step 14 PostgreSQL against DuckDB's
+# answers recorded on their fixtures (tests/integration/golden/), DuckDB's
+# side being gone — skip themselves when `KS_PG_DSN` is unset, and
 # it was unset here. **60 tests never ran**, including all 20 that guard the
 # /traffic port, on a tab that reads PostgreSQL in production behind a silent
 # fallback to DuckDB: a query that broke in one engine only would have kept
@@ -37,7 +39,8 @@
 # WHAT THIS DOES NOT DO
 #
 # It does not touch ClickHouse, KeyCRM, the production PostgreSQL or the
-# production DuckDB file. `pytest.ini` deselects the `external` marker by
+# DuckDB file (no image carries the driver since step 14's S14-19).
+# `pytest.ini` deselects the `external` marker by
 # default, which is what makes a bare `pytest` safe to run anywhere, and this
 # deliberately does not override it. The external suite reaches the live API
 # and the production database; it stays a thing a person runs on purpose.

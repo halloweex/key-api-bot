@@ -1,7 +1,7 @@
 """Pure decider for the upsert_orders write-amplification fix.
 
 Decouples the "should we touch this row?" decision from the surrounding
-I/O so it can be unit-tested exhaustively without spinning up DuckDB.
+I/O so it can be unit-tested exhaustively without spinning up a database.
 """
 from __future__ import annotations
 
@@ -49,7 +49,8 @@ def should_update_order(
       is where the amplification reduction comes from.
 
     Args:
-        existing_updated_at: stored ``orders.updated_at`` from DuckDB.
+        existing_updated_at: stored ``orders.updated_at`` (``bronze.orders``
+            since chain 3; DuckDB's ``orders`` before).
         incoming_updated_at: ``updated_at`` field from the KeyCRM payload.
         force: bypass all checks; behaves like the old "always UPDATE" path.
 
