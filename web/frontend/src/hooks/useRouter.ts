@@ -22,6 +22,11 @@ function getSnapshot() {
   return window.location.pathname
 }
 
+/** Whether `path` is `href` or a page under it: /traffic/funnel is under /traffic. */
+export function isUnder(path: string, href: string): boolean {
+  return path === href || (href !== '/' && path.startsWith(`${href}/`))
+}
+
 /** Reactive hook that returns the current pathname. */
 export function useRouter() {
   return useSyncExternalStore(subscribe, getSnapshot)
