@@ -249,28 +249,13 @@ ACQUIRE_TIMEOUT_S = 10
 # seen. What the move stood down stays named below until its readers go.
 
 
-def landing_checks_stood_down() -> frozenset:
-    """The DuckDB integrity checks over the order tables that do not run once
-    this chain has moved: on a frozen DuckDB they would compare old orders,
-    and DN-23's Postgres twins stand in alone. Always the ten
-    (`ORDER_LANDING_CHECKS`), a constant since step 14's S14-00 — otherwise
-    they would knock on the refused DuckDB connection and page
-    `duckdb_opened_while_off`. Never raises."""
-    from core.data_quality import ORDER_LANDING_CHECKS
-
-    return ORDER_LANDING_CHECKS
-
-
-def retired_conditions() -> frozenset:
-    """The conditions only the stood-down landing checks report — what nothing
-    re-examines after the flip. A check that runs bare reports under its own
-    name; `status_group_agreement` under its guard's conditions. The DuckDB
-    arm of `dq_reconciliation` retired a whole group instead
-    (`dq:reconciliation`), until step 14's S14-12 deleted the arm."""
-    from core.data_quality import GUARDED_CHECK_CONDITIONS, ORDER_LANDING_CHECKS
-
-    return frozenset(c for name in ORDER_LANDING_CHECKS
-                     for c in GUARDED_CHECK_CONDITIONS.get(name, (name,)))
+# `landing_checks_stood_down()` and `retired_conditions()` stood here until
+# step 14's S14-14: the ten DuckDB integrity checks over the order tables that
+# did not run once this chain had moved, and the conditions only they
+# reported. S14-14 deleted the checks; the names are not reused while an image
+# from before step 14 is the rollback target
+# (`tests/unit/test_rollback_condition_names.py`, rule 15). DN-23's Postgres
+# twins in `core/pg_warehouse_dq.py` are the checks of those tables.
 
 
 # The DuckDB arm of `dq_reconciliation` paged under `dq:reconciliation`

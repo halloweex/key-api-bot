@@ -232,8 +232,9 @@ STRUCTURE: AN ASYNC READ AND A PURE VERDICT, BESIDE THE POSTGRES TWINS
 
 The facts are read by the integrity job and judged by a pure function, and
 both happen in `_run_dq_integrity` next to `core/pg_warehouse_dq.py` — not
-inside `check_internal_integrity`. That function runs under the DuckDB
-connection, and these are facts about tables DuckDB no longer writes. Judged
+inside `check_internal_integrity`. That function ran under the DuckDB
+connection until step 14's S14-14, and these are facts about tables DuckDB no
+longer writes. Judged
 there, a DuckDB file that would not open, or any raise in the scan, would lose
 every chain finding of the run, and the CRITICAL page — gated on the DuckDB
 half having finished — would wait for DuckDB to recover or for the canary's

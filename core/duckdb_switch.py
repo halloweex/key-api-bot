@@ -412,29 +412,11 @@ def open_file(path: Union[str, Path], *, read_only: bool = False,
     return con
 
 
-class RefusedConnection:
-    """A DuckDB connection in name only, for code that takes one and must not
-    reach the file under `off`: every statement is refused through `guard()`
-    — counted, logged, raised — and, this module being plumbing to `_site()`,
-    the refusal names the function that issued the statement, not this class.
-
-    The integrity scan is handed one under `off` (stage 5, PR-7): every check
-    over the file stands down there, and one that does not is caught in the
-    act rather than failing on a None in a way the switch would never count.
-    Under `on` nothing hands one out; a statement then raises all the same,
-    since there is no file behind it."""
-
-    def execute(self, *_args: Any, **_kwargs: Any) -> Any:
-        guard()
-        raise RuntimeError("RefusedConnection: there is no DuckDB connection here")
-
-    sql = execute
-
-
-@contextlib.asynccontextmanager
-async def refused_connection():
-    """`async with` a `RefusedConnection` — where `store.connection()` stood."""
-    yield RefusedConnection()
+# `RefusedConnection` and `refused_connection()` stood here until step 14's
+# S14-14: the connection in name only the integrity scan was handed under
+# `off` (stage 5, PR-7), so a check that still reached for the file was
+# counted where it reached. S14-14 deleted the DuckDB scan; the integrity job
+# opens no DuckDB connection, refused or not.
 
 
 def opened() -> Dict[str, Dict[str, object]]:
