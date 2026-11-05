@@ -86,9 +86,8 @@ async def query_timeout_handler(request: Request, exc: QueryTimeoutError):
 
 @app.exception_handler(ReadUnavailable)
 async def read_unavailable_handler(request: Request, exc: ReadUnavailable):
-    """A read refused under `KS_READ_FALLBACK=off` (DN-20b), or of a table a
-    write chain owns under either mode (`read_fallback.chain_refusal`): its
-    engine failed, and DuckDB may not answer in its place.
+    """A read refused because its one engine failed (DN-20b,
+    `read_fallback.refuse`): there is no other store to answer in its place.
 
     One handler for every route, so no router has to know it is behind HTTP:
     `core.read_fallback` raises, this answers. 503, not 500 — nothing here
@@ -201,13 +200,12 @@ async def startup_event():
     # Log sync mode for visibility
     from core.config import config as app_config
 
-    # A half-enabled read switch is the same trap as a typo in it: the flag
-    # says postgres, the missing DSN quietly serves the old store, and nobody
-    # learns until the numbers disagree. This used to be checked here for
-    # KS_READ_GOLD alone; `configure_modes()` below now checks every
-    # `KS_READ_*` that names an engine without its address, logs each once and
-    # publishes them on /api/health (`read_fallback_mode.misconfigured`) —
-    # without raising, because web is the only process that syncs orders.
+    # A half-enabled read switch was the same trap as a typo in it: the flag
+    # said postgres, the missing DSN quietly served the old store. It was
+    # checked here for KS_READ_GOLD alone, then by `configure_modes()` for
+    # every `KS_READ_*` (`read_fallback_mode.misconfigured` on /api/health)
+    # until step 14's S14-16: no switch routes a read since S14-07, and a
+    # missing DSN is a refusal on every tab, a 503 naming the surface.
 
     # Validate configuration early - fail fast with clear errors
     try:

@@ -110,20 +110,15 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
     # `derivation_mode_invalid` (a KS_PG_DERIVE web did not understand) went
     # in step 14's S14-15 with the variable; the name is not reused (rule 15).
-    # KS_READ_FALLBACK set to a value web did not understand (ran as duckdb,
-    # DN-20a). Not a stop: web is the only syncer.
-    "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
-    # A read this web process answered from DuckDB because its engine failed
-    # (OD-07). The counters are per process, so only a restart empties them;
-    # the page stands until then. The soak's F1 read it back out of the
-    # journal before KS_READ_FALLBACK=off, until step 14's S14-02 retired it.
-    "read_fallback_used": _c("web restarts and answers no read from DuckDB"),
-    # A read switch web serves from DuckDB on every request with nothing to
-    # count: an engine named without its address, or the cohorts' switch not
-    # naming ClickHouse (OD-07). `off` would refuse each one.
-    "read_routed_to_duckdb": _c("web restarts with every read switch addressed"),
-    # A read refused with a 503 under KS_READ_FALLBACK=off (DN-20b), recently.
-    # Not a fallback — nothing came from DuckDB — so never under that key.
+    # The reads web answered from DuckDB paged under three names until step
+    # 14's S14-16 deleted what they judged — `core.read_fallback`'s counts,
+    # its mode and its routes, and `/api/health`'s `read_fallbacks` block:
+    # `read_fallback_mode_invalid` (a KS_READ_FALLBACK web did not
+    # understand), `read_fallback_used` (a read whose engine failed, answered
+    # from DuckDB, OD-07) and `read_routed_to_duckdb` (a read switch serving
+    # DuckDB uncounted). No read falls back since S14-00 and no switch routes
+    # one since S14-07. The names are not reused (rule 15).
+    # A read refused with a 503 because its engine failed (DN-20b), recently.
     "read_refused": _c("no read refused for thirty minutes"),
     # Step 13's switch paged under five names until step 14's S14-15 deleted
     # it (`core/warehouse_cutover.py`) with the `warehouse_writer_mode` and

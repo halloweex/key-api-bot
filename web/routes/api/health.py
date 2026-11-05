@@ -141,16 +141,6 @@ def _write_chains() -> dict:
     return {chain_name(chain): {} for chain in WRITE_CHAINS}
 
 
-def _read_fallbacks() -> dict:
-    """`{surface: {count, last_at}}` — every read this process answered from
-    DuckDB because the engine it was sent to failed (DN-20a). Local state, no
-    I/O, and no exception text: this endpoint is public, and the counts and a
-    timestamp are what a reader needs to go and look at the log."""
-    from core import read_fallback
-
-    return read_fallback.counts()
-
-
 def _duckdb_switch() -> dict:
     """KS_DUCKDB as this process understood it, the error when it was not
     understood (ran as `on`), and every open of the DuckDB file refused under
@@ -164,39 +154,22 @@ def _duckdb_switch() -> dict:
 
 
 def _read_fallback_mode() -> dict:
-    """KS_READ_FALLBACK as this process understood it at start, the error when
-    it was not understood, and every read switch naming an engine this process
-    has no address for. Local state, no I/O.
+    """`{"refused": {surface: {count, last_at}}}` — every read this process
+    refused because its one engine failed, answered 503 naming the surface
+    (`core.read_fallback.refuse`). Local state, no I/O, no exception text:
+    this endpoint is public. The canary pages a recent refusal as
+    `read_refused`, and reads the block by this name.
 
-    `no_engine` listed the surfaces only one engine may answer under `off`
-    whose switch did not name it — the cohorts at `KS_READ_COHORTS=duckdb`,
-    served from DuckDB uncounted under `duckdb`, refused under `off`. It is
-    always empty since step 14's S14-07 (`read_fallback.ENGINE_ONLY` is
-    empty): the cohorts ask ClickHouse whatever that switch says, and are
-    refused, counted under `refused`, only when ClickHouse fails or
-    `KS_CH_URL` is unset. With `misconfigured` it is what the canary pages as
-    `read_routed_to_duckdb` (OD-07), which fires only under `mode=duckdb`,
-    never since S14-00; S14-16 takes both fields and the key.
-
-    Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
-    answered 503 rather than from DuckDB (DN-20b) — and under `KS_DUCKDB=off`
-    whatever the mode, which refuses there too (stage 5, PR-8). Under `duckdb` only once
-    something was refused: the one refusal that mode knows is a read of a
-    table a write chain owns (`read_fallback.chain_refusal`), and without it
-    the block keeps the shape it has always had there. `mode` stays what was
-    configured under `KS_DUCKDB=off` too; `duckdb_switch.mode` beside it says
-    the reads are refused, and the canary reads both."""
+    Until step 14's S14-16 the block also carried `mode` and `error` (as
+    `KS_READ_FALLBACK` was understood at start, `off` since S14-00),
+    `misconfigured` (every `KS_READ_*` naming an engine with no address) and
+    `no_engine` (empty since S14-07), and `read_fallbacks` stood beside it,
+    the reads answered from DuckDB — always empty since S14-00. None of them
+    had anything left to say: no read switch routes a read and none falls
+    back, so S14-16 took them with the canary's three checks."""
     from core import read_fallback
 
-    block = {
-        "mode": read_fallback.mode(),
-        "error": read_fallback.mode_error(),
-        "misconfigured": read_fallback.misconfigured(),
-        "no_engine": read_fallback.no_engine_routes(),
-    }
-    if read_fallback.refusing() or read_fallback.refusals():
-        block["refused"] = read_fallback.refusals()
-    return block
+    return {"refused": read_fallback.refusals()}
 
 
 # The layer ages, out of Postgres, where chain 9 writes the journal (OD-02
@@ -635,7 +608,6 @@ async def health_check(request: Request):
         "alerting": alerting,
         "derivation": await _derivation_block(),
         "write_chains": await _write_chains_block(),
-        "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
         "duckdb_switch": _duckdb_switch(),
         "buyer_sync": await _buyer_sync_block(),

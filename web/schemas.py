@@ -204,41 +204,16 @@ class HealthResponse(BaseModel):
             "S14-15."
         ),
     )
-    read_fallbacks: Optional[Dict[str, Dict[str, Any]]] = Field(
-        None,
-        description=(
-            "Reads this process answered from DuckDB because Postgres (or, for "
-            "cohorts, ClickHouse) failed, per surface: `count` since the "
-            "process started and `last_at`. Empty is none. Counted by "
-            "`core.read_fallback.fall_back`, which every such site calls; the "
-            "log line beside each one carries the error (DN-20a). Always empty "
-            "under KS_READ_FALLBACK=off, where such a read is refused instead "
-            "and counted under `read_fallback_mode.refused`."
-        ),
-    )
     read_fallback_mode: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "`mode` is KS_READ_FALLBACK as understood at start — duckdb or "
-            "off; under off a read whose engine fails is refused, and an HTTP "
-            "route answers 503 naming the surface (DN-20b) — and `error` "
-            "names a value that was not understood and ran as duckdb; judged "
-            "by the canary. `misconfigured` lists every KS_READ_* set to an "
-            "engine whose address is missing (KS_PG_DSN, KS_CH_URL), found "
-            "by prefix in the environment. Since S14-07 none of those "
-            "switches routes a read, so a line names only the missing "
-            "address, and the reads its switch used to route fail either way: "
-            "a tab's is refused, counted under `refused`; a reader's with no "
-            "fallback — the weekly report, the assistant, the training "
-            "frame, the buyer-sync selection, the search index — meets its "
-            "engine's own error and is counted nowhere. `no_engine` listed the "
-            "surfaces only one engine may answer under off whose switch did "
-            "not name it — the cohorts at KS_READ_COHORTS=duckdb, until "
-            "S14-07 — and is always empty since: the cohorts ask ClickHouse "
-            "whatever that switch says, and are refused, under `refused`, "
-            "only when it fails or KS_CH_URL is unset. Under off only, `refused` "
-            "is `{surface: {count, last_at}}` for the reads refused since the "
-            "process started."
+            "`refused` is `{surface: {count, last_at}}` for the reads refused "
+            "since the process started: the engine a router reads failed, and "
+            "an HTTP route answered 503 naming the surface (DN-20b). Judged by "
+            "the canary as `read_refused` while one is recent. Until step "
+            "14's S14-16 the block also carried `mode`, `error`, "
+            "`misconfigured` and `no_engine`, and `read_fallbacks` stood "
+            "beside it — the reads answered from DuckDB, none since S14-00."
         ),
     )
     duckdb_switch: Optional[Dict[str, Any]] = Field(
