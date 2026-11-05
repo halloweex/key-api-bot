@@ -1727,6 +1727,10 @@ class SyncService:
 
         Returns:
             Dict with sync statistics
+
+        Raises:
+            KeyCRMConnectionError: KeyCRM could not be reached, an open
+                circuit breaker included — so the run is recorded as failed.
         """
         stats = {"orders": 0, "expenses": 0, "days_back": days_back}
 
@@ -1789,7 +1793,13 @@ class SyncService:
             stats["backdated"] = await self._refresh_backdated_orders(start_date.date())
 
         except KeyCRMConnectionError as e:
-            logger.warning(f"Status refresh connection error (will retry): {e}")
+            # Raised, the way `full_sync` raises it: returned as stats, a
+            # morning KeyCRM did not answer read in /api/jobs as a successful
+            # run that refreshed 0 orders. An open breaker is one of these
+            # since it became a `KeyCRMConnectionError` (A10), and raised past
+            # this handler until then.
+            logger.warning(f"Status refresh connection error: {e}")
+            raise
         except KeyCRMError as e:
             logger.error(f"Status refresh error: {e}")
 
