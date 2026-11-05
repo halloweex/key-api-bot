@@ -212,9 +212,10 @@ ten years and a week) is a 400 naming `date_range`: four endpoints build one
 list entry per day of the range on web's event loop — the trend, its
 comparison, expenses summary and profit, customer insights — and
 0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON. The trend's
-`include_forecast` predicts at most `FORECAST_HORIZON_DAYS` (60) ahead, where
-the date picker stops; eight years ahead had held the single ML thread for
-70 s.
+`include_forecast` shows at most `FORECAST_HORIZON_DAYS` (60) ahead, where
+the date picker stops. Until 2026-11-04 it ran the model for the week and a
+custom range, and eight years ahead had held the single ML thread for 70 s;
+it reads the stored forecast now (see "Revenue Prediction").
 
 An integer parameter past the width of the column it meets, or a NUL in an
 `/api/` path or query string, is a 400 naming the field. Both used to reach
@@ -584,8 +585,9 @@ What does exist:
 - **Performance** (6-fold walk-forward CV): WAPE=27.66%, R²=0.066, beats best baseline by 1.53%
 - Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no model artefact on disk
 - Predictions stored in Postgres `app.revenue_predictions`, written by chain 7b-3 (DuckDB's `revenue_predictions` until it latched)
-- Frontend shows forecast bars (lighter opacity) on Revenue Trend chart when period=month
-- "Predicted: ₴X" badge in chart header
+- Frontend shows forecast bars (lighter opacity) on Revenue Trend chart for the month, the week and a custom range with future days
+- **Every forecast a page shows is read from `revenue_predictions`; no request runs the model** (owner's decision, 2026-11-04 — the Rust council's decision 6). It is as of the last training (Mon/Thu), retail only — b2b and the other sales types show none — and `last_trained` (the Kyiv day of the rows' `created_at`) and `model_metrics` come from the same rows, so any process, the Rust read API included, can answer it. Until then the week and a custom range ran the model on the request over 780 days of Gold, and `last_trained` came from web's memory — null after every restart, until the next training
+- "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
 - Graceful degradation: chart works normally if model unavailable
 - Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches
 - **Known limitation**: Thu/Fri have ~₴30K underprediction bias due to bimodal distribution (promo spike days ₴300-600K are unpredictable from lagged features)

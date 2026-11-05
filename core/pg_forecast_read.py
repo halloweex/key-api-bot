@@ -6,15 +6,16 @@ The training frame is read from Postgres and nowhere else:
 `PredictionService._query_daily_revenue` calls `fetch_frame`, as production
 has since `KS_READ_FORECAST_INPUT=postgres` went on. There never was a
 fallback (below): a Postgres failure — a lost DSN line included — is the
-caller's own error, which both callers contain (`/trend` drops the forecast,
-training keeps the previous model). The flag chooses nothing now; the
-paragraphs below are the history of the port.
+caller's own error, which the callers contain (training keeps the previous
+model). The flag chooses nothing now; the paragraphs below are the history of
+the port.
 
 `PredictionService._query_daily_revenue` is the input to everything the model
-does: training twice a week, `evaluate`, `tune`, and — on every request to
-`/api/revenue/trend?include_forecast=true&period=week` — `predict_range`, which
-reads 780 days of it live. Stage 1 never counted it, because it is not a
-dashboard repository method.
+does: training twice a week, `evaluate` and `tune`. Until 2026-11-04 it was
+also read on every request to
+`/api/revenue/trend?include_forecast=true&period=week` — `predict_range`, 780
+days of it live; the trend reads the stored forecast now. Stage 1 never
+counted it, because it is not a dashboard repository method.
 
 WHY IT IS NOT ONE BODY FOR TWO ENGINES
 

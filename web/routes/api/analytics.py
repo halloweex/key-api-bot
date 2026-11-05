@@ -121,24 +121,27 @@ async def get_revenue_trend(
                         p for p in forecast["daily_predictions"]
                         if p["date"] <= month_end
                     ]
-                    forecast["predicted_remaining"] = sum(
-                        p["predicted_revenue"] for p in forecast["daily_predictions"]
-                    )
-                    forecast["predicted_total"] = forecast.get("actual_to_date", 0) + forecast["predicted_remaining"]
+            # The week and a custom range read the stored forecast too, as the
+            # month does: the model never runs on a request.
             elif period == "week":
                 from core.prediction_service import get_prediction_service
                 service = get_prediction_service()
                 end_of_week = today + _timedelta(days=6 - today.weekday())
-                forecast = await service.predict_range(today, end_of_week, sales_type)
+                forecast = await service.get_range_forecast(today, end_of_week, sales_type)
             else:
                 from core.prediction_service import get_prediction_service
                 service = get_prediction_service()
-                forecast = await service.predict_range(
+                forecast = await service.get_range_forecast(
                     _datetime.strptime(start, "%Y-%m-%d").date(),
                     _datetime.strptime(end, "%Y-%m-%d").date(),
                     sales_type,
                 )
             if forecast and forecast.get("daily_predictions"):
+                # The badge is what the bars add up to, from the series the
+                # chart draws: taken before the future days are appended.
+                forecast.update(dashboard_service.stack_forecast_on_actuals(
+                    _datetime.strptime(start, "%Y-%m-%d").date(),
+                    result["revenue"], forecast["daily_predictions"]))
                 result["forecast"] = forecast
 
                 preds = forecast.get("daily_predictions", [])

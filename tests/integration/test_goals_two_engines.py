@@ -377,7 +377,8 @@ def _frame_literal(df):
 
 class TestTheForecastTrainingFrame:
     """`_query_daily_revenue` is what the forecast model learns from — training,
-    `evaluate`, `tune`, and `predict_range` live on `/trend?include_forecast`.
+    `evaluate` and `tune` (and, until 2026-11-04, `predict_range` live on
+    `/trend?include_forecast`).
 
     The model does not read numbers, it reads a DataFrame, and a type drift does
     not raise: `Decimal` for `float64`, `date` for `datetime64[us]`, `int64` for
