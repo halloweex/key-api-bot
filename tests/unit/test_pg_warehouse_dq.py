@@ -138,6 +138,16 @@ class TestAttribution:
     def test_a_quiet_week_with_a_healthy_mirror_is_quiet(self):
         assert twins._attribution_check(Attribution(12, 0, 60, 20), WM) == []
 
+    def test_no_baseline_still_honours_the_floor(self):
+        """Carried from the DuckDB check's tests (deleted with it in step 14's
+        S14-14): too few orders before the window is no trend, not a pass."""
+        (issue,) = twins._attribution_check(Attribution(100, 10, 10, 1), WM)
+        assert issue.count == 90 and "Over the previous" not in issue.description
+
+    def test_a_slow_slide_within_half_is_not_news(self):
+        """30% to 20%: above the floor, and not halved."""
+        assert twins._attribution_check(Attribution(100, 20, 400, 120), WM) == []
+
     @pytest.mark.parametrize("landing", [
         dict(landing_failures=3), dict(landing_age_s=None), dict(landing_age_s=9 * 3600)])
     def test_a_quiet_week_with_a_silent_mirror_is_not_watched(self, landing):

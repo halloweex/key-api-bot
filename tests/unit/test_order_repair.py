@@ -125,6 +125,19 @@ class TestRepairOrders:
         client.get_order.assert_not_awaited()
 
 
+class TestIntegrityScanSurvivesAMissingTable:
+    """`/warehouse/rebuild-silver` DROPped silver_orders while the DuckDB scan
+    could land inside that window, and the handler written to tolerate it
+    referenced a logger the module never imported. The scan reads no DuckDB
+    table since step 14's S14-14; the name it needed stays named."""
+
+    def test_the_module_has_a_logger(self):
+        """The bug was a name that did not exist, so name it in a test."""
+        import core.data_quality as dq
+
+        assert hasattr(dq, "logger")
+
+
 class TestTheWriteRunsUnderTheHeavyLock:
     """The lock covers the upsert and the dirty mark — never the per-id
     fetches, which would hold the sync up for a batch of HTTP calls."""
