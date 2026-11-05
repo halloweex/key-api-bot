@@ -132,8 +132,10 @@ def _write_chains() -> dict:
     (`write_chains.chain_modes()`), judged by the canary as
     `write_chain_flag_invalid`, `write_chain_flag_mismatch` and
     `write_chain_precondition_unmet`. No flag is read since: every chain
-    writes Postgres, and the two copies of the latch are compared by the
-    daily `reconcile_operational`, the only thing that can read both."""
+    writes Postgres. The two copies of the latch were compared by the daily
+    `reconcile_operational` until step 14's S14-12; since then the integrity
+    layer's chain invariants judge one direction, owner rows with no marker
+    (`chain_latch_disagrees`), and nothing files a marker with no owner row."""
     from core.write_chains import WRITE_CHAINS, chain_name
 
     return {chain_name(chain): {} for chain in WRITE_CHAINS}

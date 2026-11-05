@@ -61,8 +61,9 @@ is a wait — but the wait can end without a connection: a Postgres restart
 during it leaves a reconnect that is refused, and a cancellation ends it too
 (`pg_expenses_write._latch`). A latch taken before it would move the chain with
 nothing written, leaving the copy-back as the only way back (since step
-14's S14-04 deleted it, a rollback to an image from before step 14) and
-`chain_latch_disagrees` (CRITICAL) the next morning. Chains
+14's S14-04 deleted it, a rollback to an image from before step 14), and a
+marker with no owner row, which nothing files since step 14's S14-12 and an
+image from before step 14 pages as `chain_latch_disagrees`. Chains
 1, 8 and 7a were written before that was counted and latched between the two
 until 2026-09-25; every chain now latches inside the acquire, and
 `tests/unit/test_chain_latch.py` holds each registered chain to it.
