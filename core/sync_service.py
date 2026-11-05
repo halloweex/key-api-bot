@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from core.keycrm import get_async_client
 from core.duckdb_store import get_store, DuckDBStore
-from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError
+from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError, KeyCRMTruncated
 from core.observability import get_logger, correlation_context
 from core.events import (
     events,
@@ -130,6 +130,21 @@ class InventoryStepState:
 # How long the tick waits to stamp `bronze.orders` failing in Postgres, and
 # for `last_sync_orders` out of it.
 ORDERS_FAILURE_RECORD_TIMEOUT_S = 5
+
+# The narrowest window `_fetch_order_window` splits a truncated listing into
+# before it gives up (L1-08): 5 000 orders in an hour is not a shop this size.
+ORDER_WINDOW_MIN_SPAN = timedelta(hours=1)
+
+
+def _window_bound(value: str, *, end_of_day: bool) -> datetime:
+    """A KeyCRM date filter's bound as a datetime. A date alone is widened to
+    the whole day at the end, so a split never asks for less than the window
+    it replaces (a superset is merged away by id; a subset loses orders)."""
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        day = datetime.strptime(value.strip(), "%Y-%m-%d")
+        return day.replace(hour=23, minute=59, second=59) if end_of_day else day
 
 # The step's own statement for the healthy tick after a failure (L4-03). Only
 # a write of an order zeroes `failures_since_ok` (`pg_landing._WATERMARK_OK`),
@@ -522,27 +537,25 @@ class SyncService:
 
         # Fetch by created_between
         logger.debug(f"Fetching orders created between {start_date} and {end_date}")
-        params = {
-            "include": include,
-            "filter[created_between]": f"{start_date}, {end_date}",
-        }
-        async for batch in client.paginate("order", params=params, page_size=50):
-            for order in batch:
-                orders_by_id[order["id"]] = order
+        await self._fetch_order_window(
+            client, "filter[created_between]", start_date, end_date, include,
+            orders_by_id)
 
         created_count = len(orders_by_id)
 
         # Also fetch by updated_between to catch status changes
         if include_updated:
             logger.debug(f"Fetching orders updated between {start_date} and {end_date}")
-            params = {
-                "include": include,
-                "filter[updated_between]": f"{start_date}, {end_date}",
-            }
             try:
-                async for batch in client.paginate("order", params=params, page_size=50):
-                    for order in batch:
-                        orders_by_id[order["id"]] = order  # Overwrites with latest data
+                # Overwrites with latest data
+                await self._fetch_order_window(
+                    client, "filter[updated_between]", start_date, end_date, include,
+                    orders_by_id)
+            except KeyCRMTruncated:
+                # Not "the filter is unsupported": the window holds more than a
+                # listing can carry even split to an hour, and the step must
+                # fail rather than move its watermark past what it never saw.
+                raise
             except KeyCRMError as e:
                 # filter[updated_between] may not be supported - fall back gracefully
                 logger.warning(f"filter[updated_between] failed: {e}")
@@ -552,6 +565,39 @@ class SyncService:
             logger.info(f"Fetched {created_count} created + {updated_count} updated orders")
 
         return list(orders_by_id.values())
+
+    async def _fetch_order_window(
+        self, client, key: str, start: str, end: str, include: str,
+        into: Dict[Any, Any],
+    ) -> None:
+        """One filtered order listing into `into`, by id; a listing KeyCRM
+        stops at its page cap (`KeyCRMTruncated`) is fetched again as two
+        halves of its window, recursively, down to `ORDER_WINDOW_MIN_SPAN`
+        (L1-08). The cap is 5 000 orders (100 pages of 50); past it the
+        oldest orders of the window were never fetched, and the watermark
+        moved past them. Still truncated at an hour, it raises: the caller's
+        step fails and holds its watermark. A truncated listing adds nothing;
+        its halves add theirs, overlapping at the midpoint, merged by id."""
+        params = {"include": include, key: f"{start}, {end}"}
+        got: list = []
+        try:
+            async for batch in client.paginate("order", params=params, page_size=50):
+                got.extend(batch)
+        except KeyCRMTruncated:
+            lo, hi = _window_bound(start, end_of_day=False), _window_bound(end, end_of_day=True)
+            if hi - lo <= ORDER_WINDOW_MIN_SPAN:
+                raise
+            mid = lo + (hi - lo) / 2
+            logger.warning("Order listing %s %s..%s truncated at the page cap; "
+                           "fetching it as two halves", key, start, end)
+            fmt = "%Y-%m-%d %H:%M:%S"
+            await self._fetch_order_window(
+                client, key, lo.strftime(fmt), mid.strftime(fmt), include, into)
+            await self._fetch_order_window(
+                client, key, mid.strftime(fmt), hi.strftime(fmt), include, into)
+            return
+        for order in got:
+            into[order["id"]] = order
 
     async def _upsert_orders_with_expenses(
         self, orders: list, force_update: bool = False, skip_products: bool = False,

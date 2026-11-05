@@ -17,7 +17,9 @@ from typing import Dict, List, Any, Optional, AsyncGenerator
 
 import httpx
 
-from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError
+from core.exceptions import (
+    KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError, KeyCRMTruncated,
+)
 from core.models import Order, Product, Buyer
 from core.observability import get_logger, get_correlation_id, Timer
 from core.resilience import (
@@ -430,6 +432,10 @@ class KeyCRMClient:
 
         Yields:
             List of items per page
+
+        Raises:
+            KeyCRMTruncated: the last page allowed came back full — there may
+                be more, and it was not asked for (L1-08).
         """
         params = dict(params or {})
         params["limit"] = page_size
@@ -447,6 +453,8 @@ class KeyCRMClient:
 
             if len(batch) < page_size:
                 break
+        else:
+            raise KeyCRMTruncated(endpoint, max_pages, page_size)
 
     async def fetch_all(
         self,
@@ -489,6 +497,7 @@ class KeyCRMClient:
 
         # Fetch remaining pages in parallel batches
         page = 2
+        done = False
         while page <= max_pages:
             tasks = []
             for p in range(page, min(page + parallel_batches, max_pages + 1)):
@@ -537,6 +546,9 @@ class KeyCRMClient:
 
             page += parallel_batches
 
+        if not done:
+            # Every page up to the cap came back full: the listing may go on.
+            raise KeyCRMTruncated(endpoint, max_pages, page_size)
         return all_items
 
     async def fetch_all_offers(
