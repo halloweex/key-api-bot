@@ -1126,7 +1126,10 @@ _ENHANCED_COHORT_RETENTION_SELECT_BODY = """            WITH customer_first_orde
                 GROUP BY o.buyer_id
             ),
             customer_cohorts AS (
-                -- Add first month revenue per customer
+                -- Add first month revenue per customer. The sales-type filter
+                -- belongs in the ON as in the other two CTEs: without it the
+                -- M0 denominator counted a retail cohort's b2b orders too and
+                -- every revenue retention read low (L2-04).
                 SELECT
                     c.buyer_id,
                     c.cohort_month,
@@ -1135,6 +1138,7 @@ _ENHANCED_COHORT_RETENTION_SELECT_BODY = """            WITH customer_first_orde
                 LEFT JOIN {silver_orders} o ON c.buyer_id = o.buyer_id
                     AND DATE_TRUNC('month', o.order_date) = c.cohort_month
                     AND NOT o.is_return
+                    {sales_type_filter}
                 GROUP BY c.buyer_id, c.cohort_month
             ),
             customer_orders AS (
