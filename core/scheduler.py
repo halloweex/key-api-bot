@@ -2495,11 +2495,10 @@ class BackgroundScheduler:
         DuckDB one. It is also the number that closes step 05, so it deserves
         to be readable on its own.
 
-        **No repair path, deliberately.** The DuckDB layer re-fetches orders it
-        is missing, because a delta sync keyed on `updated_at` can never reach
-        an order it does not hold. Postgres has a different answer to the same
-        problem — the backfill — and re-fetching from KeyCRM here would repair
-        the wrong store.
+        **No repair here.** The job repairs after both arms have persisted
+        (`_run_dq_reconciliation`, step 3), from this arm's discrepancies
+        alone. Until step 14's S14-12 the DuckDB layer was the one that
+        re-fetched; the history is in `.claude/CLAUDE.md`.
         """
         from datetime import datetime, timezone
         from core.data_quality import (
@@ -2746,7 +2745,8 @@ class BackgroundScheduler:
         watermark, and compares that one snapshot against Postgres (layer
         `reconciliation_pg`) and ClickHouse (layer `reconciliation_ch`), each
         persisted and alerted on CRITICAL by its own arm. Then re-fetches by
-        id the orders the Postgres arm found missing (MISSING_IN_DK).
+        id the orders the Postgres arm found missing (MISSING_IN_DK) or held
+        wrong (STATUS_DRIFT, VALUE_MISMATCH), and writes them under force.
 
         Until step 14's S14-12 the snapshot was compared against DuckDB too,
         on layer `reconciliation`; that arm stood down from chain 3's flip
@@ -2842,9 +2842,21 @@ class BackgroundScheduler:
             #    The orders we do not hold are the ones Postgres lacks: its arm
             #    classified the snapshot with Postgres on the store's side, so
             #    MISSING_IN_DK there means missing from the store the chain
-            #    writes. Additive only — MISSING_IN_KC is deliberately not
+            #    writes. Then the orders we hold wrong — STATUS_DRIFT and
+            #    VALUE_MISMATCH: KeyCRM does not bump `updated_at` on a status
+            #    change, so an order created and ordered more than 30 days ago
+            #    is reached by neither the incremental sync, nor the 05:15
+            #    refresh (created in its window, or backdated into it), nor the
+            #    weekly full sync (unforced, it skips it as unchanged), and was
+            #    filed CRITICAL every morning with nothing to fix it (L1-04).
+            #    `repair_orders` writes by id under force, so the fetch puts
+            #    KeyCRM's state over ours. The missing come first: the run is
+            #    bounded (`REPAIR_BATCH_LIMIT`) and its remainder is reported.
+            #    Additive only — MISSING_IN_KC is deliberately not
             #    touched, because deleting on the strength of one API reading
-            #    is how you turn a fetch glitch into data loss.
+            #    is how you turn a fetch glitch into data loss. Nothing is
+            #    taken from the ClickHouse arm: it compares a copy, and a copy
+            #    that differs is ClickHouse's defect, not an order to re-fetch.
             #    Half-written orders used to be repaired here too. They are
             #    found by scanning our own tables, owe nothing to the comparison
             #    or its 90-day window, and cost one API call each — so they hung
@@ -2854,12 +2866,16 @@ class BackgroundScheduler:
             repair = None
             if not error_message:
                 source = (pg_result or {}).get("discrepancies") or []
-                repairable = sorted({
-                    oid
-                    for d in source
-                    if d.diff_class == DiscrepancyClass.MISSING_IN_DK
-                    for oid in d.order_ids
-                })
+
+                def ids_of(*classes) -> list:
+                    return sorted({oid for d in source if d.diff_class in classes
+                                   for oid in d.order_ids})
+
+                missing = ids_of(DiscrepancyClass.MISSING_IN_DK)
+                drifted = [oid for oid in ids_of(DiscrepancyClass.STATUS_DRIFT,
+                                                 DiscrepancyClass.VALUE_MISMATCH)
+                           if oid not in set(missing)]
+                repairable = missing + drifted
 
                 if repairable:
                     try:
@@ -2867,6 +2883,11 @@ class BackgroundScheduler:
                         repair = await sync_service.repair_orders(
                             repairable, lock=self._heavy_job_lock,
                         )
+                        if repair.get("remaining"):
+                            logger.warning(
+                                "DQ repair: %d order(s) left for the next run "
+                                "(%d missing, %d drifted found)",
+                                repair["remaining"], len(missing), len(drifted))
                     except Exception as e:
                         logger.exception(f"DQ repair failed: {e}")
 
