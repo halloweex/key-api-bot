@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.327
+
+
+
 ## 3.0.326
 
 - Share bars start on one line, and a small share is a bar, not a dot
