@@ -51,12 +51,15 @@ def configure_modes(*, web: bool = False) -> Dict[str, str]:
     configured at all: `KS_PG_DERIVE` (Postgres derives on its own signal,
     `core.pg_derivation`), `KS_UTM_PARSE` (Postgres parses the UTM verdicts,
     `core.pg_utm_parse`) and `KS_WRITE_WAREHOUSE` (step 13's switch, whose
-    module `core/warehouse_cutover.py` is deleted). `KS_DUCKDB` and
-    `KS_READ_FALLBACK` remain, each going with its module (S14-18, S14-16).
+    module `core/warehouse_cutover.py` is deleted). Since S14-16
+    `KS_READ_FALLBACK` is not configured either: a read whose engine fails
+    is refused whatever it says (`core.read_fallback`), and the read
+    switches with no address it looked for at start route nothing.
+    `KS_DUCKDB` remains, going with its module (S14-18).
     `tests/unit/test_step14_prod_parity.py` holds every answer to what the
     code before S14-00 gave under production's environment and markers.
     """
-    from core import chain_latch, duckdb_switch, read_fallback
+    from core import chain_latch, duckdb_switch
 
     # Not in the returned mapping: that maps an environment variable to the
     # value read from it, and the latch is read from disk. Since S14-00 it
@@ -66,16 +69,6 @@ def configure_modes(*, web: bool = False) -> Dict[str, str]:
     # rollback target), and
     # `/api/health` publishes `latched` from it.
     chain_latch.load()
-    # `KS_DUCKDB` first: whether this process may open the DuckDB file at all.
-    # In web, never (S14-00). Never raises — see `core/duckdb_switch.py`.
-    #
-    # `KS_READ_FALLBACK` is a constant since S14-00, configured only so its
-    # health block keeps its shape: `off`.
-    modes = {
-        duckdb_switch.ENV: duckdb_switch.configure_mode(web=web),
-        read_fallback.ENV: read_fallback.configure_mode(report=False),
-    }
-    # The read switches with no address. Never raises — see
-    # `read_fallback.report_misconfigured`.
-    read_fallback.report_misconfigured()
-    return modes
+    # `KS_DUCKDB`: whether this process may open the DuckDB file at all. In
+    # web, never (S14-00). Never raises — see `core/duckdb_switch.py`.
+    return {duckdb_switch.ENV: duckdb_switch.configure_mode(web=web)}

@@ -228,14 +228,15 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool,
     made of the state with one thing wrong."""
     from core.duckdb_table_fates import STORE_SWITCHES
     from core.runtime_modes import configure_modes
-    from tests.unit.test_read_fallback_http import _every_switch_on
 
     for name, value in STEP13_ENV.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
     if live:
         monkeypatch.setenv("KS_PG_DSN", DSN)
-    _every_switch_on(monkeypatch)
+    # Every read switch was set on its engine here until step 14's S14-16
+    # deleted the helper: none is read since S14-07, and the walk that found
+    # them finds none (`read_switch_modules()`).
     for name in STORE_SWITCHES:
         monkeypatch.setenv(name, "postgres")
     # Production's. Its fallback is SQLite, never DuckDB, so it is not one of
@@ -293,13 +294,12 @@ WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
 def assert_target_state() -> None:
     """Every cached answer says the state was reached — and if one does not,
     which, rather than a sweep of some other state."""
-    from core import read_fallback
-
     assert duckdb_switch.value() == "off" and duckdb_switch.mode_error() is None
     # Step 13 in force: a fact of the code since step 14's S14-15, which
     # deleted the switch this asked (`warehouse_cutover.preconditions_unmet`).
-    assert read_fallback.mode() == "off"
-    assert read_fallback.misconfigured() == [] and read_fallback.no_engine_routes() == []
+    # The read fallback refuses: a fact of the code since S14-16, which
+    # deleted its mode and the configurations this asked
+    # (`read_fallback.mode`, `misconfigured`, `no_engine_routes`).
     # Every chain writes Postgres, asking nothing (step 14's S14-11 deleted
     # the registry's `chain_modes`, which this asked until then).
     assert duckdb_switch.held_back() == ()

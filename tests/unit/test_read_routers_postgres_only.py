@@ -17,7 +17,8 @@ without a database:
   13's readiness on `/api/warehouse/status` read the six variables, as
   `reader:*` keys, until S14-15 deleted it);
 - a failure is the same refusal `fall_back` made under `off`: the surface,
-  the count, the log line, the cause, and no fallback counted;
+  the count, the log line and the cause (since step 14's S14-16 `fall_back`
+  is gone, and the line no longer names `KS_READ_FALLBACK`);
 - without `KS_PG_DSN` the pool's own refusal to guess a database is that
   failure, so the answer is the same 503 — `no_address` named the switch in
   the log, the cause names the DSN now;
@@ -202,7 +203,7 @@ class TestTheSwitchIsNotRead:
         rendered, params = fetch.await_args.args
         assert table in rendered and "{" not in rendered
         assert list(params) == [7]
-        assert read_fallback.refusals() == {} and read_fallback.counts() == {}
+        assert read_fallback.refusals() == {}
 
     @pytest.mark.parametrize("module", [r[2] for r in ROUTERS])
     def test_the_module_carries_no_switch(self, module):
@@ -235,11 +236,11 @@ class TestAFailureIsTheRefusalOffMade:
         assert raised.value.surface == surface
         assert raised.value.__cause__ is down
         assert read_fallback.refusals()[surface]["count"] == 1
-        assert read_fallback.counts() == {}
-        # `fall_back`'s line under off, word for word: `read_refused`'s lever
-        # greps "read refused", the soak a fallback by the phrase below.
-        assert (f"read refused: {surface} — its engine failed, and "
-                f"KS_READ_FALLBACK=off forbids answering from DuckDB "
+        # `refuse`'s line, word for word: `read_refused`'s lever greps "read
+        # refused", and a fallback was grepped by the phrase below. (Until
+        # step 14's S14-16 it named KS_READ_FALLBACK=off as what refused.)
+        assert (f"read refused: {surface} — its engine failed, and no other "
+                f"store may answer it "
                 f"(1 refused since start): connection refused") in caplog.text
         assert "falling back to DuckDB" not in caplog.text
 
@@ -265,30 +266,14 @@ class TestAFailureIsTheRefusalOffMade:
         assert "KS_PG_DSN is not set" in str(raised.value.__cause__)
         assert read_fallback.refusals()[surface]["count"] == 1
 
-    def test_refuse_is_fall_back_under_off(self, caplog):
-        """The two produce one refusal: the same exception, cause, count and
-        line. Mutation: let `refuse` drift from `_refuse`'s body."""
-        cause = ValueError("boom")
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            try:
-                read_fallback.fall_back("x", cause)
-            except read_fallback.ReadUnavailable as exc:
-                old = exc
-            new = read_fallback.refuse("x", cause)
-        assert type(new) is type(old) and new.surface == old.surface == "x"
-        assert new.__cause__ is old.__cause__ is cause
-        assert new.__suppress_context__ and old.__suppress_context__
-        first, second = (r.getMessage() for r in caplog.records)
-        assert first.replace("(1 refused", "(2 refused") == second
-        assert read_fallback.refusals()["x"]["count"] == 2
-
 
 class TestJunkStartsWeb:
     """Rule 3 of the plan: a variable the code stopped reading cannot stop
     web, whatever it holds — neither its import nor its start. The start
     that reads these variables is `configure_modes(web=True)`, which
-    `web/main.py`'s startup calls first: `read_fallback.configure_mode` scans
-    every `KS_READ_*` for a switch with no address. So both tests run it
+    `web/main.py`'s startup calls first: until step 14's S14-16
+    `read_fallback.configure_mode` scanned every `KS_READ_*` there for a
+    switch with no address. So both tests run it
     with junk in all six; a test that only imported, or asked `/api/health`
     of an app whose start never ran, would pass a start that raised."""
 
@@ -331,17 +316,17 @@ class TestJunkStartsWeb:
         from core.runtime_modes import configure_modes
         from web.main import app
 
-        # What `configure_modes` caches here, restored after the test (the
-        # duckdb switch and the warehouse writer are conftest's to reset).
-        for name in ("_misconfigured", "_unreported", "_configured"):
-            monkeypatch.setattr(read_fallback, name, getattr(read_fallback, name))
+        # What `configure_modes` caches is the duckdb switch, conftest's to
+        # reset (read_fallback's mode went in step 14's S14-16).
         for switch in SWITCHES:
             monkeypatch.setenv(switch, "junk-s14-05")
         configure_modes(web=True)
         response = TestClient(app).get("/api/health")
         assert response.status_code == 200, response.text
         block = response.json()["read_fallback_mode"]
-        assert not any(s in line for line in block["misconfigured"] for s in SWITCHES)
+        # The refusals alone since step 14's S14-16: no `misconfigured`
+        # left to name a switch in.
+        assert set(block) == {"refused"}
 
 
 class TestNothingGoesRoundTheRouter:

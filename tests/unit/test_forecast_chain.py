@@ -84,16 +84,14 @@ DSN = "postgresql://nobody@127.0.0.1:1/none"
 def ready(monkeypatch):
     """Every precondition met, the chain's own flag unset. A test that sets
     KS_WRITE_FORECAST=postgres means it; one that takes a clause away says
-    which. `KS_READ_FALLBACK` is the configured mode, set the way
-    `configure_modes()` leaves it — the environment alone is not it."""
+    which. (`KS_READ_FALLBACK`'s configured mode was set here too until step
+    14's S14-16 deleted it.)"""
     monkeypatch.delenv(chain.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
-    monkeypatch.setattr(read_fallback, "_mode_error", None)
     return monkeypatch
 
 
@@ -792,7 +790,6 @@ class TestAFailedChainReadIsRefused:
             _forecast(_failing_on("revenue_predictions"))
         assert raised.value.surface == "goals"
         assert read_fallback.refusals()["goals"]["count"] == 1
-        assert read_fallback.counts() == {}, "nothing was answered from DuckDB"
 
     def test_the_smart_goal_is_not_computed_without_its_ml_signal(self, latched):
         now = datetime.now(KYIV)
@@ -837,7 +834,6 @@ class TestTheForecastRouteUnderTheChain:
         monkeypatch.setenv("KS_PG_DSN", DSN)
         monkeypatch.setenv("KS_READ_FALLBACK", "off")
         monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-        fresh_read_fallback.configure_mode()
         chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
         monkeypatch.setattr("core.pg_goals_read.fetch",
                             _failing_on("revenue_predictions"))
@@ -849,5 +845,5 @@ class TestTheForecastRouteUnderTheChain:
         assert "statement timeout" not in response.text
         assert fresh_read_fallback.refusals()["goals"]["count"] == 1
         health = admin_client.get("/api/health").json()
-        assert health["read_fallbacks"] == {}
+        assert "read_fallbacks" not in health
         assert health["read_fallback_mode"]["refused"]["goals"]["count"] == 1

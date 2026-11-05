@@ -1543,4 +1543,6 @@ class TestTheBotWritesTheWatch:
     def test_the_watch_key_is_not_an_alert(self):
         assert canary.DUCKDB_SWITCH_WATCH_KEY.startswith("watch:")
         assert canary.DUCKDB_SWITCH_WATCH_KEY not in REGISTRY
-        assert canary.DUCKDB_SWITCH_WATCH_GAP_S == canary.READ_FALLBACK_WATCH_GAP_S
+        # The read-fallback watch's gap, shared until step 14's S14-16
+        # stopped writing that watch: 35 minutes, as it was.
+        assert canary.DUCKDB_SWITCH_WATCH_GAP_S == 35 * 60

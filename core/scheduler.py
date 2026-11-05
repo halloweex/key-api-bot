@@ -1152,8 +1152,8 @@ class BackgroundScheduler:
                 from core.prediction_service import get_prediction_service
                 service = get_prediction_service()
 
-                # Under KS_READ_FALLBACK=off the training input may be refused
-                # rather than read from DuckDB (DN-20c). The refusal is the
+                # The training input may be refused when its engine fails
+                # (DN-20c). The refusal is the
                 # first read `train` makes, so nothing was fitted, saved or
                 # predicted: the previous model keeps serving, and tomorrow's
                 # 03:30 run asks again.
@@ -1189,8 +1189,8 @@ class BackgroundScheduler:
             # part of the keys, the shared rows mean retail.
             #
             # Nothing is written until everything has been read (DN-20c, and
-            # chain 7b's one-transaction persist). Under KS_READ_FALLBACK=off
-            # a read here can be refused — the suggestions go through
+            # chain 7b's one-transaction persist). A read here can be
+            # refused when its engine fails — the suggestions go through
             # `/goals`' router — and a refusal must leave last week's
             # `seasonal_indices` and `growth_metrics` whole, never this week's
             # indices beside last week's growth. `recalculate_goal_tables`
@@ -1259,8 +1259,8 @@ class BackgroundScheduler:
                     return {"skipped": True, "reason": "Meilisearch not available"}
 
                 sync_service = await get_sync_service()
-                # Under KS_READ_FALLBACK=off the index's read may be refused
-                # rather than served from DuckDB (DN-20c). The refusal comes
+                # The index's read may be refused when its engine fails
+                # (DN-20c). The refusal comes
                 # before anything is indexed or the watermark moves, so the
                 # step is skipped whole and the next tick asks again.
                 from core import read_fallback
@@ -3132,8 +3132,8 @@ class BackgroundScheduler:
                 logger.debug("Weekly report for %s already sent", week)
                 return {"sent": False, "week": week, "reason": "already_sent"}
 
-            # Under KS_READ_FALLBACK=off a read DuckDB would have answered is
-            # refused instead (DN-20c). Both reads come before the ledger
+            # A read whose engine fails is refused (DN-20c). Both reads come
+            # before the ledger
             # write, so a refusal defers exactly like `warehouse_behind`: no
             # row, and tomorrow's tick asks again. A report built from a store
             # that has stopped being written cannot be recalled from anybody's
@@ -3341,9 +3341,9 @@ class BackgroundScheduler:
                 logger.debug("Traffic report for %s already sent", week)
                 return {"sent": False, "week": week, "reason": "already_sent"}
 
-            # A refusal under KS_READ_FALLBACK=off defers, as in the sales
-            # report: the tab's router would otherwise answer from DuckDB, and
-            # the ledger is written only after a delivery (DN-20c).
+            # A refusal defers, as in the sales report: the tab's router
+            # refuses when its engine fails, and the ledger is written only
+            # after a delivery (DN-20c).
             try:
                 max_date = await warehouse_max_date(store)
                 if max_date is None or max_date < week_end:

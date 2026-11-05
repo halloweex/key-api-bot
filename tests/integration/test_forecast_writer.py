@@ -105,8 +105,6 @@ async def stores(tmp_path, monkeypatch):
     from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
 
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
-    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
-    monkeypatch.setattr(read_fallback, "_mode_error", None)
     store = DuckDBStore(db_path=tmp_path / "forecast.duckdb")
     await store.connect()
 
@@ -604,7 +602,6 @@ class TestTheReadsFollowTheChain:
                     await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
         assert raised.value.surface == "goals"
         assert isinstance(raised.value.__cause__, ConnectionError)
-        assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
         assert read_fallback.refusals()["goals"]["count"] == 1
 
 

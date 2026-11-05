@@ -191,7 +191,7 @@ class TestTheSwitchIsNotRead:
         rendered, params = _rendered(fn, engine.await_args)
         assert table in rendered and "{" not in rendered
         assert params == [7]
-        assert read_fallback.refusals() == {} and read_fallback.counts() == {}
+        assert read_fallback.refusals() == {}
 
     @pytest.mark.parametrize("module", MODULES)
     def test_the_module_carries_no_switch(self, module):
@@ -222,12 +222,6 @@ class TestTheSwitchIsNotRead:
 
         assert not read_switch_modules() & set(MODULES)
 
-    def test_nothing_names_the_cohorts_an_engine_only_surface(self):
-        """`ENGINE_ONLY` held the cohorts' switch for `no_engine`; it routes
-        nothing now, so it is empty and `/api/health`'s `no_engine` too."""
-        assert read_fallback.ENGINE_ONLY == {}
-        assert read_fallback.no_engine_routes() == []
-
 
 class TestAFailureIsTheRefusalOffMade:
     @pytest.mark.asyncio
@@ -245,9 +239,8 @@ class TestAFailureIsTheRefusalOffMade:
         assert raised.value.surface == surface
         assert raised.value.__cause__ is down
         assert read_fallback.refusals()[surface]["count"] == 1
-        assert read_fallback.counts() == {}
-        assert (f"read refused: {surface} — its engine failed, and "
-                f"KS_READ_FALLBACK=off forbids answering from DuckDB "
+        assert (f"read refused: {surface} — its engine failed, and no other "
+                f"store may answer it "
                 f"(1 refused since start): connection refused") in caplog.text
         assert "falling back to DuckDB" not in caplog.text
 
@@ -348,7 +341,7 @@ class TestChain7aAFailedReadPages:
 
         health = admin_client.get("/api/health").json()
         assert health["read_fallback_mode"]["refused"]["goals"]["count"] == 1
-        assert health["read_fallbacks"] == {}
+        assert "read_fallbacks" not in health
         [(key, message)] = canary.check_read_refusals(health)
         assert key == "read_refused"
         assert message.startswith(canary.READ_REFUSED_LINE + "goals ×1")
@@ -411,41 +404,29 @@ class TestTheReadersWithNoFallback:
         monkeypatch.setattr(f"core.{module}.{fn}", AsyncMock(side_effect=down))
         with pytest.raises(OSError):
             await call(store)
-        assert read_fallback.refusals() == {} and read_fallback.counts() == {}
+        assert read_fallback.refusals() == {}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("reader,module,fn,call", READERS, ids=[r[0] for r in READERS])
-    async def test_a_switch_published_without_its_dsn_is_not_refused(
-        self, store, fresh_read_fallback, monkeypatch, caplog, reader, module, fn, call,
+    async def test_a_reader_with_no_dsn_meets_its_own_error(
+        self, store, fresh_read_fallback, monkeypatch, reader, module, fn, call,
     ):
-        """What `/api/health` says of `read_fallback_mode.misconfigured`
-        (`web/schemas.py`), what the module's docstring says and what the
-        start's line says, since the second review of S14-07: the switch is
-        still listed, by prefix, but no `no_address` stands behind it any
-        more, so its reader meets `core.pg`'s own error, counted nowhere —
-        `misconfigured` is no longer exactly what is refused. No pool
-        patched, no DSN. Mutations: ask `no_address` again (a refusal is
-        counted), or have the line say every read behind the switch is
-        refused, or offer unsetting the flag as the cure."""
+        """A reader with no fallback, its switch naming Postgres and no DSN:
+        it meets `core.pg`'s own error, counted nowhere — no `no_address`
+        stands behind the switch since S14-07. No pool patched, no DSN.
+        Mutation: refuse it (a refusal is counted). (Until step 14's S14-16
+        this also held what `/api/health` published of such a switch under
+        `read_fallback_mode.misconfigured`, and the start's line, both gone
+        with it.)"""
         from core import pg
 
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         monkeypatch.setattr(pg, "_pool", None)
         _set(monkeypatch, "postgres")
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            fresh_read_fallback.configure_mode()
-
-        published = {line.split("=", 1)[0] for line in fresh_read_fallback.misconfigured()}
-        assert published == set(SWITCHES)
-        assert "every read behind it is refused" not in caplog.text
-        assert "unset the flag" not in caplog.text
-        assert ("no read of that engine can succeed, whatever the flag says: "
-                "a tab's is refused (KS_READ_FALLBACK=off)") in caplog.text
 
         with pytest.raises(RuntimeError, match="KS_PG_DSN is not set"):
             await call(store)
         assert fresh_read_fallback.refusals() == {}
-        assert fresh_read_fallback.counts() == {}
 
     def test_the_search_index_keeps_one_watermark(self):
         """The DuckDB-built index's `meilisearch` cursor went with its frames;
@@ -807,8 +788,6 @@ class TestJunkStartsWeb:
         from core.runtime_modes import configure_modes
         from web.main import app
 
-        for name in ("_misconfigured", "_unreported", "_configured"):
-            monkeypatch.setattr(read_fallback, name, getattr(read_fallback, name))
         monkeypatch.setenv("KS_GOALS_HISTORY", "junk-s14-07")
         for switch in SWITCHES:
             monkeypatch.setenv(switch, "junk-s14-07")
@@ -818,5 +797,6 @@ class TestJunkStartsWeb:
         body = response.json()
         assert "goals_history" not in body
         block = body["read_fallback_mode"]
-        assert not any(s in line for line in block["misconfigured"] for s in SWITCHES)
-        assert block["no_engine"] == []
+        # The refusals alone since step 14's S14-16: no `misconfigured`
+        # left to name a switch in.
+        assert set(block) == {"refused"}

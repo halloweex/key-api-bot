@@ -204,7 +204,7 @@ def configure_mode(*, web: bool = False) -> str:
     else:
         mode = ON
         error = f"{ENV}={value!r} is not one of {_VALID}; running as {ON!r}"
-    # Once per cause, as `read_fallback.configure_mode` does: web's startup and
+    # Once per cause, as `read_fallback.configure_mode` did: web's startup and
     # the scheduler both configure.
     if error and error != _mode_error:
         logger.error(error)
