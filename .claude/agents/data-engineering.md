@@ -433,7 +433,7 @@ HAVING cnt > 1;
 
 ## Resync Procedure
 
-A resync is `POST /api/duckdb/resync` (admin, `web/routes/api/admin.py`), which
+A resync is `POST /api/sync/resync` (admin, `web/routes/api/admin.py`), which
 calls `core.sync_service.force_resync` and rewrites the window in place through
 the write chains. The CLI that did the same (`scripts/force_resync.py`) and the
 per-date DuckDB-against-KeyCRM check (`scripts/check_date.py`) were deleted in
@@ -515,7 +515,7 @@ import asyncio
 asyncio.run(SyncService().incremental_sync())
 "
 
-# Force full resync: POST /api/duckdb/resync (admin)
+# Force full resync: POST /api/sync/resync (admin)
 # Compare the stores with KeyCRM over a window: POST /api/reconcile (admin)
 
 # DuckDB CLI — read-only, for the reason duckdb_switch.open_file gives
