@@ -1681,7 +1681,8 @@ class BackgroundScheduler:
             # this system has produced end in "wait for the next run and see
             # whether the same ids come back", and the next run is hours away.
             # `buttons_for` drops it silently where the layer is not one the
-            # action declares, so the two reconciliation siblings carry none.
+            # action declares; both reconciliation layers are declared since
+            # L4-07, and re-run the 05:30 job.
             return await raise_alert(
                 message, conditions=list(conditions), bucket=bucket,
                 group=f"dq:{layer}", evidence=evidence,

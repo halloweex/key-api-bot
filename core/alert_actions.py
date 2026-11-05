@@ -39,9 +39,10 @@ hours away.
 Deliberately absent, and each for its own reason: anything that writes to a
 mirrored table (Reconciliation A reports and does not repair — a "repair" there
 would write the only record of a stock change from the only other record of
-it), anything that deletes (`docker volume prune` was recommended by the agent
-once and would have taken a named volume with it), and the weekly compact,
-which stops both containers.
+it), and anything that deletes (`docker volume prune` was recommended by the
+agent once and would have taken a named volume with it). The weekly DuckDB
+compaction, which stopped both containers, was the third until step 14's
+S14-18 deleted it.
 """
 from __future__ import annotations
 
@@ -67,9 +68,17 @@ class AlertAction:
 
 # DQ layers a recheck may name. Taken from the scheduler's own job ids, which
 # is what makes the subject a lookup rather than a string handed to a runner.
+#
+# `reconciliation_pg` and `reconciliation_ch` are the 05:30 job's two layers
+# since step 14's S14-12 deleted DuckDB's `reconciliation`; their pages carried
+# no button until L4-07, because `buttons_for` drops a subject it does not
+# know. `reconciliation` stays, so a tap on a message sent before then still
+# resolves to the same job.
 DQ_LAYERS: Tuple[str, ...] = (
     "integrity",
     "reconciliation",
+    "reconciliation_pg",
+    "reconciliation_ch",
     "mirror_landing",
 )
 
@@ -89,6 +98,8 @@ ACTIONS: Dict[str, AlertAction] = {
 DQ_JOB_FOR_LAYER: Dict[str, str] = {
     "integrity": "dq_integrity_check",
     "reconciliation": "dq_reconciliation",
+    "reconciliation_pg": "dq_reconciliation",
+    "reconciliation_ch": "dq_reconciliation",
     "mirror_landing": "dq_mirror_landing",
 }
 
