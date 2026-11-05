@@ -354,7 +354,12 @@ def test_the_insights_are_live_because_they_answer_all_time_figures():
     for sql in (customers._INSIGHTS_CLV_SQL, customers._INSIGHTS_ALLTIME_SQL):
         body = sql.replace("{sales_where}", "")
         assert "{silver_orders}" in body
-        assert "order_date" not in body and "?" not in body, body
+        # A predicate on the date, not the column: the CLV's lifespan reads
+        # `order_date` in its SELECT list since L2-10 (Kyiv dates).
+        import re
+
+        where = " ".join(re.findall(r"WHERE(.*?)(?:GROUP BY|HAVING|\)|$)", body, re.S))
+        assert "order_date" not in where and "?" not in body, body
     window = {"start_date", "end_date"}
     [row] = [r for r in fp.routes(date(2026, 8, 1), date(2026, 8, 31))
              if r["name"] == "customers_insights"]
