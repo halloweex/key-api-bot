@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.323
+
+- WIP: S14-17 — the baseline shrinks by one with the canary's FATAL reader
+- WIP: S14-17 — CLAUDE.md and the data-engineering agent: health without DuckDB's blocks, the levers under /api/sync/
+- WIP: S14-17 — the sync levers under /api/sync/, the /api/duckdb/ names kept as aliases
+- WIP: S14-17 — /api/health without DuckDB's block, ledger and FATAL; the canary without the FATAL's page
+
+
 ## 3.0.322
 
 - WIP: S14-16 — step 13's rule-3 test expects KS_DUCKDB alone from configure_modes
