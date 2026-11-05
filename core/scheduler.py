@@ -145,6 +145,32 @@ def _writes_layer(layer: str) -> bool:
     return False
 
 
+# The page conditions a reconciliation arm's CRITICAL discrepancies raise, one
+# per (layer, class). A page made only of discrepancies used to carry
+# `conditions=[]`: the Gate journalled no series and kept no delivered entry
+# for it, so the clean run after it announced nothing resolved, and the next
+# CRITICAL morning was a new incident with no history (L4-01). Registered in
+# `core.alerting.REGISTRY`; held by `_resolve_dq_layer` while they stand.
+RECON_CONDITION_PREFIX = {
+    "reconciliation_pg": "recon_pg",
+    "reconciliation_ch": "recon_ch",
+}
+
+
+def discrepancy_conditions(layer: str, discrepancies) -> List[str]:
+    """`recon_pg:status_drift` and its kin: one name per CRITICAL class the
+    run found, for the layers that compare against KeyCRM; [] elsewhere."""
+    from core.data_quality import Severity
+
+    prefix = RECON_CONDITION_PREFIX.get(layer)
+    if prefix is None:
+        return []
+    return sorted({
+        f"{prefix}:{d.diff_class.value.lower()}" for d in discrepancies
+        if d.severity == Severity.CRITICAL
+    })
+
+
 # Where the digest remembers its last delivery. In `sync_metadata` and not on
 # the scheduler object, because the weekly restatement beat has to outlive a
 # deploy — otherwise every release re-announces the same standing WARN.
@@ -1539,6 +1565,7 @@ class BackgroundScheduler:
     async def _resolve_dq_layer(
         self, layer: str, issues, error_message: "Optional[str]",
         unverified: "Sequence[str]" = (),
+        discrepancies: "Sequence[Any]" = (),
     ) -> None:
         """Announce the layer's cleared page-conditions after a run.
 
@@ -1553,6 +1580,9 @@ class BackgroundScheduler:
         it raised, or said it was not watching. They are held as still firing:
         unknown, not cleared, for the same reason a failed run resolves nothing.
         Everything the run did verify still resolves.
+
+        `discrepancies` are a reconciliation arm's: each CRITICAL class still
+        found holds its `recon_*` condition (`discrepancy_conditions`).
         """
         if error_message:
             return
@@ -1563,7 +1593,7 @@ class BackgroundScheduler:
             still = [
                 i.check_name for i in issues
                 if i.severity == Severity.CRITICAL
-            ] + list(unverified)
+            ] + list(unverified) + discrepancy_conditions(layer, discrepancies)
             await resolve_group(f"dq:{layer}", still_firing=still)
         except Exception as e:
             logger.warning(f"DQ resolve for {layer} failed: {e}")
@@ -2452,7 +2482,20 @@ class BackgroundScheduler:
                         "Postgres dump, which carries backfilled_at with it."
                     ),
                 ))
-                return {"issues": issues, "discrepancies": [], "error": None}
+                # Gated, not a verdict: nothing was compared with KeyCRM, so
+                # the run is written as one that did not run — the ClickHouse
+                # arm's stale gate's form. Written as a success, it reset the
+                # layer's age every morning the backfill stayed missing, and
+                # the canary never paged a Postgres compared with nothing
+                # (L4-05).
+                return {
+                    "issues": issues, "discrepancies": [],
+                    "error": (
+                        "mirror_backfill_pending: bronze.orders has no "
+                        "backfilled_at, so nothing was compared with KeyCRM — "
+                        "read meta.mirror_state 'bronze.orders'"
+                    ),
+                }
 
             pg_orders = await postgres_orders_in_window(
                 pool, window_start, window_end,
@@ -2545,11 +2588,13 @@ class BackgroundScheduler:
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
                 conditions=[i.check_name for i in issues
-                                if i.severity == Severity.CRITICAL],
+                                if i.severity == Severity.CRITICAL]
+                + discrepancy_conditions(layer, discrepancies),
                 evidence=evidence_for_agent(layer, issues, discrepancies,
                                             run_id=run_id),
             )
-        await self._resolve_dq_layer(layer, issues, error_message)
+        await self._resolve_dq_layer(layer, issues, error_message,
+                                     discrepancies=discrepancies)
 
     async def _reconcile_clickhouse(
         self, kc_orders, *, window_start, window_end, as_of, inflight_ids,
@@ -2603,19 +2648,24 @@ class BackgroundScheduler:
 
             pool = await get_pool()
 
-            # The gate: a copy that never shipped, or shipped hours ago, must
-            # not be reconciled against the source — the verdict would measure
-            # the ship's lag and call it a lie. Three hours is the hourly
-            # cadence plus grace.
+            # The gate: a copy that never shipped, or shipped before the
+            # snapshot's orders could have reached it, must not be reconciled
+            # against the source — the verdict would measure the ship's lag
+            # and call it a lie. The copy holds every order KeyCRM last touched
+            # before the watermark only if it shipped after the watermark plus
+            # Silver's derivation floor (bronze → silver.orders); the inflight
+            # exclusion covers the rest. Three hours from now was the gate
+            # until L2-03: a copy whose last ship was 2 h 40 min ago passed it
+            # and an order updated 2 h 20 min ago was filed MISSING_IN_DK,
+            # CRITICAL.
             watermarks = await fetch_watermarks(pool)
             silver_state = watermarks.get("clickhouse.silver_orders") or {}
             last_ok = silver_state.get("last_ok_at")
             from datetime import datetime, timedelta, timezone
+            from core.pg_warehouse_dq import floor_seconds
 
-            stale = (
-                last_ok is None
-                or (datetime.now(timezone.utc) - last_ok) > timedelta(hours=3)
-            )
+            needed = as_of + timedelta(seconds=floor_seconds())
+            stale = last_ok is None or last_ok < needed
             if stale:
                 # Gated, not blamed — and not a verdict either. The run
                 # compared nothing against KeyCRM, so it is written the way
@@ -2633,8 +2683,9 @@ class BackgroundScheduler:
                     description=(
                         "ClickHouse silver has not shipped recently enough to "
                         "be reconciled against KeyCRM (last_ok_at="
-                        f"{last_ok}); comparing now would measure the ship's "
-                        "lag and call it a lie. The hourly ch_sync is the fix."
+                        f"{last_ok}, needed after {needed.isoformat()}); "
+                        "comparing now would measure the ship's lag and call "
+                        "it a lie. The hourly ch_sync is the fix."
                     ),
                 ))
                 shipped = (
@@ -2646,8 +2697,10 @@ class BackgroundScheduler:
                     "issues": issues, "discrepancies": [],
                     "error": (
                         f"ch_reconcile_pending: the ClickHouse copy {shipped} "
-                        f"(gate 3 h), so nothing was compared with KeyCRM — "
-                        f"read meta.mirror_state 'clickhouse.silver_orders'"
+                        f"(it must have shipped after {needed.isoformat()}, the "
+                        f"watermark plus Silver's derivation floor), so nothing "
+                        f"was compared with KeyCRM — read meta.mirror_state "
+                        f"'clickhouse.silver_orders'"
                     ),
                 }
 
@@ -2732,11 +2785,13 @@ class BackgroundScheduler:
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
                 conditions=[i.check_name for i in issues
-                                if i.severity == Severity.CRITICAL],
+                                if i.severity == Severity.CRITICAL]
+                + discrepancy_conditions(layer, discrepancies),
                 evidence=evidence_for_agent(layer, issues, discrepancies,
                                             run_id=run_id),
             )
-        await self._resolve_dq_layer(layer, issues, error_message)
+        await self._resolve_dq_layer(layer, issues, error_message,
+                                     discrepancies=discrepancies)
 
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
@@ -2816,6 +2871,30 @@ class BackgroundScheduler:
 
             ended_at = datetime.now(timezone.utc)
 
+            # 1b. The fetch (or anything before an arm) raised: no arm has a
+            #     verdict to write, and a morning whose check never ran used to
+            #     leave no row on either layer — only the canary's age, a day
+            #     later, said so (L4-09). A failed run on each layer this
+            #     process writes, the way an arm that raised is written: it
+            #     moves no age, resolves nothing and pages nothing.
+            if error_message:
+                for layer, arm in (("reconciliation_pg", pg_result),
+                                   ("reconciliation_ch", ch_result)):
+                    if arm is not None or not _writes_layer(layer):
+                        continue
+                    try:
+                        await dq_journal.journal_run(
+                            started_at=started_at, ended_at=ended_at,
+                            as_of=as_of,
+                            window_start=window_start, window_end=window_end,
+                            layer=layer, issues=[], discrepancies=[],
+                            api_calls_used=api_calls,
+                            error_message=error_message,
+                        )
+                    except Exception:
+                        logger.exception("DQ reconciliation: the failed run "
+                                         "on %s was not journalled", layer)
+
             # 2. Each arm's verdict, on its own layer so it gets its own age
             #    and its own digest section, and neither may disturb the other
             #    or the repair below.
@@ -2851,7 +2930,7 @@ class BackgroundScheduler:
             #    filed CRITICAL every morning with nothing to fix it (L1-04).
             #    `repair_orders` writes by id under force, so the fetch puts
             #    KeyCRM's state over ours. The missing come first: the run is
-            #    bounded (`REPAIR_BATCH_LIMIT`) and its remainder is reported.
+            #    bounded by `repair_orders` and its remainder is reported.
             #    Additive only — MISSING_IN_KC is deliberately not
             #    touched, because deleting on the strength of one API reading
             #    is how you turn a fetch glitch into data loss. Nothing is

@@ -405,9 +405,10 @@ async def _arm(copy_age, *, ch_down=True):
                new=AsyncMock(return_value=set())), \
          patch("core.reconciliation_io.clickhouse_orders_in_window", new=query):
         scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+        # The job's watermark, two hours back (`_run_dq_reconciliation`).
         result = await scheduler._reconcile_clickhouse(
             {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
-            as_of=now, inflight_ids=set())
+            as_of=now - timedelta(hours=2), inflight_ids=set())
     return result, query.await_count
 
 
@@ -470,8 +471,9 @@ class TestADeadClickHouseKeepsPaging:
 
     @pytest.mark.asyncio
     async def test_a_fresh_copy_that_compares_is_still_a_success(self):
-        """The gate did not become a blanket failure: a copy under 3 h is
-        compared, and a clean comparison carries no error."""
+        """The gate did not become a blanket failure: a copy shipped after
+        the job's watermark (plus Silver's floor) is compared, and a clean
+        comparison carries no error."""
         from core.scheduler import BackgroundScheduler
 
         now = datetime.now(timezone.utc)
@@ -488,7 +490,7 @@ class TestADeadClickHouseKeepsPaging:
             scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
             result = await scheduler._reconcile_clickhouse(
                 {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
-                as_of=now, inflight_ids=set())
+                as_of=now - timedelta(hours=2), inflight_ids=set())
         assert result == {"issues": [], "discrepancies": [], "error": None}
 
 
