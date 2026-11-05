@@ -190,11 +190,12 @@ async def read_owed(conn, layer: str = LAYER) -> Tuple[int, int, Optional[dateti
     The derivation reads it on a connection of its own, autocommit, before the
     rebuild begins (`_derive_and_journal_pg_layers` in `core/scheduler.py`),
     not inside the rebuild's transaction: Silver, Gold and the profile each
-    take their snapshot later, on connections of their own. That is the safe direction. Every mark counted
-    in `requested` committed with its rows before the read, so the rebuild sees
-    them; a mark that commits after the read may be rebuilt as well, but it is
-    not in `seen`, so `complete` leaves it owed and it costs one more whole
-    rebuild — never a mark recorded as built whose rows no rebuild saw.
+    take their snapshot later, on connections of their own. That is the safe
+    direction. Every mark counted in `requested` committed with its rows
+    before the read, so the rebuild sees them; a mark that commits after the
+    read may be rebuilt as well, but it is not in `seen`, so `complete` leaves
+    it owed and it costs one more whole rebuild — never a mark recorded as
+    built whose rows no rebuild saw.
     """
     row = await conn.fetchrow(
         "SELECT requested, built, built_at FROM meta.derivation_signal WHERE layer = $1",
