@@ -487,10 +487,19 @@ class KeyCRMClient:
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            # A page that failed before the last one is a list with a hole in
+            # it, and the callers cannot tell a hole from a shorter list: the
+            # stocks step wrote 850 of 900 stocks and called it a sync (L1-09).
+            # So the fetch fails whole. A failure after the last page (the
+            # first short or empty one) cost nothing and is ignored.
             done = False
+            failed: Optional[BaseException] = None
             for result in results:
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
                     logger.warning(f"Page fetch failed: {result}")
+                    failed = failed or result
                     continue
 
                 batch = result.get("data", [])
@@ -503,6 +512,12 @@ class KeyCRMClient:
                 if len(batch) < page_size:
                     done = True
                     break
+
+            if failed is not None:
+                raise KeyCRMConnectionError(
+                    f"{endpoint}: a page of the listing failed, so the listing "
+                    f"is incomplete", details=f"{type(failed).__name__}: {failed}",
+                ) from failed
 
             if done:
                 break

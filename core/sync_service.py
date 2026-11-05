@@ -395,6 +395,9 @@ class SyncService:
         # may try again after a failure (a `time.monotonic()` instant).
         self.inventory_step = InventoryStepState()
         self._inventory_retry_at = 0.0
+        # The KeyCRM error the last offers or stocks fetch ended on, for the
+        # step's published class (`sync_offers` answers None and logs it).
+        self._inventory_keycrm_error: Optional[BaseException] = None
         # Chain 5's managers step, under the chain (`MANAGERS_RETRY_AFTER_S`).
         self.managers_step = ManagersStepState()
         self._managers_retry_at = 0.0
@@ -813,7 +816,7 @@ class SyncService:
         """The `buyer_sync` block of /api/health."""
         return self.buyer_sync_state.published(self._buyers_retry_in())
 
-    async def sync_offers(self) -> int:
+    async def sync_offers(self) -> Optional[int]:
         """
         Sync offers (product variations) from KeyCRM API.
 
@@ -821,7 +824,10 @@ class SyncService:
         between offer_stocks and products tables.
 
         Returns:
-            Number of offers synced
+            Number of offers synced, or None when KeyCRM failed (logged, and
+            kept in `_inventory_keycrm_error`). None, not 0: the stocks after
+            it read the offer→product map, and written ahead of their offers a
+            new SKU's movement is recorded with no product (L1-14).
         """
         logger.info("Syncing offers...")
         try:
@@ -835,13 +841,16 @@ class SyncService:
             return count
         except KeyCRMConnectionError as e:
             logger.warning(f"Offers sync connection error (will retry): {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
         except KeyCRMAPIError as e:
             logger.error(f"Offers sync API error: {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
         except KeyCRMError as e:
             logger.error(f"Offers sync error: {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
 
     async def sync_stocks(self) -> int:
         """
@@ -873,12 +882,15 @@ class SyncService:
             return await self.store.upsert_stocks(stocks)
         except KeyCRMConnectionError as e:
             logger.warning(f"Stock sync connection error (will retry): {e}")
+            self._inventory_keycrm_error = e
             return None
         except KeyCRMAPIError as e:
             logger.error(f"Stock sync API error: {e}")
+            self._inventory_keycrm_error = e
             return None
         except KeyCRMError as e:
             logger.error(f"Stock sync error: {e}")
+            self._inventory_keycrm_error = e
             return None
 
     def _inventory_retry_in(self) -> Optional[int]:
@@ -929,13 +941,25 @@ class SyncService:
                     > INVENTORY_STEP_EVERY_S)
 
         step, ran, stocked = "offers", False, False
+        # Which fetch KeyCRM failed, if one did. Not a success: the step used
+        # to publish `last_ok_at` over a fetch that never arrived (L1-14). Not
+        # a store failure either, so no hold — the fetch is what is retried on
+        # the next tick, as it always was.
+        keycrm_failed: Optional[str] = None
+        self._inventory_keycrm_error = None
         try:
             if due(await self.store.get_last_sync_time("offers")):
                 ran = True
-                stats["offers"] = await self.sync_offers()
+                offers = await self.sync_offers()
+                stats["offers"] = offers or 0
+                if offers is None:
+                    keycrm_failed = "offers"
 
             step = "stocks"
-            if due(await self.store.get_last_sync_time("stocks")):
+            # Not after a failed offers fetch: the stocks read the offer→
+            # product map, and a new SKU's movement would be recorded with no
+            # product.
+            if keycrm_failed is None and due(await self.store.get_last_sync_time("stocks")):
                 ran = stocked = True
                 count = await self._upsert_stocks_from_keycrm()
                 stats["stocks"] = count or 0
@@ -947,6 +971,8 @@ class SyncService:
                 if count is not None:
                     await self.store.set_last_sync_time("stocks")
                     logger.info(f"Synced {count} offer stocks from KeyCRM")
+                else:
+                    keycrm_failed = "stocks"
         except Exception as exc:  # noqa: BLE001 — recorded, published, retried
             self.inventory_step.failed(step, exc)
             self._inventory_retry_at = time.monotonic() + INVENTORY_RETRY_AFTER_S
@@ -956,7 +982,11 @@ class SyncService:
                 exc, exc_info=True)
             return
 
-        if ran:
+        if keycrm_failed is not None:
+            self.inventory_step.failed(
+                keycrm_failed,
+                self._inventory_keycrm_error or KeyCRMError("KeyCRM fetch failed"))
+        elif ran:
             self.inventory_step.succeeded()
         if stocked:
             await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
@@ -1350,10 +1380,11 @@ class SyncService:
             logger.info(f"All chunks complete. Total: {stats['orders']} orders, {stats['expenses']} expenses")
 
             # Sync offers (needed for proper stock-to-product linking)
-            stats["offers"] = await self.sync_offers()
+            offers = await self.sync_offers()
+            stats["offers"] = offers or 0
 
-            # Sync stocks
-            stats["stocks"] = await self.sync_stocks()
+            # Sync stocks — not after a failed offers fetch, whose map they read
+            stats["stocks"] = await self.sync_stocks() if offers is not None else 0
 
             # Refresh Layer 1: sku_inventory_status
             await self.store.refresh_sku_inventory_status()

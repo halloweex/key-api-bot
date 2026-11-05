@@ -218,8 +218,135 @@ async def _ensure_movement_id_floor(conn) -> None:
     )
 
 
+# ─── What Postgres would refuse ──────────────────────────────────────────────
+#
+# Asked of every row before the latch, chain 3's and chain 4's rule: one row
+# Postgres refuses — a quantity KeyCRM served as null, a price over
+# NUMERIC(12,2) — used to raise inside the one transaction that writes the
+# whole catalogue of stock, so every offer kept its old quantity and no
+# movement was recorded, every hour, until somebody read the log (L1-06).
+# Revision 0013's and 0029's column types.
+
+_INT32 = (-2 ** 31, 2 ** 31 - 1)
+_MONEY = (12, 2)
+
+
+def _int_refusal(column: str, value: Any) -> Optional[str]:
+    if value is None:
+        return f"{column} is NULL"
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"{column} is a {type(value).__name__}, not an integer"
+    if not _INT32[0] <= value <= _INT32[1]:
+        return f"{column} is outside its integer range"
+    return None
+
+
+def _text_refusal(column: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return f"{column} is a {type(value).__name__}, not text"
+    if "\x00" in value:
+        return f"{column} carries a NUL byte"
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return f"{column} is not valid UTF-8"
+    return None
+
+
+def _money_refusal(column: str, value: Any) -> Optional[str]:
+    """`pg_numeric.refusal`, a numeric string read as the number it is."""
+    from decimal import Decimal, InvalidOperation
+
+    from core.pg_numeric import refusal
+
+    if isinstance(value, str):
+        try:
+            value = Decimal(value)
+        except InvalidOperation:
+            return f"{column} is text that is not a number"
+    return refusal(column, value, *_MONEY, nullable=True)
+
+
+def stock_refusal(stock: Any) -> Optional[str]:
+    """Why Postgres would refuse this stock row, or None. A missing quantity
+    or reserve is 0, as it always was; one KeyCRM served as null is not."""
+    if not isinstance(stock, dict):
+        return f"the row is a {type(stock).__name__}, not an object"
+    return (_int_refusal("id", stock.get("id"))
+            or _int_refusal("quantity", stock.get("quantity", 0))
+            or _int_refusal("reserve", stock.get("reserve", 0))
+            or _text_refusal("sku", stock.get("sku"))
+            or _money_refusal("price", stock.get("price"))
+            or _money_refusal("purchased_price", stock.get("purchased_price")))
+
+
+def offer_refusal(row: OfferRow) -> Optional[str]:
+    """Why Postgres would refuse this offer, or None (`bronze.offers.product_id`
+    is NOT NULL)."""
+    return (_int_refusal("id", row.id) or _int_refusal("product_id", row.product_id)
+            or _text_refusal("sku", row.sku))
+
+
+def _is_data_error(exc: BaseException) -> bool:
+    """A value one row carries (SQLSTATE class 22), not a writer that is
+    broken — chain 3's rule."""
+    import asyncpg
+
+    return isinstance(exc, asyncpg.DataError)
+
+
+def _kept(rows: Sequence[Any], refusal, what: str, ident) -> List[Any]:
+    kept, refused = [], []
+    for row in rows:
+        why = refusal(row)
+        if why:
+            refused.append((ident(row), why))
+        else:
+            kept.append(row)
+    if refused:
+        logger.error("inventory: %d %s row(s) not written to Postgres: %s",
+                     len(refused), what,
+                     "; ".join(f"{i!r}: {w}" for i, w in refused[:20]))
+    return kept
+
+
+def _stock_id(stock: Any) -> Any:
+    return stock.get("id") if isinstance(stock, dict) else None
+
+
+def _deduplicated(stocks: Sequence[Any]) -> List[Any]:
+    """One row per offer, the last one given. Two pages fetched in parallel
+    can both carry an offer when the list shifts between the requests, and
+    each copy then planned its own movement off the same stored quantity —
+    one sale of three recorded twice (L1-05)."""
+    by_id: Dict[Any, Any] = {}
+    unkeyed: List[Any] = []
+    for stock in stocks:
+        key = _stock_id(stock)
+        try:
+            by_id.pop(key, None)
+            by_id[key] = stock
+        except TypeError:          # an id that cannot be a key is refused later
+            unkeyed.append(stock)
+    return list(by_id.values()) + unkeyed
+
+
+async def _write_offer_rows(conn, sql: str, rows: Sequence[OfferRow]) -> None:
+    await conn.executemany(sql, [(*r, None) for r in rows])
+    await conn.execute(
+        "UPDATE bronze.offers SET synced_at = now() "
+        "WHERE id = ANY($1::int[])",
+        [r.id for r in rows],
+    )
+
+
 async def upsert_offers(rows: List[OfferRow]) -> int:
     """The offer→product map, from the same parsed rows DuckDB would take."""
+    if not rows:
+        return 0
+    rows = _kept(rows, offer_refusal, "offer", lambda r: r.id)
     if not rows:
         return 0
     from core.pg import get_pool, require_revision
@@ -233,20 +360,38 @@ async def upsert_offers(rows: List[OfferRow]) -> int:
     # one chain, and the column name is the only place that shows.
     sql = _upsert(
         "bronze.offers", OFFER_COLUMNS + ("synced_at",), ("id",))
+    written = 0
     async with pool.acquire() as conn:
         # Inside the acquire, not before it: a wait for a connection that ends
         # in a refused reconnect is a write that never reached Postgres
         # (`_latch`).
         stamp = _latch()
-        async with conn.transaction():
-            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
-            await conn.executemany(sql, [(*r, None) for r in rows])
-            await conn.execute(
-                "UPDATE bronze.offers SET synced_at = now() "
-                "WHERE id = ANY($1::int[])",
-                [r.id for r in rows],
-            )
-    return len(rows)
+        # The whole batch in one transaction; if Postgres refuses a value
+        # nothing above foresaw, the same statements row by row, so one offer
+        # cannot cost the rest.
+        groups: List[List[OfferRow]] = [list(rows)]
+        one_by_one = False
+        while groups:
+            batch = groups.pop(0)
+            try:
+                async with conn.transaction():
+                    await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+                    await _write_offer_rows(conn, sql, batch)
+            except Exception as exc:
+                if not _is_data_error(exc):
+                    raise
+                if not one_by_one:
+                    one_by_one = True
+                    groups = [[r] for r in rows]
+                    logger.warning("inventory: a batch of %d offer(s) was refused "
+                                   "(%s); writing it row by row", len(rows),
+                                   type(exc).__name__)
+                    continue
+                logger.error("inventory: offer %r refused by Postgres: %s",
+                             batch[0].id, type(exc).__name__)
+                continue
+            written += len(batch)
+    return written
 
 
 async def upsert_stocks(stocks: List[Dict[str, Any]]) -> Tuple[int, int]:
@@ -261,71 +406,105 @@ async def upsert_stocks(stocks: List[Dict[str, Any]]) -> Tuple[int, int]:
     """
     if not stocks:
         return 0, 0
+    stocks = _kept(_deduplicated(stocks), stock_refusal, "stock", _stock_id)
+    if not stocks:
+        return 0, 0
     from core.pg import get_pool, require_revision
 
     pool = await get_pool()
     await require_revision()
+    written = moved = 0
     async with pool.acquire() as conn:
         stamp = _latch()
-        async with conn.transaction():
-            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
-            current: Dict[int, Tuple[int, int]] = {
-                r["id"]: (r["quantity"], r["reserve"])
-                for r in await conn.fetch(
-                    "SELECT id, quantity, reserve FROM bronze.offer_stocks")
-            }
-            product_map: Dict[int, Optional[int]] = {
-                r["id"]: r["product_id"]
-                for r in await conn.fetch(
-                    "SELECT id, product_id FROM bronze.offers")
-            }
+        # The whole batch in one transaction; on a value Postgres refuses that
+        # `stock_refusal` could not foresee, row by row, each with its own read
+        # of the previous state, so one offer cannot cost the rest.
+        groups: List[List[Dict[str, Any]]] = [list(stocks)]
+        one_by_one = False
+        while groups:
+            batch = groups.pop(0)
+            try:
+                async with conn.transaction():
+                    await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+                    n = await _write_stock_rows(conn, batch)
+            except Exception as exc:
+                if not _is_data_error(exc):
+                    raise
+                if not one_by_one:
+                    one_by_one = True
+                    groups = [[s] for s in stocks]
+                    logger.warning("inventory: a batch of %d stock row(s) was "
+                                   "refused (%s); writing it row by row",
+                                   len(stocks), type(exc).__name__)
+                    continue
+                logger.error("inventory: stock %r refused by Postgres: %s",
+                             _stock_id(batch[0]), type(exc).__name__)
+                continue
+            written += len(batch)
+            moved += n
+    return written, moved
 
-            movements = plan_stock_movements(
-                stocks, current=current, product_map=product_map)
 
-            # One instant for the whole batch, read from the database rather
-            # than from this process: the movements of one sync happened
-            # together, and a per-row `now()` would spread them across the
-            # statement's execution for no gain.
-            now = await conn.fetchval("SELECT now()")
+async def _write_stock_rows(conn, stocks: List[Dict[str, Any]]) -> int:
+    """The read of the previous state, the plan, the upsert and the movements,
+    on the caller's transaction. Returns the movements recorded."""
+    current: Dict[int, Tuple[int, int]] = {
+        r["id"]: (r["quantity"], r["reserve"])
+        for r in await conn.fetch(
+            "SELECT id, quantity, reserve FROM bronze.offer_stocks")
+    }
+    product_map: Dict[int, Optional[int]] = {
+        r["id"]: r["product_id"]
+        for r in await conn.fetch(
+            "SELECT id, product_id FROM bronze.offers")
+    }
 
-            # `mirrored_at`, not `synced_at` — see `upsert_offers`. Stamped in
-            # the statement rather than by a DDL default, because this table
-            # has none: it was built to RECEIVE the stamp from the replication.
-            await conn.executemany(
-                _upsert(
-                    "bronze.offer_stocks",
-                    ("id", "sku", "price", "purchased_price", "quantity",
-                     "reserve", "mirrored_at"),
-                    ("id",),
-                ),
-                [
-                    (s.get("id"), s.get("sku"), s.get("price"),
-                     s.get("purchased_price"), s.get("quantity", 0),
-                     s.get("reserve", 0), now)
-                    for s in stocks
-                ],
-            )
+    movements = plan_stock_movements(
+        stocks, current=current, product_map=product_map)
 
-            if movements:
-                await _ensure_movement_id_floor(conn)
-                # `id` is omitted — revision 0030's sequence allocates it, and
-                # this is the only writer while the flag says so.
-                #
-                # `recorded_at` and `source` ARE supplied. DuckDB defaults them
-                # (`CURRENT_TIMESTAMP` and `'sync'`); the Postgres table has no
-                # defaults at all, because it was built to receive both from
-                # the replication. A writer that omitted them would record every
-                # movement with a NULL timestamp — and `recorded_at` is what
-                # `sku_inventory_status.last_stock_out_at` reads.
-                await conn.executemany(
-                    _insert(
-                        "app.stock_movements",
-                        STOCK_MOVEMENT_COLUMNS + ("recorded_at", "source"),
-                    ),
-                    [(*m, now, MOVEMENT_SOURCE) for m in movements],
-                )
-    return len(stocks), len(movements)
+    # One instant for the whole batch, read from the database rather
+    # than from this process: the movements of one sync happened
+    # together, and a per-row `now()` would spread them across the
+    # statement's execution for no gain.
+    now = await conn.fetchval("SELECT now()")
+
+    # `mirrored_at`, not `synced_at` — see `upsert_offers`. Stamped in
+    # the statement rather than by a DDL default, because this table
+    # has none: it was built to RECEIVE the stamp from the replication.
+    await conn.executemany(
+        _upsert(
+            "bronze.offer_stocks",
+            ("id", "sku", "price", "purchased_price", "quantity",
+             "reserve", "mirrored_at"),
+            ("id",),
+        ),
+        [
+            (s.get("id"), s.get("sku"), s.get("price"),
+             s.get("purchased_price"), s.get("quantity", 0),
+             s.get("reserve", 0), now)
+            for s in stocks
+        ],
+    )
+
+    if movements:
+        await _ensure_movement_id_floor(conn)
+        # `id` is omitted — revision 0030's sequence allocates it, and
+        # this is the only writer while the flag says so.
+        #
+        # `recorded_at` and `source` ARE supplied. DuckDB defaults them
+        # (`CURRENT_TIMESTAMP` and `'sync'`); the Postgres table has no
+        # defaults at all, because it was built to receive both from
+        # the replication. A writer that omitted them would record every
+        # movement with a NULL timestamp — and `recorded_at` is what
+        # `sku_inventory_status.last_stock_out_at` reads.
+        await conn.executemany(
+            _insert(
+                "app.stock_movements",
+                STOCK_MOVEMENT_COLUMNS + ("recorded_at", "source"),
+            ),
+            [(*m, now, MOVEMENT_SOURCE) for m in movements],
+        )
+    return len(movements)
 
 
 async def rebuild_sku_inventory_status() -> int:
