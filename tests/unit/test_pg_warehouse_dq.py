@@ -772,7 +772,6 @@ class TestTheJobFilesTheTwins:
 
     @pytest.fixture
     def job(self, tmp_path, monkeypatch):
-        import asyncio
         from unittest.mock import AsyncMock, patch
 
         from core.duckdb_store import DuckDBStore
@@ -785,7 +784,6 @@ class TestTheJobFilesTheTwins:
 
         journal = install_journal(monkeypatch)
         store = DuckDBStore()
-        asyncio.run(store.connect())
         scheduler = BackgroundScheduler()
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled",
                             AsyncMock(return_value=True))
@@ -794,7 +792,6 @@ class TestTheJobFilesTheTwins:
              patch("core.alerting.resolve_group", AsyncMock(return_value=0)), \
              patch.object(twins, "read_facts", AsyncMock(return_value=facts)):
             yield scheduler, journal
-        asyncio.run(store.close())
 
     def _run(self, scheduler, journal):
         import asyncio

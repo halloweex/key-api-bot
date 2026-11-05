@@ -124,7 +124,8 @@ class AnalyticsStore(
 
         return await frozen_stamp(full_key)
 
-    async def set_last_sync_time(self, key: str = "orders", timestamp: datetime = None) -> None:
+    async def set_last_sync_time(self, key: str = "orders",
+                                 timestamp: Optional[datetime] = None) -> None:
         """Update last sync timestamp — in `meta.chain_watermarks`.
 
         One row per key. Stage 4 moved the nine `last_sync_*` watermarks

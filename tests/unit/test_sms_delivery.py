@@ -458,66 +458,11 @@ async def test_a_later_optout_supplies_the_phone_the_first_one_lacked(tmp_path):
 
 # ─── schema migration ────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_delivery_columns_are_added_to_a_pre_existing_table(tmp_path):
-    """CREATE TABLE IF NOT EXISTS is a no-op on an existing table.
-
-    A database created before the TurboSMS work has the roster but none of the
-    delivery columns, so every delivery report fails. The migration has to add
-    them; this reproduces that database and checks it recovers.
-    """
-    db = tmp_path / "legacy.duckdb"
-
-    # A roster table in its pre-TurboSMS shape
-    import duckdb
-    con = duckdb.connect(str(db))
-    con.execute(
-        """
-        CREATE TABLE sms_campaign_members (
-            campaign VARCHAR NOT NULL,
-            buyer_id INTEGER NOT NULL,
-            phone VARCHAR NOT NULL,
-            tier VARCHAR NOT NULL,
-            assignment VARCHAR NOT NULL,
-            orders_at_export INTEGER NOT NULL,
-            revenue_ltv_at_export DECIMAL(14, 2),
-            margin_ltv_at_export DECIMAL(14, 2),
-            recency_at_export INTEGER,
-            PRIMARY KEY (campaign, buyer_id)
-        )
-        """
-    )
-    con.execute(
-        "INSERT INTO sms_campaign_members VALUES"
-        " ('old', 1, '380961111111', 'CORE', 'target', 2, 100, 50, 30)"
-    )
-    con.close()
-
-    store = DuckDBStore()
-
-    async with store.connection() as conn:
-        columns = {r[0] for r in conn.execute(
-            "DESCRIBE sms_campaign_members"
-        ).fetchall()}
-
-    assert {"message_id", "delivery_status", "delivered", "delivered_at"} <= columns
-
-    # And the existing row survived, so the migration did not rebuild the table
-    async with store.connection() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sms_campaign_members WHERE campaign='old'"
-        ).fetchone()[0] == 1
-
-    # The message_id index has to be created here rather than alongside the
-    # other indexes: at that point this database has no such column, and a
-    # failed CREATE INDEX would take the whole schema init down with it.
-    async with store.connection() as conn:
-        indexes = {r[0] for r in conn.execute(
-            "SELECT index_name FROM duckdb_indexes() "
-            "WHERE table_name = 'sms_campaign_members'"
-        ).fetchall()}
-
-    assert "idx_sms_members_message_id" in indexes
+# `test_delivery_columns_are_added_to_a_pre_existing_table` stood here until
+# step 14's S14-18: DuckDB's migration that added the delivery columns and
+# their index to a roster created before the TurboSMS work. DuckDB's schema
+# and migrations went with the store; the roster is `app.sms_campaign_members`
+# (revision 0013) since 2026-09-06.
 
 
 

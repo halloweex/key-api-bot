@@ -108,10 +108,6 @@ async def stores(tmp_path, monkeypatch):
     read_fallback.reset_counts()
 
     store = DuckDBStore()
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO gold_daily_revenue (date, sales_type, revenue, "
-            "orders_count) VALUES (?, 'retail', ?, 1)", [DAY, DUCK_REVENUE])
 
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)

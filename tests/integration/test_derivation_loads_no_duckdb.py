@@ -49,7 +49,7 @@ from core.scheduler import BackgroundScheduler
 
 
 async def main():
-    configure_modes(web=True)
+    configure_modes()
     try:
         return await BackgroundScheduler()._run_pg_derivation(trigger="probe", force=True)
     finally:

@@ -566,8 +566,10 @@ class TestEveryRoute:
         from web.ratelimit import limiter
 
         if state == "switches_at_duckdb_off":
-            # Every switch unset, as `stores` leaves them.
-            request.getfixturevalue("duckdb_off")
+            # Every switch unset, as `stores` leaves them. KS_DUCKDB=off was
+            # set here, the way web read it, until step 14's S14-18 deleted
+            # the switch: nothing reads it since.
+            monkeypatch.setenv("KS_DUCKDB", "off")
         elif state == "engine_fails":
             monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
             monkeypatch.setattr(ch_cohorts, "fetch",

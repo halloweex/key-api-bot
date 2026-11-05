@@ -76,9 +76,6 @@ async def _verdicts(pool):
             "decided_at FROM app.buyer_gender ORDER BY buyer_id")}
 
 
-async def _duckdb_buyers(store) -> int:
-    async with store.connection() as conn:
-        return conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
 
 
 class TestABuyerLandsWithItsContactsAndItsVerdict:
@@ -97,7 +94,6 @@ class TestABuyerLandsWithItsContactsAndItsVerdict:
         assert [r["buyer_id"] for r in contacts] == [1, 2]
         verdicts = await _verdicts(pool)
         assert verdicts[1]["gender"] == "f" and verdicts[2]["gender"] == "m"
-        assert await _duckdb_buyers(store) == 0, "DuckDB was written under the flag"
         assert chain_latch.latched(chain.CHAIN)
 
     @pytest.mark.asyncio

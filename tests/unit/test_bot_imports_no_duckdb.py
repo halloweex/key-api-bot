@@ -37,11 +37,14 @@ from typing import Dict, Set
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
-# What the bot's process must never hold: the driver, and the store that is
-# the one reach for it (`core/duckdb_switch.py`).
-FORBIDDEN = ("duckdb", "core.duckdb_store")
+# What the bot's process must never hold: the driver, and the store that was
+# the one reach for it — `core.duckdb_store`, a shim of `core.store` since
+# step 14's S14-18, and `core.store` itself (the switch,
+# `core/duckdb_switch.py`, went in S14-18).
+FORBIDDEN = ("duckdb", "core.duckdb_store", "core.store")
 # A function that asks for the store or the file by these names.
-STORE_CALLS = {"get_store", "DuckDBStore", "get_sync_service", "open_file"}
+STORE_CALLS = {"get_store", "DuckDBStore", "AnalyticsStore", "get_sync_service",
+               "open_file"}
 
 
 def _module_name(path: pathlib.Path) -> str:
@@ -105,8 +108,9 @@ class TestWhatTheBotImports:
         imports only inside functions."""
         modules = bot_imports()
         assert {"bot.main", "bot.canary", "bot.store_postgres"} <= modules
-        # Imported only inside functions of `bot/`.
-        assert {"core.bot_store", "core.alert_archive", "core.dashboard_access"} <= modules
+        # Imported only inside functions of `bot/`. (`core.alert_archive` was
+        # one, for the week of silence's watch, until step 14's S14-18.)
+        assert {"core.bot_store", "core.dashboard_access", "core.alerting"} <= modules
 
 
 def _store_touches(fn) -> bool:
@@ -115,12 +119,12 @@ def _store_touches(fn) -> bool:
 
     for node in _own(fn.node):
         if isinstance(node, ast.Import):
-            if any(a.name.split(".")[0] == "duckdb" or a.name == "core.duckdb_store"
+            if any(a.name.split(".")[0] == "duckdb" or a.name in FORBIDDEN
                    for a in node.names):
                 return True
         elif isinstance(node, ast.ImportFrom):
             if node.module and (node.module.split(".")[0] == "duckdb"
-                                or node.module == "core.duckdb_store"):
+                                or node.module in FORBIDDEN):
                 return True
         elif isinstance(node, ast.Call):
             f = node.func

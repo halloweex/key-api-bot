@@ -354,12 +354,14 @@ def build_graph(tops=WALKED) -> Graph:
                     visit(child, cls, outer)
         visit(tree, None, None)
 
-    # The store: DuckDBStore and the mixins it is composed of.
-    store_def = classes[("core/duckdb_store.py", "DuckDBStore")]
+    # The store: AnalyticsStore and the mixins it is composed of (it was
+    # `DuckDBStore` in `core/duckdb_store.py` until step 14's S14-18, which
+    # left that module a shim of the name).
+    store_def = classes[("core/store.py", "AnalyticsStore")]
     composed = {b.id for b in store_def.bases if isinstance(b, ast.Name)}
-    composed.add("DuckDBStore")
+    composed.add("AnalyticsStore")
     store = {k for k in classes if k[1] in composed and (
-        k[0].startswith("core/repositories/") or k[0] == "core/duckdb_store.py")}
+        k[0].startswith("core/repositories/") or k[0] == "core/store.py")}
 
     store_methods: Dict[str, List[Fn]] = defaultdict(list)
     by_module: Dict[str, Dict[str, Fn]] = defaultdict(dict)

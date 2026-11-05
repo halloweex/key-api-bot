@@ -123,11 +123,6 @@ async def _header(pool, oid):
             "FROM bronze.orders WHERE id = $1", oid)
 
 
-async def _duckdb_counts(store):
-    async with store.connection() as conn:
-        return tuple(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                     for t in ("orders", "order_products", "expenses",
-                               "order_backfill_misses"))
 
 
 class TestAPageLandsInOneTransaction:
@@ -160,7 +155,6 @@ class TestAPageLandsInOneTransaction:
         assert await chain_latch.read_owners(pool) == {
             t: chain_latch.latched_at(chain.CHAIN) for t in chain.CHAIN_TABLES}
         assert chain_latch.marker_path(chain.CHAIN).exists()
-        assert await _duckdb_counts(store) == (0, 0, 0, 0), "DuckDB was written under the flag"
 
     @pytest.mark.asyncio
     async def test_a_rewrite_of_the_same_state_archives_nothing(self, stores):
@@ -391,7 +385,6 @@ class TestTheMissesLedger:
                 "SELECT checked_at, reason FROM app.order_backfill_misses "
                 "WHERE order_id = $1", BASE)
         assert (row["checked_at"], row["reason"]) == (stamp, "not_in_keycrm")
-        assert await _duckdb_counts(store) == (0, 0, 0, 0)
 
 
 class TestTheCommentRestore:
@@ -462,4 +455,3 @@ class TestTheFlagRoutesNothing:
         assert chain_latch.marker_path(chain.CHAIN).exists()
         assert await chain_latch.read_owners(pool) == {
             t: chain_latch.latched_at(chain.CHAIN) for t in chain.CHAIN_TABLES}
-        assert await _duckdb_counts(store) == (0, 0, 0, 0), "DuckDB was written"

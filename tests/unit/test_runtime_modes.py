@@ -43,35 +43,29 @@ class TestConfigureModes:
     def test_it_answers_productions_modes_and_a_second_call_changes_nothing(
         self, monkeypatch,
     ):
-        """S14-00: whatever the environment says — here nothing at all — web's
-        two calls answer production's modes, and the same twice. S14-15
-        removed the three it no longer configures (KS_PG_DERIVE, KS_UTM_PARSE,
-        KS_WRITE_WAREHOUSE): their modules have no mode — and S14-16
-        KS_READ_FALLBACK, whose module has none either."""
+        """S14-00: whatever the environment says, web's two calls answer
+        production's modes, and the same twice. S14-15 and S14-16 removed
+        four (KS_PG_DERIVE, KS_UTM_PARSE, KS_WRITE_WAREHOUSE,
+        KS_READ_FALLBACK), and S14-18 the last, KS_DUCKDB, with its module:
+        no mode is configured, whatever the variables say."""
         for name in ("KS_DUCKDB", "KS_PG_DERIVE", "KS_READ_FALLBACK", "KS_UTM_PARSE",
                      "KS_WRITE_WAREHOUSE"):
-            monkeypatch.delenv(name, raising=False)
-        first = configure_modes(web=True)
-        second = configure_modes(web=True)
-        assert first == second == {"KS_DUCKDB": "off"}
+            monkeypatch.setenv(name, "junk-s14")
+        first = configure_modes()
+        second = configure_modes()
+        assert first == second == {}
 
-    def test_a_script_still_reads_ks_duckdb(self, monkeypatch):
-        """Not web: the variable decides as before — the archive tools in the
-        pinned image are run with `-e KS_DUCKDB=on`."""
-        monkeypatch.delenv("KS_DUCKDB", raising=False)
-        assert configure_modes()["KS_DUCKDB"] == "on"
-
-    def test_it_reaches_every_cached_mode_in_core(self):
+    def test_no_module_in_core_defines_a_cached_mode_left(self):
         """Walks `core/` for modules defining `configure_mode` rather than
-        trusting a list: a second cached mode that the entry points never
-        configure is this bug again, one mode later."""
+        trusting a list: a cached mode the entry points never configure is
+        the boot-sync bug again. `core.duckdb_switch` was the last until
+        S14-18; a new one must be configured from `configure_modes`."""
         defining = set()
         for path in (REPO / "core").rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             if any(isinstance(n, ast.FunctionDef) and n.name == "configure_mode"
                    for n in tree.body):
                 defining.add(".".join(path.relative_to(REPO).with_suffix("").parts))
-        assert "core.duckdb_switch" in defining, "the walk is not looking"
 
         tree = _parse("core/runtime_modes.py")
         imported = {alias.asname or alias.name: f"{n.module}.{alias.name}"
@@ -82,6 +76,7 @@ class TestConfigureModes:
                    if isinstance(call.func, ast.Attribute)
                    and isinstance(call.func.value, ast.Name)}
         assert defining <= reached, sorted(defining - reached)
+        assert "core.duckdb_switch" not in defining
 
 
 class TestWebConfiguresBeforeTheBootSync:

@@ -177,7 +177,9 @@ class TestTheStoreTestsActuallyRun:
                     continue
                 removals.append((path, line))
 
-        assert len(removals) >= 6, (
+        # Six until step 14's S14-18 deleted `scripts/weekly_compact.sh`, whose
+        # sidecar's was one.
+        assert len(removals) >= 5, (
             "the removals this walk is meant to cover have moved or gone; "
             f"found {len(removals)}"
         )

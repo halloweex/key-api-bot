@@ -168,7 +168,7 @@ def test_the_route_belongs_to_the_tgbot_tab_and_the_marketers_hold_it():
 
 
 def _admin_client() -> TestClient:
-    from tests.unit.duckdb_off_sweep_doors import hardcoded_admin, session_cookie
+    from tests.sessions import hardcoded_admin, session_cookie
     from web.main import app
 
     client = TestClient(app)

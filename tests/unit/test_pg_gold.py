@@ -1,9 +1,11 @@
 """Gold, computed in Postgres, at a grain DuckDB's table cannot hold.
 
 The interesting tests here are not the ones that read the SQL. They are the
-ones that **run** it: DuckDB speaks `GROUPING SETS` too, so the Postgres
-projection can be rendered against `silver_orders` and its output compared,
-measure for measure, with the Gold that DuckDB built from the same Silver.
+ones that **run** it: the Postgres projection over Silver derived from Bronze,
+its output compared, measure for measure, with the Gold that DuckDB built from
+the same orders. (DuckDB speaks `GROUPING SETS` too, and until step 14's
+S14-18 the projection was rendered for DuckDB over DuckDB's Silver here; it
+runs in Postgres, by the derivation's own rebuilds, since.)
 That turns the claim this whole design rests on — "every one of DuckDB's
 fourteen measures has an exact counterpart at the new grain" — into
 something executed rather than argued. DuckDB's own Gold went with its
@@ -21,7 +23,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
 from core.mirror_reconciliation import (
     _GOLD_ADDITIVE,
     _GOLD_ROLLUP_MEASURES,
@@ -49,9 +50,10 @@ from core.pg_gold import (
     insert_sql,
     select_sql,
 )
-from core.sql_dialect import DUCKDB
 from core.warehouse_sql import GOLD_MEASURES
-from tests.silver_on_duckdb import derive_silver
+from tests.integration.pg_tab_seed import (
+    DSN, derive, needs_postgres, seed, tab_in_postgres,
+)
 
 # DuckDB's `gold_daily_revenue` on the two fixtures below, its one cell each
 # (retail, one day), as `_duckdb_gold` read it on the base of step 14's S14-15,
@@ -85,55 +87,33 @@ _VERSIONS = Path(__file__).resolve().parents[2] / "migrations" / "versions"
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore()
-    return store
+async def _pg_gold(monkeypatch, orders):
+    """`{(date, sales_type, source_id): {measure: value}}` — Postgres's Gold,
+    derived from Bronze by the derivation's own two rebuilds.
 
-
-def _insert_order(conn, oid, source_id, buyer_id, when, total="1000.00", status=12):
-    conn.execute(
-        """
-        INSERT INTO orders (
-            id, source_id, status_id, grand_total, ordered_at, created_at,
-            updated_at, buyer_id, manager_id, manager_comment, promocode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
-        """,
-        [oid, source_id, status, total, when, when, when, buyer_id],
-    )
-
-
-async def _seed(store, orders):
-    """`orders` is a list of (id, source_id, buyer_id, total).
-
-    Midday UTC, one day back: Silver derives `order_date` as the Kyiv date, and
-    anchoring at midday keeps the seeded instant and the derived date on the
-    same day at every offset Kyiv has ever used. The neighbouring Gold test was
-    broken three hours out of twenty-four for exactly this reason.
+    `orders` is a list of (id, source_id, buyer_id, total). Midday UTC, one day
+    back: Silver derives `order_date` as the Kyiv date, and anchoring at midday
+    keeps the seeded instant and the derived date on the same day at every
+    offset Kyiv has ever used. The neighbouring Gold test was broken three
+    hours out of twenty-four for exactly this reason.
     """
     when = datetime.now(timezone.utc).replace(
         hour=12, minute=0, second=0, microsecond=0
     ) - timedelta(days=1)
-    async with store.connection() as conn:
-        for oid, source_id, buyer_id, total in orders:
-            _insert_order(conn, oid, source_id, buyer_id, when, total)
-    await derive_silver(store)
-    return when
 
+    async def populate(conn, pool):
+        await seed(conn, orders=[(oid, source_id, 12, Decimal(total), when, buyer_id,
+                                  None, None)
+                                 for oid, source_id, buyer_id, total in orders])
 
-def _run_pg_projection(conn):
-    """The Postgres Gold projection, executed against DuckDB's Silver.
-
-    Same text `core/pg_gold.py` sends to Postgres, rendered for the other
-    engine by the same dialect object the Silver projection uses.
-    """
-    rows = conn.execute(select_sql(DUCKDB)).fetchall()
-    keyed = {}
-    for row in rows:
-        date, sales_type, source_id = row[0], row[1], row[2]
-        keyed[(date, sales_type, source_id)] = dict(
-            zip(GOLD_MEASURE_COLUMNS, row[3:])
-        )
-    return keyed
+    async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+        await derive(pool)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT date, sales_type, source_id, {', '.join(GOLD_MEASURE_COLUMNS)} "
+                f"FROM {GOLD_TABLE}")
+    return {(r["date"], r["sales_type"], r["source_id"]):
+            {c: r[c] for c in GOLD_MEASURE_COLUMNS} for r in rows}
 
 
 def _stored(value):
@@ -215,27 +195,32 @@ class TestOneDefinitionOfAGoldMeasure:
 # ── the projection, executed ─────────────────────────────────────────────────
 
 
+@needs_postgres
 class TestTheTwoShapesAgree:
-    """Run both projections over one Silver and check the mapping holds."""
+    """Postgres's Gold against DuckDB's on the same orders: the mapping holds."""
 
     @pytest.mark.asyncio
-    async def test_the_rollup_reproduces_every_shared_measure(self, tmp_path):
-        store = await _make_store(tmp_path)
-        await _seed(store, FOUR_ORDERS)
-        async with store.connection() as conn:
-            pg = _run_pg_projection(conn)
+    async def test_the_rollup_reproduces_every_shared_measure(self, monkeypatch):
+        pg = await _pg_gold(monkeypatch, FOUR_ORDERS)
 
         dk = DUCKDB_GOLD["four_orders"]
         (rollup,) = [v for (_d, s, src), v in pg.items() if src is None and s == "retail"]
         for measure in _GOLD_ROLLUP_MEASURES:
+            if measure == "avg_order_value":
+                # The one documented difference between the two engines: DuckDB's
+                # DECIMAL `/` promotes to DOUBLE, so 2050.74 / 4 = 512.685 stored
+                # as 512.68 there and 512.69 in Postgres's exact NUMERIC — the
+                # cent `reconcile_gold` forgave (5 cells of 2,106 on production).
+                # Until step 14's S14-18 the projection ran on DuckDB here and
+                # the two agreed exactly.
+                assert abs(_stored(dk[measure]) - _stored(rollup[measure])) <= Decimal(
+                    "0.01"), measure
+                continue
             assert _stored(dk[measure]) == _stored(rollup[measure]), measure
 
     @pytest.mark.asyncio
-    async def test_the_fine_rows_reproduce_every_channel_column(self, tmp_path):
-        store = await _make_store(tmp_path)
-        await _seed(store, FOUR_ORDERS)
-        async with store.connection() as conn:
-            pg = _run_pg_projection(conn)
+    async def test_the_fine_rows_reproduce_every_channel_column(self, monkeypatch):
+        pg = await _pg_gold(monkeypatch, FOUR_ORDERS)
 
         dk = DUCKDB_GOLD["four_orders"]
         (date,) = {d for (d, s, src) in pg if src is None and s == "retail"}
@@ -245,17 +230,14 @@ class TestTheTwoShapesAgree:
             assert Decimal(str(dk[dk_column])) == actual, dk_column
 
     @pytest.mark.asyncio
-    async def test_the_exhibition_gets_a_row_where_it_had_no_column(self, tmp_path):
+    async def test_the_exhibition_gets_a_row_where_it_had_no_column(self, monkeypatch):
         """The whole reason the grain changed. Source 5 is ₴266,059.00 of
         production revenue that `SUM(the three channel columns)` cannot see.
         """
-        store = await _make_store(tmp_path)
-        await _seed(store, [
+        pg = await _pg_gold(monkeypatch, [
             (1, 1, 100, "1000.00"),
             (2, 5, 101, "266.00"),
         ])
-        async with store.connection() as conn:
-            pg = _run_pg_projection(conn)
 
         # DuckDB's Gold had revenue for it and every channel column empty —
         # on production ₴266,059.00 across 177 orders a per-channel reading
@@ -265,37 +247,32 @@ class TestTheTwoShapesAgree:
         assert pg[(date, "exhibition", 5)]["revenue"] == Decimal("266.00")
 
     @pytest.mark.asyncio
-    async def test_an_inactive_source_gets_a_row_of_zeroes(self, tmp_path):
+    async def test_an_inactive_source_gets_a_row_of_zeroes(self, monkeypatch):
         """Opencart is 2,470 orders and ₴5.8M gross, and none of it is revenue
         as this warehouse defines revenue. A zero row is `is_active_source`
         written out, and DuckDB already does the same one grain up.
         """
-        store = await _make_store(tmp_path)
-        await _seed(store, [
+        pg = await _pg_gold(monkeypatch, [
             (1, 1, 100, "1000.00"),
             (2, 3, 101, "5000.00"),
         ])
-        async with store.connection() as conn:
-            pg = _run_pg_projection(conn)
 
         opencart = [v for (_d, _s, src), v in pg.items() if src == 3]
         assert opencart, "no row for the inactive source at all"
         assert all(Decimal(str(row["revenue"])) == 0 for row in opencart)
 
 
+@needs_postgres
 class TestWhyTheRollUpIsStored:
     """29 cells of 2,107 on production, and this is their shape."""
 
     @pytest.mark.asyncio
-    async def test_summing_the_fine_rows_overstates_the_customer_count(self, tmp_path):
-        store = await _make_store(tmp_path)
+    async def test_summing_the_fine_rows_overstates_the_customer_count(self, monkeypatch):
         # One buyer, two channels, one day.
-        await _seed(store, [
+        pg = await _pg_gold(monkeypatch, [
             (1, 1, 100, "500.00"),
             (2, 2, 100, "500.00"),
         ])
-        async with store.connection() as conn:
-            pg = _run_pg_projection(conn)
 
         dk = DUCKDB_GOLD["one_buyer_two_channels"]
         (date, sales_type) = next((d, s) for (d, s, src) in pg if src is None)
@@ -314,16 +291,13 @@ class TestWhyTheRollUpIsStored:
 
 
     @pytest.mark.asyncio
-    async def test_the_additive_measures_do_fold(self, tmp_path):
+    async def test_the_additive_measures_do_fold(self, monkeypatch):
         """Which is what `gold_rollup_mismatch` is entitled to assert."""
-        store = await _make_store(tmp_path)
-        await _seed(store, [
+        pg = await _pg_gold(monkeypatch, [
             (1, 1, 100, "500.00"),
             (2, 2, 100, "500.00"),
             (3, 4, 101, "125.25"),
         ])
-        async with store.connection() as conn:
-            pg = _run_pg_projection(conn)
 
         cells = {(d, s) for (d, s, src) in pg if src is None}
         for date, sales_type in cells:

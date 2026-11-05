@@ -527,14 +527,6 @@ TABLES = {
 }
 
 
-def _goal_rows(store_path):
-    async def read():
-        store = DuckDBStore()
-        async with store.connection() as conn:
-            return {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
-                    for t in ("seasonal_indices", "growth_metrics",
-                              "weekly_patterns", "revenue_predictions")}
-    return asyncio.run(read())
 
 
 def _with_store(path, step):
@@ -553,7 +545,6 @@ class TestTheRepositoryRoutes:
             self, ready, tmp_path):
         ready.setenv(chain.WRITE_ENV, "postgres")
         path = tmp_path / "g.duckdb"
-        before = _goal_rows(path)
         writer = AsyncMock(return_value={})
         with patch.object(chain, "persist_goal_tables", new=writer):
             _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
@@ -565,7 +556,6 @@ class TestTheRepositoryRoutes:
         assert monthly == {1: 0.25, 2: 0.3}
         assert [list(r) for r in weekly] == [[1, 1, 0.25, 3], [1, 2, 0.24, 3]]
         assert now is NOW
-        assert _goal_rows(path) == before
 
 
     PREDICTIONS = [{"date": "2026-10-07", "predicted_revenue": 1000.0},
@@ -586,7 +576,6 @@ class TestTheRepositoryRoutes:
         assert preds == self.PREDICTIONS and sales_type == "retail"
         assert metrics == self.METRICS
         assert created_at.tzinfo is not None and created_at >= before
-        assert _goal_rows(path)["revenue_predictions"] == []
 
 
     def test_nothing_to_store_asks_no_chain(self, ready, tmp_path):

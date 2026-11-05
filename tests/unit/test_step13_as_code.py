@@ -183,9 +183,10 @@ class TestTheVariablesNoLongerRead:
 
         for name in STOPPED_READING:
             monkeypatch.setenv(name, value)
-        modes = configure_modes(web=True)
-        # `KS_READ_FALLBACK` left the mapping in step 14's S14-16.
-        assert set(modes) == {"KS_DUCKDB"}, modes
+        modes = configure_modes()
+        # `KS_READ_FALLBACK` left the mapping in step 14's S14-16, and
+        # `KS_DUCKDB`, the last, in S14-18.
+        assert modes == {}, modes
 
     @pytest.mark.parametrize("value", ("", "postgress", "duckdb", "piggyback"))
     def test_the_derivation_is_registered_whatever_they_say(self, monkeypatch, value):
@@ -211,11 +212,11 @@ class TestTheVariablesNoLongerRead:
         env.update({name: "postgress" for name in STOPPED_READING})
         code = ("import web.main\n"
                 "from core.runtime_modes import configure_modes\n"
-                "print(sorted(configure_modes(web=True)))\n")
+                "print(sorted(configure_modes()))\n")
         done = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env,
                               capture_output=True, text=True, timeout=120)
         assert done.returncode == 0, done.stderr[-2000:]
-        assert done.stdout.strip().splitlines()[-1] == "['KS_DUCKDB']"
+        assert done.stdout.strip().splitlines()[-1] == "[]"
 
 
 # ─── /api/health and the canary (rules 7 and 8) ──────────────────────────────

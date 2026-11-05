@@ -1091,10 +1091,9 @@ _BARE = r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:managers|manager_classifications)(?![
 # (`upsert_managers`, `set_manager_retail_status`, `get_all_managers`, routed
 # by `writes_postgres`/`reads_postgres`) went with those branches in step 14's
 # S14-11: they reach chain 5's Postgres writer and reader alone.
-_BARE_SITES = {
-    ("core/migrations.py", "_m0006_seed_manager_classifications"):
-        ("_m0006_seed_manager_classifications", "latched"),
-}
+# DuckDB's boot seed (`core/migrations.py`'s `_m0006`, behind the latch)
+# was the last site until step 14's S14-18 deleted the store's migrations.
+_BARE_SITES: dict = {}
 
 
 def _bare_walk():

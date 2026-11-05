@@ -86,10 +86,6 @@ async def _pg_rows(pool):
             f"SELECT id, name, alias, is_active FROM {TABLE} ORDER BY id")]
 
 
-async def _duck_rows(store):
-    async with store.connection() as conn:
-        return [tuple(r) for r in conn.execute(
-            "SELECT id, name, alias, is_active FROM expense_types ORDER BY id").fetchall()]
 
 
 async def _owners(pool):
@@ -105,7 +101,6 @@ class TestTheWriter:
         assert await store.upsert_expense_types(_payload()) == 27
 
         assert len(await _pg_rows(pool)) == 27
-        assert await _duck_rows(store) == [], "DuckDB was written under the flag"
         assert chain_latch.latched(chain.CHAIN)
         assert await _owners(pool) == {TABLE: chain_latch.latched_at(chain.CHAIN)}
 
@@ -229,14 +224,10 @@ class TestTheFullSync:
 
         assert stats["expense_types"] == 27 and "expense_types_error" not in stats
         assert len(await _pg_rows(pool)) == 27
-        assert await _duck_rows(store) == []
         # The watermark went with the chain, and DuckDB's copy did not move.
         async with pool.acquire() as conn:
             assert await conn.fetchval(
                 "SELECT value FROM meta.chain_watermarks WHERE key = $1", KEY)
-        async with store.connection() as conn:
-            assert conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = ?", [KEY]).fetchone() is None
 
 
 # ─── the standing watch, on the real table ───────────────────────────────────

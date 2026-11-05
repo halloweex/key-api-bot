@@ -100,11 +100,6 @@ async def _pg_intervals(pool, manager_id=None):
     return [tuple(r) for r in rows]
 
 
-async def _duck_intervals(store):
-    async with store.connection() as conn:
-        return conn.execute(
-            "SELECT manager_id, valid_from, valid_to, is_retail, set_by, note "
-            "FROM manager_classifications ORDER BY manager_id, valid_from").fetchall()
 
 
 def _open(intervals, manager_id):
@@ -185,7 +180,6 @@ class TestTheSyncNeverRevertsAHuman:
         assert {r["key"] for r in owners} == {"owner:bronze.managers",
                                               "owner:app.manager_classifications"}
         # Nothing reached DuckDB.
-        assert await _duck_intervals(store) == []
 
     @pytest.mark.asyncio
     async def test_a_manager_the_replica_carried_without_a_baseline_gets_one(self, stores):
@@ -438,7 +432,6 @@ class TestTheReadsFollow:
             assert await conn.fetchval(
                 "SELECT requested FROM meta.derivation_signal "
                 "WHERE layer = 'warehouse'") == requested + 1
-        assert await _duck_intervals(store) == []
         assert [(m["id"], m["is_retail"]) for m in listed] == [(34, True)]
 
 
