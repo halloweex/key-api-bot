@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.325
+
+- WIP: S14-18 — the basedpyright baseline shrinks by 53 with the store's DuckDB half
+- WIP: S14-18 — the suite without the store's DuckDB half: Postgres for the projections' proofs, DuckDB-only pins gone
+- WIP: S14-18 — the host tests without the deleted scripts, the heartbeat pinned, the stub tested, CLAUDE.md
+- WIP: S14-18 — the store without DuckDB, the switch gone, the compaction and snapshot deleted
+
+
 ## 3.0.324
 
 - Traffic in three sections, and a funnel that reads as one
