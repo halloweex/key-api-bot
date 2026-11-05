@@ -23,7 +23,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
