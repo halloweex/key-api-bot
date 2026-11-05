@@ -1,0 +1,52 @@
+# The Rust pilot (rust/README.md): one endpoint, never deployed. Nothing in
+# docker-compose.yml or the deploy workflow builds or runs this image.
+#
+# Built with `rust/` as the context, not the repository root:
+#
+#     docker build -f Dockerfile.rust -t ks-rust-pilot rust
+#     docker build -f Dockerfile.rust --target loadgen -t ks-rust-loadgen rust
+#
+# so nothing outside the workspace can reach the image.
+#
+# Base images pinned by digest, `Dockerfile.web`'s rule for its reasons. The
+# builder is `rust/rust-toolchain.toml`'s version; CI fails if they part.
+#
+#   docker buildx imagetools inspect rust:1.99.1-slim-bookworm | grep '^Digest:'
+#   docker buildx imagetools inspect gcr.io/distroless/cc-debian12:nonroot | grep '^Digest:'
+
+FROM rust:1.99.1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS source
+ENV CARGO_TERM_COLOR=never
+WORKDIR /src
+# No rust-toolchain.toml: the image is that toolchain, and the file would
+# have rustup fetch rustfmt and clippy, which a release build never runs.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+# The registry and target/ live in BuildKit cache mounts: a warm rebuild
+# recompiles the crate that changed, not its 200 dependencies.
+FROM source AS build-api
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release --locked -p ks-api \
+    && install -D target/release/ks-api /out/ks-api
+
+FROM source AS build-loadgen
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release --locked -p ks-loadgen \
+    && install -D target/release/ks-loadgen /out/ks-loadgen
+
+# The benchmark's client. Its own target, so the service image never carries it.
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS loadgen
+COPY --from=build-loadgen /out/ks-loadgen /usr/local/bin/ks-loadgen
+ENTRYPOINT ["/usr/local/bin/ks-loadgen"]
+
+# The service: glibc, CA roots and the binary. No shell, no package manager,
+# uid 65532. Last, so a plain `docker build` produces it.
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+COPY --from=build-api /out/ks-api /usr/local/bin/ks-api
+# All interfaces of the container's own namespace. Reach it over an internal
+# network or a port published on 127.0.0.1: it checks nobody's session.
+ENV KS_PILOT_LISTEN=0.0.0.0:8090
+EXPOSE 8090
+ENTRYPOINT ["/usr/local/bin/ks-api"]
