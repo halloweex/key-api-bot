@@ -119,12 +119,15 @@ the file.
 # bot/config.py
 DEFAULT_TIMEZONE = "Europe/Kyiv"
 RETURN_STATUS_IDS = [15, 18, 19, 21, 22, 23]   # KeyCRM lost/cancel group (6)
-SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify'}
+SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify', 5: 'Виставка'}
 
 # core/duckdb_constants.py
 B2B_MANAGER_ID = 15                             # the wholesale manager
 RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]  # seeds managers.is_retail for NEW rows only
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
+EXHIBITION_SOURCE_ID = 5                        # the fair: sales_type exhibition, whoever staffed it
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)             # what we pull from KeyCRM and reconcile
+REVENUE_SOURCE_IDS = (1, 2, 4, 5)               # what counts as revenue (is_active_source)
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 ```
 
 ## API Endpoints
@@ -262,7 +265,7 @@ meta ──── the store's own bookkeeping
 - `app.manager_classifications` - Who sells retail, wholesale or internally, as of when; only a human knows
 - `app.revenue_predictions`, `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`, `app.revenue_goals` - The forecast and the goals
 - `app.data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
-- `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items; skipped for 30 days so a repair job cannot loop on them forever
+- `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items, so a repair job cannot loop on them forever. The two kinds are skipped differently (`core/pg_orders_read.py`): an id the gap scan found absent upstream is never asked for again (`order_id_gaps` excludes every ledgered id, whatever its age), while an order KeyCRM served without line items is re-fetched by the half-written repair once its `checked_at` is 30 days old (`MISS_RETRY_DAYS`), and each such re-fetch that comes back empty restamps it
 - `app.weekly_report_sends` / `app.traffic_report_sends` - one row per week delivered; what keeps a daily job to one message a week and makes a missed Monday recoverable
 - `app.dashboard_users`, `app.role_permissions` - Access (see "Which tabs one person may open"); `app.authorized_users`, `app.user_preferences` - the bot's
 - `app.sms_campaigns`, `app.sms_campaign_members`, `app.sms_dlr_events`, `app.marketing_optouts` - The SMS campaigns, their rosters, delivery reports and opt-outs
@@ -274,9 +277,9 @@ ClickHouse holds a second copy of Silver and derives its own Gold from it
 (`core/ch_silver.py`, hourly `ch_sync`), the archive of order versions
 (`history.order_versions`) and the cohorts' reads.
 
-**Source filtering:**
-- Included: Instagram (1), Telegram (2), Shopify (4)
-- Excluded: Opencart (3) - deprecated
+**Source filtering** (`REVENUE_SOURCE_IDS`, materialised as Silver's `is_active_source`):
+- Included: Instagram (1), Telegram (2), Shopify (4), Виставка (5) — the exhibition, its own `sales_type`
+- Excluded: Opencart (3) - deprecated; still synced and reconciled (`SYNCED_SOURCE_IDS`), never revenue
 
 ## Deployment
 
@@ -641,11 +644,17 @@ projection (`core.warehouse_sql.silver_select_sql`, derived by
 13), and every dashboard endpoint defaults to `Query("retail")`:
 
 ```
+source_id = EXHIBITION_SOURCE_ID (5)      → exhibition (the fair, whoever staffed it)
 manager_id IS NULL                        → retail    (Shopify, no manager)
 manager_id = B2B_MANAGER_ID               → b2b       (the wholesale manager)
 manager_id in managers.is_retail = TRUE   → retail
 otherwise                                 → internal
 ```
+
+The exhibition branch is first on purpose: the fair was staffed by a retail
+manager, so a manager-based rule would pull a one-off channel into the retail
+trend it would distort. It counts as revenue (source 5 is in
+`REVENUE_SOURCE_IDS`) and is not gated like `internal`.
 
 **Retail is a fixed list of retail managers and b2b is the wholesale manager;
 nobody else is mixed into either.** `internal` is everyone else — staff whose
@@ -2338,8 +2347,14 @@ derived, переезд стоит одну пересборку.
 Шаг 4 (копия голда) превзойдён и оставлен фолбэком. Часовой `ch_sync` теперь:
 `core/ch_silver.py` отгружает **silver целиком** (staging + EXCHANGE, копия —
 допуск ноль на круге) и **деривит gold внутри ClickHouse** из этого silver;
-`core/ch_history.py` дописывает `history.order_versions` поверх собственного
-`MAX(id)` (append-only, курсора нет — вотермарка читается из самого CH).
+`core/ch_history.py` дописывает в `history.order_versions` разность множеств
+id — всё, что есть в `app.order_versions` и чего нет в копии (`ship_history`:
+append-only, курсора нет, а не «поверх собственного `MAX(id)`»: BIGSERIAL
+коммитится не по порядку, и отгрузка выше `MAX(id)` навсегда пропустила бы
+версию, закоммиченную после большей). Строка, потерянная копией ниже её
+`MAX(id)`, поэтому доезжает следующей же отгрузкой, с WARNING в логе и
+INFO `ch_history_selfhealed` в суточной сверке следующих 24 ч (память
+процесса: перезапуск web её теряет).
 
 **Третьего диалекта мер нет** — и это снимает возражение И1: `GOLD_MEASURES`
 написаны как `COUNT(DISTINCT CASE WHEN …)` / `COALESCE(SUM(CASE …), 0)`, и
@@ -2351,8 +2366,11 @@ ClickHouse».
 Суточный вердикт в `dq_mirror_landing`: круг silver (ноль), **gold двух
 движков друг против друга** — независимые агрегации одного silver, ноль
 всюду, кроме документированного цента на `avg_order_value` (движки по-разному
-делят DECIMAL), — и бакеты архива (ноль ниже вотермарки; находка о потерянной
-строке **не лечится** — архив чинит человек). Проверено на живой паре
+делят DECIMAL), — и бакеты архива (ноль ниже вотермарки; сама сверка ничего
+не чинит: потерянную ниже вотермарки строку довозит следующая часовая
+отгрузка по разнице id, и тогда сверка пишет INFO `ch_history_selfhealed`
+вместо CRITICAL; человек нужен, только если бакет длиннее, чем в Postgres,
+или версию потерял и сам Postgres). Проверено на живой паре
 PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движках, **0
 расхождений**, включая 374 дня, где uniqExact-свёртка законно не равна сумме
 мелких строк; сверка 0.7 с; архив — 12 000 унаследовано + 40 инкрементом,
