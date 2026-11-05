@@ -13,6 +13,7 @@ from pydantic import ValidationError as PydanticValidationError
 from typing import Annotated, List, Optional
 
 from core.gender import CONFIDENCE_LADDER, GENDERS
+from core.validators import INT32_MAX
 from core.sms_refusals import REFUSAL_REASONS
 from core.repositories.customers import (
     BUILTIN_AUDIENCE_PRESETS, DEFAULT_WINDOW_DAYS, MAX_AUDIENCE_GROUPS,
@@ -218,11 +219,19 @@ def _int_list(raw: Optional[str], label: str) -> list:
         if not piece:
             continue
         try:
-            out.append(int(piece))
+            value = int(piece)
         except ValueError:
             raise HTTPException(
                 status_code=400, detail=f"{label} must be a comma-separated list of ids",
             )
+        # Held to the column it meets, as every integer parameter is: past it
+        # asyncpg refused the statement and the route answered 500 (L3-01).
+        # `_DbInt` is the JSON form's twin.
+        try:
+            validate_db_int(value, label, allow_none=False)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        out.append(value)
     return out
 
 
@@ -281,6 +290,12 @@ _Text = Annotated[str, Field(max_length=200)]
 _MAX_WINDOW_DAYS = 3650
 
 
+# An id inside `or_groups`, held to the INTEGER column it meets — the bound
+# `_int_list` gives the flat form (`validate_db_int`). Unbounded, an id past
+# it reached asyncpg and answered 500 (L3-01).
+_DbInt = Annotated[int, Field(ge=-INT32_MAX - 1, le=INT32_MAX)]
+
+
 class _AudienceGroupParams(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -299,8 +314,8 @@ class _AudienceGroupParams(BaseModel):
     gender: Optional[List[_Text]] = Field(None, max_length=2)
     gender_min_confidence: Optional[str] = Field(None, max_length=10)
     brand: Optional[List[_Text]] = Field(None, max_length=100)
-    category_id: Optional[List[int]] = Field(None, max_length=100)
-    source_id: Optional[List[int]] = Field(None, max_length=20)
+    category_id: Optional[List[_DbInt]] = Field(None, max_length=100)
+    source_id: Optional[List[_DbInt]] = Field(None, max_length=20)
     promocode_used: Optional[str] = Field(None, max_length=40)
     bought_within_days: Optional[int] = Field(None, ge=1, le=3650)
     period_orders_min: Optional[int] = Field(None, ge=1, le=1000)

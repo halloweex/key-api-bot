@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
 from core import read_fallback
+from core.filters import MAX_RANGE_DAYS
 from web.routes.auth import require_admin
 from web.schemas import JobsResponse
 from ._deps import limiter, get_store, validate_db_int
@@ -46,7 +47,10 @@ SYNC_DOORS = {
 @limiter.shared_limit("1/minute", scope="sync/resync")
 async def trigger_resync(
     request: Request,
-    days: int = 365,
+    # The dashboard's longest range (`core.filters.MAX_RANGE_DAYS`). Unbounded,
+    # days=10**9 took the heavy lock, ran the catalogue sync and then answered
+    # 500 with the error's text (L3-10).
+    days: int = Query(365, ge=1, le=MAX_RANGE_DAYS),
     admin: dict = Depends(require_admin),
 ):
     """Force a complete resync of orders from KeyCRM API. Requires admin."""
