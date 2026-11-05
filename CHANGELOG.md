@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.330
+
+- One cost row per SKU in the SMS audience and its results
+
+
 ## 3.0.329
 
 - A period for the whole history, with nothing set beside it
