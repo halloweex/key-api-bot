@@ -130,7 +130,6 @@ ks_duckdb_env_read "$2"
 printf '%s|%s|%s|%s|%s\n' "$KS_DUCKDB_ENV" "$KS_DUCKDB_ENV_WEB" \
     "$KS_DUCKDB_ENV_MEANT_OFF" "$KS_DUCKDB_ENV_READ" "$KS_DUCKDB_ENV_VALUE"
 if ks_duckdb_stands_down; then echo DOWN; else echo RUNS; fi
-ks_duckdb_env_note
 """
 
 
@@ -141,8 +140,10 @@ def _read(tmp_path: Path, text: "str | None"):
     done = subprocess.run(["bash", "-c", READ, "_", str(DEPLOY / "duckdb_env.sh"),
                            str(env_file)], capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
-    fields, verdict, note = done.stdout.split("\n", 2)
-    return fields.split("|"), verdict, note
+    fields, verdict, rest = (done.stdout.split("\n", 2) + [""])[:3]
+    # Whatever else was printed: `ks_duckdb_env_note`'s sentence until S14-20
+    # deleted it, nothing since.
+    return fields.split("|"), verdict, rest
 
 
 class TestTheReader:
@@ -173,37 +174,9 @@ class TestTheReader:
         (env, web, meant, read, _), verdict, _ = _read(tmp_path, None)
         assert (env, web, meant, read, verdict) == ("on", "on", "0", "0", "RUNS")
 
-    def test_the_note_names_the_hold_and_what_the_line_costs(self, tmp_path):
-        """A host script reads `.env`, never web's verdict, so its stand-down
-        says what a web held back on `on` means (HELD_BACK_NOTE's sentence),
-        and a line docker reads otherwise than compose what that costs —
-        each with the one line to write instead."""
-        _, _, note = _read(tmp_path, "KS_DUCKDB=off\n")
-        assert "duckdb_switch.held_back" in note and "KS_DUCKDB=on" in note
-        assert "quotes" not in note and "refuses" not in note
-        _, _, note = _read(tmp_path, "  KS_DUCKDB=off\n")
-        assert "quotes" not in note and "refuses" not in note
-        for text in ('KS_DUCKDB="off"\n', "KS_DUCKDB=off # week of silence\n"):
-            _, _, note = _read(tmp_path, text)
-            assert "written with quotes or a comment" in note, note
-            assert "a sidecar would" in note and "run on" in note, note
-            assert "write KS_DUCKDB=off as a line of its own" in note, note
-        for text in ("export KS_DUCKDB=off\n", "KS_DUCKDB = off\n"):
-            _, _, note = _read(tmp_path, text)
-            assert "docker run --env-file refuses" in note, note
-            assert "the restore drill" in note, note
-            assert "write KS_DUCKDB=off as a line of its own" in note, note
-        _, _, note = _read(tmp_path, "KS_DUCKDB:off\n")
-        assert "docker run --env-file skips" in note and "run on" in note, note
-        _, _, note = _read(tmp_path, "KS_DUCKDB=off\nKS_DUCKDB:on\n")
-        assert "runs web on" in note and "would be refused" in note, note
-        # Since step 14's S14-00 a step-14 web runs off whatever `.env` says,
-        # so neither sentence may offer `on` as a lever for it: only an image
-        # from before step 14 is held back, or runs on.
-        assert "a step-14 web runs off whatever it says" in note, note
-        assert "KS_DUCKDB=off or KS_DUCKDB=on" not in note, note
-        assert "only ever non-empty from an image before step 14" in note, note
-        assert "on that image, set KS_DUCKDB=on" in note, note
+    # `test_the_note_names_the_hold_and_what_the_line_costs` held
+    # `ks_duckdb_env_note`'s sentence, until step 14's S14-20 deleted the
+    # function: its callers went in S14-18.
 
     def test_a_value_is_quoted_back_bounded_and_printable(self, tmp_path):
         """The value is quoted in log lines; `.env` is not a file to echo.

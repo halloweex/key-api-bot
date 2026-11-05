@@ -23,8 +23,10 @@ what the other sees.
   `getattr`, a table of callables.
 
 Web runs bot code too — the bot store behind the sign-ins and the access
-requests, `send_admin_message` behind the alerts. That is web's process, and
-the stage 5 sweep (`test_duckdb_off_sweep.py`) runs those paths there.
+requests, `send_admin_message` behind the alerts. That is web's process; the
+stage 5 sweep (`test_duckdb_off_sweep.py`) ran those paths there until step
+14's S14-18 deleted it with the last opener, and since S14-19 the images carry
+no `duckdb` at all (`test_images_carry_no_duckdb.py`).
 """
 from __future__ import annotations
 

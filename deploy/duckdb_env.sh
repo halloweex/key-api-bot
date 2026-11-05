@@ -64,8 +64,7 @@
 #                           the run cannot succeed, so it must not begin.
 #                           Standing down is the harmless direction either way
 #                           — a week's compaction or one night's DuckDB
-#                           snapshot — and the stand-down's line says which
-#                           line to write (ks_duckdb_env_note).
+#                           snapshot, until step 14's S14-18 deleted both.
 #   KS_DUCKDB_ENV_VALUE     docker's value as written, carriage return
 #                           removed, cut to printable characters and 40 of
 #                           them — it is quoted in log lines, and `.env` is
@@ -177,27 +176,8 @@ ks_duckdb_stands_down() {
     [ "${KS_DUCKDB_ENV_MEANT_OFF:-0}" = 1 ]
 }
 
-# The sentence every stand-down appends after its own: what a line the two
-# parsers read differently costs, and what a web held back on `on` means. The
-# second is core.duckdb_switch.HELD_BACK_NOTE's, in the host's words, because
-# these scripts cannot import it: the process they stand down for reads `.env`
-# and not web's verdict, so while web is held back the file it goes on writing
-# is neither compacted nor shipped — a hold is to be cleared, not lived in.
-# Only an image from before step 14 can be held back, or run on: a step-14 web
-# runs off whatever .env says and publishes held_back as [], so there
-# KS_DUCKDB=on changes nothing in web and only re-arms these scripts.
-ks_duckdb_env_note() {
-    local note="" bare="write KS_DUCKDB=off as a line of its own, nothing before it and nothing after"
-    if ks_duckdb_stands_down; then
-        if [ "$KS_DUCKDB_ENV_WEB" != off ]; then
-            note="KS_DUCKDB in .env reads off to docker run --env-file and $KS_DUCKDB_ENV_WEB to compose, whose last line for it is a KS_DUCKDB: line docker skips: an image from before step 14 runs web on (a step-14 web runs off whatever it says), and a sidecar would be refused; make it one line, KS_DUCKDB=off. "
-        else
-            case "$KS_DUCKDB_ENV" in
-                invalid) note="KS_DUCKDB is written with quotes or a comment ($KS_DUCKDB_ENV_VALUE): compose drops them and web runs off, but docker run --env-file keeps them, so a sidecar would read a value the switch does not understand and run on; $bare. " ;;
-                refused) note="KS_DUCKDB is written with export, or with a space around its = (or after a colon): compose reads it and web runs off, but docker run --env-file refuses the whole file, so no sidecar starts from it — not this one, not the restore drill; $bare. " ;;
-                on) note="KS_DUCKDB is written KS_DUCKDB:off, which compose reads and docker run --env-file skips: web runs off, but a sidecar would run on; $bare. " ;;
-            esac
-        fi
-    fi
-    printf '%s' "${note}If web is held back (/api/health duckdb_switch.held_back, only ever non-empty from an image before step 14), the week has not started: meet those keys or, on that image, set KS_DUCKDB=on."
-}
+# `ks_duckdb_env_note`, the sentence every stand-down appended after its own
+# (what a line the two parsers read differently costs, and what a web held
+# back on `on` meant), stood here until step 14's S14-20: its two callers,
+# scripts/weekly_compact.sh and deploy/daily_offsite.sh, went in S14-18, and
+# the `/api/health` block it named (`duckdb_switch.held_back`) with them.

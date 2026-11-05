@@ -14,8 +14,10 @@ once, here, for the files that hold those paths to them:
 
 What it cannot see: a name computed at run time (`getattr(store, name)` with
 `name` a variable), and a way to the file that goes through a function the
-walk does not open — which is what the entry-points walk
-(`tests/unit/test_duckdb_off_entry_points.py`) is for.
+walk does not open — which the entry-points walk
+(`tests/unit/test_duckdb_off_entry_points.py`) was for until step 14's S14-18
+deleted it with the last opener; since S14-19 no module in the images can
+import `duckdb` at all (`tests/unit/test_images_carry_no_duckdb.py`).
 """
 from __future__ import annotations
 
