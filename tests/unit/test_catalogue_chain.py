@@ -27,7 +27,7 @@ import pytest_asyncio
 
 from core import chain_latch, pg_catalogue_write as chain
 from core import pg_chain_invariants as inv
-from core import read_fallback, write_chains
+from core import write_chains
 from core.landing_rows import CategoryRow, ProductRow, category_rows, product_rows
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -45,22 +45,20 @@ CATEGORIES = [{"id": 10, "name": "Care", "parent_id": None},
 @pytest.fixture
 def flags(monkeypatch):
     """No chain's variable set, nothing latched (conftest points the marker
-    directory at this test's tmp_path), and the read fallback as it is in
-    production today."""
+    directory at this test's tmp_path). (The read fallback's mode was set
+    here too until step 14's S14-16 deleted it.)"""
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
-    monkeypatch.setattr(read_fallback, "_mode", "duckdb")
     return monkeypatch
 
 
 @pytest.fixture
 def met(flags):
     """Every precondition of the flip met, as the environment says it: chain 1
-    on Postgres and the fallback off. (Every warehouse reader on Postgres too,
-    from step 13's list, until step 14's S14-15 deleted it: nothing reads
-    those switches.)"""
+    on Postgres. (Every warehouse reader on Postgres too, from step 13's
+    list, until step 14's S14-15 deleted it, and the fallback off until
+    S14-16 deleted its mode: nothing reads those switches.)"""
     flags.setenv("KS_WRITE_INVENTORY", "postgres")
-    flags.setattr(read_fallback, "_mode", "off")
     return flags
 
 
