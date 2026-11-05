@@ -398,7 +398,6 @@ class TestTheReadsFollow:
 
         import httpx
 
-        from core import pg_derivation
         from core.permissions import ADMIN_USER_IDS
         from web.main import app
         from web.routes.api._deps import limiter
@@ -406,7 +405,6 @@ class TestTheReadsFollow:
 
         store, pool, env = stores
         env.setenv(ENV, "postgres")
-        monkeypatch.setattr(pg_derivation, "_mode", pg_derivation.OWN)
         await store.upsert_managers([{"id": 34, "name": "M"}])
         async with pool.acquire() as conn:
             requested = await conn.fetchval(

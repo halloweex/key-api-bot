@@ -55,78 +55,36 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
     # operator.
     logger.warning(WEB_MUST_BE_STOPPED)
 
-    # Before the first write: the latch and `KS_PG_DERIVE` are read once and
-    # cached, and the chain's writer must find them loaded.
+    # Before the first write: the latch is read once and cached, and the
+    # chain's writer must find it loaded.
     configure_modes()
 
     return await _backfill_utm_postgres(days_back, force_ship=force_ship)
 
 
-async def _reparse(store, *, force_ship: bool) -> None:
+async def _reparse(*, force_ship: bool) -> None:
     """The re-parse the backfill ends on, and the one place this script hands
-    `--force-ship` on (`tests/unit/test_order_utm_shipping.py` holds it to
-    exactly one)."""
-    # Now refresh UTM layers — in DuckDB only while it derives. Under
-    # KS_WRITE_WAREHOUSE=postgres (DN-29) the parse below is Postgres' alone,
-    # and the recorded writer notes it, so the way back re-parses DuckDB's
-    # verdicts too; a DuckDB that refuses the note is logged and never in the
-    # way of the table /traffic reads.
-    from core import warehouse_cutover
+    `--force-ship` on (`tests/unit/test_utm_parse_doors.py` holds it to
+    exactly one).
 
-    if warehouse_cutover.duckdb_derives():
-        logger.info("Clearing silver_order_utm to re-parse all comments...")
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_order_utm")
+    `full`, because the comments restored above may change any verdict: the
+    table is re-parsed whole out of `bronze.orders`, in Postgres. It refuses a
+    result under 90% of what Postgres holds and logs the refusal rather than
+    raising, so read the line below. `--force-ship` is the only way past that
+    guard anywhere in the repository, and it is here, behind a flag an
+    operator types, because this is the one caller that may mean a shrink.
 
-        logger.info("Refreshing UTM silver layer...")
-        utm_count = len(await store.refresh_utm_silver_layer())
-        logger.info(f"Parsed UTM for {utm_count} orders")
-    else:
-        logger.info("KS_WRITE_WAREHOUSE=postgres: DuckDB's silver_order_utm is "
-                    "left as it is; the comments are re-parsed in Postgres alone")
-        try:
-            await warehouse_cutover.note_utm_reparsed_in_postgres(store)
-        except Exception as note_error:
-            logger.error(
-                "DuckDB did not take the note that its UTM verdicts are now "
-                "older than the rules; the way back will not re-parse them: %s",
-                note_error)
-
-    logger.info("Refreshing traffic gold layer...")
-
-    # And on to Postgres, which is what `/traffic` reads since revision 0018.
-    # This script rewrites `silver_order_utm` without marking the warehouse
-    # dirty, so without this the operator who just ran it would look at the
-    # tab and see the classification they replaced. The three admin endpoints
-    # that do the same thing call the same router; never raises. `full`,
-    # because everything was deleted and re-parsed above: under
-    # KS_UTM_PARSE=postgres the table is re-parsed whole out of
-    # `bronze.orders`, and under the default DuckDB's copy is shipped.
-    #
-    # Either way it refuses a result under 90% of what Postgres holds — and
-    # the ship one made while the last DuckDB parse is recorded as failed —
-    # and logs the refusal rather than raising, so read the line below.
-    # `--force-ship` is the only way past that guard anywhere in the
-    # repository, and it is here, behind a flag an operator types, because
-    # this is the one caller that may mean a shrink.
+    Until step 14's S14-15 it re-parsed DuckDB's `silver_order_utm` first while
+    DuckDB derived, and under step 13 noted the Postgres-only re-parse for a
+    way back (DuckDB's recorded writer, or `data/warehouse-utm-reparsed-at`
+    under KS_DUCKDB=off). Both went with step 13's switch; the marker already
+    on disk is left as it is."""
     from core.pg_utm_parse import reparse_router
 
     logger.info(
         "UTM to Postgres: %s",
-        await reparse_router(store, full=True, force=force_ship),
+        await reparse_router(full=True, force=force_ship),
     )
-
-    # Show results — DuckDB's, which under postgres are as old as the switch.
-    if not warehouse_cutover.duckdb_derives():
-        return
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT traffic_type, platform, COUNT(*) FROM silver_order_utm "
-            "GROUP BY traffic_type, platform ORDER BY COUNT(*) DESC LIMIT 15"
-        ).fetchall()
-        logger.info("UTM distribution:")
-        for traffic_type, platform, count in row:
-            logger.info(f"  {traffic_type:20} {platform:15} {count}")
 
 
 async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
@@ -138,13 +96,12 @@ async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
     Postgres alone re-parses (`reparse_router`, full). Web must be stopped
     (`WEB_MUST_BE_STOPPED`, logged by `backfill_utm`, its one caller)."""
     from core import pg_orders_read, pg_orders_write
-    from core.duckdb_store import get_store
     from core.keycrm import get_async_client
     from core.runtime_modes import configure_modes
 
     # Idempotent, and asked again here because this function is the one that
-    # writes: the latch and KS_PG_DERIVE must be loaded before the chain's
-    # writer runs, whoever called it.
+    # writes: the latch must be loaded before the chain's writer runs,
+    # whoever called it.
     configure_modes()
     null_count = await pg_orders_read.null_comment_count()
     logger.info(f"Orders with NULL manager_comment in Postgres: {null_count}")
@@ -186,7 +143,7 @@ async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
     logger.info(f"Backfill complete: restored {restored_total} comment(s) in Postgres")
     if failed_chunks:
         logger.error("Chunks not written, offered again by a re-run: %s", failed_chunks)
-    await _reparse(await get_store(), force_ship=force_ship)
+    await _reparse(force_ship=force_ship)
 
 
 if __name__ == "__main__":
@@ -203,10 +160,9 @@ if __name__ == "__main__":
         "--force-ship", action="store_true",
         help=(
             "Replace Postgres' silver.order_utm even when the new table holds "
-            "under 90%% of its rows (DuckDB's copy, or under KS_UTM_PARSE=postgres "
-            "the parse of bronze.orders), or the last DuckDB parse failed. "
-            "/traffic reads that table: use only when the smaller table is the "
-            "one you mean."
+            "under 90%% of its rows (the parse of bronze.orders). /traffic "
+            "reads that table: use only when the smaller table is the one you "
+            "mean."
         ),
     )
     args = parser.parse_args()

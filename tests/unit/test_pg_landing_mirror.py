@@ -19,18 +19,9 @@ import pytest
 from core import pg_landing
 
 
-class TestTheConstant:
-    def test_it_is_on_whatever_the_variable_says(self, monkeypatch):
-        """`enabled()` and `mirror_on()` stay a constant True until S14-15
-        removes their last consumer, step 13's `evaluate_preconditions`
-        (rule 16 of the step-14 plan) — for any value, junk included."""
-        for value in (None, "0", "false", "off", "j\u00fcnk; DROP"):
-            if value is None:
-                monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
-            else:
-                monkeypatch.setenv("KS_MIRROR_LANDING", value)
-            assert pg_landing.enabled() is True
-            assert pg_landing.mirror_on(value) is True
+# `TestTheConstant` held `enabled()` and `mirror_on()` to a constant True for
+# any `KS_MIRROR_LANDING` until step 14's S14-15 deleted both with their last
+# consumer, step 13's `evaluate_preconditions` (rule 16).
 
 
 class TestTheStatement:

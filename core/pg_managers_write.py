@@ -48,7 +48,7 @@ is: changing what it accepts changes production, and that is its own decision.
 THE DERIVATION SIGNAL
 
 Silver reads `is_retail` and the intervals, so `upsert_managers` and
-`set_manager_retail_status` raise it (`pg_derivation.mark_if_owned`) in their
+`set_manager_retail_status` raise it (`pg_derivation.mark`) in their
 own transactions. `update_manager_stats` does not: Silver reads none of the
 three stats columns. Today's `write_managers` raises it after every replicate,
 the one after the stats included — one Postgres Silver rebuild a day that
@@ -278,7 +278,7 @@ async def upsert_managers(rows: Sequence[Any], *, set_at: datetime) -> int:
     `ManagersRefused` without latching. An empty batch writes nothing and
     latches nothing.
     """
-    from core.pg_derivation import mark_if_owned
+    from core.pg_derivation import mark
 
     if set_at is None:
         raise ValueError("set_at must be supplied — it is the copy-back's clock")
@@ -343,7 +343,7 @@ async def upsert_managers(rows: Sequence[Any], *, set_at: datetime) -> int:
                 set_at,
             )
             # Silver reads `is_retail` and the intervals: it owes a rebuild.
-            await mark_if_owned(conn)
+            await mark(conn)
     return len(ordered)
 
 
@@ -418,7 +418,7 @@ async def set_manager_retail_status(
     (`ManagerNotFound`) — both before the latch — and a value Postgres would
     refuse (`ClassificationRefused`), before Postgres is asked anything.
     """
-    from core.pg_derivation import mark_if_owned
+    from core.pg_derivation import mark
 
     why = _classification_refusal(manager_id, is_retail, effective_from, set_by, note)
     if why:
@@ -488,7 +488,7 @@ async def set_manager_retail_status(
                 manager_id, is_retail)
             # `sales_type` is decided from these rows: Silver owes a rebuild,
             # raised in the decision's own transaction.
-            await mark_if_owned(conn)
+            await mark(conn)
     logger.info("Manager %s retail status set to %s from %s (Postgres)",
                 manager_id, is_retail, effective_from)
 

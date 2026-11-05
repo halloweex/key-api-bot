@@ -1,36 +1,27 @@
-"""DN-19: `KS_UTM_PARSE` — who writes Postgres' `silver.order_utm`.
+"""DN-19: Postgres writes its own `silver.order_utm`.
 
-Under the default, `duckdb`, nothing changes: the tick ships DuckDB's parse
-and the four re-parse doors ship through `ship_after_reparse`. Under
-`postgres` (which needs `KS_PG_DERIVE=own`) the derivation's last step parses
-the table out of `bronze.orders`, the doors parse in Postgres through
-`reparse_router`, and nothing ships.
+The derivation's last step parses the table out of `bronze.orders`, and the
+four re-parse doors parse in Postgres through `reparse_router`. Until step
+14's S14-15 `KS_UTM_PARSE` chose between that and a copy of DuckDB's parse
+(`core/pg_order_utm.py`, deleted with the mode); the tests of the mode, of
+the copy, of the DuckDB tick and of the `utm_parse` health block and its
+canary check went with them.
 
-What is pinned here: the mode (read once, before the boot sync, never raising,
-downgraded to `duckdb` with a published error when it cannot be honoured), the
-router's two branches, the derivation's last step and its isolation from the
-derivation's own faults, the tick's silence, the boot, and what `/api/health`
-and the canary make of all of it. The structural walks — every door goes
-through the router, no ship is reachable under `postgres` — are in
-`tests/unit/test_order_utm_shipping.py`; the parse against a real Postgres in
+What is pinned here: the router's two branches, the incremental under the
+layer lock, the derivation's last step and its isolation from the
+derivation's own faults, and that `/api/health` watches the table with a
+limit of its own which the canary judges. The doors' walks are in
+`tests/unit/test_utm_parse_doors.py`; the parse against a real Postgres in
 `tests/integration/test_pg_own_derivation.py`.
-
-Since step 14's S14-00 the mode is `postgres` whatever `KS_UTM_PARSE` says,
-so the tests of `duckdb`, of a downgrade, of a typo, of the router's DuckDB
-branch, of the tick's ship and of the boot under each mode went with them.
 """
 from __future__ import annotations
 
-import ast
 import asyncio
-import inspect
-import textwrap
-from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core import pg_derivation, pg_utm_parse, read_fallback
+from core import pg_utm_parse
 # The derivation's own harness: one tick through `_run_pg_derivation` with
 # every Postgres step patched, and the fixtures it runs under.
 from tests.unit.test_pg_own_derivation import _derive, job, mode  # noqa: F401
@@ -38,72 +29,8 @@ from tests.unit.test_pg_own_derivation import _derive, job, mode  # noqa: F401
 UTM = pg_utm_parse.UTM_TABLE
 
 
-@pytest.fixture
-def modes(monkeypatch):
-    """Set KS_PG_DERIVE and KS_UTM_PARSE the way `configure_modes` reads
-    them — the derivation first — and put every cache back afterwards."""
-    before = (pg_derivation._mode, pg_derivation._mode_error,
-              pg_utm_parse._mode, pg_utm_parse._mode_error)
-
-    def set_modes(derive=None, utm=None):
-        for env, value in ((pg_derivation.ENV, derive), (pg_utm_parse.ENV, utm)):
-            if value is None:
-                monkeypatch.delenv(env, raising=False)
-            else:
-                monkeypatch.setenv(env, value)
-        pg_derivation.configure_mode()
-        return pg_utm_parse.configure_mode()
-
-    yield set_modes
-    (pg_derivation._mode, pg_derivation._mode_error,
-     pg_utm_parse._mode, pg_utm_parse._mode_error) = before
-
-
 def _bounded(coro, timeout=10):
     return asyncio.run(asyncio.wait_for(coro, timeout=timeout))
-
-
-# ─── The mode ─────────────────────────────────────────────────────────────────
-
-class TestTheMode:
-    def test_postgres_beside_own(self, modes):
-        assert modes(derive="own", utm="postgres") == "postgres"
-        assert pg_utm_parse.parses_in_postgres()
-        assert pg_utm_parse.mode_error() is None
-
-    def test_the_write_path_never_reads_the_environment(self, modes, monkeypatch):
-        """The tick, the derivation and the router ask on every run; a typo
-        evaluated there would change the writer mid-process."""
-        modes(derive="own", utm="postgres")
-        monkeypatch.setenv(pg_utm_parse.ENV, "duckdb")
-        assert pg_utm_parse.parses_in_postgres() is True
-        for fn in (pg_utm_parse.parses_in_postgres, pg_utm_parse.mode,
-                   pg_utm_parse.reparse_router):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-            reads = [n for n in ast.walk(tree)
-                     if isinstance(n, ast.Attribute) and n.attr in ("getenv", "environ")]
-            assert reads == [], fn.__name__
-
-    def test_configure_modes_reads_it_after_the_derivation(self, modes, monkeypatch):
-        """Both caches empty, as in a fresh process: `postgres` is honoured only
-        because `KS_PG_DERIVE` was read first. Read the other way round, the
-        derivation would still be unconfigured and the parse refused."""
-        from core.runtime_modes import configure_modes
-
-        modes()   # registers the restore; the caches are emptied next
-        monkeypatch.setenv(pg_derivation.ENV, "own")
-        monkeypatch.setenv(pg_utm_parse.ENV, "postgres")
-        pg_derivation._mode = pg_derivation._mode_error = None
-        pg_utm_parse._mode = pg_utm_parse._mode_error = None
-        fallback = (read_fallback._mode, read_fallback._mode_error,
-                    list(read_fallback._misconfigured))
-        try:
-            read = configure_modes()
-        finally:
-            (read_fallback._mode, read_fallback._mode_error,
-             read_fallback._misconfigured) = fallback
-        assert read[pg_utm_parse.ENV] == "postgres"
-        assert pg_utm_parse.parses_in_postgres()
 
 
 # ─── The router ───────────────────────────────────────────────────────────────
@@ -112,16 +39,12 @@ class _Engines:
     """Every way the router can reach the table, patched and counted."""
 
     def __init__(self, *, parse_raises=None):
-        self.ship_after = AsyncMock(return_value={"rows": 3})
-        self.ship = AsyncMock(return_value={"rows": 3})
         self.full = AsyncMock(return_value={"rows": 3, "replaced": 3})
         self.incremental = AsyncMock(
             side_effect=parse_raises, return_value={"parsed": 1, "rows": 3})
 
     def __enter__(self):
         self._patches = [
-            patch("core.pg_order_utm.ship_after_reparse", self.ship_after),
-            patch("core.pg_order_utm.ship_order_utm", self.ship),
             patch.object(pg_utm_parse, "parse_full", self.full),
             patch.object(pg_utm_parse, "parse_incremental_locked", self.incremental),
             patch("core.mirror_reconciliation.configured", return_value=True),
@@ -136,40 +59,32 @@ class _Engines:
 
 
 class TestTheRouter:
-    def test_postgres_parses_what_is_new_and_ships_nothing(self, modes):
-        modes(derive="own", utm="postgres")
+    def test_it_parses_what_is_new(self):
         with _Engines() as e:
-            assert _bounded(pg_utm_parse.reparse_router(object())) == {
-                "parsed": 1, "rows": 3}
+            assert _bounded(pg_utm_parse.reparse_router()) == {"parsed": 1, "rows": 3}
         assert e.incremental.await_count == 1 and e.full.await_count == 0
-        assert e.ship_after.await_count == e.ship.await_count == 0
 
-    def test_postgres_full_replaces_the_table_and_forwards_force(self, modes):
-        modes(derive="own", utm="postgres")
+    def test_full_replaces_the_table_and_forwards_force(self):
         with _Engines() as e:
-            _bounded(pg_utm_parse.reparse_router(object(), full=True))
-            _bounded(pg_utm_parse.reparse_router(object(), full=True, force=True))
+            _bounded(pg_utm_parse.reparse_router(full=True))
+            _bounded(pg_utm_parse.reparse_router(full=True, force=True))
         assert [c.kwargs for c in e.full.await_args_list] == [
             {"force": False}, {"force": True}]
         assert e.incremental.await_count == 0
-        assert e.ship_after.await_count == e.ship.await_count == 0
 
-    def test_postgres_never_raises(self, modes):
-        """The DuckDB half of the door has succeeded and must be reported; the
-        parse has already written its failure into the watermark."""
-        modes(derive="own", utm="postgres")
-        with _Engines(parse_raises=RuntimeError("pg is down")) as e:
-            out = _bounded(pg_utm_parse.reparse_router(object()))
+    def test_it_never_raises(self):
+        """The door reads the answer; the parse has already written its
+        failure into the watermark."""
+        with _Engines(parse_raises=RuntimeError("pg is down")):
+            out = _bounded(pg_utm_parse.reparse_router())
         assert out == {"error": "RuntimeError: pg is down"}
-        assert e.ship_after.await_count == 0
 
-    def test_postgres_stands_down_without_a_dsn(self, modes):
-        modes(derive="own", utm="postgres")
+    def test_it_stands_down_without_a_dsn(self):
         with _Engines() as e, \
                 patch("core.mirror_reconciliation.configured", return_value=False):
-            out = _bounded(pg_utm_parse.reparse_router(object()))
+            out = _bounded(pg_utm_parse.reparse_router())
         assert "skipped" in out
-        assert e.incremental.await_count == e.ship_after.await_count == 0
+        assert e.incremental.await_count == e.full.await_count == 0
 
 
 class TestTheIncrementalUnderTheLayerLock:
@@ -224,13 +139,10 @@ def _derive_with_parse(job, parse, **kw):
 
 
 @pytest.fixture
-def utm_postgres(job, monkeypatch):
-    """`job` is own already; this adds KS_UTM_PARSE=postgres on top of it."""
-    before = (pg_utm_parse._mode, pg_utm_parse._mode_error)
-    monkeypatch.setenv(pg_utm_parse.ENV, "postgres")
-    assert pg_utm_parse.configure_mode() == "postgres"
-    yield job
-    pg_utm_parse._mode, pg_utm_parse._mode_error = before
+def utm_postgres(job):
+    """`job`, whose derivation ends with the parse — unconditionally since
+    step 14's S14-15, which removed KS_UTM_PARSE."""
+    return job
 
 
 class TestTheDerivationsLastStep:
@@ -309,51 +221,9 @@ class TestTheDerivationsLastStep:
         assert alert.await_count == 0
 
 
-# ─── The DuckDB tick ──────────────────────────────────────────────────────────
-
-class TestTheTick:
-    def _run(self):
-        from core.scheduler import BackgroundScheduler
-
-        silver = AsyncMock(return_value={"rows": 1})
-        gold = AsyncMock(return_value={"rows": 1, "cells": 1})
-        profile, ship = AsyncMock(return_value={"rows": 1}), AsyncMock(return_value={"rows": 1})
-        with patch("core.pg_vitrina.rebuild_customer_profile", profile), \
-             patch("core.pg_order_utm.ship_order_utm", ship), \
-             patch("core.duckdb_store.get_store", AsyncMock(return_value=object())):
-            _bounded(BackgroundScheduler()._rebuild_pg_layers(silver, gold))
-        return silver, gold, profile, ship
-
-    def test_under_postgres_it_does_nothing_in_postgres(self, modes):
-        modes(derive="own", utm="postgres")
-        silver, gold, profile, ship = self._run()
-        assert (silver.await_count, gold.await_count, profile.await_count,
-                ship.await_count) == (0, 0, 0, 0)
-
-
-# ─── The boot ─────────────────────────────────────────────────────────────────
-
-
 # ─── /api/health and the canary ───────────────────────────────────────────────
 
 class TestHealthPublishesIt:
-    def test_the_block(self, modes):
-        from web.routes.api.health import _utm_parse_mode
-
-        # Since step 14's S14-00 the mode is `postgres` whatever either
-        # variable says, and no value of them is an error.
-        for derive, utm in ((None, None), ("own", "postgres"), (None, "postgres"),
-                            ("piggyback", "duckdb"), ("own", "postgress")):
-            modes(derive=derive, utm=utm)
-            assert _utm_parse_mode() == {"mode": "postgres", "error": None}
-
-    def test_the_response_model_keeps_it(self):
-        """`/api/health` has a response model, and a field it does not declare
-        is dropped on the way out — the canary would read nothing."""
-        from web.schemas import HealthResponse
-
-        assert "utm_parse" in HealthResponse.model_fields
-
     def _mirrors(self):
         from web.routes.api import health
 
@@ -369,8 +239,7 @@ class TestHealthPublishesIt:
             finally:
                 health._mirror_cache["data"] = None
 
-    def test_under_postgres_the_table_is_watched_with_its_own_limit(self, modes):
-        modes(derive="own", utm="postgres")
+    def test_the_table_is_watched_with_its_own_limit(self):
         data = self._mirrors()
         assert set(data) == {"bronze.orders", "silver.orders",
                              "gold.daily_revenue", UTM}
@@ -383,19 +252,6 @@ class TestHealthPublishesIt:
 
 
 class TestTheCanaryJudgesIt:
-    def test_an_error_is_a_failure_key(self):
-        from bot.canary import check_utm_parse_mode
-
-        payload = {"utm_parse": {"mode": "duckdb",
-                                 "error": "KS_UTM_PARSE='pg' is not one of ..."}}
-        assert [k for k, _ in check_utm_parse_mode(payload)] == ["utm_parse_mode_invalid"]
-
-    def test_absent_or_clean_is_quiet(self):
-        from bot.canary import check_utm_parse_mode
-
-        assert check_utm_parse_mode({}) == []
-        assert check_utm_parse_mode({"utm_parse": {"mode": "postgres", "error": None}}) == []
-
     def test_a_stale_or_failing_parse_is_judged_by_the_declared_limit(self):
         from bot.canary import check_mirror_freshness
 
@@ -407,30 +263,3 @@ class TestTheCanaryJudgesIt:
         keys = [k for k, _ in failures]
         assert f"mirror_failing:{UTM}" in keys and f"mirror_stale:{UTM}" in keys
         assert ages[UTM] == entry["age_seconds"]
-
-    @pytest.mark.asyncio
-    async def test_the_wiring_warns_and_names_the_lever(self):
-        import httpx
-
-        from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-
-        payload = _healthy_payload()
-        payload["utm_parse"] = {
-            "mode": "duckdb",
-            "error": "KS_UTM_PARSE='postgres' needs KS_PG_DERIVE='own', and it is "
-                     "'piggyback'; running as 'duckdb'"}
-
-        def handler(request):
-            return httpx.Response(200, json=payload)
-
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(handler) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                result = await canary.run_canary(DASHBOARD, client=client)
-        assert result.severity == "warn"
-        assert result.failure_keys == ["utm_parse_mode_invalid"]
-        assert "KS_UTM_PARSE" in canary._what_to_do(result)
-
-

@@ -14,8 +14,8 @@ without a database:
 
 - the router does not read the switch — unset, `duckdb`, a typo or junk,
   the read goes to Postgres, and nothing reaches for the DuckDB store (step
-  13's readiness on `/api/warehouse/status` still reads the six variables,
-  as `reader:*` keys, until S14-15 — `tests/unit/test_warehouse_cutover.py`);
+  13's readiness on `/api/warehouse/status` read the six variables, as
+  `reader:*` keys, until S14-15 deleted it);
 - a failure is the same refusal `fall_back` made under `off`: the surface,
   the count, the log line, the cause, and no fallback counted;
 - without `KS_PG_DSN` the pool's own refusal to guess a database is that

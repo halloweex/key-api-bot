@@ -955,7 +955,8 @@ OPERATIONAL_GRACE_MINUTES = 90
 # past that window; a backfill run by hand in the grace before 07:30 would
 # hide the orders it re-stamps for that one morning, as INFO.
 #
-# **Not the ship's watermark**, which was the other clock available. A ship
+# **Not the ship's watermark**, which was the other clock available while
+# DuckDB's parse was shipped (until step 14's S14-15 deleted the ship). A ship
 # that stops being *called* records nothing at all — a warehouse refresh that
 # errors returns before `_rebuild_postgres_layers` ships anything, so
 # `last_ok_at` just ages and `failures_since_ok` stays at zero — and this
@@ -1014,26 +1015,12 @@ FROM owed
 # levers alone, so the reasons ride in the two paging descriptions, which
 # /api/health/data-quality carries whole. One text for both, because both page
 # with the same line.
+# The parser reads bronze.orders, so the only cause left is a parse that has
+# not run or did not finish, and both refresh routes run it. Until step 14's
+# S14-15 a second text stood here for `KS_UTM_PARSE=duckdb` — copy the comment
+# into DuckDB, then the ship — and this one was `_ORDER_UTM_LEVER_REASONS_POSTGRES`;
+# the words of the findings are what production published under `postgres`.
 _ORDER_UTM_LEVER_REASONS = (
-    "The alert's levers, in order. If the fingerprint names manager_comment, "
-    "copy the comment into DuckDB from bronze.orders, which holds it after a "
-    "purge and after a restore alike. POST /api/traffic/backfill-utm is not "
-    "that lever: it re-fetches the comment from KeyCRM, so it restores one "
-    "only where KeyCRM serves it today (a restore from an export older than "
-    "a backfill), and after a purge, where KeyCRM's payload was the NULL "
-    "DuckDB stored, it skips the order and the run still reports success. "
-    "Otherwise read {table}'s row in meta.mirror_state before anything "
-    "ships: a refused ship names itself in last_error, and the next "
-    "successful one clears it. Then POST /api/traffic/refresh, which parses "
-    "and ships whether or not the warehouse is dirty; POST "
-    "/api/warehouse/refresh never ships this table."
-)
-
-# The same, for KS_UTM_PARSE=postgres (DN-19), where
-# `data_quality.REMEDIATION_UTM_PARSED_IN_POSTGRES` is the line. The parser
-# reads bronze.orders, so the only cause left is a parse that has not run or
-# did not finish, and both refresh routes run it.
-_ORDER_UTM_LEVER_REASONS_POSTGRES = (
     "The alert's levers, in order. Read {table}'s row in meta.mirror_state "
     "first: the parse records every failure there before it raises "
     "(PG_LAYER_LOCK not free within LOCK_WAIT_S, a lock_timeout on its "
@@ -1050,21 +1037,17 @@ _ORDER_UTM_LEVER_REASONS_POSTGRES = (
 
 def order_utm_completeness_findings(
     row: Mapping[str, Any], *, grace_minutes: int,
-    parsed_in_postgres: bool = False,
 ) -> List[IntegrityIssue]:
     """The findings one aggregate row of `ORDER_UTM_COMPLETENESS_SQL` makes.
 
     Pure, so what each count means is testable without a server; the SQL that
     produces the counts is tested against a real one.
 
-    `parsed_in_postgres` is the `KS_UTM_PARSE` mode, which the job reads. It
-    changes the words and never the counts: the causes a finding can have, and
-    the levers that clear it, are not the same when the parser reads
-    bronze.orders itself. False gives exactly the text written for the DuckDB
-    parse.
+    It took `parsed_in_postgres`, the `KS_UTM_PARSE` mode, until step 14's
+    S14-15: the words differed by mode and the counts never did. These are
+    the words production published under `postgres`, byte for byte.
     """
-    reasons = (_ORDER_UTM_LEVER_REASONS_POSTGRES if parsed_in_postgres
-               else _ORDER_UTM_LEVER_REASONS)
+    reasons = _ORDER_UTM_LEVER_REASONS
     issues: List[IntegrityIssue] = []
     table = ORDER_UTM_PG_TABLE
 
@@ -1092,15 +1075,7 @@ def order_utm_completeness_findings(
                 "unattributed, with nothing on screen to say so. "
                 + ("Under KS_UTM_PARSE=postgres the parser reads bronze.orders "
                    "itself, so the parse has not reached them: its last run "
-                   "failed, or none has run since they landed. "
-                   if parsed_in_postgres else
-                   "Either the "
-                   "parse did not reach them or the ship stopped carrying them, "
-                   "or DuckDB's copy of the order has no comment: the parser "
-                   "reads DuckDB's orders, not bronze.orders, so it never sees "
-                   "them, and no parse or ship clears this. The orders "
-                   "fingerprint names that case as manager_comment in "
-                   "mirror_row_values on bronze.orders. ")
+                   "failed, or none has run since they landed. ")
                 + reasons.format(table=table)
             ),
         ))
@@ -1123,14 +1098,7 @@ def order_utm_completeness_findings(
                 + ("the parse has not caught up with an edit: under "
                    "KS_UTM_PARSE=postgres it reads bronze.orders itself, so "
                    "its last run failed or none has run since the edit "
-                   "landed. "
-                   if parsed_in_postgres else
-                   "the parser has "
-                   "not caught up with an edit, or its re-parse was not shipped, "
-                   "or DuckDB's copy of the order has lost its comment and the "
-                   "parser, which reads DuckDB, no longer re-reads it (the orders "
-                   "fingerprint then names manager_comment in mirror_row_values "
-                   "on bronze.orders). ")
+                   "landed. ")
                 + "/traffic shows the previous classification for these. "
                 + reasons.format(table=table)
             ),
@@ -1149,20 +1117,14 @@ def order_utm_completeness_findings(
                 f"{grace_minutes} minutes without a current verdict in "
                 f"{table}. Not a defect yet: "
                 + ("under KS_UTM_PARSE=postgres the verdict follows on the "
-                   "next derivation, whose last step parses bronze.orders, "
-                   if parsed_in_postgres else
-                   "the verdict follows on DuckDB's "
-                   "tick and the ship's floor, the gap #213 accepted, ")
+                   "next derivation, whose last step parses bronze.orders, ")
                 + "and /traffic "
                 "shows these without their current verdict until it lands. "
                 "The clock is the row's last write, so a rewrite of an "
                 "unchanged order (the 05:15 refresh, a backfill) puts one long "
                 "without a verdict here for one grace too. "
                 + ("Counted because that width is how far the parse inside "
-                   "Postgres trails the orders it reads."
-                   if parsed_in_postgres else
-                   "Counted because that width is what step 9's parse inside "
-                   "Postgres is meant to close.")
+                   "Postgres trails the orders it reads.")
             ),
         ))
 
@@ -1217,12 +1179,7 @@ async def reconcile_order_utm_completeness(
         row = await order_utm_completeness_row(
             conn, now=now, grace_minutes=grace_minutes, max_samples=max_samples,
         )
-    from core import pg_utm_parse
-
-    return order_utm_completeness_findings(
-        row, grace_minutes=grace_minutes,
-        parsed_in_postgres=pg_utm_parse.parses_in_postgres(),
-    )
+    return order_utm_completeness_findings(row, grace_minutes=grace_minutes)
 
 
 # ─── Buyer completeness: two questions no comparison can answer ─────────────

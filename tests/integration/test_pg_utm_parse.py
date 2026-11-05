@@ -5,11 +5,14 @@ the parser DuckDB uses. Every claim it makes is about what a server does to
 real rows — which orders a predicate selects, what a transaction leaves behind
 when it fails, which of two sessions waits — so it is proved on one.
 
-The last class is the one the module exists for: DuckDB's
-`refresh_utm_silver_layer` and this parse, handed the same orders — every
-comment in the golden fixtures — must store the same thing, every column,
+The last class is the one the module exists for: this parse, handed every
+comment in the golden fixtures, must store what DuckDB's
+`refresh_utm_silver_layer` stored for the same orders — every column,
 `parsed_at` included, at zero tolerance. Then again after the edits the sync
-makes, and once more for the full parse against DuckDB's reclassify.
+makes, and once more for the full parse against DuckDB's reclassify. DuckDB's
+side is a literal since step 14's S14-15, which deleted its parse: its answer
+on this fixture, captured on the commit before (rule 9,
+`tests/integration/golden/utm_parse.json`).
 
 HOW A SCENARIO IS ISOLATED
 Most scenarios need the whole of `bronze.orders` and `silver.order_utm` to
@@ -24,12 +27,14 @@ Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` and CI supply one.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -37,8 +42,7 @@ import pytest_asyncio
 
 from core import mirror_reconciliation as mr
 from core import pg_utm_parse as parse
-from core.duckdb_store import DuckDBStore
-from core.pg_order_utm import UTM_COLUMNS, UTM_TABLE
+from core.pg_utm_parse import UTM_COLUMNS, UTM_TABLE
 from tests.unit.test_utm_classify_golden import PARSE_GOLDEN
 
 asyncpg = pytest.importorskip("asyncpg")
@@ -694,108 +698,86 @@ class TestReadersDuringAFullParse:
             await reader.close()
 
 
-# ── the two engines agree ─────────────────────────────────────────────────────
-
-@pytest_asyncio.fixture
-async def duck(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "pg_utm_parse.duckdb")
-    await store.connect()
-    try:
-        yield store
-    finally:
-        await store.close()
-
-
-class _Both:
-    """One order header written to both stores, as the sync writes it: the same
-    aware datetime handed to each driver."""
-
-    def __init__(self, store, conn):
-        self.store, self.conn = store, conn
-
-    async def order(self, oid, comment, updated_at):
-        async with self.store.connection() as dk:
-            dk.execute(
-                "INSERT OR REPLACE INTO orders (id, source_id, status_id, grand_total, "
-                "ordered_at, updated_at, buyer_id, manager_id, manager_comment) "
-                "VALUES (?, 4, 1, 100, ?, ?, 10, NULL, ?)",
-                [oid, updated_at, updated_at, comment],
-            )
-        await order(self.conn, oid, comment=comment, updated_at=updated_at)
-
-    async def duckdb_rows(self):
-        async with self.store.connection() as dk:
-            got = dk.execute(
-                f"SELECT {', '.join(UTM_COLUMNS)} FROM silver_order_utm ORDER BY order_id"
-            ).fetchall()
-        return {r[0]: _utc(r) for r in got}
-
-    async def postgres_rows(self):
-        return {k: _utc(v) for k, v in (await rows(self.conn)).items()}
-
+# ── the parse agrees with DuckDB's ───────────────────────────────────────────
 
 def _utc(row):
-    """Values, not renderings: both drivers hand back an aware datetime, in
+    """Values, not renderings: the driver hands back an aware datetime in
     whatever zone the session names, and equal instants compare equal only
     once they are in one zone."""
     *head, parsed_at = row
     return (*head, parsed_at.astimezone(timezone.utc))
 
 
-class TestTheTwoEnginesAgree:
+def _duckdbs(round_):
+    """DuckDB's rows for one round of the golden, keyed and typed as the
+    Postgres rows are read back."""
+    doc = json.loads((Path(__file__).parent / "golden" / "utm_parse.json")
+                     .read_text(encoding="utf-8"))
+    assert doc["columns"] == list(UTM_COLUMNS)
+    rows = {}
+    for row in doc[round_]["rows"]:
+        *head, parsed_at = row
+        rows[row[0]] = (*head, datetime.fromisoformat(parsed_at).astimezone(timezone.utc))
+    return set(doc[round_]["parsed_ids"]), rows
+
+
+async def _postgres_rows(conn):
+    return {k: _utc(v) for k, v in (await rows(conn)).items()}
+
+
+class TestTheParseAgreesWithDuckDBs:
     """Zero tolerance, every column. A disagreement anywhere is a second
     classifier, which is the one thing step 9 must not build."""
 
     @pytest.mark.asyncio
-    async def test_over_the_golden_fixtures_and_the_sync_edits_after_them(self, duck, conn):
-        both = _Both(duck, conn)
+    async def test_over_the_golden_fixtures_and_the_sync_edits_after_them(self, conn):
         stamps = {}
         for oid, (comment, _parsed, _row) in enumerate(PARSE_GOLDEN, start=1):
             stamps[oid] = UPDATED + timedelta(minutes=oid, microseconds=oid)
-            await both.order(oid, comment, stamps[oid])
+            await order(conn, oid, comment=comment, updated_at=stamps[oid])
         no_comment = len(PARSE_GOLDEN) + 1
-        await both.order(no_comment, None, UPDATED)
+        await order(conn, no_comment, comment=None, updated_at=UPDATED)
 
         # Round 1: everything is new.
-        duck_ids = await duck.refresh_utm_silver_layer()
+        duck_ids, duck_rows = _duckdbs("round1")
         pg = await parse.parse_incremental()
         expected = {oid for oid, (c, _, _) in enumerate(PARSE_GOLDEN, start=1) if c}
         assert duck_ids == expected and pg["parsed"] == len(expected)
-        assert await both.postgres_rows() == await both.duckdb_rows()
-        assert len(await both.postgres_rows()) == len(expected)
+        assert await _postgres_rows(conn) == duck_rows
+        assert len(duck_rows) == len(expected)
 
-        # Round 2: what the sync does to orders afterwards, applied to both.
+        # Round 2: what the sync does to orders afterwards.
         by_comment = {c: oid for oid, (c, _, _) in enumerate(PARSE_GOLDEN, start=1)}
         later = UPDATED + timedelta(days=1, microseconds=7)
         summer = by_comment["UTM: utm_source: fbads; utm_medium: cpc; utm_campaign: summer"]
-        await both.order(summer, "UTM: utm_source: fbads; utm_medium: cpc; utm_campaign: winter",
-                         later)                                     # equal length, bumped
+        await order(conn, summer, comment="UTM: utm_source: fbads; utm_medium: cpc; "
+                    "utm_campaign: winter", updated_at=later)      # equal length, bumped
         pixel = by_comment["_fbp: fb.1.1700000000.42"]
-        await both.order(pixel, "_fbp: fb.1.1700000000.43", stamps[pixel])   # not bumped
+        await order(conn, pixel, comment="_fbp: fb.1.1700000000.43",
+                    updated_at=stamps[pixel])                      # not bumped
         klaviyo = by_comment["UTM: utm_source: klaviyo; utm_medium: email; utm_campaign: welcome_flow"]
-        await both.order(klaviyo, "", later)                        # emptied, bumped
+        await order(conn, klaviyo, comment="", updated_at=later)   # emptied, bumped
         ig = by_comment["UTM: utm_id: 12345; utm_source: ig; utm_medium: social; foo: bar"]
-        await both.order(ig, PARSE_GOLDEN[ig - 1][0], later)        # same text, bumped
-        await both.order(no_comment + 1, "ttp: 2abcDEF; нове замовлення", later)  # new
+        await order(conn, ig, comment=PARSE_GOLDEN[ig - 1][0], updated_at=later)  # same, bumped
+        await order(conn, no_comment + 1, comment="ttp: 2abcDEF; нове замовлення",
+                    updated_at=later)                              # new
 
-        duck_ids = await duck.refresh_utm_silver_layer()
+        duck_ids, duck_rows = _duckdbs("round2")
         pg = await parse.parse_incremental()
         assert duck_ids == {summer, ig, no_comment + 1}
         assert pg["parsed"] == len(duck_ids)
-        after = await both.postgres_rows()
-        assert after == await both.duckdb_rows()
+        after = await _postgres_rows(conn)
+        assert after == duck_rows
         assert after[summer][UTM_COLUMNS.index("utm_campaign")] == "winter"
         assert after[pixel][UTM_COLUMNS.index("fbp")] == "fb.1.1700000000.42"
         assert klaviyo in after
 
         # Round 3: the full parse against DuckDB's reclassify — DELETE, then
         # the parse, which then selects every commented order.
-        async with duck.connection() as dk:
-            dk.execute("DELETE FROM silver_order_utm")
-        await duck.refresh_utm_silver_layer()
+        _duck_ids, duck_rows = _duckdbs("round3")
         pg = await parse.parse_full()
         assert "refused" not in pg, pg
-        full = await both.postgres_rows()
-        assert full == await both.duckdb_rows()
+        full = await _postgres_rows(conn)
+        assert full == duck_rows
         assert full[pixel][UTM_COLUMNS.index("fbp")] == "fb.1.1700000000.43"
         assert klaviyo not in full

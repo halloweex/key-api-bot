@@ -3,10 +3,12 @@
 The interesting tests here are not the ones that read the SQL. They are the
 ones that **run** it: DuckDB speaks `GROUPING SETS` too, so the Postgres
 projection can be rendered against `silver_orders` and its output compared,
-row for row, with the Gold that DuckDB built from the same Silver in the same
-process. That turns the claim this whole design rests on — "every one of
-DuckDB's fourteen measures has an exact counterpart at the new grain" — into
-something executed rather than argued.
+measure for measure, with the Gold that DuckDB built from the same Silver.
+That turns the claim this whole design rests on — "every one of DuckDB's
+fourteen measures has an exact counterpart at the new grain" — into
+something executed rather than argued. DuckDB's own Gold went with its
+warehouse rebuild in step 14's S14-15; what it answered on these fixtures is
+a literal since (`DUCKDB_GOLD`, rule 9), captured on the commit before.
 
 It also pins the reason the roll-up rows exist at all. `TestWhyTheRollUpIsStored`
 constructs the case measured on production 29 times: one buyer, two channels,
@@ -19,12 +21,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_store import (
-    DUCKDB_GOLD_COLUMNS,
-    GOLD_REVENUE_SELECT_SQL,
-    GOLD_SOURCE_MEASURES,
-    DuckDBStore,
-)
+from core.duckdb_store import DuckDBStore
 from core.mirror_reconciliation import (
     _GOLD_ADDITIVE,
     _GOLD_ROLLUP_MEASURES,
@@ -54,6 +51,30 @@ from core.pg_gold import (
 )
 from core.sql_dialect import DUCKDB
 from core.warehouse_sql import GOLD_MEASURES
+from tests.silver_on_duckdb import derive_silver
+
+# DuckDB's `gold_daily_revenue` on the two fixtures below, its one cell each
+# (retail, one day), as `_duckdb_gold` read it on the base of step 14's S14-15,
+# before DuckDB's rebuild was deleted (rule 9). Numbers as DuckDB returned
+# them: DECIMALs as strings, counts as ints.
+DUCKDB_GOLD = {
+    "four_orders": {
+        "avg_order_value": "512.68", "instagram_orders": 2,
+        "instagram_revenue": "1099.99", "new_customers": 3, "orders_count": 4,
+        "returning_customers": 0, "returns_count": 0, "returns_revenue": "0.00",
+        "revenue": "2050.74", "shopify_orders": 1, "shopify_revenue": "700.25",
+        "telegram_orders": 1, "telegram_revenue": "250.50", "unique_customers": 3,
+    },
+    "one_buyer_two_channels": {
+        "avg_order_value": "500.00", "instagram_orders": 1,
+        "instagram_revenue": "500.00", "new_customers": 1, "orders_count": 2,
+        "returning_customers": 0, "returns_count": 0, "returns_revenue": "0.00",
+        "revenue": "1000.00", "shopify_orders": 0, "shopify_revenue": "0.00",
+        "telegram_orders": 1, "telegram_revenue": "500.00", "unique_customers": 1,
+    },
+}
+FOUR_ORDERS = [(1, 1, 100, "1000.00"), (2, 2, 101, "250.50"),
+               (3, 4, 100, "700.25"), (4, 1, 102, "99.99")]
 
 # Anchored on this file, not on the working directory: a suite that only passes
 # when pytest is launched from the repository root passes for a reason nobody
@@ -96,7 +117,7 @@ async def _seed(store, orders):
     async with store.connection() as conn:
         for oid, source_id, buyer_id, total in orders:
             _insert_order(conn, oid, source_id, buyer_id, when, total)
-    await store.refresh_warehouse_layers(trigger="manual")
+    await derive_silver(store)
     return when
 
 
@@ -114,17 +135,6 @@ def _run_pg_projection(conn):
             zip(GOLD_MEASURE_COLUMNS, row[3:])
         )
     return keyed
-
-
-def _duckdb_gold(conn):
-    columns = list(DUCKDB_GOLD_COLUMNS)
-    rows = conn.execute(
-        f"SELECT {', '.join(columns)} FROM gold_daily_revenue"
-    ).fetchall()
-    return {
-        (r[0], r[1]): dict(zip(columns[2:], r[2:]))
-        for r in rows
-    }
 
 
 def _stored(value):
@@ -169,18 +179,18 @@ class TestOneDefinitionOfAGoldMeasure:
     which is exactly the situation that invites a second copy of the arithmetic.
     """
 
-    def test_every_shared_measure_appears_verbatim_in_both_renderings(self):
-        duckdb_sql = GOLD_REVENUE_SELECT_SQL
+    def test_every_shared_measure_appears_verbatim_in_the_rendering(self):
+        """DuckDB's rendering (`GOLD_REVENUE_SELECT_SQL`) went in step 14's
+        S14-15; ClickHouse's is held in `tests/unit/test_warehouse_sql.py`."""
         postgres_sql = select_sql()
         for name, expression in GOLD_MEASURES.items():
-            assert expression in duckdb_sql, f"{name} missing from DuckDB Gold"
             assert expression in postgres_sql, f"{name} missing from Postgres Gold"
 
     def test_postgres_stores_every_shared_measure_and_no_channel_columns(self):
         """The channel columns are what `source_id` replaced. Carrying them as
         well would keep the shape that cannot express the exhibition."""
         assert set(GOLD_MEASURE_COLUMNS) == set(GOLD_MEASURES)
-        assert not set(GOLD_MEASURE_COLUMNS) & set(GOLD_SOURCE_MEASURES)
+        assert not set(GOLD_MEASURE_COLUMNS) & set(_GOLD_SOURCE_MEASURES)
 
     def test_the_insert_names_the_columns_it_selects(self):
         sql = insert_sql()
@@ -200,25 +210,8 @@ class TestOneDefinitionOfAGoldMeasure:
         for: a comment naming a column would satisfy a grep."""
         assert _migration_columns() == list(GOLD_COLUMNS)
 
-    @pytest.mark.asyncio
-    async def test_duckdb_column_order_matches_its_positional_insert(self, tmp_path):
-        """`gold_daily_revenue` is written by an INSERT with no column list, so
-        `DUCKDB_GOLD_COLUMNS` is load-bearing: a reordering there is a silent
-        column shift, not an error. Read from the live table, not the DDL text.
-        """
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                columns = [
-                    r[0] for r in conn.execute(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_name = 'gold_daily_revenue' "
-                        "ORDER BY ordinal_position"
-                    ).fetchall()
-                ]
-            assert tuple(columns) == DUCKDB_GOLD_COLUMNS
-        finally:
-            await store.close()
+    # `test_duckdb_column_order_matches_its_positional_insert` stood here
+    # until step 14's S14-15 deleted DuckDB's positional Gold INSERT.
 
 # ── the projection, executed ─────────────────────────────────────────────────
 
@@ -230,23 +223,14 @@ class TestTheTwoShapesAgree:
     async def test_the_rollup_reproduces_every_shared_measure(self, tmp_path):
         store = await _make_store(tmp_path)
         try:
-            await _seed(store, [
-                (1, 1, 100, "1000.00"),
-                (2, 2, 101, "250.50"),
-                (3, 4, 100, "700.25"),
-                (4, 1, 102, "99.99"),
-            ])
+            await _seed(store, FOUR_ORDERS)
             async with store.connection() as conn:
-                gold = _duckdb_gold(conn)
                 pg = _run_pg_projection(conn)
 
-            assert gold, "the fixture produced no Gold to compare against"
-            for (date, sales_type), dk in gold.items():
-                rollup = pg[(date, sales_type, None)]
-                for measure in _GOLD_ROLLUP_MEASURES:
-                    assert _stored(dk[measure]) == _stored(rollup[measure]), (
-                        f"{measure} differs on {date} {sales_type}"
-                    )
+            dk = DUCKDB_GOLD["four_orders"]
+            (rollup,) = [v for (_d, s, src), v in pg.items() if src is None and s == "retail"]
+            for measure in _GOLD_ROLLUP_MEASURES:
+                assert _stored(dk[measure]) == _stored(rollup[measure]), measure
         finally:
             await store.close()
 
@@ -254,23 +238,16 @@ class TestTheTwoShapesAgree:
     async def test_the_fine_rows_reproduce_every_channel_column(self, tmp_path):
         store = await _make_store(tmp_path)
         try:
-            await _seed(store, [
-                (1, 1, 100, "1000.00"),
-                (2, 2, 101, "250.50"),
-                (3, 4, 100, "700.25"),
-                (4, 1, 102, "99.99"),
-            ])
+            await _seed(store, FOUR_ORDERS)
             async with store.connection() as conn:
-                gold = _duckdb_gold(conn)
                 pg = _run_pg_projection(conn)
 
-            for (date, sales_type), dk in gold.items():
-                for dk_column, (source_id, pg_column) in _GOLD_SOURCE_MEASURES.items():
-                    fine = pg.get((date, sales_type, source_id))
-                    actual = Decimal(0) if fine is None else Decimal(str(fine[pg_column]))
-                    assert Decimal(str(dk[dk_column])) == actual, (
-                        f"{dk_column} differs on {date} {sales_type}"
-                    )
+            dk = DUCKDB_GOLD["four_orders"]
+            (date,) = {d for (d, s, src) in pg if src is None and s == "retail"}
+            for dk_column, (source_id, pg_column) in _GOLD_SOURCE_MEASURES.items():
+                fine = pg.get((date, "retail", source_id))
+                actual = Decimal(0) if fine is None else Decimal(str(fine[pg_column]))
+                assert Decimal(str(dk[dk_column])) == actual, dk_column
         finally:
             await store.close()
 
@@ -286,25 +263,14 @@ class TestTheTwoShapesAgree:
                 (2, 5, 101, "266.00"),
             ])
             async with store.connection() as conn:
-                gold = _duckdb_gold(conn)
                 pg = _run_pg_projection(conn)
 
-            cell = next(c for c in gold if c[1] == "exhibition")
-            dk = gold[cell]
-            # DuckDB: revenue is there, and every channel column is empty. On
-            # production that is ₴266,059.00 across 177 orders — money in the
-            # warehouse that a per-channel reading of Gold cannot see.
-            assert Decimal(str(dk["revenue"])) == Decimal("266.00")
-            assert all(
-                Decimal(str(dk[c])) == 0
-                for c in ("instagram_revenue", "telegram_revenue", "shopify_revenue")
-            )
-            assert all(
-                int(dk[c]) == 0
-                for c in ("instagram_orders", "telegram_orders", "shopify_orders")
-            )
+            # DuckDB's Gold had revenue for it and every channel column empty —
+            # on production ₴266,059.00 across 177 orders a per-channel reading
+            # could not see (that half went with DuckDB's Gold in S14-15).
             # Postgres: the channel has a row, and it needed no new column.
-            assert pg[(cell[0], "exhibition", 5)]["revenue"] == Decimal("266.00")
+            (date,) = {d for (d, s, src) in pg if s == "exhibition" and src is None}
+            assert pg[(date, "exhibition", 5)]["revenue"] == Decimal("266.00")
         finally:
             await store.close()
 
@@ -343,10 +309,10 @@ class TestWhyTheRollUpIsStored:
                 (2, 2, 100, "500.00"),
             ])
             async with store.connection() as conn:
-                gold = _duckdb_gold(conn)
                 pg = _run_pg_projection(conn)
 
-            (date, sales_type), dk = next(iter(gold.items()))
+            dk = DUCKDB_GOLD["one_buyer_two_channels"]
+            (date, sales_type) = next((d, s) for (d, s, src) in pg if src is None)
             rollup = pg[(date, sales_type, None)]
             folded = sum(
                 int(v["unique_customers"])

@@ -635,10 +635,7 @@ def test_format_alert_includes_failures_and_extras():
     ([], "Dashboard DOWN"),
     (["cert_expiring"], "Dashboard critical"),
     (["orders_sync_failing"], "Dashboard critical"),
-    (["warehouse_preconditions_unmet"], "Warehouse switch held back"),
     (["duckdb_off_held_back"], "DuckDB switch held back"),
-    # Step 13 held makes `warehouse_postgres` off's symptom: its title first.
-    (["duckdb_off_held_back", "warehouse_preconditions_unmet"], "Warehouse switch held back"),
     (["cert_expiring", "health_status"], "Dashboard DOWN"),
 ])
 def test_a_critical_title_says_down_only_for_an_outage(keys, title):
@@ -669,12 +666,21 @@ def test_format_alert_includes_dq_ages():
 
 
 @pytest.mark.asyncio
-async def test_run_canary_warns_on_a_derivation_mode_web_did_not_understand():
-    """The wiring, not only the judge: a KS_PG_DERIVE typo reaches a failure
-    key and a warn, and the site is otherwise healthy."""
+async def test_run_canary_judges_no_step_13_block_an_older_image_publishes():
+    """The wiring: an image from before step 14 still publishes `derivation`'s
+    `mode` and `error`, `warehouse_writer_mode` and `utm_parse`, and a
+    step-14 bot judges none of them (S14-15 deleted the six checks with
+    KS_PG_DERIVE, KS_UTM_PARSE and step 13's switch). Until then a
+    KS_PG_DERIVE typo here was a warn under `derivation_mode_invalid`."""
     payload = _healthy_payload()
     payload["derivation"] = {"mode": "piggyback",
                              "error": "KS_PG_DERIVE='owned' is not one of ('piggyback', 'own')"}
+    payload["warehouse_writer_mode"] = {
+        "mode": "duckdb", "value": "postgress", "error": "not understood",
+        "preconditions_unmet": ["pg_revision"], "held": True,
+        "held_for_s": 10 * 3600, "reclassify_needed": True,
+        "way_back_refused": ["pg_orders_write"]}
+    payload["utm_parse"] = {"mode": "duckdb", "error": "postgres without own"}
 
     def handler(request):
         return httpx.Response(200, json=payload)
@@ -684,8 +690,8 @@ async def test_run_canary_warns_on_a_derivation_mode_web_did_not_understand():
     async with _mock_transport(handler) as client:
         with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
             result = await run_canary(DASHBOARD, client=client)
-    assert result.severity == "warn"
-    assert result.failure_keys == ["derivation_mode_invalid"]
+    assert result.severity == "ok", result.failure_keys
+    assert result.failure_keys == []
 
 
 # ─── the buyers step (chain 4, PR-1) ─────────────────────────────────────────
@@ -893,16 +899,9 @@ class TestOffHeldBack:
         assert canary._what_to_do(result).startswith("web runs on;")
         assert result.duckdb_silent is None, "web runs on: the week's watch is not written"
 
-    @pytest.mark.asyncio
-    async def test_step_13_held_names_its_own_lever_first(self):
-        payload = self._held(["warehouse_postgres"])
-        payload["warehouse_writer_mode"] = {"mode": "duckdb", "value": "postgres",
-                                            "error": None,
-                                            "preconditions_unmet": ["pg_revision"]}
-        result = await self._probe(payload)
-        assert set(result.failure_keys) == {"duckdb_off_held_back",
-                                            "warehouse_preconditions_unmet"}
-        assert "cutover.unmet" in canary._what_to_do(result)
+    # `test_step_13_held_names_its_own_lever_first` stood here until step
+    # 14's S14-15 deleted `warehouse_preconditions_unmet` with step 13's
+    # switch: a step-14 web publishes no `warehouse_writer_mode` block.
 
     def test_it_is_a_registered_condition_and_its_lever_one_line(self):
         from core.alerting import REGISTRY, Kind

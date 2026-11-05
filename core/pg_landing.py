@@ -39,26 +39,10 @@ from core import pg_order_versions as order_versions
 logger = logging.getLogger(__name__)
 
 
-def mirror_on(value: Optional[str] = None) -> bool:
-    """Whether a `KS_MIRROR_LANDING` value turns the mirror on: True, for any
-    value, a constant since step 14's S14-00.
-
-    Production leaves the variable unset, which has always meant on, and step
-    13 made "the landing mirror on" one of its preconditions. Nothing ships
-    out of DuckDB any more (step 14's S14-13 deleted the mirror and its
-    backfills), so this gates nothing in this module. Last consumer, by rule
-    16 of the step-14 plan: step 13's `evaluate_preconditions`, which goes in
-    S14-15. Until S14-00: unset was on, and "0", "false", "no" or an empty
-    value turned it off."""
-    return True
-
-
-def enabled() -> bool:
-    """`mirror_on()`: True, a constant since S14-00. Nothing in the
-    application asks it since S14-13, which gated the Postgres-alone checks
-    on `mirror_reconciliation.configured()` instead; it stays a constant
-    until S14-15 removes `mirror_on` (rule 16)."""
-    return mirror_on()
+# `mirror_on()` and `enabled()` stood here until step 14's S14-15: whether
+# `KS_MIRROR_LANDING` turned the landing mirror on, a constant True since
+# S14-00. Their last consumer was step 13's `evaluate_preconditions`, deleted
+# with `core/warehouse_cutover.py`; nothing ships out of DuckDB since S14-13.
 
 
 _UPSERT = """
@@ -388,14 +372,11 @@ async def _write_order_rows(
     # Chain 2: Postgres owes a rebuild of what it derives from these rows.
     # Last, and in a savepoint of its own — no mark without the rows, no rows
     # without the mark — and unable to cost the transaction anything, the
-    # order versions above included: see `core/pg_derivation.py`. A no-op
-    # unless KS_PG_DERIVE=own, and without it no savepoint is opened either:
-    # the one around the mark exists only for the mark, and with derivation
-    # not owned every shipment out of DuckDB paid a SAVEPOINT and a RELEASE
-    # for nothing (the chain-3 review: the default sends what main sent).
+    # order versions above included: see `core/pg_derivation.py`. Postgres
+    # derives on its own signal unconditionally since step 14's S14-15, which
+    # removed `KS_PG_DERIVE` and the `owns()` this asked first.
     if orders:
-        from core.pg_derivation import mark_if_owned, owns
+        from core.pg_derivation import mark
 
-        if owns():
-            async with conn.transaction():
-                await mark_if_owned(conn)
+        async with conn.transaction():
+            await mark(conn)

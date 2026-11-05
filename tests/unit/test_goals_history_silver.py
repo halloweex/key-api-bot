@@ -449,7 +449,7 @@ class TestTheSwitch:
         done = subprocess.run(
             [sys.executable, "-c",
              "import core.pg_goals_read, core.repositories.goals, "
-             "core.warehouse_cutover, core.scheduler, web.main"],
+             "core.scheduler, web.main"],
             cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
         assert done.returncode == 0, done.stderr[-2000:]
 

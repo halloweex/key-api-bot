@@ -899,13 +899,11 @@ class TestTheRules:
 @pytest.fixture
 def fresh_read_fallback(monkeypatch):
     """The module's caches, restored after the test; counts start from zero.
-    `configure_modes` sets the derivation mode too, so that is kept as well."""
-    from core import pg_derivation
-
+    (`configure_modes` set the derivation mode too until step 14's S14-15
+    removed it.)"""
     before = (read_fallback._mode, read_fallback._mode_error,
               list(read_fallback._misconfigured), list(read_fallback._unreported),
               read_fallback._configured)
-    derivation = (pg_derivation._mode, pg_derivation._mode_error)
     for name in [n for n in __import__("os").environ if n.startswith("KS_READ_")]:
         monkeypatch.delenv(name, raising=False)
     read_fallback._mode, read_fallback._mode_error = None, None
@@ -914,7 +912,6 @@ def fresh_read_fallback(monkeypatch):
     read_fallback._configured = False
     read_fallback.reset_counts()
     yield read_fallback
-    pg_derivation._mode, pg_derivation._mode_error = derivation
     read_fallback._mode, read_fallback._mode_error = before[0], before[1]
     read_fallback._misconfigured, read_fallback._unreported = before[2], before[3]
     read_fallback._configured = before[4]

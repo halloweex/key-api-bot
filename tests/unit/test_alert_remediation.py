@@ -13,7 +13,6 @@ from core.data_quality import (
     DEFAULT_REMEDIATION,
     IntegrityIssue,
     REMEDIATION,
-    REMEDIATION_UTM_PARSED_IN_POSTGRES,
     Severity,
     format_alert_message,
     machine_attempts_note,
@@ -85,20 +84,17 @@ class TestRemediationLookup:
     def test_every_entry_is_one_line_of_levers(self):
         """A reason written into an entry pushes the lever off a phone's
         screen; reasons belong in the finding's description."""
-        for prefix, line in (REMEDIATION + REMEDIATION_UTM_PARSED_IN_POSTGRES
-                             + (("<default>", DEFAULT_REMEDIATION),)):
+        for prefix, line in (REMEDIATION + (("<default>", DEFAULT_REMEDIATION),)):
             assert "\n" not in line, prefix
             assert len(line) <= self.ARROW_LINE_MAX, (prefix, len(line))
 
-    def test_a_mode_swap_replaces_an_entry_that_exists(self):
-        """`remediation_for` swaps the KS_UTM_PARSE=postgres lines in by
-        prefix. A prefix the main table does not carry would swap nothing,
-        and the findings would keep the DuckDB lever in silence."""
-        main = [prefix for prefix, _line in REMEDIATION]
-        for prefix, line in REMEDIATION_UTM_PARSED_IN_POSTGRES:
-            assert main.count(prefix) == 1, prefix
-            assert remediation_for([prefix + "x"], utm_parsed_in_postgres=True) == [line]
-            assert remediation_for([prefix + "x"], utm_parsed_in_postgres=False) != [line]
+    def test_the_utm_line_is_the_postgres_parsers(self):
+        """One line since step 14's S14-15, which removed the `KS_UTM_PARSE`
+        swap (`REMEDIATION_UTM_PARSED_IN_POSTGRES`): the line production
+        published under `postgres`, byte for byte."""
+        assert remediation_for(["pg_order_utm_missing"]) == [
+            "Read meta.mirror_state for silver.order_utm: the parse writes its "
+            "error there. Then POST /api/traffic/refresh or /api/warehouse/refresh"]
 
 
 class TestMachineAttemptsNote:

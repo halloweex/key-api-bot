@@ -75,13 +75,8 @@ async def stores(tmp_path, monkeypatch):
     carried them across; that ship stands down under the chain, and its tests
     went with it. Chain 3's own restore, `restore_manager_comments`, is
     proved in `tests/integration/test_orders_chain_writer.py`.)"""
-    from core import pg_derivation
-
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setenv("KS_PG_DERIVE", "own")
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
-    before_mode = (pg_derivation._mode, pg_derivation._mode_error)
-    pg_derivation.configure_mode()
 
     store = DuckDBStore(db_path=tmp_path / "backfill.duckdb")
     await store.connect()
@@ -99,7 +94,6 @@ async def stores(tmp_path, monkeypatch):
     await _clean(pool)
     await pool.close()
     await store.close()
-    pg_derivation._mode, pg_derivation._mode_error = before_mode
 
 
 class TestTheRestoredCommentReachesPostgres:

@@ -269,7 +269,7 @@ class BackgroundScheduler:
     # Only one heavy job runs at a time to prevent compounding OOM.
     _HEAVY_JOBS = frozenset({
         "incremental_sync", "full_sync_weekly", "order_status_refresh",
-        "revenue_prediction_train", "meilisearch_sync", "warehouse_refresh",
+        "revenue_prediction_train", "meilisearch_sync",
     })
 
     def __init__(self):
@@ -325,12 +325,6 @@ class BackgroundScheduler:
 
         configure_modes(web=True)
 
-        # What a change of warehouse writer owes (DN-29), settled before a job
-        # is registered — web's boot sync has already done it, so this is a
-        # no-op there; a scheduler started elsewhere, or a boot whose settle
-        # raised, gets it here. Never fatal: the next derivation tick tries again.
-        await self._settle_warehouse_writer()
-
         # Register jobs
         await self._register_jobs()
 
@@ -340,24 +334,6 @@ class BackgroundScheduler:
         logger.info("Background scheduler started")
 
         await self._schedule_catchup_runs()
-
-    @staticmethod
-    async def _settle_warehouse_writer() -> None:
-        """`warehouse_cutover.settle_writer`, never raising.
-
-        Without a store under KS_DUCKDB=off: the record is read from its
-        frozen copy in Postgres there and nothing is written (stage 5, PR-6)."""
-        from core import duckdb_switch, warehouse_cutover
-
-        try:
-            if duckdb_switch.is_off():
-                await warehouse_cutover.settle_writer(None)
-                return
-            from core.duckdb_store import get_store
-
-            await warehouse_cutover.settle_writer(await get_store())
-        except Exception as e:
-            logger.error("Warehouse writer not settled: %s", e, exc_info=True)
 
     async def _schedule_catchup_runs(self) -> None:
         """Queue a one-off run for any check whose due instant we missed.
@@ -629,29 +605,10 @@ class BackgroundScheduler:
                 coalesce=True,
             )
 
-        # Job: Warehouse refresh (every 2 minutes, picks up dirty flag)
-        # Decoupled from sync — sync writes Bronze + sets dirty flag,
-        # this job rebuilds Silver/Gold independently.
-        #
-        # DuckDB's derivation, so not registered while Postgres alone derives
-        # (KS_WRITE_WAREHOUSE=postgres, DN-29). The mode is cached before this
-        # runs, and never changes in a process.
-        from core import warehouse_cutover
-
-        if warehouse_cutover.duckdb_derives():
-            self._add_job(
-                job_id="warehouse_refresh",
-                name="Warehouse Refresh",
-                description="Rebuild Silver/Gold layers when dirty flag is set",
-                func=self._run_warehouse_refresh,
-                trigger=IntervalTrigger(minutes=2),
-                max_instances=1,
-                coalesce=True,
-            )
-        else:
-            logger.warning(
-                "warehouse_refresh not registered: KS_WRITE_WAREHOUSE=postgres — "
-                "Postgres alone derives Silver and Gold")
+        # `warehouse_refresh` (DuckDB's Silver/Gold rebuild every two minutes,
+        # off a dirty flag) was registered here until step 14's S14-15. It was
+        # not registered since step 13 (2026-10-09): Postgres alone derives,
+        # in `pg_warehouse_derive` below. The job name is not reused (rule 15).
 
         # Job: Daily DuckDB backup (A9-1) at a low-traffic hour.
         # Holds the store lock briefly for a consistent CHECKPOINT+copy.
@@ -783,23 +740,20 @@ class BackgroundScheduler:
             first_run_delay_s=90,
         )
 
-        # Job: Postgres derives on its own signal (chain 2, KS_PG_DERIVE=own).
-        # Registered only in that mode; under `piggyback` the DuckDB tick below
-        # keeps waking the Postgres rebuild exactly as before. Every minute,
-        # but it rebuilds only when something is owed, on the first tick of a
+        # Job: Postgres derives on its own signal (chain 2). Every minute, but
+        # it rebuilds only when something is owed, on the first tick of a
         # process, or on the hourly heartbeat — and never inside the floor.
-        from core import pg_derivation
-
-        if pg_derivation.owns():
-            self._add_job(
-                job_id="pg_warehouse_derive",
-                name="Postgres: derive Silver, Gold and the customer profile",
-                description="Rebuild the derived layers when meta.derivation_signal says one is owed",
-                func=self._run_pg_derivation,
-                trigger=IntervalTrigger(minutes=1),
-                max_instances=1,
-                coalesce=True,
-            )
+        # Registered unconditionally since step 14's S14-15, which removed
+        # `KS_PG_DERIVE` (`own` since step 13, a constant since S14-00).
+        self._add_job(
+            job_id="pg_warehouse_derive",
+            name="Postgres: derive Silver, Gold and the customer profile",
+            description="Rebuild the derived layers when meta.derivation_signal says one is owed",
+            func=self._run_pg_derivation,
+            trigger=IntervalTrigger(minutes=1),
+            max_instances=1,
+            coalesce=True,
+        )
 
         # Job: ClickHouse sync (hourly) — steps 5–6 of «Одна бронза»
         #
@@ -1344,215 +1298,10 @@ class BackgroundScheduler:
             logger.info("DuckDB checkpoint job complete")
             return result
 
-    async def _run_warehouse_refresh(self) -> Dict[str, Any]:
-        """Check dirty flag and rebuild Silver/Gold if needed."""
-        from core import warehouse_cutover
-
-        # Not registered under KS_WRITE_WAREHOUSE=postgres; this is the second
-        # half of that, for a call that finds its way here anyway. Before the
-        # peek: nothing of DuckDB's flag is read or cleared.
-        if not warehouse_cutover.duckdb_derives():
-            return {"skipped": True, "reason": "KS_WRITE_WAREHOUSE=postgres"}
-        # A no-op once settled; the retry for a boot whose settle raised, before
-        # the first rebuild could run over a flag the way back had to mark.
-        await self._settle_warehouse_writer()
-        async with self._heavy_job_lock:
-            from core.duckdb_store import get_store
-            store = await get_store()
-
-            # Peek, work, then clear — not consume-then-work. A kill or a
-            # shutdown cancellation between the two used to lose the ids: the
-            # next sync found the same rows unchanged and never re-marked
-            # them. The clear is keyed on the row's stamp, so a marker that
-            # landed during the refresh keeps the flag and the next tick
-            # redoes the union.
-            is_dirty, changed_ids, marked_at = await store.peek_warehouse_dirty()
-            if not is_dirty:
-                if BackgroundScheduler._pg_layers_pending:
-                    # A Postgres rebuild the floor deferred, with no new dirty
-                    # tick to carry it. Respects the floor itself.
-                    await self._rebuild_postgres_layers({"status": "success"})
-                    return {"skipped": True, "reason": "not dirty", "pg_layers": "deferred"}
-                return {"skipped": True, "reason": "not dirty"}
-
-            with correlation_context() as corr_id:
-                logger.info(f"Warehouse dirty — refreshing (changed_ids={'full' if changed_ids is None else len(changed_ids)})")
-                result = await store.refresh_warehouse_layers(
-                    trigger="dirty_flag",
-                    changed_order_ids=changed_ids,
-                )
-                # Regardless of status: the refresh's own error paths re-mark
-                # the flag when a retry is wanted (which bumps the stamp and
-                # makes this a no-op), and stay silent once the retry bound is
-                # spent — exactly the two outcomes consume-then-do produced,
-                # minus the lost ids on a kill.
-                await store.clear_warehouse_dirty(marked_at)
-                logger.info("Warehouse refresh complete")
-                # Step 05. Postgres computes the same Silver from its own
-                # landing. Outside every `store.connection()` block — the
-                # refresh has released the DuckDB lock by now, and holding it
-                # across a network round-trip is how a sync becomes a stall.
-                await self._rebuild_postgres_layers(result)
-                return result
-
-    # Postgres Silver and Gold are both rebuilt whole, so their cost does not
-    # shrink with the size of the change: 46,446 rows, 2.19 s, every time. The
-    # warehouse refresh fires as often as orders move, which on a busy
-    # afternoon is every two minutes — 720 rebuilds a day for tables nothing
-    # reads yet.
-    #
-    # A floor instead. Ten minutes keeps Postgres far closer to DuckDB than
-    # the daily reconciliation that compares them needs, at roughly a tenth of
-    # the work. Lower it with KS_PG_SILVER_INTERVAL_S when the read switch
-    # makes freshness matter.
-    # None, not 0.0: `time.monotonic()` counts from an arbitrary origin, which
-    # on a freshly booted host is a small number. Seeded with 0.0 the first
-    # rebuild after a restart compared `now - 0.0 < floor` and was skipped for
-    # ten minutes — on this laptop the origin is machine uptime and the bug was
-    # invisible, on a CI runner it fired immediately.
-    _pg_silver_last_at = None
-    # A rebuild the floor turned away. The dirty flag was already consumed by
-    # the tick that asked, so without this the change reached Postgres only
-    # with the *next* dirty tick past the floor — on a quiet night, hours
-    # later, while `KS_READ_GOLD=postgres` served the older Gold and the
-    # 07:30 comparison filed the gap as a CRITICAL about the data.
-    _pg_layers_pending = False
-
-    async def _rebuild_postgres_layers(self, refresh_result) -> None:
-        """Recompute `silver.orders`, then `gold.daily_revenue`. Never raises.
-
-        Same failure policy as the mirror, and the same reason: DuckDB is what
-        the business looks at, and a Postgres fault must not be able to break
-        the job that keeps it current. Rule 8 — the step leaves the system
-        working.
-
-        Skipped when the DuckDB refresh itself did not succeed. Rebuilding from
-        landing would still work, but reporting a fresh Postgres Silver beside
-        a failed DuckDB one invites reading the two as comparable when they are
-        not.
-
-        One floor covers both layers, and one call runs them in order. The
-        method was named for Silver alone until Gold joined it on 2026-08-27;
-        the shared name is the honest one, because there is exactly one moment
-        at which Postgres recomputes what it derives.
-        """
-        import os
-        import time
-
-        if (refresh_result or {}).get("status") == "error":
-            return
-
-        try:
-            from core.mirror_reconciliation import configured
-
-            if not configured():
-                return
-
-            floor = int(os.getenv("KS_PG_SILVER_INTERVAL_S", "600"))
-            now = time.monotonic()
-            last = BackgroundScheduler._pg_silver_last_at
-            if last is not None and now - last < floor:
-                # Deferred, not dropped: the refresh job runs it on the first
-                # tick past the floor even when nothing new is dirty.
-                BackgroundScheduler._pg_layers_pending = True
-                return
-
-            from core.pg_gold import rebuild_gold
-            from core.pg_silver import PG_LAYER_LOCK, rebuild_silver
-
-            # Owed until it succeeds: a rebuild that raises stays pending and
-            # is retried on the first tick past the floor, whether or not a new
-            # dirty tick arrives.
-            BackgroundScheduler._pg_layers_pending = True
-            try:
-                async with PG_LAYER_LOCK:
-                    await self._rebuild_pg_layers(rebuild_silver, rebuild_gold)
-                BackgroundScheduler._pg_layers_pending = False
-            finally:
-                # Stamped after the attempt, not before it: a rebuild that
-                # raised leaves `_pg_layers_pending` set, so it is retried on
-                # the first tick past the floor rather than on the next dirty
-                # tick past the floor.
-                BackgroundScheduler._pg_silver_last_at = time.monotonic()
-        except Exception as e:
-            # ERROR, not DEBUG. A mirror that fails quietly is the 2026-08-09
-            # shape, and the watermark it did not move is what Reconciliation A
-            # reads as "not rebuilt yet".
-            logger.error("Postgres layer rebuild failed: %s", e, exc_info=True)
-
-    async def _rebuild_pg_layers(self, rebuild_silver, rebuild_gold) -> None:
-        """The three derived layers, then the one shipped one, under
-        PG_LAYER_LOCK.
-
-        Gold reads the Silver that was just written, in the same tick and
-        from the same caller, so it can never aggregate a Silver the next
-        statement is about to replace. Not in its own job for the same
-        reason: two schedules would let Gold be built from a Silver one
-        interval stale, and the comparison would then be measuring the
-        gap between two of our own timers.
-
-        Order matters on failure too. Silver raising skips Gold, which is
-        what should happen — a Gold rebuilt over a stale Silver would
-        stamp a fresh watermark on a stale answer, and that reads clean.
-        """
-        from core import pg_derivation
-
-        # Under KS_PG_DERIVE=own the three derivations belong to
-        # `_run_pg_derivation`, on Postgres' own signal. Only the UTM ship
-        # stays on this tick, deliberately: it copies DuckDB's parse, and this
-        # is the one moment that parse is known to be finished. Moving it onto
-        # the Postgres signal would copy an empty table after a Sunday compact.
-        #
-        # THE COST OF THAT, STATED: under own, Silver and this ship run on two
-        # clocks, so a new order can reach `silver.orders` up to one floor
-        # before its `silver.order_utm` row, and /traffic files it through the
-        # COALESCE as unattributed/organic for those minutes. Under piggyback
-        # the same order was simply absent from Postgres for the same floor.
-        # Found reviewing #210 and accepted rather than patched: shipping on
-        # every DuckDB tick costs a ~220 ms global-lock read (measured on the
-        # 2026-09-17 backup, 33,203 rows) and a TRUNCATE that stalls /traffic
-        # every two minutes, and the real fix is step 9 — parsing UTM inside
-        # the Postgres derivation, where the two are one run's work. That is
-        # `KS_UTM_PARSE=postgres` (DN-19), under which the ship below stops.
-        if not pg_derivation.owns():
-            logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
-            logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
-            # And the витрина, from the same Silver in the same tick — one
-            # floor, one тик, Gold's own reasoning one consumer down.
-            from core.pg_vitrina import rebuild_customer_profile
-
-            logger.info(
-                "Rebuilding customer profile in Postgres: %s",
-                await rebuild_customer_profile(),
-            )
-        # And the UTM classification — shipped, not derived, because its body
-        # is a Python parser (revision 0018). It rides this floor rather than
-        # the hourly operational one because a stale row here does not read as
-        # missing data: it falls through the COALESCE to `organic`, and the
-        # paid/organic split moves in one store and not the other.
-        #
-        # **Last, and deliberately after the derivations.** Nothing in Postgres
-        # is computed from this level, so putting it between Silver and Gold —
-        # where it was first written — made a shipping fault cost the revenue
-        # Gold, which `/summary` and `/marketing` have read since 2026-08-28.
-        # The ordering rule above is about dependency, and this has none.
-        #
-        # **Not under `KS_UTM_PARSE=postgres`** (DN-19), where Postgres parses
-        # the table itself as the derivation's last step and a copy of
-        # DuckDB's would overwrite that parse — or, once DuckDB stops being
-        # derived, overwrite it with a frozen table and after the first Sunday
-        # compaction an empty one. That mode needs own, so under it the tick
-        # has nothing left to do in Postgres at all.
-        from core import pg_utm_parse
-
-        if not pg_utm_parse.parses_in_postgres():
-            from core.duckdb_store import get_store
-            from core.pg_order_utm import ship_order_utm
-
-            logger.info(
-                "Shipping order UTM to Postgres: %s",
-                await ship_order_utm(await get_store()),
-            )
+    # `_run_warehouse_refresh`, `_rebuild_postgres_layers` and
+    # `_rebuild_pg_layers` stood here until step 14's S14-15: DuckDB's
+    # warehouse tick, and the Postgres rebuild and UTM ship that rode it
+    # under `KS_PG_DERIVE=piggyback`. Neither ran since step 13.
 
     # Whether this process has derived yet. The first tick rebuilds regardless
     # of the signal: a deploy is exactly when an owed rebuild used to be lost.
@@ -1589,15 +1338,6 @@ class BackgroundScheduler:
 
         from core import pg_derivation as derivation
         from core.pg import get_pool, require_revision
-
-        if not derivation.owns():
-            return {"skipped": True, "reason": "KS_PG_DERIVE is not own"}
-        # The warehouse writer, once more (DN-29): under KS_WRITE_WAREHOUSE=
-        # postgres this is the only job that ticks, so a boot and a start whose
-        # settle raised — or whose resolve the ledger refused — are retried
-        # here rather than at the next restart, which, if it is the way back,
-        # would find no record and owe DuckDB nothing. A no-op once settled.
-        await self._settle_warehouse_writer()
 
         async def read_signal():
             pool = await get_pool()
@@ -1704,8 +1444,7 @@ class BackgroundScheduler:
         )
 
     async def _derive_pg_layers(self, pool, trigger: str) -> Dict[str, Any]:
-        """One whole derivation, then — under `KS_UTM_PARSE=postgres` — the UTM
-        parse, as its last step.
+        """One whole derivation, then the UTM parse, as its last step.
 
         **In its own try, after the journal row, and whatever the derivation
         did.** Nothing is computed from `silver.order_utm`, so nothing waits
@@ -1717,24 +1456,20 @@ class BackgroundScheduler:
         the derivation job"). So the derivation journals itself first, and
         the parse's failure is its own: recorded against `silver.order_utm`
         by the parse, judged by the canary through that row, and never the
-        derivation's verdict. Under `duckdb` this returns exactly what the
-        derivation returned.
+        derivation's verdict.
         """
         result = await self._derive_and_journal_pg_layers(pool, trigger)
-        utm = await self._parse_order_utm_in_postgres(pool)
-        if utm is not None:
-            result["order_utm"] = utm
+        result["order_utm"] = await self._parse_order_utm_in_postgres(pool)
         return result
 
     @staticmethod
-    async def _parse_order_utm_in_postgres(pool) -> Optional[Dict[str, Any]]:
-        """The incremental UTM parse, or None when Postgres does not parse it.
-        Never raises: the parse has written its failure into the watermark
-        before raising, and this is the ERROR line beside it."""
+    async def _parse_order_utm_in_postgres(pool) -> Dict[str, Any]:
+        """The incremental UTM parse. Never raises: the parse has written its
+        failure into the watermark before raising, and this is the ERROR line
+        beside it. (None until step 14's S14-15 under `KS_UTM_PARSE=duckdb`,
+        where Postgres did not parse the table.)"""
         from core import pg_utm_parse
 
-        if not pg_utm_parse.parses_in_postgres():
-            return None
         try:
             return await pg_utm_parse.parse_incremental_locked(pool)
         except Exception as e:  # noqa: BLE001 — see the docstring
@@ -2382,9 +2117,11 @@ class BackgroundScheduler:
                     evidence=evidence_for_agent(MIRROR_LAYER, issues, run_id=run_id),
                 )
             # A run marked the delivered pages the comparisons step 13
-            # retired were still reporting
-            # (`warehouse_cutover.note_comparisons_reported`) while they ran;
-            # none has run since step 13, and step 14's S14-12 deleted them.
+            # retired were still reporting while they ran; none has run since
+            # step 13, step 14's S14-12 deleted them, and S14-15 the marking
+            # (`warehouse_cutover`, `AlertGate.mark_delivered`). The marks
+            # already on `data/alert-gate-*.json` entries stay: the Gate keeps
+            # every entry's keys when it rewrites the file.
             # A run in which ClickHouse did not compare cannot announce what
             # only that comparison re-examines as resolved (OD-08) — the Gold
             # half's or the archive's.

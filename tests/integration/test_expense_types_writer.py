@@ -215,8 +215,7 @@ async def _full_sync(store, payload):
     async def _get_client():
         return client
 
-    with patch.object(sync_module, "get_async_client", new=_get_client), \
-         patch.object(store, "refresh_warehouse_layers", new=AsyncMock()):
+    with patch.object(sync_module, "get_async_client", new=_get_client):
         return await service.full_sync(days_back=30)
 
 

@@ -3,12 +3,12 @@
 Step 13 stops DuckDB deriving Silver, Gold and the UTM verdicts. Every door
 that read those tables with no read switch would, after the flip, answer from
 a Silver as old as the switch and after the first Sunday compaction from none —
-so each was ported or retired (`core.warehouse_cutover.OD10_DOORS`, which the
-walk in `tests/unit/test_warehouse_writer.py` keeps equal to what is left).
-The owner retired all of them, in one change. This file is what keeps them
-retired: a route that comes back under the same path, a tool the model is
-offered again, fails here — and the walk would put the door back on the list
-the switch waits for.
+so each was ported or retired (`core.warehouse_cutover.OD10_DOORS`, which a
+walk in `tests/unit/test_warehouse_writer.py` kept equal to what was left,
+until step 14's S14-15 deleted the switch, the list and the walk). The owner
+retired all of them, in one change. This file is what keeps them retired: a
+route that comes back under the same path, a tool the model is offered
+again, fails here.
 """
 from __future__ import annotations
 

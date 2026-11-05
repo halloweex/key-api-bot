@@ -27,10 +27,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-# The ownership lever since step 14's S14-04 (a module with no imports of its
-# own: this one must not import the latch module, `test_chain_latch.py`).
-from core.rollback_lever import ROLLBACK_LEVER
-
 logger = logging.getLogger(__name__)
 
 # ─── Tunables ───────────────────────────────────────────────────────────────
@@ -705,27 +701,17 @@ def check_derivation_marks(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return []
 
 
-def check_derivation_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `derivation` block: a KS_PG_DERIVE value web did not understand.
-
-    Not a liveness signal, so an absent block is not a failure — a web image
-    older than the block publishes none. What it catches is a typo: web falls
-    back to piggyback, and without this the only trace is one log line while
-    whoever set the variable believes the own derivation is running.
-    """
-    block = (payload or {}).get("derivation")
-    if isinstance(block, dict) and block.get("error"):
-        return [("derivation_mode_invalid",
-                 f"derivation: {block['error']}")]
-    return []
+# `check_derivation_mode` (`derivation_mode_invalid`, a KS_PG_DERIVE web did
+# not understand) stood here until step 14's S14-15 removed the variable and
+# the `derivation` block's `mode` and `error` with it.
 
 
 def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the `read_fallback_mode` block: a KS_READ_FALLBACK web did not
     understand (DN-20a).
 
-    Warn, as for the derivation mode: web runs as `duckdb`, which is what it
-    did before the variable existed, so nothing is failing — but whoever set
+    Warn: web runs as `duckdb`, which is what it did before the variable
+    existed, so nothing is failing — but whoever set
     it believes fallbacks are refused, and after step 13 that belief is the
     difference between an error page and frozen numbers. It must not stop web
     instead: web is the only process that syncs orders. An absent block is
@@ -1033,151 +1019,12 @@ def check_read_refusals(
     return [("read_refused", READ_REFUSED_LINE + _surfaces(recent))]
 
 
-def check_warehouse_writer_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `warehouse_writer_mode` block: a KS_WRITE_WAREHOUSE web did
-    not understand (DN-28).
-
-    Warn, the read-fallback mode's reason: web runs as `duckdb`, so before a
-    flip nothing is failing — but whoever set `postgress` believes DuckDB has
-    stopped. After a flip the same typo is the way back (a full DuckDB
-    rebuild, the checks held), and web then also publishes `value_understood`
-    under `preconditions_unmet`, which `check_warehouse_preconditions` pages
-    with the way-back lever. An absent block is not a failure; an older web
-    publishes none.
-    """
-    block = (payload or {}).get("warehouse_writer_mode")
-    if isinstance(block, dict) and block.get("error"):
-        return [("warehouse_mode_invalid",
-                 f"warehouse writer: {block['error']}")]
-    return []
-
-
-def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `warehouse_writer_mode` block: KS_WRITE_WAREHOUSE=postgres
-    with a precondition of the switch unmet (DN-29).
-
-    Pages, unlike the typo: web runs as duckdb (OD-09 (b) — never a raise, it
-    is the only syncer), so the numbers keep coming — but somebody deployed
-    the switch that retires DuckDB's derivation, the owner's decision behind
-    it has not taken effect, and the flip is the moment to hear that, not the
-    next audit. And after a flip it is the way back itself: a full DuckDB
-    rebuild, a new `since` on the next start under postgres, the warehouse
-    group closed again — which is why the lever says so first. So is a value
-    web did not understand, after a flip (`value_understood`): the same way
-    back, and the message names the value as web read it. The keys name what
-    to do; the details are on the admin status page. An absent block or field
-    is not a failure; an older web publishes none."""
-    block = (payload or {}).get("warehouse_writer_mode")
-    if not isinstance(block, dict):
-        return []
-    unmet = block.get("preconditions_unmet")
-    if not isinstance(unmet, list) or not unmet:
-        return []
-    if _way_back_refused(block):
-        # Web did not run as duckdb: `check_warehouse_way_back_refused` says
-        # what it did instead, and names these keys in its message.
-        return []
-    value = block.get("value")
-    value = value if isinstance(value, str) and value else "postgres"
-    return [("warehouse_preconditions_unmet",
-             f"KS_WRITE_WAREHOUSE={value} ran as duckdb, unmet: "
-             + ", ".join(str(key) for key in unmet))]
-
-
-def _way_back_refused(block: dict) -> "list[str]":
-    chains = block.get("way_back_refused")
-    if not isinstance(chains, list):
-        return []
-    return [str(chain) for chain in chains if chain]
-
-
-def check_warehouse_way_back_refused(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `warehouse_writer_mode` block: a start that would have run as
-    duckdb after a flip — the way back — stayed postgres, because a latched
-    write chain owns a table DuckDB derives from (chain 5's classification,
-    chain 3's orders).
-
-    Pages: either somebody asked for the way back and did not get it, or a
-    start with a precondition unmet took it on its own; both need a person,
-    and the lever is not the way back's. It was to copy the chains back
-    first; since step 14's S14-04 nothing does, and the action names
-    `core.rollback_lever.ROLLBACK_LEVER`.
-    Web serves. Postgres derives only on its own signal: under any other
-    KS_PG_DERIVE its rebuild rides the DuckDB tick, which a `postgres` start
-    does not run, so then NOTHING derives and the message says so — read
-    from the `derivation` block, since a way back taken by unsetting the
-    variable evaluates no precondition. An absent block or field is not a
-    failure; an older web publishes none."""
-    block = (payload or {}).get("warehouse_writer_mode")
-    if not isinstance(block, dict):
-        return []
-    chains = _way_back_refused(block)
-    if not chains:
-        return []
-    value = block.get("value")
-    value = value if isinstance(value, str) and value else "duckdb"
-    unmet = block.get("preconditions_unmet")
-    unmet = ("; unmet: " + ", ".join(str(key) for key in unmet)
-             if isinstance(unmet, list) and unmet else "")
-    derivation = (payload or {}).get("derivation")
-    derive = derivation.get("mode") if isinstance(derivation, dict) else None
-    if derive == "own":
-        who = "; Postgres derives"
-    elif isinstance(derive, str) and derive:
-        who = f"; NOTHING derives (KS_PG_DERIVE={derive}, not own)"
-    else:
-        who = ""
-    return [("warehouse_way_back_refused",
-             f"KS_WRITE_WAREHOUSE={value} stayed postgres: write chain(s) "
-             + ", ".join(chains) + " own what DuckDB derives from" + who + unmet)]
-
-
-# How long the way back from KS_WRITE_WAREHOUSE=postgres may hold the DuckDB
-# checks down before we say so. It ends in its first full DuckDB tick — a
-# rebuild and a parse, minutes even after a compaction emptied the verdicts —
-# so two hours is not a slow way back: it is a UTM parse raising tick after
-# tick, or a full tick whose parse raised with no dirty tick after it.
-WAREHOUSE_HOLD_WARN_S = 2 * 3600
-
-
-def check_warehouse_hold(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `warehouse_writer_mode` block: the way back's hold standing
-    past `WAREHOUSE_HOLD_WARN_S` (DN-29).
-
-    Warn: web serves and DuckDB derives — what is down is the five DuckDB
-    checks over Silver, Gold and UTM and the three mirror comparisons, which
-    the hold keeps down until a full tick validates and a UTM parse finishes.
-    Nothing else says so: the tick logs a failing parse at WARNING and still
-    reports success. An absent block or field is not a failure; an older web
-    publishes none."""
-    block = (payload or {}).get("warehouse_writer_mode")
-    if not isinstance(block, dict) or block.get("held") is not True:
-        return []
-    age = block.get("held_for_s")
-    if not isinstance(age, int) or isinstance(age, bool) or age < WAREHOUSE_HOLD_WARN_S:
-        return []
-    return [("warehouse_hold_stuck",
-             f"warehouse way back: the DuckDB checks over Silver, Gold and UTM "
-             f"held down for {_format_age(age)}")]
-
-
-def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `utm_parse` block: a KS_UTM_PARSE web ran as `duckdb` instead
-    of what was set — a value it did not understand, or `postgres` without
-    KS_PG_DERIVE=own (DN-19).
-
-    Warn, the derivation mode's reason: web runs as `duckdb`, which is what it
-    did before the variable existed, so /traffic is fed exactly as before —
-    but whoever set it believes Postgres parses the table, and a soak believed
-    to be running is not. It must not stop web instead: web is the only
-    process that syncs orders. An absent block is not a failure; an older web
-    publishes none.
-    """
-    block = (payload or {}).get("utm_parse")
-    if isinstance(block, dict) and block.get("error"):
-        return [("utm_parse_mode_invalid",
-                 f"UTM parse: {block['error']}")]
-    return []
+# Step 13's switch was judged here until step 14's S14-15 deleted it
+# (`core/warehouse_cutover.py`) with the `warehouse_writer_mode` and
+# `utm_parse` blocks of /api/health: `warehouse_mode_invalid`,
+# `warehouse_preconditions_unmet`, `warehouse_way_back_refused`,
+# `warehouse_hold_stuck` and `utm_parse_mode_invalid`. A step-14 web
+# publishes none of them, and the names are not reused (rule 15).
 
 
 # ─── The week of silence (OD-17 (a)) ────────────────────────────────────────
@@ -1250,8 +1097,8 @@ def check_duckdb_off_held_back(payload: Optional[dict]) -> "list[tuple[str, str]
     CRITICAL, titled for what it is: web runs `on` — the owner's OD-S5-1 (a),
     never a stop, web is the only syncer — so the site serves and orders come
     in, but somebody set off believing the week of silence starts, and it has
-    not: web opens the file. Like `warehouse_preconditions_unmet`, the switch
-    somebody deployed did not happen. The keys name what to meet; the details
+    not: web opens the file. Like step 13's held-back switch was (until step
+    14's S14-15), the switch somebody deployed did not happen. The keys name what to meet; the details
     are in web's log, since this endpoint is public. Held for the life of the
     web process, so the page stands until a restart that meets them. An empty
     list is off holding; an absent block or field is not a failure — an
@@ -1427,17 +1274,8 @@ async def run_canary(
         if alerting_failures and severity == "ok":
             severity = "warn"
 
-        # A derivation setting web could not read. Warn: nothing is broken —
-        # piggyback is today's behaviour — but a soak believed to be running
-        # is not.
-        derivation_failures = check_derivation_mode(payload)
-        for key, message in derivation_failures:
-            fail(key, message)
-        if derivation_failures and severity == "ok":
-            severity = "warn"
-
-        # A KS_READ_FALLBACK web could not read. Warn, the derivation mode's
-        # reason: today's behaviour is running, and somebody believes it is not.
+        # A KS_READ_FALLBACK web could not read. Warn: today's behaviour is
+        # running, and somebody believes it is not.
         fallback_mode_failures = check_read_fallback_mode(payload)
         for key, message in fallback_mode_failures:
             fail(key, message)
@@ -1469,46 +1307,6 @@ async def run_canary(
         for key, message in refused_failures:
             fail(key, message)
         if refused_failures and severity == "ok":
-            severity = "warn"
-
-        # A KS_WRITE_WAREHOUSE web could not read. Warn, for the same reason:
-        # duckdb is running, and somebody believes something else is.
-        warehouse_mode_failures = check_warehouse_writer_mode(payload)
-        for key, message in warehouse_mode_failures:
-            fail(key, message)
-        if warehouse_mode_failures and severity == "ok":
-            severity = "warn"
-
-        # KS_WRITE_WAREHOUSE=postgres held back by an unmet precondition.
-        # Pages: the switch somebody deployed did not happen (OD-09 (b)).
-        warehouse_unmet = check_warehouse_preconditions(payload)
-        for key, message in warehouse_unmet:
-            fail(key, message)
-        if warehouse_unmet:
-            severity = "critical"
-
-        # The way back refused while a latched write chain owns a table
-        # DuckDB derives from: web stayed postgres. Pages.
-        refused_way_back = check_warehouse_way_back_refused(payload)
-        for key, message in refused_way_back:
-            fail(key, message)
-        if refused_way_back:
-            severity = "critical"
-
-        # The way back holding the DuckDB checks down for hours. Warn: web
-        # serves and DuckDB derives, and the checks are what is missing.
-        hold_failures = check_warehouse_hold(payload)
-        for key, message in hold_failures:
-            fail(key, message)
-        if hold_failures and severity == "ok":
-            severity = "warn"
-
-        # A KS_UTM_PARSE web ran as duckdb instead. Warn, for the same reason:
-        # the copy /traffic has always had is still shipped.
-        utm_mode_failures = check_utm_parse_mode(payload)
-        for key, message in utm_mode_failures:
-            fail(key, message)
-        if utm_mode_failures and severity == "ok":
             severity = "warn"
 
         # Web opened the DuckDB file under KS_DUCKDB=off. Pages: the week of
@@ -1624,12 +1422,6 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("health_status", "/api/health names what degraded; a restart won't fix a migration"),
     ("cert_expiring", "Check certbot on the host — auto-renew broke"),
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
-    ("warehouse_preconditions_unmet",
-     "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
-    # Since step 14 nothing copies a chain back (S14-04): the way back from
-    # step 13 is an image from before step 14, and only after its checks.
-    ("warehouse_way_back_refused", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
-    # After step 13's: when it is held, `warehouse_postgres` is its symptom.
     # The host's sidecars read `.env`, not the verdict, so a hold also stops
     # the nightly snapshot and the Sunday compaction of the file web writes
     # (core/duckdb_off.py) — a state to leave, by either way out.
@@ -1648,17 +1440,11 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
     ("read_fallback_mode_invalid",
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
-    ("warehouse_mode_invalid",
-     "Set KS_WRITE_WAREHOUSE to duckdb or postgres in .env, then recreate web"),
-    ("warehouse_hold_stuck",
-     "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
     ("backup_evidence_stale",
      "On the host, run the script the line names; it writes its marker in data/ "
      "on success only, and the next probe clears this"),
     ("report_ledger_pending",
      "Nothing to resend: the next daily tick drains data/report-ledger-pending into the ledger, under either flag; grep -i 'report ledger' in web's log"),
-    ("utm_parse_mode_invalid",
-     "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     ("duckdb_mode_invalid",
      "Set KS_DUCKDB to on or off in .env, then recreate web"),
     # Last: when an engine is down its own key names the cause, and a fallback
@@ -1705,8 +1491,6 @@ _OUTAGE_KEYS: tuple[str, ...] = ("health_unreachable", "health_http", "health_st
 
 # A CRITICAL that is not an outage, named for what it is. First match wins.
 _CRITICAL_TITLES: tuple[tuple[str, str], ...] = (
-    ("warehouse_preconditions_unmet", "Warehouse switch held back"),
-    ("warehouse_way_back_refused", "Warehouse way back refused"),
     ("duckdb_off_held_back", "DuckDB switch held back"),
     ("duckdb_opened_while_off", "DuckDB opened while off"),
 )

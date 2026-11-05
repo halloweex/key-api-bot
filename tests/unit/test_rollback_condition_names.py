@@ -69,15 +69,26 @@ ALL_RETIRED = frozenset().union(*ROLLBACK_RETIRED.values())
 
 
 class TestTheLiteralIsTheRollbackImages:
-    def test_the_sources_are_gone_and_the_mark_stays(self):
+    def test_the_sources_are_gone_and_the_marks_stay_on_disk(self):
         """The two sets' sources went with the DuckDB scan in S14-14; the
-        literal is what they computed. `COMPARISON_MARK` stays until S14-15,
-        and is one of the marks the images before step 14 read as retired."""
-        from core import pg_orders_write, warehouse_cutover
+        literal is what they computed. `COMPARISON_MARK` went in S14-15 with
+        `core/warehouse_cutover.py` and the Gate's marks API; the marks the
+        images before step 14 read as retired stay on the gate files' entries
+        (`tests/unit/test_step13_as_code.py`, `TestTheMarksSurviveTheGate`),
+        and nothing in this build sets one."""
+        import importlib.util
 
-        assert not hasattr(warehouse_cutover, "retired_conditions")
+        from core import alerting, pg_orders_write
+
+        assert importlib.util.find_spec("core.warehouse_cutover") is None
         assert not hasattr(pg_orders_write, "retired_conditions")
-        assert warehouse_cutover.COMPARISON_MARK in ROLLBACK_MARKS
+        assert not hasattr(alerting, "mark_delivered")
+        assert not hasattr(alerting.AlertGate, "mark_delivered")
+        for tree in ("core", "web", "bot"):
+            for path in sorted((ROOT / tree).rglob("*.py")):
+                text = path.read_text(encoding="utf-8")
+                for mark in ROLLBACK_MARKS:
+                    assert f'"{mark}"' not in text, (path, mark)
 
     def test_the_retired_group_is_paged_by_nothing(self):
         """`dq:reconciliation` was the group of the 05:30 job's DuckDB arm

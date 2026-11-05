@@ -55,8 +55,11 @@ REMEDIATION_REWRITTEN = ("chain_latch_disagrees",)
 # `chain_shipper_overwrote` (the second) went in S14-12 with their emitters,
 # the daily comparisons against DuckDB (rule 8); `chain_latch_disagrees` moved
 # to the chain invariants with its lever (decision 12).
-CLEARS_REWRITTEN = ("warehouse_way_back_refused",)
-CANARY_REWRITTEN = ("warehouse_way_back_refused",)
+# `warehouse_way_back_refused` was in both until step 14's S14-15 deleted it
+# with step 13's switch, its emitter (rule 8); `test_step13_as_code.py` holds
+# that it is gone, and rule 15's literal keeps the name from being reused.
+CLEARS_REWRITTEN: tuple = ()
+CANARY_REWRITTEN: tuple = ()
 # Rewritten too, to say what is true without the copy-back, with no lever of
 # their own about a chain's ownership. `shadow_missing_in_duckdb` was the one
 # until step 14's S14-10 deleted it with `compare_shadow`, its emitter
@@ -290,18 +293,11 @@ class TestEveryLeverNamesTheOneLine:
         assert line.startswith(ROLLBACK_LEVER), line
         assert len(line) <= LINE_MAX and "\n" not in line
 
-    @pytest.mark.parametrize("condition", CLEARS_REWRITTEN)
-    def test_what_clears_it(self, condition):
-        from core.alerting import REGISTRY
-
-        assert ROLLBACK_LEVER in REGISTRY[condition].clears
-
-    @pytest.mark.parametrize("key", CANARY_REWRITTEN)
-    def test_the_canary_action(self, key):
-        from bot import canary
-
-        action = dict(canary._ACTIONS)[key]
-        assert ROLLBACK_LEVER in action and len(action) <= LINE_MAX, action
+    # `test_what_clears_it` and `test_the_canary_action` held the registry's
+    # `clears` and the canary's action for `warehouse_way_back_refused` to
+    # the lever, the one condition in `CLEARS_REWRITTEN`/`CANARY_REWRITTEN`;
+    # step 14's S14-15 deleted it with step 13's switch, and the lists are
+    # empty.
 
     def test_the_soak_script_notes(self):
         script = (ROOT / "deploy" / "stage4_soak.sh").read_text(encoding="utf-8")
@@ -337,11 +333,8 @@ class TestNoConditionWentWithTheTexts:
 
         assert REGISTRY[condition].kind is Kind.CONDITION
 
-    @pytest.mark.parametrize("key", CANARY_REWRITTEN)
-    def test_still_a_canary_key(self, key):
-        from bot import canary
-
-        assert key in {k for k, _ in canary._ACTIONS}
+    # `test_still_a_canary_key` (over `CANARY_REWRITTEN`, empty since S14-15)
+    # stood here.
 
     @pytest.mark.parametrize("condition", REMEDIATION_REWRITTEN + TOUCHED_ONLY)
     def test_still_a_remediation_entry_of_its_own(self, condition):

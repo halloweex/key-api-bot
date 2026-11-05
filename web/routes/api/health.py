@@ -46,26 +46,20 @@ async def _mirror_freshness() -> "dict | None":
             from core.mirror_reconciliation import WATCHED_MIRRORS, fetch_mirror_freshness
             from core.pg import get_pool
 
-            # Under KS_PG_DERIVE=own the derived layers are watched too, with
-            # the limit declared here: a derivation that simply stops being
-            # triggered raises nothing anywhere, and only its watermarks age.
-            owned = pg_derivation.owns()
-            # And under KS_UTM_PARSE=postgres (which needs own) the UTM table,
-            # whose watermark is then the parse's liveness stamp rather than a
-            # ship's (DN-19): the derivation's last step, in a try of its own,
-            # so it can stop while Silver and Gold stay fresh. Under the
-            # default the row is the ship's and is judged by the daily
-            # comparison, as before.
-            parsed = pg_utm_parse.parses_in_postgres()
-            tables = (WATCHED_MIRRORS
-                      + (pg_derivation.DERIVED_TABLES if owned else ())
-                      + ((pg_utm_parse.UTM_TABLE,) if parsed else ()))
+            # The derived layers are watched too, with the limit declared
+            # here: a derivation that simply stops being triggered raises
+            # nothing anywhere, and only its watermarks age. And the UTM
+            # table, whose watermark is the parse's liveness stamp (DN-19):
+            # the derivation's last step, in a try of its own, so it can stop
+            # while Silver and Gold stay fresh. Both unconditionally since
+            # step 14's S14-15, which removed KS_PG_DERIVE and KS_UTM_PARSE
+            # (`own` and `postgres` since step 13).
+            tables = (WATCHED_MIRRORS + pg_derivation.DERIVED_TABLES
+                      + (pg_utm_parse.UTM_TABLE,))
             data = await fetch_mirror_freshness(await get_pool(), tables=tables)
-            if owned:
-                for table in pg_derivation.DERIVED_TABLES:
-                    data[table]["max_age_s"] = pg_derivation.DERIVED_MAX_AGE_S
-            if parsed:
-                data[pg_utm_parse.UTM_TABLE]["max_age_s"] = pg_utm_parse.MAX_AGE_S
+            for table in pg_derivation.DERIVED_TABLES:
+                data[table]["max_age_s"] = pg_derivation.DERIVED_MAX_AGE_S
+            data[pg_utm_parse.UTM_TABLE]["max_age_s"] = pg_utm_parse.MAX_AGE_S
         except Exception as e:
             # A host with no Postgres configured raises here on every call, and
             # that is not an error worth a warning every minute.
@@ -348,46 +342,12 @@ async def _catalogue_sync_step() -> "dict | None":
         return None
 
 
-def _warehouse_writer_mode() -> dict:
-    """KS_WRITE_WAREHOUSE as this process understood it at start (DN-28,
-    DN-29): the value as read, the mode it runs, the error when the value was
-    not understood and ran as duckdb, and — when `postgres` was asked for and
-    ran as duckdb, or when a value not understood took the way back after a
-    flip (`value_understood`) — the KEYS of the preconditions unmet. Keys, not
-    details: this endpoint is public, and a detail quotes the environment;
-    the details are on `/api/warehouse/status` and in the log. `held` is the
-    way back still owed its first validated full DuckDB tick, or the UTM parse
-    that finishes after it, and `held_for_s` how long that has stood (None
-    when not held) — the canary warns on a hold that outlives what a way back
-    takes. `reclassify_needed` says DuckDB's UTM verdicts were found empty on
-    it. `way_back_refused` names the latched write chains for which a start
-    that would have run as duckdb stayed postgres instead (chain names, no
-    detail). Local state, no I/O. Judged by the canary."""
-    from core import warehouse_cutover
-
-    return {"mode": warehouse_cutover.mode(), "value": warehouse_cutover.value(),
-            "error": warehouse_cutover.mode_error(),
-            "preconditions_unmet": [u.key for u in warehouse_cutover.preconditions_unmet()],
-            "held": warehouse_cutover.held(),
-            "held_for_s": warehouse_cutover.held_for_s(),
-            "reclassify_needed": warehouse_cutover.reclassify_needed(),
-            "way_back_refused": list(warehouse_cutover.way_back_refused())}
-
-
-def _derivation_mode() -> dict:
-    """KS_PG_DERIVE as this process understood it at start. Local state, no I/O."""
-    from core import pg_derivation
-
-    return {"mode": pg_derivation.mode(), "error": pg_derivation.mode_error()}
-
-
-def _utm_parse_mode() -> dict:
-    """KS_UTM_PARSE as this process understood it at start, and the error when
-    it ran as `duckdb` instead of what was set — an unknown value, or
-    `postgres` without KS_PG_DERIVE=own (DN-19). Local state, no I/O."""
-    from core import pg_utm_parse
-
-    return {"mode": pg_utm_parse.mode(), "error": pg_utm_parse.mode_error()}
+# `_warehouse_writer_mode`, `_derivation_mode` and `_utm_parse_mode` stood
+# here until step 14's S14-15: the `warehouse_writer_mode` and `utm_parse`
+# blocks and the `derivation` block's `mode` and `error` — KS_WRITE_WAREHOUSE,
+# KS_UTM_PARSE and KS_PG_DERIVE as this process understood them, constants
+# since S14-00 and read by nothing since S14-15. The canary's checks of them
+# went in the same change.
 
 
 def _backups() -> "dict | None":
@@ -429,17 +389,15 @@ async def _dropped_marks() -> dict:
     The canary judges the pair, not the count: a drop the next rebuild will
     cover is not a finding, a drop older than any rebuild should take is.
 
-    Both null when it is not a question — under piggyback nothing marks and
-    nothing heals, so a count left over from an earlier soak would page for
-    ever — and when Postgres cannot be read. A signal that has never dropped a
-    mark has no row, and that is a count of 0.
+    Both null when Postgres cannot be read. A signal that has never dropped a
+    mark has no row, and that is a count of 0. (Null under KS_PG_DERIVE=
+    piggyback too, where nothing marked, until step 14's S14-15 removed the
+    variable.)
     """
     from datetime import datetime, timezone
 
     from core import pg_derivation
 
-    if not pg_derivation.owns():
-        return dict(_NOT_ASKED)
     now = time.time()
     async with _marks_cache_lock:
         if now < _marks_cache["expires_at"]:
@@ -471,23 +429,21 @@ def _signal_reads() -> dict:
     """`signal_unreadable_ticks`: consecutive ticks of this process that could
     not read `meta.derivation_signal` (DN-05a). Local state, no I/O — the one
     number in this block that must answer while Postgres cannot, because that
-    is when it is not zero. Null under piggyback, where the job that counts is
-    not registered and a zero would claim a watch nobody keeps. Web pages on it
-    itself (`warehouse_pg:signal_unreadable`); it is published so that the
-    minutes before the page, and a page that could not be delivered, are
-    visible from outside."""
+    is when it is not zero. Web pages on it itself
+    (`warehouse_pg:signal_unreadable`); it is published so that the minutes
+    before the page, and a page that could not be delivered, are visible from
+    outside. (Null under KS_PG_DERIVE=piggyback, where the job that counts was
+    not registered, until step 14's S14-15 removed the variable.)"""
     from core import pg_derivation
 
-    if not pg_derivation.owns():
-        return {"signal_unreadable_ticks": None}
     return {"signal_unreadable_ticks": pg_derivation.signal_unreadable_ticks()}
 
 
 async def _derivation_block() -> dict:
-    """The `derivation` block: the mode, its error and the unreadable-signal
-    count, which are local state, plus the two numbers in it that have to be
-    read out of Postgres."""
-    return {**_derivation_mode(), **_signal_reads(), **await _dropped_marks()}
+    """The `derivation` block: the unreadable-signal count, which is local
+    state, plus the two numbers in it that have to be read out of Postgres.
+    It led with `mode` and `error` (KS_PG_DERIVE) until step 14's S14-15."""
+    return {**_signal_reads(), **await _dropped_marks()}
 
 
 def _duckdb_off() -> bool:
@@ -682,8 +638,6 @@ async def health_check(request: Request):
         "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
         "duckdb_switch": _duckdb_switch(),
-        "warehouse_writer_mode": _warehouse_writer_mode(),
-        "utm_parse": _utm_parse_mode(),
         "buyer_sync": await _buyer_sync_block(),
         "backups": _backups(),
     }

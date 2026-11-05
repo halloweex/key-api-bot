@@ -81,10 +81,9 @@ class MirrorFreshness(BaseModel):
     max_age_s: Optional[int] = Field(
         None,
         description="The age limit this table is judged by, when web declares one. "
-        "Declared for the tables Postgres derives on its own signal, and for "
-        "silver.order_utm once Postgres parses it (KS_UTM_PARSE=postgres), so "
-        "the watchdog's list switches with those flags instead of being kept "
-        "in a second container.",
+        "Declared for the tables Postgres derives on its own signal and for "
+        "silver.order_utm, which it parses, so the watchdog's limits are "
+        "web's and not kept in a second container.",
     )
 
 
@@ -194,18 +193,15 @@ class HealthResponse(BaseModel):
     derivation: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "Who derives Postgres' Silver and Gold: `mode` is piggyback or own, "
-            "and `error` names a KS_PG_DERIVE value that was not understood and "
-            "fell back to piggyback. Judged by the canary, because a typo "
-            "otherwise leaves one log line and an operator believing the own "
-            "derivation is running. `marks_dropped_unhealed` counts the "
-            "derivation marks dropped since a validated rebuild last covered "
-            "them, and `last_mark_drop_age_s` is how long ago the latest was "
-            "dropped while that count is above zero — both null under "
-            "piggyback or when Postgres cannot be read. "
-            "`signal_unreadable_ticks` counts the consecutive ticks of this "
-            "process that could not read the derivation's signal; web pages on "
-            "the fifth itself. Null under piggyback."
+            "The Postgres derivation's own signal (`meta.derivation_signal`): "
+            "`marks_dropped_unhealed` counts the derivation marks dropped "
+            "since a validated rebuild last covered them, and "
+            "`last_mark_drop_age_s` is how long ago the latest was dropped "
+            "while that count is above zero — both null when Postgres cannot "
+            "be read. `signal_unreadable_ticks` counts the consecutive ticks "
+            "of this process that could not read the signal; web pages on the "
+            "fifth itself. `mode` and `error` (KS_PG_DERIVE) went in step 14's "
+            "S14-15."
         ),
     )
     read_fallbacks: Optional[Dict[str, Dict[str, Any]]] = Field(
@@ -261,30 +257,6 @@ class HealthResponse(BaseModel):
             "coherence verdict web found unmet at its start, so it ran on "
             "(paged CRITICAL as duckdb_off_held_back), and null before any "
             "verdict. Keys only, never the details."
-        ),
-    )
-    warehouse_writer_mode: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "KS_WRITE_WAREHOUSE as understood at start (DN-28, DN-29): "
-            "`value` as read, `mode` as run — postgres only when every "
-            "precondition of the switch held — `error` naming a value that "
-            "was not understood and ran as duckdb, `preconditions_unmet` the "
-            "keys of what held postgres back (the canary pages on it), `held` "
-            "while the way back from postgres awaits its first validated full "
-            "DuckDB tick, and `reclassify_needed` when DuckDB's UTM verdicts "
-            "were found empty on it; judged by the canary."
-        ),
-    )
-    utm_parse: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Who writes Postgres' silver.order_utm: `mode` is KS_UTM_PARSE as "
-            "understood at start — duckdb, a copy of DuckDB's parse, or "
-            "postgres, parsed in Postgres as the derivation's last step — and "
-            "`error` names a value that ran as duckdb instead: one not "
-            "understood, or postgres without KS_PG_DERIVE=own. Judged by the "
-            "canary (DN-19)."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

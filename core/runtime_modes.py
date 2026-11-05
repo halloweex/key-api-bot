@@ -5,7 +5,8 @@ to come before the first code path that consults it. `KS_PG_DERIVE` used to be
 read in `BackgroundScheduler.start`, and web's startup runs the boot sync
 (`init_and_sync`) before it starts the scheduler. The boot incremental sync
 therefore landed orders in Postgres while `owns()` still answered False, and
-`mark_if_owned` skipped in silence. The first derivation rebuilt over those
+`mark_if_owned` skipped in silence (both went in step 14's S14-15: Postgres
+derives on its own signal unconditionally). The first derivation rebuilt over those
 rows anyway, so no number was ever wrong — but any detector pairing writes with
 marks would have read the boot as marks lost, and every cached mode added after
 this one would have inherited the same hole.
@@ -46,15 +47,16 @@ def configure_modes(*, web: bool = False) -> Dict[str, str]:
 
     **Since S14-00 every mode configured here is a constant** — the value
     production published on 2026-10-21 (`.planning/DUCKDB_EXIT_STEP14_PLAN.md`
-    H0): `KS_PG_DERIVE` own, `KS_READ_FALLBACK` off, `KS_UTM_PARSE` postgres,
-    `KS_WRITE_WAREHOUSE` postgres, and every write chain on Postgres. Each
-    `configure_mode()` still runs, so the health blocks keep their shape, and
-    each module's line goes with the module (S14-15, S14-16, S14-18).
+    H0). Since S14-15 three of them have no reader left and are not
+    configured at all: `KS_PG_DERIVE` (Postgres derives on its own signal,
+    `core.pg_derivation`), `KS_UTM_PARSE` (Postgres parses the UTM verdicts,
+    `core.pg_utm_parse`) and `KS_WRITE_WAREHOUSE` (step 13's switch, whose
+    module `core/warehouse_cutover.py` is deleted). `KS_DUCKDB` and
+    `KS_READ_FALLBACK` remain, each going with its module (S14-18, S14-16).
     `tests/unit/test_step14_prod_parity.py` holds every answer to what the
     code before S14-00 gave under production's environment and markers.
     """
-    from core import (chain_latch, duckdb_switch, pg_derivation, pg_utm_parse,
-                      read_fallback, warehouse_cutover)
+    from core import chain_latch, duckdb_switch, read_fallback
 
     # Not in the returned mapping: that maps an environment variable to the
     # value read from it, and the latch is read from disk. Since S14-00 it
@@ -67,15 +69,11 @@ def configure_modes(*, web: bool = False) -> Dict[str, str]:
     # `KS_DUCKDB` first: whether this process may open the DuckDB file at all.
     # In web, never (S14-00). Never raises — see `core/duckdb_switch.py`.
     #
-    # The other four are constants since S14-00, configured only so their
-    # health blocks keep their shape: `own`, `off`, `postgres`, `postgres`.
-    # A dict display evaluates in order; none of them depends on another now.
+    # `KS_READ_FALLBACK` is a constant since S14-00, configured only so its
+    # health block keeps its shape: `off`.
     modes = {
         duckdb_switch.ENV: duckdb_switch.configure_mode(web=web),
-        pg_derivation.ENV: pg_derivation.configure_mode(),
         read_fallback.ENV: read_fallback.configure_mode(report=False),
-        pg_utm_parse.ENV: pg_utm_parse.configure_mode(),
-        warehouse_cutover.ENV: warehouse_cutover.configure_mode(),
     }
     # The read switches with no address. Never raises — see
     # `read_fallback.report_misconfigured`.

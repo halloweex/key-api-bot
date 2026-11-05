@@ -6,7 +6,7 @@ Postgres parser can call them without a store. What proves "verbatim" is not
 a diff of the source but the outputs: every tuple below was produced by the
 methods as they stood on the mixin before the move (`8cf727a`), by running
 them over these fixtures, and is frozen here as a literal. The new functions,
-the mixin's names for them and the DuckDB parse that writes the rows must all
+the mixin's names for them and and the Postgres parse that writes the rows must all
 still produce exactly these.
 
 The fixtures are not a sample, they are a sweep. Every `return`, every
@@ -30,12 +30,11 @@ them.
 from __future__ import annotations
 
 import ast
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from core import pg_order_utm
+from core import pg_utm_parse
 from core.repositories.traffic import TrafficMixin
 from core.utm_classify import (
     UTM_VERDICT_COLUMNS,
@@ -379,40 +378,10 @@ def test_the_mixin_holds_the_functions_not_copies():
     assert TrafficMixin._classify_traffic is classify_traffic
 
 
-@pytest.mark.asyncio
-async def test_the_duckdb_parse_writes_the_golden_rows(tmp_path):
-    """The whole old path — the mixin's SELECT, its loop, its INSERT — against
-    the frozen rows, so the loop's switch to `utm_columns` is covered by the
-    same evidence as the functions."""
-    from core.duckdb_store import DuckDBStore
-
-    stamp = datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc)
-    expected = {}
-    store = DuckDBStore(db_path=tmp_path / "golden.duckdb")
-    await store.connect()
-    try:
-        async with store.connection() as conn:
-            for i, (comment, _parsed, row) in enumerate(PARSE_GOLDEN, start=1):
-                updated = stamp + timedelta(minutes=i)
-                conn.execute(
-                    "INSERT INTO orders (id, source_id, status_id, grand_total, "
-                    "ordered_at, updated_at, buyer_id, manager_id, manager_comment) "
-                    "VALUES (?, 4, 1, 100, ?, ?, 10, NULL, ?)",
-                    [i, updated, updated, comment],
-                )
-                if comment:
-                    expected[i] = (*row, updated)
-        parsed = await store.refresh_utm_silver_layer()
-        async with store.connection() as conn:
-            stored = conn.execute(
-                "SELECT order_id, " + ", ".join(UTM_VERDICT_COLUMNS) + ", parsed_at "
-                "FROM silver_order_utm ORDER BY order_id").fetchall()
-    finally:
-        await store.close()
-
-    assert parsed == set(expected), "the empty comment must not be selected"
-    got = {r[0]: (*r[1:-1], r[-1].astimezone(timezone.utc)) for r in stored}
-    assert got == expected
+# `test_the_duckdb_parse_writes_the_golden_rows` stood here until step 14's
+# S14-15 deleted DuckDB's parse (`TrafficMixin.refresh_utm_silver_layer`). The
+# Postgres parse is held to what it wrote, over these fixtures, in
+# `tests/integration/test_pg_utm_parse.py` (`golden/utm_parse.json`).
 
 
 # ─── the golden stays a sweep ─────────────────────────────────────────────────
@@ -450,11 +419,11 @@ def test_every_verdict_the_classifier_can_return_has_a_fixture():
     assert assigned - platforms == set()
 
 
-def test_the_row_is_the_shippers_row():
+def test_the_row_is_the_parsers_row():
     """`silver.order_utm` in Postgres is `order_id`, these columns, `parsed_at`.
     The dry run reads the stored verdict by these names, so a column added to
     one and not the other would compare a verdict against the wrong field."""
-    assert pg_order_utm.UTM_COLUMNS == ("order_id", *UTM_VERDICT_COLUMNS, "parsed_at")
+    assert pg_utm_parse.UTM_COLUMNS == ("order_id", *UTM_VERDICT_COLUMNS, "parsed_at")
     assert UTM_VERDICT_COLUMNS[-2:] == ("traffic_type", "platform")
 
 

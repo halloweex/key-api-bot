@@ -191,7 +191,7 @@ class TestTheDerivationSignal:
         for fn in (pg_managers_write.upsert_managers,
                    pg_managers_write.set_manager_retail_status):
             marks = [n for t in _transaction_bodies(_fn_tree(fn)) for n in ast.walk(t)
-                     if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "mark_if_owned"]
+                     if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "mark"]
             assert marks, fn.__name__
 
     def test_the_stats_do_not(self):
@@ -495,7 +495,10 @@ class TestTheStoreRoutes:
         read.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_a_classification_marks_whichever_engine_derives(self, flags):
+    async def test_a_classification_is_the_chains_and_marks_no_duckdb(self, flags):
+        """The Postgres writer raises the derivation signal in its own
+        transaction; the DuckDB warehouse mark that followed it (a no-op since
+        step 13) went in step 14's S14-15."""
         from unittest.mock import AsyncMock, patch
 
         from core import chain_latch, pg_managers_write
@@ -510,7 +513,7 @@ class TestTheStoreRoutes:
         write.assert_awaited_once()
         assert write.await_args.args == (7, True, date(2026, 5, 1), 3, "n")
         assert write.await_args.kwargs["set_at"].tzinfo is not None
-        store.mark_warehouse_dirty.assert_awaited_once_with(None)
+        store.mark_warehouse_dirty.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_the_stats_and_the_upsert_route_too(self, flags):

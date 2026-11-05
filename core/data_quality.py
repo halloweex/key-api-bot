@@ -1260,22 +1260,16 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("pg_headline_vs_line_items", "Standing (certificates); the signal is growth, not level"),
     ("pg_goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),
     ("pg_warehouse_", "The Postgres twins did not look: read the reason, then check KS_PG_DSN and PG_LAYER_LOCK holders"),
-    # DN-16. One lever per cause, in the order that separates the causes;
-    # the reasons ride in the findings' descriptions
-    # (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS`), because this is the
-    # single "→" line of a Telegram alert. A comment Postgres holds and DuckDB
-    # lost is first, because no parse or ship can reach it: the parser reads
-    # DuckDB. Its lever is the copy in bronze.orders, which covers a purge and
-    # a restore alike — not `POST /api/traffic/backfill-utm`, which re-fetches
-    # from KeyCRM the NULL a purge stored, skips it, and reports success.
-    # Then the watermark, read before anything ships: a successful ship
-    # clears `last_error`. Then the one lever that ships with nothing marked
-    # dirty; `POST /api/warehouse/refresh` never ships this table at all.
-    # All of this is KS_UTM_PARSE=duckdb; under postgres the line is
-    # `REMEDIATION_UTM_PARSED_IN_POSTGRES`'s below.
+    # The two findings that page (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS`
+    # carries the reasons, because this is the single "→" line of a Telegram
+    # alert). The parse writes every failure into its watermark row before it
+    # raises, and both routes run it. Until step 14's S14-15 this line was
+    # `KS_UTM_PARSE`'s to choose: under `duckdb` it sent the reader to copy a
+    # comment into DuckDB and to the ship, and `REMEDIATION_UTM_PARSED_IN_POSTGRES`
+    # held this line, which `remediation_for` swapped in under `postgres`.
     ("pg_order_utm_",
-     "manager_comment in fingerprint? Copy it to DuckDB from bronze.orders. "
-     "Else read meta.mirror_state for silver.order_utm. Then POST /api/traffic/refresh"),
+     "Read meta.mirror_state for silver.order_utm: the parse writes its error there. "
+     "Then POST /api/traffic/refresh or /api/warehouse/refresh"),
     ("buyers_without_verdict",
      "Grep web's log for 'gender derivation failed'; unless chain 4 writes the buyers, read meta.mirror_state for app.buyer_gender"),
     ("buyers_missing_for_orders", "Read buyer_sync in /api/health: the step's failures and retry window"),
@@ -1322,23 +1316,6 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
 DEFAULT_REMEDIATION = (
     "No lever written down — see CLAUDE.md «How a failure reaches a human», add one"
 )
-
-# DN-19. Under KS_UTM_PARSE=postgres the `pg_order_utm_` levers above are
-# wrong twice over. The parser reads bronze.orders itself, so copying a
-# comment into DuckDB moves nothing. And `POST /api/warehouse/refresh` does
-# reach the table: under KS_PG_DERIVE=own its derivation's last step is the
-# parse. What is left is the parse's own watermark row, where it records every
-# failure before it raises, and the two routes that run it. `remediation_for`
-# puts these in place of the entries with the same prefix while the mode is
-# postgres. Under the default the table above is read unchanged, byte for
-# byte. The reasons ride in the findings' descriptions, as above
-# (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS_POSTGRES`).
-REMEDIATION_UTM_PARSED_IN_POSTGRES: Tuple[Tuple[str, str], ...] = (
-    ("pg_order_utm_",
-     "Read meta.mirror_state for silver.order_utm: the parse writes its error there. "
-     "Then POST /api/traffic/refresh or /api/warehouse/refresh"),
-)
-
 
 # Что находка значит для читателя — по-русски, коротко. Имя проверки в
 # скобках остаётся ключом для поиска; без перевода алерт говорит на языке
@@ -1400,35 +1377,20 @@ def human_check_name(name: str) -> str:
     return f"{label} ({name})" if label else name
 
 
-def remediation_for(
-    check_names: Iterable[str], *, utm_parsed_in_postgres: Optional[bool] = None,
-) -> List[str]:
+def remediation_for(check_names: Iterable[str]) -> List[str]:
     """The distinct "what to do" lines for a set of check names.
 
     Longest prefix wins, so `mirror_never_shipped` gets its own sentence
     rather than the generic `mirror_` one. Deduplicated and order-stable: an
     alert naming eight `fk_orphan_*` checks should say the one useful thing
-    once.
-
-    `utm_parsed_in_postgres` picks `REMEDIATION_UTM_PARSED_IN_POSTGRES` over
-    the entries it names. None, which is what every alert passes, reads the
-    cached `KS_UTM_PARSE` mode: set once at boot by `configure_modes()`, so
-    this reads configuration and nothing that changes while web runs.
+    once. Pure since step 14's S14-15, which removed the `KS_UTM_PARSE` mode
+    it read to pick the `pg_order_utm_` line.
     """
-    if utm_parsed_in_postgres is None:
-        from core import pg_utm_parse
-
-        utm_parsed_in_postgres = pg_utm_parse.parses_in_postgres()
-    table = REMEDIATION
-    if utm_parsed_in_postgres:
-        swapped = dict(REMEDIATION_UTM_PARSED_IN_POSTGRES)
-        table = tuple((prefix, swapped.get(prefix, line)) for prefix, line in REMEDIATION)
-
     lines: List[str] = []
     for name in check_names:
         best = ""
         chosen = DEFAULT_REMEDIATION
-        for prefix, line in table:
+        for prefix, line in REMEDIATION:
             if name.startswith(prefix) and len(prefix) > len(best):
                 best, chosen = prefix, line
         if chosen not in lines:
@@ -1486,9 +1448,9 @@ def format_alert_message(
 
     Формат — ответ на прямую правку владельца 30.08: «коротко — ясно и по
     сути». Обоснования рычагов живут в CLAUDE.md; детали — в журнале и у
-    агента-диагноста, который приходит вторым сообщением. Чистая функция —
-    кроме режима `KS_UTM_PARSE`, закэшированного при старте: он выбирает
-    рычаг находок `pg_order_utm_` (`remediation_for`).
+    агента-диагноста, который приходит вторым сообщением. Чистая функция
+    (режим `KS_UTM_PARSE`, выбиравший рычаг находок `pg_order_utm_`, ушёл в
+    S14-15 шага 14).
 
     Пример:
         🚨 <b>Сверка копий: строки расходятся между копиями — 891</b>

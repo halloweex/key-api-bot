@@ -2892,14 +2892,6 @@
                     "endColumn": 50,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 26,
-                    "endColumn": 30,
-                    "lineCount": 1
-                }
             }
         ],
         "./core/bot_store.py": [
@@ -3504,14 +3496,6 @@
         ],
         "./core/duckdb_store.py": [
             {
-                "code": "reportUndefinedVariable",
-                "range": {
-                    "startColumn": 32,
-                    "endColumn": 40,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalMemberAccess",
                 "range": {
                     "startColumn": 37,
@@ -3632,99 +3616,11 @@
                 }
             },
             {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 31,
-                    "endColumn": 92,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 31,
-                    "endColumn": 85,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 40,
-                    "endColumn": 106,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 32,
-                    "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 30,
-                    "endColumn": 39,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 39,
-                    "endColumn": 48,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 37,
-                    "endColumn": 46,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 43,
-                    "endColumn": 52,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 32,
-                    "endColumn": 31,
-                    "lineCount": 7
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 30,
-                    "endColumn": 31,
-                    "lineCount": 7
-                }
-            },
-            {
                 "code": "reportArgumentType",
                 "range": {
                     "startColumn": 82,
                     "endColumn": 86,
                     "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 21,
-                    "endColumn": 24,
-                    "lineCount": 5
                 }
             },
             {
@@ -6130,22 +6026,6 @@
         ],
         "./core/repositories/traffic.py": [
             {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 24,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 28,
-                    "endColumn": 38,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalIterable",
                 "range": {
                     "startColumn": 48,
@@ -6608,48 +6488,6 @@
                 "range": {
                     "startColumn": 21,
                     "endColumn": 28,
-                    "lineCount": 1
-                }
-            }
-        ],
-        "./core/warehouse_cutover.py": [
-            {
-                "code": "reportReturnType",
-                "range": {
-                    "startColumn": 11,
-                    "endColumn": 16,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 38,
-                    "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 60,
-                    "endColumn": 63,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 42,
-                    "endColumn": 45,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 22,
-                    "endColumn": 25,
                     "lineCount": 1
                 }
             }
@@ -7255,30 +7093,6 @@
             }
         ],
         "./web/routes/api/admin.py": [
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 20,
-                    "endColumn": 81,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 23,
-                    "endColumn": 91,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 8,
-                    "endColumn": 26,
-                    "lineCount": 1
-                }
-            },
             {
                 "code": "reportOperatorIssue",
                 "range": {

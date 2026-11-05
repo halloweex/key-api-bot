@@ -29,45 +29,16 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# ─── Who derives: Postgres' own signal (own) — a constant since S14-00 ──────
+# ─── Who derives: Postgres, on its own signal ───────────────────────────────
 #
 # `KS_PG_DERIVE` chose between `piggyback` (the Postgres rebuild rode DuckDB's
 # warehouse tick) and `own` (Postgres derives on its own signal). Step 13 made
-# `own` a precondition and production has run it since; DuckDB has no tick
-# left to ride. Since step 14's S14-00 the mode is `own` whatever the variable
-# says: `configure_mode()` reads nothing, `mode()` is `own`, `owns()` True,
-# and `mode_error()` None — so `/api/health`'s `derivation` block keeps its
-# shape until S14-15 removes the variable's last trace.
-ENV = "KS_PG_DERIVE"
-PIGGYBACK = "piggyback"
-OWN = "own"
-_VALID = (PIGGYBACK, OWN)
-
-# The cache the mode used to live in. Read by nothing since S14-00; kept, at
-# the constant, for the fixtures that save and restore it until S14-15.
-_mode: Optional[str] = OWN
-_mode_error: Optional[str] = None
-
-
-def configure_mode() -> str:
-    """`own`, whatever `KS_PG_DERIVE` says (S14-00). Reads nothing."""
-    return OWN
-
-
-def mode() -> str:
-    """`own`, a constant since S14-00."""
-    return OWN
-
-
-def mode_error() -> Optional[str]:
-    """None: since S14-00 no value of `KS_PG_DERIVE` is an error, because none
-    is read. The canary's `derivation_mode_invalid` goes with the block."""
-    return None
-
-
-def owns() -> bool:
-    """Postgres derives on its own signal: True, a constant since S14-00."""
-    return True
+# `own` a precondition and production has run it since; step 14's S14-00 made
+# it a constant, and S14-15 removed the variable's last trace — `ENV`,
+# `configure_mode`, `mode`, `mode_error`, `owns` and `mark_if_owned`: the
+# `pg_warehouse_derive` job is registered unconditionally and every writer in
+# `MARK_SITES` calls `mark` itself. `/api/health`'s `derivation` block lost
+# its `mode` and `error` with them, and the canary its `derivation_mode_invalid`.
 
 
 # ─── Signal reads that failed, in a row — this process only (DN-05a) ─────────
@@ -134,7 +105,7 @@ def signal_unreadable_ticks() -> int:
 # the signal in its own transaction. Silver reads `bronze.orders` and the
 # manager classification; the customer profile reads `bronze.buyers`. A test
 # walks the code for writers of those tables and fails on one not listed here,
-# and fails on a listed one that does not call `mark_if_owned`. The buyers'
+# and fails on a listed one that does not call `mark`. The buyers'
 # writer is `core.pg_buyer_rows`, which chain 4's writer runs (the landing
 # mirror ran it too, until step 14's S14-13 deleted `core.pg_buyers`).
 # `core.pg_replication.write_managers`, the classification copy, was listed
@@ -181,14 +152,9 @@ _MARK = """
 """
 
 
-async def mark_if_owned(conn, layer: str = LAYER) -> None:
-    """The call every writer in `MARK_SITES` makes, last in its transaction."""
-    if owns():
-        await mark(conn, layer)
-
-
 async def mark(conn, layer: str = LAYER) -> bool:
-    """Raise the signal inside the caller's transaction. Never raises.
+    """Raise the signal inside the caller's transaction. Never raises. The
+    call every writer in `MARK_SITES` makes, last in its transaction.
 
     True when the increment is part of the caller's transaction, False when it
     was dropped. The lock timeout is set for the savepoint only: it is put back
