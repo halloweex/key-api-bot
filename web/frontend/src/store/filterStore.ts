@@ -77,7 +77,7 @@ export const useQueryParams = () => {
 
     setPeriodParams(params, period, startDate, endDate)
 
-    params.set('sales_type', salesType)
+    if (applies.has('salesType')) params.set('sales_type', salesType)
 
     if (sourceId && applies.has('sourceId')) params.set('source_id', String(sourceId))
     if (categoryId && applies.has('categoryId')) params.set('category_id', String(categoryId))
