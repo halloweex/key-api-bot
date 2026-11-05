@@ -1,6 +1,7 @@
 -- O5 (chain 3) — what is true of the order tables on their own.
 --
--- Only under chain 3; the variables are deploy/stage4_soak.sh's.
+-- It judged only under chain 3 (KS_WRITE_ORDERS=postgres latched, or its
+-- latch) until step 14's S14-20: every chain writes Postgres since S14-00.
 --
 -- WHY IT EXISTS
 -- The daily comparisons against DuckDB stand down for these tables once the
@@ -27,9 +28,6 @@ WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
 ),
-flag AS (
-    SELECT :'orders_on'::text AS state
-),
 orphans AS (
     SELECT e.id
     FROM bronze.expenses e
@@ -45,22 +43,12 @@ facts AS (
             AS null_checked
 )
 SELECT 'O5 orders integrity'::text AS "check",
-       CASE flag.state
-           WHEN '0' THEN 'PASS'
-           WHEN 'pending' THEN 'PASS'
-           WHEN '1' THEN CASE WHEN f.orphan_expenses + f.null_checked > 0 THEN 'FAIL'
-                              ELSE 'PASS' END
-           ELSE 'UNKNOWN'
-       END AS verdict,
-       CASE flag.state
-           WHEN '0' THEN 'not applicable: chain 3 still writes DuckDB (KS_WRITE_ORDERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 3 has not latched'
-           WHEN '1' THEN format(
-               '%s expense(s) older than a day with no order%s, %s ledger row(s) with no checked_at',
-               f.orphan_expenses,
-               CASE WHEN f.orphan_expenses > 0
-                    THEN ' (e.g. ' || left(f.orphan_sample::text, 100) || ')' ELSE '' END,
-               f.null_checked)
-           ELSE format('orders_on=%s: KS_WRITE_ORDERS not understood, or not read from the web container', flag.state)
-       END AS detail
-FROM flag CROSS JOIN facts f;
+       CASE WHEN f.orphan_expenses + f.null_checked > 0 THEN 'FAIL'
+                          ELSE 'PASS' END AS verdict,
+       format(
+           '%s expense(s) older than a day with no order%s, %s ledger row(s) with no checked_at',
+           f.orphan_expenses,
+           CASE WHEN f.orphan_expenses > 0
+                THEN ' (e.g. ' || left(f.orphan_sample::text, 100) || ')' ELSE '' END,
+           f.null_checked) AS detail
+FROM facts f;

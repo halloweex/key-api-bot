@@ -17,8 +17,8 @@ root's crontab with nobody watching it:
 * `deploy/duckdb_silence_check.sh --crontab` — the week's crontab change,
   printed and never installed (`test_duckdb_silence_check.py`).
 
-What is left here: the reader, the runbook in CLAUDE.md, and the restore
-drill, which runs in a scratch repository root against fakes on PATH that
+What is left here: the reader, the history of the week in CLAUDE.md (its
+runbook until step 14's S14-20), and the restore drill, which runs in a scratch repository root against fakes on PATH that
 record every call. offsite_check's frozen branch and the .env that rides with
 every Postgres shipment are in `test_pg_offsite_scripts.py`.
 """
@@ -130,7 +130,6 @@ ks_duckdb_env_read "$2"
 printf '%s|%s|%s|%s|%s\n' "$KS_DUCKDB_ENV" "$KS_DUCKDB_ENV_WEB" \
     "$KS_DUCKDB_ENV_MEANT_OFF" "$KS_DUCKDB_ENV_READ" "$KS_DUCKDB_ENV_VALUE"
 if ks_duckdb_stands_down; then echo DOWN; else echo RUNS; fi
-ks_duckdb_env_note
 """
 
 
@@ -141,8 +140,10 @@ def _read(tmp_path: Path, text: "str | None"):
     done = subprocess.run(["bash", "-c", READ, "_", str(DEPLOY / "duckdb_env.sh"),
                            str(env_file)], capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
-    fields, verdict, note = done.stdout.split("\n", 2)
-    return fields.split("|"), verdict, note
+    fields, verdict, rest = (done.stdout.split("\n", 2) + [""])[:3]
+    # Whatever else was printed: `ks_duckdb_env_note`'s sentence until S14-20
+    # deleted it, nothing since.
+    return fields.split("|"), verdict, rest
 
 
 class TestTheReader:
@@ -173,37 +174,9 @@ class TestTheReader:
         (env, web, meant, read, _), verdict, _ = _read(tmp_path, None)
         assert (env, web, meant, read, verdict) == ("on", "on", "0", "0", "RUNS")
 
-    def test_the_note_names_the_hold_and_what_the_line_costs(self, tmp_path):
-        """A host script reads `.env`, never web's verdict, so its stand-down
-        says what a web held back on `on` means (HELD_BACK_NOTE's sentence),
-        and a line docker reads otherwise than compose what that costs —
-        each with the one line to write instead."""
-        _, _, note = _read(tmp_path, "KS_DUCKDB=off\n")
-        assert "duckdb_switch.held_back" in note and "KS_DUCKDB=on" in note
-        assert "quotes" not in note and "refuses" not in note
-        _, _, note = _read(tmp_path, "  KS_DUCKDB=off\n")
-        assert "quotes" not in note and "refuses" not in note
-        for text in ('KS_DUCKDB="off"\n', "KS_DUCKDB=off # week of silence\n"):
-            _, _, note = _read(tmp_path, text)
-            assert "written with quotes or a comment" in note, note
-            assert "a sidecar would" in note and "run on" in note, note
-            assert "write KS_DUCKDB=off as a line of its own" in note, note
-        for text in ("export KS_DUCKDB=off\n", "KS_DUCKDB = off\n"):
-            _, _, note = _read(tmp_path, text)
-            assert "docker run --env-file refuses" in note, note
-            assert "the restore drill" in note, note
-            assert "write KS_DUCKDB=off as a line of its own" in note, note
-        _, _, note = _read(tmp_path, "KS_DUCKDB:off\n")
-        assert "docker run --env-file skips" in note and "run on" in note, note
-        _, _, note = _read(tmp_path, "KS_DUCKDB=off\nKS_DUCKDB:on\n")
-        assert "runs web on" in note and "would be refused" in note, note
-        # Since step 14's S14-00 a step-14 web runs off whatever `.env` says,
-        # so neither sentence may offer `on` as a lever for it: only an image
-        # from before step 14 is held back, or runs on.
-        assert "a step-14 web runs off whatever it says" in note, note
-        assert "KS_DUCKDB=off or KS_DUCKDB=on" not in note, note
-        assert "only ever non-empty from an image before step 14" in note, note
-        assert "on that image, set KS_DUCKDB=on" in note, note
+    # `test_the_note_names_the_hold_and_what_the_line_costs` held
+    # `ks_duckdb_env_note`'s sentence, until step 14's S14-20 deleted the
+    # function: its callers went in S14-18.
 
     def test_a_value_is_quoted_back_bounded_and_printable(self, tmp_path):
         """The value is quoted in log lines; `.env` is not a file to echo.
@@ -236,163 +209,91 @@ class TestTheReader:
 # backup past 30 h.
 
 
-# ── the runbook ───────────────────────────────────────────────────────────────
+# ── the history ───────────────────────────────────────────────────────────────
 
-def _runbook() -> str:
+def _history() -> str:
+    """CLAUDE.md's "The week of silence, and its way back": what is left of
+    the runbook "Starting the week of silence", compressed into the history
+    of the DuckDB exit by step 14's S14-20."""
     text = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-    start = text.index("### Starting the week of silence")
+    start = text.index("### The week of silence, and its way back")
     return text[start:text.index("\n### ", start + 1)]
 
 
 @needs_checkout
-class TestTheRunbook:
-    """CLAUDE.md, "Starting the week of silence": the one runbook, read by a
-    person on the host. What it names has to be there to run."""
+class TestTheHistory:
+    """The week's runbook was a person's procedure for the host, and it is
+    history since S14-20. What it still tells a person on the host has to be
+    true: the scripts it names exist or are said to be gone, the crontab is
+    changed from the print and never from the text, and on a step-14 image
+    there is no way back to make. The runbook's own steps — the start, the
+    preconditions, the Ark's SOURCE RELEASED, the `.env` copy — went with it
+    (their tests are in S14-20's list)."""
 
-    # Named by the runbook, deleted in step 14's S14-18 with their cron lines
-    # long retired; the runbook says so.
-    DELETED = frozenset({"scripts/weekly_compact.sh", "deploy/daily_offsite.sh",
-                         "scripts/compact_duckdb.py", "deploy/compact_floor_check.py",
-                         "deploy/snapshot_export.py", "deploy/offsite_parquet.sh"})
+    # Named by the history, deleted in step 14's S14-18 with their cron lines
+    # long retired; the history says so.
+    DELETED = frozenset({"scripts/weekly_compact.sh", "deploy/daily_offsite.sh"})
 
-    def test_every_tool_it_names_exists(self):
-        """Mutation: rename a script without the runbook — or delete one
-        without the runbook saying it is gone."""
-        text = _runbook()
+    def test_every_tool_it_names_exists_or_is_said_gone(self):
+        """Mutation: rename a script without the history — or delete one
+        without the history saying it is gone."""
+        text = _history()
         named = set(re.findall(r"(?:deploy|scripts)/[\w./-]+\.(?:sh|py)", text))
-        assert {"deploy/duckdb_silence_check.sh", "deploy/ark_ship.sh",
-                "deploy/pg_offsite.sh", "deploy/offsite_check.sh",
-                "deploy/duckdb_env.sh", "deploy/stage4_soak.sh",
-                "deploy/duckdb_table_fates_check.py", "scripts/weekly_compact.sh",
-                "deploy/daily_offsite.sh"} <= named, named
+        assert {"deploy/duckdb_silence_check.sh", "deploy/duckdb_env.sh",
+                "deploy/offsite_check.sh", "deploy/restore-test.sh"} <= named, named
+        assert self.DELETED <= named, named
         for path in named - self.DELETED:
             assert (REPO / path).is_file(), path
-        for path in named & self.DELETED:
+        for path in self.DELETED:
             assert not (REPO / path).exists(), path
         joined = " ".join(text.split())
-        assert "Since step 14's S14-18 `scripts/weekly_compact.sh` and `deploy/daily_offsite.sh` are deleted" in joined
+        assert "deleted in step 14's S14-18" in joined, joined
 
     def test_it_changes_the_crontab_from_the_print_only(self):
-        """The runbook never spells a crontab line of its own: the lines are
+        """The history never spells a crontab line of its own: the lines are
         the ones `--crontab` prints, which a test holds to the scripts'
-        headers. Mutation: write `0 2 * * 0` into the runbook."""
-        text = _runbook()
+        headers. Mutation: write `0 2 * * 0` into the section."""
+        text = _history()
         assert "--crontab" in text
         assert not re.search(r"[0-9*]+ [0-9*]+ \* \* [0-9*]", text)
 
-    def test_the_env_copy_is_the_documented_one(self):
-        """`.env` is copied before it is edited, mode 600, to the directory
-        CLAUDE.md names for every copy of it — never the repository root."""
-        text = _runbook()
-        assert "install -m 600 /opt/key-api-bot/.env\n   /root/env-backups/key-api-bot/" in text
-        assert "never by printing the file" in text
-
-    @staticmethod
-    def _item(heading: str, number: int) -> str:
-        """Item `number` of the numbered list under the bold `heading`, its
-        lines joined, so a phrase the text wraps is still one phrase."""
-        text = _runbook()
-        block = text[text.index(f"**{heading}**"):]
-        start = block.index(f"\n{number}. ") + 1
-        end = re.search(r"\n(\d+\. |\*\*|\n)", block[start:])
-        item = block[start:start + end.start()] if end else block[start:]
-        return " ".join(item.split())
-
-    def test_precondition_four_asks_what_the_verdict_asks(self):
-        """It is read so the start is not the first time anybody asks
-        core/duckdb_off.py's questions, so it asks those and no others. The
-        verdict wants every chain writing Postgres, by latch or by flag, and
-        a latch — marker and owner rows — only of the chains that keep a value
-        in DuckDB's `sync_metadata`: a flagged chain with nothing written
-        latches on its first write, mid-week, and counting it once held a
-        start back. The first runbook asked for a marker per chain, which six
-        chains can rightly lack. Mutation: name another chain as needing a
-        latch, or go back to "a marker per chain"."""
-        # `core/duckdb_off.py` is gone (step 14's S14-00); its question was
-        # the copy-back's own helper, and that went with the copy-back in
-        # S14-04: the keys a chain keeps in `meta.chain_watermarks` are its
-        # declared sync keys and marker keys, read off the chain here.
-        from core.write_chains import WRITE_CHAINS, chain_name
-
-        def _kept_keys(chain):
-            return (tuple(getattr(chain, "CHAIN_SYNC_KEYS", ()))
-                    + tuple(getattr(chain, "CHAIN_MARKER_KEYS", ())))
-
-        item = self._item("Preconditions", 4)
-        assert "a marker per chain" not in item
-        assert "`mode` `postgres`" in item and "by its latch or by its flag" in item
-        latched = set(re.findall(r"`(pg_\w+_write)`", item))
-        keeping = {chain_name(c) for c in WRITE_CHAINS if _kept_keys(c)}
-        assert latched == keeping, latched
-        assert latched < {chain_name(c) for c in WRITE_CHAINS}
-
     def test_the_way_back_on_a_step_14_image_is_the_image_rollback(self):
-        """Since step 14's S14-00 web runs off whatever `.env` says, so the
-        way back as written — `KS_DUCKDB=on`, expect `mode: on`, re-add the
-        compaction and the snapshot — changes nothing in web and re-arms the
-        host scripts, which read `.env`: a Sunday stop and a rewrite of the
-        frozen file, a nightly "Daily snapshot FAILED", a stale off-site page.
-        The runbook says so before its steps, and names the rollback section
-        that exists. Mutation: drop the S14-00 paragraph, or rename the
-        Deployment section without the runbook."""
-        text = _runbook()
-        block = text[text.index("**The way back**"):]
-        first_step = block.index("\n1. ")
-        warning = " ".join(block[:first_step].split())
-        assert "Since step 14's S14-00" in warning, warning
-        assert "`KS_DUCKDB=on` changes nothing in a step-14 web" in warning
-        assert "do not re-add those two cron lines" in warning
+        """Since step 14's S14-00 web runs off whatever `.env` says, so
+        `KS_DUCKDB=on` changes nothing in web and only re-arms the host
+        scripts that read `.env`. The history says so, and names the rollback
+        section that exists. Mutation: drop the paragraph, or rename the
+        Deployment section without the history."""
+        joined = " ".join(_history().split())
+        assert "On a step-14 image there is no way back to make" in joined, joined
+        assert "leave `.env` at `KS_DUCKDB=off`" in joined
+        assert "do not re-add those two cron lines" in joined
+        assert "a step-14 web runs `off` whatever `.env` says" in joined
         section = "Before any rollback to an image from before step 14"
-        assert f'"{section}"' in warning
+        assert f'"{section}"' in joined
         whole = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
         assert f"\n### {section}\n" in whole
-        # And the section's opening says the web half is history.
-        opening = " ".join(text[:text.index("**What PR-10 changed")].split())
-        assert "a step-14 web runs `off` whatever `.env` says" in opening
-        assert "History since S14-00" in self._item("Preconditions", 4)
 
-    def test_the_way_back_names_the_snapshots_image_before_its_cron_line(self):
-        """Step 3 of the way back puts the nightly snapshot's cron line back,
-        and since S14-02 the snapshot has no default image: without the
-        variable in deploy/backup.env, or without the rollback-step14 tag on
-        the host, every night refuses (exit 2) and pages "Daily snapshot
-        FAILED". On main before S14-02 the same way back ran :latest. The
-        variable is read from the script, not spelled here. Mutation: drop
-        the sentence from step 3, or give the snapshot a default image."""
-        # The variable `deploy/daily_offsite.sh` read its image from, a
-        # literal since S14-18 deleted the script (read at 50cc367b).
-        var = "BACKUP_RESTORE_IMAGE"
-        step3 = self._item("The way back", 3)
-        assert "nightly snapshot re-added" in step3, step3
-        for words in (f"`{var}`", "`deploy/backup.env`", "`rollback-step14`",
+    def test_the_way_back_names_the_snapshots_image(self):
+        """On an image from before step 14, the nightly snapshot's cron line
+        put back has no default image since S14-02: without the variable in
+        deploy/backup.env, or without the rollback-step14 tag on the host,
+        every night refuses (exit 2) and pages "Daily snapshot FAILED". The
+        variable is the one `deploy/daily_offsite.sh` read (a literal since
+        S14-18 deleted the script, read at 50cc367b). Mutation: drop the
+        sentence."""
+        joined = " ".join(_history().split())
+        for words in ("`BACKUP_RESTORE_IMAGE`", "`deploy/backup.env`", "`rollback-step14`",
                       "Daily snapshot FAILED"):
-            assert words in step3, (words, step3)
+            assert words in joined, (words, joined)
 
-    def test_web_waits_for_the_freeze_not_the_upload(self):
-        """deploy/ark_ship.sh prints SOURCE RELEASED once nothing after it
-        reads the file — test_ark_ship_script holds that line before anything
-        leaves the host — and under off web never opens the file, so steps
-        4-6 may begin there. The first runbook kept web and the bot stopped
-        until ARK SHIPPED AND VERIFIED: the dashboard down and orders waiting
-        through the upload, the download, the decrypt and L0-L2 of the
-        downloaded copy, the longest outage of the procedure, for nothing —
-        while the script said the opposite. The crontab print and the
-        snapshot's header said step 4 waited for the Ark off-site. Mutation:
-        put "until `ARK SHIPPED AND VERIFIED`" back into step 3."""
-        step3 = self._item("Starting the week", 3)
-        assert "SOURCE RELEASED" in step3 and "ARK SHIPPED AND VERIFIED" in step3
-        assert "until `ARK SHIPPED AND VERIFIED`" not in step3
-        assert "steps 4-6" in step3.replace("–", "-")
-        for n in (4, 5, 6):
-            assert "ARK SHIPPED" not in self._item("Starting the week", n), n
-        header = " ".join(re.sub(r"^\s*#[\s#]*", "", ln)
-                          for ln in (DEPLOY / "ark_ship.sh").read_text().splitlines())
-        assert "the week's later steps need not wait for the upload" in header
+    def test_the_crontab_print_names_this_section(self):
+        """The print is what a person pastes from; it points at the section
+        by its name. Mutation: rename the section without the script."""
         printed = subprocess.run(["bash", str(DEPLOY / "duckdb_silence_check.sh"), "--crontab"],
                                  capture_output=True, text=True, timeout=30)
         assert printed.returncode == 0, printed.stderr
-        assert "once the second Ark is off-site" not in printed.stdout
-        assert "SOURCE RELEASED" in printed.stdout
+        assert '"The week of silence, and its way back"' in " ".join(printed.stdout.split())
+        assert "Starting the week of silence" not in printed.stdout
 
 
 # ── the restore drill ─────────────────────────────────────────────────────────

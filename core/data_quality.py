@@ -1163,7 +1163,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
-    ("gold_", "POST /api/warehouse/refresh rebuilds Silver and Gold — Postgres too under KS_PG_DERIVE=own"),
+    ("gold_", "POST /api/warehouse/refresh rebuilds Silver and Gold in Postgres"),
     ("customer_profile_", "Rebuilt on the same tick; survives one — suspect Silver"),
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
     ("integrity_check_raised",
@@ -1255,7 +1255,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     # The Postgres twins (step 8a). The lever depends on who derives.
-    ("pg_silver_", "Postgres Silver: under KS_PG_DERIVE=own POST /api/warehouse/refresh; under piggyback it follows the DuckDB tick"),
+    ("pg_silver_", "Postgres Silver: POST /api/warehouse/refresh (the derivation, past its floor)"),
     ("pg_attribution_coverage_", "Not ours to repair: check the shop's order-comment template; rule out a stale silver.order_utm copy first"),
     ("pg_headline_vs_line_items", "Standing (certificates); the signal is growth, not level"),
     ("pg_goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),

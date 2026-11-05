@@ -127,9 +127,9 @@ async def backfilled() -> bool:
         pool = await get_pool()
         async with pool.acquire() as conn:
             # The table's name written out (step 14, S14-07), not imported
-            # from `core.pg_expense_backfill`, which goes with the backfills
-            # in S14-13: an import failing here would be refused like any
-            # other failure, and /expenses would answer 503 on every start.
+            # from `core.pg_expense_backfill`, which went with the backfills
+            # in S14-13: an import failing here would have been refused like
+            # any other failure, and /expenses would answer 503 on every start.
             done = await conn.fetchval(
                 "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "
                 "WHERE table_name = $1",
@@ -147,7 +147,9 @@ async def backfilled() -> bool:
     if not _backfilled:
         logger.warning(
             "expenses: bronze.expenses has no completed backfill, so history "
-            "is missing — refused. The hourly ids-diff sets this on its own.")
+            "is missing — refused. Restore bronze.expenses from the nightly "
+            "Postgres dump, which carries backfilled_at with it; never set "
+            "backfilled_at by hand.")
     return _backfilled
 
 

@@ -345,7 +345,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
 
     # ── data-quality findings: Postgres twins of the Silver checks ──
-    # Chain 2 step 8a, KS_DQ_PG_WAREHOUSE. Their own names, never DuckDB's: the
+    # Chain 2 step 8a. They ran behind KS_DQ_PG_WAREHOUSE until step 14's
+    # S14-14 and run on every dq_integrity_check since; nothing reads the
+    # variable since S14-15. Their own names, never DuckDB's: the
     # Gate and the ledger key on the name alone, so a shared one would let one
     # engine hold or announce the other's recovery.
     "pg_silver_missing_rows": _c("a Postgres derivation carries the rows"),

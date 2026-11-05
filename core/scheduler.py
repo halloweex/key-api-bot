@@ -677,7 +677,7 @@ class BackgroundScheduler:
         # down under `KS_BOT_STORE=postgres`.
         self._add_job(
             job_id="replicate_operational",
-            name="Replicate: operational history and bot state",
+            name="Gender derivation and bot state",
             description="Derive new buyers' gender in Postgres and copy data/bot.db",
             func=self._run_replicate_operational,
             trigger=IntervalTrigger(hours=1),
@@ -2397,7 +2397,8 @@ class BackgroundScheduler:
         from Bronze — so this gives the second.
 
         **No extra API calls, by construction.** It is handed the orders and
-        the rollup the DuckDB comparison already fetched. Doubling KeyCRM
+        the rollup the job already fetched once for all its arms (the DuckDB
+        arm among them until step 14's S14-12). Doubling KeyCRM
         traffic for a second opinion would be a poor trade at any time and a
         particularly poor one on a job that spent 57 runs out of 84 failing on
         429s.

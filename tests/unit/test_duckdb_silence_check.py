@@ -267,7 +267,7 @@ def _documented(path: Path, marker: str) -> str:
 class TestTheCrontabIsPrinted:
     """The week of silence changes root's crontab by three lines, and nothing
     in the repository installs them: `--crontab` prints the change for a
-    person to make (CLAUDE.md, "Starting the week of silence")."""
+    person to make (CLAUDE.md, "The week of silence, and its way back")."""
 
     def _print(self, box, tmp_path, **extra):
         bin_dir = tmp_path / "bin"

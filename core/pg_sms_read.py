@@ -14,10 +14,10 @@ back with no consequence.
 
 `/sms` is not that. It is operational, and the store that answers "who is in
 this audience" must be the same store that owns the opt-outs, because the
-opt-out list is *written* here. While DuckDB is the writer, Postgres holds an
+opt-out list is *written* here. While DuckDB was the writer, Postgres held an
 hourly copy — so reading the audience from Postgres with DuckDB still writing
-would mean an opt-out recorded fifty minutes ago is invisible, and somebody who
-asked not to be messaged is messaged. That is not a stale number on a
+would have meant an opt-out recorded fifty minutes ago was invisible, and
+somebody who asked not to be messaged was messaged. That is not a stale number on a
 dashboard; it is a promise broken to a person.
 
 So reads followed `KS_SMS_STORE` — the same variable that moved the writer,

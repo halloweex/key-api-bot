@@ -1,6 +1,7 @@
 -- O4 (chain 3) — every order the chain writes with revenue has its line items.
 --
--- Only under chain 3; the variables are deploy/stage4_soak.sh's.
+-- It judged only under chain 3 (KS_WRITE_ORDERS=postgres latched, or its
+-- latch) until step 14's S14-20: every chain writes Postgres since S14-00.
 --
 -- WHY IT EXISTS
 -- The chain writes an order's header and its line items in one transaction
@@ -17,15 +18,15 @@
 --
 -- HOW IT DECIDES
 -- Orders whose header the chain wrote since the handover (`mirrored_at`, the
--- clock it stamps; the owner rows, else the given flip time), carrying
+-- clock it stamps; the handover is the owner rows), carrying
 -- revenue (the repair's own `grand_total > 0`), with no line item, created
 -- over 6 hours ago — three of the repair's intervals, so a run held back by
 -- the heavy-job lock and a timer restarted by a deploy are not a defect. A
 -- header the 05:15 refresh rewrote is in that set: its lines were never
 -- touched, so it was whole before. A created_at nobody stored reads as
--- `mirrored_at`, which only makes the order look younger. With neither an
--- owner row nor a flip time nothing dates the chain's writes: UNKNOWN, pass
--- SOAK_ORDERS_FLIP_AT.
+-- `mirrored_at`, which only makes the order look younger. With no owner row
+-- nothing dates the chain's writes: UNKNOWN. (A flip time given by hand,
+-- SOAK_ORDERS_FLIP_AT, stood in for one until step 14's S14-20.)
 --
 -- A LEDGER ROW DOES NOT EXCUSE ONE (chain 3's review). The repair re-fetches
 -- a bare order through the same writer the chain writes with, then ledgers
@@ -52,10 +53,6 @@ WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
 ),
-flag AS (
-    SELECT :'orders_on'::text AS state,
-           NULLIF(:'orders_flip_at', '')::timestamptz AS flip_at
-),
 owner AS (
     SELECT min(updated_at) AS at
     FROM meta.chain_watermarks
@@ -63,10 +60,8 @@ owner AS (
                   'owner:bronze.expenses', 'owner:app.order_backfill_misses')
 ),
 since AS (
-    SELECT COALESCE(owner.at, flag.flip_at) AS at,
-           CASE WHEN owner.at IS NOT NULL THEN 'since the handover'
-                ELSE 'since the flip' END AS said
-    FROM owner CROSS JOIN flag
+    SELECT owner.at, 'since the handover'::text AS said
+    FROM owner
 ),
 halfwritten AS (
     SELECT o.id, o.grand_total,
@@ -88,35 +83,25 @@ agg AS (
     FROM halfwritten
 )
 SELECT 'O4 half-written orders'::text AS "check",
-       CASE flag.state
-           WHEN '0' THEN 'PASS'
-           WHEN 'pending' THEN 'PASS'
-           WHEN '1' THEN CASE WHEN since.at IS NULL THEN 'UNKNOWN'
-                              WHEN agg.n > 0 THEN 'FAIL'
-                              ELSE 'PASS' END
-           ELSE 'UNKNOWN'
-       END AS verdict,
-       CASE flag.state
-           WHEN '0' THEN 'not applicable: chain 3 still writes DuckDB (KS_WRITE_ORDERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 3 has not latched'
-           WHEN '1' THEN CASE
-               WHEN since.at IS NULL THEN
-                   'no owner row and no flip time, so nothing dates the chain''s writes: '
-                   'pass SOAK_ORDERS_FLIP_AT'
-               WHEN agg.n > 0 THEN format(
-                   '%s order(s) worth %s written %s with revenue and no line items, created '
-                   'over 6 h ago, e.g. %s; %s',
-                   agg.n, agg.total, since.said, left(agg.sample::text, 120),
-                   CASE WHEN agg.ledgered = 0 THEN
-                            'none of them in app.order_backfill_misses: the repair has not '
-                            'reached them, or its record did not land'
-                        ELSE format(
-                            '%s of them in app.order_backfill_misses: the repair re-fetched '
-                            'them and still stored none — KeyCRM or the writer, nothing here '
-                            'tells which. A ledger row no longer excuses one: 0 in the 120 '
-                            'days before the flip (measured 2026-10-09)', agg.ledgered) END)
-               ELSE 'every order written ' || since.said
-                    || ' with revenue has its line items' END
-           ELSE format('orders_on=%s: KS_WRITE_ORDERS not understood, or not read from the web container', flag.state)
-       END AS detail
-FROM flag CROSS JOIN agg CROSS JOIN since;
+       CASE WHEN since.at IS NULL THEN 'UNKNOWN'
+            WHEN agg.n > 0 THEN 'FAIL'
+            ELSE 'PASS' END AS verdict,
+       CASE
+           WHEN since.at IS NULL THEN
+               'no owner row for chain 3 in meta.chain_watermarks, so nothing dates '
+               'the chain''s writes'
+           WHEN agg.n > 0 THEN format(
+               '%s order(s) worth %s written %s with revenue and no line items, created '
+               'over 6 h ago, e.g. %s; %s',
+               agg.n, agg.total, since.said, left(agg.sample::text, 120),
+               CASE WHEN agg.ledgered = 0 THEN
+                        'none of them in app.order_backfill_misses: the repair has not '
+                        'reached them, or its record did not land'
+                    ELSE format(
+                        '%s of them in app.order_backfill_misses: the repair re-fetched '
+                        'them and still stored none — KeyCRM or the writer, nothing here '
+                        'tells which. A ledger row no longer excuses one: 0 in the 120 '
+                        'days before the flip (measured 2026-10-09)', agg.ledgered) END)
+           ELSE 'every order written ' || since.said
+                || ' with revenue has its line items' END AS detail
+FROM agg CROSS JOIN since;

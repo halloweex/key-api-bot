@@ -2334,7 +2334,7 @@ async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> 
 # underscores.
 #
 # This handler authorises and records. It does not run anything: the work
-# belongs to the web container, where the scheduler and DuckDB are, and the
+# belongs to the web container, where the scheduler is (and DuckDB was), and the
 # ledger row is the handover. Rule 5 of the alerts charter is untouched — an
 # alert still triggers no repair, a person does.
 

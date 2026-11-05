@@ -941,7 +941,7 @@ OPERATIONAL_GRACE_MINUTES = 90
 # `SILVER_GRACE_MINUTES` fixes for the comparison above. A constant here would
 # go on paging the old floor's width the day somebody raised it, and the floor
 # and the grace would then be two numbers somebody has to remember to move
-# together. `deploy/stage4_soak/11_utm_gap.sql` asks the same question by hand
+# together. `deploy/daily_soak/11_utm_gap.sql` asks the same question by hand
 # with fifteen minutes: right for a reading, and a page on a slow tick here.
 #
 # **`mirrored_at` is when the row was last written, not when the order

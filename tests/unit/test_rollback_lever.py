@@ -299,9 +299,10 @@ class TestEveryLeverNamesTheOneLine:
     # step 14's S14-15 deleted it with step 13's switch, and the lists are
     # empty.
 
-    def test_the_soak_script_notes(self):
-        script = (ROOT / "deploy" / "stage4_soak.sh").read_text(encoding="utf-8")
-        assert _uncommented(script, "#").count(ROLLBACK_LEVER) == 4
+    # `test_the_soak_script_notes` held the four "latched" notes of
+    # deploy/stage4_soak.sh to the lever, until step 14's S14-20 renamed the
+    # script deploy/daily_soak.sh and took out the latch readings the notes
+    # were printed from.
 
     def test_the_finding_that_names_it(self):
         """`chain_latch_disagrees` as the chain invariants build it (since

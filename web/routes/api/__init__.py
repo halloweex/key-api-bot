@@ -43,8 +43,9 @@ from .tg_bot import router as tg_bot_router
 router = APIRouter(tags=["api"])
 
 router.include_router(health_router)
-# Operational/internal endpoints (jobs, sync, warehouse, bronze, cache, DuckDB
-# maintenance) require admin role in addition to the api_gate session check.
+# Operational/internal endpoints (jobs, sync, warehouse, bronze, cache; DuckDB
+# maintenance until step 14) require admin role in addition to the api_gate
+# session check.
 router.include_router(admin_router, dependencies=[Depends(require_admin)])
 router.include_router(analytics_router)
 router.include_router(customers_router)

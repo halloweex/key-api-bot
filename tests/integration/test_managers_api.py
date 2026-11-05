@@ -77,7 +77,6 @@ def _deps(path: str, method: str = "GET") -> set:
 class _FakeStore:
     def __init__(self):
         self.set_calls = []
-        self.dirty_calls = []
 
     async def get_all_managers(self):
         return [
@@ -90,14 +89,12 @@ class _FakeStore:
     async def set_manager_retail_status(
         self, manager_id, is_retail, effective_from=None, set_by=None, note=None
     ):
+        # The real method raises the Postgres derivation signal in the same
+        # transaction (proved in tests/integration/test_managers_chain_writer.py,
+        # `test_the_route_writes_postgres_marks_the_derivation_and_lists_it`);
+        # this fake records the call and nothing else. It also marked a DuckDB
+        # dirty flag here, until step 14's S14-15 deleted the flag.
         self.set_calls.append((manager_id, is_retail, effective_from, set_by, note))
-        # Mirrors the real method, which marks the warehouse dirty itself so
-        # that every caller triggers the rebuild — not only the route. A fake
-        # that omits it would let this test pass while production regressed.
-        await self.mark_warehouse_dirty(None)
-
-    async def mark_warehouse_dirty(self, changed_order_ids=None):
-        self.dirty_calls.append(changed_order_ids)
 
     async def get_manager_sales_365d(self):
         """Silver grouped by (manager_id, sales_type), as the endpoint reads it.
@@ -194,8 +191,12 @@ class TestBehaviour:
         assert by_id[99]["sales_type"] is None
         assert by_id[99]["revenue_365d"] == 0.0
 
-    def test_setting_marks_the_warehouse_dirty(self, client, store):
-        """sales_type lives in Silver; without a rebuild nothing changes on screen."""
+    def test_setting_forwards_the_classification_forward_dated(self, client, store):
+        """The route hands the store the manager, the flag and no date — today,
+        decided in the store. That the store then raises the derivation
+        signal, so Silver is rebuilt and the screen changes, is
+        test_managers_chain_writer.py's to prove against a real Postgres; it
+        was a DuckDB dirty flag on this fake until step 14's S14-15."""
         res = client.post(f"{SET_PATH}?is_retail=true")
 
         assert res.status_code == 200
@@ -203,7 +204,6 @@ class TestBehaviour:
         manager_id, is_retail, effective_from, _set_by, _note = store.set_calls[0]
         assert (manager_id, is_retail) == (34, True)
         assert effective_from is None, "no date given means today, decided in the store"
-        assert store.dirty_calls == [None], "must request a FULL rebuild"
 
     def test_classification_is_forward_dated_unless_backdated(self, client, store):
         """A reclassification must not restate last year's reports by default.
@@ -224,4 +224,3 @@ class TestBehaviour:
 
         assert res.status_code == 404
         assert store.set_calls == []
-        assert store.dirty_calls == []

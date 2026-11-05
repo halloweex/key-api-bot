@@ -1,7 +1,9 @@
--- I3 (chain 1) — stock movements after the flip look like the ones before it.
+-- I3 (chain 1) — stock movements stay deltas: no day of `initial` bursts.
 --
--- Only under KS_WRITE_INVENTORY=postgres; the variables are deploy/stage4_soak.sh's. The window is
--- the last 14 days, or since the flip if that is later.
+-- The window is the last 14 days. It judged only under KS_WRITE_INVENTORY=
+-- postgres or chain 1's latch, from the flip if that was later, until step
+-- 14's S14-20: every chain writes Postgres since S14-00, and the flip is weeks
+-- behind.
 --
 -- WHY IT EXISTS
 -- `stock_movements` is a delta against the previous `offer_stocks`. A Postgres
@@ -14,20 +16,15 @@
 -- WHAT A FAIL MEANS
 -- - a Kyiv day with `initial` movements numbering half the offer count or more:
 --   the writer lost its previous state. Stop and compare with the day before
---   the flip before anything else writes.
+--   before anything else writes.
 -- - movements with no product: the writer's catalogue join is broken.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
 ),
-flag AS (
-    SELECT :'inventory_on'::text AS state,
-           NULLIF(:'inventory_flip_at', '')::timestamptz AS flip_at
-),
 win AS (
-    SELECT GREATEST(COALESCE(flag.flip_at, clock.now - interval '14 days'),
-                    clock.now - interval '14 days') AS since
-    FROM clock CROSS JOIN flag
+    SELECT clock.now - interval '14 days' AS since
+    FROM clock
 ),
 offers AS (
     SELECT count(*) AS n FROM bronze.offers
@@ -51,20 +48,11 @@ agg AS (
     FROM days
 )
 SELECT 'I3 inventory movements'::text AS "check",
-       CASE flag.state
-           WHEN '0' THEN 'PASS'
-           WHEN '1' THEN CASE WHEN agg.bursts IS NOT NULL OR agg.no_product > 0
-                              THEN 'FAIL' ELSE 'PASS' END
-           ELSE 'UNKNOWN'
-       END AS verdict,
-       CASE flag.state
-           WHEN '0' THEN 'not applicable: chain 1 still writes DuckDB (KS_WRITE_INVENTORY is not postgres and no latch marker)'
-           WHEN '1' THEN
-               format('%s movement(s) since %s Kyiv, most initial in a day %s (offers %s), %s without a product%s',
-                      agg.movements,
-                      to_char(win.since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
-                      agg.max_initial, offers.n, agg.no_product,
-                      COALESCE('; initial bursts: ' || agg.bursts, ''))
-           ELSE format('inventory_on=%s: KS_WRITE_INVENTORY not understood, or not read from the web container', flag.state)
-       END AS detail
-FROM flag CROSS JOIN win CROSS JOIN offers CROSS JOIN agg;
+       CASE WHEN agg.bursts IS NOT NULL OR agg.no_product > 0
+            THEN 'FAIL' ELSE 'PASS' END AS verdict,
+       format('%s movement(s) since %s Kyiv, most initial in a day %s (offers %s), %s without a product%s',
+              agg.movements,
+              to_char(win.since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
+              agg.max_initial, offers.n, agg.no_product,
+              COALESCE('; initial bursts: ' || agg.bursts, '')) AS detail
+FROM win CROSS JOIN offers CROSS JOIN agg;

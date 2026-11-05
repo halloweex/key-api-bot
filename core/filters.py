@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 from core.exceptions import ValidationError
 from core.validators import validate_date_string
 
-# DuckDB stores dates in Kyiv timezone, so all period calculations must use it
+# Orders are dated in Kyiv time in every store (DuckDB did, and Postgres's
+# Silver `order_date` does), so all period calculations must use it
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 # The longest range explicit dates may ask for, both ends counted: ten years

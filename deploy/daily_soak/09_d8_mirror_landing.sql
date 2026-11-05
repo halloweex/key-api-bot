@@ -15,15 +15,13 @@
 -- S14-12 deleted those comparisons, so D8 reads ClickHouse's comparison and
 -- the Postgres-alone checks only.
 --
--- THE EVIDENCE IS A COPY, SO FIRST ASK WHETHER THE COPY IS CURRENT
--- The DQ journal is written in DuckDB and carried into Postgres by the hourly
--- `replicate_operational` (core/pg_operational.py). A replication that fails
--- raises nothing here — it only stops moving the watermark — and the journal in
--- Postgres then shows yesterday's clean run for as long as anyone reads it.
--- So this is UNKNOWN, not PASS, when:
--- - the copy of `app.data_quality_runs` is 75 min old or more, or failing;
--- - the copy predates 07:45 Kyiv on the day of the run being judged, so the
---   run cannot be in it yet. Before 07:45 the run judged is yesterday's.
+-- THE RUN JUDGED
+-- Today's 07:30 run from 07:45 Kyiv, yesterday's before. The DQ journal is
+-- written in Postgres by chain 9, unconditionally since step 14's S14-10, so
+-- what is read is the journal itself. Until step 14's S14-20 this check also
+-- knew it as an hourly copy out of DuckDB (`replicate_operational`), and was
+-- UNKNOWN on a copy 75 min old or more, failing, or taken before the run could
+-- be in it; nothing has copied the journal since S14-13.
 --
 -- WHAT A FAIL MEANS
 -- - no mirror_landing run since that 07:30: the job did not fire (a deploy on
@@ -57,39 +55,8 @@ WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
 ),
-journal AS (
-    -- Chain 9 (OD-02 (c)): once KS_WRITE_DQ_JOURNAL moves the journal's writer
-    -- to Postgres, these rows are the journal itself, not an hourly copy. The
-    -- copy stands down with the chain, so its `last_ok_at` freezes and would
-    -- make this check UNKNOWN for ever. Direct is the flag the script read,
-    -- or the latch's owner row, which outranks the flag (OD-19 (a)).
-    SELECT (:'dq_journal_direct' = '1'
-            OR EXISTS (SELECT 1 FROM meta.chain_watermarks
-                       WHERE key = 'owner:app.data_quality_runs')) AS direct
-),
-dq_copy AS (
-    SELECT CASE
-               WHEN journal.direct THEN NULL
-               WHEN s.table_name IS NULL THEN
-                   'app.data_quality_runs has never been copied into Postgres'
-               WHEN s.failures_since_ok > 0 THEN
-                   format('the hourly copy of app.data_quality_* is failing (%s in a row): %s',
-                          s.failures_since_ok,
-                          left(regexp_replace(COALESCE(s.last_error, ''), '\s+', ' ', 'g'), 160))
-               WHEN s.last_ok_at IS NULL THEN
-                   'the copy of app.data_quality_* has never succeeded'
-               WHEN clock.now - s.last_ok_at >= interval '75 minutes' THEN
-                   format('the copy of app.data_quality_* is %s min old (limit 75)',
-                          floor(extract(epoch FROM clock.now - s.last_ok_at) / 60))
-           END AS stale,
-           -- Direct: the journal is as current as the read.
-           CASE WHEN journal.direct THEN clock.now ELSE s.last_ok_at END AS last_ok_at
-    FROM clock
-    CROSS JOIN journal
-    LEFT JOIN meta.mirror_state s ON s.table_name = 'app.data_quality_runs'
-),
 slot AS (
-    -- The 07:30 run being judged: today's once its copy can exist, else yesterday's.
+    -- The 07:30 run being judged: today's from 07:45, else yesterday's.
     SELECT ((CASE WHEN (clock.now AT TIME ZONE 'Europe/Kyiv')::time >= time '07:45'
                   THEN (clock.now AT TIME ZONE 'Europe/Kyiv')::date
                   ELSE (clock.now AT TIME ZONE 'Europe/Kyiv')::date - 1 END)
@@ -151,19 +118,12 @@ agg AS (
 )
 SELECT 'D8 mirror_landing (derived)'::text AS "check",
        CASE
-           WHEN dq_copy.stale IS NOT NULL THEN 'UNKNOWN'
-           WHEN dq_copy.last_ok_at < slot.starts + interval '15 minutes' THEN 'UNKNOWN'
            WHEN agg.n_runs = 0 THEN 'FAIL'
            WHEN agg.errored > 0 OR agg.n_findings > 0 THEN 'FAIL'
            WHEN agg.n_blind > 0 THEN 'UNKNOWN'
            ELSE 'PASS'
        END AS verdict,
        CASE
-           WHEN dq_copy.stale IS NOT NULL THEN dq_copy.stale || '; re-run after the next replication'
-           WHEN dq_copy.last_ok_at < slot.starts + interval '15 minutes' THEN
-               format('the copy was taken at %s Kyiv, before the %s run could be in it; re-run after the next replication',
-                      to_char(dq_copy.last_ok_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
-                      to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
            WHEN agg.n_runs = 0 THEN
                format('no mirror_landing run since %s Kyiv',
                       to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
@@ -179,4 +139,4 @@ SELECT 'D8 mirror_landing (derived)'::text AS "check",
                                     agg.n_graced)
                         ELSE '' END
        END AS detail
-FROM dq_copy CROSS JOIN slot CROSS JOIN agg;
+FROM slot CROSS JOIN agg;

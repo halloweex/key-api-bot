@@ -98,6 +98,27 @@ def test_nginx_names_no_other_sync_door_slow():
         assert not any(re.match(rx, path) for rx in _long_timeout_locations()), path
 
 
+@pytest.mark.parametrize("new, old", sorted(NEW.items()))
+def test_every_doors_limit_is_shared_by_both_its_names(new, old):
+    """slowapi keys a plain `@limiter.limit` by the URL, so each name would get
+    a counter of its own and the full buyer fetch (1/hour) could run twice an
+    hour by alternating them. `shared_limit` with the new path as its scope is
+    what makes it one lever — held here for all four doors, not only the
+    resync the request test below exercises. Mutation: give any door a plain
+    `@limiter.limit` back."""
+    import inspect
+
+    from web.ratelimit import limiter
+
+    posts = _posts()
+    func = inspect.unwrap(posts[new].route.endpoint)
+    assert inspect.unwrap(posts[old].route.endpoint) is func, (new, old)
+    limits = limiter._route_limits.get(f"{func.__module__}.{func.__name__}")
+    assert limits, f"{new}: no rate limit registered"
+    assert {limit.scope for limit in limits} == {new.removeprefix("/api/")}, (
+        new, [(str(limit.limit), limit.scope) for limit in limits])
+
+
 def test_an_alias_shares_its_rate_limit():
     """One limit for the lever, not one per name: the resync allows one a
     minute, and the second through the other name is refused."""

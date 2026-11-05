@@ -1,6 +1,7 @@
-"""The stage 4 soak checks against a real Postgres (DN-03).
+"""The daily soak checks against a real Postgres (DN-03).
 
-Each file under `deploy/stage4_soak/` is one query that returns its own verdict.
+Each file under `deploy/daily_soak/` (`deploy/stage4_soak/` until step 14's
+S14-20) is one query that returns its own verdict.
 What has to be true of them is not that they parse — it is that each one says
 FAIL on the state it exists to catch, PASS on the state next to it, and UNKNOWN
 where the evidence it reads cannot be trusted. That needs seeded rows, a clock
@@ -10,7 +11,7 @@ HOW A SCENARIO IS ISOLATED
 Every scenario runs in one transaction that is rolled back: seed, then
 `SET TRANSACTION READ ONLY`, then the check. Nothing seeded survives the test —
 and the check itself runs in a read-only transaction, which proves the same
-thing `deploy/stage4_soak.sh` relies on in production: it cannot write.
+thing `deploy/daily_soak.sh` relies on in production: it cannot write.
 
 THE CLOCK
 The files read `soak.now` when it is set and `now()` otherwise; the script
@@ -18,8 +19,16 @@ never sets it. Here it is a fixed Wednesday noon in Kyiv in 2030, far from any
 row another test committed, so a heavy-job window or a stray `mirrored_at`
 cannot make a verdict depend on when CI happened to run.
 
-`psql` variables (`:'inventory_on'` and friends) mean nothing to asyncpg, so
-`render` substitutes them the way `psql -v` would.
+`psql` variables (`:'buyers_override_floor'` and P1's record) mean nothing to
+asyncpg, so `render` substitutes them the way `psql -v` would.
+
+Until S14-20 the checks also took a KS_WRITE_* state per chain (0, 1, held,
+pending, invalid, unknown), chain 9's `dq_journal_direct`, KS_DUCKDB and the
+flip-day times, and judged a chain only once it had moved and the DQ journal
+only once its hourly copy was fresh. Every chain writes Postgres since S14-00,
+the journal is written there directly since S14-10 and nothing copies it since
+S14-13, so the checks judge unconditionally; the tests of those gates went
+with them (the list is in the PR that removed them).
 """
 from __future__ import annotations
 
@@ -39,22 +48,14 @@ DSN = os.getenv("KS_PG_DSN")
 needs_pg = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 REPO = Path(__file__).resolve().parents[2]
-SQL_DIR = REPO / "deploy" / "stage4_soak"
+SQL_DIR = REPO / "deploy" / "daily_soak"
 FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
-VARIABLES = {"inventory_on": "0", "inventory_flip_at": "",
-             "buyers_on": "0", "buyers_flip_at": "",
-             "buyers_override_floor": "", "dq_journal_direct": "0",
+VARIABLES = {"buyers_override_floor": "",
              # The DuckDB file (P1, OD-17 (a)); tests/integration/test_stage5_soak_sql.py.
-             "duckdb_off": "0", "duckdb_file_last": "none",
+             "duckdb_file_last": "none",
              "duckdb_file_since": "", "duckdb_file_since_reason": "",
              "duckdb_file_checked_at": "", "duckdb_file_missing_at": ""}
-# Chain 5's one (31_m2; M1 went in step 14's S14-13).
-VARIABLES.update({"managers_on": "0", "managers_flip_at": ""})
-# Chain 3's four (33_o2 … 36_o5; O1 went in step 14's S14-13, and with it
-# `markers_read_at`, which only O1 and M1 read, and the three shadow chains'
-# states, which only H1 read).
-VARIABLES.update({"orders_on": "0", "orders_flip_at": ""})
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (
@@ -201,6 +202,25 @@ class TestTheFiles:
         assert named == {"gold_rollup_mismatch", "customer_profile_mismatch"}
         assert named <= set(REGISTRY)
 
+    def test_d9s_watched_series_are_registered_conditions(self):
+        """D9 reads `app.alert_series` by condition key, so a key nothing can
+        fire any more reads "nothing firing" for ever. `mirror_buckets_disagree`
+        stayed on its list after step 14's S14-12 deleted the comparison that
+        filed it, until S14-20. Mutation: list an unregistered key, or a prefix
+        nothing in the registry carries."""
+        from core.alerting import REGISTRY
+
+        sql = _uncommented((SQL_DIR / "10_d9_alerts.sql").read_text(encoding="utf-8"))
+        block = re.search(r"watched AS \((.*?)\n\),", sql, flags=re.S).group(1)
+        prefix, rest = block.split("a.condition_key IN", 1)
+        named = set(re.findall(r"'([\w:.]+)'", rest))
+        assert "mirror_buckets_disagree" not in named
+        assert named and named <= set(REGISTRY), sorted(named - set(REGISTRY))
+        for start in re.findall(r"left\(a\.condition_key, (\d+)\) = '([\w:]+)'", prefix):
+            length, value = int(start[0]), start[1]
+            assert len(value) == length, start
+            assert any(key.startswith(value) for key in REGISTRY), value
+
     def test_d8s_grace_checks_are_the_info_the_utm_completeness_files(self):
         """D8 forgives a UTM verdict still inside its grace (the 07:30 run
         files one nearly every morning since KS_UTM_PARSE=postgres). Derived,
@@ -342,32 +362,16 @@ async def dq_issue(conn, run_id, check_name, *, table="silver.orders", count=1,
 @needs_pg
 class TestEveryCheckRuns:
     VARIANTS = (
-        {"inventory_on": "0", "buyers_on": "0"},
-        {"inventory_on": "1",
-         "inventory_flip_at": "2030-06-01 10:00+03",
-         "buyers_on": "1", "buyers_flip_at": "2030-06-01 10:30+03",
-         "buyers_override_floor": "0",
-         "orders_on": "1", "orders_flip_at": "2030-06-01 11:00+03"},
-        {"inventory_on": "1", "buyers_on": "1",
-         "orders_on": "1"},
-        {"inventory_on": "invalid", "buyers_on": "invalid",
-         "orders_on": "invalid"},
-        {"inventory_on": "unknown", "buyers_on": "unknown",
-         "orders_on": "unknown"},
-        {"inventory_on": "0", "buyers_on": "held",
-         "orders_on": "pending"},
-        {"managers_on": "pending", "orders_on": "pending"},
-        # Chain 9's journal (OD-02 (c)): every state the script can pass.
-        {"dq_journal_direct": "1"},
-        {"dq_journal_direct": "invalid"},
+        {},
+        {"buyers_override_floor": "0"},
     )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
     @pytest.mark.parametrize("clock", ["fixed", "real"])
     async def test_returns_verdict_rows_read_only(self, pool, path, clock):
-        """On whatever the database holds, under every flag the script can pass,
-        with the real clock as well as the fixed one."""
+        """On whatever the database holds, with every value the script can
+        pass, and with the real clock as well as the fixed one."""
         uses_variables = _variables(path.read_text(encoding="utf-8"))
         for variables in (self.VARIANTS if uses_variables else self.VARIANTS[:1]):
             async with scenario(pool) as conn:
@@ -387,41 +391,10 @@ class TestEveryCheckRuns:
                 names += [r["check"] for r in await check(conn, path.name)]
         assert len(names) == len(set(names)), names
 
-    @pytest.mark.asyncio
-    async def test_buyer_checks_are_not_applicable_while_the_chain_is_off(self, pool):
-        for path in FILES:
-            if not path.name[3:].startswith("b"):
-                continue
-            async with scenario(pool) as conn:
-                await clean_buyers(conn)
-                v, detail = await verdict(conn, path.name, buyers_on="0")
-            assert (v, detail.startswith("not applicable")) == ("PASS", True), (path.name, detail)
-
-    @pytest.mark.asyncio
-    async def test_a_held_chain_is_not_applicable_to_every_buyer_check(self, pool):
-        """The flip did not move the chain: B2–B5 have nothing moved to judge.
-        (B1 said so and named the reader, until step 14's S14-13 deleted it
-        with the copies it judged.)"""
-        verdicts = {}
-        for path in FILES:
-            if not path.name[3:].startswith("b"):
-                continue
-            async with scenario(pool) as conn:
-                await clean_buyers(conn)
-                verdicts[path.name[:2]] = await verdict(
-                    conn, path.name, buyers_on="held")
-        assert set(verdicts) == {"24", "25", "26", "27"}, verdicts
-        assert all(v == "PASS" and "held on DuckDB" in d for v, d in verdicts.values()), verdicts
-
-    @pytest.mark.asyncio
-    async def test_inventory_checks_are_not_applicable_while_the_chain_is_off(self, pool):
-        for path in FILES:
-            if not path.name[3:].startswith("i"):
-                continue
-            async with scenario(pool) as conn:
-                await clean_inventory(conn)
-                v, detail = await verdict(conn, path.name, inventory_on="0")
-            assert (v, detail.startswith("not applicable")) == ("PASS", True), (path.name, detail)
+    # `test_buyer_checks_are_not_applicable_while_the_chain_is_off`,
+    # `test_a_held_chain_is_not_applicable_to_every_buyer_check` and
+    # `test_inventory_checks_are_not_applicable_while_the_chain_is_off`
+    # stood here until step 14's S14-20 took the gates out of the checks.
 
 
 @needs_pg
@@ -612,9 +585,10 @@ class TestD5DroppedMarks:
 
 
 @needs_pg
-class TestStaleEvidenceIsUnknown:
-    """A check that reads `app.data_quality_*` reads an hourly copy. A copy
-    that stopped moving must never read as a clean journal."""
+class TestD8JudgesTheRun:
+    """D8 reads the 07:30 `mirror_landing` run out of the journal itself. It
+    read an hourly copy and gated on the copy's freshness until step 14's
+    S14-20 (the copy-freshness tests went with the gate)."""
 
     TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
 
@@ -622,52 +596,17 @@ class TestStaleEvidenceIsUnknown:
         await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
 
     @pytest.mark.asyncio
-    async def test_a_copy_two_hours_old_makes_d8_unknown(self, pool):
+    async def test_a_clean_run_passes_d8(self, pool):
         async with scenario(pool) as conn:
             await self._clean_mirror_landing_run(conn)
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(hours=2))
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
-        assert v == "UNKNOWN" and "120 min old" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_a_failing_copy_makes_d8_unknown(self, pool):
-        async with scenario(pool) as conn:
-            await self._clean_mirror_landing_run(conn)
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=70),
-                               attempted_at=ago(minutes=10), failures=1, error="boom")
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
-        assert v == "UNKNOWN" and "failing" in detail, detail
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
-    async def test_a_copy_two_hours_old_makes_the_history_unknown(self, pool, name, layer):
-        async with scenario(pool) as conn:
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(hours=2))
-            v, detail = await verdict(conn, name)
-        assert v == "UNKNOWN", detail
-
-    @pytest.mark.asyncio
-    async def test_no_copy_row_at_all_is_unknown(self, pool):
-        async with scenario(pool) as conn:
-            await conn.execute(
-                "DELETE FROM meta.mirror_state WHERE table_name = 'app.data_quality_runs'")
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
-        assert v == "UNKNOWN", detail
-
-    @pytest.mark.asyncio
-    async def test_a_fresh_copy_with_a_clean_run_passes_d8(self, pool):
-        async with scenario(pool) as conn:
-            await self._clean_mirror_landing_run(conn)
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "PASS", detail
 
     @pytest.mark.asyncio
-    async def test_a_fresh_copy_with_a_finding_fails_d8(self, pool):
+    async def test_a_finding_fails_d8(self, pool):
         async with scenario(pool) as conn:
             await self._clean_mirror_landing_run(conn)
             await dq_issue(conn, DQ_RUN_IDS[0], "gold_cell_values", table="gold.daily_revenue")
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "FAIL" and "gold_cell_values" in detail, detail
 
@@ -679,7 +618,6 @@ class TestStaleEvidenceIsUnknown:
             await self._clean_mirror_landing_run(conn)
             await dq_issue(conn, DQ_RUN_IDS[0], "pg_order_utm_in_flight",
                            table="silver.order_utm", severity="INFO")
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "PASS" and "1 UTM verdict(s) in flight" in detail, detail
 
@@ -691,7 +629,6 @@ class TestStaleEvidenceIsUnknown:
                            table="silver.order_utm", severity="INFO")
             await dq_issue(conn, DQ_RUN_IDS[0], "pg_order_utm_missing",
                            table="silver.order_utm", severity="CRITICAL")
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "FAIL" and "pg_order_utm_missing" in detail, detail
         assert "pg_order_utm_in_flight" not in detail, detail
@@ -704,53 +641,40 @@ class TestStaleEvidenceIsUnknown:
             await self._clean_mirror_landing_run(conn)
             await dq_issue(conn, DQ_RUN_IDS[0], "pg_order_utm_in_flight",
                            table="silver.order_utm", severity="WARN")
-            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "FAIL" and "pg_order_utm_in_flight" in detail, detail
 
-    @pytest.mark.asyncio
-    async def test_a_fresh_copy_taken_before_the_run_is_unknown(self, pool):
-        """Copied at 07:40: the 07:30 run cannot be in it yet."""
-        at_0800 = datetime(2030, 6, 5, 8, 0, tzinfo=KYIV)
-        async with scenario(pool) as conn:
-            await self._clean_mirror_landing_run(conn)
-            await mirror_state(conn, "app.data_quality_runs",
-                               ok_at=datetime(2030, 6, 5, 7, 40, tzinfo=KYIV))
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql", now=at_0800)
-        assert v == "UNKNOWN", detail
-
-
 @needs_pg
-class TestADirectJournalIsNotGatedOnTheCopy:
-    """Chain 9 (OD-02 (c)): once the journal is written in Postgres, these
-    rows are the journal and not a copy of it. The copy stands down with the
-    chain, its `last_ok_at` freezes, and without this D8, 20, 21 and 22 read
-    UNKNOWN for as long as the chain is on. Direct is the script's flag or the
-    latch's owner row, which outranks it. Mutation: drop the `journal` CTE's
-    effect from one file — its case below stays UNKNOWN."""
+class TestNoCopyGatesTheJournal:
+    """The journal is read, not a copy of it: a `meta.mirror_state` row for
+    `app.data_quality_runs` left frozen, or failing, by the hourly copy that
+    S14-13 deleted changes no verdict. Mutation: put the copy's gate back in
+    D8 or in either history — its case below reads UNKNOWN."""
 
     TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
-    FROZEN = dict(ok_at=datetime(2030, 6, 1, 3, 0, tzinfo=KYIV))
-
-    @staticmethod
-    async def owner_row(conn):
-        await conn.execute(
-            "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
-            "VALUES ('owner:app.data_quality_runs', '2030-06-01T00:00:00+00:00', now()) "
-            "ON CONFLICT (key) DO NOTHING")
+    FROZEN = (dict(ok_at=datetime(2030, 6, 1, 3, 0, tzinfo=KYIV)),
+              dict(ok_at=datetime(2030, 6, 1, 3, 0, tzinfo=KYIV),
+                   attempted_at=datetime(2030, 6, 5, 11, 50, tzinfo=KYIV),
+                   failures=3, error="boom"))
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("how", ["flag", "owner_row"])
-    async def test_d8_judges_the_run(self, pool, how):
+    @pytest.mark.parametrize("frozen", FROZEN)
+    async def test_d8_judges_the_run(self, pool, frozen):
         async with scenario(pool) as conn:
             await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
                          started_at=self.TODAY_0730)
-            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
-            if how == "owner_row":
-                await self.owner_row(conn)
-            v, detail = await verdict(
-                conn, "09_d8_mirror_landing.sql",
-                dq_journal_direct="1" if how == "flag" else "0")
+            await mirror_state(conn, "app.data_quality_runs", **frozen)
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    async def test_d8_judges_the_run_with_no_copy_row_at_all(self, pool):
+        async with scenario(pool) as conn:
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
+                         started_at=self.TODAY_0730)
+            await conn.execute(
+                "DELETE FROM meta.mirror_state WHERE table_name = 'app.data_quality_runs'")
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "PASS", detail
 
     @pytest.mark.asyncio
@@ -759,43 +683,33 @@ class TestADirectJournalIsNotGatedOnTheCopy:
             await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
                          started_at=self.TODAY_0730)
             await dq_issue(conn, DQ_RUN_IDS[0], "gold_cell_values", table="gold.daily_revenue")
-            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql",
-                                      dq_journal_direct="1")
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN[0])
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "FAIL" and "gold_cell_values" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_without_either_the_frozen_copy_is_still_unknown(self, pool):
-        async with scenario(pool) as conn:
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
-                         started_at=self.TODAY_0730)
-            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
-        assert v == "UNKNOWN", detail
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
-    async def test_the_histories_judge_the_runs(self, pool, name, layer):
+    @pytest.mark.parametrize("frozen", FROZEN)
+    async def test_the_histories_judge_the_runs(self, pool, name, layer, frozen):
         history = TestReconciliationPgHistory()
         history.LAYER = layer
         async with scenario(pool) as conn:
-            await history.seed(conn, history.every_morning(), copied=self.FROZEN["ok_at"])
-            stale_v, _ = await verdict(conn, name)
-            v, detail = await verdict(conn, name, dq_journal_direct="1")
-        assert stale_v == "UNKNOWN"
+            await history.seed(conn, history.every_morning())
+            await mirror_state(conn, "app.data_quality_runs", **frozen)
+            v, detail = await verdict(conn, name)
         assert v == "PASS", detail
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
     async def test_a_silence_now_is_a_fail_not_an_unknown(self, pool, name, layer):
-        """With the journal direct there is no copy to wait for: a silence past
-        the limit at the read is one that happened."""
+        """There is no copy to wait for: a silence past the limit at the read
+        is one that happened."""
         history = TestReconciliationPgHistory()
         history.LAYER = layer
         async with scenario(pool) as conn:
-            await history.seed(conn, history.every_morning(last=2),
-                               copied=self.FROZEN["ok_at"])
-            v, detail = await verdict(conn, name, dq_journal_direct="1")
+            await history.seed(conn, history.every_morning(last=2))
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN[0])
+            v, detail = await verdict(conn, name)
         assert v == "FAIL", detail
 
 
@@ -823,15 +737,12 @@ class TestReconciliationPgHistory:
         starts = [moved.get(d, self.at(d)) for d in range(first, last - 1, -1)]
         return [s for s in starts if s is not None]
 
-    async def seed(self, conn, starts, *, failed=(), copied=None):
-        """A run of the layer per start, in order, `failed` ones errored,
-        and a copy of the journal taken at `copied` (ten minutes ago)."""
+    async def seed(self, conn, starts, *, failed=()):
+        """A run of the layer per start, in order, `failed` ones errored."""
         for n, started_at in enumerate(sorted(set(starts) | set(failed))):
             await dq_run(conn, self.FIRST_RUN_ID + n, layer=self.LAYER,
                          started_at=started_at,
                          error="boom" if started_at in failed else None)
-        await mirror_state(conn, "app.data_quality_runs",
-                           ok_at=copied or ago(minutes=10))
 
     @pytest.mark.asyncio
     async def test_a_run_every_morning_passes(self, pool):
@@ -963,25 +874,17 @@ class TestReconciliationPgHistory:
 
     @pytest.mark.asyncio
     async def test_no_run_by_noon_fails(self, pool):
-        """Yesterday's 05:30 was the last, and the copy taken at 11:50 holds
-        nothing since: 30.3 h, past the limit before the copy was even taken.
-        Today needs no run by the calendar; it needs one by the clock."""
+        """Yesterday's 05:30 was the last, and nothing since: 30.5 h at noon,
+        past the limit. Today needs no run by the calendar; it needs one by
+        the clock. (Until S14-20 the detail measured the silence to the moment
+        an hourly copy of the journal was taken, and a copy taken before the
+        limit made it UNKNOWN; the journal is read directly since.)"""
         async with scenario(pool) as conn:
-            await self.seed(conn, self.every_morning(last=1), copied=ago(minutes=10))
+            await self.seed(conn, self.every_morning(last=1))
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "no successful run on" not in detail, detail
-        assert "no success since 04.06 05:30 Kyiv, 30.3 h before the copy was taken" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_a_copy_taken_before_the_limit_is_unknown_after_it(self, pool):
-        """Copied at 11:00, 29.5 h after the last run: at noon the silence is past
-        the limit unless a run landed after 11:00, which the copy cannot show."""
-        async with scenario(pool) as conn:
-            await self.seed(conn, self.every_morning(last=1), copied=ago(hours=1))
-            v, detail = await verdict(conn, self.FILE)
-        assert v == "UNKNOWN", detail
-        assert "the copy taken at 05.06 11:00 Kyiv cannot say whether a run landed since" in detail, detail
+        assert "no success since 04.06 05:30 Kyiv, 30.5 h ago" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_critical_run_fails(self, pool):
@@ -993,19 +896,6 @@ class TestReconciliationPgHistory:
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "CRITICAL on 26.05" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_a_stale_copy_of_a_clean_history_is_unknown(self, pool):
-        """A run every morning, and a copy two hours old. This is the history a
-        frozen replication would certify: without the staleness rule it reads
-        PASS, where the empty journal in TestStaleEvidenceIsUnknown would at
-        least have read FAIL."""
-        async with scenario(pool) as conn:
-            await self.seed(conn, self.every_morning(), copied=ago(hours=2))
-            v, detail = await verdict(conn, self.FILE)
-        assert v == "UNKNOWN", detail
-        assert "is 120 min old (limit 75)" in detail, detail
-
 
 @needs_pg
 class TestReconciliationChHistory(TestReconciliationPgHistory):
@@ -1069,7 +959,6 @@ class TestD8ABlindComparisonIsNotADisagreement:
         await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
         for name, table in findings:
             await dq_issue(conn, DQ_RUN_IDS[0], name, table=table)
-        await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
 
     @pytest.mark.asyncio
     async def test_no_ks_ch_url_is_unknown_not_a_disagreement(self, pool):
@@ -1172,7 +1061,7 @@ class TestB2BuyersWatermark:
         async with scenario(pool) as conn:
             await clean_buyers(conn)
             await self.mark(conn, ago(hours=2).isoformat())
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and "moved 120 min ago" in detail, detail
 
     @pytest.mark.asyncio
@@ -1180,25 +1069,23 @@ class TestB2BuyersWatermark:
         async with scenario(pool) as conn:
             await clean_buyers(conn)
             await self.mark(conn, ago(minutes=40).isoformat())
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS" and "moved 40 min ago" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_missing_fails_unless_just_flipped(self, pool):
+    async def test_missing_fails(self, pool):
+        """(A flip time under 90 minutes old forgave it until S14-20.)"""
         async with scenario(pool) as conn:
             await clean_buyers(conn)
-            v, _ = await verdict(conn, self.FILE, buyers_on="1")
-            assert v == "FAIL"
-            v, detail = await verdict(conn, self.FILE, buyers_on="1",
-                                      buyers_flip_at=ago(minutes=20).isoformat())
-        assert v == "PASS" and "not written yet" in detail, detail
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL" and "no buyers step has completed" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_value_that_is_not_a_timestamp_fails_and_does_not_error(self, pool):
         async with scenario(pool) as conn:
             await clean_buyers(conn)
             await self.mark(conn, "not a time")
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and "not a timestamp" in detail, detail
 
 
@@ -1212,20 +1099,20 @@ class TestB3BuyersVerdicts:
             await clean_buyers(conn)
             await buyer(conn, BUYER_IDS[0], mirrored_at=ago(hours=2))
             await buyer(conn, BUYER_IDS[1], mirrored_at=ago(minutes=30))
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and detail.startswith("1 buyer(s)"), detail
 
     @pytest.mark.asyncio
-    async def test_fewer_overrides_than_on_flip_day_fails(self, pool):
+    async def test_fewer_overrides_than_the_floor_fails(self, pool):
         async with scenario(pool) as conn:
             await clean_buyers(conn)
             await buyer(conn, BUYER_IDS[0])
             await verdict_row(conn, BUYER_IDS[0], override=True)
-            v, _ = await verdict(conn, self.FILE, buyers_on="1", buyers_override_floor="1")
+            v, _ = await verdict(conn, self.FILE, buyers_override_floor="1")
             assert v == "PASS"
-            v, detail = await verdict(conn, self.FILE, buyers_on="1",
+            v, detail = await verdict(conn, self.FILE,
                                       buyers_override_floor="2")
-        assert v == "FAIL" and "against 2 on flip day" in detail, detail
+        assert v == "FAIL" and "against a floor of 2" in detail, detail
 
 
 @needs_pg
@@ -1238,7 +1125,7 @@ class TestB4SelectionBacklog:
             await clean_buyers(conn)
             await silver_order(conn, ORDER_IDS[0], buyer_id=BUYER_IDS[0],
                                ordered_at=ago(hours=30))
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and "1 of them for over a day" in detail, detail
 
     @pytest.mark.asyncio
@@ -1250,7 +1137,7 @@ class TestB4SelectionBacklog:
             await buyer(conn, BUYER_IDS[1])
             await silver_order(conn, ORDER_IDS[1], buyer_id=BUYER_IDS[1],
                                ordered_at=ago(days=3))
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS" and detail.startswith("1 buyer(s) owed"), detail
 
 
@@ -1264,7 +1151,7 @@ class TestB5BuyersIntegrity:
             await clean_buyers(conn)
             await buyer(conn, BUYER_IDS[0], phone="+380500000001")
             await verdict_row(conn, BUYER_IDS[0])
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
 
     @pytest.mark.asyncio
@@ -1274,7 +1161,7 @@ class TestB5BuyersIntegrity:
         async with scenario(pool) as conn:
             await clean_buyers(conn)
             await buyer(conn, BUYER_IDS[0], phone="", contact=False)
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
 
     @pytest.mark.parametrize("defect", ["orphan_verdict", "null_name", "lost_contact"])
@@ -1288,7 +1175,7 @@ class TestB5BuyersIntegrity:
                 await buyer(conn, BUYER_IDS[0], name=None)
             else:
                 await buyer(conn, BUYER_IDS[0], phone="+380500000001", contact=False)
-            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", (defect, detail)
 
 
@@ -1338,7 +1225,7 @@ class TestM2ClassificationShape:
             await manager(conn, 2, retail=True, intervals=(
                 (date(1970, 1, 1), date(2030, 3, 1), False), (date(2030, 3, 1), None, True)))
             await managers_synced(conn, ago(hours=5))
-            v, detail = await verdict(conn, self.FILE, managers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS" and "2 manager(s)" in detail and "5 h old" in detail, detail
 
     @pytest.mark.asyncio
@@ -1370,7 +1257,7 @@ class TestM2ClassificationShape:
             await manager(conn, 1)
             await manager(conn, 3, **shapes[seed])
             await managers_synced(conn, ago(hours=1))
-            v, detail = await verdict(conn, self.FILE, managers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and expected in detail, detail
 
     @pytest.mark.asyncio
@@ -1379,34 +1266,21 @@ class TestM2ClassificationShape:
             await clean_managers(conn)
             await manager(conn, 1)
             await managers_synced(conn, ago(hours=27))
-            v, detail = await verdict(conn, self.FILE, managers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and "moved 27 h ago" in detail, detail
         async with scenario(pool) as conn:
             await clean_managers(conn)
             await manager(conn, 1)
-            v, detail = await verdict(conn, self.FILE, managers_on="1")
-            assert v == "FAIL" and "no manager sync has completed" in detail, detail
-            v, detail = await verdict(conn, self.FILE, managers_on="1",
-                                      managers_flip_at=ago(minutes=10).isoformat())
-        assert v == "PASS" and "not written yet" in detail, detail
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL" and "no manager sync has completed" in detail, detail
 
     @pytest.mark.asyncio
     async def test_an_empty_table_fails(self, pool):
         async with scenario(pool) as conn:
             await clean_managers(conn)
             await managers_synced(conn, ago(hours=1))
-            v, detail = await verdict(conn, self.FILE, managers_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and "bronze.managers is empty" in detail, detail
-
-    @pytest.mark.asyncio
-    async def test_off_and_pending_judge_nothing(self, pool):
-        async with scenario(pool) as conn:
-            await clean_managers(conn)
-            await manager(conn, 3, intervals=())
-            for state in ("0", "pending"):
-                v, detail = await verdict(conn, self.FILE, managers_on=state)
-                assert v == "PASS" and detail.startswith("not applicable"), detail
-
 
 # ── chain 3: O1–O5 ────────────────────────────────────────────────────────────
 
@@ -1488,51 +1362,9 @@ async def orders_synced(conn, *, stamped_at, value=None):
         stamped_at)
 
 
-@needs_pg
-class TestChain3IsJudgedOnlyOnceItMoved:
-    @pytest.mark.asyncio
-    async def test_off_is_not_applicable_everywhere(self, pool):
-        for name in O_FILES:
-            async with scenario(pool) as conn:
-                await clean_orders(conn)
-                await chain_order(conn, CHAIN3_IDS[0], lines=0, version=None,
-                                  created_at=ago(days=3))
-                v, detail = await verdict(conn, name, orders_on="0")
-            assert (v, detail.startswith("not applicable")) == ("PASS", True), (name, detail)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("state", ["pending", "0"])
-    async def test_owner_rows_or_none_a_chain_that_has_not_moved_is_not_applicable(
-            self, pool, state):
-        """The flag without the latch (`pending`), or the flag at duckdb with
-        owner rows and no marker (a lost marker): O2–O5 have no chain writing
-        Postgres to judge. Until step 14's S14-13 O1 judged both — UNKNOWN
-        naming web's preconditions, or FAIL naming the lost marker and the
-        lever; the lost marker is `chain_latch_disagrees`' since S14-12, on
-        the chain invariants. Mutation: judge either as a chain that moved."""
-        for owned in (False, True):
-            verdicts = {}
-            for name in O_FILES:
-                async with scenario(pool) as conn:
-                    await clean_orders(conn)
-                    if owned:
-                        await order_owners(conn, ago(days=2))
-                    verdicts[name] = await verdict(conn, name, orders_on=state)
-            assert all(v == "PASS" and d.startswith("not applicable")
-                       for v, d in verdicts.values()), (owned, verdicts)
-
-    @pytest.mark.asyncio
-    async def test_a_state_nobody_named_is_unknown_everywhere(self, pool):
-        """Invalid or unread: O2–O5 cannot say whether chain 3 moved, so each
-        says so itself. (O1 FAILed an invalid flag, until S14-13.)"""
-        for name in O_FILES:
-            for state in ("unknown", "invalid"):
-                async with scenario(pool) as conn:
-                    await clean_orders(conn)
-                    v, detail = await verdict(conn, name, orders_on=state)
-                assert v == "UNKNOWN", (name, state, detail)
-                if state == "invalid":
-                    assert "KS_WRITE_ORDERS not understood" in detail, (name, detail)
+# `TestChain3IsJudgedOnlyOnceItMoved` held O2–O5 to "not applicable" for a
+# chain 3 that had not moved and to UNKNOWN for a state nobody named, until
+# step 14's S14-20 took the gates out of the checks.
 
 
 @needs_pg
@@ -1548,7 +1380,7 @@ class TestO2OrdersWatermark:
             await order_owners(conn, ago(days=2))
             await orders_synced(conn, stamped_at=ago(minutes=2),
                                 value=ago(hours=9).isoformat())
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS" and "rewritten 2 min ago" in detail, detail
         assert "newest change 05.06 03:00 Kyiv" in detail, detail
 
@@ -1568,36 +1400,32 @@ class TestO2OrdersWatermark:
             await clean_orders(conn)
             await order_owners(conn, ago(days=2))
             await orders_synced(conn, stamped_at=NOW - age)
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == expected and f"rewritten {shown} min ago (limit 105)" in detail, detail
 
     @pytest.mark.asyncio
     async def test_missing_fails_unless_the_handover_is_recent(self, pool):
         async with scenario(pool) as conn:
             await clean_orders(conn)
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
             assert v == "FAIL" and "no order step has completed" in detail, detail
-            v, detail = await verdict(conn, self.FILE, orders_on="1",
-                                      orders_flip_at=ago(minutes=20).isoformat())
-            assert v == "PASS" and "not written yet" in detail, detail
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await order_owners(conn, ago(minutes=30))
-            v, _ = await verdict(conn, self.FILE, orders_on="1")
+            v, _ = await verdict(conn, self.FILE)
         assert v == "PASS"
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await order_owners(conn, ago(hours=2))
-            v, _ = await verdict(conn, self.FILE, orders_on="1",
-                                 orders_flip_at=ago(minutes=20).isoformat())
-        assert v == "FAIL", "the owner rows date the handover before the flip time does"
+            v, _ = await verdict(conn, self.FILE)
+        assert v == "FAIL", "owner rows two hours old forgive nothing"
 
     @pytest.mark.asyncio
     async def test_a_value_that_is_not_a_timestamp_fails_and_does_not_error(self, pool):
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await orders_synced(conn, stamped_at=ago(minutes=1), value="not a time")
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and "not a timestamp" in detail, detail
 
 
@@ -1611,7 +1439,7 @@ class TestO3OrderVersions:
             await clean_orders(conn)
             await chain_order(conn, CHAIN3_IDS[0], mirrored_at=ago(days=3), version="baseline")
             await chain_order(conn, CHAIN3_IDS[1], mirrored_at=ago(minutes=5))
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS" and "1 in 24 h, every order covered" in detail, detail
 
     @pytest.mark.asyncio
@@ -1624,7 +1452,7 @@ class TestO3OrderVersions:
             await clean_orders(conn)
             await chain_order(conn, CHAIN3_IDS[0], mirrored_at=ago(hours=25))
             await order_version(conn, CHAIN3_IDS[0], captured_at=ago(hours=2), kind=kind)
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == expected, (kind, detail)
         if expected == "FAIL":
             assert "no version since 04.06 11:00 Kyiv (limit 24 h)" in detail, detail
@@ -1633,7 +1461,7 @@ class TestO3OrderVersions:
     async def test_an_empty_archive_fails(self, pool):
         async with scenario(pool) as conn:
             await clean_orders(conn)
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and "the archive holds no version" in detail, detail
 
     @pytest.mark.asyncio
@@ -1642,7 +1470,7 @@ class TestO3OrderVersions:
             await clean_orders(conn)
             await chain_order(conn, CHAIN3_IDS[0], mirrored_at=ago(minutes=5))
             await chain_order(conn, CHAIN3_IDS[1], mirrored_at=ago(minutes=5), version=None)
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and f"1 order(s) with no version at all, e.g. {{{CHAIN3_IDS[1]}}}" \
             in detail, detail
 
@@ -1658,7 +1486,7 @@ class TestO3OrderVersions:
                 "INSERT INTO app.order_versions (order_id, captured_at, kind) "
                 "SELECT $1, $2, $3 FROM generate_series(1, 1000)",
                 CHAIN3_IDS[0], ago(hours=3), kind)
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == expected, (kind, detail)
         if expected == "FAIL":
             assert "1001 versions in 24 h (limit 1000): flooding" in detail, detail
@@ -1746,7 +1574,7 @@ class TestO4HalfwrittenOrders:
             await order_owners(conn, ago(days=2))
             await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(hours=7),
                               mirrored_at=ago(hours=1))
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and detail.startswith("1 order(s) worth 100.00 written since "
                                                  "the handover"), detail
         assert f"e.g. {{{CHAIN3_IDS[0]}}}" in detail, detail
@@ -1760,7 +1588,7 @@ class TestO4HalfwrittenOrders:
             await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(hours=5))
             await chain_order(conn, CHAIN3_IDS[2], lines=2, created_at=ago(days=3))
             await chain_order(conn, CHAIN3_IDS[3], total=0, lines=0, created_at=ago(days=3))
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS" and detail.startswith("every order written since the handover"), \
             detail
         assert "ledger" not in detail, detail
@@ -1780,7 +1608,7 @@ class TestO4HalfwrittenOrders:
             await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(days=1))
             await order_miss(conn, CHAIN3_IDS[0], checked_at=ago(hours=20))
             await chain_order(conn, CHAIN3_IDS[1], total=250, lines=0, created_at=ago(days=1))
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and detail.startswith("2 order(s) worth 350.00 written since "
                                                  "the handover"), detail
         assert f"e.g. {{{CHAIN3_IDS[1]},{CHAIN3_IDS[0]}}}" in detail, detail
@@ -1801,7 +1629,7 @@ class TestO4HalfwrittenOrders:
             await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(hours=hours),
                               mirrored_at=ago(hours=1))
             await order_miss(conn, CHAIN3_IDS[0], checked_at=ago(minutes=50))
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == expected, detail
 
     @pytest.mark.asyncio
@@ -1814,20 +1642,19 @@ class TestO4HalfwrittenOrders:
             await order_owners(conn, ago(days=2))
             await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(days=5),
                               mirrored_at=ago(days=3))
-            v, _ = await verdict(conn, self.FILE, orders_on="1")
+            v, _ = await verdict(conn, self.FILE)
         assert v == "PASS"
 
     @pytest.mark.asyncio
-    async def test_without_owner_rows_the_flip_time_and_without_it_unknown(self, pool):
+    async def test_without_owner_rows_it_is_unknown(self, pool):
+        """Nothing dates the chain's writes. (A flip time stood in until
+        S14-20.)"""
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(hours=8),
                               mirrored_at=ago(hours=1))
-            v, detail = await verdict(conn, self.FILE, orders_on="1",
-                                      orders_flip_at=ago(hours=2).isoformat())
-            assert v == "FAIL" and "since the flip" in detail, detail
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
-        assert v == "UNKNOWN" and "SOAK_ORDERS_FLIP_AT" in detail, detail
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN" and "no owner row for chain 3" in detail, detail
 
 
 @needs_pg
@@ -1843,7 +1670,7 @@ class TestO5OrdersIntegrity:
             # In flight: written this hour, its order not yet — not a day old.
             await order_expense(conn, CHAIN3_IDS[1], CHAIN3_IDS[1], mirrored_at=ago(hours=2))
             await order_miss(conn, CHAIN3_IDS[2], checked_at=ago(days=1))
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
 
     @pytest.mark.asyncio
@@ -1858,7 +1685,7 @@ class TestO5OrdersIntegrity:
                 await order_expense(conn, CHAIN3_IDS[1], CHAIN3_IDS[1], mirrored_at=ago(days=2))
             else:
                 await order_miss(conn, CHAIN3_IDS[2], checked_at=None)
-            v, detail = await verdict(conn, self.FILE, orders_on="1")
+            v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL" and expected in detail, (defect, detail)
 
     @pytest.mark.asyncio
@@ -1884,83 +1711,18 @@ class TestO5OrdersIntegrity:
             await order_miss(conn, CHAIN3_IDS[2], checked_at=real)
             orphans = await conn.fetchrow(_EXPENSE_ORPHANS_SQL)
             nulls = await conn.fetchrow(_MISS_NULLS_SQL)
-            v, detail = await verdict(conn, self.FILE, now=None, orders_on="1")
+            v, detail = await verdict(conn, self.FILE, now=None)
         assert (orphans["orphans"], nulls["checked_at"]) == (1, 1)
         assert v == "FAIL" and detail.startswith(
             f"{orphans['orphans']} expense(s) older than a day with no order (e.g. "
             f"{{{orphans['sample'][0]}}}), {nulls['checked_at']} ledger row(s)"), detail
 
 
-# ── the owner rows date the handover before the flip time does ───────────────
-# Every check that dates a chain's handover by its owner rows and only then by
-# the operator's flip time, each with the one thing it counts after the
-# handover. Both given, the owner rows win: they are the chain's first write,
-# on the clock the shippers stamp with, and a flip time is what somebody typed.
-# The review of the chain 3 soak checks found I1's order survived every I1
-# test — swap `owner.at` and `flag.flip_at` and nothing failed — and the same
-# swap then survived B1's, M1's, O1's and O4's (2026-10-10). I1, B1, M1 and O1
-# went in step 14's S14-13; O4 is the one left on that clock. Walked, not
-# listed: a new file on that clock with no arrangement here fails
-# `test_every_handover_clock_is_pinned`.
-
-
-async def _o4_between(conn, latch, problem_at):
-    await clean_orders(conn)
-    await order_owners(conn, latch)
-    await chain_order(conn, CHAIN3_IDS[0], lines=0, mirrored_at=problem_at,
-                      created_at=problem_at - timedelta(hours=2))
-
-
-# file -> (the flag that says the chain writes Postgres, its flip-time
-# variable, the arrangement: owner rows at `latch`, one problem at `problem_at`)
-HANDOVER_CLOCKS = {
-    "35_o4_halfwritten_orders.sql": ("orders_on", "orders_flip_at", _o4_between),
-}
-# O2 asks whether a missing watermark is forgiven by a recent handover — a
-# different shape, pinned by its own test, which has to go on existing.
-HANDOVER_CLOCKS_ELSEWHERE = {
-    "33_o2_orders_watermark.sql": ("TestO2OrdersWatermark",
-                                   "test_missing_fails_unless_the_handover_is_recent"),
-}
-
-
-def test_every_handover_clock_is_pinned():
-    """Mutation: add `COALESCE(owner.at, flag.flip_at)` to a check and leave
-    it out of both maps."""
-    dating = {p.name for p in FILES
-              if re.search(r"COALESCE\(\s*owner\.at\s*,\s*flag\.flip_at\b",
-                           _code(p.read_text(encoding="utf-8")))}
-    assert dating == set(HANDOVER_CLOCKS) | set(HANDOVER_CLOCKS_ELSEWHERE), dating
-    for cls, test in HANDOVER_CLOCKS_ELSEWHERE.values():
-        assert callable(getattr(globals()[cls], test, None)), (cls, test)
-
-
-@needs_pg
-class TestTheOwnerRowsDateTheHandoverFirst:
-    LATCH = ago(days=2)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(HANDOVER_CLOCKS))
-    async def test_a_flip_time_after_the_latch_excuses_nothing(self, pool, name):
-        """Owner rows two days old, a flip time an hour old: a problem five
-        hours ago is after the handover. Mutation: date the handover by the
-        flip time first — the problem falls before it and passes."""
-        state, flip_var, arrange = HANDOVER_CLOCKS[name]
-        async with scenario(pool) as conn:
-            await arrange(conn, self.LATCH, ago(hours=5))
-            v, detail = await verdict(conn, name, **{
-                state: "1", flip_var: ago(hours=1).isoformat()})
-        assert v == "FAIL" and "since the handover" in detail, detail
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(HANDOVER_CLOCKS))
-    async def test_a_flip_time_before_the_latch_blames_nothing(self, pool, name):
-        """Owner rows two days old, a flip time three days old: a problem
-        stamped between the two is before the chain's first write, history.
-        Mutation: date the handover by the flip time first — it fails."""
-        state, flip_var, arrange = HANDOVER_CLOCKS[name]
-        async with scenario(pool) as conn:
-            await arrange(conn, self.LATCH, ago(days=2, hours=12))
-            v, detail = await verdict(conn, name, **{
-                state: "1", flip_var: ago(days=3).isoformat()})
-        assert v == "PASS" and "since the handover" in detail, detail
+# ── the owner rows date the handover ──────────────────────────────────────────
+# `HANDOVER_CLOCKS`, `test_every_handover_clock_is_pinned` and
+# `TestTheOwnerRowsDateTheHandoverFirst` held O4 (and I1, B1, M1 and O1
+# before S14-13) to dating a chain's handover by its owner rows before the
+# operator's flip time, until step 14's S14-20 took the flip time out: O4
+# dates it by the owner rows alone, which
+# `TestO4HalfwrittenOrders.test_a_header_the_chain_did_not_write_is_not_its_to_answer`
+# and `test_without_owner_rows_it_is_unknown` hold.

@@ -257,8 +257,8 @@ class AlertActions(Protocol):
     and it would be right to.
 
     It records an *intent*, and never executes one. The tap arrives here and
-    the work happens in the web container, which is where the scheduler and
-    DuckDB are; the row is the handover. That split is not an inconvenience to
+    the work happens in the web container, which is where the scheduler is
+    (and DuckDB was, until step 14); the row is the handover. That split is not an inconvenience to
     route around — it is why a new internal credential was not needed.
 
     `available()` is false on SQLite, and honestly: the row has to be visible

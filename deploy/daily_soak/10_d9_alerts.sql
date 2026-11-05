@@ -6,16 +6,19 @@
 -- has resolved — and the alert journal is fire-and-forget, so a message that
 -- never reached Telegram still leaves its row here.
 --
--- No freshness precondition, unlike D8: `app.alert_series` is written to
--- Postgres directly by the alert archive (core/alert_archive.py), not copied
--- out of DuckDB.
+-- No freshness precondition: `app.alert_series` is written to Postgres
+-- directly by the alert archive (core/alert_archive.py).
 --
 -- WHAT A FAIL MEANS
 -- A named series is in state `firing`. The key says which: `warehouse_pg:*` is
 -- the derivation itself, `mirror_stale:`/`mirror_failing:` a derived table's
 -- watermark, `dq_stale:mirror_landing` the daily comparison. A series that
--- fired and resolved is not a fail — one `mirror_stale` around the Sunday
--- compaction is expected — but it is listed, to be recorded.
+-- fired and resolved is not a fail — one `mirror_stale` around a deploy's
+-- recreate can be expected — but it is listed, to be recorded.
+--
+-- `mirror_buckets_disagree` was watched too, until step 14's S14-20: S14-12
+-- deleted the comparison against DuckDB that filed it, and a test holds every
+-- name listed here to the registry.
 --
 -- `derivation_mode_invalid` was watched too, until step 14's S14-15 deleted
 -- it with KS_PG_DERIVE: a step-14 web cannot fire it, and a series still
@@ -32,7 +35,7 @@ watched AS (
        OR a.condition_key IN ('mirror_stale:silver.orders', 'mirror_stale:gold.daily_revenue',
                               'mirror_failing:silver.orders', 'mirror_failing:gold.daily_revenue',
                               'mirror_block_missing',
-                              'integrity_check_raised', 'mirror_buckets_disagree',
+                              'integrity_check_raised',
                               'gold_rollup_mismatch', 'customer_profile_mismatch',
                               'dq_stale:mirror_landing')
 ),

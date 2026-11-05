@@ -1,6 +1,7 @@
 -- O3 (chain 3) — the order-version archive is still being written.
 --
--- Only under chain 3; the variables are deploy/stage4_soak.sh's.
+-- It judged only under chain 3 (KS_WRITE_ORDERS=postgres latched, or its
+-- latch) until step 14's S14-20: every chain writes Postgres since S14-00.
 --
 -- WHY IT EXISTS
 -- `app.order_versions` is not a chain table and has no copy anywhere: KeyCRM
@@ -22,7 +23,7 @@
 --     ordinary) — the content comparison has stopped discriminating, and the
 --     05:15 refresh's ~1 400 forced headers are landing as changes.
 -- The limits and the kinds left out are that function's, from
--- `pg_order_versions.NOT_THE_WRITER`; tests/integration/test_stage4_soak_sql.py
+-- `pg_order_versions.NOT_THE_WRITER`; tests/integration/test_daily_soak_sql.py
 -- holds them equal.
 --
 -- WHAT A FAIL MEANS
@@ -33,9 +34,6 @@
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
-),
-flag AS (
-    SELECT :'orders_on'::text AS state
 ),
 uncovered AS (
     SELECT o.id
@@ -69,19 +67,9 @@ problems AS (
     FROM facts f
 )
 SELECT 'O3 order versions'::text AS "check",
-       CASE flag.state
-           WHEN '0' THEN 'PASS'
-           WHEN 'pending' THEN 'PASS'
-           WHEN '1' THEN CASE WHEN cardinality(p.listed) = 0 THEN 'PASS' ELSE 'FAIL' END
-           ELSE 'UNKNOWN'
-       END AS verdict,
-       CASE flag.state
-           WHEN '0' THEN 'not applicable: chain 3 still writes DuckDB (KS_WRITE_ORDERS is not postgres and no latch marker)'
-           WHEN 'pending' THEN 'not applicable: chain 3 has not latched'
-           WHEN '1' THEN CASE WHEN cardinality(p.listed) = 0 THEN
-               format('newest version %s Kyiv, %s in 24 h, every order covered',
-                      to_char(f.newest AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'), f.recent)
-               ELSE left(array_to_string(p.listed, '; '), 500) END
-           ELSE format('orders_on=%s: KS_WRITE_ORDERS not understood, or not read from the web container', flag.state)
-       END AS detail
-FROM flag CROSS JOIN problems p CROSS JOIN facts f;
+       CASE WHEN cardinality(p.listed) = 0 THEN 'PASS' ELSE 'FAIL' END AS verdict,
+       CASE WHEN cardinality(p.listed) = 0 THEN
+           format('newest version %s Kyiv, %s in 24 h, every order covered',
+                  to_char(f.newest AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'), f.recent)
+           ELSE left(array_to_string(p.listed, '; '), 500) END AS detail
+FROM problems p CROSS JOIN facts f;

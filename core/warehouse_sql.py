@@ -1,12 +1,12 @@
 """The warehouse rule every engine renders: Silver's projection and Gold's measures.
 
-One text, three engines. `silver_select_sql` and `silver_pass2_sql` are what
-Postgres runs to derive `silver.orders` (`core.pg_silver`), what DuckDB ran to
-derive `silver_orders`, and `silver_recompute_ctes` is what the row-values
-checks recompute it with (`core.pg_warehouse_dq`, `core.data_quality`).
-`GOLD_MEASURES` is rendered verbatim by Postgres (`core.pg_gold`), by
-ClickHouse (`core.ch_silver.derive_gold_sql`) and by DuckDB
-(`core.duckdb_store.GOLD_REVENUE_SELECT_SQL`).
+One text, and once three engines. `silver_select_sql` and `silver_pass2_sql`
+are what Postgres runs to derive `silver.orders` (`core.pg_silver`) — and what
+DuckDB ran to derive `silver_orders`, until step 14's S14-15 — and
+`silver_recompute_ctes` is what the row-values checks recompute it with
+(`core.pg_warehouse_dq`). `GOLD_MEASURES` is rendered verbatim by Postgres
+(`core.pg_gold`) and by ClickHouse (`core.ch_silver.derive_gold_sql`); DuckDB
+rendered it into `core.duckdb_store.GOLD_REVENUE_SELECT_SQL` until S14-15.
 
 They lived in `core/duckdb_store.py` until step 14's S14-01, so every
 Postgres derivation tick imported the DuckDB store lazily — and with it the
@@ -16,10 +16,11 @@ and `tests/unit/test_warehouse_sql.py` holds every rendering to the bytes the
 code before the move produced.
 
 Every builder takes its dialect since step 14's S14-07, when the default —
-`core.sql_dialect.DUCKDB` — stopped being one: the DuckDB renderings left (the
-store's own rebuild, its row-values check, the DuckDB half of
-`POST /api/warehouse/rebuild-silver`) name `DUCKDB` at the call, until the PRs
-that delete them. Nothing here imports `duckdb`.
+`core.sql_dialect.DUCKDB` — stopped being one. The DuckDB renderings that
+named `DUCKDB` at the call (the store's own rebuild, its row-values check, the
+DuckDB half of `POST /api/warehouse/rebuild-silver`) went in S14-15 and S14-18;
+nothing in `core/`, `web/` or `bot/` renders `DUCKDB` since. Nothing here
+imports `duckdb`.
 """
 from __future__ import annotations
 
@@ -91,10 +92,10 @@ def silver_sales_type_case(dialect: "Dialect") -> str:
 def silver_select_sql(dialect: "Dialect") -> str:
     """Every column of a Silver row, selected `FROM <dialect.orders> o`.
 
-    One text, two engines: `core.sql_dialect.POSTGRES` renders the rule
-    against `bronze.orders`, and `DUCKDB`, named by its last callers, against
-    DuckDB's `orders`. See that module for the two — and only two — places
-    the dialects differ.
+    `core.sql_dialect.POSTGRES` renders the rule against `bronze.orders`;
+    `DUCKDB` rendered it against DuckDB's `orders` until step 14 (its callers
+    went in S14-15 and S14-18). See that module for the two — and only two —
+    places the dialects differ.
     """
     # KeyCRM's own grouping decides when we have it; the id list covers rows
     # synced before the column existed. Verified equal for every status the

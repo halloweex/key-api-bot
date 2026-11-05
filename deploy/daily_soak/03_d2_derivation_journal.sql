@@ -13,8 +13,9 @@
 --   Postgres disagree with their source — `validation` names the check.
 -- - a run of 60 s or more: something held PG_LAYER_LOCK, usually a ClickHouse
 --   ship; the derivation itself takes 2–5 s.
--- - no run at all: under own this is the derivation not running. A fallback
---   to piggyback on a bad KS_PG_DERIVE shows up exactly like this.
+-- - no run at all: the derivation is not running — `pg_warehouse_derive` not
+--   registered, or web down. (Until step 14's S14-15 a fallback to piggyback
+--   on a bad KS_PG_DERIVE showed up exactly like this.)
 --
 -- `first_tick` runs are counted and shown, not judged: one per web start is
 -- expected, and only the host knows how many starts there were.
@@ -67,7 +68,7 @@ SELECT 'D2 derivation journal'::text AS "check",
            ELSE 'PASS'
        END AS verdict,
        CASE
-           WHEN agg.runs = 0 THEN 'no derivation run in 24 h: is KS_PG_DERIVE=own live?'
+           WHEN agg.runs = 0 THEN 'no derivation run in 24 h: is pg_warehouse_derive registered and web up?'
            ELSE format('%s runs (%s), %s errors, %s not passed, avg %s s, max %s s%s',
                        agg.runs, COALESCE(by_trigger.triggers, ''), agg.errors,
                        agg.not_passed, COALESCE(agg.avg_s::text, '?'),

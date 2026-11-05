@@ -10,7 +10,8 @@ WHERE THE PATH LIVES
 
 `DB_PATH` is read at call time, not captured at construction, so a test can
 redirect it by rebinding this module's global — the same arrangement
-`core/duckdb_store.py` has, and for the same reason: a value bound once is a
+`core/duckdb_store.py` had (the store is `core/store.py` since step 14),
+and for the same reason: a value bound once is a
 production path nothing can patch.
 
 TWO CLOCKS, AND THE ADAPTER OWNS BOTH
@@ -636,7 +637,7 @@ class SqliteBotStore:
 
             # The interface language, and the language the weekly report arrives
             # in. Read from the *web* container too — see core/bot_prefs.py —
-            # because the report is built where DuckDB lives and this file is
+            # because the report is built in web (where DuckDB lived) and this file is
             # the only place a user's choice is recorded.
             try:
                 cursor.execute("ALTER TABLE user_preferences ADD COLUMN language TEXT DEFAULT 'en'")

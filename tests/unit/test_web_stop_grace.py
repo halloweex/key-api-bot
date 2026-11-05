@@ -153,35 +153,50 @@ def _text(node) -> "str | None":
     return None
 
 
+def _module_constants(trees: dict) -> dict:
+    """`{(rel, NAME): text}` for every module-level `NAME = "<sql>"`."""
+    return {
+        (rel, st.targets[0].id): _text(st.value)
+        for rel, tree in trees.items() for st in tree.body
+        if isinstance(st, ast.Assign) and len(st.targets) == 1
+        and isinstance(st.targets[0], ast.Name) and _text(st.value) is not None}
+
+
+def _function_writes(node, rel: str, constants: dict) -> bool:
+    """Whether the function `node` (in module `rel`) executes a statement
+    that writes: an INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE or
+    COPY FROM in its own body, or in a module constant it names, beside an
+    `execute`/`executemany`/`sql` call. Its docstring is not a statement."""
+    from tests.unit.test_read_fallback_consumers import _own
+
+    body = node.body
+    docstring = (body[0].value if body and isinstance(body[0], ast.Expr)
+                 and _text(body[0].value) is not None else None)
+    texts, executes = [], False
+    for child in _own(node):
+        if child is docstring:
+            continue
+        text = _text(child)
+        if text is None and isinstance(child, ast.Name):
+            text = constants.get((rel, child.id))
+        if text is not None:
+            texts.append(text)
+        executes |= (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                     and child.func.attr in _EXECUTES)
+    return executes and any(_WRITES.search(t) for t in texts)
+
+
 def derived_slow_duckdb_writers() -> set:
-    from tests.unit.test_read_fallback_consumers import _own, _routes, build_graph
+    from tests.unit.test_read_fallback_consumers import _routes, build_graph
     from web.middleware import SLOW_ENDPOINTS
 
     graph = build_graph(("core", "web"))
-    constants = {
-        (rel, st.targets[0].id): _text(st.value)
-        for rel, tree in graph.trees.items() for st in tree.body
-        if isinstance(st, ast.Assign) and len(st.targets) == 1
-        and isinstance(st.targets[0], ast.Name) and _text(st.value) is not None}
+    constants = _module_constants(graph.trees)
 
     def writes_duckdb(fn) -> bool:
         if (fn.rel, fn.cls) not in graph.store:
             return False
-        body = fn.node.body
-        docstring = (body[0].value if body and isinstance(body[0], ast.Expr)
-                     and _text(body[0].value) is not None else None)
-        texts, executes = [], False
-        for node in _own(fn.node):
-            if node is docstring:
-                continue
-            text = _text(node)
-            if text is None and isinstance(node, ast.Name):
-                text = constants.get((fn.rel, node.id))
-            if text is not None:
-                texts.append(text)
-            executes |= (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                         and node.func.attr in _EXECUTES)
-        return executes and any(_WRITES.search(t) for t in texts)
+        return _function_writes(fn.node, fn.rel, constants)
 
     opens = {fn for fn in graph.functions
              if (fn.rel, fn.cls) in graph.store and fn.name == "connect"}
@@ -210,6 +225,48 @@ def test_the_slow_writers_are_derived_from_the_code():
     """Mutation: drop `/api/sync/resync` from `SLOW_DUCKDB_WRITERS`, or
     name `/api/stocks/analysis`, which only reads."""
     assert derived_slow_duckdb_writers() == SLOW_DUCKDB_WRITERS
+
+
+# The shape the batch-E review found the derivation blind to, and the reason
+# it reads module constants: a mixin method that executes a write whose SQL
+# sits in a module constant. Since S14-11 no store method has that shape (the
+# doors that had it write Postgres), so the derivation answering the empty set
+# no longer proves it can see one — this does, on a module of its own.
+_SYNTHETIC_MIXIN = '''
+_SEASONAL_UPSERT_SQL = "INSERT INTO seasonal_indices (month, idx) VALUES (?, ?)"
+_SEASONAL_READ_SQL = "SELECT month, idx FROM seasonal_indices"
+
+
+class GoalsMixin:
+    async def store_indices(self, rows):
+        """INSERT INTO is in this docstring, which is not a statement."""
+        async with self.connection() as conn:
+            conn.executemany(_SEASONAL_UPSERT_SQL, rows)
+
+    async def read_indices(self):
+        async with self.connection() as conn:
+            return conn.execute(_SEASONAL_READ_SQL).fetchall()
+
+    async def only_says_it(self):
+        """INSERT INTO seasonal_indices — in prose, and nothing executes."""
+        return _SEASONAL_UPSERT_SQL
+'''
+
+
+def test_the_derivation_sees_a_write_through_a_constant_from_a_mixin():
+    """Mutation: drop the module-constant lookup from `_function_writes` (or
+    from `derived_slow_duckdb_writers`) — `store_indices` reads as a reader."""
+    rel = "core/repositories/synthetic_goals.py"
+    tree = ast.parse(_SYNTHETIC_MIXIN)
+    constants = _module_constants({rel: tree})
+    assert (rel, "_SEASONAL_UPSERT_SQL") in constants
+    methods = {n.name: n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert _function_writes(methods["store_indices"], rel, constants)
+    assert not _function_writes(methods["read_indices"], rel, constants)
+    assert not _function_writes(methods["only_says_it"], rel, constants)
+    # Without the constants the write is invisible: what the lookup is for.
+    assert not _function_writes(methods["store_indices"], rel, {})
 
 
 def test_the_goal_and_forecast_doors_write_postgres_alone():

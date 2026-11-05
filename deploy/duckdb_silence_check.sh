@@ -21,14 +21,14 @@
 #              writes, and only under $STATE_DIR.
 #   --peek     hash and compare; write nothing. For a human.
 #   --status   read the record; hash nothing, write nothing. What
-#              deploy/stage4_soak.sh calls: hashing a multi-GB file is the
+#              deploy/daily_soak.sh calls: hashing a multi-GB file is the
 #              cron's job, not the daily report's.
 #   --crontab  print the week's change to root's crontab, as a diff: the two
 #              lines it retires (the Sunday compaction, the nightly DuckDB
 #              snapshot), the one it adds (this check), and the way back.
 #              Reads no file, hashes nothing, writes nothing, and installs
 #              nothing — a crontab is changed by a person, from that print
-#              (CLAUDE.md, "Starting the week of silence"). A `-`/`+` before
+#              (CLAUDE.md, "The week of silence, and its way back"). A `-`/`+` before
 #              each line is what makes pasting the whole print into
 #              `crontab -e` fail instead of installing a retired line.
 #
@@ -65,7 +65,7 @@
 # Install at the start of the week of silence (not installed by anything here;
 # `--crontab` prints this line with the two the week retires):
 #   17 * * * *  /opt/key-api-bot/deploy/duckdb_silence_check.sh >/dev/null 2>&1
-# Its output is in the record; deploy/stage4_soak.sh reads it (P1).
+# Its output is in the record; deploy/daily_soak.sh reads it (P1).
 set -Eeuo pipefail
 umask 077
 
@@ -101,7 +101,7 @@ if [ "$MODE" = crontab ]; then
     cat <<CRONTAB
 # The week of silence: root's crontab, as a diff. Printed, never installed:
 # change it by hand with \`crontab -e\`, one line at a time (CLAUDE.md,
-# "Starting the week of silence"). An installed line may carry a redirect
+# "The week of silence, and its way back"). An installed line may carry a redirect
 # after its command; it is the command that names it.
 #
 # First keep a copy, and find the lines:
