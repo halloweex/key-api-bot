@@ -10,7 +10,7 @@ import os
 import logging
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from zoneinfo import ZoneInfo
@@ -49,6 +49,30 @@ _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 def _today_kyiv() -> date:
     """Get today's date in Kyiv timezone (matches Gold layer dates)."""
     return datetime.now(_KYIV_TZ).date()
+
+
+def _trained_on(stamp: Optional[datetime]) -> Optional[str]:
+    """`last_trained` of a stored forecast: the Kyiv day its training ran,
+    ISO, as `_train_impl` once stamped it in memory. The chain writes
+    `created_at` in UTC, so a naive stamp is read as UTC."""
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(_KYIV_TZ).date().isoformat()
+
+
+def _stored_metrics(predictions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """`model_metrics` of a stored forecast: the validation metrics its
+    training stored beside every row, which are one run's and so equal."""
+    if not predictions:
+        return {}
+    first = predictions[0]
+    return {
+        "mae": first.get("model_mae", 0),
+        "mape": first.get("model_mape", 0),
+        "wape": first.get("model_wape", 0),
+    }
 
 # Model storage
 MODEL_DIR = Path(__file__).parent.parent / "data"
@@ -1202,7 +1226,6 @@ class PredictionService:
         self._metrics: Dict[str, float] = {}
         self._dow_corrections: Dict[int, float] = {}
         self._clip_ratio: float = 1.0
-        self._last_trained: Optional[str] = None
         self._training = False
         self._training_lock = asyncio.Lock()
         # Whether the last `predict_month` stored its forecast: True, False, or
@@ -1261,66 +1284,50 @@ class PredictionService:
         result["sales_type"] = sales_type
         return result
 
-    async def predict_range(
+    async def get_range_forecast(
         self,
         start_date: date,
         end_date: date,
         sales_type: str = "retail",
     ) -> Optional[Dict[str, Any]]:
-        """Generate predictions for a future date range on-the-fly, up to
-        FORECAST_HORIZON_DAYS ahead.
+        """The stored forecast for a range's days from today on, up to
+        FORECAST_HORIZON_DAYS ahead: what the last training predicted, read
+        from `revenue_predictions` like `get_forecast`'s month.
 
-        Returns forecast dict compatible with get_forecast() response,
-        or None if model is not ready or no future dates in range.
+        Returns the keys `get_forecast` shares with it, or None when no day
+        of the range is in that window or none of it is stored — any sales
+        type but retail, the only one trained.
 
-        **Never past the horizon** (2026-10-21). Every day is predicted after
-        a feature rebuild over all the days before it, on the one ML thread
-        that training and the forecast job wait for too. Measured with the
-        model stubbed out: 61 days cost 0.9 s, two years 12.7 s, eight years
-        70.5 s — each day dearer than the one before, so a range ending in
-        2262, pandas' last date, would hold the thread for hours (not run).
-        The horizon is what `predict_month` stores and `get_forecast` serves,
-        and the dashboard's date picker stops at its `forecast_end`, so the
-        cut changes nothing the page can ask for.
+        **The model never runs here** (owner's decision, 2026-11-04). Until
+        then this was `predict_range`, which rebuilt the features of every
+        day of the range on the request, on the one ML thread training waits
+        for too (a range years ahead held it for tens of seconds before the
+        horizon cut of 2026-10-21), and over 780 days of Gold read live. The
+        forecast is now as of the Mon/Thu training, as the month's already
+        was, and any process can serve it from the table — the Rust read API
+        included, which cannot run the model.
         """
-        if not self.is_ready:
-            return None
-
         today = _today_kyiv()
-        # Include today (partial day) for stacked actual + remaining
-        pred_start = max(start_date, today)
-        pred_end = min(end_date, today + timedelta(days=FORECAST_HORIZON_DAYS))
-        if pred_start > pred_end:
-            return None
-
-        future_dates = []
-        d = pred_start
-        while d <= pred_end:
-            future_dates.append(d)
-            d += timedelta(days=1)
-
-        if not future_dates:
+        # Today included: its full-day forecast stacks on its actual so far.
+        first = max(start_date, today)
+        last = min(end_date, today + timedelta(days=FORECAST_HORIZON_DAYS))
+        if first > last:
             return None
 
         from core.duckdb_store import get_store
         store = await get_store()
-        historical_df = await self._query_daily_revenue(store, sales_type, days_back=780)
+        predictions, trained_at = await store.get_stored_forecast(
+            first, last, sales_type)
+        if not predictions:
+            return None
 
-        dow_corrections = self._dow_corrections
-        clip_ratio = self._clip_ratio
-        loop = asyncio.get_running_loop()
-        predictions = await loop.run_in_executor(
-            _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections, clip_ratio
-        )
-
-        predicted_total = sum(p['predicted_revenue'] for p in predictions)
-
+        predicted_total = round(sum(p["predicted_revenue"] for p in predictions), 2)
         return {
-            "predicted_remaining": round(predicted_total, 2),
-            "predicted_total": round(predicted_total, 2),
+            "predicted_remaining": predicted_total,
+            "predicted_total": predicted_total,
             "daily_predictions": predictions,
-            "model_metrics": self._metrics,
-            "last_trained": self._last_trained,
+            "model_metrics": _stored_metrics(predictions),
+            "last_trained": _trained_on(trained_at),
         }
 
     async def train(self, sales_type: str = "retail") -> Dict[str, Any]:
@@ -1397,7 +1404,6 @@ class PredictionService:
             self._metrics = metrics
             self._dow_corrections = dow_corrections
             self._clip_ratio = clip_ratio
-            self._last_trained = _today_kyiv().isoformat()
 
             # Save model to disk
             await loop.run_in_executor(_executor, self._save_model)
@@ -1518,7 +1524,16 @@ class PredictionService:
         return predictions
 
     async def get_forecast(self, sales_type: str = "retail") -> Optional[Dict[str, Any]]:
-        """Get stored forecast data (up to 60 days ahead)."""
+        """Get stored forecast data (up to 60 days ahead).
+
+        Everything about the model comes from the stored rows too:
+        `model_metrics` are the three its training stored beside them, and
+        `last_trained` is that training's day (2026-11-04). Both came from
+        the web process's memory until then: null and the rows' metrics after
+        every restart, the full in-memory dict — sixty validation days with
+        it — after a training in the same process. One answer now, and one
+        any process can give.
+        """
         from core.duckdb_store import get_store
         store = await get_store()
 
@@ -1534,7 +1549,7 @@ class PredictionService:
         actual_to_date = await self._get_actual_month_revenue(store, sales_type, month_start, today)
 
         # Get stored predictions (today + future, up to 60 days)
-        predictions = await store.get_predictions(
+        predictions, trained_at = await store.get_stored_forecast(
             start_date=today,
             end_date=forecast_end,
             sales_type=sales_type,
@@ -1546,22 +1561,13 @@ class PredictionService:
         predicted_remaining = sum(p['predicted_revenue'] for p in predictions)
         predicted_total = actual_to_date + predicted_remaining
 
-        # Recover metrics from stored predictions if in-memory state was lost (server restart)
-        metrics = self._metrics
-        if not metrics and predictions:
-            metrics = {
-                'mae': predictions[0].get('model_mae', 0),
-                'mape': predictions[0].get('model_mape', 0),
-                'wape': predictions[0].get('model_wape', 0),
-            }
-
         return {
             "actual_to_date": round(actual_to_date, 2),
             "predicted_remaining": round(predicted_remaining, 2),
             "predicted_total": round(predicted_total, 2),
             "daily_predictions": predictions,
-            "model_metrics": metrics,
-            "last_trained": self._last_trained,
+            "model_metrics": _stored_metrics(predictions),
+            "last_trained": _trained_on(trained_at),
             "month_start": month_start.isoformat(),
             "month_end": month_end.isoformat(),
             "forecast_end": forecast_end.isoformat(),
@@ -1583,9 +1589,9 @@ class PredictionService:
         # `core/pg_forecast_read.py` for why the frame has to come back
         # identical down to its dtypes. There is deliberately NO fallback, and
         # there never was: training on a store that has stopped being written
-        # is a wrong model rather than an error, and both callers already
-        # degrade — `/trend` drops the forecast and returns the chart,
+        # is a wrong model rather than an error, and the callers degrade —
         # `_train_impl` returns `status: error` and keeps the previous model.
+        # (`/trend` was one until 2026-11-04; it reads the stored forecast.)
         # `store` is not asked; DuckDB's Gold, which `KS_READ_FORECAST_INPUT`
         # chose before S14-07, is not read.
         from core import pg_forecast_read

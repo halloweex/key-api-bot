@@ -876,8 +876,16 @@ class RevenueMixin:
         sales_type: str = "retail",
         compare_type: str = "previous_period",
         promocode: Optional[str] = None,
+        granularity: str = "daily",
     ) -> Dict[str, Any]:
         """Get daily revenue trend for chart.
+
+        `granularity="monthly"` answers one point a calendar month, labelled
+        `MM.YYYY`, and says so in `granularity`: the whole history by day is a
+        thousand bars whose `dd.mm` labels repeat every year. The first and
+        last month hold only their days inside the range. A month has no
+        counterpart in a window of the same number of days, so a monthly
+        answer carries no comparison.
 
         **Two measures live here, and which one you get depends on the filter.**
         That is deliberate, and the response says which one it used.
@@ -917,6 +925,9 @@ class RevenueMixin:
         # asked about, otherwise Silver — the order lines for a line-level
         # filter, the order grain for a promocode or a source outside
         # `_GOLD_SOURCE_IDS`.
+        monthly = granularity == "monthly"
+        if monthly:
+            include_comparison = False
         prev_start, prev_end = self._comparison_window(
             start_date, end_date, compare_type)
         if not use_lines and gold_can_answer:
@@ -946,6 +957,19 @@ class RevenueMixin:
         data = []
         orders_data = []
         current = start_date
+        if monthly:
+            # Dicts keep insertion order, and the days arrive in order.
+            months: Dict[str, List[float]] = {}
+            while current <= end_date:
+                revenue_val, orders_val = daily_data.get(current, (0, 0))
+                bucket = months.setdefault(current.strftime("%m.%Y"), [0.0, 0])
+                bucket[0] += revenue_val
+                bucket[1] += orders_val
+                current += timedelta(days=1)
+            for label, (revenue_val, orders_val) in months.items():
+                labels.append(label)
+                data.append(round(revenue_val, 2))
+                orders_data.append(int(orders_val))
         while current <= end_date:
             labels.append(current.strftime("%d.%m"))
             revenue_val, orders_val = daily_data.get(current, (0, 0))
@@ -1020,6 +1044,8 @@ class RevenueMixin:
             # brand filter goes on, and nothing on screen says why.
             "measure": "goods_value" if use_lines else "revenue",
         }
+        if monthly:
+            result["granularity"] = "monthly"
         if comparison:
             result["comparison"] = comparison
         return result
@@ -1840,12 +1866,16 @@ class RevenueMixin:
         sales_type: str = "retail",
         category_id: Optional[int] = None,
         brand: Optional[str] = None,
+        include_comparison: bool = True,
     ) -> Dict[str, Any]:
         """Get marketing report for arbitrary date range with previous period and YoY comparison.
 
         `category_id` and `brand` narrow every section to the matching order
         lines. Gold has no product dimension, so a narrowed report reads the
         line level instead — see `_MARKETING_LINES_PERIOD_SQL`.
+
+        `include_comparison=False` reads neither comparison window: both
+        periods and their dates come back None (`core.filters.has_comparison`).
         """
         # Previous period: same duration immediately before. Year ago: the
         # same dates a year back, 29 February to 28 February; this used
@@ -1922,8 +1952,10 @@ class RevenueMixin:
                 }
 
         current, cur_sources = await _fetch_month(start_date, end_date)
-        previous, _ = await _fetch_month(prev_start, prev_end)
-        year_ago, _ = await _fetch_month(yoy_start, yoy_end)
+        previous = year_ago = None
+        if include_comparison:
+            previous, _ = await _fetch_month(prev_start, prev_end)
+            year_ago, _ = await _fetch_month(yoy_start, yoy_end)
 
         # Brands, from the order-line level rather than `gold_daily_products`.
         #
@@ -2022,10 +2054,10 @@ class RevenueMixin:
         return {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
-            "prev_start_date": prev_start.isoformat(),
-            "prev_end_date": prev_end.isoformat(),
-            "yoy_start_date": yoy_start.isoformat(),
-            "yoy_end_date": yoy_end.isoformat(),
+            "prev_start_date": prev_start.isoformat() if include_comparison else None,
+            "prev_end_date": prev_end.isoformat() if include_comparison else None,
+            "yoy_start_date": yoy_start.isoformat() if include_comparison else None,
+            "yoy_end_date": yoy_end.isoformat() if include_comparison else None,
             "general_sales": {
                 "current": current,
                 "previous": previous,

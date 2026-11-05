@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.331
+
+- The forecast badge is what the trend's bars add up to
+- The trend's forecast is the stored one, for every period
+
+
+## 3.0.330
+
+- One cost row per SKU in the SMS audience and its results
+
+
+## 3.0.329
+
+- A period for the whole history, with nothing set beside it
+
+
 ## 3.0.328
 
 - WIP: S14-20 — CLAUDE.md: the test baseline taken again, the date
