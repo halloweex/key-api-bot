@@ -81,8 +81,7 @@ async def stores(tmp_path, monkeypatch):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
-    store = DuckDBStore(db_path=tmp_path / "goals.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -90,7 +89,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _pg_goals(pool):
@@ -101,13 +99,6 @@ async def _pg_goals(pool):
     return {r["period_type"]: tuple(r) for r in rows}
 
 
-async def _duck_goals(store):
-    async with store.connection() as conn:
-        rows = conn.execute(
-            "SELECT period_type, goal_amount, is_custom, calculated_goal, "
-            "growth_factor, updated_at FROM revenue_goals ORDER BY period_type"
-        ).fetchall()
-    return {r[0]: tuple(r) for r in rows}
 
 
 class TestUnderTheFlag:
@@ -127,7 +118,6 @@ class TestUnderTheFlag:
         # Supplied by the writer: the Postgres column has no default, and it
         # is the clock the copy-back's handover orders versions by.
         assert row[5] is not None
-        assert await _duck_goals(store) == {}, "the write reached DuckDB"
 
         # GET /api/goals is `get_goals`, reading Postgres under KS_READ_GOALS:
         # no hour of invisibility any more.
@@ -244,7 +234,6 @@ class TestUnderTheFlag:
 
         row = (await _pg_goals(pool))["daily"]
         assert row[2] is False and float(row[1]) == out["amount"]
-        assert await _duck_goals(store) == {}
 
 
 class TestInputPostgresWouldRefuseNeverTakesTheLatch:
@@ -300,7 +289,7 @@ class TestInputPostgresWouldRefuseNeverTakesTheLatch:
 
         assert not chain_latch.latched(CHAIN)
         assert await chain_latch.read_owners(pool) == {}
-        assert await _pg_goals(pool) == {} and await _duck_goals(store) == {}
+        assert await _pg_goals(pool) == {}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("field", ["is_custom", "updated_at"])
@@ -358,7 +347,6 @@ class TestTheReadsFollowTheChain:
         # table stays empty — a read of it would answer no goal at all.)
         await store.set_goal("monthly", self.PRE_FLIP)          # Postgres
         await store.set_goal("monthly", self.TYPED)             # Postgres
-        assert await _duck_goals(store) == {}
 
     @pytest.mark.asyncio
     async def test_the_goals_page_reads_the_chain_with_its_flag_at_duckdb(self, stores):
@@ -461,7 +449,6 @@ class TestTheFlagGoesBackWithoutTheCopyBack:
 
         goals = await _pg_goals(pool)
         assert set(goals) == {"monthly", "weekly"}, "the flag moved the write back"
-        assert await _duck_goals(store) == {}, "a second writer started in DuckDB"
         assert (await store.get_goals())["weekly"]["amount"] == 400_000.0
 
         # Since step 14's S14-11 the flag is read by nothing: `/api/health`

@@ -105,22 +105,18 @@ async def stores(tmp_path, monkeypatch):
     from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
 
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
-    store = DuckDBStore(db_path=tmp_path / "forecast.duckdb")
-    await store.connect()
+    store = DuckDBStore()
 
     async def populate(conn, pool):
         await _clean(pool)
         await _seed_history_pg(conn, pool)
 
-    try:
-        async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
-            async with pool.acquire() as conn:
-                assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") > 1500
-            with patch("core.pg.require_revision", new=AsyncMock()):
-                yield store, pool, monkeypatch
-            await _clean(pool)
-    finally:
-        await store.close()
+    async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") > 1500
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            yield store, pool, monkeypatch
+        await _clean(pool)
 
 
 def _flag(env):
@@ -136,22 +132,12 @@ async def _pg(pool, table, stamps=False):
     return [tuple(r) for r in rows]
 
 
-async def _duck(store, table, stamps=False):
-    cols = COLUMNS[table] + ((STAMP[table],) if stamps else ())
-    name = table.split(".", 1)[1]
-    async with store.connection() as conn:
-        rows = conn.execute(
-            f"SELECT {', '.join(cols)} FROM {name} ORDER BY {cols[0]}, {cols[1]}"
-        ).fetchall()
-    return [tuple(r) for r in rows]
 
 
 async def _all_pg(pool, stamps=False):
     return {t: await _pg(pool, t, stamps) for t in TABLES}
 
 
-async def _all_duck(store, stamps=False):
-    return {t: await _duck(store, t, stamps) for t in TABLES}
 
 
 FORECAST = [{"date": (date(2026, 10, 7) + timedelta(days=n)).isoformat(),
@@ -168,7 +154,6 @@ class TestUnderTheFlag:
             self, stores):
         store, pool, env = stores
         _flag(env)
-        before = await _all_duck(store)
 
         tables = await store.recalculate_goal_tables(include_weekly=True)
 
@@ -180,7 +165,6 @@ class TestUnderTheFlag:
         # One stamp for the whole set: the writer's clock, one transaction.
         stamps = {r[-1] for t in (SEASONAL, GROWTH, WEEKLY) for r in pg[t]}
         assert len(stamps) == 1 and None not in stamps
-        assert await _all_duck(store) == before, "the write reached DuckDB"
         assert chain_latch.latched(CHAIN)
 
     @pytest.mark.asyncio
@@ -207,7 +191,6 @@ class TestUnderTheFlag:
         assert rows[0][2:6] == (Decimal("1000.00"), Decimal("120.50"),
                                 Decimal("31.20"), Decimal("27.66"))
         assert len({r[-1] for r in rows}) == 1 and rows[0][-1] is not None
-        assert await _duck(store, PREDICTIONS) == []
 
     @pytest.mark.asyncio
     async def test_postgres_stores_what_the_duckdb_branch_stored(self, stores):
@@ -224,7 +207,6 @@ class TestUnderTheFlag:
 
         assert await _all_pg(pool) == duck
         assert len(duck[SEASONAL]) == 12 and len(duck[WEEKLY]) == 60
-        assert await _all_duck(store) == {t: [] for t in duck}
 
     @pytest.mark.asyncio
     async def test_over_the_hourly_copys_rows_every_column_is_rewritten(self, stores):
@@ -684,12 +666,10 @@ class TestTheFlagPutBack:
         _flag(env)
         await store.store_predictions(FORECAST, "retail", METRICS)
         env.setenv(pg_forecast_write.WRITE_ENV, "duckdb")
-        before = await _all_duck(store)
 
         await store.recalculate_goal_tables(include_weekly=True)
 
         assert len(await _pg(pool, SEASONAL)) == 12, "the flag moved the write back"
-        assert await _all_duck(store) == before, "a second writer started in DuckDB"
         assert _write_chains()[CHAIN] == {}
 
 

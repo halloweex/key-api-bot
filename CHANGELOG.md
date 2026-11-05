@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.328
+
+- WIP: S14-20 — CLAUDE.md: the test baseline taken again, the date
+- WIP: S14-20 — CLAUDE.md: stages 4-5 compressed into the history of the DuckDB exit, the Postgres schema, the refusal as it is; the week's runbook tests hold its history
+- WIP: S14-20 — comments in the files that name DuckDB only in text say it was, not is (appendix B)
+- WIP: S14-20 — the review minors of S14-11..S14-18: the managers fake, the doors' shared limits, the lever and soak texts, the host scripts' and docs' stale pointers
+- WIP: S14-20 — the slow-writer derivation proved on a synthetic mixin, the write-flag walk reads bare and indirect reads, the compose grace and the twins' comments say what is left
+- WIP: S14-20 — deploy/daily_soak.sh, Postgres only: no gate on a flag, a latch, KS_DUCKDB or a flip time; the agent routes warehouse_pg:* and its runbooks know DuckDB is an archive
+- WIP: S14-20 — docstrings say what the latch's two directions are since S14-12; the expenses refusal names the dump; the hourly job's display name
+
+
+## 3.0.327
+
+
+
+## 3.0.326
+
+- Share bars start on one line, and a small share is a bar, not a dot
+- WIP: S14-18 review — the boot and the hourly job keep their proofs
+- WIP: S14-18 review — rule 5's guard reads Python and shell, deploy/ included
+- WIP: S14-19 — CLAUDE.md: the images carry no DuckDB, and what holds it
+- WIP: S14-19 — the images carry no duckdb: an AST walk of every code tree, every module imported with the driver absent, the dev line pinned
+- WIP: S14-19 — duckdb out of requirements.txt and requirements.lock, its own line in requirements-dev.txt
+
+
+## 3.0.325
+
+- WIP: S14-18 — the basedpyright baseline shrinks by 53 with the store's DuckDB half
+- WIP: S14-18 — the suite without the store's DuckDB half: Postgres for the projections' proofs, DuckDB-only pins gone
+- WIP: S14-18 — the host tests without the deleted scripts, the heartbeat pinned, the stub tested, CLAUDE.md
+- WIP: S14-18 — the store without DuckDB, the switch gone, the compaction and snapshot deleted
+
+
+## 3.0.324
+
+- Traffic in three sections, and a funnel that reads as one
+
+
 ## 3.0.323
 
 - WIP: S14-17 — the baseline shrinks by one with the canary's FATAL reader

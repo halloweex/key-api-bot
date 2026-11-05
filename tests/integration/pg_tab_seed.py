@@ -187,7 +187,7 @@ def store_that_never_reaches_duckdb(tmp_path, monkeypatch, what: str = "the tab"
     connection is a trap: an answer it gives can only be Postgres's."""
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+    store = DuckDBStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError(f"{what} reached for DuckDB")

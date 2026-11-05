@@ -44,7 +44,7 @@ from core.observability import get_logger, correlation_context
 from core import dq_journal
 # The application's data directory, `/app/data`: what the disk watchdog
 # samples and where it leaves the heartbeat host cron reads (S14-01).
-from core.paths import DATA_DIR
+from core.paths import DATA_DIR, DUCKDB_FILE_NAME
 
 logger = get_logger(__name__)
 
@@ -319,11 +319,9 @@ class BackgroundScheduler:
         # landing writers' transactions. See `core/pg_derivation.py`. Web's
         # startup has already done this before its boot sync; calling it again
         # is harmless, and keeps a scheduler started anywhere else correct.
-        # The scheduler runs in web, so `web=True`: web runs KS_DUCKDB=off
-        # whatever the variable says (step 14's S14-00).
         from core.runtime_modes import configure_modes
 
-        configure_modes(web=True)
+        configure_modes()
 
         # Register jobs
         await self._register_jobs()
@@ -356,8 +354,6 @@ class BackgroundScheduler:
         from datetime import datetime, timedelta, timezone
 
         from apscheduler.triggers.date import DateTrigger
-
-        from core import duckdb_switch
 
         # Both probes ask Postgres, which writes both tables (chain 1's
         # snapshot, chain 9's journal). Until step 14's S14-11 a process
@@ -578,63 +574,17 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Two jobs whose subject is the DuckDB file itself, and so not
-        # registered under KS_DUCKDB=off (stage 5, PR-7): a CHECKPOINT of a
-        # file nothing writes, and a daily copy of a file frozen at the start
-        # of the week — the last backup and the Ark are taken before it.
-        from core import duckdb_switch
-
-        duckdb_off = duckdb_switch.is_off()
-        if duckdb_off:
-            logger.info(
-                "duckdb_checkpoint and db_backup not registered: KS_DUCKDB=off "
-                "— this process does not open the DuckDB file")
-
-        # Job: DuckDB WAL checkpoint (hourly)
-        # Silver full-rebuild every 2 min + Gold incremental rewrites push WAL
-        # past 600MB between 6h checkpoints. Hourly keeps MVCC tombstones
-        # reaped and RAM pressure lower.
-        if not duckdb_off:
-            self._add_job(
-                job_id="duckdb_checkpoint",
-                name="DuckDB Checkpoint",
-                description="Flush WAL to main database file",
-                func=self._run_duckdb_checkpoint,
-                trigger=IntervalTrigger(hours=1),
-                max_instances=1,
-                coalesce=True,
-            )
+        # `duckdb_checkpoint` (an hourly CHECKPOINT of the DuckDB file) and
+        # `db_backup` (its nightly copy, 04:30) were registered here, under
+        # KS_DUCKDB=on only, until step 14's S14-18. Web has run off since
+        # 2026-10-16, so neither was registered since; the last backup and the
+        # Ark were taken before the week of silence began. The job names are
+        # not reused (rule 15).
 
         # `warehouse_refresh` (DuckDB's Silver/Gold rebuild every two minutes,
         # off a dirty flag) was registered here until step 14's S14-15. It was
         # not registered since step 13 (2026-10-09): Postgres alone derives,
         # in `pg_warehouse_derive` below. The job name is not reused (rule 15).
-
-        # Job: Daily DuckDB backup (A9-1) at a low-traffic hour.
-        # Holds the store lock briefly for a consistent CHECKPOINT+copy.
-        #
-        # Retention is 2, not 7. Seven daily copies of a file that is mostly
-        # derived tables cost ~18 GB to defend one threat — logical corruption
-        # noticed within a week — and defended nothing else, because they sit on
-        # the volume they are copies of. Now that deploy/offsite_parquet.sh puts
-        # a validated archive somewhere else, on-disk copies only serve fast RTO
-        # on a bad write, and two is enough for that.
-        #
-        # The trade this makes explicit: local granularity is now 2 days, while
-        # the off-site copy is weekly. Corruption discovered on day 4 is
-        # recoverable from off-site, but at up to a week's resolution. If that
-        # becomes uncomfortable, the fix is a more frequent off-site push, not
-        # more copies on the same disk.
-        if not duckdb_off:
-            self._add_job(
-                job_id="db_backup",
-                name="DB Backup",
-                description="Consistent on-disk backup of analytics.duckdb (retains 2)",
-                func=self._run_backup,
-                trigger=CronTrigger(hour=4, minute=30),
-                max_instances=1,
-                coalesce=True,
-            )
 
         # Job: Data Quality — Layer 1 integrity (every 6h)
         # Cheap DB-only scans (PK uniqueness, FK orphans, value domains).
@@ -727,7 +677,7 @@ class BackgroundScheduler:
         # down under `KS_BOT_STORE=postgres`.
         self._add_job(
             job_id="replicate_operational",
-            name="Replicate: operational history and bot state",
+            name="Gender derivation and bot state",
             description="Derive new buyers' gender in Postgres and copy data/bot.db",
             func=self._run_replicate_operational,
             trigger=IntervalTrigger(hours=1),
@@ -1277,27 +1227,6 @@ class BackgroundScheduler:
                 )
                 return stats
 
-    async def _run_duckdb_checkpoint(self) -> Dict[str, Any]:
-        """
-        Run CHECKPOINT to flush WAL to main database file.
-
-        DuckDB uses Write-Ahead Logging (WAL) for durability. The WAL file
-        can grow over time with many writes. CHECKPOINT forces all pending
-        changes to be written to the main database file and resets the WAL.
-        """
-        with correlation_context() as corr_id:
-            logger.info("Starting DuckDB checkpoint job")
-
-            from core.duckdb_store import get_store
-            store = await get_store()
-
-            # Run checkpoint
-            await store.checkpoint()
-
-            result = {"checkpointed": True}
-            logger.info("DuckDB checkpoint job complete")
-            return result
-
     # `_run_warehouse_refresh`, `_rebuild_postgres_layers` and
     # `_rebuild_pg_layers` stood here until step 14's S14-15: DuckDB's
     # warehouse tick, and the Postgres rebuild and UTM ship that rode it
@@ -1604,17 +1533,6 @@ class BackgroundScheduler:
                               group="warehouse_pg")
         except Exception as e:  # noqa: BLE001 — an alert must not break the job
             logger.warning("warehouse_pg alert failed (%s): %s", key, e)
-
-    async def _run_backup(self) -> Dict[str, Any]:
-        """Daily consistent backup of the DuckDB warehouse (A9-1)."""
-        async with self._heavy_job_lock:
-            from core.duckdb_store import get_store
-            store = await get_store()
-            with correlation_context() as corr_id:
-                logger.info("Starting daily DB backup")
-                result = await store.backup_database(keep=2)
-                logger.info(f"DB backup job complete: {result.get('status')}")
-                return result
 
     # ─── Data Quality framework (Layer 1 + 2) ─────────────────────────────────
 
@@ -2262,16 +2180,14 @@ class BackgroundScheduler:
             sample_disk_state,
         )
         from core import watchdog_samples
-        from core.duckdb_store import get_store
 
         with correlation_context() as corr_id:
-            store = await get_store()
-            # The DuckDB file itself, by the store's own path: its size is the
-            # sample's `db_size_mb`. Everything else below is the data
-            # directory, `core.paths.DATA_DIR` since step 14's S14-01 — the
-            # same directory in production, where the file sits in it, but no
-            # longer found by way of the DuckDB store.
-            sample = sample_disk_state(str(store.db_path))
+            # The DuckDB file itself, which stays on disk until the final
+            # stage: its size is the sample's `db_size_mb`. It sits in the data
+            # directory, `core.paths.DATA_DIR`, where everything below is
+            # sampled too. Until step 14's S14-18 the path was the store's
+            # `db_path`; the store holds no file since.
+            sample = sample_disk_state(str(DATA_DIR / DUCKDB_FILE_NAME))
 
             # The whole directory, not just the database file. The 27 GB that
             # arrived in August 2026 sat next to analytics.duckdb, so a check
@@ -2481,7 +2397,8 @@ class BackgroundScheduler:
         from Bronze — so this gives the second.
 
         **No extra API calls, by construction.** It is handed the orders and
-        the rollup the DuckDB comparison already fetched. Doubling KeyCRM
+        the rollup the job already fetched once for all its arms (the DuckDB
+        arm among them until step 14's S14-12). Doubling KeyCRM
         traffic for a second opinion would be a poor trade at any time and a
         particularly poor one on a job that spent 57 runs out of 84 failing on
         429s.

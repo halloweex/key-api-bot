@@ -262,8 +262,10 @@ export interface ExpenseType {
   alias: string
 }
 
-// `duckdb` (DuckDB's row counts) left the answer in step 14's S14-17. The
-// page reads `version` alone (SidebarRail); `status` is `healthy` since then.
+// `duckdb` (DuckDB's row counts) left the answer in step 14's S14-17, and
+// `duckdb_switch` (KS_DUCKDB and the opens it refused, never declared here) in
+// S14-18. The page reads `version` alone (SidebarRail); `status` is `healthy`
+// since S14-17.
 export interface HealthResponse {
   status: string
   degraded_by: string[]

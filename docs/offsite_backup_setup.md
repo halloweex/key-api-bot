@@ -1,5 +1,14 @@
 # Off-site backup setup
 
+> **History since step 14.** Everything here that writes or ships the DuckDB
+> archive is deleted: the weekly compaction (`scripts/compact_duckdb.py`,
+> `scripts/weekly_compact.sh`), `deploy/offsite_parquet.sh`,
+> `deploy/daily_offsite.sh` and `deploy/snapshot_export.py` (S14-18). The
+> archives already on the Storage Box stay, and `deploy/restore-test.sh`
+> still restores them, on the pinned image `keycrm-web:rollback-step14`
+> (`.claude/CLAUDE.md`, "The archive tools on a pinned image"). What leaves
+> this machine since is Postgres, by `deploy/pg_offsite.sh` (`docs/backup_runbook.md`).
+
 One-time, on the server. The daily backup writes to the same volume as the
 database it copies, so on its own it defends against logical corruption and
 nothing else — any failure that takes the volume takes the copies with it.
@@ -123,8 +132,7 @@ ignored ones survive.
 ## 5. Prove it
 
 ```bash
-deploy/offsite_parquet.sh     # ships one archive now, ~8 MB
-deploy/restore-test.sh        # pulls it BACK and rebuilds a validated warehouse
+deploy/restore-test.sh        # pulls the newest archive BACK and rebuilds a validated warehouse
 ```
 
 `restore-test.sh` deliberately restores from the Storage Box rather than the

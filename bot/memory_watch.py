@@ -4,7 +4,8 @@ The memory monitor lives in the web container and reads its own cgroup; the
 bot, with a limit fourteen times smaller, had a healthcheck and no pressure
 telemetry at all. This module closes that: the same evaluator, the same
 thresholds, the same per-level cooldowns — different persistence, because the
-bot cannot open DuckDB (single-writer lock, held by web).
+bot never opened DuckDB (web held its single-writer lock; since step 14 no
+process opens it).
 
 What the OOM-delta rule actually needs is one previous sample, so the bot
 keeps exactly that: a small JSON file on the shared volume, written

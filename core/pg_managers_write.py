@@ -257,7 +257,10 @@ def _int_refusal(column: str, value, *, nullable: bool) -> Optional[str]:
 def _refusal(row) -> Optional[str]:
     """Why Postgres would refuse this manager, or None. Asked before the latch:
     a first batch the server refused whole would leave the marker with no
-    owner row behind it — CRITICAL `chain_latch_disagrees` the next morning."""
+    owner row behind it. Nothing files that direction since step 14's S14-12
+    (the integrity layer's chain invariants judge only owner rows with no
+    marker); an image from before step 14 pages it as CRITICAL
+    `chain_latch_disagrees`."""
     return (_int_refusal("id", row.id, nullable=False)
             or _text_refusal("name", row.name, nullable=False)
             or _text_refusal("email", row.email, nullable=True)
@@ -439,8 +442,9 @@ async def set_manager_retail_status(
             # Again under the lock: a classification that landed between the
             # read above and the lock would otherwise be stacked behind. On
             # the chain's very first write that costs a marker with no owner
-            # row — `chain_latch_disagrees` the next morning — and it is
-            # accepted: two admins classifying one manager in the same second.
+            # row — filed by nothing since step 14's S14-12, and paged as
+            # `chain_latch_disagrees` by an image from before step 14 — and it
+            # is accepted: two admins classifying one manager in the same second.
             latest = await conn.fetchval(
                 "SELECT MAX(valid_from) FROM app.manager_classifications "
                 "WHERE manager_id = $1", manager_id)

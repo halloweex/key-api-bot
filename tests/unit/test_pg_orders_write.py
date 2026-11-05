@@ -138,11 +138,9 @@ class TestTheDeclaration:
 async def duck(tmp_path, flags):
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "orders.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     flags.setenv("KS_MIRROR_LANDING", "0")
     yield store
-    await store.close()
 
 
 class TestTheDecisionIsDuckDBs:
@@ -308,9 +306,6 @@ class TestTheRouting:
         assert counts == (1, 1) and out == [1]
         writer.assert_awaited_once()
         assert writer.await_args.kwargs == {"force_update": True, "skip_products": True}
-        async with duck.connection() as conn:
-            assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 0
-            assert conn.execute("SELECT count(*) FROM expenses").fetchone()[0] == 0
 
     @pytest.mark.asyncio
     async def test_the_misses_go_where_the_scans_read_them(self, met, duck):
@@ -319,9 +314,6 @@ class TestTheRouting:
         met.setattr(pow_, "record_backfill_misses", writer)
         assert await duck.record_backfill_misses({1: "gone", 2: "empty"}) == 2
         writer.assert_awaited_once_with({1: "gone", 2: "empty"})
-        async with duck.connection() as conn:
-            assert conn.execute(
-                "SELECT count(*) FROM order_backfill_misses").fetchone()[0] == 0
 
 
 # ─── G8: the selections follow the writes ────────────────────────────────────

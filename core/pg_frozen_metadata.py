@@ -33,8 +33,10 @@ verdict's `sync_metadata_copied` key (PR-2), not this module's to judge.
 
 Reads only, and only the copy: nothing writes `app.sync_metadata` — its one
 writer stood down under `off` with the rest of what was copied out of DuckDB
-(PR-7), and went in step 14's S14-13. The first two callers are behind `duckdb_switch.is_off()`;
-the digest's beat asks the copy in either mode.
+(PR-7), and went in step 14's S14-13. The first two callers were behind
+`duckdb_switch.is_off()` until step 14 made `off` a constant (S14-00) and
+deleted the switch (S14-18); they ask the copy unconditionally since, as the
+digest's beat always did.
 """
 from __future__ import annotations
 

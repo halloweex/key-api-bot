@@ -907,7 +907,8 @@ class TestThroughTheApp:
             monkeypatch.delenv("KS_READ_FALLBACK", raising=False)
         else:
             monkeypatch.setenv("KS_READ_FALLBACK", value)
-        assert configure_modes(web=True) == {"KS_DUCKDB": "off"}
+        # `KS_DUCKDB` left the mapping in S14-18, the last mode in it.
+        assert configure_modes() == {}
         health = admin_client.get("/api/health")
         assert health.status_code == 200, health.text
         assert health.json()["read_fallback_mode"] == {"refused": {}}

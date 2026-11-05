@@ -128,7 +128,7 @@ class TestNothingGoesRoundTheRouter:
         Postgres, whatever `KS_READ_MARKETING` says, on a store whose
         connection is a trap."""
         monkeypatch.setenv("KS_READ_MARKETING", "duckdb")   # not read any more
-        store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+        store = DuckDBStore()
 
         def boom(*_a, **_k):
             raise AssertionError("the marketing read reached for DuckDB")

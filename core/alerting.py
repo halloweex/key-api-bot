@@ -126,18 +126,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # `warehouse_mode_invalid`, `warehouse_preconditions_unmet`,
     # `warehouse_way_back_refused`, `warehouse_hold_stuck` and
     # `utm_parse_mode_invalid`. The names are not reused (rule 15).
-    # A path in web opened, or tried to open, the DuckDB file under
-    # KS_DUCKDB=off — the week of silence's tripwire (OD-17 (a)). The counters
-    # are per process, so only a restart empties them.
-    "duckdb_opened_while_off": _c(
-        "web restarts and opens no DuckDB file under KS_DUCKDB=off, or runs on"),
-    # KS_DUCKDB set to a value web did not understand: ran as `on` (OD-09).
-    "duckdb_mode_invalid": _c("web restarts with a valid KS_DUCKDB"),
-    # KS_DUCKDB=off with a precondition of off unmet: web runs `on` — opens the
-    # file, takes orders — and the week of silence does not start (stage 5's
-    # PR-2, OD-S5-1 (a)). The verdict is the web process's for its life.
-    "duckdb_off_held_back": _c(
-        "web restarts with every precondition of KS_DUCKDB=off met, or with KS_DUCKDB=on"),
+    # The DuckDB switch paged under three names until step 14's S14-18
+    # deleted it (`core/duckdb_switch.py`) with the `duckdb_switch` block of
+    # /api/health the canary judged them from: `duckdb_opened_while_off` (a
+    # path in web opened the file under KS_DUCKDB=off, the week of silence's
+    # tripwire), `duckdb_mode_invalid` (a KS_DUCKDB web did not understand)
+    # and `duckdb_off_held_back` (an image from before step 14 held on `on`).
+    # Nothing in any process opens the file since. The names are not reused.
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),
@@ -192,8 +187,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # Five ticks in a row that could not read meta.derivation_signal — before
     # DN-05a nothing but the derived tables' 90-minute age said so.
     "warehouse_pg:signal_unreadable": _c("the derivation reads its signal again"),
-    "warehouse:backup_preflight": _EVENT,   # one refused attempt, that night's fact
-    "warehouse:backup_failed": _EVENT,      # one failed copy/validation
+    # `warehouse:backup_preflight` and `warehouse:backup_failed`, the nightly
+    # DuckDB backup's two events (a refused attempt, a failed copy), went with
+    # the backup in step 14's S14-18. It had not run since the week of
+    # silence began (2026-10-16). The names are not reused.
 
     # ── resource watchdogs (web) ──
     "disk:WARN": _c("usage back under the warning threshold"),
@@ -348,7 +345,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
 
     # ── data-quality findings: Postgres twins of the Silver checks ──
-    # Chain 2 step 8a, KS_DQ_PG_WAREHOUSE. Their own names, never DuckDB's: the
+    # Chain 2 step 8a. They ran behind KS_DQ_PG_WAREHOUSE until step 14's
+    # S14-14 and run on every dq_integrity_check since; nothing reads the
+    # variable since S14-15. Their own names, never DuckDB's: the
     # Gate and the ledger key on the name alone, so a shared one would let one
     # engine hold or announce the other's recovery.
     "pg_silver_missing_rows": _c("a Postgres derivation carries the rows"),

@@ -108,13 +108,16 @@ def store(tmp_path, monkeypatch):
     here may reach for DuckDB, under any value of any switch."""
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+    store = DuckDBStore()
 
     def trap(*_a, **_k):
         raise AssertionError("a Postgres-only dashboard read reached for DuckDB")
 
+    # `_fetch_one`/`_fetch_all` went with the store's DuckDB half in step
+    # 14's S14-18 and `connection()` is a refusal since; trapped all the same,
+    # so a reader that reaches for any of them fails here by name.
     for name in ("connection", "_fetch_one", "_fetch_all"):
-        monkeypatch.setattr(type(store), name, trap)
+        monkeypatch.setattr(type(store), name, trap, raising=False)
     read_fallback.reset_counts()
     yield store
     read_fallback.reset_counts()
@@ -808,7 +811,7 @@ class TestTheShape:
 class TestJunkStartsWeb:
     """Rule 3 of the plan: a variable the code stopped reading cannot stop
     web, whatever it holds — neither its import nor its start. The start
-    that reads these variables is `configure_modes(web=True)`, which
+    that reads these variables is `configure_modes()`, which
     `web/main.py`'s startup calls first: until step 14's S14-16
     `read_fallback.configure_mode` scanned every `KS_READ_*` there for a
     switch with no address. So both tests run it with
@@ -830,8 +833,8 @@ class TestJunkStartsWeb:
             "    importlib.import_module('core.' + m)\n"
             "importlib.import_module('core.repositories.revenue')\n"
             "from core.runtime_modes import configure_modes\n"
-            "configure_modes(web=True)\n"
-            "configure_modes(web=True)\n"   # the scheduler's call, after the startup's
+            "configure_modes()\n"
+            "configure_modes()\n"   # the scheduler's call, after the startup's
             "print('ok')\n" % list(MODULES)
         )
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
@@ -854,7 +857,7 @@ class TestJunkStartsWeb:
         # reset (read_fallback's mode went in step 14's S14-16).
         for switch in SWITCHES:
             monkeypatch.setenv(switch, "junk-s14-06")
-        configure_modes(web=True)
+        configure_modes()
         response = TestClient(app).get("/api/health")
         assert response.status_code == 200, response.text
         block = response.json()["read_fallback_mode"]

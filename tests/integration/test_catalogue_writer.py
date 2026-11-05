@@ -80,8 +80,7 @@ async def stores(tmp_path, monkeypatch):
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_MIRROR_LANDING", "1")
-    store = DuckDBStore(db_path=tmp_path / "catalogue.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -89,7 +88,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _pg(pool, sql, *params):
@@ -97,9 +95,6 @@ async def _pg(pool, sql, *params):
         return await conn.fetch(sql, *params)
 
 
-async def _duck(store, sql, params=None):
-    async with store.connection() as conn:
-        return conn.execute(sql, params or []).fetchall()
 
 
 async def _state(pool, table=PRODUCTS):
@@ -132,8 +127,6 @@ class TestTheWriter:
 
         assert await store.upsert_products(payload) == 3
 
-        assert await _duck(store, "SELECT COUNT(*) FROM products") == [(0,)], (
-            "DuckDB was written under the flag")
         assert chain_latch.latched(chain.CHAIN)
         stamp = chain_latch.latched_at(chain.CHAIN)
         assert await chain_latch.read_owners(pool) == {t: stamp for t in chain.CHAIN_TABLES}
@@ -248,8 +241,6 @@ class TestTheWriter:
         assert await store.get_last_sync_time("products") == stamp
         keys = {r["key"] for r in await _pg(pool, "SELECT key FROM meta.chain_watermarks")}
         assert set(chain.CHAIN_SYNC_KEYS) <= keys
-        assert await _duck(store, "SELECT COUNT(*) FROM sync_metadata WHERE key LIKE "
-                                  "'last_sync_%'") == [(0,)]
 
     @pytest.mark.asyncio
     async def test_categories_are_written_the_same_way(self, stores):

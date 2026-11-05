@@ -246,10 +246,12 @@ def _refusal(row, contacts) -> Optional[str]:
     NUMERIC, a contact naming another buyer or carrying such text. The parse
     already strips NUL, writes 'Unknown' for a blank name and reads a birthday
     DuckDB would refuse as NULL. A first batch the server refused whole after
-    the latch would leave the marker with no owner row behind it — CRITICAL
-    `chain_latch_disagrees` the next morning and a copy-back that refuses — so
-    what can be foreseen is refused here; what cannot is retried buyer by
-    buyer and skipped (`upsert_buyers`)."""
+    the latch would leave the marker with no owner row behind it — a
+    direction nothing files since step 14's S14-12 (the integrity layer's
+    chain invariants judge only owner rows with no marker), and one an image
+    from before step 14 pages as CRITICAL `chain_latch_disagrees` — so what
+    can be foreseen is refused here; what cannot is retried buyer by buyer
+    and skipped (`upsert_buyers`)."""
     from core.pg_numeric import refusal
 
     for column in type(row)._fields:

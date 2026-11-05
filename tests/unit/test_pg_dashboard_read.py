@@ -114,7 +114,7 @@ class TestItDoesNotTakeTheDuckDbLock:
         # switch says (step 14, S14-05 and S14-06); their fetches are stubbed
         # below.
         # A store never connected, as web's is under `KS_DUCKDB=off`.
-        store = DuckDBStore(db_path=tmp_path / f"d-{name}-{len(kwargs)}.duckdb")
+        store = DuckDBStore()
 
         def boom(*_a, **_k):
             raise AssertionError(f"{name} reached for DuckDB")

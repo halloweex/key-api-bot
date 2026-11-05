@@ -487,7 +487,7 @@ class TestTheStoreRoutes:
         from core.duckdb_store import DuckDBStore
 
         chain_latch.latch(pg_managers_write.CHAIN)
-        store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+        store = DuckDBStore()
         rows = [{"id": 1, "name": "M", "synced_at": T0}]
         with patch("core.pg_managers_read.fetch_all_managers",
                    new=AsyncMock(return_value=rows)) as read:
@@ -505,7 +505,7 @@ class TestTheStoreRoutes:
         from core.duckdb_store import DuckDBStore
 
         chain_latch.latch(pg_managers_write.CHAIN)
-        store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+        store = DuckDBStore()
         store.mark_warehouse_dirty = AsyncMock()
         with patch.object(pg_managers_write, "set_manager_retail_status",
                           new=AsyncMock()) as write:
@@ -523,7 +523,7 @@ class TestTheStoreRoutes:
         from core.duckdb_store import DuckDBStore
 
         chain_latch.latch(pg_managers_write.CHAIN)
-        store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+        store = DuckDBStore()
         with patch.object(pg_managers_write, "update_manager_stats",
                           new=AsyncMock(return_value=4)), \
                 patch.object(pg_managers_write, "upsert_managers",
@@ -810,7 +810,7 @@ class TestEveryReadOfTheTablesFollowsTheChain:
             flags.delenv("KS_READ_DASHBOARD", raising=False)
         else:
             flags.setenv("KS_READ_DASHBOARD", switch)
-        store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+        store = DuckDBStore()
         with patch("core.pg_dashboard_read.fetch",
                    new=AsyncMock(return_value=[(1,)])) as fetch:
             assert await store._dashboard_run(_RETURN_ORDERS_SQL.replace(
@@ -1091,10 +1091,9 @@ _BARE = r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:managers|manager_classifications)(?![
 # (`upsert_managers`, `set_manager_retail_status`, `get_all_managers`, routed
 # by `writes_postgres`/`reads_postgres`) went with those branches in step 14's
 # S14-11: they reach chain 5's Postgres writer and reader alone.
-_BARE_SITES = {
-    ("core/migrations.py", "_m0006_seed_manager_classifications"):
-        ("_m0006_seed_manager_classifications", "latched"),
-}
+# DuckDB's boot seed (`core/migrations.py`'s `_m0006`, behind the latch)
+# was the last site until step 14's S14-18 deleted the store's migrations.
+_BARE_SITES: dict = {}
 
 
 def _bare_walk():

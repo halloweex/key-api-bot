@@ -204,17 +204,13 @@ class TestItDoesNotTakeTheDuckDbLock:
         self, tmp_path, monkeypatch, name, args, kwargs,
     ):
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / f"g-{name}-{len(args)}.duckdb")
-        await store.connect()
-        try:
-            def boom(*_a, **_k):
-                raise AssertionError(f"{name} reached for DuckDB")
+        store = DuckDBStore()
+        def boom(*_a, **_k):
+            raise AssertionError(f"{name} reached for DuckDB")
 
-            with patch.object(type(store), "connection", boom), \
-                 patch("core.pg_goals_read.fetch", new=AsyncMock(return_value=[])):
-                await getattr(store, name)(*args, **kwargs)
-        finally:
-            await store.close()
+        with patch.object(type(store), "connection", boom), \
+             patch("core.pg_goals_read.fetch", new=AsyncMock(return_value=[])):
+            await getattr(store, name)(*args, **kwargs)
 
 class TestTheRoutedBodies:
     def test_the_rendering_leaves_no_hole(self):

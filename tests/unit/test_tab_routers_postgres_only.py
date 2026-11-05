@@ -151,13 +151,16 @@ def store(tmp_path, monkeypatch):
     from core import pg_expenses_read
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+    store = DuckDBStore()
 
     def trap(*_a, **_k):
         raise AssertionError("a one-engine reader reached for DuckDB")
 
+    # `_fetch_one`/`_fetch_all` went with the store's DuckDB half in step
+    # 14's S14-18 and `connection()` is a refusal since; trapped all the same,
+    # so a reader that reaches for any of them fails here by name.
     for name in ("connection", "_fetch_one", "_fetch_all"):
-        monkeypatch.setattr(type(store), name, trap)
+        monkeypatch.setattr(type(store), name, trap, raising=False)
     monkeypatch.setattr(pg_expenses_read, "backfilled", AsyncMock(return_value=True))
     read_fallback.reset_counts()
     yield store
@@ -747,7 +750,7 @@ class TestNothingGoesRoundTheRouter:
 
 class TestJunkStartsWeb:
     """Rule 3: a variable the code stopped reading cannot stop web, whatever
-    it holds — its import or its start (`configure_modes(web=True)`, the
+    it holds — its import or its start (`configure_modes()`, the
     startup's and the scheduler's call)."""
 
     def test_a_fresh_interpreter_imports_and_starts_with_junk_in_every_one(self, tmp_path):
@@ -767,8 +770,8 @@ class TestJunkStartsWeb:
             "import core.repositories.inventory, core.chat_tools, core.weekly_report\n"
             "import core.prediction_service, core.sync_service\n"
             "from core.runtime_modes import configure_modes\n"
-            "configure_modes(web=True)\n"
-            "configure_modes(web=True)\n"
+            "configure_modes()\n"
+            "configure_modes()\n"
             "print('ok')\n" % (list(MODULES),)
         )
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
@@ -791,7 +794,7 @@ class TestJunkStartsWeb:
         monkeypatch.setenv("KS_GOALS_HISTORY", "junk-s14-07")
         for switch in SWITCHES:
             monkeypatch.setenv(switch, "junk-s14-07")
-        configure_modes(web=True)
+        configure_modes()
         response = TestClient(app).get("/api/health")
         assert response.status_code == 200, response.text
         body = response.json()

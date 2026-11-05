@@ -41,8 +41,12 @@ def render() -> Dict[str, object]:
 
     try:
         from core import warehouse_sql as home
-    except ImportError:  # a tree from before S14-01
-        from core import duckdb_store as home
+    except ImportError:  # a tree from before S14-01, whose duckdb_store held
+        # them; by name, since this tree's duckdb_store (a shim since S14-18)
+        # holds none of them.
+        import importlib
+
+        home = importlib.import_module("core.duckdb_store")
 
     fine, rollup = ch_silver.derive_gold_sql()
     renderers: Dict[str, Callable[[], object]] = {

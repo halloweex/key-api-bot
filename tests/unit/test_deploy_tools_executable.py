@@ -117,7 +117,7 @@ def test_the_walk_sees_the_tools_it_guards():
     docs/offsite_backup_setup.md, which the store-backed gate does not mount,
     so it is required only where that document is."""
     seen = {t.relative_to(REPO).as_posix() for t in _run_by_path()}
-    expected = {"deploy/api_fingerprint.py", "deploy/ark_ship.sh", "deploy/stage4_soak.sh"}
+    expected = {"deploy/api_fingerprint.py", "deploy/ark_ship.sh", "deploy/daily_soak.sh"}
     if (REPO / "docs" / "offsite_backup_setup.md").is_file():
         expected.add("deploy/restore-test.sh")
     assert expected <= seen, seen

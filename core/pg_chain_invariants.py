@@ -2,14 +2,14 @@
 
 WHAT STOPS WATCHING THE MOMENT A CHAIN SWITCHES
 
-Stage 4 moves writes chain by chain, and when a chain switches, two jobs stand
-down for its tables and neither says so: the hourly `replicate_operational`
-must not ship them, and the daily `reconcile_operational` must not compare them
-(`core/write_chains.py` has the reasons). The comparison's stand-down is a
-`continue` with no finding — so from the switch onward the only checks these
-tables had are gone, and nothing replaces them. For `app.manual_expenses` today
-that is one table; for chain 1's six it is the only record there will ever be
-of a stock change.
+Stage 4 moved writes chain by chain, and when a chain switched, two jobs stood
+down for its tables and neither said so: the hourly `replicate_operational`
+must not ship them, and the daily `reconcile_operational` must not compare them.
+The comparison's stand-down was a `continue` with no finding — so from the
+switch onward the only checks these tables had were gone, and nothing replaced
+them. Step 14 deleted both jobs' DuckDB halves (S14-12, S14-13), and this watch
+is what is left: for `app.manual_expenses` that is one table; for chain 1's six
+it is the only record there will ever be of a stock change.
 
 The comparison could not be kept: it compares against a DuckDB that has stopped
 receiving these rows, so every new row would be a discrepancy it created

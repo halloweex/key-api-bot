@@ -178,10 +178,8 @@ class TestPostgresDownAtBoot:
     async def store(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
-        s = DuckDBStore(db_path=tmp_path / "latched.duckdb")
-        await s.connect()
+        s = DuckDBStore()
         yield s
-        await s.close()
 
     @pytest.mark.asyncio
     async def test_an_expense_raises_instead_of_landing_in_duckdb(self, flags, store):
@@ -204,8 +202,6 @@ class TestPostgresDownAtBoot:
             with pytest.raises(OSError):
                 await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 100)
 
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM manual_expenses").fetchone()[0] == 0
 
 
 class TestAWriteThatNeverReachesPostgres:
@@ -224,10 +220,8 @@ class TestAWriteThatNeverReachesPostgres:
     async def store(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
-        s = DuckDBStore(db_path=tmp_path / "unreached.duckdb")
-        await s.connect()
+        s = DuckDBStore()
         yield s
-        await s.close()
 
     @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
     @pytest.mark.asyncio
@@ -255,8 +249,6 @@ class TestAWriteThatNeverReachesPostgres:
         # Until step 14's S14-00 the flag was then still the whole answer; it
         # routes nothing now, but an image from before step 14 does, and finds
         # no marker.
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM manual_expenses").fetchone()[0] == 0
 
     @pytest.mark.asyncio
     async def test_the_dictionary_chain_when_the_pool_has_no_connection_to_give(
@@ -334,8 +326,6 @@ class TestAWriteThatNeverReachesPostgres:
         assert not chain_latch.marker_path("pg_buyers_write").exists()
         # And DuckDB was not written in its place: under the flag the batch
         # belonged to Postgres.
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0] == 0
 
     @pytest.mark.asyncio
     async def test_the_gender_derivation_returns_without_latching(self, flags):
@@ -732,7 +722,7 @@ class TestTheWatermarkGoesToPostgresAskingNothing:
         not, whatever the flag says."""
         from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+        store = DuckDBStore()
         if latched:
             chain_latch.latch("pg_inventory_write")
         flags.setenv("KS_WRITE_INVENTORY", "duckdb")

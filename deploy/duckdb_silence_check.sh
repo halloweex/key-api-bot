@@ -21,14 +21,14 @@
 #              writes, and only under $STATE_DIR.
 #   --peek     hash and compare; write nothing. For a human.
 #   --status   read the record; hash nothing, write nothing. What
-#              deploy/stage4_soak.sh calls: hashing a multi-GB file is the
+#              deploy/daily_soak.sh calls: hashing a multi-GB file is the
 #              cron's job, not the daily report's.
 #   --crontab  print the week's change to root's crontab, as a diff: the two
 #              lines it retires (the Sunday compaction, the nightly DuckDB
 #              snapshot), the one it adds (this check), and the way back.
 #              Reads no file, hashes nothing, writes nothing, and installs
 #              nothing — a crontab is changed by a person, from that print
-#              (CLAUDE.md, "Starting the week of silence"). A `-`/`+` before
+#              (CLAUDE.md, "The week of silence, and its way back"). A `-`/`+` before
 #              each line is what makes pasting the whole print into
 #              `crontab -e` fail instead of installing a retired line.
 #
@@ -65,7 +65,7 @@
 # Install at the start of the week of silence (not installed by anything here;
 # `--crontab` prints this line with the two the week retires):
 #   17 * * * *  /opt/key-api-bot/deploy/duckdb_silence_check.sh >/dev/null 2>&1
-# Its output is in the record; deploy/stage4_soak.sh reads it (P1).
+# Its output is in the record; deploy/daily_soak.sh reads it (P1).
 set -Eeuo pipefail
 umask 077
 
@@ -87,9 +87,12 @@ esac
 
 # ── the crontab, printed ──────────────────────────────────────────────────────
 # Before the lock, the record and the file: this mode touches none of them.
-# Each line is the one its script's own header documents, with the path of
-# the checkout this runs from — tests/unit/test_week_of_silence_host.py holds
-# the two together.
+# Each line is the one its script's own header documented, with the path of
+# the checkout this runs from — tests/unit/test_duckdb_silence_check.py holds
+# them to it. The two retired scripts, scripts/weekly_compact.sh and
+# deploy/daily_offsite.sh, were deleted from the checkout in step 14's S14-18
+# (their lines were retired on 2026-10-16): the print still names them, so
+# the lines can be found and confirmed gone, and no longer offers them back.
 if [ "$MODE" = crontab ]; then
     root="$(cd "$HERE/.." && pwd)"
     retire_compact="0 2 * * 0  $root/scripts/weekly_compact.sh"
@@ -98,7 +101,7 @@ if [ "$MODE" = crontab ]; then
     cat <<CRONTAB
 # The week of silence: root's crontab, as a diff. Printed, never installed:
 # change it by hand with \`crontab -e\`, one line at a time (CLAUDE.md,
-# "Starting the week of silence"). An installed line may carry a redirect
+# "The week of silence, and its way back"). An installed line may carry a redirect
 # after its command; it is the command that names it.
 #
 # First keep a copy, and find the lines:
@@ -116,9 +119,10 @@ if [ "$MODE" = crontab ]; then
 # Unchanged: offsite_check.sh (09:00; reports the DuckDB copy frozen under
 # off), pg_offsite.sh (07:40; carries .env since OD-S5-6), and every other line.
 #
-# THE WAY BACK (KS_DUCKDB=on again) — the reverse:
-+ $retire_compact
-+ $retire_snapshot
+# THE WAY BACK (KS_DUCKDB=on again) — not by cron from this checkout: the two
+# scripts it re-added were deleted in step 14's S14-18, and a step-14 web runs
+# off whatever .env says (CLAUDE.md, "Before any rollback to an image from
+# before step 14"). Only the silence check comes out:
 - $add_silence
 # The record under $STATE_DIR stays as it is: history, not a lever.
 CRONTAB

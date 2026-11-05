@@ -63,7 +63,7 @@ class TestEveryLookupReadsPostgres:
         self, tmp_path, monkeypatch, name, args,
     ):
         monkeypatch.setenv("KS_READ_LOOKUPS", "duckdb")   # not read any more
-        store = DuckDBStore(db_path=tmp_path / f"l-{name}.duckdb")
+        store = DuckDBStore()
 
         def boom(*_a, **_k):
             raise AssertionError(f"{name} reached for DuckDB")

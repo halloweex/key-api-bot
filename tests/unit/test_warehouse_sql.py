@@ -134,17 +134,22 @@ SHARED_SQL = (
 
 class TestTheOldNamesAreTheNewObjects:
     @pytest.mark.parametrize("name", SHARED_SQL)
-    def test_duckdb_store_re_exports_the_warehouse_sql(self, name):
-        """Mutation: a copy left behind in `core/duckdb_store.py` — the two
-        would be two homes of one rule, which is what #101 proved diverges."""
+    def test_duckdb_store_holds_no_copy_of_the_warehouse_sql(self, name):
+        """`core/duckdb_store.py` re-exported these as the same objects from
+        S14-01 until S14-18, which made it a shim of the store alone. Neither
+        a re-export nor a copy is left there: a copy would be two homes of
+        one rule, which is what #101 proved diverges. Mutation: define or
+        re-export any of them in the shim again."""
         from core import duckdb_store, warehouse_sql
 
-        assert getattr(duckdb_store, name) is getattr(warehouse_sql, name)
+        assert hasattr(warehouse_sql, name)
+        assert not hasattr(duckdb_store, name)
 
     def test_upsert_result(self):
+        """Re-exported by `core/duckdb_store.py` until S14-18."""
         from core import duckdb_store, pg_orders_write
 
-        assert duckdb_store.UpsertResult is pg_orders_write.UpsertResult
+        assert not hasattr(duckdb_store, "UpsertResult")
         assert pg_orders_write.UpsertResult.__module__ == "core.pg_orders_write"
 
     def test_the_data_directory(self):
@@ -298,8 +303,10 @@ class TestNoDuckDBModuleOnTheDerivationPath:
     def test_a_fresh_interpreter_renders_everything_without_duckdb(self):
         """Import the five modules the plan names, render every statement they
         own, take the order writer's no-row path, and look. Then import the
-        DuckDB store in the same interpreter, so a check that could not see
-        the driver cannot pass. Fails on S14-00's tree: `pass1_sql` loads it."""
+        store's old name, which loads no driver since step 14's S14-18, and
+        the driver itself, in the same interpreter, so a check that could not
+        see the driver cannot pass. Fails on S14-00's tree: `pass1_sql` loads
+        it."""
         program = r"""
 import asyncio, json, sys
 sys.path.insert(0, sys.argv[1])
@@ -316,8 +323,10 @@ assert (result.count, result.changed_ids, expenses) == (0, [], 0), result
 watched = ("duckdb", "core.duckdb_store", "pandas")
 before = sorted(m for m in watched if m in sys.modules)
 import core.duckdb_store
+shim = sorted(m for m in watched if m in sys.modules)
+import duckdb
 after = sorted(m for m in watched if m in sys.modules)
-print(json.dumps({"before": before, "after": after}))
+print(json.dumps({"before": before, "shim": shim, "after": after}))
 """
         done = subprocess.run(
             [sys.executable, "-I", "-c", program, str(ROOT)],
@@ -326,5 +335,7 @@ print(json.dumps({"before": before, "after": after}))
         seen = json.loads(done.stdout.strip().splitlines()[-1])
         assert seen["before"] == [], seen
         # pandas came with the store until step 14's S14-09 deleted its last
-        # user there (`upsert_orders`); the driver is the control's point.
+        # user there (`upsert_orders`), and the driver until S14-18 deleted
+        # its DuckDB half; the driver imported by name is the control's point.
+        assert seen["shim"] == ["core.duckdb_store"], seen
         assert seen["after"] == ["core.duckdb_store", "duckdb"], seen

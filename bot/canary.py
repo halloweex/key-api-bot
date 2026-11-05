@@ -95,7 +95,7 @@ DQ_MAX_AGE_S = {
     # DN-21's opt-in rested on what the stage-4 soak checked on 18.09: a
     # successful run on each of the 14 days before that, none CRITICAL. That
     # counted calendar days, not the silence this limit measures; the check
-    # asks both now (deploy/stage4_soak/20_reconciliation_pg_history.sql).
+    # asks both now (deploy/daily_soak/20_reconciliation_pg_history.sql).
     # A web with no Postgres configured never writes the layer
     # (`_reconcile_postgres` returns None — silence, not a clean run), so such
     # a host now pages `dq_never:reconciliation_pg`; production web always
@@ -196,14 +196,10 @@ class CanaryResult:
     dq_ages: dict[str, Optional[int]] = field(default_factory=dict)
     # mirrored table -> seconds since its last successful shipment
     mirror_ages: dict[str, Optional[int]] = field(default_factory=dict)
-    # How long the web process this probe read had been running, from
-    # `uptime_seconds`; None when no payload said. The watch uses it to tell
-    # the process it read last time from a new one (see record_watch).
-    web_uptime_s: Optional[float] = None
-    # What this probe read for the week of silence's watch (OD-17 (a)): True
-    # web runs KS_DUCKDB=off and opened nothing, False it opened something,
-    # None no block read or web not under off. See duckdb_silent.
-    duckdb_silent: Optional[bool] = None
+    # `web_uptime_s` and `duckdb_silent` stood here until step 14's S14-18:
+    # what the week of silence's watch (`watch:duckdb_switch`) was written
+    # from on every probe. The switch is deleted, its row stays in
+    # `app.alert_series` as history, and nothing writes it.
     # Keys this probe could not judge, because it read no block to judge them
     # by: the resolve keeps them firing (see unjudged_keys).
     unjudged_keys: list[str] = field(default_factory=list)
@@ -763,11 +759,11 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     an nginx reload, a 10 s timeout) would be announced resolved and paged
     again as a new incident by the next probe, agent and all. Only these
     keys: `read_refused` (OD-07's; its siblings `read_fallback_used` and
-    `read_routed_to_duckdb` went in step 14's S14-16), the buyers step's,
-    and the week of silence's tripwire (`duckdb_opened_while_off`, which
-    stands until web restarts) with off's held-back verdict beside it
-    (`duckdb_off_held_back`, the web process's for its life): every other
-    payload-derived key keeps today's behaviour.
+    `read_routed_to_duckdb` went in step 14's S14-16), and the buyers
+    step's: every other payload-derived key keeps today's behaviour. (The
+    week of silence's tripwire, `duckdb_opened_while_off`, and off's
+    held-back verdict, `duckdb_off_held_back`, were held the same way until
+    step 14's S14-18 deleted the switch and its block.)
 
     The buyers step's two keys are held the same way, when the probe read no
     `buyer_sync` block: that step is the only writer of buyers, and a stall
@@ -793,13 +789,6 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     chains = payload.get("write_chains")
     if not isinstance(payload.get("buyer_sync"), dict):
         keys += ["buyer_sync_stalled", "buyer_sync_stalled_chain"]
-    # The week of silence's page stands until web restarts; a probe that read
-    # no switch block cannot say it cleared.
-    if not isinstance(payload.get("duckdb_switch"), dict):
-        keys.append("duckdb_opened_while_off")
-        # Off's verdict is the web process's for its life, so a probe that
-        # read no switch block cannot say a held-back web was replaced.
-        keys.append("duckdb_off_held_back")
     # Chain 3's CRITICAL, held the way chain 4's is: the order step is the
     # only writer of orders, and a hung Postgres — the likeliest cause of the
     # page — hangs /api/health too, which is exactly a blind probe. Held
@@ -815,16 +804,6 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     if not isinstance(payload.get("backups"), dict):
         keys.append("backup_evidence_stale")
     return keys
-
-
-def web_uptime_s(payload: Optional[dict]) -> Optional[float]:
-    """`uptime_seconds` as a number, or None: how long the web process this
-    probe read had been running. A bool, a negative or anything else is
-    None — the watch then judges the gap alone, as it did before."""
-    value = (payload or {}).get("uptime_seconds")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value) if value >= 0 else None
 
 
 def _parse_instant(value: object) -> Optional[datetime]:
@@ -873,107 +852,17 @@ def check_read_refusals(
 # publishes none of them, and the names are not reused (rule 15).
 
 
-# ─── The week of silence (OD-17 (a)) ────────────────────────────────────────
+# ─── The week of silence (OD-17 (a)), until step 14's S14-18 ────────────────
 #
-# Stage 5 waits for seven days in which nothing opened the DuckDB file, and
-# "nothing" has to be shown by running web with `KS_DUCKDB=off`, not by reading
-# the code. Web refuses every open under `off`, counts it at the raise and
-# publishes the sites as `duckdb_switch.opened_while_off`
-# (core/duckdb_switch.py). The canary pages that block and keeps the watch that
-# says since when web has run `off` and opened nothing — written only under
-# `off`, so a web running `on`, today, writes no row at all.
-
-# The first words of the page's line: what a reader greps the journal by. The
-# week-of-silence soak check (P4, retired at step 14's S14-02 once the owner
-# closed the week) judged the page by its key and the watch below.
-DUCKDB_OPENED_LINE = "DuckDB opened while KS_DUCKDB=off: "
-
-# The watch row in `app.alert_series` (`core.alert_archive.record_watch`), and
-# its gap. The longest a web process may go unread before it is replaced, and
-# the watch still hold: the counters cover a process from its start, so a probe
-# that reads the SAME process as the last one reads everything since, however
-# long the bot was away; only a process that ended between two probes loses
-# what it counted after the last. That tail is at most the time from the last
-# probe to the new process's start (`uptime_seconds`, core.alert_archive): up
-# to one probe interval plus the stop-to-start of a deploy, or of the Sunday
-# compaction. It was the read-fallback watch's gap, shared, until step 14's
-# S14-16 stopped writing that watch (`watch:read_fallbacks`, history now).
-DUCKDB_SWITCH_WATCH_KEY = "watch:duckdb_switch"
-DUCKDB_SWITCH_WATCH_GAP_S = 35 * 60
-
-
-def check_duckdb_switch(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge `duckdb_switch.opened_while_off`: a path in web that opened, or
-    tried to open, the DuckDB file under KS_DUCKDB=off.
-
-    CRITICAL: under `off` the claim being made is that nothing needs DuckDB
-    any more, and this is the proof that something does — the week of silence
-    starts again. On the block being non-empty, not on a count moving: the
-    counters are per process, so the page stands until web restarts. Never
-    fires under `on`, where nothing is refused. An absent block is not a
-    failure; an older web publishes none."""
-    block = (payload or {}).get("duckdb_switch")
-    if not isinstance(block, dict):
-        return []
-    opened = block.get("opened_while_off")
-    if not isinstance(opened, dict) or not opened:
-        return []
-    return [("duckdb_opened_while_off", DUCKDB_OPENED_LINE + _surfaces(opened))]
-
-
-def check_duckdb_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge `duckdb_switch.error`: a KS_DUCKDB web did not understand.
-
-    Warn, the read-fallback mode's reason: web runs `on`, today's behaviour,
-    so nothing is failing — but whoever set it believes the week of silence is
-    running, and it is not. It must not stop web instead: web is the only
-    process that syncs orders. An absent block is not a failure."""
-    block = (payload or {}).get("duckdb_switch")
-    if isinstance(block, dict) and block.get("error"):
-        return [("duckdb_mode_invalid", f"DuckDB switch: {block['error']}")]
-    return []
-
-
-# The first words of the held-back page's line, before the unmet keys.
-DUCKDB_HELD_BACK_LINE = "KS_DUCKDB=off ran as on, unmet: "
-
-
-def check_duckdb_off_held_back(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge `duckdb_switch.held_back`: KS_DUCKDB=off with a precondition of
-    off unmet (stage 5's PR-2, core/duckdb_off.py).
-
-    Since step 14's S14-00 the verdict is gone and web publishes `[]`, so
-    this fires only for an image from before step 14, the rollback target;
-    it goes with the block (S14-17).
-
-    CRITICAL, titled for what it is: web runs `on` — the owner's OD-S5-1 (a),
-    never a stop, web is the only syncer — so the site serves and orders come
-    in, but somebody set off believing the week of silence starts, and it has
-    not: web opens the file. Like step 13's held-back switch was (until step
-    14's S14-15), the switch somebody deployed did not happen. The keys name what to meet; the details
-    are in web's log, since this endpoint is public. Held for the life of the
-    web process, so the page stands until a restart that meets them. An empty
-    list is off holding; an absent block or field is not a failure — an
-    older web publishes none, and `on` publishes no field at all."""
-    block = (payload or {}).get("duckdb_switch")
-    if not isinstance(block, dict):
-        return []
-    held = block.get("held_back")
-    if not isinstance(held, list) or not held:
-        return []
-    return [("duckdb_off_held_back",
-             DUCKDB_HELD_BACK_LINE + ", ".join(str(key) for key in held))]
-
-
-def duckdb_silent(payload: Optional[dict]) -> Optional[bool]:
-    """What this probe can say for the week of silence's watch: True when web
-    runs `off` and has opened nothing, False when it runs `off` and has, None
-    when it is not under `off` or published no block — which says nothing
-    about the week and is not written, so a web running `on` writes no row."""
-    block = (payload or {}).get("duckdb_switch")
-    if not isinstance(block, dict) or block.get("mode") != "off":
-        return None
-    return not block.get("opened_while_off")
+# Web refused every open of the DuckDB file under `KS_DUCKDB=off`, counted it
+# and published the sites as `duckdb_switch.opened_while_off`; this module
+# paged that block (`duckdb_opened_while_off`, CRITICAL), a value of
+# `KS_DUCKDB` web did not understand (`duckdb_mode_invalid`, WARN) and an
+# image from before step 14 held back on `on` (`duckdb_off_held_back`,
+# CRITICAL), and wrote the week's watch (`watch:duckdb_switch` in
+# `app.alert_series`) from every probe that read the block. S14-18 deleted the
+# switch and the block: nothing in any process opens the file. The names are
+# not reused (rule 15), and the watch's row stays as history.
 
 
 # `(field of /api/health's backups block, what it proves, the script that
@@ -1071,8 +960,6 @@ async def run_canary(
     sync_seconds = None
     dq_ages: dict[str, Optional[int]] = {}
     mirror_ages: dict[str, Optional[int]] = {}
-    uptime_seen: Optional[float] = None
-    duckdb_silent_seen: Optional[bool] = None
     if payload:
         health_status = payload.get("status")
         sync_block = payload.get("sync") or {}
@@ -1119,8 +1006,6 @@ async def run_canary(
         if alerting_failures and severity == "ok":
             severity = "warn"
 
-        uptime_seen = web_uptime_s(payload)
-
         # A read refused with a 503, recently. Warn: an outage somebody saw,
         # which is what a refusal chooses over a wrong number.
         refused_failures = check_read_refusals(payload, now)
@@ -1128,31 +1013,6 @@ async def run_canary(
             fail(key, message)
         if refused_failures and severity == "ok":
             severity = "warn"
-
-        # Web opened the DuckDB file under KS_DUCKDB=off. Pages: the week of
-        # silence's claim is that nothing needs it, and this disproves it.
-        opened_failures = check_duckdb_switch(payload)
-        for key, message in opened_failures:
-            fail(key, message)
-        if opened_failures:
-            severity = "critical"
-
-        # A KS_DUCKDB web could not read. Warn: `on` is running, and somebody
-        # believes the week of silence is.
-        duckdb_mode_failures = check_duckdb_mode(payload)
-        for key, message in duckdb_mode_failures:
-            fail(key, message)
-        if duckdb_mode_failures and severity == "ok":
-            severity = "warn"
-        duckdb_silent_seen = duckdb_silent(payload)
-
-        # KS_DUCKDB=off held on `on` by an unmet precondition of off. Pages:
-        # the week of silence somebody started has not (OD-S5-1 (a)).
-        held_back = check_duckdb_off_held_back(payload)
-        for key, message in held_back:
-            fail(key, message)
-        if held_back:
-            severity = "critical"
 
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
@@ -1215,8 +1075,6 @@ async def run_canary(
         sync_seconds_since=sync_seconds,
         dq_ages=dq_ages,
         mirror_ages=mirror_ages,
-        web_uptime_s=uptime_seen,
-        duckdb_silent=duckdb_silent_seen,
         unjudged_keys=unjudged_keys(payload),
     )
 
@@ -1229,22 +1087,12 @@ async def run_canary(
 # because "the dashboard is unreachable" outranks "a layer is stale" when both
 # are true.
 _ACTIONS: tuple[tuple[str, str], ...] = (
-    # First: under KS_DUCKDB=off web cannot work yet, so the health keys beside
-    # it are its symptom and this is the cause.
-    ("duckdb_opened_while_off",
-     "KS_DUCKDB=off and web opened DuckDB at the sites named: decouple them, or "
-     "KS_DUCKDB=on and up -d web. The week of silence starts again"),
     ("health_unreachable",
      "curl /api/health from the VPS — app vs nginx/TLS. Restart is the last lever"),
     ("health_http", "Read web's log for the failing request — not a network issue"),
     ("health_status", "/api/health's degraded_by names what degraded; read web's log for it"),
     ("cert_expiring", "Check certbot on the host — auto-renew broke"),
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
-    # The host's sidecars read `.env`, not the verdict, so a hold also stops
-    # the nightly snapshot and the Sunday compaction of the file web writes
-    # (core/duckdb_off.py) — a state to leave, by either way out.
-    ("duckdb_off_held_back",
-     "web runs on; cron neither snapshots nor compacts DuckDB: meet each key (web's log: 'precondition(s) of off') or set KS_DUCKDB=on, then up -d web"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
@@ -1261,8 +1109,6 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "on success only, and the next probe clears this"),
     ("report_ledger_pending",
      "Nothing to resend: the next daily tick drains data/report-ledger-pending into the ledger, under either flag; grep -i 'report ledger' in web's log"),
-    ("duckdb_mode_invalid",
-     "Set KS_DUCKDB to on or off in .env, then recreate web"),
     # Last: when an engine is down its own key names the cause, and a refusal
     # is what that cause cost the pages.
     ("read_refused",
@@ -1292,10 +1138,10 @@ def _what_to_do(result: CanaryResult) -> Optional[str]:
 _OUTAGE_KEYS: tuple[str, ...] = ("health_unreachable", "health_http", "health_status")
 
 # A CRITICAL that is not an outage, named for what it is. First match wins.
-_CRITICAL_TITLES: tuple[tuple[str, str], ...] = (
-    ("duckdb_off_held_back", "DuckDB switch held back"),
-    ("duckdb_opened_while_off", "DuckDB opened while off"),
-)
+# Empty since step 14's S14-18: its two entries were the DuckDB switch's,
+# "DuckDB switch held back" and "DuckDB opened while off". Every other
+# CRITICAL that is not an outage reads "Dashboard critical".
+_CRITICAL_TITLES: tuple[tuple[str, str], ...] = ()
 
 
 def _title(result: CanaryResult) -> str:

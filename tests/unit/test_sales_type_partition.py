@@ -202,7 +202,7 @@ class TestSalesTypeCaseSpeaksOnlyKnownTypes:
 
     @staticmethod
     def _results_by_dialect() -> dict[str, tuple[list[str], bool]]:
-        from core.duckdb_store import silver_sales_type_case
+        from core.warehouse_sql import silver_sales_type_case
         from core.sql_dialect import DUCKDB, POSTGRES
 
         return {d.name: _case_results(silver_sales_type_case(d)) for d in (DUCKDB, POSTGRES)}

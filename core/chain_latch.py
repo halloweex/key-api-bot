@@ -343,9 +343,10 @@ def owned_tables(owners: Mapping[str, str]) -> FrozenSet[str]:
     the hour, and the two copies then agreed, so the daily comparison had
     nothing to say. `chain_owner_unregistered` is what says it instead.
 
-    Every path that holds a pool and stands down on the owner rows reads this
-    one answer — the operational pair and `pg_landing.owned_among` — so no two
-    of them can disagree about which tables have changed hands.
+    Every path that held a pool and stood down on the owner rows read this
+    one answer — the operational pair, until step 14's S14-12 and S14-13
+    deleted it, and `pg_landing.owned_among` — so no two of them could
+    disagree about which tables had changed hands.
     """
     return claimed_tables(owners) | frozenset(owners)
 

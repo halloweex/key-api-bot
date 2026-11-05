@@ -2,7 +2,8 @@
 Meilisearch async client wrapper for typo-tolerant search.
 
 Provides fast, typo-tolerant search for buyers, orders, and products.
-Syncs data from DuckDB to Meilisearch for optimal search performance.
+Syncs data from Postgres to Meilisearch (from DuckDB until step 14) for optimal
+search performance.
 """
 import asyncio
 import math

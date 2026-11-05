@@ -19,7 +19,6 @@ from web.services.auth_service import (
     check_user_access,
     check_user_access_async,
     create_session_data,
-    get_user_role,
 )
 
 logger = logging.getLogger(__name__)

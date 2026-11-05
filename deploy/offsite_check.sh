@@ -18,8 +18,9 @@
 #   0 9 * * *  /opt/key-api-bot/deploy/offsite_check.sh
 #
 # THE WEEK OF SILENCE (stage 5). With KS_DUCKDB=off in .env the DuckDB copy is
-# frozen on purpose: deploy/daily_offsite.sh stands down and its cron line is
-# retired once the second Ark is off-site, so its marker only ages. Judging it
+# frozen on purpose: deploy/daily_offsite.sh stood down and its cron line was
+# retired once the second Ark was off-site (2026-10-16), and step 14's S14-18
+# deleted it with deploy/offsite_parquet.sh, so its marker only ages. Judging it
 # would page "off-site copy is stale" every morning from the second day on,
 # and a check that cries wolf every morning is one nobody reads by Monday —
 # so under `off` that marker is reported, "frozen" with its age, and never
@@ -49,9 +50,10 @@ PG_MAX_AGE_HOURS="${BACKUP_PG_MAX_ARCHIVE_AGE_HOURS:-36}"
 # plus slack: later than this and it has stopped, whatever it last logged.
 WATCHDOG_MARKER="${WATCHDOG_MARKER:-data/health/watchdog_last_sample}"
 WATCHDOG_MAX_AGE_HOURS="${WATCHDOG_MAX_AGE_HOURS:-14}"
-# deploy/daily_offsite.sh ships nightly, so this is one missed run plus slack.
-# It was 216h when the push rode the weekly compact; a threshold left at a
-# cadence the system no longer has is a check that has stopped checking.
+# deploy/daily_offsite.sh shipped nightly, so this was one missed run plus
+# slack (216h when the push rode the weekly compact). Nothing ships the DuckDB
+# copy since step 14's S14-18; the limit is read only when .env does not say
+# KS_DUCKDB=off, and that branch's alerts say to put it back.
 MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-36}"
 
 # `|| true` is load-bearing: grep exits 2 when .env is absent and 1 when the key
@@ -125,7 +127,7 @@ elif [ ! -f "$MARKER" ]; then
     notify "$(printf '%s\n\n%s\n\n%s\n\n%s' \
         "🚨 Warehouse: off-site copy age = never" \
         "The database, its local backups and the export all share one volume, so any failure that takes the volume takes every copy with it." \
-        "Set it up: docs/offsite_backup_setup.md — then run deploy/offsite_parquet.sh and deploy/restore-test.sh" \
+        "Nothing ships it since step 14 (S14-18 deleted the scripts that did): put KS_DUCKDB=off back in .env, which this check then reports as frozen" \
         "$(_where)")"
     RC=1
     AGE_HOURS=9999
@@ -138,7 +140,7 @@ else
             "🚨 Warehouse: off-site copy is stale" \
             "Newest copy: ${AGE_HOURS}h old" \
             "Allowed: ${MAX_AGE_HOURS}h" \
-            "The weekly compact ships it — check /var/log/keycrm-compact.log and run deploy/offsite_parquet.sh by hand." \
+            "Nothing ships it since step 14 (S14-18 deleted the scripts that did): put KS_DUCKDB=off back in .env, which this check then reports as frozen." \
             "$(_where)")"
         RC=1
     fi

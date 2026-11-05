@@ -148,14 +148,10 @@ def _migration_columns(table: str) -> list[str]:
 class TestItIsReallyUnbacked:
     """The argument for copying these fifty rows, checked rather than repeated."""
 
-    def test_the_offsite_job_only_ever_takes_the_warehouse(self):
-        script = (REPO / "deploy" / "daily_offsite.sh").read_text(encoding="utf-8")
-        # Every path it selects for shipping. If `bot.db` is ever added here,
-        # this test should fail and the argument in revision 0009 be revisited.
-        selected = re.findall(r'ls -t "\$BACKUP_DIR"/(\S+)', script)
-        assert selected, "found nothing being selected for the off-site copy"
-        assert all("analytics" in pattern for pattern in selected), selected
-        assert "bot.db" not in script
+    # `test_the_offsite_job_only_ever_takes_the_warehouse` stood here: it read
+    # `deploy/daily_offsite.sh` for what it shipped (the DuckDB backups, never
+    # `bot.db`). Step 14's S14-18 deleted the script; the bot's state rides in
+    # Postgres (revision 0009) and in its nightly dump.
 
 
 # ── the two type gaps ────────────────────────────────────────────────────────

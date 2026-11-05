@@ -92,40 +92,31 @@ class TestTheSupportedReplayShape:
     @pytest.mark.asyncio
     async def test_a_message_derived_id_replays_and_replays_again(self, tmp_path):
         store = await _store_with_roster(tmp_path)
-        try:
-            for _attempt in range(2):
-                for msg in ("msg-aaa", "msg-bbb"):
-                    known = await _replay(store, f"replay-{msg}", msg)
-                    assert known is True
+        for _attempt in range(2):
+            for msg in ("msg-aaa", "msg-bbb"):
+                known = await _replay(store, f"replay-{msg}", msg)
+                assert known is True
 
-            assert (await _delivered(store, "msg-aaa"))[0] is True
-            assert (await _delivered(store, "msg-bbb"))[0] is True
-        finally:
-            await store.close()
+        assert (await _delivered(store, "msg-aaa"))[0] is True
+        assert (await _delivered(store, "msg-bbb"))[0] is True
 
     @pytest.mark.asyncio
     async def test_it_survives_the_export_being_reordered(self, tmp_path):
         """The second run sends the same rows in the opposite order, which is
         what happens when someone re-sorts the sheet or filters it down."""
         store = await _store_with_roster(tmp_path)
-        try:
-            for msg in ("msg-aaa", "msg-bbb"):
-                await _replay(store, f"replay-{msg}", msg)
-            for msg in ("msg-bbb", "msg-aaa"):
-                assert await _replay(store, f"replay-{msg}", msg) is True
-        finally:
-            await store.close()
+        for msg in ("msg-aaa", "msg-bbb"):
+            await _replay(store, f"replay-{msg}", msg)
+        for msg in ("msg-bbb", "msg-aaa"):
+            assert await _replay(store, f"replay-{msg}", msg) is True
 
     @pytest.mark.asyncio
     async def test_a_live_callback_afterwards_is_not_refused(self, tmp_path):
         """The gateway's own ids never collide with `replay-` ones, so the
         repair does not spend the event ids real callbacks still need."""
         store = await _store_with_roster(tmp_path)
-        try:
-            await _replay(store, "replay-msg-aaa", "msg-aaa")
-            assert await _replay(store, "gateway-event-1", "msg-aaa") is True
-        finally:
-            await store.close()
+        await _replay(store, "replay-msg-aaa", "msg-aaa")
+        assert await _replay(store, "gateway-event-1", "msg-aaa") is True
 
 
 class TestTheShapeThatBreaks:
@@ -136,18 +127,15 @@ class TestTheShapeThatBreaks:
         self, tmp_path,
     ):
         store = await _store_with_roster(tmp_path)
-        try:
-            for n, msg in enumerate(("msg-aaa", "msg-bbb")):
-                await _replay(store, f"row-{n}", msg)
+        for n, msg in enumerate(("msg-aaa", "msg-bbb")):
+            await _replay(store, f"row-{n}", msg)
 
-            # Same rows, opposite order — `row-0` now names msg-bbb.
-            with pytest.raises(DlrEventRebound) as caught:
-                await _replay(store, "row-0", "msg-bbb")
+        # Same rows, opposite order — `row-0` now names msg-bbb.
+        with pytest.raises(DlrEventRebound) as caught:
+            await _replay(store, "row-0", "msg-bbb")
 
-            assert caught.value.bound_message_id == "msg-aaa"
-            assert caught.value.message_id == "msg-bbb"
-        finally:
-            await store.close()
+        assert caught.value.bound_message_id == "msg-aaa"
+        assert caught.value.message_id == "msg-bbb"
 
 
 class TestTheBindingStillDoesItsJob:
@@ -156,24 +144,18 @@ class TestTheBindingStillDoesItsJob:
     @pytest.mark.asyncio
     async def test_a_captured_pair_cannot_be_repointed(self, tmp_path):
         store = await _store_with_roster(tmp_path)
-        try:
-            await _replay(store, "captured-id", "msg-aaa")
-            with pytest.raises(DlrEventRebound):
-                await _replay(store, "captured-id", "msg-bbb", status="REJECTD")
+        await _replay(store, "captured-id", "msg-aaa")
+        with pytest.raises(DlrEventRebound):
+            await _replay(store, "captured-id", "msg-bbb", status="REJECTD")
 
-            # and the other recipient's state was not touched
-            assert (await _delivered(store, "msg-bbb"))[1] == "Accepted"
-        finally:
-            await store.close()
+        # and the other recipient's state was not touched
+        assert (await _delivered(store, "msg-bbb"))[1] == "Accepted"
 
     @pytest.mark.asyncio
     async def test_an_id_spent_on_an_unknown_message_stays_spent(self, tmp_path):
         """`record_sms_delivery` binds even when the roster does not know the
         message — otherwise an event aimed at nothing stays re-pointable."""
         store = await _store_with_roster(tmp_path)
-        try:
-            assert await _replay(store, "wasted", "msg-not-ours") is False
-            with pytest.raises(DlrEventRebound):
-                await _replay(store, "wasted", "msg-aaa")
-        finally:
-            await store.close()
+        assert await _replay(store, "wasted", "msg-not-ours") is False
+        with pytest.raises(DlrEventRebound):
+            await _replay(store, "wasted", "msg-aaa")
