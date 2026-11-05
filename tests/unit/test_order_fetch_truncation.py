@@ -125,7 +125,10 @@ class TestTheOrderWindow:
         import core.sync_service as mod
 
         monkeypatch.setattr(mod.events, "emit", AsyncMock())
-        orders = _orders(5050, NOW - timedelta(minutes=40), timedelta(milliseconds=400))
+        # Every order at one instant, so no split can divide them: spread
+        # over minutes, a halving boundary could fall among them (it moves
+        # with the wall clock) and both halves fit, which is a pass by luck.
+        orders = _orders(5050, NOW - timedelta(minutes=10), timedelta(0))
         svc, store, written = _service(FakeKeyCRM(orders))
 
         with pytest.raises(KeyCRMTruncated):
