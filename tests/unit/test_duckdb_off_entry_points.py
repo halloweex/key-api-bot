@@ -316,7 +316,8 @@ class TestEveryWayIn:
         # `POST /api/mirror/backfill/*` routes, the hourly job, which asks the
         # store no more, and `sync_all_buyers`, which reached the file only
         # through the name `run` it shares with the orders backfill's
-        # background `run()`. Each step-14 PR that removes a DuckDB branch shrinks
+        # background `run()`; S14-14's integrity job one more (77), which
+        # opens no DuckDB connection, refused or not. Each step-14 PR that removes a DuckDB branch shrinks
         # this; the floor is only that the walk still finds the ways in, not
         # a count to keep. The mirror job's comparisons and lambdas were ten
         # of the eleven callables held until S14-12; the eleventh, the orders
@@ -324,9 +325,12 @@ class TestEveryWayIn:
         # nothing that reaches the file is held any more. The branch stays in
         # `classify` for the next one; an entry it failed to hold would read
         # `unexplained` and fail the test above.
-        assert count["door"] >= 78, dict(count)
+        assert count["door"] >= 77, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
-        assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_integrity"] == "door"
+        # The integrity job reaches the file no more (S14-14); the 05:30
+        # reconciliation still does, through the unconnected store.
+        assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_reconciliation"] == "door"
+        assert "core/scheduler.py:BackgroundScheduler._run_dq_integrity" not in kinds
         assert kinds["web/routes/websocket.py:dashboard_websocket"] == "door"
         assert kinds["web/routes/auth.py:require_admin"] == "door"
         assert "web/routes/api/admin.py:run" not in kinds

@@ -178,6 +178,8 @@ class TestWhatTheBotCalls:
 
         keys = {fn.key for fn in store_reaching(build_graph(("bot", "core")))}
         assert "core/permissions.py:get_permissions_for_role_async" in keys
-        # The integrity job, not the digest any more: step 14's S14-10 took
-        # the store out of the digest, whose journal is Postgres's alone.
-        assert "core/scheduler.py:BackgroundScheduler._run_dq_integrity" in keys
+        # The full sync, not the integrity job any more: step 14's S14-14
+        # took the store out of the integrity job (S14-10 had taken it out of
+        # the digest, whose journal is Postgres's alone).
+        assert "core/scheduler.py:BackgroundScheduler._run_full_sync" in keys
+        assert "core/scheduler.py:BackgroundScheduler._run_dq_integrity" not in keys
