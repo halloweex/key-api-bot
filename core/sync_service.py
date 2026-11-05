@@ -666,7 +666,7 @@ class SyncService:
         window, so the incremental tick goes on to offers and stocks and does
         not come back for ten minutes.
 
-        The one thing is a read refused under `KS_READ_FALLBACK=off`
+        The one thing is a read refused because its engine failed
         (`read_fallback.ReadUnavailable`, DN-20c): recorded the same way, and
         then passed on, because the caller is the one that can answer it — the
         tick names it and skips the step, and `POST /duckdb/sync-buyers`
