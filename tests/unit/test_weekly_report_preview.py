@@ -75,20 +75,24 @@ class TestItRefusesBeforeReading:
 
 
 class TestTheStoreItHandsTheReaders:
-    def test_it_refuses_to_connect_and_creates_no_file(self):
-        """Mutation: hand the readers a plain `DuckDBStore()` — its lazy
-        connect opens (and creates) the file."""
+    def test_it_refuses_to_connect_and_creates_no_file(self, tmp_path, monkeypatch):
+        """The store has no DuckDB half since step 14's S14-18: a reader that
+        still reached for it meets the refusal (`StoreRemoved`), and nothing
+        is opened or created. Mutation: hand the readers anything whose
+        `connection()` answers."""
+        from core.store import AnalyticsStore, StoreRemoved
+
+        monkeypatch.chdir(tmp_path)
         store = preview._store()
-        path = Path(store.db_path)
-        assert not path.exists()
+        assert isinstance(store, AnalyticsStore)
 
         async def ask():
             async with store.connection():
                 pass
 
-        with pytest.raises(preview.PostgresOnly):
+        with pytest.raises(StoreRemoved):
             asyncio.run(ask())
-        assert not path.exists() and not path.parent.joinpath(path.name + ".wal").exists()
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestItReadsWhatTheJobReads:
@@ -158,13 +162,13 @@ class TestTheTrafficReport:
         """`send_traffic` hands the traffic report's builder the store that
         refuses to connect, and sends what it built to the one chat.
 
-        Mutation: build the week on a plain `DuckDBStore()` that connects —
-        the shape this script had before S14-03 — which opens (and creates)
-        the file. Every connect of the base class fails the test here, so the
-        mutated run creates nothing either; the store the builder was handed
-        must refuse a connection the way `_store()` does.
+        Mutation: build the week on a store whose `connection()` answers —
+        the shape this script had before S14-03 opened (and created) the
+        file. The store the builder was handed must refuse a connection the
+        way `_store()` does (`StoreRemoved` since step 14's S14-18).
         """
-        from core import duckdb_store, telegram_alerts, traffic_report
+        from core import telegram_alerts, traffic_report
+        from core.store import StoreRemoved
 
         handed = {}
 
@@ -175,8 +179,6 @@ class TestTheTrafficReport:
                 revenue=1000.0, orders=4, previous_revenue=800.0, previous_orders=3)
 
         monkeypatch.setattr(traffic_report, "build_report", build)
-        monkeypatch.setattr(duckdb_store.DuckDBStore, "connect", AsyncMock(
-            side_effect=AssertionError("a DuckDB store connected")))
         sent = AsyncMock(return_value=1)
         monkeypatch.setattr(telegram_alerts, "send_rich_message_http", sent)
 
@@ -184,15 +186,13 @@ class TestTheTrafficReport:
 
         assert handed["today"] == date(2026, 9, 7)
         store = handed["store"]
-        path = Path(store.db_path)
 
         async def ask():
             async with store.connection():
                 pass
 
-        with pytest.raises(preview.PostgresOnly):
+        with pytest.raises(StoreRemoved):
             asyncio.run(ask())
-        assert not path.exists()
         assert sent.await_count == 1
         assert sent.await_args.kwargs["chat_ids"] == [7]
         assert "31.08" in sent.await_args.args[0], sent.await_args.args[0]

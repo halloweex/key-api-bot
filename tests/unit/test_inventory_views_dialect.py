@@ -11,7 +11,6 @@ divergence, the thing an `if postgres:` in the body could hide indefinitely.
 """
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
@@ -115,29 +114,10 @@ class TestTheGoldProductsDependencyIsGone:
         }
 
 
-class TestTheStoreDoesNotKeepItsOwnCopy:
-    """The bodies moved out of `core/duckdb_store.py`; a copy left behind is
-    the failure mode charter rule 1 names, and it took under a day the last
-    time (#101 updated one Silver projection and not the other)."""
-
-    def test_create_inventory_views_holds_no_sql_of_its_own(self):
-        source = Path("core/duckdb_store.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        func = next(
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef)
-            and node.name == "_create_inventory_views"
-        )
-        literals = [
-            node.value for node in ast.walk(func)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        ]
-        assert not any("CREATE OR REPLACE VIEW v_" in text for text in literals)
-        assert not any("gold_daily_products" in text for text in literals)
-
-    def test_the_store_renders_from_the_shared_body(self):
-        source = Path("core/duckdb_store.py").read_text(encoding="utf-8")
-        assert "inventory_view_selects as _inventory_view_selects" in source
+# `TestTheStoreDoesNotKeepItsOwnCopy` stood here until step 14's S14-18: the
+# DuckDB store's `_create_inventory_views` rendered the views from the shared
+# body and held no SQL of its own. The store's schema went with its DuckDB
+# half; Postgres renders the same body (revision 0014).
 
 
 class TestTheConsumersAreCovered:

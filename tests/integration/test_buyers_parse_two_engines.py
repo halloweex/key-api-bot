@@ -80,8 +80,7 @@ def _normal(value):
 @pytest_asyncio.fixture
 async def both_engines(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore(db_path=tmp_path / "buyers.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
 
     async def clear():
@@ -114,7 +113,6 @@ async def both_engines(tmp_path, monkeypatch):
                     f"({', '.join(f'${i}' for i in range(1, len(cols) + 1))})",
                     *row.values())
         await pool.close()
-        await store.close()
 
 
 # What chain 4's DuckDB branch stored for `BATCH`, normalised as the test

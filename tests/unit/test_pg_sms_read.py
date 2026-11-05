@@ -108,7 +108,7 @@ class TestItDoesNotTakeTheDuckDbLock:
     ):
         from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path=tmp_path / "locked.duckdb")
+        store = DuckDBStore()
 
         def _explode(*_a, **_k):
             raise AssertionError(
@@ -130,7 +130,6 @@ class TestItDoesNotTakeTheDuckDbLock:
             assert result["funnel"][0] == {"stage": "customers", "remaining": 0}
         finally:
             monkeypatch.undo()
-            await store.close()
 
 
 class TestTheSwitchIsGone:
@@ -150,10 +149,10 @@ class TestTheSwitchIsGone:
     the file (`tests/store_reach.py`): no `connection()`, no helper over it
     (`_fetch_one`, `_fetch_all`, `_offload`), no opener.
 
-    The switch itself is still defined, a constant, in `core/pg_sms.py` for
-    its last readers (the copy and its comparison, S14-12/13; the manifest,
-    S14-18), and `core/pg_sms_read.py` still renders the Postgres body with
-    `sms_segments_select`; neither is the store side. Parsed, not grepped: a
+    The switch itself stayed a constant in `core/pg_sms.py` for its last
+    readers (the copy and its comparison, S14-12/13; the manifest, S14-18,
+    which deleted it with the module), and `core/pg_sms_read.py` still renders
+    the Postgres body with `sms_segments_select`; it is not the store side. Parsed, not grepped: a
     comment naming the function satisfies a grep.
     """
 
@@ -186,10 +185,12 @@ class TestTheSwitchIsGone:
             assert gone not in spelled, f"{gone} is still read on the /sms path"
 
     def test_the_guard_left_core_pg_sms(self):
-        from core import pg_sms
+        """`core/pg_sms.py` held the switch, a constant, after the guard went
+        (S14-08); its last reader went in S14-18 and the module with it, so
+        neither the guard nor the switch can come back through it."""
+        import importlib.util
 
-        assert not hasattr(pg_sms, "refuse_while_unported")
-        assert not hasattr(pg_sms, "UNPORTED")
+        assert importlib.util.find_spec("core.pg_sms") is None
 
     def test_no_sms_method_opens_the_store(self):
         """Mutations (the review's, on 4cceda69): `await self._fetch_all(…)`
@@ -248,7 +249,7 @@ class TestTheDeliveryWriteEscapesTheStoreLock:
     async def test_it_writes_while_the_store_lock_is_fatal(self, tmp_path, monkeypatch):
         from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path=tmp_path / "burst.duckdb")
+        store = DuckDBStore()
 
         def _explode(*_a, **_k):
             raise AssertionError(
@@ -294,7 +295,6 @@ class TestTheDeliveryWriteEscapesTheStoreLock:
                 delivered_at=None, event_id="e-1")
         finally:
             monkeypatch.undo()
-            await store.close()
 
         assert known is True, "the roster row was not reported as known"
         joined = " | ".join(statements)

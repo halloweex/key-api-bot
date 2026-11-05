@@ -89,24 +89,8 @@ class ValidationError(Exception):
         return f"{self.field}: {self.message}"
 
 
-class QueryTimeoutError(Exception):
-    """
-    Database query exceeded timeout.
-
-    Indicates a long-running query that should be investigated:
-    - Missing index
-    - Too much data being scanned
-    - Complex join/aggregation
-    """
-
-    def __init__(self, query: str, timeout: float, details: str = None):
-        self.query = query[:200] + "..." if len(query) > 200 else query
-        self.timeout = timeout
-        self.details = details
-        message = f"Query timed out after {timeout}s"
-        if details:
-            message = f"{message}: {details}"
-        super().__init__(message)
-
-    def __str__(self) -> str:
-        return f"QueryTimeoutError: Query timed out after {self.timeout}s - {self.query}"
+# `QueryTimeoutError` stood here until step 14's S14-18: the DuckDB store's
+# `_fetch_one`/`_fetch_all` raised it when a query outlived its timeout on
+# the executor thread, and `web/main.py` answered it 504. Both went with the
+# DuckDB half of the store; a Postgres read that fails is refused with a 503
+# naming its tab (`core.read_fallback.refuse`).

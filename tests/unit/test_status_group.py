@@ -20,13 +20,10 @@ The members now carry KeyCRM's labels; the names this codebase used before
 are preserved in `LEGACY_STATUS_NAMES`, because whether the CRM's labels are
 right is a question about the business and it is not settled here.
 """
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
 from core.pg_warehouse_dq import KNOWN_STATUS_IDS
-from core.duckdb_store import DuckDBStore
 from core.models import (
     LEGACY_STATUS_NAMES,
     LOST_STATUS_GROUP_ID,
@@ -38,12 +35,6 @@ from tests.pg_orders_seed import needs_pg, pg_orders  # noqa: F401 — the fixtu
 
 # The mapping the API returned, as measured.
 MEASURED_GROUPS = {1: 1, 9: 4, 12: 5, 15: 6, 19: 6, 20: 4, 21: 6, 22: 6, 23: 6}
-
-
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    return store
 
 
 def _api_order(oid: int, status_id: int, group_id=None, total="1000.00"):
@@ -193,65 +184,8 @@ class TestSilverUsesIt:
         assert rows[2] is False
 
 
-class TestTheColumnArrivesOnAnExistingDatabase:
-    """`CREATE TABLE IF NOT EXISTS` does not add columns to a table that
-    already exists. Production learned this the hard way: every warehouse
-    refresh failed on `Table "o" does not have a column named
-    status_group_id` until the migration shipped."""
-
-    @pytest.mark.asyncio
-    async def test_a_pre_existing_orders_table_gains_the_column(self, tmp_path):
-        import duckdb
-
-        db = tmp_path / "legacy.duckdb"
-        conn = duckdb.connect(str(db))
-        # The orders table exactly as production held it before this change.
-        conn.execute("""
-            CREATE TABLE orders (
-                id INTEGER PRIMARY KEY,
-                source_id INTEGER NOT NULL,
-                status_id INTEGER NOT NULL,
-                grand_total DECIMAL(12, 2) NOT NULL,
-                ordered_at TIMESTAMP WITH TIME ZONE,
-                created_at TIMESTAMP WITH TIME ZONE,
-                updated_at TIMESTAMP WITH TIME ZONE,
-                buyer_id INTEGER,
-                manager_id INTEGER,
-                manager_comment TEXT,
-                promocode VARCHAR,
-                synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                update_count INTEGER DEFAULT 0
-            )
-        """)
-        conn.execute("""
-            INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,
-                                created_at, updated_at, buyer_id)
-            VALUES (1, 4, 19, 100.00, '2026-08-01T10:00:00+03:00',
-                    '2026-08-01T10:00:00+03:00', '2026-08-01T10:00:00+03:00', 10)
-        """)
-        conn.close()
-
-        store = DuckDBStore(db_path=db)
-        await store.connect()
-        try:
-            async with store.connection() as c:
-                cols = {r[1] for r in c.execute("PRAGMA table_info('orders')").fetchall()}
-                assert "status_group_id" in cols
-                # The rows that were already there keep their verdict.
-                value = c.execute(
-                    "SELECT status_group_id FROM orders WHERE id = 1"
-                ).fetchone()[0]
-                assert value is None
-
-            # And the Silver rule that reads the column now binds — the shared
-            # projection, run as DuckDB's rebuild ran it until step 14's S14-15.
-            from tests.silver_on_duckdb import derive_silver
-
-            assert await derive_silver(store) == 1
-            async with store.connection() as c:
-                assert c.execute(
-                    "SELECT is_return FROM silver_orders WHERE id = 1"
-                ).fetchone()[0] is True
-        finally:
-            await store.close()
+# `TestTheColumnArrivesOnAnExistingDatabase` stood here until step 14's
+# S14-18: DuckDB's migration that added `status_group_id` to an `orders`
+# table created before it (`CREATE TABLE IF NOT EXISTS` adds no column).
+# DuckDB's schema and migrations went with the store; Postgres's column is
+# revision 0003's.

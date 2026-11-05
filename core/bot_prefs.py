@@ -1,7 +1,7 @@
 """The bot's settings, read from the container that does not own them.
 
 The weekly report is built in the *web* container, because that is where
-DuckDB lives. Who may read it, and in what language, is decided in the *bot*
+the scheduler runs (and where DuckDB lived until step 14). Who may read it, and in what language, is decided in the *bot*
 container — the approval flow and the settings screen. Both questions go
 through the bot store port (`core.bot_store.get_bot_store`), so this module
 asks the same engine the bot writes to: Postgres under `KS_BOT_STORE=postgres`,

@@ -275,7 +275,6 @@ class TestTheSignedIdIsBoundToItsMessage:
             "computed from, and a callback that never referred to them "
             "must not touch it"
         )
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_the_rejection_is_counted_under_its_own_condition(
@@ -293,7 +292,6 @@ class TestTheSignedIdIsBoundToItsMessage:
 
         assert webhooks._dlr_counts["event_rebound"] == 1
         assert webhooks._dlr_counts["accepted"] == 1, "the forged one is not accepted"
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_the_gateways_nine_retries_are_still_recorded(
@@ -317,7 +315,6 @@ class TestTheSignedIdIsBoundToItsMessage:
 
         assert await self._row(store, "mid-victim") == ("DELIVRD", True)
         assert webhooks._dlr_counts["accepted"] == 9
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_a_second_event_for_the_same_message_still_records(
@@ -333,7 +330,6 @@ class TestTheSignedIdIsBoundToItsMessage:
 
         assert r.status_code == 200
         assert await self._row(store, "mid-victim") == ("DELIVRD", True)
-        await store.close()
 
 
 class TestDiagnosis:

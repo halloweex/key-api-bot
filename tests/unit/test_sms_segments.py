@@ -180,7 +180,6 @@ async def test_tier_assignment_and_eligibility(tmp_path):
     assert totals["target"] == 4
     assert totals["holdout"] == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -211,7 +210,6 @@ async def test_deprecated_sources_excluded(tmp_path):
     assert customers[1]["orders"] == 1
     assert customers[1]["recencyDays"] == 30, "recency comes from the live order"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -230,7 +228,6 @@ async def test_returns_excluded_from_ltv(tmp_path):
     assert customer["orders"] == 1, "the return must not count as a purchase"
     assert customer["tier"] == "CORE", "CORE by LTV, not VIP"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -249,7 +246,6 @@ async def test_duplicate_phones_collapse_to_highest_ltv(tmp_path):
     assert result["totals"]["customers"] == 1, "one SMS per phone number"
     assert result["customers"][0]["buyerId"] == 2, "the higher-LTV record wins"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -281,7 +277,6 @@ async def test_holdout_is_deterministic_per_campaign(tmp_path):
     assert 40 <= first["totals"]["holdout"] <= 80
     assert first["totals"]["target"] + first["totals"]["holdout"] == 300
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -298,7 +293,6 @@ async def test_holdout_zero_targets_everyone(tmp_path):
     assert result["totals"]["holdout"] == 0
     assert result["totals"]["target"] == 50
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -313,7 +307,6 @@ async def test_tier_filter_and_summary_shape(tmp_path):
     assert result["segments"][0]["total"] == 2
     assert result["segments"][0]["avgLtv"] == 3500.0  # (1000 + 6000) / 2
 
-    await store.close()
 
 
 def _funnel(result: dict) -> dict:
@@ -343,7 +336,6 @@ async def test_funnel_accounts_for_every_dropped_customer(tmp_path):
     assert funnel["subscribed"] == 4
     assert funnel["uniquePhone"] == 4
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -364,7 +356,6 @@ async def test_funnel_survives_an_empty_segmentation(tmp_path):
         "phone": 0, "subscribed": 0, "reachable": 0, "uniquePhone": 0,
     }
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -379,7 +370,6 @@ async def test_funnel_counts_opt_outs_separately_from_bad_phones(tmp_path):
     assert funnel["subscribed"] == 3
     assert funnel["uniquePhone"] == 3
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -393,7 +383,6 @@ async def test_funnel_describes_the_base_not_the_tier_filter(tmp_path):
     assert result["totals"]["customers"] == 2
     assert _funnel(result)["uniquePhone"] == 4
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -407,7 +396,6 @@ async def test_customers_omitted_unless_requested(tmp_path):
     assert result["totals"]["customers"] == 4, "summary is still complete"
     assert result["truncated"] is False
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -421,7 +409,6 @@ async def test_limit_truncates_rows_but_not_summary(tmp_path):
     assert result["totals"]["customers"] == 4
     assert result["truncated"] is True
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -446,7 +433,6 @@ async def test_last_order_is_the_most_recent_one(tmp_path):
     assert customer["lastOrderItems"] == f"Product {PRODUCT_HIGH_MARGIN}"
     assert customer["lastOrderDate"] is not None
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -477,7 +463,6 @@ async def test_last_order_lists_items_and_counts_the_rest(tmp_path):
     assert items.startswith("Product 201"), "ordered by quantity, biggest line first"
     assert items.endswith("+2 ещё"), "the omitted lines are accounted for"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -502,7 +487,6 @@ async def test_long_product_names_are_truncated(tmp_path):
     assert items.endswith("…")
     assert items.startswith("GROWUS Damage Therapy")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -525,7 +509,6 @@ async def test_last_order_ignores_returns_and_dead_sources(tmp_path):
     assert customer["lastOrderId"] == 1
     assert customer["lastOrderTotal"] == 6000.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -565,7 +548,6 @@ async def test_margin_basis_reranks_customers(tmp_path):
         assert result[1]["marginLtv"] == 6400.0
         assert result[1]["marginPct"] == 80.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -592,7 +574,6 @@ async def test_order_discount_is_charged_to_margin(tmp_path):
     assert customer["marginLtv"] == 6000.0
     assert customer["marginPct"] == 75.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -615,7 +596,6 @@ async def test_uncosted_lines_reported_via_coverage(tmp_path):
     assert customer["marginLtv"] == 800.0, "only the costed order contributes margin"
     assert customer["costCoverage"] == 50.0, "half the revenue has cost data"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -636,7 +616,6 @@ async def test_below_cost_sales_yield_negative_margin(tmp_path):
     assert customer["marginLtv"] == -200.0
     assert customer["revenueLtv"] == 400.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -661,7 +640,6 @@ async def test_basis_defaults_and_validation(tmp_path):
     with pytest.raises(ValueError, match="ltv_basis"):
         await store.get_sms_segments(ltv_basis="profit")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -680,7 +658,6 @@ async def test_summary_reports_both_bases(tmp_path):
     assert segment["totalMargin"] == 8000.0
     assert segment["marginPct"] == 80.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -707,7 +684,6 @@ async def test_thresholds_are_configurable(tmp_path):
     )
     assert set(_by_id(result)) == {1, 2, 3}
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -729,7 +705,6 @@ async def test_several_tiers_come_back_in_one_roster(tmp_path):
     everyone = await store.get_sms_segments(holdout_pct=0)
     assert everyone["criteria"]["tiers"] == []
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -741,7 +716,6 @@ async def test_a_single_tier_name_still_works_as_a_string(tmp_path):
 
     assert [s["tier"] for s in result["segments"]] == ["VIP"]
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -767,7 +741,6 @@ async def test_tier_subset_does_not_change_who_wins_a_shared_phone(tmp_path):
     )
     assert only_react["customers"] == []
 
-    await store.close()
 
 
 # ─── A number the gateway keeps rejecting ───────────────────────────────────
@@ -828,7 +801,6 @@ async def test_a_number_rejected_in_two_campaigns_is_left_out(tmp_path):
     async with pg_conn() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM app.marketing_optouts") == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -845,7 +817,6 @@ async def test_two_buyers_on_one_number_in_one_campaign_are_one_rejection(tmp_pa
     assert 1 in _by_id(result)
     assert _funnel(result)["reachable"] == _funnel(result)["subscribed"]
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -859,7 +830,6 @@ async def test_other_failures_do_not_count_as_rejections(tmp_path):
 
     assert 1 in _by_id(await store.get_sms_segments(include_customers=True, holdout_pct=0))
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -879,4 +849,3 @@ async def test_a_follow_up_leaves_out_a_number_rejected_twice(tmp_path):
     assert [c["buyerId"] for c in data["customers"]] == [2]
     assert _funnel(data) == {"rootTarget": 2, "accepted": 2, "subscribed": 2, "reachable": 1}
 
-    await store.close()

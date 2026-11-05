@@ -365,24 +365,27 @@ async def test_run_canary_all_green():
     assert result.cert_days_remaining and result.cert_days_remaining > 50
 
 
-def _healthy_payload_under_duckdb_off():
-    """What web publishes under KS_DUCKDB=off with nothing opened (stage 5,
-    PR-3): nothing degrades, and the switch's block is empty. (The `duckdb`
-    block and the ledger said `off` here until step 14's S14-17 took both
-    out.)"""
+def _payload_with_the_switch_block():
+    """What an image from before step 14's S14-18 published: the
+    `duckdb_switch` block, here as loud as it could be — opens refused under
+    off, a held-back verdict, a value not understood."""
     payload = _healthy_payload()
-    payload["duckdb_switch"] = {"mode": "off", "value": "off", "error": None,
-                                "opened_while_off": {}}
+    payload["duckdb_switch"] = {"mode": "on", "value": "of", "error": "junk",
+                                "opened_while_off": {"core.x:f": {"count": 3,
+                                                                  "last_at": None}},
+                                "held_back": ["user_store"]}
     return payload
 
 
 @pytest.mark.asyncio
-async def test_run_canary_a_healthy_payload_under_duckdb_off_is_green():
-    """The week of silence's healthy probe: nothing pages, and the probe can
-    say the week holds. Mutation: judge `duckdb.status != "connected"` as a
-    failure — every probe of the week would page `health_status`."""
+async def test_run_canary_a_payload_still_carrying_the_switch_block_is_green():
+    """S14-18 deleted the DuckDB switch and the canary's three pages over its
+    block (`duckdb_opened_while_off`, `duckdb_mode_invalid`,
+    `duckdb_off_held_back`): a payload that still carries one pages nothing,
+    whatever it says. Mutation: put any of the three checks back in
+    `run_canary`."""
     def handler(request):
-        return httpx.Response(200, json=_healthy_payload_under_duckdb_off())
+        return httpx.Response(200, json=_payload_with_the_switch_block())
 
     future = datetime.now(timezone.utc) + timedelta(days=60)
     fake_cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
@@ -393,7 +396,11 @@ async def test_run_canary_a_healthy_payload_under_duckdb_off_is_green():
     assert result.ok is True and result.severity == "ok", result.failures
     assert result.failure_keys == []
     assert result.health_status == "healthy"
-    assert result.duckdb_silent is True
+    for gone in ("duckdb_opened_while_off", "duckdb_mode_invalid",
+                 "duckdb_off_held_back"):
+        assert gone not in result.unjudged_keys
+        assert gone not in dict(canary._ACTIONS)
+        assert not hasattr(canary, "check_duckdb_switch")
 
 
 @pytest.mark.asyncio
@@ -611,7 +618,6 @@ def test_format_alert_includes_failures_and_extras():
     ([], "Dashboard DOWN"),
     (["cert_expiring"], "Dashboard critical"),
     (["orders_sync_failing"], "Dashboard critical"),
-    (["duckdb_off_held_back"], "DuckDB switch held back"),
     (["cert_expiring", "health_status"], "Dashboard DOWN"),
 ])
 def test_a_critical_title_says_down_only_for_an_outage(keys, title):
@@ -823,81 +829,8 @@ class TestBuyerSync:
         assert "KeyCRMConnectionError" in message
 
 
-# ─── KS_DUCKDB=off held back (stage 5's PR-2) ────────────────────────────────
-
-class TestOffHeldBack:
-    """Web read KS_DUCKDB=off and runs `on` because a precondition of off is
-    unmet (core/duckdb_off.py, OD-S5-1 (a)): CRITICAL, titled for what it is
-    — the site serves — and the week-of-silence watch is not written."""
-
-    @staticmethod
-    def _held(keys):
-        payload = _healthy_payload()
-        payload["duckdb_switch"] = {"mode": "on", "value": "off", "error": None,
-                                    "opened_while_off": {}, "held_back": keys}
-        return payload
-
-    async def _probe(self, payload):
-        def handler(request):
-            return httpx.Response(200, json=payload)
-
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(handler) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                return await run_canary(DASHBOARD, client=client)
-
-    @pytest.mark.parametrize("block", [
-        None, {}, {"mode": "on", "opened_while_off": {}},
-        {"mode": "off", "value": "off", "held_back": []},
-        {"mode": "off", "value": "off", "held_back": None},
-        {"mode": "on", "held_back": "user_store"},
-    ])
-    def test_off_holding_or_no_verdict_says_nothing(self, block):
-        payload = {} if block is None else {"duckdb_switch": block}
-        assert canary.check_duckdb_off_held_back(payload) == []
-
-    def test_it_names_every_unmet_key(self):
-        [(key, line)] = canary.check_duckdb_off_held_back(
-            {"duckdb_switch": {"held_back": ["chain:pg_orders_write", "user_store"]}})
-        assert key == "duckdb_off_held_back"
-        assert line == canary.DUCKDB_HELD_BACK_LINE + "chain:pg_orders_write, user_store"
-
-    @pytest.mark.asyncio
-    async def test_it_pages_critical_with_its_title_and_lever(self):
-        """Mutation: make the severity `warn` in `run_canary`."""
-        result = await self._probe(self._held(["writer_record"]))
-        assert result.severity == "critical"
-        assert result.failure_keys == ["duckdb_off_held_back"]
-        message = canary.format_alert(result, DASHBOARD)
-        assert message.splitlines()[0] == "\U0001f6a8 <b>DuckDB switch held back</b>"
-        assert "DOWN" not in message
-        assert canary._what_to_do(result).startswith("web runs on;")
-        assert result.duckdb_silent is None, "web runs on: the week's watch is not written"
-
-    # `test_step_13_held_names_its_own_lever_first` stood here until step
-    # 14's S14-15 deleted `warehouse_preconditions_unmet` with step 13's
-    # switch: a step-14 web publishes no `warehouse_writer_mode` block.
-
-    def test_it_is_a_registered_condition_and_its_lever_one_line(self):
-        from core.alerting import REGISTRY, Kind
-
-        assert REGISTRY["duckdb_off_held_back"].kind is Kind.CONDITION
-        action = dict(canary._ACTIONS)["duckdb_off_held_back"]
-        assert "\n" not in action and len(action) <= 150
-
-    def test_its_lever_says_what_a_hold_stops_and_both_ways_out(self):
-        """Review of PR-2: the host's sidecars read `.env`, not web's
-        verdict, so while web is held back the nightly DuckDB snapshot and
-        the Sunday compaction are refused as web writes the file on. The page
-        is where the operator learns a hold is a state to leave — and that
-        putting `KS_DUCKDB=on` back is a way out as much as meeting the keys,
-        the same two the condition's resolution names. Mutation: the old
-        lever, which named neither."""
-        from core.alerting import REGISTRY
-        from core.duckdb_switch import ENV, ON
-
-        action = dict(canary._ACTIONS)["duckdb_off_held_back"]
-        assert f"{ENV}={ON}" in action and "meet each key" in action
-        assert "snapshots" in action and "compacts" in action
-        assert f"{ENV}={ON}" in REGISTRY["duckdb_off_held_back"].clears
+# `TestOffHeldBack` stood here until step 14's S14-18: KS_DUCKDB=off held on
+# `on` by an unmet precondition (`duckdb_off_held_back`, CRITICAL, titled
+# "DuckDB switch held back"). The switch and its block are deleted; a block a
+# payload still carries pages nothing
+# (`test_run_canary_a_payload_still_carrying_the_switch_block_is_green`).

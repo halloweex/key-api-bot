@@ -87,7 +87,6 @@ async def test_roster_is_recorded_with_both_groups(tmp_path):
     assert float(rows[0][3]) == 12000.0
     assert float(rows[0][4]) == 6600.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -108,7 +107,6 @@ async def test_criteria_snapshot_is_kept(tmp_path):
     assert row[4] is not None, "export time is stamped"
     assert row[5] is None, "not sent yet"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -119,7 +117,6 @@ async def test_refreeze_refused_without_overwrite(tmp_path):
     with pytest.raises(ValueError, match="already frozen"):
         await _freeze(store)
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -138,7 +135,6 @@ async def test_overwrite_replaces_roster_before_send(tmp_path):
         )]
     assert ids == [9], "the previous roster is gone, not merged"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -157,7 +153,6 @@ async def test_sent_roster_cannot_be_rewritten(tmp_path):
         )
     assert n == 4, "the original roster survives the refused overwrite"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -167,7 +162,6 @@ async def test_empty_roster_refused(tmp_path):
     with pytest.raises(ValueError, match="empty roster"):
         await _freeze(store, roster=[])
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -186,7 +180,6 @@ async def test_mark_sent_records_the_moment(tmp_path):
     assert later["previouslySentAt"].startswith("2026-08-10T09:30")
     assert later["sentAt"].startswith("2026-08-11T09:30")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -196,7 +189,6 @@ async def test_mark_sent_unknown_campaign(tmp_path):
     with pytest.raises(ValueError, match="not frozen"):
         await store.mark_sms_campaign_sent("never-existed")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -215,7 +207,6 @@ async def test_campaigns_listed_newest_first(tmp_path):
     assert campaigns["aug-promo"]["target"] == 3
     assert campaigns["aug-promo"]["holdout"] == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -244,7 +235,6 @@ async def test_the_list_carries_what_the_campaign_was(tmp_path):
     assert row["messageText"] is None
     assert row["costTotal"] is None
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -277,4 +267,3 @@ async def test_a_restored_record_cannot_overwrite_a_real_one(tmp_path):
     [row] = await store.list_sms_campaigns()
     assert row["messageText"] == "старий текст"
 
-    await store.close()

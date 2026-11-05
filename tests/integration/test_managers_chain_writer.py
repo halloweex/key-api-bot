@@ -72,8 +72,7 @@ async def stores(tmp_path, monkeypatch):
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_MIRROR_LANDING", "on")
-    store = DuckDBStore(db_path=tmp_path / "managers.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=2, max_size=6)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -81,7 +80,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _pg_managers(pool):
@@ -102,11 +100,6 @@ async def _pg_intervals(pool, manager_id=None):
     return [tuple(r) for r in rows]
 
 
-async def _duck_intervals(store):
-    async with store.connection() as conn:
-        return conn.execute(
-            "SELECT manager_id, valid_from, valid_to, is_retail, set_by, note "
-            "FROM manager_classifications ORDER BY manager_id, valid_from").fetchall()
 
 
 def _open(intervals, manager_id):
@@ -187,7 +180,6 @@ class TestTheSyncNeverRevertsAHuman:
         assert {r["key"] for r in owners} == {"owner:bronze.managers",
                                               "owner:app.manager_classifications"}
         # Nothing reached DuckDB.
-        assert await _duck_intervals(store) == []
 
     @pytest.mark.asyncio
     async def test_a_manager_the_replica_carried_without_a_baseline_gets_one(self, stores):
@@ -440,7 +432,6 @@ class TestTheReadsFollow:
             assert await conn.fetchval(
                 "SELECT requested FROM meta.derivation_signal "
                 "WHERE layer = 'warehouse'") == requested + 1
-        assert await _duck_intervals(store) == []
         assert [(m["id"], m["is_retail"]) for m in listed] == [(34, True)]
 
 

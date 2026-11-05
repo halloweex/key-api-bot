@@ -265,7 +265,8 @@ _MANAGER_SALES_365D_SQL = """
 # though the trend shows source 5's money: correcting it is a change of its
 # own, to be made once the answer from Gold's `source_id` dimension is ready,
 # and never inside a change whose claim is that no number moved.
-# `tests/unit/test_duckdb_off_reads.py` pins it.
+# `tests/unit/test_step12_odna_bronza.py`
+# (`test_a_source_gold_is_not_asked_about_never_reaches_it`) pins it.
 _NO_GOLD_SOURCE_TOTALS: Tuple[int, int, int, int] = (0, 0, 0, 0)
 
 

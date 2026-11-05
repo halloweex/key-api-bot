@@ -465,16 +465,11 @@ class TestTheBeatIsInherited:
     missing, and since S14-10 it reads the copy whatever `KS_DUCKDB` says."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("duckdb", ["on", "off"])
-    async def test_absent_in_postgres_it_is_the_copys(self, flag, no_duckdb, pg_journal,
-                                                      monkeypatch, duckdb):
+    async def test_absent_in_postgres_it_is_the_copys(self, flag, no_duckdb, pg_journal):
         """The first digest after a flip would otherwise restate every
-        standing finding as new. Mutation: no inherit — or inherit only under
-        `KS_DUCKDB=off`, as before S14-10, or from DuckDB's own table."""
-        from core import duckdb_switch
-
-        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
-        duckdb_switch.configure_mode()
+        standing finding as new. (It ran under both values of `KS_DUCKDB`
+        until step 14's S14-18 deleted the switch.) Mutation: no inherit, or
+        inherit from DuckDB's own table."""
         pg_journal["marker"] = None
         pg_journal["copy"] = {dq_journal.DIGEST_MARKER_KEY: "2026-09-29T06:00:00+00:00"}
         last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
@@ -527,20 +522,18 @@ class TestOneRendering:
                        for v in rows.run)
         assert run_dict(chain._local(pg_row)) == DUCKDB_RENDERED_RUN
 
-    @pytest.mark.parametrize("duckdb", ["on", "off"])
-    def test_the_zone_is_the_hosts_and_never_asks_duckdb(self, monkeypatch, duckdb):
-        """Whatever `KS_DUCKDB` says: under `on` the zone used to be asked of an
-        in-memory DuckDB through the one opener. Mutation: put the probe back."""
+    def test_the_zone_is_the_hosts_and_never_asks_duckdb(self, monkeypatch):
+        """The zone used to be asked of an in-memory DuckDB under `KS_DUCKDB=on`
+        (until S14-10); the switch itself went in S14-18. Mutation: put the
+        probe back."""
+        import sys
         from zoneinfo import ZoneInfo
 
-        from core import duckdb_switch
-
         monkeypatch.setattr(chain, "_ZONE", None)
-        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
-        duckdb_switch.configure_mode()
         monkeypatch.setenv("TZ", "Europe/Kyiv")
+        loaded = "duckdb" in sys.modules
         assert chain._zone() == ZoneInfo("Europe/Kyiv")
-        assert duckdb_switch.opened() == {}
+        assert ("duckdb" in sys.modules) == loaded, "the zone loaded the driver"
         assert not hasattr(chain, "_duckdb_zone")
 
     def test_the_zone_is_read_once(self, monkeypatch):

@@ -48,23 +48,12 @@ USER_COLUMNS: Tuple[str, ...] = (
     "last_activity", "denial_count", "created_at", "allowed_features",
 )
 
-def user_store_is_postgres() -> bool:
-    """Which store owns the dashboard's user list: Postgres, a constant since
-    step 14's S14-00 — production since 2026-09-07, with no way back (the
-    DuckDB copy is long stale).
-
-    `KS_USER_STORE` is read for nothing, so no value of it can stop the
-    container. Production keeps `postgres` in `.env` for the images before
-    step 14, which read an absent value as `duckdb` — a 401 for everybody.
-    Since S14-08 nothing routes on this: `core/repositories/users.py` and
-    `bot/store_postgres.py` stopped asking, and the DuckDB tails of
-    `_users_run`/`_perms_run` are gone. Last consumers, by rule 16 of the
-    step-14 plan: `core/duckdb_table_fates.py` (S14-18);
-    `core/mirror_reconciliation.reconcile_dashboard_users` went in S14-12
-    and `replicate_dashboard_users` in S14-13. Until S14-00
-    an unknown value raised — `KS_BOT_STORE`'s rule.
-    """
-    return True
+# `user_store_is_postgres()` stood here until step 14's S14-18: which store
+# owned the dashboard's user list, Postgres, a constant since S14-00 —
+# production since 2026-09-07. Its last reader, the table-fate manifest's
+# `duckdb_written`, went in S14-18. `KS_USER_STORE` is read by nothing; keep
+# `postgres` in `.env` for the images before step 14, which read an absent
+# value as `duckdb` — a 401 for everybody.
 
 
 # ─── the pool, thinly ────────────────────────────────────────────────────────

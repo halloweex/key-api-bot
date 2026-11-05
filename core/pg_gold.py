@@ -7,9 +7,13 @@ in, `gold.daily_revenue` out, no KeyCRM and no DuckDB anywhere in the path.
 ONE SET OF MEASURES, TWO SHAPES
 
 The eight aggregates come from `GOLD_MEASURES` in `core/warehouse_sql.py`,
-verbatim — the same dict DuckDB renders into `GOLD_REVENUE_SELECT_SQL`. A test
-asserts each expression appears in both. That is charter rule 1, and #101 is
-the standing proof of how fast a second copy diverges.
+verbatim — the same dict ClickHouse renders (`core.ch_silver.derive_gold_sql`),
+and DuckDB rendered into `GOLD_REVENUE_SELECT_SQL` until step 14's S14-15
+deleted it. `tests/unit/test_pg_gold.py`
+(`test_every_shared_measure_appears_verbatim_in_the_rendering`) holds each
+expression in the Postgres rendering, and `tests/unit/test_warehouse_sql.py`
+both renderings to their bytes. That is charter rule 1, and #101 is the
+standing proof of how fast a second copy diverges.
 
 The *shape* is where the two part company, and deliberately. DuckDB splits
 channels into columns; this carries `source_id` as a dimension, because a

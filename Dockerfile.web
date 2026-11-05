@@ -68,7 +68,11 @@ COPY core/ ./core/
 # The brand marks (and, once added, the brand fonts) the weekly report draws.
 COPY assets/ ./assets/
 
-# Copy maintenance scripts (compact_duckdb.py etc.) — used via sidecar `docker run`
+# Copy the maintenance scripts, run by hand with `docker exec` or
+# `docker compose run` (backfill_utm.py, weekly_report_preview.py, ...). The
+# DuckDB compaction went in step 14's S14-18 and the driver in S14-19: this
+# image carries neither, and the archive tools run on the pinned
+# `rollback-step14` image (deploy/archive_image.sh).
 COPY scripts/ ./scripts/
 
 # Copy web application (excluding frontend source)

@@ -144,8 +144,10 @@ def _fits(column: str, value: Optional[float], *, nullable: bool) -> None:
     **Asked before the latch, because the latch is permanent.** A value
     Postgres rejects raises inside the write, after `_latch()` has written the
     marker: the chain is then latched for good, with no owner row behind it —
-    a CRITICAL `chain_latch_disagrees` the next morning and a copy-back that
-    refuses — for an input DuckDB would have refused without a trace. The
+    a direction nothing files since step 14's S14-12 (the integrity layer's
+    chain invariants judge only owner rows with no marker), and one an image
+    from before step 14 pages as CRITICAL `chain_latch_disagrees` — for an
+    input DuckDB would have refused without a trace. The
     route bounds `amount` only from below, so ₴10 000 000 000 is one typing
     slip away.
 

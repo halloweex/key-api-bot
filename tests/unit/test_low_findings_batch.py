@@ -1,11 +1,8 @@
 """The last batch of the race audit's LOW findings, each with the guard it got."""
-import asyncio
 import inspect
-from pathlib import Path
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
 
 
 # `TestAHeaderOnlyRefreshNeverCreatesAnOrder` stood here, pinning the
@@ -23,44 +20,11 @@ from core.duckdb_store import DuckDBStore
 # `tests/integration/test_dq_journal_pg.py` (`TestOneTransaction`).
 
 
-class TestATimedOutQueryLeavesTheConnectionBeforeTheLockDoes:
-    @pytest.mark.asyncio
-    async def test_the_lock_is_free_and_usable_after_a_timeout(self, tmp_path):
-        from core.exceptions import QueryTimeoutError
-
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            with pytest.raises(QueryTimeoutError):
-                await asyncio.wait_for(
-                    store._fetch_all("SELECT count(*) FROM range(20000000000) r1, range(2) r2", timeout=0.05),
-                    timeout=15,
-                )
-            assert not store._lock.locked()
-            assert (await store._fetch_one("SELECT 1"))[0] == 1
-        finally:
-            await store.close()
-
-
-class TestBackupSweepsItsOwnOrphans:
-    @pytest.mark.asyncio
-    async def test_a_stale_temp_file_is_removed(self, tmp_path):
-        store = DuckDBStore(db_path=tmp_path / "analytics.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                conn.execute("INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, buyer_id) "
-                             "VALUES (1, 1, 1, 10.0, TIMESTAMPTZ '2026-08-01 10:00:00+00', 1)")
-            dest = tmp_path / "backups"
-            dest.mkdir()
-            stale = dest / ".analytics-20260101-000000.duckdb.tmp"
-            stale.write_bytes(b"x" * 10)
-            result = await store.backup_database(dest_dir=dest, keep=2)
-            assert result["status"] == "success", result
-            assert not stale.exists()
-            assert not list(dest.glob(".*.tmp"))
-        finally:
-            await store.close()
+# `TestATimedOutQueryLeavesTheConnectionBeforeTheLockDoes` and
+# `TestBackupSweepsItsOwnOrphans` stood here: the DuckDB store's `_fetch_*`
+# releasing its lock after a `QueryTimeoutError`, and its nightly backup
+# removing a stale temp copy. Both went with the store's DuckDB half in step
+# 14's S14-18.
 
 
 class TestTheUtmBackfillFlagIsAlwaysReleased:

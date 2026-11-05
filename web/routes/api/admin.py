@@ -685,7 +685,9 @@ async def reconcile_on_demand(
 # four of the six return statuses, the second's KeyCRM half had raised on every
 # stored order since it was written. The Postgres twin `pg_silver_row_values`
 # asks the same question, on every column, of the store every tab reads — in
-# `dq_integrity_check` (01, 07, 13, 19) under KS_DQ_PG_WAREHOUSE=on.
+# every `dq_integrity_check` run (01, 07, 13, 19). It ran under
+# KS_DQ_PG_WAREHOUSE=on until step 14's S14-14; nothing reads that variable
+# since S14-15.
 
 
 @router.get("/events")

@@ -190,7 +190,7 @@ class TestTheRefreshReachesThem:
             async def find_backdated_order_ids(self, since, limit=200):
                 raise OSError("disk")
 
-        stats = await _refresh(Broken(db_path=tmp_path / "t.duckdb"), client, upsert)
+        stats = await _refresh(Broken(), client, upsert)
         assert stats["orders"] == 1
         assert stats["backdated"] == {"error": "OSError"}
         assert "backdated orders were not re-fetched" in caplog.text

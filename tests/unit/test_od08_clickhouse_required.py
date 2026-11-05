@@ -13,7 +13,7 @@ Every guard here has a named mutation in the test that catches it. The
 production payload at the bottom proves one point in time, the evening of
 2026-09-30, and nothing more: whether the canary would have paged over the
 last fourteen days is a question about history, which
-`deploy/stage4_soak/22_reconciliation_ch_history.sql` answers on the host
+`deploy/daily_soak/22_reconciliation_ch_history.sql` answers on the host
 (DN-21's bar), and which the OD-08 review found unasked.
 """
 from __future__ import annotations
@@ -909,7 +909,7 @@ class TestTheHistoryIsAskedForEveryPagedArm:
         from bot.canary import DQ_MAX_AGE_S
         from core.scheduler import CATCHUP_SIBLING_LAYERS
 
-        soak = Path(__file__).resolve().parents[2] / "deploy/stage4_soak"
+        soak = Path(__file__).resolve().parents[2] / "deploy/daily_soak"
         judged = {}
         for path in sorted(soak.glob("*.sql")):
             code = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))

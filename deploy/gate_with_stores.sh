@@ -4,8 +4,10 @@
 #
 # WHY THIS EXISTS
 #
-# The differential tests — the ones that prove DuckDB, PostgreSQL and
-# ClickHouse answer the same question the same way — skip themselves when
+# The differential tests — the ones that prove PostgreSQL and ClickHouse
+# answer the same question the same way, and since step 14 the same as
+# DuckDB's answers recorded on their fixtures (tests/integration/golden/) —
+# skip themselves when
 # `KS_PG_DSN` and `KS_CH_URL` are unset. Every deploy before 2026-08-31 ran the
 # gate without them, so **80 tests skipped**, including every proof that the
 # ported /sms audience and the cohort matrix agree between engines. A check

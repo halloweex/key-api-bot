@@ -150,7 +150,13 @@ RETIRED = {"goals_history": "S14-07",
            # published (`mode`, `mode_error`, `refusing`, `misconfigured`,
            # `no_engine_routes`); the block's fields on `/api/health` are
            # `RETIRED_FIELDS`', since the block itself stays, as `{refused}`.
-           "read_fallback": "S14-16"}
+           "read_fallback": "S14-16",
+           # S14-18 deleted the DuckDB switch (`core/duckdb_switch.py`) with
+           # its block on `/api/health`, and the two store predicates the
+           # table-fate manifest was the last to ask
+           # (`user_store_is_postgres`, `sms_store_is_postgres`).
+           "duckdb_switch": "S14-18",
+           "stores": "S14-18"}
 
 # The same for single fields, by their path in a capture. S14-09 deleted chain
 # 3's, 6's and 6a's routing answers the capture asks of the modules themselves
@@ -198,6 +204,10 @@ RETIRED_FIELDS = {
        for call in ("configure_modes", "configure_modes_again")},
     **{("health", "read_fallback_mode", name): "S14-16"
        for name in ("mode", "error", "misconfigured", "no_engine")},
+    # S14-18 stopped configuring KS_DUCKDB: `configure_modes()` names no mode
+    # any more.
+    **{(call, "KS_DUCKDB"): "S14-18"
+       for call in ("configure_modes", "configure_modes_again")},
 }
 _S14_11_HEALTH_FIELDS = ("env", "mode", "error", "latched", "mismatch",
                          "unmet_precondition", "shadow", "preflight")
@@ -1012,8 +1022,12 @@ def capture() -> dict:
     """Every mode and predicate the plan's S14-00 lists, as this process
     answers it after web's `configure_modes`. Only names both sides of
     S14-00 define."""
-    from core import (duckdb_switch, pg_dashboard_users, pg_derivation,
-                      pg_landing, pg_sms, pg_utm_parse, pg_warehouse_dq, read_fallback,
+    import importlib
+    import importlib.util
+    import inspect
+
+    from core import (pg_dashboard_users, pg_derivation,
+                      pg_landing, pg_utm_parse, pg_warehouse_dq, read_fallback,
                       runtime_modes, write_chains)
     from core import pg_forecast_write, pg_managers_write, pg_orders_write
 
@@ -1023,15 +1037,28 @@ def capture() -> dict:
         wc = None
 
     out: dict = {}
-    out["configure_modes"] = runtime_modes.configure_modes(web=True)
+    # `web=True` until S14-18, which deleted the switch it configured.
+    web = ({"web": True} if "web" in inspect.signature(
+        runtime_modes.configure_modes).parameters else {})
+    out["configure_modes"] = runtime_modes.configure_modes(**web)
     # The scheduler configures again, in the same process.
-    out["configure_modes_again"] = runtime_modes.configure_modes(web=True)
-    out["duckdb_switch"] = {
-        "mode": duckdb_switch.mode(), "value": duckdb_switch.value(),
-        "error": duckdb_switch.mode_error(), "is_off": duckdb_switch.is_off(),
-        "held_back": list(duckdb_switch.held_back() or ()),
-        "health_block": duckdb_switch.health_block(),
-    }
+    out["configure_modes_again"] = runtime_modes.configure_modes(**web)
+    # Deleted in S14-18 (`RETIRED`), with their modules: asked by name where
+    # they still exist — the import walk reads a literal module name, and
+    # `module.<name>`, as a claim it exists.
+    def _old(module: str):
+        name = f"core.{module}"
+        return (importlib.import_module(name)
+                if importlib.util.find_spec(name) is not None else None)
+
+    switch = _old("duckdb_switch")
+    if switch is not None:
+        out["duckdb_switch"] = {
+            name: getattr(switch, fn)() for name, fn in (
+                ("mode", "mode"), ("value", "value"), ("error", "mode_error"),
+                ("is_off", "is_off"), ("health_block", "health_block"))}
+        out["duckdb_switch"]["held_back"] = list(getattr(switch, "held_back")() or ())
+    pg_sms = _old("pg_sms")
     # Deleted in S14-15 (`RETIRED`) with their modules or names; asked where
     # they still exist, by name, so the capture still runs against the trees
     # before it — the import walk reads `module.<name>` as a claim it exists.
@@ -1096,8 +1123,11 @@ def _after_step13(pg_dashboard_users, pg_sms, write_chains, pg_forecast_write,
     """The rest of `capture`: the store switches, the chains, the registry
     and `/api/health`."""
     out: dict = {}
-    out["stores"] = {"user_store_is_postgres": pg_dashboard_users.user_store_is_postgres(),
-                     "sms_store_is_postgres": pg_sms.sms_store_is_postgres()}
+    # Deleted in S14-18 (`RETIRED`); asked by name where they still exist.
+    if pg_sms is not None and hasattr(pg_dashboard_users, "user_store_is_postgres"):
+        out["stores"] = {
+            "user_store_is_postgres": getattr(pg_dashboard_users, "user_store_is_postgres")(),
+            "sms_store_is_postgres": getattr(pg_sms, "sms_store_is_postgres")()}
     chains = {}
     # Every routing answer went in S14-11 (`RETIRED_FIELDS`); asked where they
     # still exist, by name, so the capture still runs against the trees
@@ -1215,8 +1245,10 @@ def _constants(result: dict) -> dict:
     chain flag's error and the mismatch it makes with a latch — which a junk
     value changes by design (rule 3: the answer must not)."""
     result = _without_retired(result)
-    for block in (result["duckdb_switch"], result["duckdb_switch"]["health_block"],
-                  result["health"]["duckdb_switch"]):
+    # The switch's blocks published `value` as read until S14-18 retired them.
+    switch = result.get("duckdb_switch") or {}
+    for block in (switch, switch.get("health_block") or {},
+                  result["health"].get("duckdb_switch") or {}):
         block.pop("value", None)
     for state in (*result.get("chain_modes", {}).values(),
                   *result["health"]["write_chains"].values()):
@@ -1247,6 +1279,7 @@ def main(argv) -> int:
         data.mkdir()
         from core import chain_latch, duckdb_store
 
+        # The DuckDB store's file, where the tree still has one (until S14-18).
         duckdb_store.DB_DIR, duckdb_store.DB_PATH = data, data / "analytics.duckdb"
         chain_latch.MARKER_DIR = data / "write-chain-owners"
         _place_files(data, markers == "11")
@@ -1278,8 +1311,10 @@ def production(monkeypatch, tmp_path):
             monkeypatch.setenv(name, value)
         data = tmp_path / "data"
         data.mkdir(exist_ok=True)
-        monkeypatch.setattr(duckdb_store, "DB_DIR", data)
-        monkeypatch.setattr(duckdb_store, "DB_PATH", data / "analytics.duckdb")
+        # The DuckDB store held a file until S14-18; set where it still does.
+        monkeypatch.setattr(duckdb_store, "DB_DIR", data, raising=False)
+        monkeypatch.setattr(duckdb_store, "DB_PATH", data / "analytics.duckdb",
+                            raising=False)
         monkeypatch.setattr(backup_evidence, "DATA_DIR", data)
         _place_files(data, markers)
 
@@ -1310,7 +1345,8 @@ def test_the_literal_is_what_production_published(production):
     kept = _without_retired({"health": health})["health"]
     live = _without_retired({"health": H0})["health"]
     for block in ("duckdb_switch", "read_fallback_mode"):
-        assert kept[block] == live[block], block
+        if block not in RETIRED:
+            assert kept[block] == live[block], block
     for block in RETIRED:
         assert health.get(block) is None, f"{block} went with {RETIRED[block]}"
     for path, pr in RETIRED_FIELDS.items():
