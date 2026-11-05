@@ -5304,7 +5304,18 @@ the moment web ran `on`.
 
 ### The archive tools on a pinned image (step 14, S14-02)
 
-Step 14 takes DuckDB out of the code, and at S14-19 out of the images. The
+Step 14 takes DuckDB out of the code, and since S14-19 out of the images:
+`requirements.lock` installs no `duckdb`, so neither web's image nor the
+bot's carries the driver. `tests/unit/test_images_carry_no_duckdb.py` holds
+it: an AST walk of `core/`, `web/`, `bot/`, `scripts/`, `deploy/` and
+`migrations/` finds no import of the driver in any form (aliased, inside a
+function, `import_module`, `sys.modules`, a `python -c` program in a
+string) but in the three host tools that run on the pinned image, and every
+module under `core/`, `web/`, `bot/` and `scripts/` imports in a fresh
+interpreter in which `duckdb` cannot be found. `requirements-dev.txt` names
+`duckdb==1.5.5` on its own line, for those tools' tests and a few that
+evaluate a SQL fragment in memory; it used to arrive there only through
+`-r requirements.txt`. The
 archives stay: the off-site Parquet archive, the nightly snapshots, two Arks.
 What reads them is DuckDB 1.5.5, the version that wrote every one, with the
 restore code they were proven against — `scripts/compact_duckdb.py`'s phases
@@ -5313,7 +5324,7 @@ every image built before step 14, and the host's `keycrm-web:rollback-step14`
 is the last of them, pinned at S14-00's deploy (the plan's H1/H2; see "Before
 any rollback to an image from before step 14"). A tag is never removed by the
 deploy's `docker image prune -f`; `:latest` moves with every deploy and
-carries no DuckDB from S14-19 on.
+carries no DuckDB since S14-19.
 
 So `deploy/restore-test.sh` and `deploy/ark_ship.sh` — and
 `deploy/daily_offsite.sh`, the nightly snapshot, until S14-18 deleted it —

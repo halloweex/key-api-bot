@@ -6,6 +6,18 @@
 # is how you find out that a floor needs raising)
 -r requirements.txt
 
+# DuckDB 1.5.5, for tests only, since step 14's S14-19 took it out of
+# requirements.txt and with it out of both images. It used to arrive here
+# through `-r requirements.txt`, so a lock regenerated without this line
+# would silently lose it. What needs it: the tests of the frozen host tools
+# that run on the pinned image (deploy/ark_freeze.py,
+# deploy/duckdb_table_fates_check.py — tests/unit/test_ark_ship_script.py,
+# test_archive_image.py, test_duckdb_table_fates.py), and the tests that
+# evaluate a SQL fragment on an in-memory DuckDB. Pinned to the version
+# that wrote every archive and that deploy/archive_image.sh requires of the
+# pinned image (`ARCHIVE_DUCKDB_VERSION`); a test holds the two equal.
+duckdb==1.5.5
+
 pytest>=8.0.0
 # Upper bound is deliberate. Whether a locally defined `event_loop` fixture
 # overrides the plugin's own changed at the 1.0 boundary: below it the override
