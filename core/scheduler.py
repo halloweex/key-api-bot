@@ -171,6 +171,46 @@ def discrepancy_conditions(layer: str, discrepancies) -> List[str]:
     })
 
 
+# How long a derivation waits for `PG_LAYER_LOCK` (L2-11). The derivation runs
+# under `_heavy_job_lock`, and the lock's other holders — the hourly ClickHouse
+# ship and the daily ClickHouse read-back — hold it across HTTP round trips of
+# up to `ch_common.TIMEOUT_S` each. Unbounded, a slow ClickHouse held the heavy
+# lock with it, and the minute sync, which waits for the heavy lock, stopped
+# taking orders. Past this the tick gives up, the signal stays owed, and the
+# next tick asks again.
+DERIVE_LOCK_WAIT_S = 60
+
+
+async def _acquire_within(lock: asyncio.Lock, timeout: float) -> bool:
+    """Take `lock` within `timeout` s, or report False holding nothing.
+
+    The acquire runs as a task of its own, shielded: a timeout, or a
+    cancellation of the caller, can then never leave the lock taken by a
+    waiter that gave up — if the task wins after all, it releases."""
+    task = asyncio.ensure_future(lock.acquire())
+
+    def release_if_won(t: "asyncio.Future") -> None:
+        if not t.cancelled() and t.exception() is None:
+            lock.release()
+
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+        return True
+    except asyncio.TimeoutError:
+        if task.done() and not task.cancelled() and task.exception() is None:
+            return True
+        task.cancel()
+        task.add_done_callback(release_if_won)
+        return False
+    except BaseException:
+        if task.done() and not task.cancelled() and task.exception() is None:
+            lock.release()
+        else:
+            task.cancel()
+            task.add_done_callback(release_if_won)
+        raise
+
+
 # Where the digest remembers its last delivery. In `sync_metadata` and not on
 # the scheduler object, because the weekly restatement beat has to outlive a
 # deploy — otherwise every release re-announces the same standing WARN.
@@ -1414,6 +1454,10 @@ class BackgroundScheduler:
         derivation's verdict.
         """
         result = await self._derive_and_journal_pg_layers(pool, trigger)
+        if result.get("skipped"):
+            # The layer lock was busy: the parse would wait for the same lock,
+            # up to `pg_utm_parse.LOCK_WAIT_S`, still under the heavy lock.
+            return result
         result["order_utm"] = await self._parse_order_utm_in_postgres(pool)
         return result
 
@@ -1461,6 +1505,16 @@ class BackgroundScheduler:
                         PROFILE_TABLE: PROFILE_TABLE,
                         "validation": derivation.RUNS_TABLE}
 
+        if not await _acquire_within(PG_LAYER_LOCK, DERIVE_LOCK_WAIT_S):
+            # Not a failure: nothing was read, nothing journalled, and the
+            # signal stays owed for the next tick. Returned under the heavy
+            # lock's `async with`, which releases it (L2-11).
+            logger.warning(
+                "Postgres derivation skipped: PG_LAYER_LOCK was not free within "
+                "%ss (the ClickHouse ship or read-back holds it); the rebuild "
+                "stays owed", DERIVE_LOCK_WAIT_S)
+            return {"skipped": True, "reason": "layer_lock_busy", "trigger": trigger}
+
         started = datetime.now(timezone.utc)
         counts: Dict[str, Optional[int]] = {}
         stage = "signal"
@@ -1468,7 +1522,7 @@ class BackgroundScheduler:
         BackgroundScheduler._pg_derive_ran = True
         BackgroundScheduler._pg_derive_started = started
         try:
-            async with PG_LAYER_LOCK:
+            try:
                 async with pool.acquire() as conn:
                     seen, _built, _at = await derivation.read_owed(conn)
                 stage = SILVER_TABLE
@@ -1496,6 +1550,8 @@ class BackgroundScheduler:
                         validation=validation,
                     )
                     await derivation.clear_tail_failures(conn)
+            finally:
+                PG_LAYER_LOCK.release()
         except Exception as e:
             logger.error("Postgres derivation failed at %s: %s", stage, e, exc_info=True)
             if stage in failure_rows:
