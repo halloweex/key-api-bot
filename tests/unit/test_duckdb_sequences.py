@@ -525,33 +525,10 @@ class TestAViewThatCannotBeBuilt:
         finally:
             await store.close()
 
-    def test_health_reads_degraded_while_the_store_serves(self, monkeypatch):
-        """Through the endpoint the canary polls: DuckDB connected and
-        answering, the status degraded, and the view named."""
-        import asyncio
-
-        from fastapi.testclient import TestClient
-
-        from web.main import app
-        from web.ratelimit import limiter
-        from web.routes.api import health as health_routes
-
-        asyncio.run(_file_with_sequences_behind(duckdb_store.DB_PATH))
-        monkeypatch.setitem(health_routes._stats_cache, "data", None)
-        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
-        limiter.reset()
-
-        try:
-            with _views_always_fail("inventory"):
-                body = TestClient(app).get("/api/health").json()
-        finally:
-            limiter.reset()
-            asyncio.run(duckdb_store.close_store())
-
-        assert body["duckdb"]["status"] == "connected"
-        assert body["migrations"]["status"] == "failed"
-        assert [f["id"] for f in body["migrations"]["failed"]] == ["view:inventory"]
-        assert body["status"] == "degraded"
+    # `test_health_reads_degraded_while_the_store_serves` stood here until
+    # step 14's S14-17: through `/api/health`, DuckDB connected, the ledger
+    # failed and the view named, the status degraded. Health publishes
+    # neither block since; `schema_status()` above is the ledger's answer.
 
     @pytest.mark.asyncio
     async def test_a_file_older_than_a_migration_its_view_reads_boots_clean(

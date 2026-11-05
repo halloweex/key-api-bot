@@ -262,17 +262,13 @@ export interface ExpenseType {
   alias: string
 }
 
+// `duckdb` (DuckDB's row counts) left the answer in step 14's S14-17. The
+// page reads `version` alone (SidebarRail); `status` is `healthy` since then.
 export interface HealthResponse {
   status: string
+  degraded_by: string[]
   version: string
   uptime_seconds: number
-  duckdb: {
-    status: string
-    orders?: number
-    products?: number
-    categories?: number
-    db_size_mb?: number
-  }
 }
 
 // ─── Goal Types ─────────────────────────────────────────────────────────────

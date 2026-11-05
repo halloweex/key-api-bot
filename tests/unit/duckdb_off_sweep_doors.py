@@ -103,12 +103,21 @@ METHOD_ORDER = ("POST", "PUT", "PATCH", "DELETE")
 
 def write_routes(app) -> List[Tuple[str, Any]]:
     """`(method, endpoint)` for every route under `/api/` that is not a GET,
-    read off the app, in path order and then `METHOD_ORDER`."""
+    read off the app, in path order and then `METHOD_ORDER`. An alias — the
+    same function under an old name, out of the schema (step 14's S14-17
+    kept `/api/duckdb/…` beside `/api/sync/…`) — is opened once, by the name
+    in the schema: opened again it would meet the world the first opening
+    left, a breaker open among it, and answer what that state answers."""
+    from tests.routes_helper import aliases
+
+    old_names = aliases(app)
     found = []
     for endpoint in _endpoints(app):
         if not endpoint.path.startswith("/api/") or is_socket(endpoint):
             continue
         for method in sorted(endpoint.methods - {"GET", "HEAD"}, key=METHOD_ORDER.index):
+            if (method, endpoint.path) in old_names:
+                continue
             found.append((method, endpoint))
     return sorted(found, key=lambda pair: (pair[1].path, METHOD_ORDER.index(pair[0])))
 
@@ -390,14 +399,13 @@ class Http:
     @staticmethod
     def fresh() -> None:
         """What one request must not inherit from the one before: a rate
-        limit's count, a refusal's count, the health route's cached stats."""
+        limit's count, a refusal's count. (And the health route's cached
+        DuckDB stats, until step 14's S14-17 took them out.)"""
         from core import read_fallback
         from web.ratelimit import limiter
-        from web.routes.api import health as health_routes
 
         limiter.reset()
         read_fallback.reset_counts()
-        health_routes._stats_cache.update(data=None, expires_at=0)
 
     async def request(self, method: str, path: str, *, cookie: Optional[str] = None,
                       params: Optional[dict] = None, body: Any = None):

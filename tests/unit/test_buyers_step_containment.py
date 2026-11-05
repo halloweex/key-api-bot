@@ -441,7 +441,7 @@ class TestTheManualEndpoint:
             monkeypatch, upsert=AsyncMock(side_effect=RuntimeError("buyer +380 refused")))
         monkeypatch.setattr(mod, "_sync_service", svc)
 
-        r = self._client().post("/api/duckdb/sync-buyers")
+        r = self._client().post("/api/sync/sync-buyers")
 
         assert r.status_code == 500
         assert "RuntimeError" in r.json()["detail"]
@@ -453,7 +453,7 @@ class TestTheManualEndpoint:
         svc, _, _ = _service(monkeypatch)
         monkeypatch.setattr(mod, "_sync_service", svc)
 
-        r = self._client().post("/api/duckdb/sync-buyers")
+        r = self._client().post("/api/sync/sync-buyers")
 
         assert r.status_code == 200, r.text
         assert r.json()["buyers_synced"] == 3
@@ -507,7 +507,7 @@ class TestARefusedReadIsAnsweredByTheCaller:
         svc, _, _ = self._refusing(monkeypatch)
         monkeypatch.setattr(mod, "_sync_service", svc)
 
-        r = TestTheManualEndpoint()._client().post("/api/duckdb/sync-buyers")
+        r = TestTheManualEndpoint()._client().post("/api/sync/sync-buyers")
 
         assert r.status_code == 503, r.text
         assert "buyer_sync" in r.text

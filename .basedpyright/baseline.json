@@ -8,14 +8,6 @@
                     "endColumn": 38,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 30,
-                    "endColumn": 33,
-                    "lineCount": 1
-                }
             }
         ],
         "./bot/config.py": [

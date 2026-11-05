@@ -111,8 +111,7 @@ class TestApiRequiresAuth:
         "/api/products/intel/summary",
         "/api/reports/marketing-summary",
         "/api/health/detailed",
-        "/api/duckdb/stats",
-        # The health router's only public path is /api/health itself; the four
+        # The health router's only public path is /api/health itself; the three
         # operational reads beside it must each still refuse an anonymous
         # caller. What they disclose to an *approved* one is a separate
         # question, answered in tests/integration/test_health_router_disclosure.py.
@@ -126,7 +125,12 @@ class TestApiRequiresAuth:
         "/api/revenue/forecast/tune",
         "/api/expenses",
         "/api/stocks/snapshot/refresh",
+        # The sync levers by both their names (step 14's S14-17): the alias
+        # under /api/duckdb/ is the same function and must refuse the same.
+        "/api/sync/sync-buyers",
         "/api/duckdb/sync-buyers",
+        "/api/sync/resync",
+        "/api/duckdb/resync",
     ]
 
     @pytest.mark.parametrize("path", PROTECTED_GETS)

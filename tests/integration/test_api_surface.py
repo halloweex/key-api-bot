@@ -46,8 +46,9 @@ SESSION_ONLY = {
 
     # Operational readouts: row counts, uptime, check ages. No per-tab data,
     # and the canary and the digest read them. Pre-dating tabs.
-    "GET /api/duckdb/stats": "row counts and date bounds",
-    "GET /api/health/detailed": "component status and row counts",
+    # (`GET /api/duckdb/stats`, DuckDB's row counts, was one until step 14's
+    # S14-17 deleted it.)
+    "GET /api/health/detailed": "component status",
     "GET /api/health/data-quality": "check results, no business figures",
     "GET /api/metrics": "uptime and request timings",
 }

@@ -127,7 +127,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 
 | Endpoint | Description |
 |----------|-------------|
-| `/api/health` | Health check (status, version, uptime, cache stats); `degraded` while `duckdb.fatal` is set, and `degraded_by` says why |
+| `/api/health` | Health check (status, version, uptime, the blocks the canary judges); `status` is `healthy` and `degraded_by` empty since step 14's S14-17 took DuckDB's block, its ledger and their three causes out |
 | `/api/summary` | Summary statistics |
 | `/api/revenue/trend` | Revenue time series (+ `include_forecast=true` for ML predictions) |
 | `/api/revenue/forecast` | ML revenue forecast for current month |
@@ -446,7 +446,8 @@ TZ=UTC KS_PG_DSN=... pytest -q
 `pytest -m external` runs nothing today: its one test, KeyCRM against the
 production DuckDB file, went in step 14's S14-03 with `scripts/check_date.py`
 and `scripts/force_resync.py`. `reconciliation_pg` makes that comparison every
-morning, and a resync is `POST /api/duckdb/resync`.
+morning, and a resync is `POST /api/sync/resync` (`/api/duckdb/resync`
+until step 14's S14-17, kept as an alias until its final stage).
 
 ### Type checking
 
@@ -1635,7 +1636,9 @@ deleting the guard — never just the test.
 uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
 cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
 checkpoint (~7 s at 900 MB) — ~67 s for an ordinary request. **Not for a slow
-one**: the eight `SLOW_ENDPOINTS` (`web/middleware.py`) get 300 s, uvicorn
+one**: the ten `SLOW_ENDPOINTS` (`web/middleware.py`; the resync and the
+status refresh by both names since step 14's S14-17, `/api/sync/…` and the
+`/api/duckdb/…` alias) get 300 s, uvicorn
 drains them too, and none writes DuckDB since step 14's S14-15: the resync
 and the status refresh reached DuckDB's warehouse rebuild and the reclassify
 its `silver_order_utm`, all deleted there (`/api/goals/recalculate` and
@@ -1668,8 +1671,11 @@ leaves its WAL. Asked, not read off the exception: a caller may swallow the
 FATAL and raise something else, and a FatalException can come from another
 instance. **It does not heal**: an index short in the file fails the same
 write after every reconnect — in the sync, an order batch every tick. So
-`/api/health` publishes `duckdb.fatal` (`count`, `kinds` — `index` or `other`
-— `last_at`; never the text) and `status: degraded` until web restarts;
+`/api/health` published `duckdb.fatal` (`count`, `kinds` — `index` or `other`
+— `last_at`; never the text) and `status: degraded` until web restarted —
+**until step 14's S14-17**, which took the block, the ledger, the three
+causes and the canary's page for them out: web has not opened the file since
+S14-00, so they said `off`, `null` and nothing. What follows is the history;
 otherwise the next read answering would resolve the `health_status` page over
 a write that still fails. The existing page, not a new canary key — **but
 named for what it is** (batch-E review): it read "Dashboard DOWN",
@@ -1683,8 +1689,9 @@ the process's memory and the damage is the file's, so a restart announced a
 short index healed while the same write still failed. It is written down
 beside the file (`data/.duckdb_index_short.json`, under the file's device and
 inode) and published as `duckdb.fatal.index_short` until a compaction swaps
-a new file in. A restore that copies over the file in place keeps the inode:
-delete the marker then.
+a new file in (until S14-17; the marker stays on disk, for the image a
+rollback would start). A restore that copies over the file in place keeps the
+inode: delete the marker then.
 
 **DuckDB prints the rows it could not remove** — every column, so a buyer's
 name, phone and email — after `\nChunk:` in the FATAL, and again in every
@@ -2002,7 +2009,8 @@ raising):
 - A `KS_WRITE_BUYERS` nobody can read writes nowhere: the step refuses before
   KeyCRM is asked, both manual doors answer 409 before starting, the gender
   rider reports `stood_down`, and `get_stats` — `/health/detailed`,
-  `/api/duckdb/stats` and the DuckDB block of `/api/health` — leaves the buyer
+  `/api/duckdb/stats` and the DuckDB block of `/api/health`, none of which
+  asks it since step 14's S14-17 — leaves the buyer
   counts out rather than show DuckDB's frozen ones; the live count is
   `bronze.buyers` (`pg_buyer_sync_read.count_buyers`).
 - `scripts/backfill_gender.py` writes Postgres alone since step 14's S14-11
@@ -4079,7 +4087,7 @@ passed by not seeing those routes — `service.chat(...)` names a method two
 classes define — so the walk types an object by the annotated factory that
 made it, and pins every call it still leaves unresolved under the name of a
 function that reaches a refusal (`UNRESOLVED_NAMESAKES`). A remembered list
-had missed the goals job. `POST /api/duckdb/sync-buyers` reaches the 503
+had missed the goals job. `POST /api/sync/sync-buyers` reaches the 503
 too: it shares the buyers step, which used to answer the refusal in its own
 `except Exception` and now passes it on (chain 4's PR-3). An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
@@ -4628,7 +4636,8 @@ change** — none had a caller, and most had stopped working long before:
   question of the store the tabs read.
 - **`/api/buyers/stats`**: counters that read "all synced" after a
   compaction. The number that mattered is the buyer step's own selection from
-  Postgres; DuckDB's raw counts stay at `/api/duckdb/stats`.
+  Postgres; DuckDB's raw counts stayed at `/api/duckdb/stats` until step
+  14's S14-17 deleted it.
 - **`POST /api/duckdb/purge-orders`**: the April 2026 DuckDB 1.5 MVCC
   one-shot. It never reached Postgres, so it had stopped changing any number;
   deleting an order from Postgres is chain 3's to design.
@@ -4640,7 +4649,8 @@ change** — none had a caller, and most had stopped working long before:
   writer, so it is **history now** — OD-13's freeze — and the table, its
   hourly copy and its daily comparison stay; a test fails if anything writes
   it again. The manual levers are `POST /api/reconcile` (detection) and
-  `POST /api/duckdb/refresh-statuses` (repair).
+  `POST /api/sync/refresh-statuses` (repair; `/api/duckdb/…` until step
+  14's S14-17, an alias since).
   **The legacy job made one repair nothing else made, and it was kept.** A
   B2B order's `ordered_at` can sit weeks after its `created_at`, and KeyCRM
   does not bump `updated_at` on a status change. So a moved status on an
@@ -4660,7 +4670,7 @@ change** — none had a caller, and most had stopped working long before:
 **Kept on purpose**: the DuckDB half of `POST /api/warehouse/rebuild-silver`
 (DN-29 already stands it down, and the way back needs it; it goes with step
 14's code deletion), the assistant's revenue tools (behind `KS_READ_CHAT`),
-and `POST /api/duckdb/sync-all-buyers` (the only `include=loyalty,shipping`
+and `POST /api/sync/sync-all-buyers` (the only `include=loyalty,shipping`
 fetch; chain 4 routes it). No table was dropped and none was touched in
 `_init_schema` or the compaction's lists — OD-11 is still open.
 
@@ -4748,7 +4758,8 @@ the startup (the handler used to ask DuckDB first), and a route refused the
 file answers 503 `surface: duckdb` beside `ReadUnavailable`. `/api/health`,
 `/health/detailed` and `/api/duckdb/stats` reach for nothing (PR-3):
 `duckdb.status` and `migrations.status` read `off`, `fatal` is null, and
-`duckdb` is never in `degraded_by` — so the canary's probe and the Docker
+`duckdb` is never in `degraded_by` (step 14's S14-17 took the three blocks,
+the stats route and the causes out) — so the canary's probe and the Docker
 healthcheck are neither a tripwire site nor an outage, and a healthy probe
 writes `duckdb_silent: true`. The shadow chains (9, 10, 11a, 11b) stood
 their DuckDB half down before `store.connection()` (PR-4): counted apart as
@@ -4906,9 +4917,10 @@ watermark read carries its key, so one row is one reach. A site that
 appears outside the list fails, and so does a row the code no longer earns.
 **A DuckDB lever may reach the file only if listed** in `DUCKDB_LEVERS` with
 its reason and refused loudly (503 naming `duckdb`, counted, paged) — and
-only a door under `/api/duckdb/`, the names OD-S5-8 keeps until code
-deletion; the list is empty, since under the chains each of those routes its
-sync to Postgres. **A door that says success having done nothing** — asked
+only a door under `/api/duckdb/`, the names OD-S5-8 kept until code
+deletion — `/api/sync/` since step 14's S14-17, which renamed the four and
+left the old names as aliases the sweep opens once, by the new one; the list
+is empty, since under the chains each of those routes its sync to Postgres. **A door that says success having done nothing** — asked
 the world, was refused, still answered 2xx `"status": "success"` — is listed
 exactly in `KNOWN_FALSE_SUCCESS`: one, the inline status refresh, whose
 `refresh_order_statuses` swallows KeyCRM's errors (9502d9bd). Old and the
@@ -6144,7 +6156,8 @@ Reliable solution for completely re-uploading historical data to DuckDB from scr
 ### Files to Create
 
 **Stale — this was built differently.** The admin endpoint exists as
-`POST /duckdb/resync` in `web/routes/api/admin.py:21` and nginx already routes
+`POST /sync/resync` in `web/routes/api/admin.py` (`/duckdb/resync` until step
+14's S14-17, an alias since) and nginx already routes
 it (`nginx.conf:103`). Neither `core/resync_service.py` nor
 `scripts/full_resync.py` was ever created; the CLI equivalent,
 `scripts/force_resync.py`, was deleted in step 14's S14-03, and the endpoint

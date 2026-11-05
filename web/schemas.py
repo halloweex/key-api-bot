@@ -22,40 +22,6 @@ class BrandResponse(BaseModel):
     name: str
 
 
-class DuckDBStats(BaseModel):
-    """DuckDB statistics."""
-    status: str = Field(
-        description=(
-            "connected, error, or off: under KS_DUCKDB=off this process does "
-            "not open the DuckDB file, so nothing is counted, `fatal` is null "
-            "and `off` is not a cause of degradation (stage 5)."
-        ),
-    )
-    latency_ms: Optional[float] = None
-    orders: Optional[int] = None
-    products: Optional[int] = None
-    categories: Optional[int] = None
-    managers: Optional[int] = None
-    db_size_mb: Optional[float] = None
-    fatal: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "DuckDB instances a FatalException invalidated in this process: "
-            "`count`, `kinds` (count per kind) and `last_at` (UTC). `index` is "
-            "an index short in the file — the write that met it fails again "
-            "until every CREATE INDEX index is rebuilt (the Sunday compaction, "
-            "or weekly_compact.sh by hand); `other` is any other FATAL. Each "
-            "invalidated instance is dropped and the next use opens the file "
-            "again, so DuckDB keeps answering. `index_short` (`since`, "
-            "`last_at`, `count`) is that index damage as written down beside "
-            "the file, and outlives a restart until a compaction replaces the "
-            "file. `status` reads degraded while either is set: a FATAL of "
-            "this process until web restarts, `index_short` until the "
-            "compaction. Null until one. Never the exception text."
-        ),
-    )
-
-
 class DataQualityFreshness(BaseModel):
     """When a data-quality layer last produced a verdict.
 
@@ -99,33 +65,28 @@ class SyncStatus(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
-    status: str = Field(description="Service status: healthy or degraded")
+    status: str = Field(
+        description=(
+            "Service status: healthy or degraded. Healthy since step 14's "
+            "S14-17, which took the DuckDB block and the DuckDB schema ledger "
+            "out, the only things that degraded it; kept for the canary, "
+            "Docker's healthcheck and the deploy's gate."
+        ),
+    )
     degraded_by: List[str] = Field(
         default_factory=list,
         description=(
-            "Why `status` is degraded, one word per cause: `duckdb` (the store "
-            "did not answer), `migrations` (a step failed), `duckdb_fatal` "
-            "(`duckdb.fatal` is set). Empty when healthy. Never `duckdb` "
-            "under KS_DUCKDB=off, where the store is switched off and "
-            "`duckdb.status` says so."
+            "Why `status` is degraded, one word per cause. Empty since step "
+            "14's S14-17: its three causes — `duckdb`, `migrations`, "
+            "`duckdb_fatal` — were DuckDB's."
         ),
     )
     version: str = Field(description="Application version")
     uptime_seconds: int = Field(description="Uptime in seconds")
     correlation_id: Optional[str] = Field(None, description="Request correlation ID")
-    duckdb: DuckDBStats
     sync: Optional[SyncStatus] = Field(None, description="Background sync service status")
     data_quality: Optional[Dict[str, DataQualityFreshness]] = Field(
         None, description="Per-layer age of the last successful data-quality run"
-    )
-    migrations: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Schema ledger as of connect: how many steps are applied, which are "
-            "pending, and which failed. Named `migrations` rather than `schema` "
-            "because Pydantic already owns that word. `{\"status\": \"off\"}` "
-            "under KS_DUCKDB=off, where no DuckDB migration runs."
-        ),
     )
     alerting: Optional[Dict[str, Any]] = Field(
         None,

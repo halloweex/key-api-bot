@@ -1858,7 +1858,7 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
                 "the shared parse, so this is a contact list deleted and not "
                 "written again — and the SMS audience reads phone numbers from "
                 "the contact list, not the column. The next write of that "
-                "buyer rewrites both; POST /api/duckdb/sync-all-buyers rewrites "
+                "buyer rewrites both; POST /api/sync/sync-all-buyers rewrites "
                 "every buyer KeyCRM has.")))
     return issues
 

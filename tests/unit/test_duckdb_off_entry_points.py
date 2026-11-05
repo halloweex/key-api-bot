@@ -322,7 +322,9 @@ class TestEveryWayIn:
         # more (68): the warehouse status, refresh and rebuild-silver routes,
         # the UTM refresh, reclassify and backfill routes, the retail-status
         # route (its store method's dirty mark), the derivation tick (its
-        # settle of the recorded writer) and the DuckDB warehouse tick. Each step-14 PR that removes a DuckDB branch shrinks
+        # settle of the recorded writer) and the DuckDB warehouse tick;
+        # S14-17's `GET /api/duckdb/stats` one more (67), deleted with its
+        # counts. Each step-14 PR that removes a DuckDB branch shrinks
         # this; the floor is only that the walk still finds the ways in, not
         # a count to keep. The mirror job's comparisons and lambdas were ten
         # of the eleven callables held until S14-12; the eleventh, the orders
@@ -330,7 +332,7 @@ class TestEveryWayIn:
         # nothing that reaches the file is held any more. The branch stays in
         # `classify` for the next one; an entry it failed to hold would read
         # `unexplained` and fail the test above.
-        assert count["door"] >= 68, dict(count)
+        assert count["door"] >= 67, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
         # The integrity job reaches the file no more (S14-14); the 05:30
         # reconciliation still does, through the unconnected store.
