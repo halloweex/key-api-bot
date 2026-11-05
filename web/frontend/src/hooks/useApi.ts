@@ -306,10 +306,13 @@ export function useCategoryBreakdown(parentCategory: string | null) {
 
 export function useCustomerInsights() {
   const queryParams = useQueryParams()
+  const { period } = useFilterStore()
+  // The AOV trend by month for the whole history, as the revenue trend is.
+  const fullParams = period === 'all_time' ? `${queryParams}&granularity=monthly` : queryParams
 
   return useQuery<CustomerInsightsResponse>({
     queryKey: queryKeys.customerInsights(queryParams),
-    queryFn: () => api.getCustomerInsights(queryParams),
+    queryFn: () => api.getCustomerInsights(fullParams),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

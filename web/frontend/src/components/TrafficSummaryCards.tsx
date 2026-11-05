@@ -4,7 +4,7 @@ import { Megaphone, Sparkles, Monitor, CircleHelp, User, Info } from 'lucide-rea
 import { StatCard, StatCardSkeleton } from './StatCard'
 import { TileGrid } from './TileGrid'
 import { useTrafficAnalytics } from '../hooks/useApi'
-import { formatCurrency, formatNumber } from '../utils/formatters'
+import { formatCurrency, formatCurrencyShort, formatNumber } from '../utils/formatters'
 import type { TrafficSummary } from '../types/api'
 
 // ─── Traffic Type Descriptions ────────────────────────────────────────────────
@@ -138,6 +138,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.paidAds')}
         value={summary?.paid?.revenue ?? 0}
         formatter={formatCurrency}
+        shortFormatter={formatCurrencyShort}
         icon={Megaphone}
         variant="blue"
         subtitle={ordersOf('paid')}
@@ -153,6 +154,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.organic')}
         value={summary?.organic?.revenue ?? 0}
         formatter={formatCurrency}
+        shortFormatter={formatCurrencyShort}
         icon={Sparkles}
         variant="green"
         subtitle={ordersOf('organic')}
@@ -163,6 +165,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.salesManager')}
         value={summary?.manager?.revenue ?? 0}
         formatter={formatCurrency}
+        shortFormatter={formatCurrencyShort}
         icon={User}
         variant="cyan"
         subtitle={ordersOf('manager')}
@@ -173,6 +176,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.pixelOnly')}
         value={summary?.pixel_only?.revenue ?? 0}
         formatter={formatCurrency}
+        shortFormatter={formatCurrencyShort}
         icon={Monitor}
         variant="orange"
         subtitle={ordersOf('pixel_only')}
@@ -183,6 +187,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.unknown')}
         value={summary?.unknown?.revenue ?? 0}
         formatter={formatCurrency}
+        shortFormatter={formatCurrencyShort}
         icon={CircleHelp}
         variant="purple"
         subtitle={ordersOf('unknown')}

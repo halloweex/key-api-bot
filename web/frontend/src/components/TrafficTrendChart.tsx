@@ -18,7 +18,9 @@ import {
   X_AXIS_PROPS,
 } from './chartConfig'
 import { useTrafficTrend } from '../hooks/useApi'
+import { useFilterStore } from '../store/filterStore'
 import { formatCurrency, formatNumber } from '../utils/formatters'
+import { trafficByMonth, trafficLabel } from '../utils/trafficTrend'
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
 
@@ -211,16 +213,17 @@ export const TrafficTrendChart = memo(function TrafficTrendChart() {
   const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useTrafficTrend()
 
+  const { period } = useFilterStore()
+  const monthly = period === 'all_time'
+
   const chartData = useMemo(() => {
     if (!data?.trend?.length) return []
 
-    return data.trend.map(day => {
-      // Parse date to get short format (dd.mm)
-      const parts = day.date.split('-') // "2026-02-01"
-      const shortDate = parts.length === 3 ? `${parts[2]}.${parts[1]}` : day.date
+    return (monthly ? trafficByMonth(data.trend) : data.trend).map(day => {
+      const shortDate = trafficLabel(day.date)
 
       return {
-        date: day.date,
+        date: monthly ? shortDate : day.date,
         shortDate,
         paidRevenue: day.paid_revenue,
         organicRevenue: day.organic_revenue,
@@ -231,7 +234,7 @@ export const TrafficTrendChart = memo(function TrafficTrendChart() {
         total: day.paid_revenue + day.organic_revenue + day.other_revenue,
       }
     })
-  }, [data])
+  }, [data, monthly])
 
   const isEmpty = !isLoading && chartData.length === 0
 
@@ -247,7 +250,7 @@ export const TrafficTrendChart = memo(function TrafficTrendChart() {
 
   return (
     <ChartContainer
-      title={t('traffic.revenueTrend')}
+      title={monthly ? `${t('traffic.revenueTrend')} · ${t('chart.byMonth')}` : t('traffic.revenueTrend')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
