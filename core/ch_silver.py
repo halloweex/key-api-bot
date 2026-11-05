@@ -2,9 +2,11 @@
 
 Step 5 of «Одна бронза», and the step where ClickHouse stops being a copy:
 
-  1. `silver.orders` ships from Postgres whole — staging + EXCHANGE,
-     `ch_gold`'s shape — and is verified as a round trip, tolerance zero,
-     because a copy that differs is a defect in the copy.
+  1. `silver.orders` ships from Postgres whole — into a staging table,
+     swapped in by one `EXCHANGE TABLES` only when the row count matches, so
+     a reader never sees a half-shipped table — and is verified as a round
+     trip, tolerance zero, because a copy that differs is a defect in the
+     copy.
   2. `gold.daily_revenue` is then DERIVED inside ClickHouse from that silver,
      both grains, and compared against the Gold Postgres computed from the
      same rows. That comparison is the page's «сверка навсегда» line: two
@@ -246,6 +248,17 @@ def _key3(row: Tuple[Any, ...]) -> Tuple[Any, Any, Any]:
     return (row[0], row[1], row[2])
 
 
+def _cell_order(key: Tuple[Any, Any, Any]) -> Tuple[Any, Any, int]:
+    """How cells sort, the roll-up (`source_id` NULL) first in its day.
+
+    Python cannot order `None` against an `int`, and a real divergence
+    between the engines touches a day's fine rows and its roll-up together —
+    so sorting the raw keys raised `TypeError` on exactly the shape this
+    comparison exists for, and the run filed `gold_values_unwatched` in place
+    of the finding (L2-01)."""
+    return (key[0], key[1], -1 if key[2] is None else key[2])
+
+
 def compare_gold_cells(
     pg_cells: Sequence[Tuple[Any, ...]],
     ch_cells: Sequence[Tuple[Any, ...]],
@@ -265,8 +278,8 @@ def compare_gold_cells(
     columns = GOLD_COLUMNS
     avg_i = columns.index("avg_order_value")
 
-    missing = sorted(k for k in want if k not in got)
-    extra = sorted(k for k in got if k not in want)
+    missing = sorted((k for k in want if k not in got), )
+    extra = sorted((k for k in got if k not in want), )
     differing = []
     detail = ""
     for k, pg_row in want.items():
@@ -310,7 +323,7 @@ def compare_gold_cells(
             ),
         ))
     if differing:
-        differing.sort()
+        differing.sort(key=_cell_order)
         issues.append(IntegrityIssue(
             check_name="ch_engines_gold_mismatch",
             table_name=GOLD_TABLE, severity=Severity.CRITICAL,
@@ -418,10 +431,11 @@ def gold_unverified_conditions(issues: Sequence[IntegrityIssue]) -> List[str]:
 
 async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]:
     """The daily ClickHouse verdict: ship, round-trip silver, then set the two
-    engines' Gold against each other. `ch_gold.reconcile_ch_gold`'s contract:
-    WARNs instead of raising — an unreachable store must not silence the other
-    comparisons in this layer. Not silently any more: every run that did not
-    compare files `gold_values_unwatched` beside its cause (OD-08).
+    engines' Gold against each other. Its contract: a ClickHouse that cannot
+    be reached is a WARN, never an exception — an unreachable store must not
+    silence the other comparisons in this layer. Not silently any more: every
+    run that did not compare files `gold_values_unwatched` beside its cause
+    (OD-08).
 
     The whole body runs under PG_LAYER_LOCK, and the reason is the review's
     sharpest finding: without it, a silver rebuild committing between "fetch
