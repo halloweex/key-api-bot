@@ -22,7 +22,7 @@ import ssl
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 from urllib.parse import urlparse
 
 import httpx
@@ -748,7 +748,46 @@ def _surfaces(entries: dict) -> str:
 # S14-00, and since S14-17 publishes neither `duckdb.fatal` nor that cause.
 
 
-def unjudged_keys(payload: Optional[dict]) -> "list[str]":
+# Which block of /api/health each payload-judged family is read from (L4-02).
+# A probe that read the payload without one of these blocks — or read no
+# payload at all — cannot say a page judged from it cleared, so every
+# delivered key of the block's families is held (`unjudged_keys`). Until then
+# only the keys named below were held: a blip the canary defers (no payload),
+# or a payload with `data_quality` null, announced a standing
+# `dq_stale:mirror_landing` resolved, and the next probe paged it again as a
+# new incident. The `*_block_missing` keys are failures of their own and are
+# not listed. `tests/unit/test_canary_blind_probe_holds.py` holds the table
+# to the check functions.
+BLOCK_KEY_PREFIXES: "tuple[tuple[str, tuple[str, ...]], ...]" = (
+    ("data_quality", ("dq_missing:", "dq_never:", "dq_stale:")),
+    ("mirrors", ("mirror_missing:", "mirror_never:", "mirror_stale:",
+                 "mirror_failing:")),
+    ("alerting", ("alerting_transport_failing",)),
+    ("derivation", ("derivation_marks_",)),
+    ("write_chains", ("report_ledger_pending",)),
+)
+
+# The keys a probe judges from its own answer, never from the payload: the
+# request's outcome and the TLS probe. A blind probe still judges these.
+JUDGED_WITHOUT_PAYLOAD = frozenset({
+    "health_unreachable", "health_http", "cert_expiring", "cert_unreachable",
+})
+
+
+def _delivered_canary_keys() -> "list[str]":
+    """The canary's delivered, unresolved conditions in this process's Gate.
+    Never raises: a probe must not fail over what it holds."""
+    try:
+        from core.alerting import delivered_conditions
+
+        return sorted(k for k, group in delivered_conditions().items()
+                      if group == "canary")
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def unjudged_keys(payload: Optional[dict],
+                  delivered: "Sequence[str]" = ()) -> "list[str]":
     """The keys this probe could not judge, because it read no block to
     judge them by — web did not answer, or answered without the block.
 
@@ -781,7 +820,13 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     judged, and cleared it; no entry says a mode since.
 
     And `backup_evidence_stale` (step 14's S14-00) when the probe read no
-    `backups` block: a stale drill stands until the next weekly run."""
+    `backups` block: a stale drill stands until the next weekly run.
+
+    And, of the `delivered` canary keys (L4-02): every one judged from the
+    payload when the probe read none, and every one of a block's families
+    (`BLOCK_KEY_PREFIXES`) when the payload carried that block as anything
+    but an object."""
+    blind = not payload
     payload = payload or {}
     keys = []
     if not isinstance(payload.get("read_fallback_mode"), dict):
@@ -803,6 +848,15 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     # drill has run since.
     if not isinstance(payload.get("backups"), dict):
         keys.append("backup_evidence_stale")
+    for key in delivered:
+        if blind:
+            held = key not in JUDGED_WITHOUT_PAYLOAD
+        else:
+            held = any(key.startswith(prefixes)
+                       for block, prefixes in BLOCK_KEY_PREFIXES
+                       if not isinstance(payload.get(block), dict))
+        if held and key not in keys:
+            keys.append(key)
     return keys
 
 
@@ -1075,7 +1129,7 @@ async def run_canary(
         sync_seconds_since=sync_seconds,
         dq_ages=dq_ages,
         mirror_ages=mirror_ages,
-        unjudged_keys=unjudged_keys(payload),
+        unjudged_keys=unjudged_keys(payload, delivered=_delivered_canary_keys()),
     )
 
 
