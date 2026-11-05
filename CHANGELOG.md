@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.322
+
+- WIP: S14-16 — step 13's rule-3 test expects KS_DUCKDB alone from configure_modes
+- WIP: S14-16 — the catalogue chain's fixtures stop setting the deleted mode
+- WIP: S14-16 — junk, or nothing, in KS_READ_FALLBACK changes no start and no block
+- WIP: S14-16 — CLAUDE.md: the read-fallback section says only the refusal is left
+- WIP: S14-16 — the kept handlers say what refuses them now
+- WIP: S14-16 — the tests that asked the mode, the counts or the retired keys follow them out
+- WIP: S14-16 — the three integration modules over a live Postgres, without the mode
+- WIP: S14-16 — the five read-fallback test modules hold the refusal alone
+- WIP: S14-16 — a read whose engine fails is refused, and nothing else is left of the fallback
+
+
 ## 3.0.321
 
 - WIP: S14-15 — the slow endpoints write no DuckDB, the warehouse lever's lock is the derivation's, and two tests made hermetic
