@@ -61,12 +61,34 @@ TYPES = ("cold", "warm", "other")
 
 # (start, end) → {"payload": dict, "fetched_at": iso str, "expires_at": monotonic}
 _cache: "OrderedDict[Tuple[date, date], Dict[str, Any]]" = OrderedDict()
-_lock = asyncio.Lock()
+# One lock per period, so two readers of one period ask GA4 once, and a fresh
+# answer for one period never waits behind another period's fetch (L3-05: a
+# cached hit waited 2.97 s behind an unrelated period's six requests, under
+# one module-wide lock). Pruned with the cache's `MAX_ENTRIES` bound.
+_locks: "Dict[Tuple[date, date], asyncio.Lock]" = {}
 
 
 def _reset_cache() -> None:
     """For tests."""
     _cache.clear()
+    _locks.clear()
+
+
+def _lock_for(key: Tuple[date, date]) -> asyncio.Lock:
+    lock = _locks.get(key)
+    if lock is None:
+        lock = _locks[key] = asyncio.Lock()
+    return lock
+
+
+def _fresh(key: Tuple[date, date], clock: Callable[[], float]) -> Optional[Dict[str, Any]]:
+    """The cached answer for `key` while it is fresh, else None. Synchronous,
+    so it needs no lock: nothing can interleave with it on the event loop."""
+    cached = _cache.get(key)
+    if cached is not None and clock() < cached["expires_at"]:
+        _cache.move_to_end(key)
+        return {**cached["payload"], "stale": False, "fetched_at": cached["fetched_at"]}
+    return None
 
 
 def channel_type(channel: str) -> str:
@@ -201,11 +223,16 @@ async def get_funnel(
     """
     key = (start, end)
     day = today or datetime.now(_KYIV_TZ).date()
-    async with _lock:
+    hit = _fresh(key, clock)
+    if hit is not None:
+        return hit
+    async with _lock_for(key):
+        # Asked again under the period's lock: a reader that waited here for
+        # another's fetch of the same period takes its answer.
+        hit = _fresh(key, clock)
+        if hit is not None:
+            return hit
         cached = _cache.get(key)
-        if cached is not None and clock() < cached["expires_at"]:
-            _cache.move_to_end(key)
-            return {**cached["payload"], "stale": False, "fetched_at": cached["fetched_at"]}
         try:
             if client is not None:
                 payload = await _ask(start, end, client, day)
@@ -221,4 +248,9 @@ async def get_funnel(
         _cache.move_to_end(key)
         while len(_cache) > MAX_ENTRIES:
             _cache.popitem(last=False)
+        # The locks follow the cache's bound: one for a period no longer held
+        # and nobody waits on goes (this one is still held, so it stays).
+        for stale_key in [k for k, lock in _locks.items()
+                          if k not in _cache and not lock.locked()]:
+            del _locks[stale_key]
         return {**payload, "stale": False, "fetched_at": fetched_at}
