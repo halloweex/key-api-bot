@@ -5,6 +5,7 @@ import { AppShell } from './components/AppShell'
 import { AdminGuard, PermissionGuard } from './components/RouteGuard'
 import { Spinner } from './components/Spinner'
 import { useRouter } from './hooks/useRouter'
+import { trafficTabFor } from './utils/trafficTabs'
 
 // Lazy load pages
 const AdminUsersPage = lazyChunk(() => import('./components/AdminUsersPage').then(m => ({ default: m.AdminUsersPage })))
@@ -57,8 +58,8 @@ function App() {
     )
   }
 
-  // Traffic Analytics
-  if (path === '/v2/traffic' || path === '/traffic') {
+  // Traffic Analytics: three sections, each a path (`utils/trafficTabs`)
+  if (trafficTabFor(path)) {
     return (
       <AppShell>
         <PermissionGuard feature="traffic">
