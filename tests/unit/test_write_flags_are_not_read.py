@@ -161,34 +161,107 @@ def test_a_fresh_interpreter_imports_and_starts_with_junk_in_all_thirteen(tmp_pa
 # ─── Nothing reads one ───────────────────────────────────────────────────────
 
 
-def _reads_of_the_environment(tree: ast.AST):
-    """Every `os.getenv(X)`, `os.environ.get(X)` and `os.environ[X]`, with X."""
+def _os_bindings(tree: ast.AST) -> tuple:
+    """Names bound to `os.getenv` and `os.environ` by `from os import ...`,
+    aliases included: a bare `getenv(X)` reads the environment too."""
+    getenvs, environs = set(), set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
+        if isinstance(node, ast.ImportFrom) and node.module == "os":
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if alias.name == "getenv":
+                    getenvs.add(bound)
+                elif alias.name == "environ":
+                    environs.add(bound)
+    return getenvs, environs
+
+
+def _reads_of_the_environment(tree: ast.AST):
+    """Every `os.getenv(X)`, `os.environ.get(X)` and `os.environ[X]` — and the
+    same through `from os import getenv, environ` under any alias — with X."""
+    getenvs, environs = _os_bindings(tree)
+
+    def is_environ(node) -> bool:
+        return (ast.unparse(node).endswith("environ")
+                or (isinstance(node, ast.Name) and node.id in environs))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args:
             func = node.func
-            if (isinstance(func, ast.Attribute) and func.attr in ("getenv", "get")
-                    and node.args):
-                target = ast.unparse(func.value)
-                if func.attr == "getenv" or target.endswith("environ"):
+            if isinstance(func, ast.Attribute) and func.attr in ("getenv", "get"):
+                if func.attr == "getenv" or is_environ(func.value):
                     yield node.args[0]
-        elif isinstance(node, ast.Subscript) and ast.unparse(node.value).endswith("environ"):
+            elif isinstance(func, ast.Name) and func.id in getenvs:
+                yield node.args[0]
+        elif isinstance(node, ast.Subscript) and is_environ(node.value):
             yield node.slice
+
+
+def _names_a_flag(text: str) -> bool:
+    return "WRITE_ENV" in text or "KS_WRITE_" in text or any(f in text for f in FLAGS)
+
+
+def _bound_to_a_flag(tree: ast.AST, name: str) -> bool:
+    """Whether `name` is assigned, anywhere in the module, from an expression
+    that names a chain's flag — `name = chain.WRITE_ENV; os.getenv(name)`."""
+    for node in ast.walk(tree):
+        targets, value = (), None
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            targets, value = (node.target,), node.value
+        elif isinstance(node, (ast.For, ast.comprehension)):
+            targets, value = (node.target,), node.iter
+        for target in targets:
+            bound = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+            if name in bound and _names_a_flag(ast.unparse(value)):
+                return True
+    return False
 
 
 def test_nothing_reads_a_write_flag():
     """Static: no read of the environment names a chain's flag — by
-    `WRITE_ENV` (bare or as an attribute) or by its literal. Mutation: an
-    `os.getenv(WRITE_ENV)` left in a chain module, or an
-    `os.environ.get("KS_WRITE_BUYERS")` anywhere."""
+    `WRITE_ENV` (bare or as an attribute), by its literal, or through a local
+    name bound to either. Mutation: an `os.getenv(WRITE_ENV)` left in a chain
+    module, an `os.environ.get("KS_WRITE_BUYERS")` anywhere, `from os import
+    getenv; getenv(WRITE_ENV)`, or `name = chain.WRITE_ENV; os.getenv(name)`."""
     found = []
     for top in ("core", "web", "bot", "scripts"):
         for path in sorted((ROOT / top).rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for arg in _reads_of_the_environment(tree):
                 text = ast.unparse(arg)
-                if "WRITE_ENV" in text or any(f in text for f in FLAGS):
+                via = {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
+                if _names_a_flag(text) or any(_bound_to_a_flag(tree, n) for n in via):
                     found.append(f"{path.relative_to(ROOT)}:{arg.lineno}: {text}")
     assert not found, found
+
+
+@pytest.mark.parametrize("source", [
+    "from os import getenv\nWRITE_ENV = 'KS_WRITE_BUYERS'\ngetenv(WRITE_ENV)\n",
+    "from os import getenv as ge\nge('KS_WRITE_ORDERS')\n",
+    "from os import environ\nenviron.get('KS_WRITE_ORDERS')\n",
+    "from os import environ as env\nenv['KS_WRITE_ORDERS']\n",
+    "import os\ndef f(chain):\n    name = chain.WRITE_ENV\n    return os.getenv(name)\n",
+    "import os\nfor chain in CHAINS:\n    os.environ.get(chain.WRITE_ENV)\n",
+])
+def test_the_walk_sees_every_spelling(source):
+    """The review's two spellings, and their neighbours: each is a read the
+    walk above must find. Mutation: drop the `from os import` bindings, or
+    the local-name resolution."""
+    tree = ast.parse(source)
+    hits = [arg for arg in _reads_of_the_environment(tree)
+            if _names_a_flag(ast.unparse(arg)) or any(
+                _bound_to_a_flag(tree, n.id) for n in ast.walk(arg)
+                if isinstance(n, ast.Name))]
+    assert hits, source
+
+
+def test_the_walk_does_not_see_an_unrelated_read():
+    tree = ast.parse("import os\nname = 'KS_PG_DSN'\nos.getenv(name)\n")
+    assert not [arg for arg in _reads_of_the_environment(tree)
+                if any(_bound_to_a_flag(tree, n.id) for n in ast.walk(arg)
+                       if isinstance(n, ast.Name))]
 
 
 # ─── The two CRITICALs judged on the step alone ──────────────────────────────
