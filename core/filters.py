@@ -40,6 +40,15 @@ MAX_RANGE_DAYS = 3660
 EARLIEST_DATE = date(2000, 1, 1)
 LATEST_DATE = date(2099, 12, 31)
 
+# The first day the store holds an order, in Kyiv dates: KeyCRM's first
+# order is 2023-12-02. Measured on the 2026-08-31 production backup — every
+# sales type's `MIN(order_date)` in Silver is that day or later, and so is
+# Gold's first row — and nothing deletes an order, so a later sync cannot make
+# an earlier day the first. `all_time` starts here and ends today. Starting it
+# at EARLIEST_DATE instead would be 26 years of empty days in every per-day
+# loop, and a range over MAX_RANGE_DAYS.
+HISTORY_START = date(2023, 12, 2)
+
 
 @dataclass
 class DateRange:
@@ -83,8 +92,10 @@ def parse_period(
     Parse period shortcut or explicit dates into DateRange.
 
     Args:
-        period: Period shortcut (today, yesterday, week, last_week, month, last_month)
-                Also accepts bot aliases: thisweek, thismonth
+        period: Period shortcut (today, yesterday, week, last_week, month,
+                last_month, last_7_days, last_28_days, all_time — from
+                HISTORY_START to today). Also accepts bot aliases: thisweek,
+                thismonth
         start_date: Explicit start date (YYYY-MM-DD), used if period is None
         end_date: Explicit end date (YYYY-MM-DD), used if period is None
         reference_date: Reference date for calculations (default: today)
@@ -167,6 +178,9 @@ def parse_period(
         start = today - timedelta(days=27)  # 28 days including today
         return DateRange(start, today)
 
+    elif period == "all_time":
+        return DateRange(HISTORY_START, today)
+
     # Handle explicit dates
     if start_date and end_date:
         start = _read_date(start_date, "start_date")
@@ -217,5 +231,17 @@ def get_period_label(period: str) -> str:
         "last_month": "Last Month",
         "last_7_days": "Last 7 Days",
         "last_28_days": "Last 28 Days",
+        "all_time": "All Time",
     }
     return labels.get(period, period.title() if period else "Today")
+
+
+def has_comparison(period: Optional[str]) -> bool:
+    """Whether a period has anything before it to be compared with.
+
+    `all_time` does not: its previous period lies wholly before the first
+    order, so it is zeros, and a year back still covers two thirds of the
+    history — a baseline made of the same orders. The routes that compare ask
+    this rather than naming the shortcut.
+    """
+    return period != "all_time"

@@ -212,6 +212,10 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
   if (wantsForecast) {
     fullParams += '&include_forecast=true'
   }
+  // The whole history by day is a thousand bars whose labels repeat every year.
+  if (period === 'all_time') {
+    fullParams += '&granularity=monthly'
+  }
 
   return useQuery<RevenueTrendResponse>({
     queryKey: [...queryKeys.revenueTrend(queryParams), compareType, wantsForecast],

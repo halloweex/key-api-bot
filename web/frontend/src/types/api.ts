@@ -75,6 +75,8 @@ export interface RevenueTrendResponse {
   revenue: number[]
   orders: number[]
   measure?: RevenueMeasure
+  /** Present only for month buckets: labels are `MM.YYYY`, no comparison. */
+  granularity?: 'monthly'
   comparison?: {
     labels: string[]
     revenue: number[]
@@ -1453,14 +1455,16 @@ export interface MarketingSourceRow {
 export interface MarketingReportResponse {
   start_date: string
   end_date: string
-  prev_start_date: string
-  prev_end_date: string
-  yoy_start_date: string
-  yoy_end_date: string
+  // All four dates and both periods are null when the period has nothing
+  // before it (`all_time`, `core/filters.has_comparison`).
+  prev_start_date: string | null
+  prev_end_date: string | null
+  yoy_start_date: string | null
+  yoy_end_date: string | null
   general_sales: {
     current: MarketingMonthStats
-    previous: MarketingMonthStats
-    year_ago: MarketingMonthStats
+    previous: MarketingMonthStats | null
+    year_ago: MarketingMonthStats | null
     monthly_goal: number | null
   }
   brands: MarketingBrandRow[]

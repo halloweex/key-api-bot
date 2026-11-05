@@ -343,7 +343,7 @@ def validate_period(
     Raises:
         ValidationError: If period is invalid
     """
-    valid_periods = {"today", "yesterday", "week", "last_week", "month", "last_month", "last_7_days", "last_28_days"}
+    valid_periods = {"today", "yesterday", "week", "last_week", "month", "last_month", "last_7_days", "last_28_days", "all_time"}
 
     if value is None or value == "":
         if allow_none:

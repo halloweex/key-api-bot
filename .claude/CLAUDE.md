@@ -171,7 +171,19 @@ GET answers a JSON 404, as does any `/api/` GET no route matches. The SPA
 catch-all used to serve those the shell with a 200, which a script reads as
 success.
 
-**Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+**Query params**: `period` (today/yesterday/week/last_week/month/last_month/last_7_days/last_28_days/all_time) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+
+`all_time` («За весь час», 2026-11-05) runs from `core.filters.HISTORY_START`
+— 2023-12-02, KeyCRM's first order, measured on the 2026-08-31 backup — to
+today. It has nothing before it to compare with (`has_comparison`): its
+previous period is zeros and a year back is two thirds the same orders. So
+the trend reads no comparison, the marketing report and its CSV read neither
+of theirs (`include_comparison=False`, the four dates and both periods
+null), and the page hides the change column of the organic block. The page
+asks the trend `granularity=monthly` for it: one bar a month, labelled
+`MM.YYYY`, never a comparison or a forecast — by day it is a thousand bars
+whose `dd.mm` repeats every year. The GA4 funnel sees 14 months of it and
+says so; the CRM's order count beside it starts at GA4's `earliest` too.
 
 `start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
 `core/filters.parse_period`, and only as a pair: one alone is ignored, and a
