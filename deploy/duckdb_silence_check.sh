@@ -87,9 +87,12 @@ esac
 
 # ── the crontab, printed ──────────────────────────────────────────────────────
 # Before the lock, the record and the file: this mode touches none of them.
-# Each line is the one its script's own header documents, with the path of
-# the checkout this runs from — tests/unit/test_week_of_silence_host.py holds
-# the two together.
+# Each line is the one its script's own header documented, with the path of
+# the checkout this runs from — tests/unit/test_duckdb_silence_check.py holds
+# them to it. The two retired scripts, scripts/weekly_compact.sh and
+# deploy/daily_offsite.sh, were deleted from the checkout in step 14's S14-18
+# (their lines were retired on 2026-10-16): the print still names them, so
+# the lines can be found and confirmed gone, and no longer offers them back.
 if [ "$MODE" = crontab ]; then
     root="$(cd "$HERE/.." && pwd)"
     retire_compact="0 2 * * 0  $root/scripts/weekly_compact.sh"
@@ -116,9 +119,10 @@ if [ "$MODE" = crontab ]; then
 # Unchanged: offsite_check.sh (09:00; reports the DuckDB copy frozen under
 # off), pg_offsite.sh (07:40; carries .env since OD-S5-6), and every other line.
 #
-# THE WAY BACK (KS_DUCKDB=on again) — the reverse:
-+ $retire_compact
-+ $retire_snapshot
+# THE WAY BACK (KS_DUCKDB=on again) — not by cron from this checkout: the two
+# scripts it re-added were deleted in step 14's S14-18, and a step-14 web runs
+# off whatever .env says (CLAUDE.md, "Before any rollback to an image from
+# before step 14"). Only the silence check comes out:
 - $add_silence
 # The record under $STATE_DIR stays as it is: history, not a lever.
 CRONTAB
