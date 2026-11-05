@@ -1133,8 +1133,9 @@ class SyncService:
         """The hourly products step, chain 6's (step 14's S14-09 deleted the
         DuckDB one). Never raises a chain fault: a watermark it cannot read, a
         catalogue Postgres refuses or a Postgres that is down is recorded, and
-        the tick goes on to managers, buyers and inventory. A KeyCRM error
-        propagates, as it always has.
+        the tick goes on to managers, buyers and inventory. So does a KeyCRM
+        error, recorded under the step without a `meta.mirror_state` stamp
+        (L1-02); it used to end the tick.
 
         Nothing is put in `stats` but a count: the tick sums it."""
         from core.pg_landing import _record_failure
@@ -1158,8 +1159,17 @@ class SyncService:
 
         logger.info("Syncing products (hourly, chain 6)...")
         products = []
-        async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
-            products.extend(batch)
+        try:
+            async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
+                products.extend(batch)
+        except KeyCRMError as exc:
+            # KeyCRM's, contained like the other steps' (L1-02): an open
+            # breaker or a page that would not decode here used to end the
+            # tick, so managers, buyers and inventory never ran. Recorded under
+            # the step and retried after the hold; nothing in Postgres says
+            # the catalogue is failing, because nothing there failed.
+            self._catalogue_step_failed(exc)
+            return
         try:
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")

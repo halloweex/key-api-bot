@@ -172,7 +172,8 @@ class TestAKeyCRMOutageIsAFailureNotAnEmptySelection:
     @pytest.mark.parametrize("exc,recorded", [
         ("connection", "KeyCRMConnectionError"),
         ("forbidden", "KeyCRMAPIError"),
-        ("breaker", "KeyCRMConnectionError"),     # CircuitOpenError, wrapped
+        # A KeyCRMConnectionError itself since L1-02, so no longer wrapped.
+        ("breaker", "CircuitOpenError"),
     ])
     async def test_it_holds_the_watermark_and_backs_off(
             self, monkeypatch, exc, recorded):

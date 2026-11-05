@@ -17,7 +17,7 @@ from typing import Dict, List, Any, Optional, AsyncGenerator
 
 import httpx
 
-from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError
+from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError
 from core.models import Order, Product, Buyer
 from core.observability import get_logger, get_correlation_id, Timer
 from core.resilience import (
@@ -262,7 +262,20 @@ class KeyCRMClient:
                 )
 
             if response.content:
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as e:
+                    # A 200 carrying a proxy's or a maintenance page's HTML is
+                    # KeyCRM not answering, not this process failing: as a bare
+                    # JSONDecodeError the order step filed it as chain 3's
+                    # (L1-02). Not retried and not a breaker failure, as before.
+                    raise KeyCRMDataError(
+                        f"API returned {response.status_code} with a body that "
+                        f"is not JSON",
+                        details=(response.headers.get("content-type") or "")[:100],
+                        expected="JSON",
+                        got=type(e).__name__,
+                    ) from e
             return {"status": "success"}
 
         except httpx.TimeoutException as e:
