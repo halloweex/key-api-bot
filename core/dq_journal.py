@@ -232,54 +232,31 @@ async def digest_inputs(
     return last_sent_at, sections
 
 
+# Which layers `/api/health/data-quality` shows their diffs for, not their
+# issues: the two arms that compare against KeyCRM file discrepancies.
+_DIFF_LAYERS = frozenset({"reconciliation_pg", "reconciliation_ch"})
+
+
 async def _health_runs(reader) -> Dict[str, Any]:
-    """`/api/health/data-quality`'s body — the endpoint's block, moved."""
-    integrity = await reader.latest_run("integrity")
-    reconciliation = await reader.latest_run("reconciliation")
+    """`/api/health/data-quality`'s body: the latest run of every watched
+    layer (`data_quality.WATCHED_LAYERS`) with its top 20 findings — issues
+    for the integrity and landing checks, diffs for the reconciliation arms.
 
-    # Include top-N drilldown for the recon run so admins can see
-    # WHICH (month, source) drifted without making a second call.
-    reconciliation_diffs: List[Any] = []
-    if reconciliation:
-        reconciliation_diffs = await reader.run_diffs(reconciliation["run_id"], 20)
-    integrity_issues: List[Any] = []
-    if integrity:
-        integrity_issues = await reader.run_issues(integrity["run_id"], 20)
+    Built from that list since L4-06. It named its layers by hand, so it kept
+    showing `reconciliation` — DuckDB's arm, deleted in step 14's S14-12, its
+    last run three weeks old — and never showed `reconciliation_ch`."""
+    from core.data_quality import WATCHED_LAYERS
 
-    # The two layers that arrived after this endpoint was written.
-    # Found by an audit standing exactly where on-call would stand: a
-    # WARN verdict in the mirror-landing log line, and no way to see
-    # WHICH findings without opening the database — which the
-    # single-writer rule forbids from outside the process. The layer
-    # holding the most comparisons must not be the one invisible here.
-    mirror_landing = await reader.latest_run("mirror_landing")
-    mirror_issues: List[Any] = []
-    if mirror_landing:
-        mirror_issues = await reader.run_issues(mirror_landing["run_id"], 20)
-    reconciliation_pg = await reader.latest_run("reconciliation_pg")
-    reconciliation_pg_diffs: List[Any] = []
-    if reconciliation_pg:
-        reconciliation_pg_diffs = await reader.run_diffs(
-            reconciliation_pg["run_id"], 20)
-
-    return {
-        "integrity": {
-            "last_run": integrity,
-            "issues": integrity_issues,
-        },
-        "reconciliation": {
-            "last_run": reconciliation,
-            "diffs": reconciliation_diffs,
-        },
-        "mirror_landing": {
-            "last_run": mirror_landing,
-            "issues": mirror_issues,
-        },
-        "reconciliation_pg": {
-            "last_run": reconciliation_pg,
-            "diffs": reconciliation_pg_diffs,
-        },
-    }
+    body: Dict[str, Any] = {}
+    for layer in WATCHED_LAYERS:
+        run = await reader.latest_run(layer)
+        if layer in _DIFF_LAYERS:
+            diffs = await reader.run_diffs(run["run_id"], 20) if run else []
+            body[layer] = {"last_run": run, "diffs": diffs}
+        else:
+            issues = await reader.run_issues(run["run_id"], 20) if run else []
+            body[layer] = {"last_run": run, "issues": issues}
+    return body
 
 
 async def health_runs() -> Dict[str, Any]:

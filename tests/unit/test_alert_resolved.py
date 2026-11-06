@@ -324,8 +324,14 @@ class TestPageConditionsAreCriticalOnly:
         import pathlib
 
         src = pathlib.Path("core/scheduler.py").read_text()
+        # The two reconciliation arms add their discrepancy conditions after
+        # the bracket (L4-01): CRITICAL-only too, by `discrepancy_conditions`.
         assert src.count(
             "if i.severity == Severity.CRITICAL],"
-        ) == 4
+        ) == 2
+        assert src.count(
+            "if i.severity == Severity.CRITICAL]\n"
+            "                + discrepancy_conditions(layer, discrepancies),"
+        ) == 2
         # And the old unfiltered form is extinct.
         assert "conditions=[i.check_name for i in issues]," not in src

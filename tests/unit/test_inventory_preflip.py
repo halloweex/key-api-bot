@@ -300,7 +300,13 @@ class TestTheStockStepOnPostgres:
 
         assert stats["stocks"] == 0 and not _stock_watermark_moved(calls)
         store.record_inventory_snapshot.assert_awaited_once()
-        assert service.inventory_step_health()["failures_since_ok"] == 0
+        # A fetch that never arrived is not a success (L1-14): recorded under
+        # the stocks step, and with no hold — the fetch is retried next tick.
+        step = service.inventory_step_health()
+        assert step["failures_since_ok"] == 1 and step["last_ok_at"] is None
+        assert step["last_failed_step"] == "stocks"
+        assert step["last_error"] == "KeyCRMConnectionError"
+        assert step["retry_in_s"] is None
 
     @pytest.mark.asyncio
     async def test_nothing_due_is_not_a_success(self, on_postgres):

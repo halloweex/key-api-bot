@@ -136,3 +136,26 @@ async def null_comment_count() -> int:
     async with pool.acquire() as conn:
         return int(await conn.fetchval(
             "SELECT count(*) FROM bronze.orders WHERE manager_comment IS NULL"))
+
+
+async def postgres_now() -> datetime:
+    """Postgres' own clock, the one `bronze.orders.mirrored_at` is stamped
+    with — what `repair_orders` reads before it fetches (L1-12)."""
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT now()")
+
+
+async def rewritten_since(ids: Iterable[int], since: datetime) -> List[int]:
+    """Which of `ids` some writer stored after `since`: a payload fetched
+    before then is older than what Postgres holds, and written under force it
+    would put the older state back (L1-12)."""
+    wanted = [int(i) for i in ids]
+    if not wanted:
+        return []
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM bronze.orders WHERE id = ANY($1::int[]) "
+            "AND mirrored_at > $2 ORDER BY id", wanted, since)
+    return [int(r["id"]) for r in rows]

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from core import read_fallback
 from core.duckdb_store import get_store
-from core.meilisearch_client import get_meili_client
+from core.meilisearch_client import MeiliUnavailable, get_meili_client
 from core.observability import get_logger
 
 logger = get_logger(__name__)
@@ -758,7 +758,12 @@ async def _get_customer_insights(period: str) -> Dict[str, Any]:
 async def _search_buyer(query: str, limit: int) -> Dict[str, Any]:
     """Search for buyers using Meilisearch."""
     meili = get_meili_client()
-    results = await meili.search_buyers(query, limit)
+    try:
+        results = await meili.search_buyers(query, limit)
+    except MeiliUnavailable as exc:
+        # Answered in the conversation as `data_unavailable` by
+        # `execute_tool`, never as "no matches" (L3-04).
+        raise read_fallback.refuse("search", exc)
 
     return {
         "query": query,
@@ -770,7 +775,12 @@ async def _search_buyer(query: str, limit: int) -> Dict[str, Any]:
 async def _search_order(query: str, limit: int) -> Dict[str, Any]:
     """Search for orders using Meilisearch."""
     meili = get_meili_client()
-    results = await meili.search_orders(query, limit)
+    try:
+        results = await meili.search_orders(query, limit)
+    except MeiliUnavailable as exc:
+        # Answered in the conversation as `data_unavailable` by
+        # `execute_tool`, never as "no matches" (L3-04).
+        raise read_fallback.refuse("search", exc)
 
     return {
         "query": query,
@@ -782,7 +792,12 @@ async def _search_order(query: str, limit: int) -> Dict[str, Any]:
 async def _search_product(query: str, limit: int) -> Dict[str, Any]:
     """Search for products using Meilisearch."""
     meili = get_meili_client()
-    results = await meili.search_products(query, limit)
+    try:
+        results = await meili.search_products(query, limit)
+    except MeiliUnavailable as exc:
+        # Answered in the conversation as `data_unavailable` by
+        # `execute_tool`, never as "no matches" (L3-04).
+        raise read_fallback.refuse("search", exc)
 
     return {
         "query": query,

@@ -22,8 +22,11 @@
 -- Both are UNKNOWN, not FAIL, while a job that holds `_heavy_job_lock` is in
 -- its window: the derivation queues behind it by design, and only the log can
 -- say whether the hold is the job or a stall. The windows are the scheduler's
--- own crons (core/scheduler.py), plus the host's Sunday compaction, which
--- stops the containers and is scheduled in UTC.
+-- own crons (core/scheduler.py). Two more stood here until they were retired
+-- and went on excusing a stall (L4-10): the DuckDB backup, 04:30 Kyiv daily
+-- (`db_backup` is not registered since step 14's S14-00), and the host's
+-- Sunday compaction, 02:00 UTC (its cron line went on 2026-10-16, its script
+-- in S14-18).
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
@@ -31,9 +34,7 @@ WITH clock AS (
 heavy (name, isodows, starts, ends, tz) AS (
     VALUES ('weekly full sync',     '{7}'::int[],   time '02:00', time '03:00', 'Europe/Kyiv'),
            ('model training',       '{1,4}'::int[], time '03:30', time '04:30', 'Europe/Kyiv'),
-           ('DuckDB backup',        NULL::int[],    time '04:30', time '05:00', 'Europe/Kyiv'),
-           ('order status refresh', NULL::int[],    time '05:15', time '05:45', 'Europe/Kyiv'),
-           ('Sunday compaction',    '{7}'::int[],   time '02:00', time '03:30', 'UTC')
+           ('order status refresh', NULL::int[],    time '05:15', time '05:45', 'Europe/Kyiv')
 ),
 windows AS (
     SELECT h.name,

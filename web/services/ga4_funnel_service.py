@@ -3,7 +3,8 @@
 Three windows are asked together: the period, the one of equal length just
 before it, and the same dates a year earlier. Each window is two funnels, by
 channel group (whose total row is the whole site) and by device, so a period
-costs six requests run at once.
+costs six requests run at once. Across periods at most ``GA4_CONCURRENCY``
+are in flight, under the Data API's ten concurrent requests per property.
 
 **A small in-process cache, and it exists for GA4's quota.** The standing rule
 is no server-side cache without evidence (CLAUDE.md, "Caching"). GA4 meters
@@ -31,9 +32,10 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import contextlib
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 import time
 from zoneinfo import ZoneInfo
 
@@ -45,6 +47,10 @@ from core import ga4
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 TTL_S = 3600
 MAX_ENTRIES = 32
+#: GA4 requests in flight at once, across every period. The Data API admits
+#: ten concurrent requests per standard property; one period's six still go
+#: side by side under it.
+GA4_CONCURRENCY = 6
 CHANNEL = "sessionDefaultChannelGroup"
 DEVICE = "deviceCategory"
 #: GA4 keeps event data this many months, and funnels are built from events.
@@ -61,12 +67,68 @@ TYPES = ("cold", "warm", "other")
 
 # (start, end) → {"payload": dict, "fetched_at": iso str, "expires_at": monotonic}
 _cache: "OrderedDict[Tuple[date, date], Dict[str, Any]]" = OrderedDict()
-_lock = asyncio.Lock()
+# One lock per period, so two readers of one period ask GA4 once, and a fresh
+# answer for one period never waits behind another period's fetch (L3-05: a
+# cached hit waited 2.97 s behind an unrelated period's six requests, under
+# one module-wide lock). A lock lives while somebody holds it or waits on it,
+# and goes with its last user whatever the fetch did: pruned only after a
+# fetch that succeeded, a period GA4 failed for left its lock behind for as
+# long as GA4 kept failing.
+_locks: "Dict[Tuple[date, date], asyncio.Lock]" = {}
+_lock_users: "Dict[Tuple[date, date], int]" = {}
+# The cap across periods: per-period locks let three uncached periods put
+# eighteen requests in flight at once. Made on the running loop the first time
+# it is asked for there, since an asyncio primitive belongs to one loop.
+_slots: "Optional[Tuple[asyncio.AbstractEventLoop, asyncio.Semaphore]]" = None
 
 
 def _reset_cache() -> None:
     """For tests."""
+    global _slots
     _cache.clear()
+    _locks.clear()
+    _lock_users.clear()
+    _slots = None
+
+
+@contextlib.asynccontextmanager
+async def _period_lock(key: Tuple[date, date]) -> AsyncIterator[None]:
+    """Hold `key`'s lock. The count is taken before the wait and given back
+    after the release, synchronously both times, so a lock is never dropped
+    while a reader waits on it: a reader that came later would make a second
+    one and fetch beside the first."""
+    lock = _locks.get(key)
+    if lock is None:
+        lock = _locks[key] = asyncio.Lock()
+    _lock_users[key] = _lock_users.get(key, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        left = _lock_users[key] - 1
+        if left:
+            _lock_users[key] = left
+        else:
+            del _lock_users[key]
+            del _locks[key]
+
+
+def _ga4_slots() -> asyncio.Semaphore:
+    global _slots
+    loop = asyncio.get_running_loop()
+    if _slots is None or _slots[0] is not loop:
+        _slots = (loop, asyncio.Semaphore(GA4_CONCURRENCY))
+    return _slots[1]
+
+
+def _fresh(key: Tuple[date, date], clock: Callable[[], float]) -> Optional[Dict[str, Any]]:
+    """The cached answer for `key` while it is fresh, else None. Synchronous,
+    so it needs no lock: nothing can interleave with it on the event loop."""
+    cached = _cache.get(key)
+    if cached is not None and clock() < cached["expires_at"]:
+        _cache.move_to_end(key)
+        return {**cached["payload"], "stale": False, "fetched_at": cached["fetched_at"]}
+    return None
 
 
 def channel_type(channel: str) -> str:
@@ -175,8 +237,14 @@ async def _ask(start: date, end: date, client: httpx.AsyncClient, today: date) -
     answers: List[Dict[str, Dict[str, int]]] = []
     if plan:
         token = await ga4.access_token(client)
+        slots = _ga4_slots()
+
+        async def one(s: date, e: date, breakdown: str) -> Dict[str, Dict[str, int]]:
+            async with slots:
+                return await ga4.run_funnel(client, token, s, e, breakdown)
+
         answers = list(await asyncio.gather(*(
-            ga4.run_funnel(client, token, s, e, breakdown) for _, s, e, breakdown in plan
+            one(s, e, breakdown) for _, s, e, breakdown in plan
         )))
     by_channel: Dict[str, Dict[str, Dict[str, int]]] = {w: {} for w in names}
     by_device: Dict[str, Dict[str, Dict[str, int]]] = {w: {} for w in names}
@@ -201,11 +269,16 @@ async def get_funnel(
     """
     key = (start, end)
     day = today or datetime.now(_KYIV_TZ).date()
-    async with _lock:
+    hit = _fresh(key, clock)
+    if hit is not None:
+        return hit
+    async with _period_lock(key):
+        # Asked again under the period's lock: a reader that waited here for
+        # another's fetch of the same period takes its answer.
+        hit = _fresh(key, clock)
+        if hit is not None:
+            return hit
         cached = _cache.get(key)
-        if cached is not None and clock() < cached["expires_at"]:
-            _cache.move_to_end(key)
-            return {**cached["payload"], "stale": False, "fetched_at": cached["fetched_at"]}
         try:
             if client is not None:
                 payload = await _ask(start, end, client, day)

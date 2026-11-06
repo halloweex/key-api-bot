@@ -129,11 +129,9 @@ BOUNDED_VALIDATORS = frozenset({
 EXEMPT = {
     ("GET", "/api/tg-bot/activity", "days"):
         "checked against tg_bot_service.WINDOWS in the body; sent to ks-tg-bot over HTTP",
-    ("POST", "/api/sync/resync", "days"):
-        "the KeyCRM fetch window, computed in Python; never a statement parameter",
-    # The same function under the name it keeps until step 14's final stage.
-    ("POST", "/api/duckdb/resync", "days"):
-        "the KeyCRM fetch window, computed in Python; never a statement parameter",
+    # The resync's `days` was exempt here until L3-10: never a statement
+    # parameter, but days=10**9 overflowed the date arithmetic after the heavy
+    # lock and the catalogue sync. Bounded by FastAPI since.
 }
 
 
@@ -217,3 +215,96 @@ def test_the_walk_sees_parameters_and_every_exemption_exists():
     assert ("GET", "/api/admin/users/{user_id}", "user_id") in seen
     missing = sorted(key for key in EXEMPT if key not in seen)
     assert not missing, f"exemptions that name no parameter: {missing}"
+
+
+# ─── Ids that arrive as text, and ids inside a JSON body (L3-01) ─────────────
+
+# Parsers that turn a comma-separated text parameter into ids bounded to their
+# column (`customers._int_list`, `validate_db_int` on each).
+BOUNDED_LIST_PARSERS = frozenset({"_int_list"})
+
+
+def _list_parsed_names(function) -> typing.Set[str]:
+    """Names passed as the first argument to a bounded list parser."""
+    source = textwrap.dedent(inspect.getsource(inspect.unwrap(function)))
+    return {node.args[0].id for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in BOUNDED_LIST_PARSERS
+            and node.args and isinstance(node.args[0], ast.Name)}
+
+
+def _str_id_parameters():
+    from web.main import app
+
+    for endpoint in iter_endpoints(app):
+        if not endpoint.path.startswith("/api/"):
+            continue
+        annotation_ok = (str, typing.Optional[str])
+        parsed = _list_parsed_names(endpoint.route.endpoint)
+        params = endpoint.route.dependant.query_params
+        # A dependency's own parameters (`_sms_segment_params`) are its own.
+        for dep in endpoint.route.dependant.dependencies:
+            params = list(params) + [(p, dep.call) for p in dep.query_params]
+        for item in params:
+            param, owner = item if isinstance(item, tuple) else (item, endpoint.route.endpoint)
+            annotation = getattr(param.field_info, "annotation", None)
+            if param.name.endswith("_id") and annotation in annotation_ok:
+                yield endpoint.path, param.name, param.name in (
+                    parsed | _list_parsed_names(owner))
+
+
+# Text `*_id` parameters that are not lists of ids, and why.
+STR_ID_EXEMPT = {
+    ("/api/chat/stream", "conversation_id"):
+        "a conversation's key in the chat service's memory; never a statement parameter",
+}
+
+
+def test_every_id_list_in_text_is_bounded():
+    """Mutation: drop `validate_db_int` from `_int_list` is caught by
+    `tests/unit/test_sms_id_lists_bounded.py`; this holds every text `*_id`
+    parameter to a parser that bounds it."""
+    seen = list(_str_id_parameters())
+    assert any(name == "category_id" for _, name, _ in seen), seen
+    unbounded = sorted({f"{path} {name}" for path, name, ok in seen
+                        if not ok and (path, name) not in STR_ID_EXEMPT})
+    assert not unbounded, unbounded
+    assert set(STR_ID_EXEMPT) <= {(path, name) for path, name, _ in seen}
+
+
+def _int_list_fields():
+    """Every `List[int]` field of a pydantic model in the API's modules."""
+    import importlib
+    import pkgutil
+
+    from pydantic import BaseModel
+
+    import web.routes.api as package
+
+    for info in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(f"{package.__name__}.{info.name}")
+        for obj in vars(module).values():
+            if not (isinstance(obj, type) and issubclass(obj, BaseModel)
+                    and obj.__module__ == module.__name__):
+                continue
+            for name, field in obj.model_fields.items():
+                for arg in typing.get_args(field.annotation) or (field.annotation,):
+                    if typing.get_origin(arg) is list:
+                        (item,) = typing.get_args(arg)
+                        if item is int or typing.get_origin(item) is typing.Annotated:
+                            yield f"{module.__name__}.{obj.__name__}.{name}", item
+
+
+def test_every_json_id_list_is_bounded():
+    from pydantic import TypeAdapter, ValidationError
+
+    fields = list(_int_list_fields())
+    assert any(name.endswith("_AudienceGroupParams.category_id") for name, _ in fields)
+    unbounded = []
+    for name, item in fields:
+        try:
+            TypeAdapter(item).validate_python(INT64_MAX)
+            unbounded.append(name)
+        except ValidationError:
+            pass
+    assert not unbounded, unbounded

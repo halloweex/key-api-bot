@@ -160,7 +160,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager; raises the Postgres derivation signal (POST, admin) |
-| `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg, reconciliation_ch — with issues/diffs (за сессией) |
+| `/api/health/data-quality` | Latest run of every watched layer (`data_quality.WATCHED_LAYERS`: integrity, mirror_landing, reconciliation_pg, reconciliation_ch) with its top 20 issues, or diffs for the two reconciliation arms (за сессией) |
 | `/api/warehouse/status` | The Postgres derivation: owed or not, when built, the last journalled run (`cutover` and `duckdb_frozen` went with step 13's switch in step 14's S14-15) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
@@ -1241,8 +1241,12 @@ KeyCRM that answers while nobody orders: the longest such gap in the year
 to 2026-10-29 was 12.2 h, overnight.
 
 The legacy 06:00 `reconciliation_check` is gone (OD-10, 2026-09-30):
-`dq_reconciliation` is the reconciliation. It repairs only the orders we do
-not hold. The one repair only the legacy job made now belongs to
+`dq_reconciliation` is the reconciliation. It re-fetches by id, from the
+Postgres arm's verdict, the orders we do not hold (MISSING_IN_DK) and then
+those we hold wrong (STATUS_DRIFT, VALUE_MISMATCH: a status moved on an order
+created and ordered more than 30 days ago reaches no sync), at most
+`REPAIR_BATCH_LIMIT` a run; never one KeyCRM no longer returns. The one
+repair only the legacy job made now belongs to
 `order_status_refresh` (05:15): an order dated into the last 30 days but
 created before them, whose status or total moved without `updated_at`
 changing. That job re-fetches these orders by id, before 05:30 looks at them.
@@ -1735,8 +1739,8 @@ Cap what rebounds; only delete what stays deleted.
 **Since step 14's S14-12 the job compares Postgres and ClickHouse only**:
 DuckDB's arm (`reconciliation_io.duckdb_orders_in_window`, layer
 `reconciliation`), standing down since chain 3's flip, is deleted, and
-`MISSING_IN_DK` in the Postgres arm's verdict is what the job re-fetches by
-id. History below.
+`MISSING_IN_DK`, `STATUS_DRIFT` and `VALUE_MISMATCH` in the Postgres arm's
+verdict are what the job re-fetches by id. History below.
 
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the

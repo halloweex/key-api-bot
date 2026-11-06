@@ -192,8 +192,61 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
 # (WARN), neither of which is a CRITICAL, so `resolve_group` saw nothing
 # still firing. `ch_silver.GOLD_WATCH_CONDITIONS` is the same hold, one call
 # up in the same job.
-HISTORY_WATCH_CONDITIONS: Tuple[str, ...] = ("ch_history_buckets",)
+# `ch_history_stalled` (L2-02) is judged from the copy's MAX(id) too, so the
+# same run that could not read the copy cannot announce it resolved.
+HISTORY_WATCH_CONDITIONS: Tuple[str, ...] = ("ch_history_buckets", "ch_history_stalled")
 HISTORY_UNREACHABLE = "ch_history_unreachable"
+
+# How long the copy may go without a successful ship, or a version wait to be
+# shipped, before the comparison says the copy has stopped (L2-02): the hourly
+# cadence plus grace, the reconciliation's gate. CRITICAL past a day.
+STALL_WARN_S = 3 * 3600
+STALL_CRITICAL_S = 24 * 3600
+
+
+def _stall(now: datetime, ceiling: int, unshipped, state) -> Optional[IntegrityIssue]:
+    """`ch_history_stalled`, or None (L2-02).
+
+    The buckets are compared below the copy's own MAX(id), so a copy that
+    stopped receiving read as PASS for ever: stopped at 47 000 while Postgres
+    held 52 448, the comparison filed nothing. Judged from Postgres' side of
+    the ship: versions above the copy's ceiling captured more than
+    `STALL_WARN_S` ago, or the archive's state row failing, or without a
+    success for that long."""
+    reasons: List[str] = []
+    age = 0.0
+    waiting = int(unshipped["n"] or 0) if unshipped is not None else 0
+    oldest = unshipped["oldest"] if unshipped is not None else None
+    if waiting and oldest is not None:
+        waited = (now - oldest).total_seconds()
+        if waited > STALL_WARN_S:
+            reasons.append(f"{waiting} version(s) above the copy's MAX(id) {ceiling}, "
+                           f"the oldest captured {waited / 3600:.1f} h ago")
+            age = max(age, waited)
+    last_ok = state["last_ok_at"] if state is not None else None
+    failures = int(state["failures_since_ok"] or 0) if state is not None else 0
+    if failures:
+        reasons.append(f"meta.mirror_state '{STATE_ROW}' counts {failures} failed "
+                       f"ship(s) since the last success")
+    if last_ok is None:
+        reasons.append(f"meta.mirror_state '{STATE_ROW}' records no successful ship")
+    else:
+        since = (now - last_ok).total_seconds()
+        if since > STALL_WARN_S:
+            reasons.append(f"the last successful ship was {since / 3600:.1f} h ago")
+            age = max(age, since)
+    if not reasons:
+        return None
+    description = ("the archive copy has stopped receiving: " + "; ".join(reasons)
+                   + ". The comparison below its MAX(id) cannot see what never "
+                   "arrived; ch_sync ships it, and its error is in meta.mirror_state")
+    if age > STALL_CRITICAL_S:
+        return IntegrityIssue(
+            check_name="ch_history_stalled", table_name=table(),
+            severity=Severity.CRITICAL, count=max(waiting, 1), description=description)
+    return IntegrityIssue(
+        check_name="ch_history_stalled", table_name=table(),
+        severity=Severity.WARN, count=max(waiting, 1), description=description)
 
 
 def history_unverified_conditions(
@@ -242,12 +295,25 @@ async def reconcile_ch_history(*, max_samples: int = 10) -> List[IntegrityIssue]
             "WHERE id <= $1 GROUP BY 1",
             ceiling,
         )
+        unshipped = await conn.fetchrow(
+            "SELECT count(*) AS n, min(captured_at) AS oldest "
+            "FROM app.order_versions WHERE id > $1",
+            ceiling,
+        )
+        state = await conn.fetchrow(
+            "SELECT last_ok_at, failures_since_ok FROM meta.mirror_state "
+            "WHERE table_name = $1",
+            STATE_ROW,
+        )
     pg_buckets = {int(r[0]): int(r[1]) for r in records}
 
     issues: List[IntegrityIssue] = []
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
+    stalled = _stall(now, ceiling, unshipped, state)
+    if stalled is not None:
+        issues.append(stalled)
     if last_heal and (now - last_heal["at"]).total_seconds() < 24 * 3600:
         issues.append(IntegrityIssue(
             check_name="ch_history_selfhealed",

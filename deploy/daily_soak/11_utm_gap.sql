@@ -16,20 +16,15 @@
 -- after the order was mirrored: the 600 s floor, a tick, and slack.
 --
 -- WHAT A FAIL MEANS
--- `missing_past_floor` or `stale_verdict` above zero outside the Sunday
--- compaction window: /traffic is misattributing those orders now. Read the
--- `silver.order_utm` watermark, then DN-04. Inside the compaction window the
--- same counts are UNKNOWN — the web container is down and the ship with it.
+-- `missing_past_floor` or `stale_verdict` above zero: /traffic is
+-- misattributing those orders now. Read the `silver.order_utm` watermark,
+-- then DN-04. Inside the host's Sunday compaction window (02:00-03:30 UTC)
+-- the same counts read UNKNOWN until L4-10: the compaction stopped the web
+-- container, but its cron line was retired on 2026-10-16 and its script
+-- deleted in step 14's S14-18, so nothing stops web there any more.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
-),
-compaction AS (
-    -- Host cron, Sunday 02:00 UTC (scripts/weekly_compact.sh), and the restart after it.
-    SELECT extract(isodow FROM clock.now AT TIME ZONE 'UTC') = 7
-           AND (clock.now AT TIME ZONE 'UTC')::time >= time '02:00'
-           AND (clock.now AT TIME ZONE 'UTC')::time < time '03:30' AS inside
-    FROM clock
 ),
 counts AS (
     SELECT count(*) FILTER (WHERE u.order_id IS NULL
@@ -49,16 +44,11 @@ counts AS (
 SELECT 'UTM gap'::text AS "check",
        CASE
            WHEN counts.missing_past_floor = 0 AND counts.stale_verdict = 0 THEN 'PASS'
-           WHEN compaction.inside THEN 'UNKNOWN'
            ELSE 'FAIL'
        END AS verdict,
-       format('missing past the floor %s%s; missing in flight %s; stale verdicts %s%s',
+       format('missing past the floor %s%s; missing in flight %s; stale verdicts %s',
               counts.missing_past_floor,
               CASE WHEN counts.first_missing IS NOT NULL
                    THEN format(' (lowest order id %s)', counts.first_missing) ELSE '' END,
-              counts.missing_in_flight, counts.stale_verdict,
-              CASE WHEN compaction.inside
-                        AND (counts.missing_past_floor > 0 OR counts.stale_verdict > 0)
-                   THEN ' — inside the Sunday compaction window; re-run after 03:30 UTC'
-                   ELSE '' END) AS detail
-FROM counts CROSS JOIN compaction;
+              counts.missing_in_flight, counts.stale_verdict) AS detail
+FROM counts;
