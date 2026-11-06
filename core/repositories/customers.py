@@ -2669,7 +2669,14 @@ class CustomersMixin:
                        CASE WHEN os.purchased_price > 0
                             THEN os.purchased_price * l.quantity END AS line_cogs
                 FROM {{lines}} l
-                LEFT JOIN {{stocks}} os ON os.sku = l.sku
+                -- One cost row per SKU, as in the audience and in margin: a
+                -- SKU on two offers repeated its lines and both their costs.
+                LEFT JOIN (
+                    SELECT sku, MAX(purchased_price) AS purchased_price
+                    FROM {{stocks}}
+                    WHERE sku IS NOT NULL
+                    GROUP BY sku
+                ) os ON os.sku = l.sku
                 WHERE NOT l.is_return
                   AND l.is_active_source
                   -- From the moment the message went out, not from midnight

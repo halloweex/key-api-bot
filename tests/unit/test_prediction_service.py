@@ -2,7 +2,7 @@
 import json
 import pathlib
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -315,65 +315,144 @@ class TestPredictionServiceInit:
 
 
 # ---------------------------------------------------------------------------
-# predict_range stops at the horizon
+# The trend's forecast is the stored one
 # ---------------------------------------------------------------------------
 
-class TestPredictRangeStopsAtTheHorizon:
-    """`/api/revenue/trend?include_forecast=true` predicts a custom range's
-    future days through `predict_range`: one feature rebuild per day, on the
-    one ML thread training and the forecast job wait for too. Unbounded, a
-    range ending years ahead held that thread for tens of seconds (two years
-    12.7 s, eight 70.5 s, measured). It stops at FORECAST_HORIZON_DAYS, where
-    the dashboard's date picker already stops."""
+class TestTheRangeForecastIsTheStoredOne:
+    """`/api/revenue/trend?include_forecast=true` shows the week, or a custom
+    range's future days, from `revenue_predictions` — what the last training
+    stored — as it shows the month (owner's decision, 2026-11-04). Until then
+    it ran the model on the request (`predict_range`): one feature rebuild
+    per day on the one ML thread training waits for too, over 780 days of
+    Gold read live. Here no model is loaded and running one fails the test,
+    so an answer proves it was never asked."""
 
     TODAY = date(2026, 10, 21)
+    # 22:30 UTC on the 20th is 01:30 on the 21st in Kyiv (EEST): the day the
+    # training ran there, which the UTC date would put a day early.
+    TRAINED = datetime(2026, 10, 20, 22, 30, tzinfo=timezone.utc)
+    METRICS = {"mae": 900.0, "mape": 30.5, "wape": 24.2}
 
     @pytest.fixture
     def service(self, monkeypatch):
         import core.prediction_service as ps
 
-        asked = {}
+        asked = []
+        trained = self.TRAINED
 
-        def predict(model, history, future_dates, dow_corrections, clip_ratio):
-            asked["dates"] = list(future_dates)
-            return [{"date": d.isoformat(), "predicted_revenue": 1.0} for d in future_dates]
+        class Store:
+            async def get_stored_forecast(self, start_date, end_date, sales_type="retail"):
+                asked.append((start_date, end_date, sales_type))
+                if sales_type != "retail":           # the only one trained
+                    return [], None
+                return [{"date": (start_date + timedelta(days=i)).isoformat(),
+                         "predicted_revenue": 1000.0 + i,
+                         "model_mae": 900.0, "model_mape": 30.5, "model_wape": 24.2}
+                        for i in range((end_date - start_date).days + 1)], trained
 
         async def store():
-            return object()
+            return Store()
 
-        async def history(store, sales_type, days_back, exclude_today=True):
-            return pd.DataFrame()
+        def never(*args, **kwargs):
+            raise AssertionError("the model ran on a request")
 
         monkeypatch.setattr(ps, "_today_kyiv", lambda: self.TODAY)
-        monkeypatch.setattr(ps, "_predict_future", predict)
+        monkeypatch.setattr(ps, "_predict_future", never)
         monkeypatch.setattr("core.duckdb_store.get_store", store)
         svc = ps.PredictionService()
-        svc._model = object()
-        monkeypatch.setattr(svc, "_query_daily_revenue", history)
+        monkeypatch.setattr(svc, "_query_daily_revenue", never)
+        assert not svc.is_ready
         return svc, asked
 
     def _days(self, first: int, last: int):
-        return [self.TODAY + timedelta(days=i) for i in range(first, last + 1)]
+        return [(self.TODAY + timedelta(days=i)).isoformat() for i in range(first, last + 1)]
 
     @pytest.mark.asyncio
-    async def test_a_range_past_the_horizon_is_cut_at_it(self, service):
+    async def test_a_week_is_its_days_from_today_on(self, service):
+        svc, asked = service
+        out = await svc.get_range_forecast(self.TODAY - timedelta(days=2),
+                                           self.TODAY + timedelta(days=4))
+        assert asked == [(self.TODAY, self.TODAY + timedelta(days=4), "retail")]
+        assert [p["date"] for p in out["daily_predictions"]] == self._days(0, 4)
+        assert out["predicted_total"] == out["predicted_remaining"] == 5010.0
+
+    @pytest.mark.asyncio
+    async def test_a_range_past_the_horizon_is_read_up_to_it(self, service):
+        """The table holds nothing past it anyway — a training stores sixty
+        days — and the date picker stops there."""
         from core.prediction_service import FORECAST_HORIZON_DAYS
 
         svc, asked = service
-        out = await svc.predict_range(self.TODAY - timedelta(days=5),
-                                      self.TODAY + timedelta(days=400))
-        assert asked["dates"] == self._days(0, FORECAST_HORIZON_DAYS)
+        out = await svc.get_range_forecast(self.TODAY - timedelta(days=5),
+                                           self.TODAY + timedelta(days=400))
+        assert asked == [(self.TODAY, self.TODAY + timedelta(days=FORECAST_HORIZON_DAYS),
+                          "retail")]
         assert len(out["daily_predictions"]) == FORECAST_HORIZON_DAYS + 1
 
     @pytest.mark.asyncio
-    async def test_inside_the_horizon_nothing_changes(self, service):
+    @pytest.mark.parametrize("first,last", [(100, 130), (-10, -1)],
+                             ids=["past-the-horizon", "in-the-past"])
+    async def test_a_range_with_no_day_in_the_window_reads_nothing(self, service, first, last):
         svc, asked = service
-        await svc.predict_range(self.TODAY - timedelta(days=3), self.TODAY + timedelta(days=6))
-        assert asked["dates"] == self._days(0, 6)
+        assert await svc.get_range_forecast(self.TODAY + timedelta(days=first),
+                                            self.TODAY + timedelta(days=last)) is None
+        assert asked == []
 
     @pytest.mark.asyncio
-    async def test_a_range_wholly_past_the_horizon_predicts_nothing(self, service):
+    async def test_a_sales_type_never_trained_has_no_forecast(self, service):
+        """Training is retail's alone (`revenue_prediction_train`). The model
+        used to run over b2b's history all the same, which answered numbers
+        nobody had trained for."""
         svc, asked = service
-        assert await svc.predict_range(self.TODAY + timedelta(days=100),
-                                       self.TODAY + timedelta(days=130)) is None
-        assert "dates" not in asked
+        assert await svc.get_range_forecast(self.TODAY, self.TODAY + timedelta(days=6),
+                                            "b2b") is None
+        assert asked == [(self.TODAY, self.TODAY + timedelta(days=6), "b2b")]
+
+    @pytest.mark.asyncio
+    async def test_its_stamp_and_metrics_are_the_rows_not_the_process(self, service):
+        """A training in this process left its own day and metrics in memory,
+        sixty validation days with them; the rows are what any process can
+        read, and what the forecast shown was made by."""
+        svc, _asked = service
+        svc._metrics = {"mae": 1.0, "mape": 2.0, "wape": 3.0,
+                        "validation_days": [{"date": "2026-08-01"}]}
+        out = await svc.get_range_forecast(self.TODAY, self.TODAY + timedelta(days=6))
+        assert out["last_trained"] == "2026-10-21"
+        assert out["model_metrics"] == self.METRICS
+
+    @pytest.mark.asyncio
+    async def test_the_month_reads_them_from_the_rows_too(self, service, monkeypatch):
+        """`get_forecast`: null and the rows' metrics after every restart
+        until a training, the in-memory dict after one — now the rows."""
+        svc, asked = service
+        svc._metrics = {"mae": 1.0, "validation_days": []}
+        monkeypatch.setattr(svc, "_get_actual_month_revenue",
+                            lambda *a, **k: _value(12_345.0))
+        out = await svc.get_forecast("retail")
+        assert asked[-1][:2] == (self.TODAY, self.TODAY + timedelta(days=60))
+        assert out["last_trained"] == "2026-10-21"
+        assert out["model_metrics"] == self.METRICS
+        assert out["actual_to_date"] == 12_345.0
+
+
+async def _value(value):
+    return value
+
+
+class TestTrainedOn:
+    """`last_trained` is the Kyiv day of the stored stamp, ISO."""
+
+    def test_none_is_none(self):
+        from core.prediction_service import _trained_on
+        assert _trained_on(None) is None
+
+    def test_the_kyiv_day_not_the_utc_one(self):
+        from core.prediction_service import _trained_on
+        assert _trained_on(datetime(2026, 10, 20, 22, 30, tzinfo=timezone.utc)) == "2026-10-21"
+        # Winter time: 23:30 UTC on 1 November is 01:30 on the 2nd (EET).
+        assert _trained_on(datetime(2026, 11, 1, 23, 30, tzinfo=timezone.utc)) == "2026-11-02"
+
+    def test_a_naive_stamp_is_utc(self):
+        from core.prediction_service import _trained_on
+        assert _trained_on(datetime(2026, 11, 2, 1, 30)) == "2026-11-02"
+        assert _trained_on(datetime(2026, 11, 1, 22, 30)) == "2026-11-02"

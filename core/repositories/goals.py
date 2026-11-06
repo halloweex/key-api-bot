@@ -71,8 +71,14 @@ _GOALS_DAILY_FOR_DATES_SQL = """
 # dates go over as `date` objects, never as ISO strings. The sibling method two
 # rows down shipped that bug: DuckDB coerces the string, asyncpg refuses it, and
 # under the flag the read falls back and the tab looks switched while it is not.
+#
+# `created_at` says which training made the rows: each one replaces its whole
+# range under one stamp (`pg_forecast_write.store_predictions`). It is read in
+# the statement that reads the rows, so the stamp cannot belong to a training
+# that committed between two reads.
 _PREDICTIONS_SQL = """
-    SELECT prediction_date, predicted_revenue, model_mae, model_mape, model_wape
+    SELECT prediction_date, predicted_revenue, model_mae, model_mape, model_wape,
+           created_at
     FROM {revenue_predictions}
     WHERE sales_type = ?
       AND prediction_date >= ?
@@ -1408,11 +1414,32 @@ class GoalsMixin:
         them back. It reads only now, through `_goal_tables_run`, from
         Postgres, where chain 7b-3 writes them. This read goes through
         `_goals_run`: Postgres alone since step 14's S14-07.
+
+        The rows of `get_stored_forecast`, without the training's stamp —
+        the answer the goals golden pins.
+        """
+        predictions, _trained_at = await self.get_stored_forecast(
+            start_date, end_date, sales_type)
+        return predictions
+
+    async def get_stored_forecast(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+    ) -> Tuple[List[Dict], Optional[datetime]]:
+        """The stored predictions for a range, and when they were made.
+
+        The second half is the latest `created_at` among the rows: over a
+        range from today on they are one training's, so it is when that
+        training ran — readable by any process, where the stamp a training
+        left in the web process's memory was gone after every restart.
+        None with no rows, or none stamped.
         """
         rows = await self._goals_run(
             _PREDICTIONS_SQL, [sales_type, start_date, end_date])
 
-        return [
+        predictions = [
             {
                 'date': row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
                 'predicted_revenue': float(row[1]),
@@ -1422,6 +1449,8 @@ class GoalsMixin:
             }
             for row in rows
         ]
+        stamps = [row[5] for row in rows if row[5] is not None]
+        return predictions, (max(stamps) if stamps else None)
 
     async def get_daily_revenue_for_dates(
         self,

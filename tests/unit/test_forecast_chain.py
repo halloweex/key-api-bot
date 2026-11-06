@@ -795,7 +795,8 @@ class TestAFailedChainReadIsRefused:
         """Non-vacuity: with Postgres answering, the forecast is read from it."""
         async def fetch(sql, params=()):
             if "revenue_predictions" in sql:
-                return [(date.today(), 1234.0, 1.0, 2.0, 3.0)]
+                return [(date.today(), 1234.0, 1.0, 2.0, 3.0,
+                         datetime(2026, 11, 2, 1, 30, tzinfo=timezone.utc))]
             return [(1000.0,)]
 
         result = _forecast(fetch)

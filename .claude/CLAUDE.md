@@ -119,12 +119,15 @@ the file.
 # bot/config.py
 DEFAULT_TIMEZONE = "Europe/Kyiv"
 RETURN_STATUS_IDS = [15, 18, 19, 21, 22, 23]   # KeyCRM lost/cancel group (6)
-SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify'}
+SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify', 5: 'Виставка'}
 
 # core/duckdb_constants.py
 B2B_MANAGER_ID = 15                             # the wholesale manager
 RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]  # seeds managers.is_retail for NEW rows only
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
+EXHIBITION_SOURCE_ID = 5                        # the fair: sales_type exhibition, whoever staffed it
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)             # what we pull from KeyCRM and reconcile
+REVENUE_SOURCE_IDS = (1, 2, 4, 5)               # what counts as revenue (is_active_source)
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 ```
 
 ## API Endpoints
@@ -175,7 +178,19 @@ GET answers a JSON 404, as does any `/api/` GET no route matches. The SPA
 catch-all used to serve those the shell with a 200, which a script reads as
 success.
 
-**Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+**Query params**: `period` (today/yesterday/week/last_week/month/last_month/last_7_days/last_28_days/all_time) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+
+`all_time` («За весь час», 2026-11-05) runs from `core.filters.HISTORY_START`
+— 2023-12-02, KeyCRM's first order, measured on the 2026-08-31 backup — to
+today. It has nothing before it to compare with (`has_comparison`): its
+previous period is zeros and a year back is two thirds the same orders. So
+the trend reads no comparison, the marketing report and its CSV read neither
+of theirs (`include_comparison=False`, the four dates and both periods
+null), and the page hides the change column of the organic block. The page
+asks the trend `granularity=monthly` for it: one bar a month, labelled
+`MM.YYYY`, never a comparison or a forecast — by day it is a thousand bars
+whose `dd.mm` repeats every year. The GA4 funnel sees 14 months of it and
+says so; the CRM's order count beside it starts at GA4's `earliest` too.
 
 `start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
 `core/filters.parse_period`, and only as a pair: one alone is ignored, and a
@@ -200,9 +215,10 @@ ten years and a week) is a 400 naming `date_range`: four endpoints build one
 list entry per day of the range on web's event loop — the trend, its
 comparison, expenses summary and profit, customer insights — and
 0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON. The trend's
-`include_forecast` predicts at most `FORECAST_HORIZON_DAYS` (60) ahead, where
-the date picker stops; eight years ahead had held the single ML thread for
-70 s.
+`include_forecast` shows at most `FORECAST_HORIZON_DAYS` (60) ahead, where
+the date picker stops. Until 2026-11-04 it ran the model for the week and a
+custom range, and eight years ahead had held the single ML thread for 70 s;
+it reads the stored forecast now (see "Revenue Prediction").
 
 An integer parameter past the width of the column it meets, or a NUL in an
 `/api/` path or query string, is a 400 naming the field. Both used to reach
@@ -249,7 +265,7 @@ meta ──── the store's own bookkeeping
 - `app.manager_classifications` - Who sells retail, wholesale or internally, as of when; only a human knows
 - `app.revenue_predictions`, `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`, `app.revenue_goals` - The forecast and the goals
 - `app.data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
-- `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items; skipped for 30 days so a repair job cannot loop on them forever
+- `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items, so a repair job cannot loop on them forever. The two kinds are skipped differently (`core/pg_orders_read.py`): an id the gap scan found absent upstream is never asked for again (`order_id_gaps` excludes every ledgered id, whatever its age), while an order KeyCRM served without line items is re-fetched by the half-written repair once its `checked_at` is 30 days old (`MISS_RETRY_DAYS`), and each such re-fetch that comes back empty restamps it
 - `app.weekly_report_sends` / `app.traffic_report_sends` - one row per week delivered; what keeps a daily job to one message a week and makes a missed Monday recoverable
 - `app.dashboard_users`, `app.role_permissions` - Access (see "Which tabs one person may open"); `app.authorized_users`, `app.user_preferences` - the bot's
 - `app.sms_campaigns`, `app.sms_campaign_members`, `app.sms_dlr_events`, `app.marketing_optouts` - The SMS campaigns, their rosters, delivery reports and opt-outs
@@ -261,9 +277,9 @@ ClickHouse holds a second copy of Silver and derives its own Gold from it
 (`core/ch_silver.py`, hourly `ch_sync`), the archive of order versions
 (`history.order_versions`) and the cohorts' reads.
 
-**Source filtering:**
-- Included: Instagram (1), Telegram (2), Shopify (4)
-- Excluded: Opencart (3) - deprecated
+**Source filtering** (`REVENUE_SOURCE_IDS`, materialised as Silver's `is_active_source`):
+- Included: Instagram (1), Telegram (2), Shopify (4), Виставка (5) — the exhibition, its own `sales_type`
+- Excluded: Opencart (3) - deprecated; still synced and reconciled (`SYNCED_SOURCE_IDS`), never revenue
 
 ## Deployment
 
@@ -572,8 +588,9 @@ What does exist:
 - **Performance** (6-fold walk-forward CV): WAPE=27.66%, R²=0.066, beats best baseline by 1.53%
 - Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no model artefact on disk
 - Predictions stored in Postgres `app.revenue_predictions`, written by chain 7b-3 (DuckDB's `revenue_predictions` until it latched)
-- Frontend shows forecast bars (lighter opacity) on Revenue Trend chart when period=month
-- "Predicted: ₴X" badge in chart header
+- Frontend shows forecast bars (lighter opacity) on Revenue Trend chart for the month, the week and a custom range with future days
+- **Every forecast a page shows is read from `revenue_predictions`; no request runs the model** (owner's decision, 2026-11-04 — the Rust council's decision 6). It is as of the last training (Mon/Thu), retail only — b2b and the other sales types show none — and `last_trained` (the Kyiv day of the rows' `created_at`) and `model_metrics` come from the same rows, so any process, the Rust read API included, can answer it. Until then the week and a custom range ran the model on the request over 780 days of Gold, and `last_trained` came from web's memory — null after every restart, until the next training
+- "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
 - Graceful degradation: chart works normally if model unavailable
 - Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches
 - **Known limitation**: Thu/Fri have ~₴30K underprediction bias due to bimodal distribution (promo spike days ₴300-600K are unpredictable from lagged features)
@@ -627,11 +644,17 @@ projection (`core.warehouse_sql.silver_select_sql`, derived by
 13), and every dashboard endpoint defaults to `Query("retail")`:
 
 ```
+source_id = EXHIBITION_SOURCE_ID (5)      → exhibition (the fair, whoever staffed it)
 manager_id IS NULL                        → retail    (Shopify, no manager)
 manager_id = B2B_MANAGER_ID               → b2b       (the wholesale manager)
 manager_id in managers.is_retail = TRUE   → retail
 otherwise                                 → internal
 ```
+
+The exhibition branch is first on purpose: the fair was staffed by a retail
+manager, so a manager-based rule would pull a one-off channel into the retail
+trend it would distort. It counts as revenue (source 5 is in
+`REVENUE_SOURCE_IDS`) and is not gated like `internal`.
 
 **Retail is a fixed list of retail managers and b2b is the wholesale manager;
 nobody else is mixed into either.** `internal` is everyone else — staff whose
@@ -2328,8 +2351,14 @@ derived, переезд стоит одну пересборку.
 Шаг 4 (копия голда) превзойдён и оставлен фолбэком. Часовой `ch_sync` теперь:
 `core/ch_silver.py` отгружает **silver целиком** (staging + EXCHANGE, копия —
 допуск ноль на круге) и **деривит gold внутри ClickHouse** из этого silver;
-`core/ch_history.py` дописывает `history.order_versions` поверх собственного
-`MAX(id)` (append-only, курсора нет — вотермарка читается из самого CH).
+`core/ch_history.py` дописывает в `history.order_versions` разность множеств
+id — всё, что есть в `app.order_versions` и чего нет в копии (`ship_history`:
+append-only, курсора нет, а не «поверх собственного `MAX(id)`»: BIGSERIAL
+коммитится не по порядку, и отгрузка выше `MAX(id)` навсегда пропустила бы
+версию, закоммиченную после большей). Строка, потерянная копией ниже её
+`MAX(id)`, поэтому доезжает следующей же отгрузкой, с WARNING в логе и
+INFO `ch_history_selfhealed` в суточной сверке следующих 24 ч (память
+процесса: перезапуск web её теряет).
 
 **Третьего диалекта мер нет** — и это снимает возражение И1: `GOLD_MEASURES`
 написаны как `COUNT(DISTINCT CASE WHEN …)` / `COALESCE(SUM(CASE …), 0)`, и
@@ -2341,8 +2370,11 @@ ClickHouse».
 Суточный вердикт в `dq_mirror_landing`: круг silver (ноль), **gold двух
 движков друг против друга** — независимые агрегации одного silver, ноль
 всюду, кроме документированного цента на `avg_order_value` (движки по-разному
-делят DECIMAL), — и бакеты архива (ноль ниже вотермарки; находка о потерянной
-строке **не лечится** — архив чинит человек). Проверено на живой паре
+делят DECIMAL), — и бакеты архива (ноль ниже вотермарки; сама сверка ничего
+не чинит: потерянную ниже вотермарки строку довозит следующая часовая
+отгрузка по разнице id, и тогда сверка пишет INFO `ch_history_selfhealed`
+вместо CRITICAL; человек нужен, только если бакет длиннее, чем в Postgres,
+или версию потерял и сам Postgres). Проверено на живой паре
 PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движках, **0
 расхождений**, включая 374 дня, где uniqExact-свёртка законно не равна сумме
 мелких строк; сверка 0.7 с; архив — 12 000 унаследовано + 40 инкрементом,

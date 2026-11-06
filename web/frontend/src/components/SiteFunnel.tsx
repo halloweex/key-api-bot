@@ -539,7 +539,9 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
   const [picked, setPicked] = useState<Against>('previous')
   const period = data.periods.current
   const now = data.total.current
-  const orders = useSiteOrders(period.start, period.end)
+  // The CRM's orders over the days GA4 counted: a period reaching before
+  // `earliest` (the whole history does) has funnels for its tail alone.
+  const orders = useSiteOrders(period.start < data.earliest ? data.earliest : period.start, period.end)
   const today = kyivToday()
   const since = formatDay(data.earliest, { month: 'long' })
 

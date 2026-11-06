@@ -317,14 +317,17 @@ async def reclassify_traffic(
 ):
     """Re-parse ALL UTM data with current classification rules (admin only).
 
-    Use after classification rule changes. Deletes silver_order_utm
-    and re-parses everything from scratch.
+    Use after classification rule changes. Runs `pg_utm_parse.parse_full`
+    through `reparse_router`: every commented order in `bronze.orders` is
+    re-parsed, and `silver.order_utm` is replaced whole — a `DELETE` of every
+    row and the re-parsed verdicts inserted, in one transaction. A result that
+    would shrink the table under `FULL_PARSE_FLOOR_PCT` of its rows is refused
+    (409) and the table keeps what it holds.
 
-    **A 504 in the browser is expected and does not mean it failed.** The work
-    is synchronous and longer than any proxy will wait: 2026-09-09 it took
-    **281 s** for 32,966 orders, while nginx gave up well before that and
-    served the "warming up" page. The application still finished and returned
-    200. Read the outcome in the log, not in the response:
+    **A 504 in the browser does not mean it failed.** The work is synchronous,
+    and a proxy that gives up first serves its own error page while the
+    application finishes and returns 200. Read the outcome in the log, not in
+    the response:
 
         docker compose logs web | grep -E "Order UTM parsed in Postgres|reclassify"
 

@@ -7,15 +7,15 @@ accruing anyway — see below.
 
 **There is deliberately no percentage-growth alert here.** There was one,
 and it could not work. The weekly compact (`scripts/weekly_compact.sh`,
-Sunday 02:00 UTC) rebuilds the DB from Parquet and drops it to ~80 MB, so
-the 24h-ago baseline resets every week. Against a baseline that small a
-perfectly healthy +620 MB/day reads as +456% on Monday and +33.7% by
+Sunday 02:00 UTC) rebuilt the DuckDB file from Parquet and dropped it to
+~80 MB, so the 24h-ago baseline reset every week. Against a baseline that
+small a perfectly healthy +620 MB/day read as +456% on Monday and +33.7% by
 Wednesday: the same measured rate, with a deceleration manufactured
 entirely by the denominator. Ten consecutive real samples in August 2026
 varied by ±6% as MB/day and by 1350% as reported percentages.
 
 To read below the old 10% WARN line the baseline had to exceed 6300 MB.
-The weekly pre-compact peak is 4.4 GB. So the check could not return "OK"
+The weekly pre-compact peak was 4.4 GB. So the check could not return "OK"
 at any point in any week — 15 CRITICAL, 9 WARN and 0 quiet evaluations
 per week, by construction, forever. The better the compact worked, the
 lower the floor and the louder the false alarm. It ran that way for
@@ -25,8 +25,15 @@ files alongside it that `sample_disk_state` does not look at.
 
 Its replacement is absolute growth measured over a whole directory with
 per-path attribution, so an alert can name what grew. That is written and
-live — `evaluate_dir_growth` below, differenced at the compact's own 168h
-period so the sawtooth cancels and only trend survives.
+live — `evaluate_dir_growth` below, differenced at 168 h, the compact's own
+period, so the sawtooth cancelled and only trend survived.
+
+The compaction is history: its cron line was retired on 2026-10-16, when
+the week of silence began, and step 14's S14-18 deleted the script and
+`scripts/compact_duckdb.py`, so its sawtooth is gone from the samples. The
+lag, the floor and every threshold below are kept as they were chosen
+against it — a week-over-week difference still reads trend — and were not
+re-derived.
 
 It reaches past the directory as well. Only `./data` and `./logs` are
 mounted into this container, so three of the largest things on the host
@@ -48,10 +55,12 @@ from core.data_quality import Severity
 
 # Thresholds — tuned for the 75 GB Hetzner host.
 #
-# 90% of 75 GB leaves 7.5 GB free, and the compact needs
-# `source × 0.50 + 1.0 GB` (compact_duckdb.compute_disk_requirements) —
-# ~3.2 GB at the current 4.4 GB weekly peak. So CRITICAL still leaves room
-# to compact our way out.
+# Chosen while the weekly compaction ran: 90% of 75 GB leaves 7.5 GB free,
+# and the compact needed `source × 0.50 + 1.0 GB`
+# (compact_duckdb.compute_disk_requirements) — ~3.2 GB at the 4.4 GB weekly
+# peak of the time. So CRITICAL left room to compact our way out. The
+# compaction and that function went in step 14's S14-18; the line is kept as
+# it was, not re-derived.
 #
 # An earlier comment here justified the 90% line against an empirical
 # "compact preflight needs 22 GB free". That number was
@@ -233,12 +242,15 @@ def prune_cutoff(retention_days: int, now: Optional[datetime] = None) -> datetim
 # changed. An alert that cannot say *what* grew is worse than none, because it
 # sends the reader somewhere specific and wrong.
 #
-# **It compares at the signal's own period.** The compact runs weekly, so the
-# sawtooth is cron-locked to 168 hours. Differencing at exactly that lag cancels
-# everything periodic and leaves only trend, which is the quantity anyone
-# actually wants. That is why this survived a change of retention policy while
-# a threshold derived from a fixed disk budget did not: ratios to a trailing
-# window and differences at the signal's period travel; budgets do not.
+# **It compared at the signal's own period.** The compact ran weekly, so the
+# sawtooth was cron-locked to 168 hours. Differencing at exactly that lag
+# cancelled everything periodic and left only trend, which is the quantity
+# anyone actually wants. That is why this survived a change of retention policy
+# while a threshold derived from a fixed disk budget did not: ratios to a
+# trailing window and differences at the signal's period travel; budgets do
+# not. The compaction is gone (retired 2026-10-16, deleted in S14-18) and the
+# 168 h lag stays: without its sawtooth it is a week-over-week difference,
+# which still cancels anything else that recurs weekly.
 
 # Path groups. Deliberately coarse — the point is to name a culprit, not to
 # itemise. `other` is the catch-all that makes the parts sum to the total, so a
@@ -257,9 +269,10 @@ def _classify_path(name: str) -> str:
     return "other"
 
 
-# Week-over-week drift on a healthy system is business growth: pre-compact peaks
-# moved 3.3 → 4.4 GB over ten weeks, and under the current retention the
-# residual footprint drift is ≈ +0.22 GB/week. These are 3.4x and 9x that.
+# Week-over-week drift on a healthy system is business growth. Measured while
+# the compaction ran: pre-compact peaks moved 3.3 → 4.4 GB over ten weeks, and
+# under the retention of the time the residual footprint drift was
+# ≈ +0.22 GB/week. These are 3.4x and 9x that.
 #
 # Sized to catch a step change, not a trend. The 2026-08-05 event was +8.93 GB
 # in an afternoon: 12x the CRITICAL line, detected at the next 6-hourly sample
@@ -391,7 +404,8 @@ def evaluate_dir_growth(
 
     Returns:
         GrowthAlert when the total grew past a threshold, else None. Shrinkage
-        is never an alert: that is the compact, or a prune, doing its job.
+        is never an alert: that is a prune doing its job (and the weekly
+        compact, while it ran).
     """
     if not baseline:
         return None

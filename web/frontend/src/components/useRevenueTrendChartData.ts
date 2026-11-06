@@ -49,7 +49,8 @@ export function useChartData(
       const change = revenue - prevRevenue
       const changePercent = prevRevenue > 0 ? (change / prevRevenue) * 100 : 0
 
-      const shortDate = label.length > 6 ? label.slice(0, 6) : label
+      // A month's `MM.YYYY` is whole; the cut is for long day labels.
+      const shortDate = data.granularity !== 'monthly' && label.length > 6 ? label.slice(0, 6) : label
 
       const isPeak = topPeakIndices.has(index)
 

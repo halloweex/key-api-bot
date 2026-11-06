@@ -13,16 +13,21 @@ WHY IT IS A MODULE AND NOT TWO METHODS ON THE MIXIN
 
 It lived as two static methods on `TrafficMixin` (`core/repositories/traffic.py`)
 until DN-15, step 9a of the DuckDB exit. They were already pure — `re` and
-nothing else, no store, no clock — so moving them costs nothing, and three
-readers need them without a DuckDB store in hand:
+nothing else, no store, no clock — so moving them cost nothing, and the
+readers needed them without a DuckDB store in hand. Today they are:
 
-- the mixin itself, which still parses in the warehouse tick and the four
-  re-parse doors, and now delegates here;
+- the Postgres parse (`core/pg_utm_parse.py`, step 9b, DN-18), which reads
+  `bronze.orders` as the derivation's last step and for the four re-parse
+  doors, and calls `utm_columns`;
 - `scripts/utm_reclassify_dryrun.py`, which recomputes every stored verdict in
   memory to say what a reclassify would move before anybody runs one;
-- the Postgres parse of step 9b (DN-18), which will read `bronze.orders`
-  instead of DuckDB's `orders` and must reach the same verdict on the same
-  comment.
+- the tab's reads on `TrafficMixin` (`core/repositories/traffic.py`), which
+  name channels from the stored tags (`tab_platform`, `organic_channel`,
+  `organic_detail`, `first_order_channel`) and keep the two moved methods
+  bound under their old names for existing callers.
+
+The mixin itself parsed DuckDB's `orders` in the warehouse tick and the four
+doors, delegating here, until step 14's S14-15 deleted that parse.
 
 Moved verbatim. `tests/unit/test_utm_classify_golden.py` holds the outputs the
 methods produced before the move, frozen as literals, and fails on any change

@@ -2,6 +2,23 @@ import type { Period } from '../types/filters'
 import { addDays, isIsoDate, kyivToday } from './smsDates'
 
 /**
+ * The first day the store holds an order, where `all_time` starts:
+ * `core/filters.HISTORY_START`, which says how it was measured.
+ * `tests/unit/test_period_all_time.py` holds the two equal.
+ */
+export const HISTORY_START = '2023-12-02'
+
+/**
+ * Whether a period has anything before it to be compared with —
+ * `core/filters.has_comparison`. The whole history does not: its previous
+ * period is all before the first order, and a year back is mostly the same
+ * orders. Blocks that set a period beside another hide that half for it.
+ */
+export function hasComparison(period: Period): boolean {
+  return period !== 'all_time'
+}
+
+/**
  * The days a period covers, as the server counts them.
  *
  * A transliteration of `core/filters.parse_period`, in Kyiv dates: a week
@@ -44,6 +61,8 @@ export function periodDates(
       return { start: addDays(today, -6), end: today }
     case 'last_28_days':
       return { start: addDays(today, -27), end: today }
+    case 'all_time':
+      return { start: HISTORY_START, end: today }
     case 'custom':
       return isIsoDate(startDate) && isIsoDate(endDate) ? { start: startDate, end: endDate } : null
   }
