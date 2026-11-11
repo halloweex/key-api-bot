@@ -8,10 +8,8 @@ complete.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import duckdb
 import pytest
 
-from core.data_quality import Severity, _orders_without_line_items_check
 from core.sync_service import SyncService
 
 
@@ -53,7 +51,10 @@ class TestRepairOrders:
         assert upserted.kwargs["force_update"] is True
 
     @pytest.mark.asyncio
-    async def test_marks_the_warehouse_dirty_for_the_repaired_ids(self):
+    async def test_marks_no_duckdb_warehouse(self):
+        """It marked DuckDB's warehouse dirty for the repaired ids until step
+        14's S14-15 — a no-op since step 13. Chain 3's writer raises the
+        Postgres derivation's signal in the order's own transaction."""
         service = _service()
         service._upsert_orders_with_expenses = AsyncMock(return_value=(1, 0))
         client = _client({7: {"id": 7}})
@@ -61,7 +62,7 @@ class TestRepairOrders:
         with patch("core.sync_service.get_async_client", AsyncMock(return_value=client)):
             await service.repair_orders([7])
 
-        service.store.mark_warehouse_dirty.assert_awaited_once_with([7])
+        service.store.mark_warehouse_dirty.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_one_failing_order_does_not_lose_the_others(self):
@@ -127,86 +128,11 @@ class TestRepairOrders:
         client.get_order.assert_not_awaited()
 
 
-class TestOrdersWithoutLineItemsCheck:
-    @pytest.fixture
-    def conn(self):
-        c = duckdb.connect(":memory:")
-        c.execute("""
-            CREATE TABLE orders (id BIGINT, grand_total DECIMAL(12,2));
-            CREATE TABLE order_products (order_id BIGINT, quantity INTEGER);
-        """)
-        yield c
-        c.close()
-
-    def test_reports_orders_with_revenue_and_no_products(self, conn):
-        conn.execute("""
-            INSERT INTO orders VALUES (1, 500.00), (2, 300.00), (3, 100.00);
-            INSERT INTO order_products VALUES (3, 1);
-        """)
-        issues = _orders_without_line_items_check(conn)
-
-        assert len(issues) == 1
-        assert issues[0].count == 2
-        assert issues[0].check_name == "orders_without_line_items"
-        assert issues[0].severity == Severity.WARN
-        assert issues[0].sample_ids == (1, 2)
-        assert "800.00" in issues[0].description
-
-    def test_zero_value_orders_are_not_flagged(self, conn):
-        """An order billed at nothing having sold nothing is coherent."""
-        conn.execute("INSERT INTO orders VALUES (1, 0.00)")
-
-        assert _orders_without_line_items_check(conn) == []
-
-    def test_clean_data_reports_nothing(self, conn):
-        conn.execute("""
-            INSERT INTO orders VALUES (1, 500.00);
-            INSERT INTO order_products VALUES (1, 2);
-        """)
-
-        assert _orders_without_line_items_check(conn) == []
-
-    def test_an_order_with_several_lines_counts_once(self, conn):
-        conn.execute("""
-            INSERT INTO orders VALUES (1, 500.00), (2, 200.00);
-            INSERT INTO order_products VALUES (1, 1), (1, 2), (1, 3);
-        """)
-        issues = _orders_without_line_items_check(conn)
-
-        assert issues[0].count == 1
-        assert issues[0].sample_ids == (2,)
-
-
 class TestIntegrityScanSurvivesAMissingTable:
-    """`/warehouse/rebuild-silver` DROPs silver_orders; the 6-hourly scan can
-    land inside that window. The handler written to tolerate it referenced a
-    logger the module never imported, so it raised NameError and took the whole
-    scan down with it — including every check that had nothing to do with
-    silver_orders."""
-
-    def test_no_silver_orders_table_is_tolerated(self):
-        import duckdb
-
-        from core.data_quality import check_internal_integrity
-
-        conn = duckdb.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE orders (id BIGINT, ordered_at TIMESTAMPTZ,
-                                 source_id INTEGER, status_id INTEGER,
-                                 grand_total DOUBLE);
-            CREATE TABLE order_products (id BIGINT, order_id BIGINT,
-                                         product_id BIGINT, price_sold DOUBLE,
-                                         quantity INTEGER);
-            CREATE TABLE products (id BIGINT);
-            CREATE TABLE buyers (id BIGINT);
-            CREATE TABLE categories (id BIGINT);
-            CREATE TABLE sync_metadata (key VARCHAR, value VARCHAR);
-        """)
-
-        issues = check_internal_integrity(conn)
-
-        assert isinstance(issues, list)
-        conn.close()
+    """`/warehouse/rebuild-silver` DROPped silver_orders while the DuckDB scan
+    could land inside that window, and the handler written to tolerate it
+    referenced a logger the module never imported. The scan reads no DuckDB
+    table since step 14's S14-14; the name it needed stays named."""
 
     def test_the_module_has_a_logger(self):
         """The bug was a name that did not exist, so name it in a test."""
@@ -216,11 +142,12 @@ class TestIntegrityScanSurvivesAMissingTable:
 
 
 class TestTheWriteRunsUnderTheHeavyLock:
-    """The lock covers the upsert and the dirty mark — never the per-id
-    fetches, which would hold the sync up for a batch of HTTP calls."""
+    """The lock covers the upsert — never the per-id fetches, which would hold
+    the sync up for a batch of HTTP calls. (It covered DuckDB's dirty mark
+    too, until step 14's S14-15 deleted the mark.)"""
 
     @pytest.mark.asyncio
-    async def test_fetch_outside_write_and_mark_inside(self):
+    async def test_fetch_outside_and_write_inside(self):
         import asyncio
 
         lock = asyncio.Lock()
@@ -235,17 +162,13 @@ class TestTheWriteRunsUnderTheHeavyLock:
             seen["upsert"] = lock.locked()
             return (len(orders), 0)
 
-        async def _mark(ids):
-            seen["mark"] = lock.locked()
-
         client = MagicMock()
         client.get_order = AsyncMock(side_effect=_get_order)
         service._upsert_orders_with_expenses = AsyncMock(side_effect=_upsert)
-        service.store.mark_warehouse_dirty = AsyncMock(side_effect=_mark)
 
         with patch("core.sync_service.get_async_client", AsyncMock(return_value=client)):
             result = await service.repair_orders([5], lock=lock)
 
         assert result["repaired"] == 1
-        assert seen == {"fetch": False, "upsert": True, "mark": True}
+        assert seen == {"fetch": False, "upsert": True}
         assert not lock.locked()

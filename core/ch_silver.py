@@ -2,9 +2,11 @@
 
 Step 5 of «Одна бронза», and the step where ClickHouse stops being a copy:
 
-  1. `silver.orders` ships from Postgres whole — staging + EXCHANGE,
-     `ch_gold`'s shape — and is verified as a round trip, tolerance zero,
-     because a copy that differs is a defect in the copy.
+  1. `silver.orders` ships from Postgres whole — into a staging table,
+     swapped in by one `EXCHANGE TABLES` only when the row count matches, so
+     a reader never sees a half-shipped table — and is verified as a round
+     trip, tolerance zero, because a copy that differs is a defect in the
+     copy.
   2. `gold.daily_revenue` is then DERIVED inside ClickHouse from that silver,
      both grains, and compared against the Gold Postgres computed from the
      same rows. That comparison is the page's «сверка навсегда» line: two
@@ -214,6 +216,10 @@ async def ch_silver_sync() -> Dict[str, Any]:
 
     if not configured():
         return {"skipped": f"{URL_ENV} is not set"}
+    # Which state row a failure belongs to: the silver ship's until it is
+    # marked OK, then Gold's derivation's. Recorded against Silver alone, a
+    # Gold that stopped deriving read as fresh (A17).
+    stage = SILVER_STATE
     try:
         # Under PG_LAYER_LOCK for two of the review's races: the hourly tick
         # and the daily reconciliation both drive TRUNCATE/EXCHANGE on the
@@ -223,6 +229,7 @@ async def ch_silver_sync() -> Dict[str, Any]:
             rows = await _fetch_pg_silver()
             await _ship_silver_rows(rows)
             await _mark_ok(SILVER_STATE, len(rows))
+            stage = GOLD_STATE
             gold_rows = await _derive_gold()
             await _mark_ok(GOLD_STATE, gold_rows)
         logger.info(
@@ -233,7 +240,7 @@ async def ch_silver_sync() -> Dict[str, Any]:
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"
         logger.error("ch_silver: sync failed: %s", detail)
-        await _mark_failed(SILVER_STATE, detail)
+        await _mark_failed(stage, detail)
         return {"error": detail}
 
 
@@ -244,6 +251,17 @@ async def ch_silver_sync() -> Dict[str, Any]:
 
 def _key3(row: Tuple[Any, ...]) -> Tuple[Any, Any, Any]:
     return (row[0], row[1], row[2])
+
+
+def _cell_order(key: Tuple[Any, Any, Any]) -> Tuple[Any, Any, int]:
+    """How cells sort, the roll-up (`source_id` NULL) first in its day.
+
+    Python cannot order `None` against an `int`, and a real divergence
+    between the engines touches a day's fine rows and its roll-up together —
+    so sorting the raw keys raised `TypeError` on exactly the shape this
+    comparison exists for, and the run filed `gold_values_unwatched` in place
+    of the finding (L2-01)."""
+    return (key[0], key[1], -1 if key[2] is None else key[2])
 
 
 def compare_gold_cells(
@@ -265,8 +283,8 @@ def compare_gold_cells(
     columns = GOLD_COLUMNS
     avg_i = columns.index("avg_order_value")
 
-    missing = sorted(k for k in want if k not in got)
-    extra = sorted(k for k in got if k not in want)
+    missing = sorted((k for k in want if k not in got), key=_cell_order)
+    extra = sorted((k for k in got if k not in want), key=_cell_order)
     differing = []
     detail = ""
     for k, pg_row in want.items():
@@ -310,7 +328,7 @@ def compare_gold_cells(
             ),
         ))
     if differing:
-        differing.sort()
+        differing.sort(key=_cell_order)
         issues.append(IntegrityIssue(
             check_name="ch_engines_gold_mismatch",
             table_name=GOLD_TABLE, severity=Severity.CRITICAL,
@@ -370,10 +388,10 @@ async def _fetch_pg_gold_cells() -> List[Tuple[Any, ...]]:
 #   files those two, since a raise leaves nothing to return here);
 # - both engines' Gold came back empty, which compares nothing.
 #
-# WARN while DuckDB's own Gold is still compared against Postgres', CRITICAL
-# once it is not (`warehouse_checks_stand_down`: Postgres alone derives, or the
-# way back is still holding DuckDB's comparisons down) — then this is the only
-# independent check left, and a day without it is a day nobody checked Gold.
+# CRITICAL: this is the only independent check of Gold, and a day without it
+# is a day nobody checked Gold. (WARN while DuckDB's own Gold was still
+# compared against Postgres', until step 13; step 14's S14-12 deleted that
+# comparison and the predicate.)
 GOLD_UNWATCHED = "gold_values_unwatched"
 
 # What only this comparison re-examines. A run that did not compare cannot
@@ -386,34 +404,20 @@ GOLD_WATCH_CONDITIONS: Tuple[str, ...] = (
 )
 
 
-def gold_unwatched_severity() -> Severity:
-    """CRITICAL exactly when the mirror-landing job does not compare DuckDB's
-    Gold with Postgres' — the predicate it stands `reconcile_gold` down on.
-    A predicate that cannot be read is CRITICAL too: nothing then shows that
-    another engine looked, and the finding must still be filed."""
-    try:
-        from core import warehouse_cutover
-
-        stood_down = warehouse_cutover.warehouse_checks_stand_down()
-    except Exception:  # noqa: BLE001 — unknown is not "DuckDB still compares"
-        logger.exception("gold_values_unwatched: cannot tell who derives Gold")
-        return Severity.CRITICAL
-    return Severity.CRITICAL if stood_down else Severity.WARN
-
-
 def gold_values_unwatched(reason: str) -> IntegrityIssue:
-    """The finding for a run in which ClickHouse did not re-aggregate Gold."""
-    severity = gold_unwatched_severity()
+    """The finding for a run in which ClickHouse did not re-aggregate Gold.
+
+    CRITICAL, always: ClickHouse's derivation is the only independent check of
+    Postgres' Gold (OD-08 (a)). Until step 14's S14-12 it was WARN while
+    DuckDB's Gold was still compared against Postgres' — never, since step 13
+    stood that comparison down, and S14-12 deleted it."""
     alone = (
-        "Postgres alone derives Gold and DuckDB's comparison stands down, so "
-        "no second engine checked a single Gold value this run"
-        if severity is Severity.CRITICAL else
-        "DuckDB's Gold was still compared against Postgres'; after step 13 "
-        "this would be the only independent check"
+        "Postgres alone derives Gold, so no second engine checked a single "
+        "Gold value this run"
     )
     return IntegrityIssue(
         check_name="gold_values_unwatched",
-        table_name=GOLD_TABLE, severity=severity, count=1,
+        table_name=GOLD_TABLE, severity=Severity.CRITICAL, count=1,
         description=(
             f"ClickHouse did not re-aggregate Gold this run: {reason}. {alone}. "
             f"{', '.join(GOLD_WATCH_CONDITIONS)} are held as they were, not "
@@ -432,10 +436,11 @@ def gold_unverified_conditions(issues: Sequence[IntegrityIssue]) -> List[str]:
 
 async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]:
     """The daily ClickHouse verdict: ship, round-trip silver, then set the two
-    engines' Gold against each other. `ch_gold.reconcile_ch_gold`'s contract:
-    WARNs instead of raising — an unreachable store must not silence the other
-    comparisons in this layer. Not silently any more: every run that did not
-    compare files `gold_values_unwatched` beside its cause (OD-08).
+    engines' Gold against each other. Its contract: a ClickHouse that cannot
+    be reached is a WARN, never an exception — an unreachable store must not
+    silence the other comparisons in this layer. Not silently any more: every
+    run that did not compare files `gold_values_unwatched` beside its cause
+    (OD-08).
 
     The whole body runs under PG_LAYER_LOCK, and the reason is the review's
     sharpest finding: without it, a silver rebuild committing between "fetch
@@ -451,15 +456,17 @@ async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]
         return [gold_values_unwatched(f"{URL_ENV} is not set")]
 
     async with PG_LAYER_LOCK:
+        stage = SILVER_STATE           # whose row a failure is (`ch_silver_sync`)
         try:
             shipped = await _fetch_pg_silver()
             await _ship_silver_rows(shipped)
             await _mark_ok(SILVER_STATE, len(shipped))
+            stage = GOLD_STATE
             gold_rows = await _derive_gold()
             await _mark_ok(GOLD_STATE, gold_rows)
         except Exception as e:
             detail = f"{type(e).__name__}: {e}"
-            await _mark_failed(SILVER_STATE, detail)
+            await _mark_failed(stage, detail)
             return [IntegrityIssue(
                 check_name="ch_silver_sync_failed",
                 table_name=SILVER_TABLE, severity=Severity.WARN, count=1,

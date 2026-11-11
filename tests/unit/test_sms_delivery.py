@@ -3,31 +3,41 @@
 The behaviours worth pinning are the ones that quietly corrupt a measurement:
 messaging the control arm, re-selecting someone who opted out, and treating a
 not-yet-reported delivery as a failure.
+
+On Postgres, `/sms`'s one store since step 14's S14-08 (they ran on DuckDB
+until then; `tests/integration/pg_sms_seed.py`). The store tests are skipped
+without `KS_PG_DSN`. One test here is DuckDB's own: the file's schema
+migration adding the delivery columns, which stays while the DuckDB store
+does (step 14's S14-18).
 """
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
 from core.repositories.customers import DlrEventRebound
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import as_tuple, pg_conn
+
+# The DuckDB file's own schema, not `/sms`'s store: run on DuckDB.
+_DUCKDB_SCHEMA_TESTS = {"test_delivery_columns_are_added_to_a_pre_existing_table"}
 
 
-@pytest.fixture(autouse=True)
-def _sms_on_duckdb(monkeypatch):
-    """This module's engine is DuckDB, as it was before step 14's S14-00 made
-    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(request, monkeypatch):
+    if request.node.name in _DUCKDB_SCHEMA_TESTS:
+        yield
+        return
+    async with pg_sms_seed.for_async_tests(request, monkeypatch):
+        yield
 
 SENT = datetime(2026, 8, 10, 9, 0)
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    return store
+    return pg_sms_seed.store(tmp_path, "test.duckdb")
 
 
 def _member(buyer_id: int, assignment: str, tier: str = "CORE") -> dict:
@@ -63,7 +73,6 @@ async def test_only_the_target_arm_is_returned_for_sending(tmp_path):
     targets = await store.get_sms_campaign_targets("aug")
 
     assert {t["buyerId"] for t in targets} == {1, 2}
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -75,7 +84,6 @@ async def test_sending_twice_is_refused(tmp_path):
     with pytest.raises(ValueError, match="already sent"):
         await store.get_sms_campaign_targets("aug")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -83,7 +91,6 @@ async def test_unknown_campaign_has_no_targets(tmp_path):
     store = await _make_store(tmp_path)
     with pytest.raises(ValueError, match="not frozen"):
         await store.get_sms_campaign_targets("nope")
-    await store.close()
 
 
 # ─── recording the gateway's answer ──────────────────────────────────────
@@ -103,25 +110,21 @@ async def test_send_records_ids_stoplist_and_failures(tmp_path):
     assert summary == {"campaign": "aug", "accepted": 1, "stoplisted": 1,
                        "failed": 1, "notSent": 0}
 
-    async with store.connection() as conn:
-        rows = dict(conn.execute(
-            "SELECT buyer_id, delivery_status FROM sms_campaign_members"
-            " WHERE campaign='aug'"
-        ).fetchall())
-        mid = conn.execute(
-            "SELECT message_id FROM sms_campaign_members"
-            " WHERE campaign='aug' AND buyer_id=1"
-        ).fetchone()[0]
-        sent_at = conn.execute(
-            "SELECT sent_at FROM sms_campaigns WHERE campaign='aug'"
-        ).fetchone()[0]
+    async with pg_conn() as conn:
+        rows = dict(await conn.fetch(
+            "SELECT buyer_id, delivery_status FROM app.sms_campaign_members WHERE "
+            "campaign='aug'"))
+        mid = await conn.fetchval(
+            "SELECT message_id FROM app.sms_campaign_members WHERE campaign='aug' AND "
+            "buyer_id=1")
+        sent_at = await conn.fetchval(
+            "SELECT sent_at FROM app.sms_campaigns WHERE campaign='aug'")
 
     assert mid == "mid-1"
     assert rows[2] == "Stoplist"
     assert rows[3] == "INVALID_NUMBER"
     assert sent_at is not None, "recording a send stamps the campaign"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -132,10 +135,10 @@ async def test_stoplisted_recipients_become_optouts(tmp_path):
 
     await store.record_sms_send("aug", {1: "mid-1"}, [2], {}, SENT)
 
-    async with store.connection() as conn:
-        rows = conn.execute(
-            "SELECT buyer_id, channel, phone, reason, source FROM marketing_optouts"
-        ).fetchall()
+    async with pg_conn() as conn:
+        rows = await conn.fetch(
+            "SELECT buyer_id, channel, phone, reason, source FROM "
+            "app.marketing_optouts")
 
     assert len(rows) == 1
     assert rows[0][0] == 2
@@ -144,7 +147,6 @@ async def test_stoplisted_recipients_become_optouts(tmp_path):
     assert rows[0][3] == "stoplist"
     assert rows[0][4] == "turbosms"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -156,16 +158,15 @@ async def test_the_stoplist_completes_a_phoneless_optout(tmp_path):
 
     await store.record_sms_send("aug", {}, [1], {}, SENT)
 
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT phone, reason, source FROM marketing_optouts WHERE buyer_id = 1"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT phone, reason, source FROM app.marketing_optouts WHERE buyer_id = "
+            "1"))
 
     assert row[0] == "3809" + f"{1:08d}", "the roster's phone lands on the row"
     assert (row[1], row[2]) == ("complaint", "ops"), \
         "the gateway confirms a refusal it did not receive; it does not reattribute it"
 
-    await store.close()
 
 
 # ─── delivery reports ────────────────────────────────────────────────────
@@ -181,17 +182,15 @@ async def test_delivery_report_marks_the_member(tmp_path):
     )
     assert matched is True
 
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT delivery_status, delivered, delivered_at FROM sms_campaign_members"
-            " WHERE message_id='mid-1'"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered, delivered_at FROM "
+            "app.sms_campaign_members WHERE message_id='mid-1'"))
 
     assert row[0] == "DELIVRD"
     assert row[1] is True
     assert row[2] is not None
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -203,16 +202,14 @@ async def test_non_final_status_leaves_the_flag_alone(tmp_path):
 
     await store.record_sms_delivery("mid-1", "Sent", None, event_id="evt-1")
 
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT delivery_status, delivered FROM sms_campaign_members"
-            " WHERE message_id='mid-1'"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered FROM app.sms_campaign_members WHERE "
+            "message_id='mid-1'"))
 
     assert row[0] == "Sent"
     assert row[1] is None, "still open, not a failure"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -220,7 +217,6 @@ async def test_report_for_unknown_message_is_reported_as_unmatched(tmp_path):
     store = await _make_store(tmp_path)
     assert await store.record_sms_delivery(
         "never-seen", "DELIVRD", True, event_id="evt-1") is False
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -246,15 +242,13 @@ async def test_a_confirmed_delivery_is_not_downgraded_by_a_later_failure(tmp_pat
         "mid-1", "UNDELIV", False, datetime(2026, 8, 10, 9, 9),
         event_id="evt-2") is True
 
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT delivery_status, delivered FROM sms_campaign_members"
-            " WHERE message_id='mid-1'"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered FROM app.sms_campaign_members WHERE "
+            "message_id='mid-1'"))
 
     assert row[1] is True, "a confirmed delivery must stay delivered"
     assert row[0] == "DELIVRD", "and its status is not clobbered by the downgrade"
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -269,14 +263,12 @@ async def test_a_confirmed_delivery_is_not_reopened_by_a_later_nonfinal_status(t
                                     datetime(2026, 8, 10, 9, 5), event_id="evt-1")
     await store.record_sms_delivery("mid-1", "Sent", None, event_id="evt-2")
 
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT delivery_status, delivered FROM sms_campaign_members"
-            " WHERE message_id='mid-1'"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered FROM app.sms_campaign_members WHERE "
+            "message_id='mid-1'"))
 
     assert row == ("DELIVRD", True)
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -294,14 +286,12 @@ async def test_an_open_report_can_still_progress_to_delivered(tmp_path):
     await store.record_sms_delivery("mid-1", "READ", True,
                                     datetime(2026, 8, 10, 9, 6), event_id="evt-3")
 
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT delivery_status, delivered FROM sms_campaign_members"
-            " WHERE message_id='mid-1'"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered FROM app.sms_campaign_members WHERE "
+            "message_id='mid-1'"))
 
     assert row == ("READ", True)
-    await store.close()
 
 
 # ─── an event id names one message, for good ─────────────────────────────
@@ -321,14 +311,12 @@ async def test_an_event_id_cannot_be_re_pointed_at_another_message(tmp_path):
         await store.record_sms_delivery("mid-2", "UNDELIV", False, event_id="evt-1")
 
     assert caught.value.bound_message_id == "mid-1"
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT delivery_status, delivered FROM sms_campaign_members"
-            " WHERE message_id='mid-2'"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered FROM app.sms_campaign_members WHERE "
+            "message_id='mid-2'"))
     assert row == ("Accepted", None), "the other recipient is untouched"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -345,14 +333,12 @@ async def test_the_same_event_reported_nine_times_is_recorded_every_time(tmp_pat
             "mid-1", "DELIVRD", True, datetime(2026, 8, 10, 9, 5),
             event_id="evt-1") is True
 
-    async with store.connection() as conn:
-        row = conn.execute(
-            "SELECT delivery_status, delivered FROM sms_campaign_members"
-            " WHERE message_id='mid-1'"
-        ).fetchone()
+    async with pg_conn() as conn:
+        row = as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered FROM app.sms_campaign_members WHERE "
+            "message_id='mid-1'"))
 
     assert row == ("DELIVRD", True)
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -369,7 +355,6 @@ async def test_an_event_spent_on_an_unknown_message_is_still_spent(tmp_path):
     with pytest.raises(DlrEventRebound):
         await store.record_sms_delivery("mid-1", "UNDELIV", False, event_id="evt-1")
 
-    await store.close()
 
 
 # ─── opt-outs keep people out ────────────────────────────────────────────
@@ -378,29 +363,27 @@ async def test_an_event_spent_on_an_unknown_message_is_still_spent(tmp_path):
 async def test_optout_excludes_the_customer_from_future_segments(tmp_path):
     """Segmentation reads purchases only, so without this they come straight back."""
     store = await _make_store(tmp_path)
-    async with store.connection() as conn:
-        conn.execute("INSERT INTO products (id, name, sku, price)"
-                     " VALUES (1, 'Cream', 'SKU-1', 1000)")
-        conn.execute("INSERT INTO offer_stocks (id, sku, price, purchased_price,"
-                     " quantity) VALUES (1, 'SKU-1', 1000, 400, 10)")
+    async with pg_conn() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.products (id, name, sku, price) VALUES (1, 'Cream', "
+            "'SKU-1', 1000)")
+        await conn.execute(
+            "INSERT INTO bronze.offer_stocks (id, sku, price, purchased_price, "
+            "quantity) VALUES (1, 'SKU-1', 1000, 400, 10)")
         for bid in (1, 2):
-            conn.execute("INSERT INTO buyers (id, full_name, phone, city)"
-                         " VALUES (?, ?, ?, 'Kyiv')",
-                         [bid, f"Buyer {bid}", f"3809{bid:08d}"])
-            conn.execute(
-                """
-                INSERT INTO silver_orders (id, source_id, status_id, grand_total,
-                    ordered_at, buyer_id, manager_id, order_date, is_return,
-                    sales_type, is_active_source, source_name, is_new_customer)
-                VALUES (?, 4, 1, '9000.00', ?, ?, NULL, ?, FALSE, 'retail', TRUE,
-                        'Shopify', FALSE)
-                """,
-                [bid, date.today() - timedelta(days=10), bid,
-                 date.today() - timedelta(days=10)],
-            )
-            conn.execute("INSERT INTO order_products (id, order_id, product_id,"
-                         " name, quantity, price_sold) VALUES (?, ?, 1, 'Cream',"
-                         " 9, '1000.00')", [bid, bid])
+            await conn.execute(
+                "INSERT INTO bronze.buyers (id, full_name, phone, city) VALUES ($1, $2, "
+                "$3, 'Kyiv')", bid, f"Buyer {bid}", f"3809{bid:08d}")
+            await conn.execute(
+                "INSERT INTO silver.orders (id, source_id, status_id, grand_total, "
+                "ordered_at, buyer_id, manager_id, order_date, is_return, sales_type, "
+                "is_active_source, source_name, is_new_customer) VALUES ($1, 4, 1, "
+                "'9000.00', $2, $3, NULL, $4, FALSE, 'retail', TRUE, 'Shopify', FALSE)",
+                bid, date.today() - timedelta(days=10), bid,
+                date.today() - timedelta(days=10))
+            await conn.execute(
+                "INSERT INTO bronze.order_products (id, order_id, product_id, name, "
+                "quantity, price_sold) VALUES ($1, $2, 1, 'Cream', 9, '1000.00')", bid, bid)
 
     before = await store.get_sms_segments(include_customers=True, holdout_pct=0)
     assert {c["buyerId"] for c in before["customers"]} == {1, 2}
@@ -410,7 +393,6 @@ async def test_optout_excludes_the_customer_from_future_segments(tmp_path):
     after = await store.get_sms_segments(include_customers=True, holdout_pct=0)
     assert {c["buyerId"] for c in after["customers"]} == {1}
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -420,7 +402,6 @@ async def test_optout_is_idempotent(tmp_path):
     result = await store.add_marketing_optout(buyer_id=7, reason="complaint")
 
     assert result["totalOptouts"] == 1, "the same person is not recorded twice"
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -435,38 +416,35 @@ async def test_a_later_optout_supplies_the_phone_the_first_one_lacked(tmp_path):
     """
     store = await _make_store(tmp_path)
     shared = "380900000001"
-    async with store.connection() as conn:
-        conn.execute("INSERT INTO products (id, name, sku, price)"
-                     " VALUES (1, 'Cream', 'SKU-1', 1000)")
-        conn.execute("INSERT INTO offer_stocks (id, sku, price, purchased_price,"
-                     " quantity) VALUES (1, 'SKU-1', 1000, 400, 10)")
+    async with pg_conn() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.products (id, name, sku, price) VALUES (1, 'Cream', "
+            "'SKU-1', 1000)")
+        await conn.execute(
+            "INSERT INTO bronze.offer_stocks (id, sku, price, purchased_price, "
+            "quantity) VALUES (1, 'SKU-1', 1000, 400, 10)")
         # 1 and 2 are one person under two buyer records; 3 is somebody else.
         for bid, phone in ((1, shared), (2, shared), (3, "380900000003")):
-            conn.execute("INSERT INTO buyers (id, full_name, phone, city)"
-                         " VALUES (?, ?, ?, 'Kyiv')",
-                         [bid, f"Buyer {bid}", phone])
-            conn.execute(
-                """
-                INSERT INTO silver_orders (id, source_id, status_id, grand_total,
-                    ordered_at, buyer_id, manager_id, order_date, is_return,
-                    sales_type, is_active_source, source_name, is_new_customer)
-                VALUES (?, 4, 1, '9000.00', ?, ?, NULL, ?, FALSE, 'retail', TRUE,
-                        'Shopify', FALSE)
-                """,
-                [bid, date.today() - timedelta(days=10), bid,
-                 date.today() - timedelta(days=10)],
-            )
-            conn.execute("INSERT INTO order_products (id, order_id, product_id,"
-                         " name, quantity, price_sold) VALUES (?, ?, 1, 'Cream',"
-                         " 9, '1000.00')", [bid, bid])
+            await conn.execute(
+                "INSERT INTO bronze.buyers (id, full_name, phone, city) VALUES ($1, $2, "
+                "$3, 'Kyiv')", bid, f"Buyer {bid}", phone)
+            await conn.execute(
+                "INSERT INTO silver.orders (id, source_id, status_id, grand_total, "
+                "ordered_at, buyer_id, manager_id, order_date, is_return, sales_type, "
+                "is_active_source, source_name, is_new_customer) VALUES ($1, 4, 1, "
+                "'9000.00', $2, $3, NULL, $4, FALSE, 'retail', TRUE, 'Shopify', FALSE)",
+                bid, date.today() - timedelta(days=10), bid,
+                date.today() - timedelta(days=10))
+            await conn.execute(
+                "INSERT INTO bronze.order_products (id, order_id, product_id, name, "
+                "quantity, price_sold) VALUES ($1, $2, 1, 'Cream', 9, '1000.00')", bid, bid)
 
     await store.add_marketing_optout(buyer_id=1, reason="manual")
     await store.add_marketing_optout(buyer_id=1, phone=shared, reason="stoplist")
 
-    async with store.connection() as conn:
-        stored = conn.execute(
-            "SELECT phone, reason FROM marketing_optouts WHERE buyer_id = 1"
-        ).fetchone()
+    async with pg_conn() as conn:
+        stored = as_tuple(await conn.fetchrow(
+            "SELECT phone, reason FROM app.marketing_optouts WHERE buyer_id = 1"))
 
     assert stored[0] == shared, "the phone must land on the row already there"
     assert stored[1] == "manual", \
@@ -476,74 +454,16 @@ async def test_a_later_optout_supplies_the_phone_the_first_one_lacked(tmp_path):
     assert {c["buyerId"] for c in after["customers"]} == {3}, \
         "the second buyer record carries the same number and must be suppressed too"
 
-    await store.close()
 
 
 # ─── schema migration ────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_delivery_columns_are_added_to_a_pre_existing_table(tmp_path):
-    """CREATE TABLE IF NOT EXISTS is a no-op on an existing table.
+# `test_delivery_columns_are_added_to_a_pre_existing_table` stood here until
+# step 14's S14-18: DuckDB's migration that added the delivery columns and
+# their index to a roster created before the TurboSMS work. DuckDB's schema
+# and migrations went with the store; the roster is `app.sms_campaign_members`
+# (revision 0013) since 2026-09-06.
 
-    A database created before the TurboSMS work has the roster but none of the
-    delivery columns, so every delivery report fails. The migration has to add
-    them; this reproduces that database and checks it recovers.
-    """
-    db = tmp_path / "legacy.duckdb"
-
-    # A roster table in its pre-TurboSMS shape
-    import duckdb
-    con = duckdb.connect(str(db))
-    con.execute(
-        """
-        CREATE TABLE sms_campaign_members (
-            campaign VARCHAR NOT NULL,
-            buyer_id INTEGER NOT NULL,
-            phone VARCHAR NOT NULL,
-            tier VARCHAR NOT NULL,
-            assignment VARCHAR NOT NULL,
-            orders_at_export INTEGER NOT NULL,
-            revenue_ltv_at_export DECIMAL(14, 2),
-            margin_ltv_at_export DECIMAL(14, 2),
-            recency_at_export INTEGER,
-            PRIMARY KEY (campaign, buyer_id)
-        )
-        """
-    )
-    con.execute(
-        "INSERT INTO sms_campaign_members VALUES"
-        " ('old', 1, '380961111111', 'CORE', 'target', 2, 100, 50, 30)"
-    )
-    con.close()
-
-    store = DuckDBStore(db_path=db)
-    await store.connect()
-
-    async with store.connection() as conn:
-        columns = {r[0] for r in conn.execute(
-            "DESCRIBE sms_campaign_members"
-        ).fetchall()}
-
-    assert {"message_id", "delivery_status", "delivered", "delivered_at"} <= columns
-
-    # And the existing row survived, so the migration did not rebuild the table
-    async with store.connection() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sms_campaign_members WHERE campaign='old'"
-        ).fetchone()[0] == 1
-
-    # The message_id index has to be created here rather than alongside the
-    # other indexes: at that point this database has no such column, and a
-    # failed CREATE INDEX would take the whole schema init down with it.
-    async with store.connection() as conn:
-        indexes = {r[0] for r in conn.execute(
-            "SELECT index_name FROM duckdb_indexes() "
-            "WHERE table_name = 'sms_campaign_members'"
-        ).fetchall()}
-
-    assert "idx_sms_members_message_id" in indexes
-
-    await store.close()
 
 
 # ─── claiming ────────────────────────────────────────────────────────────
@@ -566,7 +486,6 @@ async def test_asking_for_targets_claims_the_campaign(tmp_path):
     with pytest.raises(ValueError, match="already sent"):
         await store.get_sms_campaign_targets("aug")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -587,7 +506,6 @@ async def test_concurrent_sends_cannot_both_take_the_roster(tmp_path):
     assert len(ok) == 1, "exactly one caller may send"
     assert len(refused) == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -601,7 +519,6 @@ async def test_a_released_campaign_can_be_sent_again(tmp_path):
 
     assert [t["buyerId"] for t in await store.get_sms_campaign_targets("aug")] == [1]
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -622,16 +539,14 @@ async def test_members_the_gateway_never_answered_for_are_marked(tmp_path):
     summary = await store.record_sms_send("aug", {1: "m-1"}, [], {})
 
     assert summary["notSent"] == 2
-    async with store.connection() as conn:
-        rows = dict(conn.execute(
-            "SELECT buyer_id, delivery_status FROM sms_campaign_members"
-            " WHERE campaign = 'aug' ORDER BY buyer_id"
-        ).fetchall())
+    async with pg_conn() as conn:
+        rows = dict(await conn.fetch(
+            "SELECT buyer_id, delivery_status FROM app.sms_campaign_members WHERE "
+            "campaign = 'aug' ORDER BY buyer_id"))
     assert rows[1] == "Accepted"
     assert rows[2] == rows[3] == "NotSent"
     assert rows[4] is None, "the control was never sent to, so it is not NotSent"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -647,7 +562,6 @@ async def test_a_complete_send_marks_nobody_as_unsent(tmp_path):
 
     assert summary["notSent"] == 0, "a refusal is an answer, not a silence"
 
-    await store.close()
 
 
 # ─── the hand-written send time and the gateway's ─────────────────────────
@@ -664,7 +578,6 @@ async def test_marking_sent_by_hand_is_refused_once_the_gateway_sent_it(tmp_path
 
     with pytest.raises(ValueError, match="through the gateway"):
         await store.mark_sms_campaign_sent("aug", None)
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -675,7 +588,6 @@ async def test_marking_sent_by_hand_still_works_for_a_campaign_that_left_as_a_fi
     second = await store.mark_sms_campaign_sent("aug", None)
     assert first["previouslySentAt"] is None
     assert second["previouslySentAt"] is not None, "date correction is still allowed"
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -689,11 +601,10 @@ async def test_a_re_freeze_after_a_claim_is_refused_and_the_roster_survives(tmp_
             campaign="aug", customers=[_member(3, "target")], criteria={},
             ltv_basis="margin", sales_type="retail", holdout_pct=10, overwrite=True,
         )
-    async with store.connection() as conn:
-        ids = sorted(r[0] for r in conn.execute(
-            "SELECT buyer_id FROM sms_campaign_members WHERE campaign='aug'").fetchall())
+    async with pg_conn() as conn:
+        ids = sorted(r[0] for r in await conn.fetch(
+            "SELECT buyer_id FROM app.sms_campaign_members WHERE campaign='aug'"))
     assert ids == [1, 2], "the claimed roster is the control group; it must not move"
-    await store.close()
 
 
 def test_the_binding_is_written_before_it_is_read():

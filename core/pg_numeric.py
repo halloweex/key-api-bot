@@ -2,9 +2,11 @@
 
 Asked by the write chains BEFORE they latch, because the latch is permanent: a
 value Postgres rejects raises inside the write, after the marker is on disk, and
-the chain is then latched for good with no owner row behind it — a CRITICAL
-`chain_latch_disagrees` the next morning and a copy-back that refuses — for an
-input DuckDB would have refused without a trace. Chain 7a found that first
+the chain is then latched for good with no owner row behind it — a direction
+nothing files since step 14's S14-12 (the integrity layer's chain invariants
+judge only owner rows with no marker), and one an image from before step 14
+pages as CRITICAL `chain_latch_disagrees` — for an input DuckDB would have
+refused without a trace. Chain 7a found that first
 (`core/pg_goals_write._fits`); chain 4 asks the same question of a buyer's
 loyalty figures. One home for Postgres' rule, so the two cannot come to
 disagree about where a boundary lies.

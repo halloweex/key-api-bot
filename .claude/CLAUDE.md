@@ -5,16 +5,19 @@ Automated sales reporting Telegram bot for KoreanStory with interactive web dash
 
 ## Architecture
 
-Selective — only the entries worth naming. `core/` alone holds 43 modules; the
-listing below is not a directory dump and should not be read as one.
+Selective — only the entries worth naming. `core/` alone holds 120 modules;
+the listing below is not a directory dump and should not be read as one.
 
 ```
 key-api-bot/
-├── core/                         # Shared modules (bot + web), 43 files
+├── core/                         # Shared modules (bot + web), 120 files
 │   ├── config.py                # Shared configuration
 │   ├── keycrm.py                # Unified async KeyCRM client
-│   ├── duckdb_store.py          # The analytics store; repositories/ mix into it
-│   ├── repositories/            # Nine mixins composed into DuckDBStore
+│   ├── store.py                 # The analytics store (AnalyticsStore), over Postgres
+│   ├── duckdb_store.py          # Its old name, a shim for one release (S14-18)
+│   ├── repositories/            # Nine mixins composed into AnalyticsStore
+│   ├── pg_*_write.py            # The thirteen write chains, one writer per table set
+│   ├── pg_derivation.py         # Silver, Gold and UTM derived in Postgres on a signal
 │   ├── models.py                # Data models (Order, Product, Category, Buyer)
 │   ├── filters.py               # Date period parsing (DateRange, parse_period)
 │   ├── scheduler.py             # APScheduler jobs, addressed by string id
@@ -47,23 +50,21 @@ key-api-bot/
 │   └── static-v2/               # Built React app (generated, gitignored)
 │
 ├── scripts/                      # Utility scripts. Whole dir is COPYied into the
-│   │                            # web image — the compact sidecar runs from it.
-│   ├── compact_duckdb.py        # Host cron, Sunday 02:00 UTC. Do not touch.
-│   ├── weekly_compact.sh        # The cron entry itself
-│   ├── check_date.py            # Compare DuckDB vs KeyCRM for date
+│   │                            # web image. The DuckDB compaction
+│   │                            # (compact_duckdb.py, weekly_compact.sh) went in
+│   │                            # step 14's S14-18; the pinned image keeps it.
 │   ├── check_turbosms_signature.py  # Is TURBOSMS_WEBHOOK_SECRET the one the gateway signs with?
-│   ├── utm_reclassify_dryrun.py # What a UTM reclassify would move; read-only, snapshots the verdicts
-│   └── force_resync.py          # Force rebuild DuckDB from API
+│   └── utm_reclassify_dryrun.py # What a UTM reclassify would move; read-only, snapshots the verdicts
 │
 ├── deploy/                       # Reached only from host cron, never imported
-│   ├── daily_offsite.sh         # 02:45 daily — snapshot + ship off-site
 │   ├── offsite_check.sh         # 09:00 daily — freshness, in-app watchdog liveness
-│   └── restore_from_export.py   # The only restore path. Never delete.
+│   ├── daily_soak.sh            # The daily soak report, by hand; checks in daily_soak/
+│   ├── duckdb_silence_check.sh  # Hourly: the frozen DuckDB file's hash, until it is deleted
+│   ├── api_fingerprint.py       # sha256 of past-window API answers, before/after a deploy
+│   └── restore_from_export.py   # The only restore path, on the pinned image. Never delete.
 │
-├── tests/                        # 67 files. pytest.ini sets testpaths, so only
-│   │                            # this tree is collected — scripts/ is not.
-│   └── test_data_consistency.py # KeyCRM vs DuckDB; marked `external`,
-│                                # deselected by default, run with -m external
+├── tests/                        # 326 test modules. pytest.ini sets testpaths, so only
+│                                # this tree is collected — scripts/ is not.
 │
 ├── nginx/nginx.conf             # Reverse proxy configuration
 ├── .github/workflows/deploy.yml # GitHub Actions auto-deployment
@@ -83,7 +84,7 @@ key-api-bot/
 | Charts | Recharts |
 | State | TanStack Query 5 + Zustand 5 |
 | Styling | Tailwind CSS 4 |
-| Database | DuckDB (analytics store) |
+| Database | PostgreSQL 17 (every store: landing, warehouse, operational) + ClickHouse 24.8 (second Gold, cohorts); DuckDB until step 14 |
 | ML | LightGBM + scikit-learn |
 | Hosting | Hetzner VPS |
 
@@ -118,19 +119,22 @@ the file.
 # bot/config.py
 DEFAULT_TIMEZONE = "Europe/Kyiv"
 RETURN_STATUS_IDS = [15, 18, 19, 21, 22, 23]   # KeyCRM lost/cancel group (6)
-SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify'}
+SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify', 5: 'Виставка'}
 
 # core/duckdb_constants.py
 B2B_MANAGER_ID = 15                             # the wholesale manager
 RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]  # seeds managers.is_retail for NEW rows only
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
+EXHIBITION_SOURCE_ID = 5                        # the fair: sales_type exhibition, whoever staffed it
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)             # what we pull from KeyCRM and reconcile
+REVENUE_SOURCE_IDS = (1, 2, 4, 5)               # what counts as revenue (is_active_source)
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 ```
 
 ## API Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
-| `/api/health` | Health check (status, version, uptime, cache stats); `degraded` while `duckdb.fatal` is set, and `degraded_by` says why |
+| `/api/health` | Health check (status, version, uptime, the blocks the canary judges); `status` is `healthy` and `degraded_by` empty since step 14's S14-17 took DuckDB's block, its ledger and their three causes out |
 | `/api/summary` | Summary statistics |
 | `/api/revenue/trend` | Revenue time series (+ `include_forecast=true` for ML predictions) |
 | `/api/revenue/forecast` | ML revenue forecast for current month |
@@ -151,16 +155,14 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/customers/sms-campaigns/{c}/send` | Send through TurboSMS (POST, needs `sms` edit); requires `confirm_campaign`, refuses on balance or a recent overlap — see "What stops an SMS send" |
 | `/api/customers/sms/channels` | Configured channels and tariff; `include_balance=true` adds the gateway's balance |
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
+| `/api/traffic/funnel` | The site's purchase funnel from GA4, live: the period, the one before and a year ago, by traffic type, channel group and device (tab `traffic`). 503 "not configured" without the key — see "Воронка сайта из GA4" |
 | `/api/me/send-file` | A CSV the page already holds, sent by the bot to the requester's own chat — how every export works inside the Telegram Mini App, whose WebView saves no download (POST, any session; `utils/deliverFile.ts`) |
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
-| `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
-| `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg, reconciliation_ch — with issues/diffs (за сессией) |
-| `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
+| `/api/managers/{id}/retail-status` | Classify a manager; raises the Postgres derivation signal (POST, admin) |
+| `/api/health/data-quality` | Latest run of every watched layer (`data_quality.WATCHED_LAYERS`: integrity, mirror_landing, reconciliation_pg, reconciliation_ch) with its top 20 issues, or diffs for the two reconciliation arms (за сессией) |
+| `/api/warehouse/status` | The Postgres derivation: owed or not, when built, the last journalled run (`cutover` and `duckdb_frozen` went with step 13's switch in step 14's S14-15) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
-| `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
-| `/api/mirror/backfill/buyers` | Re-ship every buyer DuckDB holds, with its contacts, detached; chain 4's pre-flip lever (POST, admin) |
-| `/api/mirror/backfill/catalogue` | Carry the catalogue rows only DuckDB holds and KeyCRM retired (product 1055) into Postgres; dry run by default; chain 6's pre-flip lever (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
@@ -171,12 +173,24 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 `/api/orders/{id}`, `/api/products/{id}`, `/api/buyers/stats`,
 `/api/debug/stale-returns`, `/api/debug/order-status/{id}`,
 `/api/reconciliation`, and `POST /api/reconciliation/run`,
-`/api/duckdb/purge-orders`. See "OD-10: the DuckDB-only doors". A retired
+`/api/duckdb/purge-orders`. See "History of the DuckDB exit". A retired
 GET answers a JSON 404, as does any `/api/` GET no route matches. The SPA
 catch-all used to serve those the shell with a 200, which a script reads as
 success.
 
-**Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+**Query params**: `period` (today/yesterday/week/last_week/month/last_month/last_7_days/last_28_days/all_time) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+
+`all_time` («За весь час», 2026-11-05) runs from `core.filters.HISTORY_START`
+— 2023-12-02, KeyCRM's first order, measured on the 2026-08-31 backup — to
+today. It has nothing before it to compare with (`has_comparison`): its
+previous period is zeros and a year back is two thirds the same orders. So
+the trend reads no comparison, the marketing report and its CSV read neither
+of theirs (`include_comparison=False`, the four dates and both periods
+null), and the page hides the change column of the organic block. The page
+asks the trend `granularity=monthly` for it: one bar a month, labelled
+`MM.YYYY`, never a comparison or a forecast — by day it is a thousand bars
+whose `dd.mm` repeats every year. The GA4 funnel sees 14 months of it and
+says so; the CRM's order count beside it starts at GA4's `earliest` too.
 
 `start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
 `core/filters.parse_period`, and only as a pair: one alone is ignored, and a
@@ -201,55 +215,71 @@ ten years and a week) is a 400 naming `date_range`: four endpoints build one
 list entry per day of the range on web's event loop — the trend, its
 comparison, expenses summary and profit, customer insights — and
 0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON. The trend's
-`include_forecast` predicts at most `FORECAST_HORIZON_DAYS` (60) ahead, where
-the date picker stops; eight years ahead had held the single ML thread for
-70 s.
+`include_forecast` shows at most `FORECAST_HORIZON_DAYS` (60) ahead, where
+the date picker stops. Until 2026-11-04 it ran the model for the week and a
+custom range, and eight years ahead had held the single ML thread for 70 s;
+it reads the stored forecast now (see "Revenue Prediction").
 
-## DuckDB Schema
+An integer parameter past the width of the column it meets, or a NUL in an
+`/api/` path or query string, is a 400 naming the field. Both used to reach
+asyncpg and fail there, and the engine routers read that as the store failing:
+a 503 naming the page and a `read_refused` page, for a request no page sends
+(found by the Rust ports, #330–#332). Integers are held to their column where
+the route reads them (`core.validators.validate_db_int`, and
+`validate_category_id`'s int32 ceiling); a NUL is refused before routing by
+`web.middleware.RejectNulMiddleware`. `tests/unit/test_input_bounds.py` walks
+every `/api/` route: each integer parameter is bounded on both sides by
+FastAPI (`ge`/`le`) or passed to a bounded validator, or is exempt there with
+the reason it never reaches SQL.
+
+## Postgres schema
+
+PostgreSQL 17, one database, five schemas, every one migrated by Alembic
+(`migrations/versions/`, `REQUIRED_REVISION` in `core/pg.py`; `migrate` runs
+before web and the bot on every deploy). DuckDB held all of this until step
+14 — see "History of the DuckDB exit".
 
 ```
-┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│    categories   │       │    products     │       │  expense_types  │
-├─────────────────┤       ├─────────────────┤       ├─────────────────┤
-│ id          PK  │◄──────│ category_id FK  │       │ id          PK  │
-│ name            │       │ id          PK  │       │ name            │
-│ parent_id   FK  │       │ name, brand     │       │ alias           │
-└─────────────────┘       │ sku, price      │       └────────┬────────┘
-                          └────────┬────────┘                │
-┌─────────────────┐       ┌────────┴────────┐       ┌────────┴────────┐
-│     orders      │       │ order_products  │       │    expenses     │
-├─────────────────┤       ├─────────────────┤       ├─────────────────┤
-│ id          PK  │◄──────│ order_id    FK  │       │ id          PK  │
-│ source_id       │       │ product_id  FK  │       │ order_id    FK  │
-│ status_id       │       │ name, quantity  │       │ expense_type_id │
-│ grand_total     │       │ price_sold      │       │ amount, status  │
-│ ordered_at      │       └─────────────────┘       └─────────────────┘
-│ buyer_id        │
-│ manager_id      │       ┌──────────────────────┐
-└─────────────────┘       │  gold_daily_revenue  │
-                          ├──────────────────────┤
-                          │ date, sales_type (PK)│
-                          │ revenue, orders_count│
-                          │ new/returning_custs  │
-                          └──────────────────────┘
+bronze ── what KeyCRM serves, as one parse writes it        (the write chains)
+  orders ─┬─ order_products      products ── categories      offers ── offer_stocks
+          └─ expenses ── expense_types     buyers ── buyer_contacts     managers
+silver ── derived from bronze by pg_warehouse_derive, on a signal
+  orders (one row per order: sales_type, order_date in Kyiv, is_return …)
+  order_utm (the parsed attribution)       order_lines (a view)
+gold ──── derived from silver in the same tick
+  daily_revenue (date × sales_type × source_id, plus the roll-up row)
+  v_* (the inventory views over app.* and bronze.*)
+app ───── what nothing can rebuild, and the application's own state
+meta ──── the store's own bookkeeping
 ```
 
 **Key tables:**
-- `orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id
-- `order_products` - Line items with product_id, quantity, price_sold
-- `products` - Product catalog with category_id, brand, sku, price
-- `categories` - Hierarchical categories (parent_id for tree structure)
-- `expenses` - Order-level expenses (delivery, commission, etc.)
-- `gold_daily_revenue` - Pre-aggregated daily revenue by sales_type (the real aggregate; `daily_stats` was declared but never written and has been dropped)
-- `revenue_predictions` - ML forecast predictions (date, sales_type, predicted_revenue, model metrics)
-- `data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
-- `warehouse_refreshes` - ~65k rows back to 2026-03-14, the best forensic trail in the system
-- `order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items; skipped for 30 days so a repair job cannot loop on them forever
-- `weekly_report_sends` - one row per week delivered by `weekly_report`; what keeps a daily job to one message a week and makes a missed Monday recoverable
+- `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text)
+- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted
+- `bronze.products` / `bronze.categories` - The catalogue (hierarchical categories by parent_id); a product KeyCRM retires stays, never deleted
+- `bronze.expenses` / `bronze.expense_types` - Order-level expenses (delivery, commission, etc.)
+- `silver.orders` - One row per order with `sales_type` materialised and the Kyiv `order_date`; what every tab reads
+- `gold.daily_revenue` - Pre-aggregated daily revenue; `source_id IS NULL` is the roll-up, because distinct buyer counts do not add up across sources
+- `app.order_versions` - The only record that an order ever changed; append-only, fed from what a write actually changed
+- `app.stock_movements`, `app.inventory_sku_history`, `app.sku_inventory_status`, `app.inventory_history` - The stock history KeyCRM does not keep
+- `app.manager_classifications` - Who sells retail, wholesale or internally, as of when; only a human knows
+- `app.revenue_predictions`, `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`, `app.revenue_goals` - The forecast and the goals
+- `app.data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
+- `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items, so a repair job cannot loop on them forever. The two kinds are skipped differently (`core/pg_orders_read.py`): an id the gap scan found absent upstream is never asked for again (`order_id_gaps` excludes every ledgered id, whatever its age), while an order KeyCRM served without line items is re-fetched by the half-written repair once its `checked_at` is 30 days old (`MISS_RETRY_DAYS`), and each such re-fetch that comes back empty restamps it
+- `app.weekly_report_sends` / `app.traffic_report_sends` - one row per week delivered; what keeps a daily job to one message a week and makes a missed Monday recoverable
+- `app.dashboard_users`, `app.role_permissions` - Access (see "Which tabs one person may open"); `app.authorized_users`, `app.user_preferences` - the bot's
+- `app.sms_campaigns`, `app.sms_campaign_members`, `app.sms_dlr_events`, `app.marketing_optouts` - The SMS campaigns, their rosters, delivery reports and opt-outs
+- `app.alert_series` / `app.alert_events` - The alert journal
+- `meta.chain_watermarks` - Each chain's `last_sync_*` keys and its `owner:<table>` rows; `meta.mirror_state` - per-table write stamps; `meta.derivation_signal` / `meta.derivation_runs` - the derivation's request counter and journal
+- History, written by nothing (OD-11): `app.sync_metadata`, `app.warehouse_refreshes` (~65k rows back to 2026-03-14, still the best forensic trail of the DuckDB warehouse), `app.reconciliation_log`
 
-**Source filtering:**
-- Included: Instagram (1), Telegram (2), Shopify (4)
-- Excluded: Opencart (3) - deprecated
+ClickHouse holds a second copy of Silver and derives its own Gold from it
+(`core/ch_silver.py`, hourly `ch_sync`), the archive of order versions
+(`history.order_versions`) and the cohorts' reads.
+
+**Source filtering** (`REVENUE_SOURCE_IDS`, materialised as Silver's `is_active_source`):
+- Included: Instagram (1), Telegram (2), Shopify (4), Виставка (5) — the exhibition, its own `sales_type`
+- Excluded: Opencart (3) - deprecated; still synced and reconciled (`SYNCED_SOURCE_IDS`), never revenue
 
 ## Deployment
 
@@ -363,18 +393,52 @@ docker-compose logs --tail=50 web
 docker-compose logs --tail=50 nginx
 ```
 
+### The /api request log
+
+`docker logs` goes with the container, and on 2026-10-29 the dead-route audit
+found four hours of it: too little to call a lever run by hand once a month
+dead. So nginx also writes one JSON line per HTTPS request under `/api/` to
+`/var/log/ks-api/api.log` on the host (`nginx/nginx.conf`, `ks_api`): time,
+method, path, status, bytes, both timings, the upstream by name and by
+address. **No client address, no user agent, no query string**: the query of
+a search is what somebody typed. The path is cut out of the request line as
+it arrived, so a request answered with the 502 page keeps its own path.
+
+The bound is the `api-log` service, declared beside the mount that creates
+the log (`nginx/api-log/rotate.sh`, every five minutes): the file is cut at
+the first pass after midnight UTC, or past 32 MiB, compressed, and the newest
+62 cuts are kept. That is two months on an ordinary day, and in a flood never
+much more than 62 × 32 MiB of text. Copy, then truncate, because nothing
+there can signal nginx: a line written inside the copy can be lost.
+`tests/unit/test_api_request_log.py` holds the path, the format and the bound
+to each other and runs the script.
+
+Which routes were asked, on the host:
+
+```bash
+zcat -f /var/log/ks-api/api.log /var/log/ks-api/api-*.log.gz | python3 -c '
+import collections, json, sys
+c = collections.Counter((r["m"], r["p"]) for r in map(json.loads, sys.stdin))
+for (m, p), n in c.most_common(): print(n, m, p)'
+```
+
 ## Testing
 
 `pytest.ini` sets `testpaths`, `asyncio_mode = strict`, and deselects the
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-08-14 (`d81b194`): 1297 passed, 7 deselected, 39s.**
-Any change that lowers the passing count is a regression until explained.
+**Baseline as of 2026-11-05 (step 14's S14-20), with the store up: 9 288
+passed, 10 skipped, in about 12 minutes** — the skips are ClickHouse (6), no
+real gpg on the machine (3) and one TIMESTAMPTZ case. Any change that lowers
+the passing count is a regression until explained. (It was 1 297 passed on
+2026-08-14 without a store, and 3 771 with one on 2026-09-08.)
 
 **CI runs the suite against a real PostgreSQL** since 2026-09-08. Without one,
 every differential test — the ones proving DuckDB and Postgres answer the same
-question the same way — skipped itself on `KS_PG_DSN`, so **60 checks never
+question the same way, and since step 14 Postgres the same as DuckDB's answers
+recorded on their fixtures (`tests/integration/golden/`) — skipped itself on
+`KS_PG_DSN`, so **60 checks never
 ran on a pull request**, including all 20 guarding the /traffic port. That tab
 reads Postgres in production behind a silent fallback to DuckDB, so a query
 broken in one engine only would have kept the page working and left an ERROR
@@ -383,8 +447,8 @@ in a log nobody reads. `.github/workflows/ci.yml` now starts
 `services:` block starts *before* the checkout that would supply those
 scripts), applies `alembic upgrade head`, and **fails the job if any test
 still skips for want of PostgreSQL** — the arrangement breaking silently is
-the state it replaced. Baseline with the store up: **3 771 passed, 8 skipped**
-(ClickHouse, which CI still has no container for). `tests/unit/test_ci_workflow.py`
+the state it replaced. ClickHouse still has no container in CI, so its
+differential tests skip there. `tests/unit/test_ci_workflow.py`
 pins all of it, including that the image matches `docker-compose.yml` and
 `deploy/gate_with_stores.sh`.
 
@@ -405,17 +469,13 @@ KS_PG_DSN=... pytest -q
 # ways: it compares *rendered* timestamps, so it only passes where the
 # renderer agrees with Postgres. CI and the production image are UTC.
 TZ=UTC KS_PG_DSN=... pytest -q
-
-# The external tests, deliberately: these reach the live KeyCRM API and the
-# production DuckDB file.
-pytest -m external -v
-
-# Check specific date
-PYTHONPATH=. python tests/test_data_consistency.py 2025-12-07
-
-# Force resync DuckDB
-python scripts/force_resync.py --days 365
 ```
+
+`pytest -m external` runs nothing today: its one test, KeyCRM against the
+production DuckDB file, went in step 14's S14-03 with `scripts/check_date.py`
+and `scripts/force_resync.py`. `reconciliation_pg` makes that comparison every
+morning, and a resync is `POST /api/sync/resync` (`/api/duckdb/resync`
+until step 14's S14-17, kept as an alias until its final stage).
 
 ### Type checking
 
@@ -527,9 +587,10 @@ What does exist:
 - LightGBM with 500 rounds, early stopping (patience=50), time-series validation (last 60 days)
 - **Performance** (6-fold walk-forward CV): WAPE=27.66%, R²=0.066, beats best baseline by 1.53%
 - Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no model artefact on disk
-- Predictions stored in `revenue_predictions` — DuckDB, or Postgres `app.revenue_predictions` under chain 7b-3 (`KS_WRITE_FORECAST`, off)
-- Frontend shows forecast bars (lighter opacity) on Revenue Trend chart when period=month
-- "Predicted: ₴X" badge in chart header
+- Predictions stored in Postgres `app.revenue_predictions`, written by chain 7b-3 (DuckDB's `revenue_predictions` until it latched)
+- Frontend shows forecast bars (lighter opacity) on Revenue Trend chart for the month, the week and a custom range with future days
+- **Every forecast a page shows is read from `revenue_predictions`; no request runs the model** (owner's decision, 2026-11-04 — the Rust council's decision 6). It is as of the last training (Mon/Thu), retail only — b2b and the other sales types show none — and `last_trained` (the Kyiv day of the rows' `created_at`) and `model_metrics` come from the same rows, so any process, the Rust read API included, can answer it. Until then the week and a custom range ran the model on the request over 780 days of Gold, and `last_trained` came from web's memory — null after every restart, until the next training
+- "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
 - Graceful degradation: chart works normally if model unavailable
 - Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches
 - **Known limitation**: Thu/Fri have ~₴30K underprediction bias due to bimodal distribution (promo spike days ₴300-600K are unpredictable from lagged features)
@@ -574,19 +635,26 @@ component boundary. Concretely:
   Spacing *inside* a card (padding, header margins) stays the component's own.
 
 ### Timezone Handling
-KeyCRM API stores timestamps in +04:00 (server timezone), but UI displays in Europe/Kyiv. DuckDB queries use `_date_in_kyiv()` helper to convert before extracting dates.
+KeyCRM API stores timestamps in +04:00 (server timezone), but UI displays in Europe/Kyiv. Every date is taken in Kyiv before it is extracted: Silver carries `order_date` as the Kyiv date (`AT TIME ZONE 'Europe/Kyiv'`, rendered by `core.duckdb_constants._date_in_kyiv` through the dialect), which is what DuckDB's queries did too.
 
 ### Retail / B2B / Internal
-`sales_type` is materialised into `silver_orders` by one CASE in
-`refresh_warehouse_layers`, and every dashboard endpoint defaults to
-`Query("retail")`:
+`sales_type` is materialised into `silver.orders` by one CASE in the Silver
+projection (`core.warehouse_sql.silver_select_sql`, derived by
+`pg_warehouse_derive`; it was DuckDB's `refresh_warehouse_layers` until step
+13), and every dashboard endpoint defaults to `Query("retail")`:
 
 ```
+source_id = EXHIBITION_SOURCE_ID (5)      → exhibition (the fair, whoever staffed it)
 manager_id IS NULL                        → retail    (Shopify, no manager)
 manager_id = B2B_MANAGER_ID               → b2b       (the wholesale manager)
 manager_id in managers.is_retail = TRUE   → retail
 otherwise                                 → internal
 ```
+
+The exhibition branch is first on purpose: the fair was staffed by a retail
+manager, so a manager-based rule would pull a one-off channel into the retail
+trend it would distort. It counts as revenue (source 5 is in
+`REVENUE_SOURCE_IDS`) and is not gated like `internal`.
 
 **Retail is a fixed list of retail managers and b2b is the wholesale manager;
 nobody else is mixed into either.** `internal` is everyone else — staff whose
@@ -603,8 +671,9 @@ needs the same treatment.
 `managers.is_retail` is seeded from `RETAIL_MANAGER_IDS` for managers the
 warehouse has never seen and **never overwritten afterwards** — it used to be
 recomputed on every sync, which made a human's classification impossible to
-keep. Set it via `POST /api/managers/{id}/retail-status`, which also marks the
-warehouse dirty, because `sales_type` only changes on a rebuild.
+keep. Set it via `POST /api/managers/{id}/retail-status`, which raises the
+derivation signal in the same transaction, because `sales_type` only changes
+on a rebuild.
 
 ### The audience of an SMS campaign
 Until 2026-08-26 the page had exactly one cohort: three value tiers over a
@@ -675,7 +744,8 @@ any group (`SmsAudienceGroup`, at most `MAX_AUDIENCE_GROUPS` = 5).
 - **One group selects what the audience selected before groups.**
   `tests/sms_segments_legacy.py` freezes the query as it was on main at
   5b4d1c61, and `test_sms_audience_groups_two_engines.py` runs it beside the
-  current one for every filter: the same rows on DuckDB and on PostgreSQL. On
+  current one for every filter: the same rows, on PostgreSQL — and on DuckDB
+  too until step 14's S14-08 left Postgres the audience's only engine. On
   production on 2026-10-17, group B alone through both: zero rows different.
 - **A group's window is its own.** `scored` reads everyone inside the widest
   window and a narrower group carries `recency <= ?` in its own flag, so a
@@ -911,13 +981,16 @@ the web container through `core/repositories/users.py` and by the bot through
 its own pool — a grant written two ways would drift the first time one of them
 learned something the other did not.
 
-`available()` is the honest half: it needs `KS_BOT_STORE=postgres` **and**
-`KS_USER_STORE=postgres`. Under `KS_USER_STORE=duckdb` the dashboard's list is
-in a file the web container holds the single writer for, so no bot process can
-reach it — the approval still grants bot access and the message says the tabs
-are set from Admin → Users, rather than showing a checklist that would do
-nothing. Two variables in the same `.env`; if they ever disagree, a tab set
-written by the bot would go to a table nothing reads.
+`available()` is the honest half: it needed `KS_BOT_STORE=postgres` **and**
+`KS_USER_STORE=postgres`. Under `KS_USER_STORE=duckdb` the dashboard's list was
+in a file the web container holds the single writer for, so no bot process
+could reach it — the approval still granted bot access and the message said the
+tabs are set from Admin → Users, rather than showing a checklist that would do
+nothing. **Since step 14's S14-08 it asks only `KS_BOT_STORE`**, by the adapter
+that variable chose: the Postgres one answers True, SQLite's False. The
+dashboard's list has no store but Postgres (a constant since S14-00), so the
+disagreement this guarded against cannot happen, and the bot's startup ERROR
+about it went with it.
 
 One portability trap, found by running the statement rather than reading about
 it: DuckDB cannot resolve a bare `CURRENT_TIMESTAMP` on the right of
@@ -987,7 +1060,11 @@ every two minutes (the measured cause of the SMS tab going 124 → 38 req/s).
 Revision 0022 puts `role_permissions` in `app`, routed by `_perms_run` through
 the same `KS_USER_STORE` switch, so one variable still answers "where does
 access live" — splitting them would let an approval and the permissions behind
-it disagree about which database is authoritative.
+it disagree about which database is authoritative. **Since step 14's S14-08
+neither `_users_run` nor `_perms_run` has a DuckDB tail**: both render into
+`app.*` and ask nothing, and `KS_USER_STORE` routes nothing — `_ENV` left
+`core/pg_dashboard_users.py`; the `.env` line stays while an image from before
+step 14 can be a rollback target, which reads an absent value as `duckdb`.
 
 **Not ClickHouse**, asked and answered: these rows are read on every request,
 written by a human, and authoritative. ClickHouse has no transactional update
@@ -1078,6 +1155,21 @@ gateway, and each refusal hands the claim back with nothing sent:
   (`recent_campaign`, `balance_short`, `balance_unreadable`) and the figures.
 - **A guard that raises** releases the claim before the error goes out.
 
+**Since step 14's S14-08 `/sms` has one store, Postgres**, and the guards are
+proved on it. `_sms_tx`, `_sms_run` and the audience lost their DuckDB
+branches (`_DuckTx`, `sms_segments_select(DUCKDB)`), and the half-switch
+guard `refuse_while_unported`/`UNPORTED` — empty since every path ran on both
+engines — went with them; `sms_store_is_postgres()` stays a constant for its
+last readers (the copy and its comparison, S14-12/13; the manifest, S14-18).
+The tests that ran on a DuckDB fixture seed the tables the production reads
+name (`tests/integration/pg_sms_seed.py`), and every guard above has a test
+end to end over a real Postgres store — the typed name, the claim (two sends
+at once, one goes), an overlap, a short or unreadable balance, a guard that
+raises — that reads the claim back out of `app.sms_campaigns`
+(`TestTheGuardsOverAPostgresStore`). The two-engine files compare with
+DuckDB's answers recorded on their fixtures (`tests/integration/golden/`),
+dates written back from today so a literal holds on any day.
+
 **Every refusal on the campaign routes is named**, not only the three above:
 the name typed back, the claim (`not_frozen`, `already_sent`), the gateway's
 own answers, the freeze and every follow-up refusal. `detail` stays the English
@@ -1123,36 +1215,57 @@ whole reason the group is read from the source now.
 
 | Job | Trigger | What it does |
 |---|---|---|
-| `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard; not registered under `KS_WRITE_WAREHOUSE=postgres` |
+| `pg_warehouse_derive` | every 1 min | Postgres derives Silver, Gold and the customer profile when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
-| `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
-| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **all three stores** (DuckDB, PG, ClickHouse), one fetch; слои `reconciliation`, `reconciliation_pg`, `reconciliation_ch` |
-| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, the five `app.*` tables, `bot.db` — tolerance zero — then the order-version archive, which is a liveness check and not a comparison |
-| `replicate_operational` | every 1 h | Copy the five irreplaceable tables and `data/bot.db` into Postgres |
+| `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
+| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
+| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, the витрина, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
+| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
 | `bot_memory_watch` | every 30 min (bot) | бот сторожит свои 512 МБ тем же evaluator'ом; предыдущий сэмпл — в `data/memory-bot-last.json` (OOM-счётчик ядра сбрасывается при recreate) |
 
+**`freshness_orders` judges when the order step last wrote, not the
+watermark's value** (2026-10-29). `last_sync_orders` holds KeyCRM's newest
+`updated_at` — where the next window starts — and stands still whenever
+nobody touches an order. Judged at 6 h it paged CRITICAL on five quiet
+nights from 2026-09-21 to 10-29, each age the length of that night's gap in
+order activity, while the sync landed a batch every minute.
+The integrity job reads `meta.chain_watermarks.updated_at` beside the value
+(`read_values_and_stamps`, one statement) and judges that stamp for
+`data_quality.JUDGED_BY_LAST_WRITE`; every other entity's value is the
+sync's own `now()` and is judged as before. What it no longer sees is a
+KeyCRM that answers while nobody orders: the longest such gap in the year
+to 2026-10-29 was 12.2 h, overnight.
+
 The legacy 06:00 `reconciliation_check` is gone (OD-10, 2026-09-30):
-`dq_reconciliation` is the reconciliation. It repairs only the orders we do
-not hold. The one repair only the legacy job made now belongs to
+`dq_reconciliation` is the reconciliation. It re-fetches by id, from the
+Postgres arm's verdict, the orders we do not hold (MISSING_IN_DK) and then
+those we hold wrong (STATUS_DRIFT, VALUE_MISMATCH: a status moved on an order
+created and ordered more than 30 days ago reaches no sync), at most
+`REPAIR_BATCH_LIMIT` a run; never one KeyCRM no longer returns. The one
+repair only the legacy job made now belongs to
 `order_status_refresh` (05:15): an order dated into the last 30 days but
 created before them, whose status or total moved without `updated_at`
 changing. That job re-fetches these orders by id, before 05:30 looks at them.
 
-**Never schedule anything at 05:00–05:05 Kyiv.** The host cron
-`0 2 * * 0 weekly_compact.sh` is 02:00 UTC — the same instant — and it stops
-both containers. A `CronTrigger` computes its next fire from registration, so
-a scheduler that comes back at 02:00:51 sets the next run a day out: the job
-is not late, it does not exist when it is due, and `misfire_grace_time` has
-nothing to forgive. That cost `dq_reconciliation` every Sunday.
+**A job must not fire at the instant something restarts web.** The host cron
+`0 2 * * 0 weekly_compact.sh`, 02:00 UTC — 05:00 Kyiv in summer, 04:00 in
+winter — stopped both containers every Sunday until the week of silence
+retired it (2026-10-16; step 14's S14-18 deleted the script). A `CronTrigger`
+computes its next fire from registration, so a scheduler that comes back at
+02:00:51 sets the next run a day out: the job is not late, it does not exist
+when it is due, and `misfire_grace_time` has nothing to forgive. That cost
+`dq_reconciliation` every Sunday, and a deploy on a cron instant does the
+same today.
 
 `BackgroundScheduler.start()` queues a one-off catch-up for any check whose
 last *successful* verdict is older than its cadence (`CATCHUP_CHECKS`), which
-also covers deploys landing on a cron instant. For `dq_reconciliation` that is
-the oldest of the layers it writes in this process (`CATCHUP_SIBLING_LAYERS`:
+also covers deploys landing on a cron instant. For `dq_reconciliation`, which
+has no layer of its own since step 14's S14-12 deleted DuckDB's, that is the
+oldest of the layers it writes in this process (`CATCHUP_SIBLING_LAYERS`:
 `reconciliation_pg` with `KS_PG_DSN`, `reconciliation_ch` with `KS_CH_URL` as
 well — a host without one never writes the layer, and would otherwise re-fetch
 KeyCRM on every start). Every layer the canary pages on is read by a catch-up
@@ -1278,9 +1391,14 @@ caption over Telegram's 1 024, or any render failure costs the picture and
 nothing else — the text still goes out.
 
 Preview any of it on a real phone with `scripts/weekly_report_preview.py`,
-which honours the kill switch and writes nothing to the send ledger;
+which honours the kill switch and writes nothing to the send ledger. It reads
+Postgres through the job's own readers (`build_report` and its `fetch_*`, or
+the traffic report's), refuses without `KS_PG_DSN` (the switches
+`KS_READ_WEEKLY` and `KS_READ_TRAFFIC` are not read since S14-07 and S14-05),
+and hands them a store that refuses to connect, so it opens no DuckDB file (it
+read a DuckDB backup until S14-03).
 `--fixture` renders the 31.08–06.09.2026 week from Gold rows copied out of
-Postgres, for a laptop whose DuckDB copy is stale.
+Postgres, and reads nothing.
 
 **The instance signature is admins-only** (owner's decision, 2026-09-07).
 `· prod-vps` answers an operator's question and only an admin can act on the
@@ -1350,8 +1468,9 @@ mid-week finds last week complete and unsent and delivers it the next
 morning — a week that ended before the report existed, arriving on a day
 nobody expects a weekly message. The ledger cannot express "skip this one":
 it records deliveries, marking that week delivered would be a lie in the one
-table that answers whether a week went out, and backdating it is not
-available anyway while DuckDB is held open by the running process. Checked
+table that answers whether a week went out, and backdating it was not
+available anyway while DuckDB was held open by the running process (the
+ledger is Postgres's since chain 11b). Checked
 **before** the ledger, because nothing about that week changes by tomorrow,
 and skipping a week does **not** record it as sent — the guard defers, it
 does not consume. Unset means no floor, which is right for a report already
@@ -1485,183 +1604,6 @@ returns to its natural size reads as growth a week later. The WARN standing on
 2026-09-13 was made by a `docker builder prune` on 09-09, not by anything new.
 Cap what rebounds; only delete what stays deleted.
 
-### A killed DuckDB writer, and what the next start used to lose
-
-DuckDB 1.5.5 drops index entries across a kill. The rows a killed writer left
-in its WAL are replayed into every `CREATE INDEX` index (not the PK/UNIQUE
-ones) as entries the index has not bound yet, and DuckDB's **own** checkpoint
-— `close()`, or `wal_autocheckpoint` — writes those indexes without them.
-From then on `WHERE col = ?` misses rows a scan still sees, and a write that
-must take such a row out of the index is a FatalException ("Failed to delete
-all rows from index") that invalidates the whole instance. Measured through
-`DuckDBStore.connect()` then `close()`: 45 of 45 single-column indexes short,
-`DELETE FROM t` a FATAL on 26 of 26 indexed tables, composite ones included.
-Every OOM kill and every stop that outlives its grace is such a kill.
-
-**The fix is a CHECKPOINT before anything else runs.**
-`core.duckdb_switch.open_file` is the one read-write `duckdb.connect` of the
-analytics file, and its first statement on a read-write open is `CHECKPOINT`,
-which keeps every replayed entry. It is also the application's one opener
-for the week of silence (`KS_DUCKDB`, below), whose refusal it runs first,
-before the driver. The two guards were built apart — this one as
-`core.duckdb_store.open_read_write` — and each walk demanded its own function
-be the only opener, so they were made one at the stage-4 integration: neither
-walk can now be satisfied by an opener the other does not see, and both name
-the same `OPENER`. First, not after the SETs: a SET that fails leaves a valid
-instance, and closing a valid instance is the lossy checkpoint. A guard
-checkpoint that fails inside DuckDB is FATAL, so nothing is written on close
-and the WAL waits for the next open. One that is **interrupted** is not —
-`InterruptException`, or Ctrl-C in a CLI opening through the store, leaves a
-valid instance and the WAL unapplied (measured on a 58 MB WAL), and closing
-that is the lossy checkpoint again. `PRAGMA disable_checkpoint_on_shutdown`
-on every failed exit is what stops it, and every failed exit closes: an
-instance left to the exception's traceback holds the file's lock against
-every other process. Free on a clean start; behind a kill, 1.5 / 3.6 /
-8.9 s at 30 / 300 / 900 MB of WAL — the checkpoint the restart would have
-taken anyway, moved to the open. **The store's memory limit and spill
-directory are given to the open** (`open_file(config=...)`), not SET after
-it: the open replays the WAL and the guard checkpoints it before any SET can
-run, so as SETs they bounded neither, and both ran under DuckDB's default —
-80% of detected memory, ~5.6 GB in web's 7 GB container — after exactly the
-kill that leaves a large WAL (batch-E review; not measured at production WAL
-sizes). A limit DuckDB refuses there raises before any instance exists, the
-WAL whole for the next open. DuckDB refuses a second in-process open of one
-file under a different configuration; only the store opens the live file in
-web. A WAL found at open is logged as a WARNING,
-so every kill is named. Read-only opens replay into memory and answer
-correctly; they neither lose entries nor take the guard.
-
-`tests/unit/test_duckdb_open_guard.py` walks `core/ web/ bot/ scripts/
-deploy/`, not a list of callers: every `duckdb.connect` is read-only,
-in-memory, the opener, or `compact_duckdb.py::phase3_validate` (the file
-phase 2 just built and closed — no WAL — in a do-not-touch script),
-including one written out in a string a module runs elsewhere (`python -c`,
-a subprocess), which the AST never sees inside — the step-13 rehearsal's D1
-DELETE hid there, merged in after the walk was written. Such a program is
-read the way a module is when it parses, so the driver imported under an
-alias and connected through the alias does not pass where the first form,
-which searched for the literal call, let it through, and
-the week of silence's walk reads it too: it runs in another process, past
-the in-process count, and a read-only open changes no byte the hash sees
-(batch-E review); the
-`duckdb` module is never handed on as a value; and every ATTACH of a database
-file carries the READ_ONLY *option* — parsed, because `AS read_only_copy`,
-`(READ_ONLY false)` and a comment saying READ_ONLY all attach read-write, and
-read through `%` and `+` as well as f-strings. It also reads every document
-in the repository (Markdown, shell, YAML, SQL, Dockerfiles; not `.planning/`
-or other worktrees) for a `duckdb.connect` call, an ATTACH and the `duckdb`
-CLI, under the same rules: the analytics agent's instructions told it to open
-`data/analytics.duckdb` with a bare read-write connect, which on a killed
-writer's file is the lossy restart itself. (So this file, too, never writes
-such a call out.) `test_duckdb_kill_guard.py` SIGKILLs
-a child that wrote through `DuckDBStore`, and also pins **the defect without
-the guard**: if that half fails after a DuckDB upgrade, re-measure before
-deleting the guard — never just the test.
-
-**web gets 120 s to stop** (`stop_grace_period`; Docker's default is 10 s):
-uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
-cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
-checkpoint (~7 s at 900 MB) — ~67 s for an ordinary request. **Not for a slow
-one**: the eight `SLOW_ENDPOINTS` (`web/middleware.py`) get 300 s, uvicorn
-drains them too, and five write DuckDB (`/api/duckdb/resync`,
-`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`, and — until chain
-7b-3's `KS_WRITE_FORECAST=postgres` moves their tables — `/api/goals/recalculate`
-and `/api/revenue/forecast/train`). The list was kept by hand and named three;
-it is derived from the code now (`test_web_stop_grace.py` walks each handler
-to a store method executing a write). One in flight at a stop is killed. Covering them (~340 s) would leave a deploy — pull, stop,
-migrate, the 180 s health gate — no margin inside its 10-minute ssh timeout,
-so the grace makes kills rarer and `open_file`'s checkpoint is what makes
-them harmless. `test_web_stop_grace.py` pins both halves, the endpoints by name.
-`weekly_compact.sh` keeps its `--timeout 30`; harmless now.
-
-**`close()` is final.** Shutdown closes the store while a handler past its
-504 or a job past its cancellation may still be queued on its lock. Such a
-caller used to find no connection, take it for one a FATAL had dropped, and
-open the file again — the schema and the migrations during shutdown, a write
-after `close()`'s checkpoint, and an instance nothing would ever close. It
-gets `StoreClosedError` now; only an explicit `connect()` reopens a store.
-`get_store()` after `close_store()` still builds a new one — a new lifespan
-and the tests rely on it — so a caller that asks the singleton afresh during
-shutdown is not stopped; one holding the store is.
-
-**A FATAL drops the instance instead of leaving web's DuckDB dead.**
-`connection()` reconnected only when there was no connection, so one FATAL
-failed every later use, the caller queued on the lock included, until a
-restart. Now, whenever a block raises, the instance is asked (`SELECT 1`);
-one DuckDB invalidated is dropped and the next use opens the file again —
-through the guard, since an invalidated instance writes nothing on close and
-leaves its WAL. Asked, not read off the exception: a caller may swallow the
-FATAL and raise something else, and a FatalException can come from another
-instance. **It does not heal**: an index short in the file fails the same
-write after every reconnect — in the sync, an order batch every tick. So
-`/api/health` publishes `duckdb.fatal` (`count`, `kinds` — `index` or `other`
-— `last_at`; never the text) and `status: degraded` until web restarts;
-otherwise the next read answering would resolve the `health_status` page over
-a write that still fails. The existing page, not a new canary key — **but
-named for what it is** (batch-E review): it read "Dashboard DOWN",
-"status=degraded" and "a restart won't fix a migration" while web answered.
-`/api/health` says why it is degraded (`degraded_by`: `duckdb`, `migrations`,
-`duckdb_fatal`), and when the FATAL is the only cause the canary pages
-`health_status` as **"DuckDB index short"** (CRITICAL, lever: the compaction)
-for an index, and as a WARN for any other FATAL (the reconnect answered past
-it; lever: web's log). **An index FATAL outlives the restart**: `_fatal` is
-the process's memory and the damage is the file's, so a restart announced a
-short index healed while the same write still failed. It is written down
-beside the file (`data/.duckdb_index_short.json`, under the file's device and
-inode) and published as `duckdb.fatal.index_short` until a compaction swaps
-a new file in. A restore that copies over the file in place keeps the inode:
-delete the marker then.
-
-**DuckDB prints the rows it could not remove** — every column, so a buyer's
-name, phone and email — after `\nChunk:` in the FATAL, and again in every
-"invalidated" echo that quotes it. The store's own line was cut from the start,
-but the exception went to the caller whole, and the buyers step logs a failed
-write with its traceback, on every retry while the index stays short. Now
-`connection()`, `checkpoint()` and `connect()` cut the dump out of what leaves
-them, the whole exception chain included
-(`core.observability.cut_row_dumps`); web's log handler (`RowDumpFilter`,
-installed by `setup_logging`) cuts it from any record, for a handler that logs
-inside its own block before the exception reaches the store's exit; and a
-migration's or a view's error text — published on `/api/health`, which is
-public — is cut where it is recorded. Not covered: text an in-block handler
-writes anywhere but a log, and a script that logs through its own handler
-(scripts still get the cut exception).
-
-**A cancelled read waits for its thread.** `_fetch_one`/`_fetch_all` run the
-query on the executor thread under the store lock. A timeout interrupted the
-query and waited for the thread; a cancellation — the scheduler at shutdown,
-a caller giving up — released the lock with the thread still inside
-`conn.execute()`, and the next block that raised made the probe above wait
-for that query on the event loop (2.2–2.9 s of every request stalled,
-measured). Both now interrupt and wait (`_offload`); the probe never runs on
-a cancellation. An aborted transaction is not a FATAL: the probe's
-`TransactionException` keeps the instance.
-
-The lever for `index` is rebuilding every index, which the compaction does —
-Sunday's, or `weekly_compact.sh` by hand; a restart clears neither the damage
-nor, since the marker, the status. Rebuilding automatically was measured and **not** built (3–3.5 s,
-≤394 MB, DDL at startup, the file growing once by the index footprint) — the
-owner's call. Whether production holds damage from before the guard is
-unknown; the first compaction after it ships clears whatever there is.
-
-**Not fixed: a WAL that cannot be replayed at all.** On 1.5.5 a WAL holding a
-column-level `ALTER TABLE` — add, drop or rename a column, change its type,
-set or drop a DEFAULT or a NOT NULL — on a table that, after it, has a column
-DEFAULT calling a function (`nextval(...)`, `CURRENT_TIMESTAMP`, `now()`,
-`uuid()`: nearly every table here, and an `ADD COLUMN ... DEFAULT nextval(...)`
-makes one) fails every open, read-only included, guard or not: `INTERNAL
-Error: Failure while replaying WAL file … GetDefaultDatabase with no default
-database set`. Neither web nor the compaction opens the file until the WAL is
-removed, and its contents with it. First seen as "a brand-new file killed
-before its first checkpoint" (the first start creates `warehouse_refreshes`,
-then ALTERs it), but production is exposed too: the first start after a
-deploy that alters such a table, until the hourly checkpoint. What replays:
-renaming the table, dropping the function DEFAULT itself, `CREATE INDEX`,
-DML, and an `ADD COLUMN IF NOT EXISTS` of a column that exists (it writes
-nothing). `test_duckdb_kill_guard.py::test_which_wal_cannot_be_replayed`
-pins each case. Candidate fix, as a separate change: a second CHECKPOINT at
-the end of `connect()`.
-
 ### How a failure reaches a human
 - **`KS_ALERTS_DISABLED=1` глушит весь исходящий Telegram** (алерты, дайджест,
   watchdog'и, недельный отчёт, хендлерные уведомления, host-cron скрипты) —
@@ -1738,23 +1680,22 @@ the end of `connect()`.
 - **Run-age watchdog**: `/api/health` publishes the age of the last successful
   run per layer, keyed on `error_message IS NULL` — a failed run writes a row
   too, so row-existence alone reads green. `bot/canary.py` judges it from the
-  *other* container every 15 min: 30 h for reconciliation, 12 h for integrity,
-  30 h for mirror_landing, and since DN-21 30 h for
+  *other* container every 15 min: 12 h for integrity,
+  30 h for mirror_landing (30 h for reconciliation, DuckDB's arm, until step
+  14's S14-12 deleted it with its layer), and since DN-21 30 h for
   reconciliation_pg — the Postgres half of the 05:30 job, and the comparison
-  against KeyCRM meant to outlive DuckDB. It does not yet: the job runs it
-  only once the DuckDB extraction has succeeded, and journals it in DuckDB,
-  which is where its age comes from — so a DuckDB failure silences it too
-  and, since DN-21, pages under both keys. Decoupling it belongs with step 13.
-  A missing block or a layer that never succeeded both count as failures.
-  `reconciliation_ch` joins them at 30 h since OD-08 (a) (2026-09-30), which
-  made ClickHouse required for the parallel period: same job, same dependence
-  on the DuckDB extraction, and a web without `KS_CH_URL` never writes it and
-  pages `dq_never:reconciliation_ch`. A copy too old to reconcile (over 3 h)
+  against KeyCRM meant to outlive DuckDB, which it does: the DuckDB extraction
+  it once waited on went with DuckDB's arm in S14-12, and its runs are
+  journalled in Postgres (chain 9). A missing block or a layer that never
+  succeeded both count as failures. `reconciliation_ch` joins them at 30 h
+  since OD-08 (a) (2026-09-30), which made ClickHouse required: same job, and
+  a web without `KS_CH_URL` never writes it and pages
+  `dq_never:reconciliation_ch`. A copy too old to reconcile (over 3 h)
   is gated, and written with `error_message` beside its `ch_reconcile_pending`:
   it compared nothing, so it moves no age. Written as a success, as it was
   until the OD-08 review, it reset the age every morning ClickHouse stayed
   down, and the page was announced resolved with ClickHouse still down. The
-  history that watch rests on is `deploy/stage4_soak/22_reconciliation_ch_history.sql`,
+  history that watch rests on is `deploy/daily_soak/22_reconciliation_ch_history.sql`,
   DN-21's bar for `reconciliation_pg` (20) applied to this arm, read the way
   the canary now reads it.
 - **Every message is signed with `KS_INSTANCE`** (default `gethostname()`,
@@ -1772,10 +1713,12 @@ the end of `connect()`.
   Anything unlisted gets an anchor to this section — which is the signal to
   add one.
 - **The alert says what the machine already tried**, and still never triggers
-  a repair. `machine_attempts_note()` reads the two ids-diff heal ledgers
-  (24 h window) and is *passed into* `format_alert_message`, which stays pure
-  but for one mode cached at boot: `KS_UTM_PARSE` picks which lever line the
-  `pg_order_utm_*` findings carry (`REMEDIATION_UTM_PARSED_IN_POSTGRES`).
+  a repair. `machine_attempts_note()` reads the ClickHouse archive's heal
+  ledger (24 h window; the buyers' ids-diff was the other until step 14's
+  S14-13 deleted it) and is *passed into* `format_alert_message`, which is
+  pure: the `pg_order_utm_*` findings carry the Postgres parser's lever line,
+  the one `KS_UTM_PARSE=postgres` picked (`REMEDIATION_UTM_PARSED_IN_POSTGRES`)
+  until step 14's S14-15 removed the mode and the swap.
 - **Mirror freshness**: `/api/health` publishes `mirrors` — `last_ok_at` age,
   `failures_since_ok` and a boolean `failing` for `bronze.orders`. The error
   *text* is deliberately not published; this endpoint is public and the text
@@ -1792,683 +1735,13 @@ the end of `connect()`.
   declines to overwrite a name that is *present*). What stops tests reaching
   Telegram is the autouse fixture, never that variable.
 
-### The buyers step, before chain 4 moves its writes
-
-Chain 4 of the DuckDB exit will make the buyers step of the incremental sync
-the **only** writer of buyers, contacts and gender. Its preparation (PR-1)
-changed nothing about which store is written, and four things about how:
-
-- **One parse** (`core.landing_rows.parse_buyers`) feeds both stores. A
-  birthday reads exactly as DuckDB 1.5.5's CAST reads it — 80 shapes pinned
-  against DuckDB itself — and one it refuses becomes NULL, logged by id,
-  instead of rolling back the batch. NUL is stripped (Postgres refuses it); a
-  blank or NUL-only name is `'Unknown'` (an empty name loops the selection).
-- **The step cannot take the tick down.** It never raises; a failure holds the
-  watermark and waits ten minutes, during which it asks neither store nor
-  KeyCRM anything, and offers and stocks run regardless. A KeyCRM outage used
-  to read as "nothing to fetch" and was stamped as a success; it is a failure
-  now. `/api/health` publishes `buyer_sync` (ages, count, error *class*, never
-  text), and the canary pages `buyer_sync_stalled` (WARN) on three failures in
-  a row or no success for 90 minutes — naming "step not reached" when the
-  whole tick stops before it.
-- **Every buyer write mirrors, from one place**: `DuckDBStore.upsert_buyers`,
-  in portions of 1 000, each committed then shipped outside the store lock. A
-  portion whose ship failed is retried once at the end and then raised — the
-  next portion's success would otherwise erase the trace. `sync-all-buyers`
-  now mirrors too, and runs **detached** (the answer is `started`; the result
-  is logged as `Full buyer sync:`). **Do not run it to see whether it works**:
-  it is the only path fetching with `include=loyalty,shipping`, so it fills
-  city and region for every buyer and moves the SMS city filter.
-- **`reconcile_buyer_completeness`** (in `dq_mirror_landing`, Postgres alone):
-  `buyers_without_verdict` — landed over 90 minutes ago with no verdict of the
-  current rules — and `buyers_missing_for_orders` — named by an order over a
-  day old and never landed. Running with the flag off is the point: its false
-  positives are measured before the flip. It read zero of each on 2026-09-24.
-
-PR-2 made the way back ready, still with no chain registered and nothing
-routed differently:
-
-- **One writer of buyer rows**, `core.pg_buyer_rows._write_buyer_rows` — the
-  mirror and, since PR-3, the chain both run it. The rows go on the caller's
-  transaction (the chain proves its first write by the owner row sharing an
-  `xmin` with the row) and it never stamps the buyers' rows of
-  `meta.mirror_state`, which stay the mirror's — a dropped derivation mark is
-  recorded there, but under `meta.derivation_signal`, `core.pg_derivation`'s
-  own row, on a connection outside the caller's transaction. It lives
-  outside the chain module on purpose: the registry walk derives
-  `BUYER_UNIT` from the function that writes it and skips chain modules.
-- **`app.buyer_gender.decided_at` is compared** every morning (decision 7):
-  the hourly derive restamps only the verdicts it writes and the copy ships
-  the value as it stands. Per row now, so a re-derive is forgiven for the
-  90-minute grace and no longer.
-- **`buyer_contacts` left `snapshot_validation.MONOTONE`** for `MUST_BE_NONEMPTY`
-  and a `BOUNDED_SHRINK` tier at 1%: its writers replace a buyer's contacts
-  whole, so a small fall is a dropped number and not a loss — but an export
-  that falls by more than 1% (~330 rows at 32 700), or to zero, is rejected,
-  including after a copy-back that writes back noticeably fewer contacts.
-- **The copy-back knows mirrored tables** — see "A write flag is no longer a
-  rollback" — and `POST /api/mirror/backfill/buyers` is the lever its
-  pre-flip handover names.
-
-The chain itself, its rollback under the DN-06 latch and the owner's decisions
-are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`, revised against today's main in
-`.planning/DUCKDB_EXIT_CHAIN4_PLAN_REV2.md`.
-
-### Chain 4: the buyers, written where they are read
-
-`core/pg_buyers_write.py` is the fifth registered write chain (PR-3):
-`bronze.buyers`, `bronze.buyer_contacts` and `app.buyer_gender`, moved together
-by `KS_WRITE_BUYERS=postgres`. **Off in production.** The flip needs the
-owner's own yes, not before 2026-09-30, Tuesday to Thursday 10:30–12:30 Kyiv.
-
-**Held on DuckDB until its readers follow.** Three readers show buyers — the
-SMS audience (`KS_SMS_STORE`), the search index (`KS_READ_SEARCH_INDEX`) and
-the dashboard's buyer reads (`KS_READ_DASHBOARD`) — and each could still read
-DuckDB, whose buyers stop the moment the chain writes Postgres.
-`unmet_precondition()` names any of the three not on postgres (a typo in one is
-unmet), and until all are an unlatched chain runs as duckdb whatever its flag
-says: DN-26's hook, made generic in the registry for this chain. Production had
-all three on postgres on 2026-09-25, so the hook is met there and changes
-nothing. The warning is rate-limited to once an hour per reason — this chain's
-key is read every incremental tick — and `/api/health` publishes it on every
-read, where the canary warns `write_chain_precondition_unmet`.
-
-**Every buyer's verdict is written with its name.** `upsert_buyers` classifies
-the names it writes and writes the verdicts in the same transaction, in a
-savepoint caught on `asyncpg.PostgresError` only, so the buyers land whatever
-the gender does — and when that savepoint fails, the portion's verdicts are
-marked stale (`rules_version = 0`, never over a human's) so the hourly
-derivation re-decides them: a renamed buyer's old verdict at the current
-version is one nothing would select again. `derive_gender_pg` (the hourly rider, and
-`scripts/backfill_gender.py`) reads what is pending **before** it latches — an
-hour with nothing to decide takes nothing — then share-locks the portion's
-buyers and drops a verdict whose name moved. That closes a race the hourly
-derivation alone would leave open: a derivation that read an old name and
-wrote after a rename committed would store the old name's verdict at the
-current rules version, and nothing would ever select that buyer again. Proved
-by running it: without `FOR SHARE` the old verdict lands. A human override is
-never overwritten; an equal verdict is not rewritten, so `decided_at` is when
-the answer last changed — the web process's UTC clock, passed in, which is the
-clock DuckDB's `CURRENT_TIMESTAMP` is and the one the copy-back orders by.
-DuckDB never re-derives on a rename; this does, on purpose.
-
-**A buyer Postgres would refuse is skipped, not raised.** Refused before the
-latch where it can be seen (`_refusal`: an id missing or outside INTEGER, text
-that is not UTF-8 — a lone surrogate — a value of the wrong type, a loyalty
-figure over its `NUMERIC` via `core/pg_numeric.py`, shared with chain 7a), and
-retried buyer by buyer on a `DataError` it could not foresee. Either way the
-id is logged and counted in `buyer_sync.last_skipped_bad`. A batch `_refusal`
-rejects whole leaves no marker; one Postgres refuses buyer by buyer has
-already latched the chain, and the marker stands without an owner row until
-the next write lands — `chain_latch_disagrees` the next morning if none does,
-which is why `_refusal` asks everything the driver would refuse. A batch in
-which every fetched buyer was refused is **not a success**: the step raises
-`BuyersRefused`, a data error, so the watermark and the canary's clock stay
-where they were. A cancelled statement is not bad data and raises at once. A
-statement timeout and a two-minute deadline — counted from the latch, and
-never before the first portion — bound the write.
-
-**Every path asks the chain's one answer** (`pg_buyers_write.mode()`, never
-raising):
-
-- `DuckDBStore.upsert_buyers` hands the batch to the chain first, before the
-  portion loop — so DuckDB's copy stops and the mirror has nothing to ship.
-- `get_missing_buyer_ids` selects from Postgres whenever the chain is off
-  DuckDB, before and regardless of `KS_READ_BUYER_SYNC` — a selection from a
-  DuckDB that stopped would fetch the same buyers every hour. A latched chain
-  with its flag set back routes both the selection and the write to Postgres;
-  the copy-back's post-latch levers depend on exactly that, and one test pins
-  the two together.
-- A `KS_WRITE_BUYERS` nobody can read writes nowhere: the step refuses before
-  KeyCRM is asked, both manual doors answer 409 before starting, the gender
-  rider reports `stood_down`, and `get_stats` — `/health/detailed`,
-  `/api/duckdb/stats` and the DuckDB block of `/api/health` — leaves the buyer
-  counts out rather than show DuckDB's frozen ones; the live count is
-  `bronze.buyers` (`pg_buyer_sync_read.count_buyers`).
-- `scripts/backfill_gender.py` writes Postgres only for a chain web has
-  already latched (exit 4 otherwise): the latch is a marker web reads once and
-  caches, so a script taking the first write would leave web writing DuckDB
-  until it restarted.
-- `reconcile_buyer_completeness` also runs under the chain with the landing
-  mirror off — it is the one Postgres check that the writer is alive.
-
-`tests/unit/test_buyer_paths_consult_registry.py` walks the tree for every
-DuckDB statement that writes the three tables and requires each path into it
-to pass through a function that asks.
-
-**Watched from three sides.** The canary pages `buyer_sync_stalled_chain`
-(CRITICAL) when the step has not succeeded for three hours under the chain —
-the WARN at 90 minutes stays — judged by the older of the step's own clock and
-`buyer_sync.watermark_age_s`, the age of the stamp it writes to Postgres: the
-first is floored at web's start, so on its own every recreate reset a stall
-and announced it resolved. The standing watch (`core/pg_chain_invariants.py`)
-files `chain_buyer_orphan_rows` (CRITICAL, from the handover on),
-`chain_required_column_null` for a NULL `full_name` (DuckDB's is NOT NULL, so
-the copy-back could not carry it back) and `chain_buyer_contact_missing` (WARN):
-all three read zero on production on 2026-09-30. Its watermark is left to the
-canary, which pages on the step's own state. `deploy/stage4_soak.sh` reads
-B1–B5 — copies stood down, the watermark's stored value at 90 minutes,
-verdicts and the override floor, the selection's backlog, integrity — and
-knows a fifth state for this chain, `held`: flagged, unlatched and a reader
-not on postgres, reported by B1 as the flip that did not move. B1 dates the
-handover by the owner rows, then by `SOAK_BUYERS_FLIP_AT`, and with neither
-reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. With
-`buyers_on=0` and the chain's owner rows standing it FAILs as a lost marker —
-the buyers step back on DuckDB and nothing shipping it — naming
-`data/write-chain-owners/pg_buyers_write` and `scripts/chain_copy_back.py
-buyers`, and it counts a copy's failure for the day it was stamped. `held`
-with owner rows standing is the same lost marker, so B1 names the marker, the
-copy-back and the reader instead of "take the flag back", which would only
-make it `0`. The restore drill counts all three tables, because once the
-chain writes them the nightly dump is their only backup.
-
-**Revision 0034 locks older images out** (PR-4, owner decision 16) and is
-deployed directly before the flip. It changes no schema — three table comments
-saying who writes each table — and moves `REQUIRED_REVISION` to
-`0034_buyer_chain`, so an image without chain 4 refuses the database: its
-replication would otherwise full-replace `app.buyer_gender` out of a DuckDB
-that stopped, and its mirror ship DuckDB's buyers over the chain's. Two things
-it does not do, both written down in the revision:
-
-- **It does not hold images below v3.0.249.** Their buyers mirror and
-  backfills never called `require_revision`. None of them is a rollback target
-  after this revision, whatever the database says.
-- **It is not "no writes" for an image that checks — it is an outage.** The
-  session read raises under `KS_USER_STORE=postgres` (401 for everybody) and
-  the bot refuses to start. An image-only rollback therefore needs `alembic
-  downgrade 0033_derivation_signal` first, run with the new migrate image, and
-  then all three images moved back — keycrm-migrate too, or `up -d` re-runs its
-  `alembic upgrade head` and puts 0034 back. Only before the flip: after chain
-  4 has written Postgres the way back is `scripts/chain_copy_back.py buyers`,
-  never a downgrade below 0034.
-- **A locked-out image still writes DuckDB.** From v3.0.249 on, a build without
-  chain 4 cannot reach the buyer tables but its sync still commits buyers to
-  DuckDB before the mirror refuses — and after the flip `--handover` then
-  refuses on those ids. After the flip, no image rollback at all.
-
-### Revision 0035: the same lock for the eight chains #280 registered
-
-#280 registered chains 3, 5, 6, 7b-3, 9, 10, 11a and 11b, all off, and shipped
-no revision, so a database at 0034 still admitted images 3.0.263 to 3.0.270 —
-built between chain 4's lock and #280, and knowing none of these chains.
-Image numbers here are what `/app/VERSION` and the Docker Hub tag say, each
-read from `git show <merge>:VERSION`. The git tag of the same code is usually
-one higher — `deploy.yml` tags the image with the VERSION it was built from,
-and `bump_version.sh` then bumps it and tags the new number — but not always:
-#273 and #274 were both built as 3.0.259, so image 3.0.260 never existed and
-their bumps are v3.0.260 and v3.0.261. `v3.0.249` above is a git tag.
-`0035_batch_e_chains` is 0034's shape for all eight at once: twenty `COMMENT ON
-TABLE` statements naming each table's chain, `KS_WRITE_*` and writing module,
-and `REQUIRED_REVISION` moved to it, so every gated path in an older image
-refuses the database.
-
-**One revision, directly before the first of these flips.** The bump refuses
-every older image whatever tables it comments, so eight revisions would buy
-seven more deploys and seven more windows in which an image-only rollback
-needs a downgrade, and lock nothing more. It goes out before the first of the
-eight flips (planned from 2026-10-10) and not earlier — owner decision 16's
-rule for 0034 — because from the day it lands, rolling an image back below it
-for any reason takes the downgrade below.
-
-**What it adds is an outage, not a wall.** In 3.0.263 to 3.0.270 every gated
-path that writes one of these tables already stands down on an owner row read
-as itself (DN-22a, DN-22b, both older than 0034): the operational copy, the
-classification copy, chain 3's backfills, ids-diffs and comment ship. What the
-lock adds is that such an image cannot run quietly beside a latched chain —
-the dashboard answers 401 under `KS_USER_STORE=postgres`, and the bot, the
-canary with it, refuses to start. What it does not hold, written in the
-revision:
-
-- **The per-tick landing mirrors never gated**: `upsert_orders` →
-  `mirror_orders` → `write_orders` and `pg_landing._mirror` (expenses,
-  products, categories). The sync runs without a session, so a locked-out
-  image still ships its own copy over chain 3's and chain 6's rows — and the
-  comparisons that would file `owner_row_without_marker` and
-  `order_owner_row_without_marker` are gated, so its 07:30 run fails on the
-  revision instead of naming the overwrite.
-- **It still writes DuckDB**: the sync, the checks, the watchdogs, the reports,
-  the goal and forecast jobs. After a flip those are rows the chain does not
-  hold — `shadow_duckdb_only_rows` for the shadow chains, a handover that
-  reports them for the rest.
-
-**The way back below it.** An image-only rollback below the first image built
-with 0035 — the first whose `/app/core/pg.py` says `REQUIRED_REVISION =
-"0035_batch_e_chains"`; ask the image, since its number is whatever VERSION
-main carries when this merges — needs `alembic downgrade 0034_buyer_chain`
-first, run with the **new** migrate image — an older one
-does not know 0035 — and then all three images moved back, keycrm-migrate with
-web and bot, or `up -d` re-runs `alembic upgrade head` and puts 0035 back.
-Only before the first of these chains latches: after one has written Postgres,
-the way back is `scripts/chain_copy_back.py <chain>`, never a downgrade below
-0035. It also locks out 3.0.271 and 3.0.272, which carry these chains — the
-cost of a bump, not a hazard.
-
-**Deploying it** is any revision's rule: CI rebuilds `keycrm-migrate` with
-`keycrm-web` and the bot, compose runs `migrate` first and holds web and bot on
-`service_completed_successfully`, and the workflow checks `docker wait
-ks-migrate`. Each statement takes SHARE UPDATE EXCLUSIVE on its table
-(measured on 17.2): reads and writes go on — the full replaces of these tables
-are DELETE, not TRUNCATE — and it waits only behind a manual VACUUM or ANALYZE,
-an index build or other DDL. After step 13's flip the restart re-asks step 13's
-preconditions like any deploy's; `migrate` finishing first is what keeps
-`pg_revision` met.
-
-**Measured on a throwaway PostgreSQL 17.2**: 0034 → 0035, down to 0034 and up
-again, each clean, with all 57 table comments equal to the replay of the
-migrations at every step; origin/main's code (0034) refused the 0035 database
-in `require_revision` and in the bot store's `initialise()`, and this code
-refused the 0034 one. Held by `tests/unit/test_batch_e_chains_revision.py`
-(each test names its mutation) and `tests/integration/test_batch_e_lock_pg.py`
-(the round trip and the lock on a real server, in a transaction rolled back).
-Both read what came before from `tests/migration_replay.py`, which runs every
-revision against a recorder rather than restating its text. The unit tests are
-frozen like the revision — 0035's twenty tables, chains, flags and modules as
-literals, nothing read from the modules as they are today — so a later change
-to a chain cannot fail them and tempt an edit of an applied revision.
-
-**A flip waits for the lock-out, at runtime, from this build on.** Each of the
-eight names 0035 as its `LOCKOUT_REVISION`, and a chain's flag moves its writes
-only in a build whose `REQUIRED_REVISION` is that revision or a later one
-(`core.chain_latch.lockout_unmet`, compared by the four-digit number, because
-neither image carries the migrations): until then it runs as duckdb,
-`/api/health` names `lockout` under its `unmet_precondition`, and the canary
-warns `write_chain_precondition_unmet`. A latched chain is not held (OD-19
-(a)). Its writers pass `require_revision()` before the latch, so the database
-is at the lock-out too when the chain first writes Postgres. A chain registered
-later names its own lock-out and cannot flip until a build requires it.
-`tests/unit/test_chain_lockout.py` holds all of it for every chain from #280
-on, and that the revision a chain names comments every table it owns naming its
-module. A table added to a chain afterwards fails there, and the answer is a
-new revision, never an edit of 0035. Chains 1, 4, 6a, 7a and 8 predate the
-rule; 0034 holds them.
-
-**What no code here can hold is the images already built.** 3.0.271 and
-3.0.272 carry the eight chains, require 0034 and have no such rule (3.0.272
-runs in production on 2026-10-09). In them nothing refuses a flip: reproduced
-against a 0034 database, `KS_WRITE_WEEKLY_LEDGER=postgres` latched chain 11a at
-its first write — owner row and ledger row written, no revision asked. So
-**set none of the eight flags until the database says `0035_batch_e_chains`**
-(`SELECT version_num FROM meta.alembic_version`). If this revision has not
-deployed by the time the flips are due, the flips wait for it.
-
-### Chain 3: the orders, written where they are read (off)
-
-`core/pg_orders_write.py` is the sixth registered write chain:
-`bronze.orders`, `bronze.order_products`, `bronze.expenses` and
-`app.order_backfill_misses`, moved together by `KS_WRITE_ORDERS=postgres`.
-**Off in production, and held off by its own preconditions.** Owner decision
-OD-13 (a): a **raising** writer. Under the chain a Postgres write *is* the
-write; there is no DuckDB fallback when Postgres is down, and the way back is
-`scripts/chain_copy_back.py orders`.
-
-**What moves together, and why.** The two order tables are one unit (DN-22a).
-The expenses come in the same payload (`include=…,expenses`) at the same call
-site, so a page's orders and their costs commit in one Postgres transaction or
-neither does. The misses ledger moves because the repair *selections* move: the
-gap scan and the half-written scan stop re-asking KeyCRM for an id only through
-a 30-day `NOT EXISTS` over it, and a ledger read where nothing writes it stops
-nothing. `app.order_versions` is **not** a chain table: it has no DuckDB copy,
-and its one writer runs in both modes, so the archive goes on across a flip and
-across a way back with nothing to copy. `bronze.expense_types` is chain 6a's.
-
-**One writer of the order tables stays one writer.** `pg_landing.write_orders`
-became a thin acquire-and-transaction around `_write_order_rows`, which takes
-the caller's connection (and `_write` around `_write_rows` for expenses). The
-mirror runs the cores in their own transaction; the chain runs them in its own,
-after `chain_latch.claim`, so the owner rows share an `xmin` with the order.
-The version capture, both landing watermarks (the canary's `mirror_stale` and
-`order_versions_stalled` keep meaning what they say) and the derivation mark go
-with them unchanged.
-
-**The decider read is the write decision.** DuckDB decided insert, update,
-skip-as-unchanged and the header-only refresh's deferral from one read of
-`(id, updated_at)` under its store lock. The chain reads the same pair
-`FOR UPDATE`, in id order, inside the writing transaction, and decides with the
-same `core.upsert_decider.should_update_order` — on UTC instants, and never
-rewriting a stored order from a payload without `updated_at` (DuckDB reads
-that stamp as NaT; a grid against DuckDB's own `upsert_orders` found it). A
-batch that would write nothing is read before the latch and takes none. A
-value Postgres would refuse (NUL in text, a number over `NUMERIC(12,2)`, an id
-outside INTEGER, a NULL into NOT NULL) is refused before the latch, logged by
-id, counted in `failed`. A `DataError` nobody foresaw retries the batch order
-by order on the same connection, each with its own claim. Anything else raises.
-
-**Every path asks the chain's one answer.** `SyncService._upsert_orders_with_expenses`
-routes at its first statement; DuckDB's `upsert_orders` and
-`upsert_expenses_batch` raise `ChainOwnsOrders` while it writes Postgres
-(`upsert_expenses`, which had no caller, is deleted). `record_backfill_misses`
-routes, dated by the web clock rather than `now()` — the clock the copy-back
-orders the two stores by. The gap, backdated, half-written and checkpoint
-selections read Postgres (`core/pg_orders_read.py`, no `except`), and so does
-the boot's "do we hold any orders" gate — a latched host with an empty DuckDB
-would otherwise full-sync 730 days on every start. The two comment backfills
-write through `restore_manager_comments`: only NULL comments, headers only,
-`kind='backfill'`. `tests/unit/test_order_paths_consult_chain.py` walks
-`core/`, `web/` and `scripts/` for every DuckDB statement writing the four
-tables.
-
-**The order step cannot take the tick down.** Under the chain a failure that
-is not KeyCRM's is recorded (`write_chains.pg_orders_write.sync_step`, the
-error class only), `last_sync_orders` stays where it was, `meta.mirror_state`
-marks `bronze.orders` failing, and products, managers, buyers and inventory run.
-The watermark lives in `meta.chain_watermarks` and is read before the fetch, so
-a dead Postgres spends no KeyCRM call. Until the first tick under the flag
-writes it there, DuckDB's frozen stamp stands in
-(`CHAIN_WATERMARK_INHERITS_DUCKDB`, read by the store's getter as well as the
-freshness check): it is where the window starts, and read as absent it was
-"an hour ago", so a flip after a day of KeyCRM failing skipped every order
-updated in that day (found in review). The canary pages
-**`orders_sync_failing`** (CRITICAL) on three failures in a row, no success for
-15 minutes, or the step not reached for 20 — except while the tick waits
-for the heavy-job lock (`sync_step.lock_wait_s`, recorded by the scheduler's
-tick): the full sync, training, the backup and the 05:15 refresh hold it,
-and a hold past 20 minutes paged with nothing at fault (found in review).
-The wait excuses its own length, never what was stale before it, and pages
-on its own past 90 minutes, chain 4's bound. How long those jobs hold the
-lock has not been measured.
-
-**The search index's Postgres cursor moves with it** (OD-15).
-`last_sync_meilisearch_pg` is `MAX(mirrored_at)` over orders, buyers and
-products, a Postgres clock, and it is the chain's second sync key: under the
-chain the store's getter and setter keep it in `meta.chain_watermarks`,
-DuckDB's frozen cursor stands in until the first index tick writes it there
-(the same `CHAIN_WATERMARK_INHERITS_DUCKDB`, so that tick goes on
-incrementally rather than re-indexing everything), and the copy-back carries
-it into DuckDB and the release deletes it. Nothing judges its age: it is in no
-`FRESHNESS_THRESHOLDS` entry, so a run that cannot read the moved watermarks
-does not name it in `sync_watermarks_unwatched`. `last_sync_meilisearch`, the
-DuckDB-built index's cursor, is a DuckDB clock and stays DuckDB's. Declared on
-no chain until a review found it, while this file said chain 3 carried it.
-
-**What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
-`reconciliation`): against a DuckDB that no longer receives orders it would
-page every morning and re-fetch every new order. The Postgres arm, from the
-same KeyCRM snapshot, drives the repair; the stood-down arm journals no run.
-`/api/health` marks the layer `stood_down` — after chain 9's `_journal_ages`,
-which answers Postgres's block and ignores the one it is handed, so marking
-first loses the mark — and the canary, the catch-up and the digest skip it.
-Each of those is pinned by running it, not by reading its source. The ten
-DuckDB integrity checks over the order tables (`ORDER_LANDING_CHECKS`) join
-`stood_down_duckdb_checks()`, so DN-23's Postgres twins stand in alone;
-`tests/unit/test_order_landing_stand_down.py` derives the list from the scan.
-The standing watch adds `chain_expense_orphans` (an expense with no order past
-a day) and a NULL `checked_at` in the misses.
-
-**Since step 14's S14-00 none of these is asked** — the chain writes
-Postgres, a constant, and the start hold is gone. **The backup evidence is
-judged by the canary instead: `backup_evidence_stale` (WARN)** reads
-`/api/health`'s `backups` at `core/backup_evidence.py`'s limits — a PITR or
-off-site restore drill older than 8 days, an off-site shipment older than
-36 h, or a marker that was never written — and names the script that writes
-it. Until then only this precondition judged the two drills, and
-`deploy/offsite_check.sh` reads the shipment's marker alone. History below.
-
-**Preconditions, every one read locally** (`unmet_precondition()`, published
-through the registry, `write_chain_precondition_unmet` on the canary):
-`step13` (Postgres alone derives the warehouse), `chain1` (DuckDB's SKU rebuild
-reads DuckDB order lines), the backup evidence — `pitr_drill` and
-`remote_restore` under 8 days, `pg_offsite` under 36 h, from the markers the
-host scripts now write on success only (`core/backup_evidence.py`; one provider,
-OD-01 (c) cancelled 2026-10-01; their ages, and only their ages, are
-`/api/health`'s `backups`) — and `landing_pages_clear`: no delivered page
-under a condition the stand-down retires. (`goals_bridge` was first among them
-while the goal calculators read DuckDB orders through the DN-12 bridge; chain
-7b-4 deleted the bridge.) While any is unmet an unlatched chain
-runs as duckdb whatever its flag says. **And held is held until the process
-ends** (`held_until_restart`): the markers age and are rewritten by the
-host's drills, and a page resolves, inside a running web, and with the flag
-set the Monday drill's fresh marker used to flip a running web on its next
-write — no stopped window, no `--handover` (found in review). The first unmet
-answer under the flag is remembered, from the start (`configure_modes()`)
-on, so the flip happens only at a start that found everything met. **Except
-`step13` before step 13 has decided** (`warehouse_cutover.verdict_reached()`):
-step 13's start used to ask this chain its mode before its own verdict
-existed — gathering the goal bridge's owners, until 7b-4 deleted the bridge —
-and remembering that "unmet" held chain 3 — and chain 5 through it — for good
-on every start that found step 13 in force (batch-E review). The start asks
-no chain now; the guard stays for any ask before the verdict. It still keeps
-the chain on DuckDB; it is not held on.
-`preflight` adds what Postgres says: the three bronze tables backfilled and
-their mirrors not failing. It is asked beside chain 1's, never after it: each
-is bounded at 5 s, and two in a row with Postgres hung were the canary's whole
-10 s (found in review). And each is shielded, the sync tick's DN-05a form: a
-bare `wait_for` waits for asyncpg's cancel round trip, and against a paused
-Postgres the "5 s" answer came after 60 s, holding its cache lock — and every
-later `/api/health` — meanwhile (batch-E review). Its `reasons` are one entry
-per precondition by structure (`unmet_reasons()`), never the joined answer
-split on "; ", which two of them carry.
-
-**The way back** is the copy-back generalised from chain 4's mirrored tables:
-the orders, expenses and line items each dated by their own `mirrored_at`,
-KeyCRM's `updated_at` refusing a later DuckDB version, and the misses
-replaced whole. **A line item is never dated by its order's header**: the
-05:15 refresh and the comment restore write headers alone, so a line only
-DuckDB holds under any refreshed order read as a basket the chain shrank and
-`--execute` deleted it (found in review). It is the chain's only when
-Postgres's line items of its order carry a stamp from after the latch. A
-basket the chain emptied leaves no line to date and is refused, knowingly too
-strict, with the per-id decision named. No allocator to carry. Proved against
-a real Postgres in `tests/integration/test_chain_copy_back_orders.py` until
-step 14's S14-00, which deleted it: every case set up the pre-flip state
-through DuckDB's order writer, which nothing routes to any more.
-**Soak checks O1–O5**: the hourly copy of the misses and the two ids-diffs
-stood down (no `last_ok_at` or failure on the misses, no `backfilled_at` on
-the bronze three, after the owner rows — else `SOAK_ORDERS_FLIP_AT`, else a
-75-minute window read as UNKNOWN; the chain stamps `last_ok_at` on the bronze
-three itself, so there that column says nothing); `last_sync_orders`
-rewritten within 105 minutes, the longest the canary goes without paging (its
-90-minute lock wait plus the 15 it allows after it, derived from its constants
-by a test), judged by the row's stamp because its value is KeyCRM's clock;
-`reconcile_order_versions`' three predicates, asked live; no order the chain
-wrote with revenue and no line items past 6 h, ledgered or not; and the
-standing watch's chain-3 group. A ledger row no longer excuses one: the repair
-re-fetches through the chain's own writer and ledgers whatever is still empty,
-so it would launder a writer that drops line items, and production held 0 such
-orders in the 120 days before the flip (measured 2026-10-09). O1 counts a
-copy's failure for the day it was stamped — nothing resets the count while the
-chain owns the table — and FAILs owner rows with `orders_on=0` as the marker
-lost (`order_owner_row_without_marker`'s state), naming
-`data/write-chain-owners/pg_orders_write` and `scripts/chain_copy_back.py
-orders` — and FAILs the same with `orders_on=pending`, where a precondition
-unmet keeps the mirror shipping and the flag is not the lever, rather than
-read it as a flip waiting for its first write. Unless the owner rows are
-dated after `markers_read_at`, the moment the script took before reading any
-marker: a healthy first write takes the marker before it claims the rows, so
-those are the chain latching while the report ran — flip day's +2 min run,
-some thirty psql sessions after the marker read — and O1 is UNKNOWN, "run the
-report again", never a FAIL naming a rollback tool.
-`stage4_soak.sh` passes `orders_on=pending` for a flag the chain has not
-latched under, chain 5's way. The restore drill counts the four tables once
-an owner row names one: orders, expenses and misses `grows`, line items
-`either`. The lock-out for images without the chain is revision 0035, shared
-with the other seven chains #280 registered (see "Revision 0035"); it holds
-the backfills and the misses ledger's copy, and not the per-tick orders and
-expenses mirrors, which never asked the revision.
-
-### The Postgres mirror of landing
-One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
-rows; DuckDB and Postgres each write the rows they are handed. Bookkeeping
-columns are *not* shared — DuckDB stamps `synced_at`, Postgres `mirrored_at` —
-because two correct copies differ on those by construction.
-
-**The catalogue re-ships whole; orders ship a delta.** `mirror_products` sends
-all 1,003 products every hour. `upsert_orders` sends `updated_ids` — what it
-actually wrote — because a page of 500 orders usually changes a handful, and
-re-sending the page every minute would be thousands of no-op writes. That
-difference is why orders need `POST /api/mirror/backfill/orders` and the
-catalogue never did.
-
-Three things the orders path must keep doing, each with a reason that is not
-obvious from the code:
-
-- **`manager_comment` is `COALESCE(EXCLUDED, stored)`, never overwritten with
-  NULL** — it carries UTM attribution a backfill restored, and 14 179 of 46 446
-  orders have it NULL. A plain `EXCLUDED` would erase attribution on one store
-  only, and the reconciliation would then report a difference the mirror had
-  created.
-- **Line items are deleted per order and re-inserted, never upserted.** Ids are
-  `order_id * 1000 + position`, so an order dropping from three items to two
-  leaves `…002` behind under an upsert.
-- **The `order_products` watermark only moves when line items moved.**
-  `skip_products=True` (the status-only refresh) rewrites headers and does not
-  look at line items; stamping them as shipped there would tell the
-  reconciliation they are current when nothing touched them.
-
-The backfill has **no cursor**: it asks both stores which order ids they hold,
-ships the difference in chunks, and stops. Interrupt it anywhere and the next
-run resumes by recomputing. It does *not* repair an order that exists on both
-sides and differs — that is the reconciliation's business, downstream of a
-check that can say which rows disagree. Measured end to end against the
-production backup on a throwaway Postgres 17.2: 46 446 orders and 147 508 line
-items in **13.2 s**, then compared column by column — **0 differing rows on
-both tables**.
-
-### Replicated, not mirrored: the manager classification
-`bronze.managers` and `app.manager_classifications` are the one pair that does
-**not** come from a KeyCRM payload. `sales_type` is decided by
-`silver_sales_type_case()`, four of whose six branches read these tables, and
-KeyCRM has no idea whether a manager sells retail, wholesale, internally, or
-ships to bloggers — **only a human does**. `upsert_managers` seeds `is_retail`
-from `RETAIL_MANAGER_IDS` for managers it has never seen and never touches it
-again, because recomputing it every sync made the column unfixable.
-
-So `core/pg_replication.py` copies what DuckDB holds. A payload-fed mirror would
-re-seed from the same constant, the two stores would classify differently, and
-the Gold reconciliation would then be measuring the classification instead of
-the migration.
-
-**Full replace, both tables, one transaction.** An interval can be *deleted* — a
-correction removes one — and an upsert would leave a ghost that silently
-reclassifies past orders. It refuses an empty manager list: replacing a
-populated table with nothing sends every affected order to `internal`, which is
-admin-only, and empties the dashboard for everyone else.
-
-Written on every manager sync **and** in `POST /api/managers/{id}/retail-status`,
-because that endpoint is the reason the value cannot be re-derived and waiting
-for the daily sync would leave Postgres a day behind.
-
-In Reconciliation A the two carry `full_replace=True`, which removes the retired
-category: a full replace writes every row it holds, so a missing row was lost,
-not retired. Proven on the production classification — deleting one interval in
-Postgres is reported CRITICAL with the manager id as the sample, where the
-catalogue rule would have excused it as retired (seeded baselines carry
-`valid_from = 1970-01-01`, so their `set_at` always predates the watermark).
-
-### Chain 5: the classification, written where it is derived (off)
-
-`core/pg_managers_write.py` is a registered write chain for `bronze.managers`
-and `app.manager_classifications` — `pg_replication.MANAGER_UNIT`, whole —
-under `KS_WRITE_MANAGERS=postgres`. **Off in production, and held even if
-set**: `unmet_precondition()` names `lockout` (this build requires revision
-0035, which refuses every image built before the chain), `step13` (DuckDB
-would derive `sales_type` from a classification the chain freezes), `chain3`
-(`update_manager_stats` reads the orders; a build without chain 3 reads as
-unmet, not as an import error) and `read_fallback_off`. `goals_bridge` was a
-fifth until chain 7b-4 deleted the bridge through which the goal calculators
-read DuckDB's classification. Every fact is local, so `/api/health` answers
-with Postgres down. Order of flips: step 13, chain 3, chain 5, with the
-lock-out revision — 0035, shared by all eight of #280's chains — deployed
-before the first of those eight flips (see "Revision 0035"). 7b-4 had to come
-before chain 3, since chains 3 and 5 held on its `goals_bridge`, and not
-before step 13, whose own `goals_bridge` `KS_GOALS_HISTORY=silver` met. The
-way back runs in reverse.
-
-**Three writers, one advisory lock** (`CHAIN_LOCK_KEY`, 'ks' + 5), taken
-first in every transaction. Measured before building: two classifications of
-one manager in flight leave **two open intervals** without it, one with it.
-
-- `upsert_managers` — from the shared parse (`landing_rows.manager_row`).
-  `is_retail` is inserted for a new manager and **never in the conflict
-  update**: writing the seed there reverts every human classification. The
-  same transaction seeds a baseline for every manager without one — DuckDB
-  does that only at the next boot (`_m0006`), which stands down once the
-  chain is latched, because a DuckDB baseline after the latch is a key the
-  copy-back refuses on.
-- `update_manager_stats` — one body for both engines
-  (`sql_dialect.manager_stats_sql`) with the date **spelled in Kyiv**.
-  `DATE(ordered_at)` took the process's timezone: right in production only
-  because web runs `TZ=Europe/Kyiv`, a day early under UTC — CI, a laptop, a
-  Postgres session. Production's answer does not move. It raises no
-  derivation signal: Silver reads none of the three columns.
-- `set_manager_retail_status` — close, replace the same day, open, set
-  `is_retail`, raise the signal: one transaction. **A backdate behind the
-  manager's latest change is refused** (`BackdateBehindLatest`, 409) before
-  the latch and again under the lock (OD-C5-1 (a)). DuckDB accepts one and
-  writes two open intervals and an overlap, and the `sales_type` it then
-  gives depends on the direction — that latent defect is left as it is, since
-  changing what DuckDB accepts changes production. `set_at` is the web
-  container's UTC clock, the copy-back's handover clock.
-
-**Around it, with the flag off nothing moves**: the store routes the four
-methods by `writes_postgres()` (or `reads_postgres()`); `get_all_managers`
-and every statement carrying `{managers}` (the dashboard's returns list,
-through `_dashboard_run`) read Postgres once the chain owns the tables, with
-no fallback — a walk in `test_managers_chain.py` finds every such statement;
-the incremental tick's managers step is contained under the chain, retried
-after 10 minutes and published as `write_chains.pg_managers_write.sync_step`
-(on DuckDB a raise there skipped the buyers, offers and stocks steps, and
-still does); the retail-status route answers a `KS_WRITE_MANAGERS` typo with
-409 before anything is read and a Postgres failure with 503;
-`replicate_managers` already stood down on the flag and on an owner row
-alone (DN-22b). `/api/health` asks chain 5's `preflight()` concurrently with
-chain 1's — two in a row could cost the canary's whole timeout — and it
-names every unmet precondition and, once those all hold, a replica failing or
-over 26 h old and the shape the standing watch would file.
-
-**Watched**: `chain_managers_empty` and `chain_manager_open_interval`
-(CRITICAL), `chain_manager_unclassified` (WARN, from the latch on),
-`chain_manager_intervals_broken` and `chain_manager_retail_disagrees` (WARN),
-and a NULL `set_at` as `chain_required_column_null` — one read,
-`pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (the
-replica stayed away; with `managers_on=0` or `pending` and owner rows
-standing, a FAIL as a lost marker naming
-`data/write-chain-owners/pg_managers_write` and
-`scripts/chain_copy_back.py managers` — at `pending` only for rows older than
-the script's `markers_read_at`, since newer ones are the first tick latching
-during the report, UNKNOWN; a failure counts for its day) and M2
-(the shape and `last_sync_managers` under 26 h);
-`stage4_soak.sh` passes `managers_on=pending` for a flag the chain has not
-latched under, since only web holds the step-13 and chain-3 verdicts. The restore drill
-counts both tables once the chain owns them (`grows`: nothing deletes a
-manager, and the writer's one DELETE is followed by the INSERT of the same
-key).
-
-**The way back** is `scripts/chain_copy_back.py managers`. `chain_specs`
-derives the pair from a fourth source — `pg_replication.REPLICATED_SHAPES`
-and `mirror_reconciliation.REPLICATED_TABLES` — and the handover differs from
-an operational table's in two places: the pre-flip lever is
-`replicate_managers` and `POST /api/jobs/manager_stats/trigger`, and after the
-latch a key only DuckDB holds is a DuckDB write after it. Before a flip a key
-only Postgres holds is **CRITICAL** (there is no next full replace to remove a
-ghost interval) — this pair's rule first, and every full-replace operational
-table's since F6 (review of #265). Expect one pre-flip CRITICAL naming a
-`(manager, 1970-01-01)` baseline: the script's own connect runs `_m0006` for
-a manager synced since web's last start; `up -d web` ships it. A chain
-declaring `CHAIN_COPY_BACK_OWES_FULL_REBUILD` gets `warehouse_dirty='full'`
-in the copy's own transaction — `sales_type` is materialised at rebuild time
-and an incremental rebuild never re-derives an order whose classification
-moved. **Step 13's way back is refused while this chain is latched**: a
-start that would run as duckdb stays `postgres` and pages
-`warehouse_way_back_refused` (see "Step 13"); copy chain 5 back first, then
-chain 3, then take the way back.
-
-**What the review moved (2026-10-08).** The ways back leave a state where this
-chain is on DuckDB and chain 3 still owns the orders; DuckDB's
-`update_manager_stats` then leaves the stats as the copy-back carried them
-(`duckdb_orders_frozen`) rather than count frozen orders and ship
-`last_order_date` and `order_count` backwards. A value Postgres would refuse —
-a note with NUL, a `set_by` past INTEGER — is `ClassificationRefused`, which
-the route answers **422**, not "Postgres did not answer". Every precondition's
-reason starts with its key, an unreadable one too (`read_fallback_off`, not
-`read_fallback`). With the flag off nothing is asked on the chain's behalf:
-the preflight asks Postgres only once every local precondition holds — never
-while chain 3 writes DuckDB, its default — and the restore drill counts the two tables only
-once live `meta.chain_watermarks` holds an owner row naming one. And a walk in
-`test_managers_chain.py` finds every statement naming DuckDB's `managers` or
-`manager_classifications` **bare**, not only through the holes, and holds each
-to the router that keeps it off the frozen copy.
-
 ### Postgres against KeyCRM — the other half of the criterion
+**Since step 14's S14-12 the job compares Postgres and ClickHouse only**:
+DuckDB's arm (`reconciliation_io.duckdb_orders_in_window`, layer
+`reconciliation`), standing down since chain 3's flip, is deleted, and
+`MISSING_IN_DK`, `STATUS_DRIFT` and `VALUE_MISMATCH` in the Postgres arm's
+verdict are what the job re-fetches by id. History below.
+
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the
 source. So step 05 closes on **two** things — zero differences between the
@@ -2505,73 +1778,6 @@ and float addition is not associative: the largest observed gap is **2.1e-09**
 on a ₴1 834 807.24 cell. The tolerance in `classify_discrepancies` is
 load-bearing here — exact equality would buy a daily discrepancy of two
 nanohryvnia.
-
-### Reconciliation A — the two stores against each other
-`dq_mirror_landing` (layer `mirror_landing`, daily 07:30) compares
-`bronze.products` and `bronze.categories` in Postgres against `products` and
-`categories` in DuckDB, **column by column with a tolerance of zero**. Landing
-is a copy, not a computation — the same parsed tuple from `core/landing_rows.py`
-goes to both stores in the same call — so any difference at all is a defect in
-the mirror, and a tolerance would only be somewhere for one to hide. This is
-step 05's closing criterion.
-
-**A row DuckDB has and Postgres does not is two different things**, and
-`meta.mirror_state.last_ok_at` is what tells them apart. Every successful mirror
-ships the *whole* catalogue, so after a success at T, Postgres holds everything
-KeyCRM served at T:
-
-- `synced_at <= last_ok_at` → KeyCRM has **retired** the row. DuckDB keeps it
-  because upsert never deletes; a payload-fed mirror can never learn of it
-  again. INFO, counted. Production has exactly one, product 1055, last synced
-  2026-06-13 — that is the whole 1004-vs-1003 gap.
-- `synced_at > last_ok_at` → in flight inside the 15-minute grace, **lost**
-  past it. CRITICAL.
-
-A table with no `last_ok_at` at all reports `mirror_never_shipped` and
-**suppresses the row-level findings**, so `bronze.categories` — written only by
-the weekly full sync — does not report 28 missing rows every morning until
-Sunday.
-
-Report-only, like the Silver arc and the Gold cell check: a finding cannot
-reach `validation_passed`, and a mirror that quietly re-shipped whatever it
-noticed missing would destroy the signal.
-
-**Orders are compared differently, because 46 487 rows and 147 648 line items
-cannot be pulled whole every morning.** Both sides are folded into one
-fingerprint per 1 000-id bucket — a count and one SUM per column — and only the
-buckets that disagree are opened and compared row by row. ~47 rows come back
-from each store; the full check costs **0.27 s** measured over the whole
-catalogue of orders.
-
-The fingerprint sees any change to a number, a timestamp, or a text column's
-*length*. It cannot see a text edit of exactly equal length in a bucket where
-nothing else moved — measured and confirmed, not assumed. The alternative is a
-cross-engine row hash, which needs both databases to render numerics and
-timestamps to text identically, and they do not.
-
-**Not keyed on `updated_at`, which would be exact and cheap.** KeyCRM does not
-bump it on a status change — that is why `upsert_orders` has `force_update` —
-so an order can move from status 12 to 20 with `updated_at` untouched on both
-sides. Verified: the fingerprint catches exactly that change.
-
-**The gate is `meta.mirror_state.backfilled_at`.** `last_ok_at` licenses a
-tolerance of zero for the catalogue because a catalogue mirror ships the whole
-table. The orders mirror ships `updated_ids`, so it proves only that the last
-delta landed. Until the backfill has carried history across, every order older
-than the mirror looks exactly like a lost one — so the row-level comparison is
-suppressed and one `mirror_backfill_pending` is reported instead. The column is
-written by `core/pg_backfill.py` only on a run that finished with nothing
-remaining. A partial backfill claiming completion would file tens of thousands
-of CRITICALs.
-
-`mirror_buckets_disagree` caps the drill-down: more than 20 disagreeing buckets
-is a whole-table problem, and reading them all would turn a daily check into a
-table scan of both stores. `mirror_landing` is in
-`WATCHED_LAYERS` (digest section, layer age, catch-up), and since 2026-08-28 in
-the canary's `DQ_MAX_AGE_S` too, paged at 30 h: the worry that kept it out —
-the canary's first probe 90 s after the bot starts, before the catch-up can
-finish — only bites a layer already past 30 h, and the 26 h catch-up sits
-under that page (see "Scheduled checks").
 
 ### Gold in Postgres, and why it is not the same table
 
@@ -2650,6 +1856,15 @@ failed runs, so the layer ages go stale and the 09:00 digest says so. Fails
 closed, not silently — but you find out the next morning, not at deploy.
 
 ### The five tables with no source to be rebuilt from
+
+**Since step 14's S14-13 nothing copies them**: each is a write chain's, and
+`core/pg_operational.py` is deleted with `replicate_after_manual_expense`, the
+SMS state's copy (`replicate_sms`) and the dashboard users' copy
+(`replicate_dashboard_users`). The hourly job keeps its id,
+`replicate_operational` — `/api/jobs`' history and the catch-up read it — and
+runs `derive_gender_pg` and `replicate_bot_state`. `app.sync_metadata`,
+`app.warehouse_refreshes` and `app.reconciliation_log` are history (OD-S5-4).
+History below.
 
 `bronze.*` can be re-fetched from KeyCRM; Silver and Gold can be recomputed.
 These cannot, which is why the plan's 2026-08-22 amendment routes them to
@@ -2935,10 +2150,10 @@ it. 86 tests — 44 characterising the behaviour, 42 on the seam.
 un-ported would be code that silently reads SQLite after the engine moves —
 but deleting them would make the port smaller and is the owner's call.
 
-**`web/main.py._migrate_sqlite_users_to_duckdb` goes round the seam** and is
-left alone: it is a startup one-shot copying `authorized_users` into DuckDB's
-own `users` table, unrelated to what the port is for. It will need a decision
-when the engine moves, because it opens `data/bot.db` directly.
+**`web/main.py._migrate_sqlite_users_to_duckdb` went round the seam**: a
+startup one-shot copying `authorized_users` into DuckDB's own `users` table,
+unrelated to what the port is for. It was deleted on 2026-09-07, when the
+dashboard's user list moved to Postgres.
 
 ### The Postgres adapter behind that port, and the switch
 
@@ -2998,9 +2213,9 @@ one-way and it was standing down the whole time.
 ### The bot's own state, and the only store with no backup
 
 `data/bot.db` is the third store in this system. Measured 2026-08-27: it is in
-**no backup at all** — `data/backups/` holds `analytics-*.duckdb`,
-`deploy/daily_offsite.sh` globs the same pattern, and the Ark froze the
-warehouse. One file, one disk, no copy, holding 24 approved users, 25
+**no backup at all** — `data/backups/` held `analytics-*.duckdb`,
+`deploy/daily_offsite.sh` globbed the same pattern (both gone since step 14),
+and the Ark froze the warehouse. One file, one disk, no copy, holding 24 approved users, 25
 celebrated milestones and everyone's language choice. Nothing re-derives any of
 it: an approval is a human's decision, a celebrated milestone is a message
 already sent, a language is a preference nobody will re-enter.
@@ -3058,6 +2273,14 @@ that is false for every replicated table. It was found by reading a real
 finding, not by reading the code.
 
 ### Шаги 1–2 «Одной бронзы»: переключение чтения и строка на клиента
+
+**С S14-06 шага 14 дашборд читает только Postgres**: `KS_READ_GOLD`,
+`KS_READ_SILVER` и `KS_READ_DASHBOARD` движок больше не выбирают (до S14-15
+их читала только готовность шага 13 на `/api/warehouse/status`), сбой —
+отказ 503 `surface=dashboard` (у экрана менеджеров — `managers`).
+`/api/summary` по источнику без колонки в DuckDB-Gold (3, 5) по-прежнему
+отвечает нулями — константа по решению владельца 5 для шага 14; маршрут
+`/api/summary` источник 5 и вовсе отвергает 400 до чтения. Ниже — история.
 
 **Шаг 1 — `KS_READ_GOLD`** (`duckdb` по умолчанию | `postgres`; опечатка
 роняет запрос, правило `KS_BOT_STORE`). **В проде `postgres` с 28.08** —
@@ -3128,8 +2351,14 @@ derived, переезд стоит одну пересборку.
 Шаг 4 (копия голда) превзойдён и оставлен фолбэком. Часовой `ch_sync` теперь:
 `core/ch_silver.py` отгружает **silver целиком** (staging + EXCHANGE, копия —
 допуск ноль на круге) и **деривит gold внутри ClickHouse** из этого silver;
-`core/ch_history.py` дописывает `history.order_versions` поверх собственного
-`MAX(id)` (append-only, курсора нет — вотермарка читается из самого CH).
+`core/ch_history.py` дописывает в `history.order_versions` разность множеств
+id — всё, что есть в `app.order_versions` и чего нет в копии (`ship_history`:
+append-only, курсора нет, а не «поверх собственного `MAX(id)`»: BIGSERIAL
+коммитится не по порядку, и отгрузка выше `MAX(id)` навсегда пропустила бы
+версию, закоммиченную после большей). Строка, потерянная копией ниже её
+`MAX(id)`, поэтому доезжает следующей же отгрузкой, с WARNING в логе и
+INFO `ch_history_selfhealed` в суточной сверке следующих 24 ч (память
+процесса: перезапуск web её теряет).
 
 **Третьего диалекта мер нет** — и это снимает возражение И1: `GOLD_MEASURES`
 написаны как `COUNT(DISTINCT CASE WHEN …)` / `COALESCE(SUM(CASE …), 0)`, и
@@ -3141,8 +2370,11 @@ ClickHouse».
 Суточный вердикт в `dq_mirror_landing`: круг silver (ноль), **gold двух
 движков друг против друга** — независимые агрегации одного silver, ноль
 всюду, кроме документированного цента на `avg_order_value` (движки по-разному
-делят DECIMAL), — и бакеты архива (ноль ниже вотермарки; находка о потерянной
-строке **не лечится** — архив чинит человек). Проверено на живой паре
+делят DECIMAL), — и бакеты архива (ноль ниже вотермарки; сама сверка ничего
+не чинит: потерянную ниже вотермарки строку довозит следующая часовая
+отгрузка по разнице id, и тогда сверка пишет INFO `ch_history_selfhealed`
+вместо CRITICAL; человек нужен, только если бакет длиннее, чем в Postgres,
+или версию потерял и сам Postgres). Проверено на живой паре
 PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движках, **0
 расхождений**, включая 374 дня, где uniqExact-свёртка законно не равна сумме
 мелких строк; сверка 0.7 с; архив — 12 000 унаследовано + 40 инкрементом,
@@ -3157,10 +2389,9 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 отгружает то, что сравнивает, так что сбой отгрузки и есть устаревшая копия);
 при сбое чтения обратно; при двух пустых Gold; при исключении или прогоне,
 не дошедшем до сверки — эти два файлит сам джоб, сверке нечего вернуть.
-**WARN, пока Gold DuckDB ещё сравнивается с Postgres, CRITICAL — когда нет**:
-`warehouse_checks_stand_down()`, тот же предикат, на котором джоб снимает
-`reconcile_gold` (Postgres деривит один, или путь назад держит сравнения), а
-нечитаемый предикат — тоже CRITICAL. Такой прогон держит `ch_silver_roundtrip`
+**CRITICAL всегда с S14-12 шага 14**: до него — WARN, пока Gold DuckDB ещё
+сравнивался с Postgres, и CRITICAL, когда нет (`warehouse_checks_stand_down()`,
+константа с S14-00); S14-12 удалил `reconcile_gold` и предикат вместе с ним. Такой прогон держит `ch_silver_roundtrip`
 и `ch_engines_gold_*` как были, а не объявляет их решёнными; и архив так же:
 прогон, не посчитавший бакеты (`ch_history_unreachable`, `[]` без
 `KS_CH_URL`, исключение), держит `ch_history_buckets`, который закрывает
@@ -3170,7 +2401,7 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 страница; а утро, на котором ClickHouse не сверили с KeyCRM, пейджит
 канарейка через `reconciliation_ch` (см. «How a failure reaches a human»).
 Что за 14 дней такого утра не было, говорит не снимок `/api/health`, а
-`deploy/stage4_soak/22_reconciliation_ch_history.sql` — его прогоняют на хосте
+`deploy/daily_soak/22_reconciliation_ch_history.sql` — его прогоняют на хосте
 до мержа. Соак D8 читает прогон, где на производных таблицах только «ClickHouse
 не сравнивал» (`gold_values_unwatched` и WARN'ы самой сверки), как UNKNOWN, а
 не как расхождение хранилищ.
@@ -3198,6 +2429,13 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 и делается на месте.
 
 ### Вкладка /traffic: слой, который убрали, а не скопировали
+
+**С S14-05 шага 14 вкладка читает только Postgres** — каждый её метод,
+разбивка органики и «Тільки піксель» тоже, одним роутером `_traffic_run`:
+`KS_READ_TRAFFIC` движок больше не выбирает (до S14-15 его читала только
+готовность шага 13 на `/api/warehouse/status`), сбой — отказ 503
+`surface=traffic` (см. «A read whose engine fails is refused»).
+Ниже — история переноса и блоки вкладки.
 
 `KS_READ_TRAFFIC=postgres` переводит все пять методов вкладки. Две из них
 читали `gold_daily_traffic`, которой в Postgres нет — **и не будет**.
@@ -3325,11 +2563,25 @@ LOCK снимка не фиксирует и пережидает тик; пус
 
 **Фильтры шапки, которых вкладка не применяет, на ней не показываются.**
 `utils/pageFilters.filtersForPath` — одна карта на два читателя: `FilterBar` не
-рисует контрол, `useQueryParams` не кладёт параметр в запрос. Для `/traffic`
-это `period`, `sales_type`, `source_id`; категория, бренд и промокод не
-доезжали до эндпоинтов никогда (FastAPI молча роняет лишние query-параметры), и
-выбор их не менял на странице ровно ничего. Остальные вкладки намеренно не
-тронуты — сузить любую из них значит сперва проверить её эндпоинты.
+рисует контрол, `useQueryParams` не кладёт параметр в запрос. Категория, бренд
+и промокод не доезжали до эндпоинтов `/traffic` никогда (FastAPI молча роняет
+лишние query-параметры), и выбор их не менял на странице ровно ничего.
+Остальные вкладки намеренно не тронуты — сузить любую из них значит сперва
+проверить её эндпоинты.
+
+**С 4.11.2026 вкладка — три раздела, у каждого свой путь** (`utils/trafficTabs`,
+`SectionNav`; владелец оценил ленту из девяти блоков на 2 из 10): «Воронка»
+(`/traffic`, Google Analytics), «Продажи по каналам» (`/traffic/sales`: итоги по
+типам трафика, динамика, платформы, органика, «только пиксель») и «Кампании и
+реклама» (`/traffic/campaigns`: кампании по меткам, заказы с метками,
+окупаемость). Путь, а не состояние: раздел открывается ссылкой, и по пути
+карта решает фильтры. Воронке — только `period`: GA4 не видит ни типа продаж,
+ни источника заказа CRM, поэтому их нет ни в шапке, ни в запросе (`sales_type`
+`useQueryParams` теперь тоже кладёт только там, где он есть в карте). Двум
+другим — `period`, `sales_type`, `source_id`. Под ссылками раздела — период
+словами («Период: 1–31 октября 2026») и одна фраза о том, какие фильтры
+действуют; даты считает `utils/periodDates` тем же правилом, что
+`core/filters.parse_period`.
 
 **Ревизия 0018** привозит две таблицы, которых действительно не хватало:
 
@@ -3364,6 +2616,17 @@ COUNT(*) FROM ( ... )` без имени производной таблицы; 
 под `LIMIT`/`OFFSET`, из-за чего две кампании с равной выручкой попадают на обе
 страницы или ни на одну; и `SUM(revenue)` по выручковому Gold без предиката
 свёртки — в Postgres это считает каждый заказ дважды и **делит ROAS пополам**.
+
+**С S14-15 шага 14 `silver.order_utm` пишет только разбор в Postgres.**
+Копия из DuckDB (`core/pg_order_utm.py`, `ship_order_utm`,
+`ship_after_reparse`), разбор DuckDB (`refresh_utm_silver_layer`) и режим
+`KS_UTM_PARSE` удалены: деривация кончается `parse_incremental_locked`, четыре
+двери зовут `reparse_router` без стора — `parse_full` для reclassify и CLI,
+`parse_incremental_locked` для остальных, — блок `utm_parse` и канарейка
+`utm_parse_mode_invalid` ушли, строка «→» находок `pg_order_utm_*` — та, что
+была при `postgres`. Обходы дверей — `tests/unit/test_utm_parse_doors.py`;
+разбор держится литерала того, что DuckDB писал на золотых фикстурах
+(`tests/integration/golden/utm_parse.json`). Ниже — история.
 
 **Перепарсинг UTM обязан отгружаться сам.** Три админских эндпоинта и
 `scripts/backfill_utm.py` переписывают `silver_order_utm` в DuckDB, **не помечая
@@ -3491,7 +2754,96 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 повторных (₴3.68M), из них первыми пришли через Instagram Direct 193, ссылку в
 профиле 99, рекламу Facebook 82.
 
+**Воронка сайта из GA4** (`GET /api/traffic/funnel`, раздел «Воронка», `/traffic`).
+Шаги — события GA4: начало сеанса → просмотр товара → корзина → оформление →
+покупка; воронка закрытая и считает людей, поэтому дубли просмотров от
+песочницы пикселя Shopify её не завышают. Только сайт: фильтры источника и
+типа продаж сюда не доходят.
+
+**Блок переделан 4.11.2026 по утверждённому владельцем макету** — первая
+версия получила 2 из 10: «основной воронки как таковой нет (Вошли → товар →
+корзина → оформление → покупка, Итог)». Арифметика — `utils/funnel`, фразы —
+`utils/funnelText`, сам блок — `SiteFunnel`.
+
+- **Сверху — конверсия и что она значит**, потом пять шагов полосами от общего
+  левого края (синее — дошли, бледный хвост — были на прошлом шаге и не
+  дошли), между полосами словами: «из них положили в корзину 12,9 % · ушли
+  16 974 · было 13,5 %», в конце строка «Итог». Изменение доли пишется «было
+  X %», никогда относительными процентами.
+- **«Хуже обычного» — z двух долей с поправкой на разброс GA4**:
+  `OVERDISPERSION = 1.96` — дневные воронки сентября–октября 2026 разбросаны в
+  1,96 раза шире биномиального (χ²/df). Без поправки тест назвал бы
+  «заметными» 10 из 12 помесячных изменений конверсии. Ничего не утверждается
+  при меньше чем 2 000 зашедших или 50 купивших (один день — ~1 100 и ~23,
+  ±0,8 п.п. сам по себе), про группу меньше 200 человек и про долю из меньше
+  чем 50 человек. Красный значит только «хуже», всегда со значком ▼.
+- **Вывод — сначала факт, потом место, без «из-за»**: при конверсии в пределах
+  колебаний заголовок — счётчики («Покупателей почти столько же, а зашедших на
+  13 % больше»), затем шаг, ушедший за колебания, и его цена в покупателях
+  (доля тогда и сейчас × люди перед шагом × сколько прошедших его купило),
+  затем где уходит больше всего людей. При заметном изменении конверсии —
+  шаг, сдвинувший больше всего покупателей (не самый «уверенный»: z растёт с
+  числом людей), и состав трафика, если он дал не меньше пятой части изменения
+  в ту же сторону (симметричное разложение по холодным/тёплым/другим).
+- **«Купили» — люди, а не заказы**, и блок говорит это рядом с числом заказов
+  сайта в CRM за те же дни (`useSiteOrders`: `/api/summary`, `source_id=4`,
+  `sales_type=all`).
+- **«Кто как проходит воронку»** — холодные и тёплые, каналы GA4 или
+  устройства. ▼ в ячейке — доля шага заметно ниже, чем у остального сайта
+  (сайт минус группа); «хуже обычного» в последней колонке — итог группы
+  против её же итога тогда. Устройства меньше 1 % зашедших складываются в
+  «Другие устройства» (смарт-ТВ — 0 корзин, похоже на ботов), строка не
+  судится. Строки не складываются в «Весь сайт» (люди без канала, люди с
+  заходами из двух каналов), и блок говорит, на сколько.
+- **Состояния словами**: GA4 не подключён или не отвечает, данные устарели
+  («показаны данные на 10:42»), последние два дня ещё досчитываются, год назад
+  старше 14 месяцев, мало людей, период задом наперёд, нет визитов. В
+  Storybook — по истории на каждое (`Traffic/SiteFunnel`), на условных
+  числах (`test/funnelFixtures`), не на продовых.
+
+- **Читается вживую из GA4 Data API** (`core/ga4.py`, `runFunnelReport`
+  v1alpha), без таблицы в базе. Доступ — сервисный аккаунт `ga4-reader` с
+  ролью «Читатель» на ресурсе и без ролей в проекте Google Cloud; JSON-ключ
+  лежит на хосте в `/root/secrets/key-api-bot/` (вне дерева — репозиторий
+  публичный), права 640 с группой `appuser` контейнера, и монтируется в web
+  папкой на `/run/secrets/ks` только на чтение. `KS_GA4_PROPERTY_ID` и
+  `KS_GA4_KEY_FILE` — в compose. Без файла маршрут отвечает 503 «GA4 is not
+  configured», и блок так и пишет; в Google ничего не уходит. Подпись токена —
+  `cryptography`, единственная новая зависимость.
+- **Три окна за раз**: период, такой же перед ним и те же даты год назад; на
+  окно две воронки (по группе каналов сеанса, чья итоговая строка — весь сайт,
+  и по устройству) — шесть запросов параллельно
+  (`web/services/ga4_funnel_service.py`). Ответ держится час в процессе, не
+  больше 32 периодов, и при недоступном GA4 отдаётся последний с `stale:
+  true` — ради квоты GA4 на ресурс в час, не ради скорости.
+- **Тип трафика решается при чтении** (холодный: Paid Social, Cross-network,
+  Paid Shopping/Other/Video, Display; тёплый: Direct, Email, Organic Social,
+  Organic Search, Paid Search, Organic Shopping; остальное — «другой»), так
+  что деление меняется без перезаписи.
+- **Воронки GA4 видят только 14 месяцев** — максимум для обычного ресурса.
+  4.11.2026 они начинались с 2025-09-04 — ровно 14 месяцев назад, по дням, а
+  не с начала месяца, — а январь–август 2025 приходили пустыми; агрегатные
+  отчёты при этом хранят всю историю. Сравнение с
+  прошлым годом блок прячет, если те даты старше `earliest`. О днях вне
+  `earliest`…сегодня (по Киеву) GA4 не спрашивают вовсе (`asked_window`):
+  ответ от этого не меняется, а окно без таких дней — нули без запроса.
+  Дашборд пропускает диапазон задом наперёд и дни раньше 2015-08-14, первого
+  дня GA4. На них GA4 отвечал 400 (замер 4.11.2026), и блок писал «не
+  отвечает».
+- **Трендовая воронка GA4 — не дневная**: на отрезке она считает человека
+  один раз, в первый его день (за 01–02.10.2026 «вошли 2-го» 1 428 против
+  1 552 у воронки одного дня). Ряд по дням — только воронкой на каждый день.
+- **История в базе — следующий шаг**, после шага 14 (новая ревизия меняет
+  откат). До тех пор помесячная и понедельная история с сентября 2025 по
+  каналам и устройствам и дневная по каналам сохранены страховочной
+  выгрузкой в файлах артефакта «Воронка сайта KoreanStory».
+
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
+
+**С S14-07 шага 14 вкладка читает только Postgres**: `KS_READ_EXPENSES`
+движок больше не выбирает, сбой — отказ 503 `surface=expenses`, и пустой
+`backfilled_at` у `bronze.expenses` — тоже явный отказ, а не нули. Ниже —
+история переноса.
 
 `KS_READ_EXPENSES=postgres` переводит шесть читающих методов, и они делятся
 надвое. **Три** (`list_expenses`, `get_ad_spend_by_platform`,
@@ -3529,504 +2881,46 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 читает Postgres, поэтому отставание, которое ревизия 0018 сознательно приняла,
 здесь перестаёт быть приемлемым. `add/update/delete_expense` зовут
 `replicate_after_manual_expense` — 116 мс по замеру, **вне лока стора** и без
-права упасть, потому что запись в DuckDB уже состоялась.
+права упасть, потому что запись в DuckDB уже состоялась. (С S14-11 пишет
+цепочка 8, а с S14-13 копии нет вовсе.)
 
 **Сверка**: `expense_types` идёт с каталогом (27 строк, отгружается целиком
 каждый синк, так что первая успешная отгрузка и есть его история).
 `bronze.expenses` едет дельтой, поэтому гейтится на `backfilled_at` как заказы,
-имеет `core/pg_expense_backfill.py` и `POST /api/mirror/backfill/expenses`, и
+имела `core/pg_expense_backfill.py` и `POST /api/mirror/backfill/expenses`
+(оба удалены в S14-13), и
 **читается целиком, а не отпечатками**: 15 тыс. строк дёшево сравнить точно, а
 `description` — текст, переписывание которого в ту же длину отпечаток не видит.
 Часы сверки — `synced_at` (бухгалтерия DuckDB), не `created_at`: штамп KeyCRM
 прочитал бы только что синканный старый расход как потерянный.
 
-### Every read that falls back to DuckDB is counted
+### A read whose engine fails is refused
 
-Every ported tab answers from DuckDB when Postgres (for cohorts, ClickHouse)
-fails, and until DN-20a each said so in its own words — or, in
-`pg_expenses_read.backfilled()`, in words no grep for "falling back to DuckDB"
-could find. After step 13 each of those paths serves frozen Silver and Gold,
-and after the first Sunday compaction empty ones, behind a page that looks as
-if it works. So every such site calls `core.read_fallback.fall_back(surface,
-exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
-`/api/health` publishes as `read_fallbacks {surface: {count, last_at}}` — no
-exception text, the endpoint is public. **Under the default, nothing a read
-returns changed.**
+Every tab reads Postgres, the cohorts ClickHouse, and nothing else. When the
+engine fails, the router's handler raises `core.read_fallback.refuse(surface,
+exc)`: one `ReadUnavailable`, counted per surface, logged as "read refused:
+<surface> — its engine failed…" with the cause, and answered by one handler
+in `web/main.py` with a 503 carrying `surface` — the cause stays in the log,
+because the endpoint is public. `/api/health` publishes the counts as
+`read_fallback_mode.refused {surface: {count, last_at}}`, and the canary
+pages `read_refused` (WARN) while a refusal is under 30 minutes old: a
+refusal leaves no wrong number behind, only a 503 somebody saw.
 
-**The week `off` waits for is proven by the canary, not by the log** (OD-07
-(a), 2026-09-30). The condition for `KS_READ_FALLBACK=off` is a covered, clean
-168 h with no read answered from DuckDB. The plan measured it by grepping web's
-log from its oldest surviving line, but every deploy recreates web and loses
-the counters and the log together, so a week that spans a deploy could not be
-called covered at all. The evidence is now made by the process that outlives
-web's and kept in Postgres. The canary pages two keys, both WARN, and the
-Alert Gate journals a delivered page in `app.alert_series`/`alert_events`:
+Nothing that is not an HTTP request answers a refusal with a number either
+(DN-20c): the two weekly reports defer to the next tick, the Monday goals
+job and training are skipped with nothing written, the search index and the
+buyers step skip the tick with the watermark held, the assistant's tools
+return `data_unavailable`, and a job's result names
+`{"reason": "read_unavailable", "surface"}`.
+`tests/unit/test_read_fallback_consumers.py` derives where every refusal
+stops, and `tests/unit/test_read_fallback_sites.py` holds every engine call
+of a router inside a `try` whose handler is exactly that `raise`.
 
-- **`read_fallback_used`** whenever `read_fallbacks` is non-empty — an engine
-  failed and DuckDB answered — naming the surfaces and each `last_at`. The key
-  is the condition alone, and the page stands until web restarts, because
-  only a restart empties the counters.
-- **`read_routed_to_duckdb`** whenever `read_fallback_mode.misconfigured` or
-  `no_engine` is non-empty, under `duckdb` only. Those reads are served from
-  DuckDB on every request and **counted by nothing**, so `read_fallbacks`
-  stays empty over them, and `off` refuses every one. The review of OD-07
-  reproduced the week passing over a lost `KS_CH_URL` while cohorts read
-  ClickHouse. `no_engine` is the cohorts' switch not naming ClickHouse, their
-  only engine under `off` — a route no missing address names, published by
-  `read_fallback.no_engine_routes()` from `ENGINE_ONLY`. A test holds the two
-  lists to exactly what `off` would refuse, for every switch and address.
-
-**A probe that read nothing clears nothing.** The canary calls `resolve_group`
-on every tick, and a probe that got no payload — a first-time blip the canary
-holds back, the 05:15 freeze, a 10 s timeout — used to announce a standing
-`read_fallback_used` resolved and page it again as a new incident on the next
-probe, agent and all. `CanaryResult.unjudged_keys` names the OD-07 keys a
-probe could not judge for want of their block, and `canary_job` keeps them in
-`still_firing` — and the buyers step's two keys, `buyer_sync_stalled` when the
-probe read no `buyer_sync` block and chain 4's CRITICAL also when it read no
-entry for the chain: under chain 4 a stall of the only writer of buyers
-outlives the freeze and every recreate, and both keys fire for it. Chain 3's
-`orders_sync_failing` is held the same way when the probe read no entry for
-the chain, or read it on Postgres with no `sync_step`: the Postgres hang
-that fails the only writer of orders hangs `/api/health` too (batch-E
-review). Every other payload-derived key keeps today's behaviour, though
-they share the flaw.
-
-A page proves a fallback, but it cannot prove that a quiet week was looked at.
-So every probe that read the block also rewrites one row,
-`watch:read_fallbacks` in `app.alert_series` (`core.alert_archive.record_watch`).
-It is event-kind, not in the REGISTRY, and read by nothing else that reads the
-series. `first_fired_at` is the moment since which every probe read no read
-served from DuckDB. A probe that reads one restarts it at its own time.
-**What can restart it otherwise is the unread tail of a replaced web process,
-not the gap between probes.** The counters cover a process from its start, so
-a probe of the same process reads everything since the last one, however long
-the bot was away. Only a process replaced in between loses its counts after
-the last probe, and that tail ends at the latest at the new process's start,
-`now() - uptime_seconds`. Over 35 min restarts the run at the next clean
-probe. The first form judged the gap, and the Sunday compaction alone —
-last probe, stop, compaction, web's startup, the bot's first probe failing
-before web answers — could pass 35 min every week. One row, so it declares
-its own bound. `deploy/stage4_soak/22_f1_read_fallbacks.sql` (F1) judges the
-page journal and the watch **a day at a time**, like every check in the
-report:
-
-- **FAIL**: a page of either key fired, escalated or resolved in the last
-  24 h, or is still standing however old, or the watch's latest probe, inside
-  the day, found a read served from DuckDB. The last one counts because the
-  Gate journals only a delivered page.
-- **UNKNOWN**: no watch row, a watch not written for 35 min, or one clean for
-  less than the day.
-- **PASS**: otherwise, and its detail says how many of the week's 168 h the
-  clean run has covered. "Covered" is the licence for `off`. It was 168 h
-  deep at first, which made F1 UNKNOWN for a week after every deploy and every
-  reset, and one fallback a week of FAIL, in the daily report chain 1's soak
-  reads too.
-
-What it cannot see is a fallback in a web process after the canary's last
-probe of it and before it was replaced: at most the tail above. **A refusal
-under `off` is never paged as a fallback.** It served nothing from DuckDB, and
-counting it would fail the soak that licenses the flip. It is `read_refused`
-(WARN), judged on recency: a refusal in the last 30 minutes. A refusal left no
-wrong number behind, only a 503 somebody saw, so the page stands while reads
-are being refused, not until a restart. Production on 2026-09-30 published
-`read_fallbacks: {}` and `misconfigured: []` under `duckdb`, with cohorts on
-ClickHouse and its address, so the merge pages nothing at the deploy, and F1
-reads UNKNOWN on the first report, before the watch holds a day. What happens
-over a web process's life was not measured: both reads of `/api/health`
-caught a process under two hours old, and the fallbacks of older ones went
-with their logs. So a routine fallback — a Postgres timeout under a heavy
-job — would page after the merge and hold F1's week at zero until explained.
-The plan's grep over the oldest surviving log line answers it on the host.
-The first one came on 2026-10-06 06:18 UTC, a cohort read: ClickHouse's
-server is shared with other projects, its total memory limit was spent, and
-its OvercommitTracker stopped our query with code 241. Our own hourly ship had
-finished 18 minutes earlier. `ch_cohorts.fetch` now asks again after 1 s and
-3 s on code 241 alone, and only the last refusal reaches the fallback.
-
-`KS_READ_FALLBACK` (`duckdb` default | `off`; production `off` since
-2026-10-09 08:01 UTC, ahead of step 13 — the owner shortened the clean week
-to the rehearsal) is read in `configure_modes()`,
-before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
-(DN-20b) instead of letting its caller read DuckDB, and one exception handler
-in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
-the cause stays in the log. One raise, so it refuses every router an HTTP
-route reaches, the filter bar's lookups included, not only the tabs the plan
-named. A refusal is not a fallback: counted apart, logged without the phrase
-a fallback is grepped by, published as `read_fallback_mode.refused` under `off`
-— and under `duckdb` only once a write chain's read was refused, below — so
-`read_fallbacks` stays empty there and the block keeps its shape under
-`duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
-except the cohorts, which have no Postgres body: under `off` a live
-ClickHouse answers them or nobody does (`no_engine`). A switch naming an
-engine this process has **no address** for (`KS_READ_TRAFFIC=postgres`
-without `KS_PG_DSN`) counts as a failure there: the gate is simply false and
-DuckDB answers with nothing to count, so every `enabled() and available()`
-gate first calls `no_address(surface, switch)`, which refuses under `off` and
-does nothing under `duckdb`. A lost DSN line is then a 503 on every tab, not
-frozen numbers behind all of them. Chosen over having the canary page
-`misconfigured` under `off`, which would have kept serving DuckDB until
-somebody read the page. The trend's forecast
-overlay, which already degrades to "no forecast" on any failure, drops under
-a refusal and the chart answers; the forecast's own endpoint,
-`/api/revenue/forecast`, is not an overlay and answers 503 — it used to read
-an outage as "Forecast not available yet", a model nobody had trained.
-
-**Everything else a refusal can reach answers it itself** (DN-20c), and
-never with a DuckDB number. The two weekly reports defer: no message, no
-ledger row, and tomorrow's tick asks again. The Monday goals job
-(`seasonality_calc`) reads everything before it writes anything, in one
-transaction (chain 7b-1), so a refusal at any of its reads defers it whole
-instead of leaving new indices beside last week's `growth_metrics`. Training is skipped
-and the previous model stands; `_train_impl` lets the refusal through its
-`except Exception`, so `POST /api/revenue/forecast/train` answers 503 like
-every route rather than 200 `"status": "error"`. The search index and the
-buyers step skip their step for the tick with the watermark held, and the
-tick goes on to offers and stocks; the boot contains each of them. The
-assistant's tools return a named `data_unavailable` result, which is what
-the model reads instead of numbers. A job puts
-`{"reason": "read_unavailable", "surface"}` in its result
-(`read_fallback.answered`), so `/api/jobs` shows a refusal, not a quiet run —
-except the incremental sync, whose `stats` are summed and carry no strings:
-the buyers step records the refusal and passes it on, and the tick names it
-at the call and skips the step, so it shows in the log, in `buyer_sync`'s
-error class and in `/api/health` `read_fallback_mode.refused`.
-Several of these never had a fallback — the weekly report, the training
-input, the buyers step and the index read Postgres or nothing — so for them
-a Postgres failure is still their own error, as before; `off` adds only the
-switch with no address. **That list is derived, not remembered** —
-`tests/unit/test_read_fallback_consumers.py` walks up from every
-`fall_back`/`no_address`/`no_engine` to the entry points nothing in the
-repository calls (`NON_HTTP_CONSUMERS`), then back down through the `try`
-each call sits in, and pins where every consumer's refusal stops
-(`ANSWERS`): a refusal that could leave one as an exception fails it, and a
-handler that answers rather than raises may sit only where no HTTP route
-reaches but the assistant's two, `POST /api/chat` and `GET /api/chat/stream`,
-which answer inside the conversation (`IN_BAND_ROUTES`). That rule first
-passed by not seeing those routes — `service.chat(...)` names a method two
-classes define — so the walk types an object by the annotated factory that
-made it, and pins every call it still leaves unresolved under the name of a
-function that reaches a refusal (`UNRESOLVED_NAMESAKES`). A remembered list
-had missed the goals job. `POST /api/duckdb/sync-buyers` reaches the 503
-too: it shares the buyers step, which used to answer the refusal in its own
-`except Exception` and now passes it on (chain 4's PR-3). An
-unknown value **runs as `duckdb` and never raises** — web is the only syncer,
-so a crash loop over how a read degrades would stop order intake (OD-09); it
-publishes `read_fallback_mode.error` and the canary warns
-`read_fallback_mode_invalid`. The same call lists, under
-`read_fallback_mode.misconfigured`, every `KS_READ_*=postgres` without
-`KS_PG_DSN` and `=clickhouse` without `KS_CH_URL` — found by prefix in the
-environment, not listed: under `duckdb` those reads serve DuckDB with nothing
-failing to count, and under `off` exactly those are refused, by the same rule.
-Beside it, `no_engine` names the cohorts when their switch does not name
-ClickHouse: no address is missing, and `off` refuses them all the same. Under
-`duckdb` the canary pages both as `read_routed_to_duckdb`.
-
-`tests/unit/test_read_fallback_sites.py` walks `core/` and `web/` for the
-shapes, never a list of routers: a "falling back to DuckDB" log; an
-`enabled() and available()` gate whose handler carries on toward DuckDB; and
-**every** handler in a function reaching another engine under
-`core/repositories/` or `core/pg_*_read*.py`, because `backfilled()` returns
-False and `_pg_gold_summary` returns None and it is the caller that then reads
-DuckDB. Each must call `fall_back`, re-raise, or say in the same `try` what
-`ReadUnavailable` means — `_get_ml_forecast_total` lets it through, so a
-refusal is never turned into a goal computed without its signal. And every
-gate's function must call `no_address` with the switch the gate consults (or
-`no_engine`); the two Gold readers gained `pg_gold_read.available()` so they
-take the gate's shape and the walk sees them.
-
-That the refusal then *reaches* the 503 is proved by running it, not listing
-it: `tests/unit/test_read_fallback_http.py` sweeps **every GET route under
-`/api/` read off the app** — every switch on, once with an engine that fails
-and once with no address — and fails on any request that left a refusal
-counted without answering 503 naming it. Only `/api/chat/stream` is skipped,
-and for the network. A service wrapping a router in `except Exception:
-return {}` was invisible to the static walk and to a hand-kept list of
-thirteen routes; the sweep finds it by the route. The static half checks
-every module `web/` imports: a handler that names `ReadUnavailable` must end
-in a bare `raise` or `raise <its name>` — `raise HTTPException(500)` turns a
-503 naming the surface into a 500 naming nothing. DN-20c's answers are the
-one exemption, by function: those pinned, each proved reached from the
-non-HTTP consumers and the assistant's routes alone, and each required to
-exist.
-
-### A write flag is no longer a rollback
-
-**Since step 14's S14-00 nothing routes by a flag, a latch or a
-precondition: every chain writes Postgres, a constant** (`writes_postgres()`,
-`mode()`, `unmet_precondition()` and the registry's `mode` and
-`unmet_precondition`). A first write still takes the marker and the owner
-rows (decision 3), because an image from before step 14 — the rollback
-target, see "Before any rollback to an image from before step 14" — routes
-by them; `/api/health` still publishes `env`, `error`, `latched` and `mismatch`.
-History below.
-
-Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
-variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
-(chain 1, off), `KS_WRITE_GOALS` (chain 7a, off — `app.revenue_goals`, the three
-goal amounts typed on /goals, whose POST wrote DuckDB while the GET read an
-hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off),
-`KS_WRITE_BUYERS` (chain 4, off — the buyers, their contacts and their gender;
-see "Chain 4: the buyers, written where they are read"), `KS_WRITE_ORDERS`
-(chain 3, off — see "Chain 3: the orders, written where they are read"),
-`KS_WRITE_MANAGERS` (chain 5, off — see "Chain 5: the classification, written
-where it is derived"), `KS_WRITE_CATALOGUE` (chain 6, off — see "Chain 6: the
-catalogue"), `KS_WRITE_FORECAST` (chain 7b-3, off — the three goal tables and
-the forecast; see "Chain 7b-3"). Putting one back to `duckdb` reads like an
-undo and is not one:
-once rows have landed in Postgres, it starts a **second writer beside the
-first** — a typed expense in the store the page does not read, DuckDB's
-`seq_stock_movements_id` reissuing ids the Postgres sequence already handed out
-(the state revision 0030 forbids), and the hourly full replace rolling the
-Postgres rows back out of a frozen DuckDB, once an hour, looking healthy in
-between.
-
-So the first Postgres write a chain performs **latches** it (owner decision
-OD-19 (a), `core/chain_latch.py`): `writes_postgres()` answers True from then
-on whatever the variable says, and every consumer — the nine writers, the sync
-keys, the hourly shipper, the daily comparison — reads that one answer. The
-latch has two copies, a marker file under `data/write-chain-owners/` that
-routes the writes without needing a database, and an `owner:<table>` row in
-`meta.chain_watermarks` written inside the writing transaction; anything
-already holding a Postgres connection stands down on either. The cost is
-named: a latched chain whose Postgres is unreachable **fails its writes**
-rather than writing DuckDB.
-
-The disagreement is never silent — `/api/health` publishes `latched`,
-`latched_at` and `mismatch` per chain, the canary pages `write_chain_flag_mismatch`
-(WARN) within one probe, the shipper stamps failing the chain's tables it ships
-itself (never a table another shipper carries — chain 4's bronze buyers are the
-buyers mirror's, and a stamp there only that mirror's next success could clear),
-and the daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
-(both CRITICAL) — and `chain_owner_unregistered` for an owner row no chain in
-the running build declares. Today nothing is latched: `app.manual_expenses` holds zero
-rows, so chain 8's flag can still be moved freely, and the first typed expense
-ends that.
-
-**The way back is `scripts/chain_copy_back.py`** (DN-08), and it is the only
-thing that may release a latch. It reads every table the chain owns out of
-Postgres and then, in **one DuckDB transaction**, writes them, carries the
-chain's `last_sync_*` values back into `sync_metadata`, moves the DuckDB id
-allocator above every id either store has used, and compares both sides
-**whole, with tolerance zero and no grace** — on the same connection, before
-COMMIT, and on every column it wrote **except the two bookkeeping stamps the
-daily spec forgives** (`ignore_columns`): `bronze.offers.synced_at` and
-`app.sku_inventory_status.updated_at`. That is right, not a gap: each is one
-value stamped across the whole table by one sync or one rebuild, so it says
-when that writer last ran and nothing about an offer or a SKU, and the writer
-restamps it wholesale on its next hourly run after `up -d` — a bad copy could
-cost a wrong "as of" on /inventory until then. Keeping the daily list is
-also what keeps the specs derived rather than a second opinion, and a unit
-test computes the set so a third cannot join it quietly. Chain 7b-3 added four
-more on purpose, with the reason in that test: the goal tables' `updated_at`
-and `revenue_predictions.created_at`, each one stamp per writer run and read
-by nothing in DuckDB. Two of them are **not** restamped by the next run —
-`weekly_patterns` is stored only by `POST /api/goals/recalculate`, never by
-the Monday job, and a training replaces only the range it predicts, so a past
-day's `created_at` stands for good — so a mis-copy of either is seen by no
-comparison and corrected by no run. What the copy carries is pinned by the
-suite instead (`test_forecast_writer.py::TestTheCopyBack`, stamps that differ
-by row).
-`stock_movements.recorded_at` is the opposite case and **is** compared: the
-daily check leaves it out only because it is that check's clock, but it dates
-one movement for good, and a review shifted every copied value by an hour and
-saw the latch released. It commits, and
-releases the marker and the `owner:` rows, **only on zero findings**. A
-difference is a ROLLBACK: DuckDB is left exactly as it was and Postgres stays
-the writer. A ROLLBACK does not undo a sequence burn — measured on 1.5.5, the
-burn stays in the process and reaches the file only if something commits
-afterwards — so the allocator ends at or above where it was: a gap, never a
-reissued id.
-
-**After the COMMIT come a checkpoint and the release, and either can fail.**
-That is exit 3, never exit 1: until it had its own code, an exception there
-left through the interpreter's exit 1 — "rolled back" — with the copy in
-DuckDB. The message reads which copies of the latch survived and names one
-step: owner rows still standing → `--execute` again (its handover finds DuckDB
-already equal, and it releases); owner rows UNREADABLE — Postgres gone
-between the comparison and the release, so the read that would answer fails
-too — → the same, once Postgres answers, and never a guess
-either way; owner rows gone and the marker not → the marker-only steps below,
-`--handover` first. The marker is read from disk, not the process's cache: an
-unlink whose directory fsync raised has removed the file and not the entry.
-
-**A comparison run after the copy cannot see what the copy destroyed.** A
-full-replace table is DELETE+INSERT, and afterwards the two stores agree by
-construction; the first draft released a latch exactly so, with an offer
-DuckDB had catalogued after the last shipment deleted by the copy it then
-"verified". So the handover question is asked first, of both stores as they
-stand — in the dry run as well — and any CRITICAL refuses before anything is
-written:
-
-- a key only DuckDB holds — bar two the copy may delete, each INFO: a row
-  older than anything Postgres holds on a table both stores sweep by age
-  (DuckDB's sweep lagging the writer's), and after the latch a contact or
-  line item the chain's rewrite of its owner dropped (decision 6, below);
-- before a flip, a key only Postgres holds in a table the hourly copy replaces
-  whole: a row DuckDB deleted after the copy last ran. The copy would remove
-  it, but it stands down at the flip, so the flip would keep it in the store
-  the page reads — the review of #265 (F6) reproduced a withdrawn expense back
-  in the ad spend. The lever is the copy itself, with the chain writing DuckDB
-  (the flag at duckdb, no marker). One exception, and only on a table both
-  stores sweep by age (chain 10's samples): a row older than anything DuckDB
-  still holds is its sweep, which Postgres's own writer repeats after a flip.
-  A row's own clock is no sweep — an older withdrawn expense is a ghost too.
-  An append table's key only Postgres holds, above DuckDB's watermark, is
-  refused too (owner's decision, 2026-10-09; the review of F6 had left it
-  INFO): a DuckDB file restored from before the last copy and a writer round
-  the copy look the same there, and a flip would keep either as the record.
-  So the decision is made per id, with web stopped — a row DuckDB lost is
-  written back into DuckDB (its allocator moved above it), a phantom is
-  deleted from Postgres — and `--handover` is asked again. After the latch
-  the same row is Postgres's later write and stays INFO;
-- in an append-only table, two different rows under one key. There is no
-  "newer" there: they are two events, and the usual one is a movement id both
-  allocators issued, because Postgres floors its sequence on its own MAX(id);
-- in an append-only table, a Postgres row the copy can never read back: below
-  DuckDB's watermark, or at it where the copy reads strictly above
-  (`stock_movements`; `inventory_sku_history` re-reads its watermark day with
-  `>=`, so a row on that day is carried);
-- a DuckDB version later than Postgres's by a clock both stores carry as a value
-  — derived per table from the daily spec (`_shared_clock`; `manual_expenses`
-  and `inventory_history` first, then every chain that carries one, such as
-  `revenue_goals`, whose two writers stamp `updated_at` from the web
-  container's clock for exactly this reason), and for a buyer or an order
-  KeyCRM's own `updated_at`. `TestTheClockIsDerived` lists every one.
-
-Any other difference after the latch is taken as Postgres being newer, and that
-is true by construction only when `--handover` was clean before the flip —
-which is why the runbook puts it first. One refusal is knowingly too strict: an
-expense DuckDB held before the flip and Postgres deleted after the latch looks
-exactly like a stranded one (a row on one side has nothing to compare a clock
-against). Unreachable today, since DuckDB holds no expenses; the refusal names
-the ids and the two levers.
-
-Its specs are derived rather than written out — `_FULL_REPLACE` and
-`_APPEND_ABOVE` intersected with the chain's `CHAIN_TABLES`, plus the daily
-comparison's own specs — and a chain table with no shipping shape or no
-comparison spec **raises** instead of being skipped. Chain 4 added a third
-source, `MIRRORED_LANDING_TABLES`: `bronze.buyers` and `bronze.buyer_contacts`
-are shipped by the buyers mirror from the same parse as DuckDB and nothing
-replaces them whole. Their handover is stricter because it can be — Postgres
-dates every write of a buyer (`mirrored_at = now()`), and the owner row's
-`updated_at` is `now()` in the latching transaction, one clock. Before a flip
-any difference, either side, is CRITICAL. A buyer or contact DuckDB holds that
-Postgres lacks or holds differently, and a contact only Postgres holds of a
-buyer DuckDB holds, name `POST /api/mirror/backfill/buyers`, which re-ships
-every buyer DuckDB holds with its contacts (detached, heavy lock per portion;
-it moves every `mirrored_at`, so the search index re-indexes everything and
-`buyers_without_verdict` is blind for 90 minutes). A buyer only Postgres holds
-is a per-id decision — nothing deletes one. After the latch a difference, or
-a row on one side only, is INFO only for a buyer the chain rewrote since the
-latch and CRITICAL otherwise (decision 6); a buyer only DuckDB holds always
-refuses — the chain never deletes one — and so does a buyer DuckDB holds in a
-version KeyCRM's own `updated_at` dates later, with its contacts: a DuckDB
-write after the latch (the marker lost with the flag back at duckdb) that the
-rewrite clock alone would take for the chain's. Contacts are read in both
-stores through a join to their own buyers, as the daily check reads DuckDB's,
-so an orphan on either side is outside the landing rather than a refusal the
-reship could never clear. For every chain, a Postgres row with NULL where
-DuckDB declares NOT NULL (read from DuckDB's catalogue) is a handover CRITICAL
-whose lever is correcting it in Postgres, so `--handover` refuses what
-`--execute` would otherwise have died on at its first INSERT. The two big tables are
-compared row by row rather than by fingerprint, because the fingerprint's one
-blind spot — a text column rewritten to the same length — is affordable every
-morning and not affordable in the comparison that releases a latch.
-
-**Preconditions, and one deliberate absence.** Web must be stopped, which is
-proved by DuckDB opening read-write at all: the file lock is exclusive, so a
-check against the docker socket would only be a second opinion that can be
-wrong. The chain's **owner rows** must exist — they are written inside every
-Postgres write, so they are the proof that rows changed hands, marker or no
-marker (a lost `./data` loses the marker and keeps them). A **marker without
-owner rows** is a first write that failed, or a release that died between its
-two deletes: Postgres received nothing, a copy would be a rewind, and it is
-refused with the steps that clear it. **`--handover` is the first of them**:
-with no owner rows it applies the pre-flip rule, and a CRITICAL there is a row
-DuckDB wrote after the shipper stood down. Then the flag in `.env` — left at
-`postgres` only on exit 0, or the next write latches the chain over that row
-and every later copy-back refuses on it — then delete
-`data/write-chain-owners/<chain>`, then `up -d`. `KS_WRITE_*` is **not** a
-precondition: under OD-19 (a) it does not route writes while the chain is
-latched, and it is put back afterwards, by the runbook.
-
-**`--handover` comes first, in both directions.** It reads only and needs no
-latch, but it does need the database file to itself — DuckDB will not let a
-second process open a file web holds, not even read-only — so it runs in the
-stopped window. Before a flip it is the gate; before a rollback it is the
-preview, and its CRITICALs are exactly what `--execute` refuses on.
-
-```bash
-cd /opt/key-api-bot && docker compose stop web bot
-docker compose run --rm --no-deps -T web \
-    python /app/scripts/chain_copy_back.py inventory --handover
-# BEFORE A FLIP: first, with web still up, /api/health must show
-#   write_chains.pg_inventory_write.preflight.ok = true (DN-24). Then this:
-#   exit 0, or do not flip. A CRITICAL is a row the flip would
-#   strand, or one DuckDB deleted that the flip would keep: up -d web with the
-#   chain writing DuckDB — KS_WRITE_INVENTORY=duckdb and no marker under
-#   data/write-chain-owners — let replicate_operational ship
-#   (POST /api/jobs/replicate_operational/trigger), stop, ask again. Not
-#   "the flag unchanged": the handover asks the same pre-flip question with
-#   the flag already at postgres and nothing latched, or with a marker whose
-#   first write failed, and there the copy stays down and the next write
-#   latches the chain over the row.
-# TO ROLL BACK: the same command with --dry-run (also the default), then with
-#   --execute. Exit 0 released. 1 not committed (a difference rolled back, or
-#   a traceback before COMMIT): DuckDB as it was, latch kept. 2 refused before
-#   writing. 3 COMMITTED, then the checkpoint or the release failed: DuckDB
-#   HAS the copy; do what the message says for the latch it found. Only after
-#   exit 0:
-#   1. set KS_WRITE_INVENTORY=duckdb in .env   (the flag decides again)
-#   2. docker compose up -d web bot
-#   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
-#      chain 1; chains 7a, 6a and 7b-3 have no soak check yet, so meta.mirror_state
-#      for app.revenue_goals or bronze.expense_types. The hourly copy must be
-#      shipping the chain's tables again. Chain 4's B1-B5 read "not
-#      applicable" once it is released, so read meta.mirror_state for its
-#      three tables: the buyers mirror stamps the bronze two on its next
-#      batch (POST /api/mirror/backfill/buyers now), replicate_operational
-#      stamps app.buyer_gender within the hour.
-```
-
-**Run it as the web service, never as a bare `docker run --env-file .env`.**
-`KS_PG_DSN` is not in `.env`: `docker-compose.yml` builds it in web's
-`environment:` block, with the password interpolated from `.env`. The first
-form of this runbook passed `--env-file .env` and a hand-picked network, and at
-chain 1's flip (2026-09-30) the handover died on `KS_PG_DSN is not set` — safely,
-exit 1 before anything was written, web back in 8 s. `docker compose run
---rm --no-deps -T web` gives the one-off exactly web's environment, volumes and
-networks, so the DSN, `./data` and the route to Postgres are web's own and not
-a second copy that can drift. I1 dates the handover by chain 1's owner rows,
-then by `SOAK_INVENTORY_FLIP_AT`, and with neither reads a copy's stamp inside
-its 75-minute window as UNKNOWN, so on flip day pass the flip time
-(`SOAK_INVENTORY_FLIP_AT='<latch time>' deploy/stage4_soak.sh`) until the
-chain's first write. I1 counts a copy's failure only after the handover and
-for the day it was stamped, and with `inventory_on=0` and owner rows standing
-FAILs as the marker lost, naming `data/write-chain-owners/pg_inventory_write`
-and `scripts/chain_copy_back.py inventory`. E1 counts a failure on
-`app.manual_expenses` for its day too, and once chain 8 holds an owner row,
-only after it: nothing resets the count while the copy stands down. At
-production's size — 162,883 history rows, 56,277 movements —
-the whole copy-back is ~9 s on a laptop, because rows go in 1,000 to a
-statement. `executemany` runs once per row in DuckDB's client: about eight
-minutes for the history alone with no memory limit, and under the store's own
-4 GB — what the one-off container gets — `OutOfMemoryException` in 17 s.
-
-**Chain 7a moves the write, and the reads of its table follow it.**
-`KS_WRITE_GOALS=postgres` routes `set_goal` — and `reset_goal_to_auto` through
-it — to `core/pg_goals_write.py`. Every statement reading `{revenue_goals}` —
-`get_goals`, `get_smart_goals`, the /marketing target line — then goes to
-Postgres whatever `KS_READ_GOALS` or `KS_READ_MARKETING` say, and a Postgres
-error there raises instead of falling back. The first version left those reads
-on the two flags and called "both at `postgres`" a precondition of the flip.
-It could not stay one: putting a read flag back is every read port's rollback,
-and after the latch that would have shown the pre-flip goal out of a DuckDB
-nothing writes, for good and in silence. The flags still choose the engine for
-the rest of those pages. `tests/unit/test_goals_reads_follow_chain.py` walks
-`core/` and `web/` for every goal statement and fails if its router does not
-ask. `scripts/chain_copy_back.py goals` is the chain's way back; there is no
-sequence and no sync key to carry.
+Until step 14 a failure was answered from DuckDB and counted
+(`read_fallbacks`), and `KS_READ_FALLBACK=off` (production from 2026-10-09)
+made it this refusal; since S14-16 the refusal is all there is and the
+variable is not read. The tabs' numbers are held to literals DuckDB answered
+on their fixtures before its side went (`tests/integration/golden/`).
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue
@@ -4054,7 +2948,10 @@ hid it outright, because pixel-only orders were counted as Facebook until
 number was 58. Every guard in this system watched whether data was
 transported faithfully; not one asked whether it still said anything.
 
-`_attribution_coverage_check` is the first that does, and it rides
+`_attribution_coverage_check` was the first that does. Since step 14's
+S14-14 deleted it with the DuckDB scan, its Postgres twin
+`pg_attribution_coverage_website` is the check, at the same thresholds
+(moved byte for byte to `core/pg_warehouse_dq.py`). It rides
 `dq_integrity_check` (01, 07, 13, 19) so it reaches people through the 09:00
 digest. It measures the share of **website** orders (`source_id = 4`) that
 carry a `utm_campaign` — an order taken by hand in the Instagram inbox cannot
@@ -4077,6 +2974,21 @@ a rebuild every two minutes.
 
 ### The standing watch on a moved chain's tables
 
+**It judges the latch's two copies too, since step 14's S14-12** (decision
+12): `chain_latch_disagrees`, CRITICAL, for every registered chain whose
+`owner:` rows stand in `meta.chain_watermarks` with no marker under
+`data/write-chain-owners/` — read afresh from disk on every run, never the
+process's cache. A step-14 image routes by neither copy; an image from before
+step 14 (the rollback target) routes by the marker and, without it, by its
+flag and preconditions again. So the lever is: do not roll back until the
+marker is restored (its content: `latched_at` = the earliest owner row), and
+"Before any rollback to an image from before step 14". The other direction —
+a marker with no owner row, a first write that failed — is safe and is not
+filed. An unreadable marker directory is `chain_invariants_unwatched` on
+`data/write-chain-owners`, which holds every condition. The daily
+`reconcile_operational` judged both directions on `mirror_landing` until
+S14-12 deleted it.
+
 Once a chain is latched or flagged, `replicate_operational` and
 `reconcile_operational` both stand down for its tables — the comparison without
 a finding — so `core/pg_chain_invariants.py` watches them on the integrity layer
@@ -4087,1786 +2999,263 @@ allocator above `MAX(id)`; no NULL where Postgres has no default
 chain 1's `last_sync_*` under 90 minutes; and from chain 1's handover on, no
 burst of `initial` movements, no offer first seen after a day it was already
 photographed, and both snapshots every day; for chain 7b-3, the four goal and
-forecast tables complete and stored by their last scheduled slot (WARN, see
-"Chain 7b-3"). Who is watched comes from
-`chain_modes()`, a watched chain with no invariants written for it is reported
-unwatched rather than clean, and nothing is repaired. **It is judged in the
-integrity job beside the Postgres twins, not inside the DuckDB scan**: these
-are Postgres facts about tables DuckDB no longer writes, so a DuckDB half that
-raises neither loses a chain finding nor holds back its page, and the
-`chain_*` conditions resolve on such a run the way the twins' `pg_*` ones do.
-**Production reads chain 8 on every run**: `KS_WRITE_EXPENSES=postgres` is live
-and nothing is latched, so each run reads `app.manual_expenses`' allocator and
-NULL count, and a Postgres it cannot read is `chain_invariants_unwatched`
-(WARN). Measured 2026-09-18, before chain 1's flip: 0 of 56 277
+forecast tables complete and stored by their last scheduled slot (WARN).
+Every registered chain is watched (the registry's `chain_modes()` chose
+which until step 14's S14-11), a watched chain with no invariants written for
+it is reported unwatched rather than clean, and nothing is repaired. **It is judged in the
+integrity job beside the Postgres twins, not inside `check_internal_integrity`**
+(the DuckDB scan until step 14's S14-14): these are Postgres facts about
+tables DuckDB no longer writes, so a scan that raises neither loses a chain
+finding nor holds back its page, and the `chain_*` conditions resolve on such
+a run the way the twins' `pg_*` ones do.
+**Chain 8 is read on every run**, though nothing typed has latched it: each
+run reads `app.manual_expenses`' allocator and NULL count, and a Postgres it
+cannot read is `chain_invariants_unwatched` (WARN). Measured 2026-09-18, before chain 1's flip: 0 of 56 277
 `stock_movements` rows carry a NULL `recorded_at` or `source`.
 
-### Chain 1 before its flip (DN-24)
-
-Three things that would bite the day `KS_WRITE_INVENTORY=postgres` is set,
-closed while it is still off. The lock and the Postgres step path do not run
-under today's flags. The preflight does, by design, since its question is
-asked before the flip: every `/api/health` cache miss (once a minute) reads
-Postgres — the revision check, then four reads on one web-pool connection —
-bounded at 5 s, and publishes the answer.
-
-- **One rebuild at a time.** The stock step holds the scheduler's heavy lock;
-  the 01:00 `inventory_snapshot` job, its boot catch-up and
-  `POST /api/inventory/snapshot` do not. DuckDB's store lock hid that. In
-  Postgres two status rebuilds interleave, the second one's DELETE cannot see
-  the first one's new rows, and its INSERT dies on `offer_id` — reproduced.
-  So the rebuild and both snapshots take `pg_advisory_xact_lock(CHAIN_LOCK_KEY)`
-  as their first statement (`pg_locks`: classid 1802698752, objid 1). The
-  stock upsert does not: nothing but the stock step calls it.
-- **The pre-flip questions are asked for you.** `/api/health` publishes
-  `write_chains.pg_inventory_write.preflight` — `ok` and the `reasons` it is
-  not: the writing role lacks TEMPORARY (every status rebuild would raise), one
-  of the six tables was not copied within 50 min or its copy is failing, or
-  the latest `mirror_landing` run — read from a journal copy under 75 min old
-  — is over the canary's 30 h, filed anything against the six tables or the
-  chain, or failed before comparing them: `reconcile_operational` itself
-  raised, an exception fell between checks (`setup`), or the error is not in
-  the job's format. Any other check raising — SMS, ClickHouse — leaves chain
-  1's comparison complete, so it is a `note`, not a reason; the run still
-  counts as failed everywhere else. `ok` is null once the chain writes
-  Postgres. It is not a substitute for `chain_copy_back.py --handover`, which
-  is still the gate: read the preflight first, then stop web and ask the
-  handover.
-- **A step failure is not the tick's end.** On the Postgres path the offers
-  and stocks steps run in `SyncService._inventory_step_postgres`, which never
-  raises: a failure (the watermark reads included — they are Postgres reads
-  there) is published as `write_chains.pg_inventory_write.sync_step`, error
-  class only; `last_sync_stocks` moves only after the upsert, the rebuild and
-  both snapshots commit; a failed offers step skips stocks; and the next
-  attempt waits 10 min, or the held watermark would refetch every stock from
-  KeyCRM once a minute. The DuckDB path is unchanged, a failure escaping it
-  included.
-
-### Step 13: the switch, thrown on 2026-10-09 (DN-28, DN-29)
-
-**Since step 14's S14-00 the mode is a constant, `postgres`**: no
-precondition is evaluated at the start and Postgres is not asked there;
-`KS_WRITE_WAREHOUSE` is read only to be published, and `KS_PG_DERIVE`,
-`KS_UTM_PARSE`, `KS_READ_FALLBACK`, `KS_DQ_PG_WAREHOUSE`, `KS_MIRROR_LANDING`
-and `KS_GOALS_HISTORY` are constants too (`own`, `postgres`, `off`, `on`, on,
-`silver`) — production's values, held by `tests/unit/test_step14_prod_parity.py`.
-`/api/warehouse/status` still reports the preconditions until S14-15. History
-below.
-
-`KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
-`duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
-the boot sync. **Production set it to `postgres` on 2026-10-09 at 08:18 UTC**,
-after a rehearsal on the production backups passed 11 checks of 11 and
-seventeen minutes after `KS_READ_FALLBACK=off`; the first Postgres derivation
-after it validated at 08:24. An unknown value runs as
-`duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
-where the canary warns `warehouse_mode_invalid`; it never raises, since web is
-the only syncer. After a flip the same typo is the way back, so it pages as
-one: `settle_writer`, finding `postgres` recorded, adds `value_understood` to
-the unmet preconditions, and the canary's CRITICAL carries the way-back lever.
-
-**What `postgres` does (DN-29)** — only when every precondition below holds;
-the verdict is reached once per process, the Postgres revision read on a
-connection of its own. DuckDB stops deriving: `warehouse_refresh` is not
-registered, every production call of `refresh_warehouse_layers` stands behind
-`duckdb_derives()` (a test walks `core/`, `web/`, `bot/`, `scripts/` and
-`deploy/` for one that does not), `mark_warehouse_dirty` is a no-op and the id
-list pending at the switch is abandoned, `POST /api/warehouse/refresh` and
-rebuild-silver run the Postgres derivation alone. The five DuckDB integrity
-checks over Silver, Gold and UTM stand down and the Postgres twins stand in;
-in `dq_mirror_landing` `reconcile_silver`, `reconcile_order_utm` and
-`reconcile_gold` stand down and `pg_gold_internal_check` asks
-`gold_rollup_mismatch` in `reconcile_gold`'s place. ClickHouse's own
-derivation is then the only independent check of Gold, so a run in which it
-did not compare files `gold_values_unwatched` CRITICAL and pages (OD-08 (a)).
-The first start records
-`sync_metadata.warehouse_writer` in DuckDB and closes the `warehouse` alert
-group once — its only resolver was the DuckDB tick — without a validating
-tick. **One precondition unmet and it runs as `duckdb`** (OD-09 (b)):
-`/api/health` lists the unmet keys under `warehouse_writer_mode` (keys only,
-the endpoint is public) and the canary pages `warehouse_preconditions_unmet`,
-CRITICAL — titled "Warehouse switch held back", since web serves throughout:
-a canary title says "Dashboard DOWN" only for the three keys that mean web
-did not answer or said it is unhealthy, and any other CRITICAL reads
-"Dashboard critical".
-
-**The way back costs a full DuckDB rebuild.** Unset the variable and
-`up -d web`: a start under `duckdb` that finds `postgres` recorded marks the
-warehouse dirty in full, before any job exists, and holds the stood-down
-checks and the three comparisons down until a full tick validates — the Silver
-they would read is as old as the switch, and an incremental rebuild over it
-would validate — and a UTM parse has finished, in that tick or a later one:
-the tick swallows a parse that raised and still reports a validated success,
-and `attribution_coverage` and `reconcile_order_utm` read what that parse
-left. Not a second full rebuild, which would rewrite Silver every two minutes
-for as long as the parser failed. The tick that completes both writes
-`duckdb` back. A hold that does not end — a parse that keeps raising, which
-the tick logs at WARNING and reports as a validated success, or a full tick
-whose parse raised with nothing dirty after it — is published as
-`held_for_s`, and past two hours the canary warns `warehouse_hold_stuck`.
-When DuckDB's
-`silver_order_utm` is empty (a Sunday compaction ran in between) it publishes
-`reclassify_needed`; the tick's own parse refills every commented order with
-no verdict, so `POST /api/traffic/reclassify` is the lever only if that parse
-fails. Every day spent under `postgres` is a day no independent derivation
-proves Postgres Silver/Gold, and that cannot be re-verified afterwards. The
-gate-stack rehearsal on the production backups — a container killed mid
-Postgres rebuild, the owed state surviving — runs on the host before any flip.
-
-**After a flip, a start with any precondition unmet IS the way back**, not
-only an operator's unset: the same full rebuild and hold, and the next start
-under `postgres` records a new `since` — the soak clock starts again — and
-closes the `warehouse` group again without a validating tick. The canary's
-lever says so first. So a Postgres read that failed (no answer in time, or an
-exception, a connection lost in the middle of the SELECT included — never an
-answer such as a wrong revision) is asked again before the verdict: three
-asks, 2 s and 5 s apart, at most 37 s, once per process. The revision is read
-strictly (`current_revision(strict=True)`): only a version table that is not
-there reads as "never migrated", where the default reads any failure so.
-The write-chain registry and the Alert Gate are read on the caller's thread,
-outside that bound, so a start that could not reach Postgres names
-`pg_revision` alone.
-
-**Unless a write chain is latched over what DuckDB derives from** (chain 5's
-review, 2026-10-08). A chain owning `bronze.orders`/`order_products` (chain 3)
-or `bronze.managers`/`app.manager_classifications` (chain 5) froze DuckDB's
-copy at its latch, and the full rebuild the way back owes would derive Silver
-from it — every order of a manager reclassified since on the wrong
-`sales_type`, with the Silver and Gold comparisons back to vouch for it. An
-automatic way back follows no runbook, so `configure_mode` refuses it: a start
-that would run as duckdb — unset, typo or an unmet precondition — stays
-`postgres` while such a chain is latched (`DUCKDB_DERIVATION_SOURCES`, local
-markers only), publishes the chains as `warehouse_writer_mode.way_back_refused`,
-and the canary pages `warehouse_way_back_refused` (CRITICAL, "Warehouse way
-back refused") in place of `warehouse_preconditions_unmet`. The lever: copy the
-chains back first (chain 5, then chain 3), then the way back. Postgres derives
-on its own signal only under `KS_PG_DERIVE=own` — under `piggyback` its
-rebuild rides the DuckDB tick a `postgres` start does not run — so a refusal
-with `own` gone leaves **nothing** deriving, screens frozen and correct up to
-the start; still refused, because the alternative is a wrong `sales_type` that
-rolled-back read switches would serve. The page says which, from the
-`derivation` block. Never on a
-deployment that has not flipped — both chains hold themselves behind `step13`,
-which a test requires of every chain declaring one of those tables — and not
-for chain 4: DuckDB's Silver reads none of the buyers.
-
-**The UTM doors parse Postgres alone under `postgres`.** `POST
-/api/traffic/refresh`, `/traffic/reclassify`, the `manager_comment` backfill
-and `scripts/backfill_utm.py` neither empty nor re-parse DuckDB's
-`silver_order_utm`: a DuckDB parse that raised used to leave the Postgres
-reclassify — what /traffic reads — unrun behind a 500, and after a compaction
-each door re-parsed every order in DuckDB first. The Postgres answer is the
-door's (an error is a 500, a refused full parse a 409, a failed parse makes
-the backfill `partial`). The reclassify and the CLI note the re-parse in the
-recorded writer (`utm_reparsed_at`), and the way back then empties DuckDB's
-`silver_order_utm`, so the full tick it owes re-parses every verdict under
-the rules in force — an incremental parse would never notice a rule change on
-an order whose `updated_at` has not moved.
-
-`GET /api/warehouse/status` publishes `cutover`: the variable as read,
-`switch_built: true`, and every unmet precondition by name, from
-`evaluate_preconditions(env, facts)` — a `KS_WRITE_WAREHOUSE` this build
-understands, `KS_PG_DERIVE=own`, the twins on,
-`KS_UTM_PARSE=postgres`, `KS_READ_FALLBACK=off`, a DSN and the required
-revision, the landing mirror on, every Silver/Gold/UTM read switch on
-`postgres` (a test reads every string in `core/`, `web/` and `bot/` for a
-`KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
-excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
-it), cohorts on ClickHouse with `KS_CH_URL` (`goals_bridge` — the goal
-calculators off the DN-12 bridge — was one until chain 7b-4 deleted the
-bridge; see "Chain 7b"), **`bronze.expenses` holding its history**
-(`expenses_backfilled` — see "OD-10: the DuckDB-only doors"), **no door OD-10
-has not answered** (`od10_doors`: `OD10_DOORS` is every function in `web/`
-naming DuckDB's Silver, its order-lines view, Gold, UTM or an inventory view
-over them (the set is derived from the view bodies, `{views}` hole included)
-without asking `duckdb_derives()`, and a test walks `web/` and requires
-exactly that list. It is **empty since 2026-09-30**, when the owner retired
-all seven doors; a door added later joins it and holds the switch again),
-and **no delivered page open under a condition only a stood-down check
-reports** (`retired_conditions_clear`). A stood-down
-check is not a raised one, so the integrity job does not hold its conditions,
-and the first run after the switch would announce such a page "✅ Resolved"
-with no check looking. Holding them instead would keep it open for as long as
-Postgres derives, since nothing re-examines a retired check; so the switch
-waits while the DuckDB check can still clear it. It reads the Alert Gate's
-delivered map — what `resolve_group` announces from — not `app.alert_series`,
-which can miss a delivered page (its fired row is fire-and-forget).
-`gold_missing_cells` and `gold_orphan_cells` count as retired too, since
-`reconcile_gold` goes with the switch. `reconcile_silver` and
-`reconcile_order_utm` report under `mirror_*` names the comparisons that stay
-up share, and the Gate keys a page by condition and group alone, so those
-names cannot be retired — that would hold the switch over every
-`bronze.orders` page, and after a flip run a restart as duckdb over one.
-Instead each `dq_mirror_landing` run in which they ran marks the delivered
-pages they were still reporting (`AlertGate.mark_delivered`, persisted with
-the entry, gone when it resolves) and unmarks the rest once all three reached
-a verdict; a marked page holds the switch. `preconditions_met: true` is a
-checklist done, not a switch thrown. An exception reading any fact is
-published by its class alone and logged whole: a driver's text names the
-database user, host and port.
-
-### The step-13 rehearsal (`deploy/step13_rehearsal.sh`)
-
-The gate-stack rehearsal named above, as one command and one table. It
-exercises PR #268's eight points on **copies** of production, on the host,
-beside the live stack: P1 the flip with every precondition, P2 DuckDB frozen
-while Postgres derives, P3 web killed inside the Postgres derivation (Gold's
-`TRUNCATE` held by a lock, so the kill lands between Silver's commit and
-Gold's), P4 the three mutations (a deleted Silver row, a landed order, an
-unknown sales_type via a trigger on the copy), P5 both DQ jobs under the
-stand-down, P6 restarts — graceful, after the kill, graceful — and one
-resolve, P7 one precondition broken and the canary paging, P8 the way back.
-P3, P6, P8 and D1 judge the stops the container shows, not the ones the
-script meant: `docker inspect` after each stop and start (exit 0, or exit 137
-after the rehearsal's `docker kill` and not the OOM killer), and P6 counts the
-restart after the kill only when its SIGKILL is the one `p3.json` records.
-Every stop of reh-web gets production's grace — web's `stop_grace_period`,
-120 s since the DuckDB kill guard and compose's 10 s default before it
-(`STOP_GRACE_S`, pinned to `docker-compose.yml`) — and records the
-container's state after it, so one that outruns the grace is recorded as the
-kill a deploy would have made: P6 reads F5s's and F7's, D1 phase 0's and
-F7's, P8 the stop the way back starts from and its own last one, and a stop
-that outran the grace is UNKNOWN there until somebody has read why web did
-not stop in time. D1 reads those last two as well, because its DELETE comes
-after them: a loss it finds behind one that was no deploy's stop is still
-FAIL, and says that a kill after P3's may have cost it. Three
-stops recorded nothing until 2026-10-08 — both around the way back, and the
-one after a run that did not flip — while phase 0's had already taken 7 of
-the 10 s it had then on 400 orders. A test walks the script for a stop of reh-web
-without a state file, and for a record or a judge fed another phase's.
-Plus D1 (what P3's kill cost DuckDB's indexes, below), K0 (KeyCRM never
-called) and Z0 (no other container on the host moved). Z0 records every other container's
-`StartedAt`, `RestartCount` and `OOMKilled`, not just its id: a restart
-policy brings an OOM-killed live web back under the same id and name, so
-only those say it happened, and one that did is a FAIL until somebody has
-read why. A container gone or new is UNKNOWN — a deploy or a cron one-off,
-or, on a laptop, other work. Exit 0 all PASS, 1 any FAIL, 2 UNKNOWN only,
-3 not set up.
-
-**What keeps it off production**, each pinned by parsing the script —
-and the watchdog, the lock and the disk guard by running its own functions
-against stubbed `docker`, `df` and `du`
-(`tests/unit/test_step13_rehearsal_script.py`): every container, one-offs
-included, and the network are named `reh-*`, and nothing else is ever acted
-on — the one look at the rest is Z0's `docker ps` and `docker inspect`, and
-no `docker compose`;
-the network is `--internal`, so there is no route to KeyCRM, Telegram or any
-live container; `--pull never` on every `docker run`, so the image the next
-`up -d` starts is not changed; hard memory caps (web 1.5 g with DuckDB at
-768 MB, Postgres 512 m, ClickHouse 1.5 g) and `--oom-score-adj 1000` on
-every container — the caps bound what the rehearsal takes, but if the host
-runs short anyway the kernel kills the largest RSS, the live web, unless the
-rehearsal's processes ask to go first (at 0 the live one went, reproduced);
-a start guard on `MemAvailable`, and one on the disk that projects every
-copy onto both filesystems it lands on against 74 %, a point under the live
-monitor's 75 % WARN, which would otherwise page production's admins about
-the rehearsal's own files; a watchdog on both that kills the `reh-*`
-containers itself and only then signals the shell, which runs its TERM trap
-once its foreground command returns — 25 minutes for a `docker exec`,
-unbounded for `pg_restore`; `/tmp/ks-gate.lock` taken with `flock -n` before
-anything starts, and the watchdog launched with fd 9 closed and alive only
-while the shell is — a SIGKILLed shell left it looping with the lock, every
-gate waiting in `flock 9` and `--cleanup-only` refusing, and now it removes
-what the shell started instead; the tree mounted read-only and never
-written; cleanup on EXIT with `docker rm -f -v`, deaf to a second signal.
-reh-web runs with `KS_ALERTS_DISABLED=1`, no `BOT_TOKEN`, and
-`KEYCRM_BASE_URL` pointing at a
-stub (`deploy/step13_rehearsal/keycrm_stub.py`) — nothing in the application
-switches the sync off, so the base URL and the network are what keep the
-quota untouched. The canary is `bot/canary.py` imported inside reh-web and
-judged against its own `/api/health`, never sent. Jobs are triggered through
-reh-web's own API with a session signed by a key minted for the run.
-
-**Production enters as copies only**: the newest nightly `pg_dump` (streamed
-into `reh-pg`, ownership kept, on roles initdb creates with per-run
-passwords) and the newest `data/backups/analytics-*.duckdb` — never the live
-file — copied into the rehearsal's own directory (mode 700), plus the
-`KS_WRITE_*` chain flags read from `.env` by exact name. The copies go at the
-end; only the table survives, in `step13-rehearsal-<stamp>.txt` beside that
-directory, ids, counts and keys only. `--keep` leaves the copies and names
-each in red: the directory, and the stopped `reh-pg` (a full restore of
-production's Postgres, buyers and phones) and `reh-ch` in their anonymous
-volumes; `--cleanup-only` removes what a killed run left. A window guard
-refuses to start within 100 minutes of any reh-web or host cron
-(`--any-hour` overrides): ~75 minutes on production's data.
-
-`--local` runs it on a laptop over synthetic data, and is refused on the
-host — root, or `/opt/key-api-bot` present — since it skips the window,
-the memory guard and the watchdog: `seed_synthetic.py`
-invents an account, the stub serves it, a reh-web over an empty directory
-syncs it the way production once synced the real one, and the rehearsal
-proper then restores that dump and that backup by the host's path. The
-floor (`KS_PG_SILVER_INTERVAL_S`) is 120 s on the host and 60 s locally
-instead of 600 s; every property is "within floor plus a tick", so its size
-changes nothing proved. On 2026-10-02 a local run over 400 orders, on an
-image built from this branch (3.0.261, revision 0033) with `--build`,
-passed P1–P8, D1 and K0 in 22 minutes, exit 2 for Z0 alone, UNKNOWN for
-other sessions' containers. P4a and P5 judged F4's runs as F5s read them,
-both whole through `fetch_run_issues`; D1 swept 23 indexes at both stops
-and found none short. That PASS said less than it read as. F5s's graceful
-stop had checkpointed F4's runs before F6's kill, so they were out of its
-reach; what the sweep asked within it was whatever reh-web wrote after that
-checkpoint, the fixture's fourth version among it — landed by F6 before the
-kill, and asked of the single-column indexes on `orders` and
-`order_products` (`idx_orders_status` among them). That row survived
-because the sync touches `orders` after a restart, not because the kill
-could not reach it. And the sweep asked
-single-column indexes only: 23 of the 57, the other 34 the 12 composite
-ones and 22 left empty by the seed (counted on the 10-07 run, whose seed is
-the same deterministic one; none was one-valued). Its P6 counted a `kill`
-restart the script recorded whether or not F6 had killed anything; that
-run's P3 shows
-the kill landed, but P6 could not have told. The run the day before, on
-the same image with P4a and P5 read after the kill, failed both on the
-DuckDB defect below and on nothing else: the live process showed both
-runs' findings at F4, and after F6's kill `fetch_run_issues` returned none
-of them. An earlier note here said a run had passed everything on an image
-of main at 3.0.264, revision 0034; the image it ran was built at revision
-0033, and its P4a and P5 had read around the defect.
-
-On 2026-10-07, with P6 and D1 reworked and main merged (an image built from
-this branch, 3.0.267, revision 0034), the first local run did not flip:
-chain 7b had added `goals_bridge` (`KS_GOALS_HISTORY=silver`; 7b-4 removed it
-again) to the preconditions and reh-web's list lacked it — and the script, deciding the
-flip with a grep that `utm_parse`'s `"mode": "postgres"` matched, ran every
-phase after F1 anyway. The script now asks the probe for the writer's mode
-out of the snapshot P1 judges, and a test runs this tree's
-`evaluate_preconditions` over the list: F1 must leave nothing unmet, phase
-0 exactly `read_fallback_off`. The next run passed P1–P8 and K0 in 22
-minutes and failed D1 as predicted: after the kill and F7's checkpoint,
-`idx_dqi_run`, `idx_dqr_layer` and `idx_dqr_started_at` each missed F5w's
-run, `fetch_run_issues` returned 0 of its 1 finding, and deleting the run's
-rows from `data_quality_issues` and `data_quality_runs` was DuckDB's FATAL.
-The fixture order and its line came out of every index on `orders` and
-`order_products` that holds them — after a restart the sync touches
-`orders`, and nothing touches the DQ journal — but that is two of the four
-composite indexes on `orders`, not all four as this note first said: the
-fixture has no buyer and no manager, and DuckDB keeps no index entry for a
-row with a NULL in any key column, so `idx_orders_buyer_date`,
-`idx_orders_manager_date` and their single-column twins never held it and
-the DELETE asked them nothing. Z0 failed on another session's ClickHouse
-container, stopped (exit 0, not the OOM
-killer, no restart policy) and started again 12 s into the run. What the
-local run cannot answer is production's own readiness — whether the copy's
-preconditions hold, the way back's full rebuild inside 1.5 GB, and the
-timings at 47 k orders — which is what the host run is for.
-
-**P5 reads the stand-down off the job, not off its silence.**
-`dq_mirror_landing` names every check it asked, verdict or raise, as
-`checks_run` on its completion line, and P5 fails on a retired comparison
-there and is UNKNOWN without the list. Absent findings could not fail it:
-`compare_gold` excuses every cell whose orders synced inside its 20-minute
-grace — every cell of the local seed, and on the host the fixture's — so a
-review that ran `reconcile_gold` under the stand-down got a PASS.
-
-**The local runs found two things outside the rehearsal.** With a
-Silver row deleted and a Gold row bumped in one window, ClickHouse's
-comparison raised instead of filing: `compare_gold_cells` sorts cell keys
-whose roll-up `source_id` is NULL beside per-source ints, so one day that
-differs in both grains is a `TypeError`, `gold_values_unwatched`, and never
-`ch_engines_gold_mismatch`. The mutations now run one per DQ run.
-
-**And DuckDB 1.5.5 drops index entries across a SIGKILL — production's
-shape, not the rehearsal's.** Every index made by `CREATE INDEX` — all 57,
-on 26 tables; `PRIMARY KEY` and `UNIQUE` constraints keep theirs, and so
-does an index that was empty at the last checkpoint — loses the
-rows a kill caught in the WAL when the first checkpoint after the restart is
-one DuckDB takes on its own (at close, which is the next `docker stop`, or
-past `wal_autocheckpoint`) and nothing wrote that table, or filtered it on a
-value it holds, first. Replay buffers the entries in the still-unbound index;
-that checkpoint writes the index without them, and they stay out. Measured
-with production's own code on a fresh file: schema by `DuckDBStore.connect()`,
-runs by `persist_run` in a process then SIGKILLed, the restart as
-`connect()` then `close()` — `fetch_run_issues` answered 0 of 2 and 0 of 5,
-`fetch_run_diffs` 0 of 3, and with rows in every indexed table each of the
-45 single-column indexes answered for 2 of 5; with the hourly
-`duckdb_checkpoint` job's explicit `CHECKPOINT` before the close, every one
-answered whole. The same in web's image (Python 3.14, Linux) and on macOS.
-Nothing the product runs at start binds them. A blind read
-is the mildest of what follows:
-
-- **reads through the index miss the rows** — `fetch_run_issues` and
-  `fetch_run_diffs` (`run_id = ?`), so `/api/health/data-quality` and the
-  09:00 digest list no finding under a run whose counts (read by its
-  primary key, intact) say it has some;
-- **a `DELETE` through it leaves them** — the sync's
-  `DELETE FROM order_products WHERE order_id IN (?)` for a one-order batch
-  and `DELETE FROM buyer_contacts WHERE buyer_id = ?`: stale line items and
-  contacts;
-- **the next write that must take a lost row out of an index is a DuckDB
-  FATAL** ("Failed to delete all rows from index") — `UPDATE orders` on a
-  status change, `INSERT OR REPLACE` into `order_products` or `buyers`, the
-  samples' retention `DELETE`. A FATAL invalidates the instance: every later
-  statement on web's connection fails and nothing in the store reconnects.
-  A restart does not clear it — the index is still short, so the same write
-  fails the same way.
-
-The exposure is an OOM kill of web followed, within the hour before
-`duckdb_checkpoint` first runs in the new process, by a deploy or any other
-stop. The Sunday compaction rebuilds every index from its table (a row a
-`DELETE` missed survives it as a row), and so does `DROP INDEX` +
-`CREATE INDEX` with web stopped. A `CHECKPOINT` as the first statement after
-`duckdb.connect()` kept every entry in the same measurement; whether the
-store should take one is the owner's call, not this rehearsal's.
-
-**The rehearsal's F6 is that kill, so nothing P4 and P5 judge is read after
-it.** F5s stops reh-web gracefully after F5 — the checkpoint a deploy
-takes — and reads F4's two runs there, scan and `fetch_run_issues` side by
-side; P4a and P5 judge that read. The kill stays inside a live derivation
-for P3, and F7 still reads after it for P2's frozen state and P6's gate
-file.
-
-**D1 asks what the kill cost of the rows it could cost** — those written
-after F5s's checkpoint, since a graceful stop puts everything before it out
-of a kill's reach: one integrity run F5w triggers, and the fixture's fourth
-version F6 lands (an order and its line). An index holds no row with a NULL
-in any key column — measured on 1.5.5 by losing every entry across a kill
-and deleting each row: only a row with every key set is the FATAL — and the
-fixture has no buyer and no manager, so it is in two of the four composite
-indexes on `orders` (`idx_orders_source_date`, `idx_orders_status_date`),
-and the buyer and manager ones cannot be asked about it. `window_rows`
-reads which index holds how many of the window's rows (`held`), D1 counts
-only those as asked and names the rest, and an index whose holding was not
-read leaves the row UNKNOWN. After the kill and F7's graceful stop — the
-checkpoint that writes the loss down; a read-only open before it still sees
-every row the WAL holds — the run is read by `fetch_run_issues` beside a
-scan. At the end, on the copy about to be removed, the window's rows are
-deleted table by table in a process each, found by a predicate no index
-serves: a `DELETE` must take each row out of every index on its table that
-holds it, so a lost entry is DuckDB's FATAL, and that is the only question
-a composite index answers — on 1.5.5 none serves a read. Each process opens
-the copy through the image's own `duckdb_switch.open_file`, as the product's next
-start would. A bare read-write open there, as D1 had it until the kill
-guard was merged beside it, replays a WAL the last stop left and closes
-lossily, so the next table's DELETE was a FATAL of D1's own making
-(measured: a killed writer's rows in two tables, the first DELETE clean,
-the second the FATAL; `test_the_ends_delete_costs_no_index_of_its_own_duckdb_1_5_5`).
-An image without the guard cannot import it, and the DELETE is UNKNOWN.
-The copy reaches that DELETE after the way back, through two more stops of
-reh-web, and a loss found behind one that was not graceful (or not
-recorded) may be that stop's kill: still FAIL, and the verdict names the
-stop — a hedge written for an image whose restarts were lossy; through the
-guard neither a restart nor D1's own open loses what a WAL holds. Every
-single-column index is also swept at both
-stops (lookup limits lifted, held to `count_if` over the table). A loss
-after the kill is a FAIL labelled **DuckDB 1.5.5's known defect, not a
-step-13 regression** — the switch writes no DuckDB index, and an OOM kill of
-the live web costs the same; a loss already there before the kill is the
-copy's own and is not given that label. Nothing the product runs at start
-touches the DQ journal, so on 1.5.5 as the store opens today D1 fails on
-the window's run — the 2026-10-07 run above did, on the DQ journal alone. A
-`CHECKPOINT` of the replayed WAL before anything else runs —
-`duckdb_switch.open_file`, the kill guard ("A killed DuckDB writer, and what the
-next start used to lose"), merged after this was written — should turn it
-PASS, and nothing here depends on it; the rehearsal has not yet been run
-against an image that carries it.
-Two earlier notes here called it one odd segment, then a DQ-journal matter,
-and the judges first read P4a and P5 after the kill, which passed what the
-product could not show anyone.
-`test_the_sweep_finds_what_a_kill_costs_duckdb_1_5_5` holds the loss on
-DuckDB itself: if an upgrade makes it zero, re-measure before changing it.
-
-### OD-10: the DuckDB-only doors, retired (2026-09-30)
-
-Step 13 waited on every door in `web/` that read DuckDB's Silver, Gold or UTM
-with no read switch: after the flip each would have answered from a Silver as
-old as the switch, and after the first Sunday compaction from none. OD-10 was
-"port or retire", door by door. **The owner retired all of them, in one
-change** — none had a caller, and most had stopped working long before:
-
-- **The buyer, order and product cards** (`GET /api/buyers/{id}`,
-  `/api/orders/{id}`, `/api/products/{id}`) and the assistant's
-  `get_buyer_details` / `get_order_details`. `dict()` of a DuckDB tuple
-  answered 404 for every real id from 2026-02-06 on, and the order card's
-  `op.sku` named a column `order_products` never had. The model was being
-  told real customers did not exist. The Meilisearch searches stay; a customer
-  card, if one is wanted, is built new on Postgres behind a read switch.
-- **The two debug routes** (`/api/debug/stale-returns`,
-  `/api/debug/order-status/{id}`): DuckDB's Bronze against its Silver. The
-  first checked four of the six return statuses; the second's KeyCRM half
-  called a method the client never had. `pg_silver_row_values` asks the same
-  question of the store the tabs read.
-- **`/api/buyers/stats`**: counters that read "all synced" after a
-  compaction. The number that mattered is the buyer step's own selection from
-  Postgres; DuckDB's raw counts stay at `/api/duckdb/stats`.
-- **`POST /api/duckdb/purge-orders`**: the April 2026 DuckDB 1.5 MVCC
-  one-shot. It never reached Postgres, so it had stopped changing any number;
-  deleting an order from Postgres is chain 3's to design.
-- **The legacy 06:00 `reconciliation_check`**, `GET /api/reconciliation` and
-  `POST /api/reconciliation/run`, with the comparator only they used
-  (`reconcile_with_api`, `get_order_summaries_by_date`,
-  `log_reconciliation`). `dq_reconciliation` compares 90 days per order
-  against all three stores from one fetch. `reconciliation_log` had no other
-  writer, so it is **history now** — OD-13's freeze — and the table, its
-  hourly copy and its daily comparison stay; a test fails if anything writes
-  it again. The manual levers are `POST /api/reconcile` (detection) and
-  `POST /api/duckdb/refresh-statuses` (repair).
-  **The legacy job made one repair nothing else made, and it was kept.** A
-  B2B order's `ordered_at` can sit weeks after its `created_at`, and KeyCRM
-  does not bump `updated_at` on a status change. So a moved status on an
-  order created more than 30 days ago and ordered inside them was re-fetched
-  by nothing else. `order_status_refresh` fetches by creation date, the
-  weekly full sync skips the order as unchanged, and `dq_reconciliation`
-  filed it as STATUS_DRIFT (CRITICAL) every morning but repairs only
-  MISSING_IN_DK. The legacy fetch was padded by 30 days for exactly this.
-  `refresh_order_statuses` now finishes by re-fetching those orders by id
-  (`find_backdated_order_ids`, Kyiv dates): 156 ids over 183 daily runs on
-  the 2026-08-31 copy, 0.85 a day and at most 5, each one API call
-  (`tests/unit/test_status_refresh_backdated.py`).
-- **`scripts/migrate_sqlite_to_duckdb.py`**: dead at both ends since the bot
-  and the user list moved to Postgres, and it wrote roles from two hardcoded
-  ids.
-
-**Kept on purpose**: the DuckDB half of `POST /api/warehouse/rebuild-silver`
-(DN-29 already stands it down, and the way back needs it; it goes with step
-14's code deletion), the assistant's revenue tools (behind `KS_READ_CHAT`),
-and `POST /api/duckdb/sync-all-buyers` (the only `include=loyalty,shipping`
-fetch; chain 4 routes it). No table was dropped and none was touched in
-`_init_schema` or the compaction's lists — OD-11 is still open.
-
-**The sweep that closed OD-10 found one more reader**, and it is a
-precondition now rather than a door. `_expenses_run` sends the /expenses
-summary and profit analysis to Postgres only once
-`meta.mirror_state.backfilled_at` is set for `bronze.expenses`, whatever
-`KS_READ_EXPENSES` says — and a NULL there is an answer, not a failure, so
-DuckDB's Silver serves them uncounted and unrefused even under
-`KS_READ_FALLBACK=off`. Production has it set; a fresh host or a restore older
-than the backfill would not, and after the switch that page would read HTTP
-200 and zero expenses. So `expenses_backfilled` is read in the revision's
-path — the cutover's own connection at a start, the pool for the status page,
-one bound for both, retried with the revision, published by class — and only
-of a Postgres that said its revision, so a start that cannot reach Postgres
-still names `pg_revision` alone.
-
-### Stage 5's two clocks: the parallel period and the week of silence (OD-17 (a))
-
-Stage 5 — the end of DuckDB — waits for two things in a row (owner decision
-OD-17 (a)): a **14-day parallel period** counted from the last `KS_WRITE_*`
-flag, then a **7-day week of silence**. The period was 30 days until the
-owner shortened it on 2026-10-08, with the soak after step 13 and after chain
-3 cut from seven days to three and `KS_READ_FALLBACK=off` taken on the day of
-a clean rehearsal; the week of silence and "no DROP before a week after full
-completion, with a tested way back" were kept. Four things breach either one and
-restart its count: web opens DuckDB, the file's hash changes, a rollback lever
-is used, a read is served from DuckDB. None of the tooling below drops,
-deletes or moves anything — OD-11 (a) forbids any DROP before the owner's week
-after full completion, and schema removal, a `DERIVED_TABLES` addition and
-deleting the file all count. Everything is off or read-only by default;
-production behaves as before.
-
-**Why two clocks, not one.** Until stage 5 decouples the code, web opens the
-file on every boot and writes it all day, so "web opens DuckDB" and "the hash
-changed" are true every minute under today's settings and measure nothing.
-The parallel period is therefore judged on the two breaches that *can* be
-measured beside a live DuckDB — levers and fallbacks — and the week of silence
-on all four, with web running `KS_DUCKDB=off`.
-
-**`KS_DUCKDB`** (`core/duckdb_switch.py`; `on` default, `off`). `open_file` is
-the only reach for the driver in `core/`, `web/` and `bot/` — `connect`, and
-every function on its default connection, which `ATTACH` points at any file.
-A test walks the three trees, and the host tools in `scripts/`/`deploy/` are
-an exemption map the walk must equal; every read-write open the kill guard
-exempts from the checkpoint is one of them, under the same name. The same
-function is the kill guard's checkpoint-first opener (above): the refusal,
-then the CHECKPOINT, one driver call between them. It reads the driver however it is
-reached: imported, re-exported (`from core.duckdb_store import duckdb`, or
-`<module>.duckdb`), imported by its name (`import_module('duckdb')`,
-`sys.modules`), through `getattr`, or handed on as a value. It cannot read a
-module named by a variable, nor anything that is not Python; the first walk
-read `duckdb.connect` alone and let four such spellings past (review of
-02.10). The weekly compaction's phase 1 — the one scheduled process outside
-web that opens the live file, read-only, which no hash can see — and the
-nightly off-site's snapshot, which runs the same phase, open through the
-switch: their sidecars start from `.env`, so under `off` both are refused
-before the driver runs, each with one line saying its cron line is retired
-at the start of the week. Since PR-10 their wrappers do not get that far:
-each reads `KS_DUCKDB` out of `.env` first and stands down — exit 0, one
-line — before it stops, deletes or starts anything ("Starting the week of
-silence", below). Under `off` an open is refused **before the
-driver runs**, so the file is not even created — and `DuckDBStore.connect()`
-and `backup_database()` ask first, before either touches the disk beside the
-file (`data/`, `duckdb_tmp/`, `backups/` and the temp copies in it); the
-copy-back asks before `configure_modes()`, which would read Postgres;
-counted **at the raise**, because dozens of callers wrap `get_store()` in
-`except Exception` and a swallowed refusal is exactly the open the week must
-not miss; logged CRITICAL; published as `duckdb_switch.opened_while_off`
-(`{site: {count, last_at}}`, a site being `module:function`, at most 20, never
-exception text — and `<coroutine> (task)` when the read ran in a task of its
-own, which the frame walk would otherwise have named after uvicorn); and
-paged **CRITICAL `duckdb_opened_while_off`**, whose lever
-goes first because under `off` the outage beside it is its symptom. A typo
-runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
-
-**What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 to PR-9).
-`get_store()` publishes the store **unconnected**: about 150 callers hold it
-only as the host of a router that goes to Postgres, and the tripwire stands
-at `connection()`, where the file is actually reached. The boot asks
-`orders_held()` instead of `get_stats()`, a failed boot sync no longer ends
-the startup (the handler used to ask DuckDB first), and a route refused the
-file answers 503 `surface: duckdb` beside `ReadUnavailable`. `/api/health`,
-`/health/detailed` and `/api/duckdb/stats` reach for nothing (PR-3):
-`duckdb.status` and `migrations.status` read `off`, `fatal` is null, and
-`duckdb` is never in `degraded_by` — so the canary's probe and the Docker
-healthcheck are neither a tripwire site nor an outage, and a healthy probe
-writes `duckdb_silent: true`. The shadow chains (9, 10, 11a, 11b) stand
-their DuckDB half down before `store.connection()` (PR-4): counted apart as
-`shadow_stood_down` under `off`, never as a failure or at ERROR;
-`compared_in_shadow()` is empty, so the daily comparison does not read those
-tables, and `duckdb_written()` reads every table False. Under `on`, in the
-target state, DuckDB still writes exactly ten tables — the shadow chains'
-eight, `sync_metadata` and `schema_migrations` — pinned in
-`test_duckdb_table_fates.py`. After a week under `off` a way back reads the
-week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)), accepted
-until the drop: the finding dates its rows on Postgres's clock, its lever says
-rows of a week under `off` are expected and never names
-`scripts/chain_copy_back.py` as the cure (it releases the latch and hands the
-chain back to DuckDB), and the soak's H2 lists it as accepted, not failed, once
-the canary's `watch:duckdb_switch` row exists. On the read
-path (PR-8) DuckDB answers nothing even by routing: `/api/summary?source_id=3`
-(Opencart, no column in Gold) answers DuckDB's zeros without a connection;
-`/api/warehouse/status` reads DuckDB's last refresh out of its copy,
-`app.warehouse_refreshes`, as `status: off`; and `read_fallback.refusing()`
-holds whatever `KS_READ_FALLBACK` says, so a failed engine, a read switch
-left at `duckdb` (refused by name in `no_address`) and the expenses' NULL
-`backfilled_at` are each a 503 naming the surface, not the tripwire's.
-`read_fallback_mode.mode` keeps publishing what was configured, so the canary
-reads `duckdb_switch.mode` beside it: such a route is paged as `read_refused`
-alone, never also as `read_routed_to_duckdb`, and the refusal's log line names
-the variable that refused.
-**What was inherited from DuckDB is read from its copy** (PR-5): a sync
-window, freshness stand-in or digest beat Postgres holds no key for comes
-from `app.sync_metadata` — DuckDB's table as the hourly copy last shipped it,
-which stopped moving at the latches (`core/pg_frozen_metadata.py`) — the
-freshness check's bootstrap gate asks Postgres too, and an unreadable copy
-is `sync_watermarks_unwatched`, never "fresh install"; the report ledgers
-adopt nothing under `off`. That finding carries every entity it names
-(`IntegrityIssue.unverified`) and the integrity job holds each one, not only
-the moved keys — an entity no chain moved rests on the copy alone, and a run
-that could not read it must not announce its page resolved. Before it, every
-tick's order step was refused and order intake stopped. **The jobs stand down
-rather than fail** (PR-7): `duckdb_checkpoint` and `db_backup` are not registered, the catch-up asks
-Postgres alone, the mirror landing reads DuckDB only for what survives the
-stand-down, and the integrity scan is handed a connection that refuses
-(`duckdb_switch.RefusedConnection` — a check that still reaches is counted
-where it reached) with `pk_uniqueness_{products,buyers,categories}` stood down
-and no twin (`DUCKDB_OFF_STOOD_DOWN`, OD-S5-5), so its run is a verdict with no
-`error_message`. Those three stay bare calls skipped by name, never lambdas:
-the set is read out of the scan by the rule the `off` verdict reads its
-retired conditions by, so the two cannot part. The copied tables no chain
-owns — `app.sync_metadata`, `app.warehouse_refreshes`, `app.reconciliation_log`
-— freeze as history (`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4),
-neither copied nor compared, so `meta.mirror_state.last_ok_at` of the
-`sync_metadata` copy stops with them: nothing may judge that stamp against
-an owner row a chain first writes under `off`. A page their stood-down
-checks delivered before the switch is the `off` verdict's
-`retired_pages_clear` to wait for (PR-2). The warehouse writer's record is
-read from its frozen copy in Postgres, `app.sync_metadata`, and never
-written (PR-6, OD-S5-2 (a)); a door that re-parses every UTM
-verdict in Postgres alone notes it in `data/warehouse-utm-reparsed-at`
-instead, and the first start back under `on` merges that into DuckDB's record,
-so a later way back from step 13 still re-parses DuckDB's verdicts — the one
-thing `on` does differently, and only when the marker is there. A marker its
-removal left behind is found spent by the next start — its note already in
-the record, or the record `duckdb` since after it, the way back it fed done —
-and is only removed again: merging it once more used to start a second full
-DuckDB rebuild on every restart.
-
-**Since step 14's S14-00 web runs `off` whatever `KS_DUCKDB` says** —
-`core/duckdb_off.py` and its verdict are gone, one WARNING names a value
-that is not `off`, and `held_back` is published as `[]`. Scripts and host
-tools still read the variable. The tripwire (`guard`, `open_file`,
-`opened_while_off`, `duckdb_opened_while_off`) stays until S14-18. History
-below.
-
-**Off is a claim checked at web's start** (PR-2, `core/duckdb_off.py`,
-OD-S5-1 (a)): step 13 **in force** — `postgres` with every precondition met,
-not a way back that latched chains 3 and 5 refused, which stays `postgres`
-over whatever was unmet (a reader left on DuckDB would be a refusal per
-request); every chain on Postgres (`chain:<name>`, read off `WRITE_CHAINS`,
-never listed); every store switch of `duckdb_table_fates.STORE_SWITCHES`
-step 13 does not already hold at postgres, read off it too (today
-`KS_USER_STORE`, key `user_store`); step 13's record resolved in the frozen
-copy; every chain that keeps a value in DuckDB's `sync_metadata`
-(`CHAIN_SYNC_KEYS`/`CHAIN_MARKER_KEYS`) latched, and the copy shipped after
-the first latch of each — only those, since nothing moves the copy under
-`off` and chain 8's first typed expense mid-week used to hold the next
-deploy back and lose the week; and no page open that a check off stands down
-would announce resolved unseen — `data_quality.DUCKDB_OFF_STOOD_DOWN` (the
-`pk_uniqueness_` of the three tables no chain judges; one list, which PR-7
-stands down by), `shadow_*`, and the `mirror_*` pages of the three history
-tables, which the mirror job marks under `on` (the one other addition `on`
-sees: a mark on a delivered gate entry that only this verdict reads). One
-unmet and web runs **`on`** —
-the file opened, orders taken, the week not started — publishing the keys as
-`duckdb_switch.held_back` and paging CRITICAL `duckdb_off_held_back`, P4's
-breach and not P3's (OD-S5-7). Web's verdict alone (`configure_modes(web=True)`,
-kept for the process); a script under `off` stays `off`. So do the Sunday
-compaction's and the nightly snapshot's sidecars, which read `.env` and not
-the verdict: while web is held back both are refused and the file web goes on
-writing is neither compacted nor shipped. Their refusals say the week has
-started only of a web running off and name the hold beside it
-(`duckdb_switch.HELD_BACK_NOTE`), and the page's lever offers `KS_DUCKDB=on`
-as the other way out — a hold is a state to leave. Each key's detail in web's
-log names the value it found (a chain's flag, not its name). Otherwise, under
-`on` nothing changed. **Nothing the sweep runs reaches for the file
-any more**: `KNOWN_RESIDUAL` in `tests/unit/test_duckdb_off_sweep.py` is
-empty — no boot step since PR-6, no job since PR-4 to PR-7 together, no GET
-route since PR-8, and none of the doors PR-9 added the first time they were
-opened — and a control reach after the last step proves the tripwire still
-stands. The sweep runs in the target state (derived from the registries,
-every chain latched, step 13 met, off's own verdict holding), in three
-sweeps, each in an interpreter of its own and each **in four flavours** —
-Postgres refusing, or, wherever `KS_PG_DSN` is set (CI fails if it skipped),
-live: emptied, seeded with a small history in Bronze that Postgres derives
-into Silver, Gold and the customer profile itself (the integration variant),
-and put back after; crossed with **the world outside**, KeyCRM and TurboSMS
-(`tests/unit/duckdb_off_sweep_world.py`), answering canned payloads through
-`httpx.MockTransport` under the clients' own retries and breaker, or refusing
-(`down-offline`, `live-offline`, the outage branches). Until the review of
-PR-9 the world was refused in every flavour, so no path that runs only once
-data arrives ran — the syncs' writes, the gap backfill, the status refresh,
-the half-written repair, the resync, both buyer syncs, the SMS send and its
-delivery report — and a reach planted behind a payload passed the sweep;
-it now fails it in six process steps. KeyCRM's date filters are applied, so
-each path is served what only it writes. Where both answer the sweep also
-judges that it got there: every step in `FED_BY_KEYCRM` was served orders
-and wrote them to Postgres (`Landed`: row versions newer than the step's
-first transaction), every door that asked the world went through, every
-assistant tool answered without an error, and every DuckDB lever that syncs
-answered 2xx, was served and wrote Bronze. **process** boots web,
-starts the scheduler and runs every registered job — each as the tick that
-comes once every window an earlier step armed has passed, on a fresh sync
-service. **routes** calls every GET route under `/api/` as an admin, with
-its required parameters, then again per value of each optional parameter
-that can pick a branch (source, sales type, every boolean) and once with
-the header's filters together. **doors** (PR-9) boots web again and opens
-the rest of what a week exercises, every door read off the app rather than
-listed (`tests/unit/duckdb_off_sweep_doors.py`): every route under `/api/`
-that is not a GET, with its optional values and a body derived from what
-the route declares or reads itself (a 422 fails the run — a door refused as
-malformed swept nothing); every route outside it as nobody, a viewer and an
-admin, the two Telegram sign-ins and the TurboSMS webhook signed as their
-senders sign them; both WebSocket routes with the client's frames; every
-event on the bus with a socket open in each room; every assistant tool
-through `execute_tool` and through both `/api/chat` routes under a model
-that asks for all of them; every GET route `NETWORK_ROUTES` keeps out of
-the admin's sweep, as an admin; every GET again under a **real viewer
-session** nothing patches; and web's stop. Requests run in-process over ASGI on the
-sweep's own loop, so a background task a door starts is awaited inside its
-step. Seeding the history found that the live flavour had derived nothing
-until then: emptying the database took `meta.derivation_signal`'s row, so
-`pg_warehouse_derive` ran "signal unreadable" every time. A refused
-watermark read carries its key, so one row is one reach. A site that
-appears outside the list fails, and so does a row the code no longer earns.
-**A DuckDB lever may reach the file only if listed** in `DUCKDB_LEVERS` with
-its reason and refused loudly (503 naming `duckdb`, counted, paged) — and
-only a door under `/api/duckdb/`, the names OD-S5-8 keeps until code
-deletion; the list is empty, since under the chains each of those routes its
-sync to Postgres. **A door that says success having done nothing** — asked
-the world, was refused, still answered 2xx `"status": "success"` — is listed
-exactly in `KNOWN_FALSE_SUCCESS`: one, the inline status refresh, whose
-`refresh_order_statuses` swallows KeyCRM's errors (9502d9bd). Old and the
-same under `on`, so stage 5 lists it rather than changes it. **The static half** (`test_duckdb_off_entry_points.py`)
-walks `core/`, `web/`, `scripts/` and `deploy/` from every function that
-opens the file up to its entry points, and each must be a door the sweep
-opens, held by one (called, named as a value, nested — the mirror job's
-lambdas, a route's background `run()`), or pinned exactly as a host tool or
-dead code. **The bot's process never loads DuckDB**
-(`test_bot_imports_no_duckdb.py`): what it imports, lazily included, in a
-fresh interpreter, and what it calls. That is the code's half of the week's
-licence; the host tools (PR-10), the second Ark (PR-11), the rehearsal on
-the production copies and the owner's own yes are the rest. Not set
-anywhere until then.
-
-**The file's hash** — `deploy/duckdb_silence_check.sh`, a host tool, **not
-installed**: hourly from root's crontab at the start of the week (the line is
-in its header, and `--crontab` prints it with the two the week retires —
-printed, never installed). sha256 of the file and its `.wal`, O_RDONLY and no lock, so it
-can never be the change it reports; record in `/root/duckdb-silence/state`
-(600, atomic, parsed and never sourced) and one history line per run, cut to
-500 by the run that grows it. `--peek` hashes and writes nothing; `--status`
-reads the record and hashes nothing — that is what the soak calls. A MISSING
-file keeps the recorded hash as the reference, and the soak fails on it under
-either mode: deleting the file is a DROP. The record also keeps `missing_at`,
-the last check that found the file gone, through every later run: a file
-moved away and back byte for byte reads UNCHANGED, and until the key existed
-only the history file — which nothing reads — remembered the episode, so the
-soak passed (review of 02.10). It cannot see a change and its exact reversal
-inside one hour, nor a read-only open.
-
-**A copy-back now leaves a trace.** `scripts/chain_copy_back.py` is the only
-lever that gives a chain back to DuckDB, and it used to leave only an absence
-— owner rows deleted, a marker unlinked, its report gone with its `--rm`
-container. `release_chain` now writes one `app.alert_events` row
-(`condition_key = 'lever:chain_copy_back'`, `event_type = 'lever_used'`,
-`context` naming the chain and outcome) **inside the transaction that deletes
-the owner rows** (`core/lever_journal.py`): a release whose record fails does
-not commit. Exit 3 writes `committed_not_released` while the owner rows still
-stand. No revision — `event_type` has no CHECK, and every reader of the journal
-asks for `fired`/`escalated`/`resolved` by name. A copy-back container that
-inherits `KS_DUCKDB=off` is refused (exit 2); `-e KS_DUCKDB=on` is the
-decision to restart both clocks, said out loud.
-
-**The soak checks**, `deploy/stage4_soak/50`–`53`, read-only as `ks_readonly`:
-
-- **P1** the file record. FAIL on MISSING, or a `missing_at` inside the day,
-  always; under `off`, FAIL on a change at the last check or inside the day,
-  UNKNOWN with no record, one over 3 h old, or one younger than the day;
-  under `on`, not applicable.
-- **P2** levers in the day: a `lever_used` row, a `write_chain_flag_mismatch`
-  or `warehouse_hold_stuck` page (fired, escalated, resolved or still
-  standing), step 13 given back (`warehouse_writer` = duckdb with `since` in
-  the day), and `warehouse_preconditions_unmet` — but only once a period is
-  declared or web runs `off`, because before the step-13 flip that page means
-  "held back", not "rolled back". And `warehouse_way_back_refused`, always:
-  while chain 3 or 5 owns what DuckDB derives from, the way back is refused
-  and pages that key *instead of* the one above — in the parallel period,
-  with every chain latched, the only page a way back can raise — and it can
-  only happen after a flip. UNKNOWN when nothing says a page could
-  have been journaled: the pages reach `app.alert_events` only through the
-  bot's fire-and-forget alert archive (nothing without `KS_PG_DSN`, standing
-  down while Postgres is slow), whose proof of life is the
-  `watch:read_fallbacks` row the same writer rewrites every probe — none, or
-  none for 35 min, and an empty journal says nothing (review of 02.10: it used
-  to PASS on one nobody wrote). A recorded copy-back FAILs without it.
-- **P3** the parallel period. Starts at the latest of `SOAK_PARALLEL_FROM`
-  (the operator declares the last flip — nothing in the database knows which
-  flip the stage needed), the newest `owner:` row, step 13's switch, every
-  breach (P2's and F1's pages), and the `watch:read_fallbacks` clean-since — an
-  unwatched stretch is not a clean one. Covered at **336 h** (14 days, the
-  owner's amendment of 2026-10-08).
-- **P4** the week of silence, under `off` only. Starts at the latest of the
-  `watch:duckdb_switch` clean-since (the canary writes it only while web runs
-  `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
-  `.env`, every breach of all four kinds — the file's `missing_at` among them,
-  and a `duckdb_off_held_back` page, since a held web opens the file —
-  and F1's watch. `.env` is asked because the Sunday compaction and the
-  nightly off-site start their sidecars from it, not from web's environment,
-  and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way
-  `docker run --env-file` reads it is a FAIL — quotes and an inline comment
-  kept, and `export` or a space before the `=` making it refuse the whole
-  file — read through `deploy/duckdb_env.sh`, the reader the host scripts
-  stand down by, and any edit of the file restarts the week. Covered at **168 h** — a full week holds
-  Sunday 05:00 and Monday 09:30 by construction — **and** an
-  `app.weekly_report_sends.sent_at` after the start, because a week that never
-  delivered a report has not shown the Monday path works without DuckDB.
-  Today that ledger is written in DuckDB and copied, so under `off` it cannot
-  be covered: correctly, since the decoupling has not happened.
-
-These are the measurements, not the gate: every chain latched, source
-reconciliation clean, `KS_READ_FALLBACK=off`, the second Ark and the rest of
-the plan's stage-5 preconditions are their own checks.
-
-### Starting the week of silence (stage 5, PR-10)
-
-The one runbook for the start of the week and for the way back. Nothing in
-the repository runs any of it: every step is a person's, on the host, as
-root, in `/opt/key-api-bot`. `KS_DUCKDB=off` in production needs the owner's
-own "yes", separate from every merge (decision of 10.10.2026).
-
-**Since step 14's S14-00 web ignores `KS_DUCKDB`**: a step-14 web runs `off`
-whatever `.env` says, publishes `held_back: []`, and never registers
-`db_backup` or `duckdb_checkpoint`; `core/duckdb_off.py` and
-`chains_keeping_sync_metadata()` are gone. What follows is the runbook as
-the week was started, under an image from before step 14. Its host half
-still holds — the host scripts read `.env`, so the line stays
-`KS_DUCKDB=off` — and its way back is not a way back any more (below).
-
-**What PR-10 changed on the host**, which is what makes the order below safe:
-
-- `scripts/weekly_compact.sh` and `deploy/daily_offsite.sh` read `KS_DUCKDB`
-  out of `.env` by exact name — `deploy/duckdb_env.sh`, the one reader, the
-  lines naming the key and nothing else of the file, read both the way
-  compose reads them (web's environment) and the way `docker run --env-file`
-  does (a sidecar's) — and when either says `off` they exit 0 with one line
-  **before they stop, delete, link or start anything**. The
-  compaction used to delete the last compaction's backup and the export and
-  stop web, bot and Meilisearch, and only then have its sidecar refused; the
-  snapshot paged "Daily snapshot FAILED" the first night and refused a stale
-  backup every night after. Their cron lines are retired at step 4; the
-  stand-down is the insurance for a line left behind.
-- `deploy/pg_offsite.sh` ships `.env` beside every Postgres dump
-  (`env-<stamp>.gpg`, OD-S5-6): in the manifest, read back, hashed, decrypted
-  and compared like the dump, and a run without a `.env` fails. The only
-  off-site `.env` used to ride in the DuckDB Parquet archive, which the week
-  stops; now the Postgres marker is its age.
-- `deploy/offsite_check.sh` reports the DuckDB copy as frozen, with its age,
-  and never fails on it while `.env` says `off`. The Postgres marker and the
-  watchdog are judged as before, their pages say they carry the only
-  off-site `.env`, and the Monday heartbeat keeps speaking.
-- `deploy/duckdb_silence_check.sh --crontab` prints root's crontab change as
-  a diff, both directions. It installs nothing; nothing here does.
-- `deploy/restore-test.sh` starts its rebuild with `-e KS_DUCKDB=on` beside
-  `--env-file .env` (docker ranks `-e` first), so the drill that proves the
-  Parquet archive rebuilds still runs in the week — its sidecar sees only its
-  scratch directory — and it reports the newest archive as frozen rather
-  than stale. The real restore's command (`restore_from_export.py`'s
-  docstring) carries the same `-e`, for a `.env` decrypted from the week.
-
-**Not done in PR-10, though the plan (2.9) gave it these**, and what each does
-under `off` meanwhile — none of them opens the live file or pages:
-`scripts/check_date.py` and `scripts/force_resync.py` are refused by the
-switch with a traceback rather than one line; `scripts/weekly_report_preview.py`
-still reads a DuckDB copy, not the `KS_READ_*` readers; `deploy/dq_history.py`
-and `deploy/measure_dlr_throughput.py` are not retired (`HOST_TOOLS` still
-lists the first); `deploy/agent/run_agent.sh` still routes `duckdb_*` alerts
-to the `default` runbook, and the runbooks (`_common`, `disk`, `memory`,
-`warehouse`, `health`) still describe DuckDB as the live file; two
-`REMEDIATION` levers in `core/data_quality.py` still name DuckDB
-(`POST /api/duckdb/sync-all-buyers`, and restoring a catalogue row from it),
-as does the scheduler's memory lever.
-
-Write it bare: `KS_DUCKDB=off`, a line of its own, nothing before it and
-nothing after. Compose reads nearly any spelling as off, and web runs `off`
-on all of them; `docker run --env-file` does not. It keeps quotes and an
-inline comment (`KS_DUCKDB=off # …` hands a sidecar `off # …`, and it runs
-`on`), and it refuses the whole file — every sidecar, the restore drill's
-too — over `export KS_DUCKDB=off` or a space before the `=`. Either way the
-soak's P4 FAILs. The host scripts stand down on every one of them anyway,
-the harmless direction, and their line says which line to write.
-
-**Preconditions**, all of them, before step 1:
-
-1. The owner's "yes" for `KS_DUCKDB=off`; outside the freeze window (Sat 22:00
-   – Sun 02:30 UTC); not the day of a chain flip.
-2. This build deployed (stage 5's PR-0 to PR-11): `/api/health` carries
-   `duckdb_switch`, and `/opt/key-api-bot/deploy` holds `duckdb_env.sh` and
-   `ark_ship.sh`.
-3. The parallel period done: `deploy/stage4_soak.sh` P3 covered (336 h from
-   the last flip), no FAIL in P1–P3 or F1.
-4. *History since S14-00: a step-14 web checks none of this, and
-   `core/duckdb_off.py` and `chains_keeping_sync_metadata()` are deleted —
-   `chain_transfer._carried_keys` names the same chains' keys.* What web's
-   verdict would check at its start (`core/duckdb_off.py`), read
-   beforehand so the start is not the first time anybody asks: `/api/health`
-   `write_chains` with every chain's `mode` `postgres` — by its latch or by
-   its flag — and no `mismatch` and no `unmet_precondition`; `latched: true`
-   (its marker under `data/write-chain-owners/` and its `owner:` rows) only
-   for the chains that keep a value in DuckDB's `sync_metadata`, which off
-   reads from the copy (`chains_keeping_sync_metadata()`):
-   `pg_inventory_write`, `pg_expense_types_write`, `pg_buyers_write`,
-   `pg_orders_write`, `pg_managers_write`, `pg_catalogue_write`,
-   `pg_dq_journal_write`. The others may stand on
-   their flag with nothing written — chain 8 with no expense typed latches on
-   its first write, mid-week, as the verdict expects; do not write a row to
-   make a marker appear. Then `warehouse_writer_mode` with nothing unmet (step
-   13 in force); `grep -E '^(KS_USER_STORE|KS_SMS_STORE|KS_DQ_PG_WAREHOUSE)='
-   .env` reading `postgres`, `postgres`, `on`; as `ks_readonly`, `SELECT
-   value FROM app.sync_metadata WHERE key = 'warehouse_writer'` saying
-   `postgres` and resolved, and `meta.mirror_state.last_ok_at` of
-   `app.sync_metadata` later than the newest `owner:` row of
-   `meta.chain_watermarks` (the verdict asks it of those chains' first rows;
-   the newest of all is stricter, and an hourly copy away); no
-   delivered page under `pk_uniqueness_{products,buyers,categories}`,
-   `shadow_*` or the three history tables' `mirror_*`.
-5. `.env` off-site through Postgres: `data/logs/pg_offsite.log` has
-   `verified: env-<stamp>.gpg opens with` from this build, **and** somebody
-   has fetched that file to another machine and opened it with the escrowed
-   passphrase (`docs/backup_runbook.md`, "To open a copy"). The host can only
-   prove that its own passphrase file opens it.
-6. `deploy/pg_restore_drill.sh --from-remote` passed this week, and this
-   morning's `offsite_check.sh` was green.
-
-**Starting the week**, in this order (the plan's numbering):
-
-1. The last backup, and the manifest checked on it: the newest
-   `data/backups/analytics-*.duckdb` is last night's (or trigger `db_backup`
-   from `/api/jobs`), and `deploy/duckdb_table_fates_check.py`, run as its
-   header shows, exits 0 — or each UNKNOWN is decided first.
-2. `docker compose stop web bot`. From here the file is static: a clean
-   close checkpoints, and no `.wal` is left beside it.
-3. The second Ark: `deploy/ark_ship.sh --source data/analytics.duckdb`, in a
-   terminal of its own. Web and the bot stay stopped until it prints `SOURCE
-   RELEASED` — the freeze needs the file static — and no longer: nothing
-   after that line reads the file, and under `off` web never opens it, so
-   steps 4–6 begin there while it ships. (A web held back on `on` does open
-   it — the first hour, below — and then the week starts again, with a new
-   Ark, anyway.) The run must still end in `ARK SHIPPED AND VERIFIED`; then
-   `chattr +i -R /root/ark/key-api-bot/<stamp>`. One that fails after
-   `SOURCE RELEASED` is finished with `--ark`, which does not freeze again;
-   one whose local Ark does not verify needs a new freeze, and under `off`
-   the file is still static for it. Its header has the rest.
-4. Root's crontab: `deploy/duckdb_silence_check.sh --crontab`, keep the copy
-   it names, then delete the two `-` lines under STARTING THE WEEK — the
-   compaction and the nightly snapshot — by hand.
-5. `offsite_check.sh` needs nothing: it turns to its frozen branch the moment
-   `.env` says `off`.
-6. `.env`, the CLAUDE.md way: `install -m 600 /opt/key-api-bot/.env
-   /root/env-backups/key-api-bot/.env.bak-week-of-silence-$(date -u
-   +%Y%m%d-%H%M%S)`, then make the one line `KS_DUCKDB=off` — check it with
-   `grep -n '^KS_DUCKDB=' .env`, never by printing the file — keep it 600,
-   and `docker compose up -d web bot`. **Any later edit of `.env` restarts the
-   week** (P4 reads its mtime).
-7. Add the `+` line of `--crontab` — the silence check, hourly at :17 — and
-   run the script once by hand: `BASELINE`, exit 2.
-8. Read `/api/health`, as below.
-
-**The first hour:**
-
-- `curl -fsS https://ksanalytics.duckdns.org/api/health | jq '{status,
-  degraded_by, duckdb: .duckdb.status, switch: .duckdb_switch}'` — `healthy`,
-  `[]`, `off`, and `mode: off`, `value: off`, `error: null`,
-  `opened_while_off: {}`, `held_back: []`.
-- A `held_back` naming any key means web runs **`on`**: it opens and writes
-  the file, the two retired cron lines are gone, and the canary pages
-  `duckdb_off_held_back`. Meet the key within the hour or take the way back
-  now; a hold is a state to leave.
-- `docker compose logs --since 1h web | grep -E 'KS_DUCKDB=off|DuckDB opened
-  while'` — the one CRITICAL saying this process must not open the file, and
-  no "DuckDB opened while KS_DUCKDB=off".
-- Orders land: as `ks_readonly`, `SELECT updated_at FROM
-  meta.chain_watermarks WHERE key = 'last_sync_orders'` moves every minute or
-  two.
-- `/api/jobs` (admin) lists none of `db_backup`, `duckdb_checkpoint`,
-  `warehouse_refresh`.
-- After hh:17, `deploy/duckdb_silence_check.sh --status` — `last=UNCHANGED`.
-- No page among `duckdb_opened_while_off`, `duckdb_off_held_back`,
-  `duckdb_mode_invalid`, `health_status`.
-- Next morning: `offsite_check.sh` prints `off-site frozen (KS_DUCKDB=off)`,
-  and `deploy/stage4_soak.sh` P4 reads UNKNOWN until its watch is a day old,
-  then PASS with its hours. Covered takes 168 h **and** a Monday report
-  delivered after the start.
-
-**The way back**, whenever the week has to end early or a hold cannot be
-cleared:
-
-**Since step 14's S14-00 this is not the way back on its own, and done on a
-step-14 image it does harm.** `KS_DUCKDB=on` changes nothing in a step-14
-web: it runs `off` whatever `.env` says, so step 2 reads `mode: off` and
-`db_backup` and `duckdb_checkpoint` never register again. The host scripts
-read `.env`, though: with it saying `on` and step 3's cron lines back, the
-compaction stops web, the bot and Meilisearch every Sunday and rewrites the
-frozen file — the hourly hash of which step 14's last stage relies on — the
-nightly snapshot refuses a stale backup every night ("Daily snapshot
-FAILED"), and `offsite_check.sh` pages the DuckDB copy stale. So on a
-step-14 image leave `.env` at `KS_DUCKDB=off` and do not re-add those two
-cron lines. The way back is a rollback to an image from before step 14
-first ("Before any rollback to an image from before step 14", under
-Deployment); the steps below are that image's.
-
-1. Copy `.env` the same way, make the line `KS_DUCKDB=on` (or delete it), and
-   `docker compose up -d web bot`.
-2. `/api/health`: `duckdb_switch.mode: on`, no `held_back` key, and
-   `duckdb.status` no longer `off`.
-3. Root's crontab: the WAY BACK half of `--crontab` — the compaction and the
-   nightly snapshot re-added, the silence check deleted. Its record under
-   `/root/duckdb-silence` stays, as history.
-4. Expected, not to be chased: the first start under `on` opens the file
-   with its always-run migrations (0027's sequence shift among them) and
-   merges `data/warehouse-utm-reparsed-at` if a UTM re-parse ran under `off`
-   (PR-6); `db_backup` and `duckdb_checkpoint` register again, but until the
-   first new backup (04:30 Kyiv, or trigger `db_backup`) the 02:45 UTC
-   snapshot refuses a backup over 30 h old and
-   `offsite_check` pages the DuckDB copy stale; and `shadow_missing_in_duckdb`
-   WARNs in the digest every morning — the week's shadow rows, accepted until
-   the drop (OD-S5-3 (a)).
-5. Not the way back: `scripts/chain_copy_back.py`. It hands a chain's writes
-   back to DuckDB, a different decision with its own clock.
-
-Starting again later is step 1 again, a new Ark included: the file changed
-the moment web ran `on`.
-
-### The order write path asks the registry too (DN-22a)
-
-Until DN-22a nothing that ships orders out of DuckDB asked who owns the order
-tables, so registering a chain for `bronze.orders` would have had the sync's
-mirror overwrite the chain's rows and archive each overwrite in
-`app.order_versions` as a change that never happened. Now every such path asks
-`core.pg_landing.order_tables_stood_down()` **before** `write_orders`, never
-inside its transaction: the sync's mirror in `upsert_orders` skips, the ids-diff
-and header-only repair refuse, the hourly diff returns `stood_down`, the
-comment ship reports `skipped`, `POST /api/mirror/backfill/orders` answers 409,
-and the bucket comparison files `mirror_stood_down` (INFO). Either table stands
-both down, because ownership of the order tables passes as a unit: a chain that
-declares one declares both, which `tests/unit/test_write_chains.py` walks the
-registry for. It is not that they cannot ship apart — the 05:15 refresh and the
-comment ship send headers alone every day. The question is asked only of
-chains that declare an order table (`write_chains.stood_down_among`) — none do
-today, so it reads no variable and no file, and nothing changed in production.
-`tests/unit/test_write_chains.py` walks `core/`, `web/` and `scripts/` for any
-caller of `write_orders` or `mirror_orders` that does not ask.
-
-The paths that already hold a pool — the ids-diff and its repair, the hourly
-diff, the comment ship and the bucket comparison — then ask
-`order_tables_stood_down_or_owned(pool)` too, which adds the `owner:` rows in
-`meta.chain_watermarks`: DN-06's rule that anything holding a Postgres
-connection stands down on either copy of the latch, so a lost marker cannot
-make the chain's rows look like DuckDB's again. It is asked after
-`require_revision()` and a read that fails raises into each path's own
-handling, as in `replicate_operational`. Only the sync's per-tick mirror stays
-on the local answer — the write path, where that read is the one to avoid.
-An owner row naming an order table counts even when no chain in this build
-declares it: after an image rollback to a build older than the orders chain,
-`claimed_tables` alone would drop `owner:bronze.orders` and hand the tables
-back to DuckDB, so the helper reads the row as itself too, and either order
-table owned stands both down. The comparison files a different check for
-each answer, because the two are not the same state. On the local answer the
-sync's mirror has stopped too, and `mirror_stood_down` stays INFO — a decision
-somebody took. On the owner rows alone it has not — the per-tick mirror asks
-only the local answer — so every tick writes DuckDB's copy over the chain's
-rows, and that is `order_owner_row_without_marker`, **CRITICAL**, whose lever
-names `data/write-chain-owners` and `scripts/chain_copy_back.py` (or, with no
-chain declared in this build, a redeploy of one that does). It was the same
-INFO once, and a page or the digest prints only the check's label and lever,
-never its description: all three said "not a defect" about the one state
-here that is. Production today files neither: no chain declares an order
-table and no owner row names one.
-`POST /api/mirror/backfill/orders` asks the owner rows too, before anything
-starts: a lost marker is a 409, not a "started" whose refusal lands in the web
-log, and an owner read that fails — `SchemaVersionError` included — is a 503.
-With `KS_MIRROR_LANDING` off it answers 409 before any of that, asking
-Postgres nothing: the backfill refuses a switched-off mirror, and the route
-used to say "started" (or 500 in the foreground) to the run it refused.
-
-### Chain 6a: the expense-type dictionary (DN-26, off)
-
-`bronze.expense_types` was the one catalogue table in chain 8's exact shape:
-KeyCRM serves the 27 rows only to the weekly full sync, so DuckDB was its
-source and the hourly full replace copied it. Under
-`KS_WRITE_EXPENSE_TYPES=postgres` `upsert_expense_types` writes Postgres
-directly (`core/pg_expense_types_write.py`), **after** `core.landing_rows`
-has resolved the localisation-key names, so both stores are handed the same
-names; `last_sync_expense_types` moves with it, and the hourly copy and the
-daily comparison stand down. Three things differ from the chains before it:
-
-- **`full_sync` contains the raise.** A Postgres fault, or a flag nobody can
-  read, leaves the watermark where it was and the sync carries on with
-  products and orders — one dictionary must not cost a week's orders, or the
-  whole history on a boot with an empty DuckDB. With the chain on DuckDB the
-  raise goes out as it always has.
-- **Its watermark is not judged at 90 minutes.** It moves weekly;
-  `CHAIN_WATERMARK_MAX_AGE_MIN = None` leaves it to `_freshness_check`'s
-  192 h. The standing watch judges instead that the table is not empty
-  (CRITICAL — /expenses collapses into "Other") and that no name is still a
-  localisation key (WARN).
-- **Its watermark is inherited across the flip.** Postgres holds no
-  `last_sync_expense_types` until the Sunday full sync under the flag writes
-  one, and a mid-week flip used to file "entity never synced" on every
-  integrity run until then. `CHAIN_WATERMARK_INHERITS_DUCKDB` has the check
-  judge DuckDB's frozen stamp for the absent key instead — the age of what
-  the hourly copy last shipped — at the same 192 h, so a first sync that
-  fails still pages. Chain 1 does not declare it: its keys move hourly.
-
-**`KS_READ_EXPENSES=postgres` comes first, and the chain enforces it.** Every
-reader of the dictionary goes through `_expenses_run`, so with the read flag
-off a chain writing Postgres would leave each type KeyCRM adds in Postgres
-alone, shown as "Other", with nothing to say so. `unmet_precondition()` names
-the read flag; until it is on, an unlatched chain runs as duckdb whatever
-`KS_WRITE_EXPENSE_TYPES` says — `core.write_chains` reads the same answer, so
-the hourly copy keeps shipping — and the write_chains block in `/api/health`
-publishes `unmet_precondition`, which the canary turns into
-`write_chain_precondition_unmet` (WARN). A latched chain keeps writing
-Postgres (OD-19 (a)) and the same warning says its readers are on the frozen
-copy. DN-27's rule, generic in the registry. Chain 8 carries the same
-assumption unenforced: it is live, so enforcing it is its own change.
-Rollback is `scripts/chain_copy_back.py expense_types` once latched.
-
-**The latch waits for a connection.** Every chain latches inside
-`pool.acquire()`, not between `_pool()` and it. `core.pg.get_pool` sets no
-acquire timeout, so a pool with nothing free — the Sunday sync holding all
-five — is a wait, not a failure, and a latch taken before the acquire sat on
-disk through the whole wait. What ends a wait without a connection: a Postgres
-restart (or a reset that failed on release) leaves the connection handed back
-dead and the reconnect is refused; a cancellation; a closed pool; or the
-process stopped mid-wait. Each of those used to move the chain with nothing
-written. Nothing in web cancels these writers: `RequestTimeoutMiddleware`
-answers 504 and lets the handler run on (Starlette's `BaseHTTPMiddleware`,
-checked on 1.6.0), so an expense can land after its 504. 6a was written that
-way; chains 1, 8 and 7a latched before the acquire until 2026-09-25 and were
-moved, chain 8 while live — only *when* its latch is taken changed.
-`tests/unit/test_chain_latch.py` holds every registered chain to it by nesting,
-not by line: each `_latch()` inside `async with …acquire()`, each `claim`
-inside `async with …transaction()`. Its walk counts as a writer every public
-async function of a chain module that reaches a connection or a writing
-statement, through the module's private helpers and constants — the first walk
-read only SQL spelled in the function itself and passed a writer whose
-statement sat in a helper — bar the readers it names and holds to writing
-nothing. A function handed its connection whose statement lives in another
-module is still past it. `tests/integration/test_latch_waits_for_a_connection.py`
-proves it per writer against a live pool: no marker while it waits, none and
-no owner row after a refused reconnect, a cancellation or a closed pool; no
-owner row after a write that rolls back; and a first write takes the marker
-and claims its owner rows in the transaction that writes the row.
-
-### Chain 6: the catalogue (off)
-
-`core/pg_catalogue_write.py` is the seventh registered chain, after chain 3:
-`bronze.products` and `bronze.categories`, moved by `KS_WRITE_CATALOGUE=postgres` (default
-`duckdb`, which changes nothing). **Off in production.** It does not "delete
-the DuckDB half", as the chain map once said: like 6a it inverts the write.
-`DuckDBStore.upsert_products` / `upsert_categories` hand the rows
-`core.landing_rows` parsed to the writer, so brand and price are read one way
-whichever store is written, and DuckDB's two tables freeze in place — they stay
-in `_init_schema` (OD-11 (a)).
-
-**Retired and lost are told apart by one clock** (OD-15 (a), no new column).
-Every write is the whole catalogue — every product hourly, every category on
-the weekly full sync — upserted with `mirrored_at = now()`, and in the same
-transaction `meta.mirror_state.last_ok_at` is stamped with the mirror's own
-statement (`pg_landing.WATERMARK_OK_SQL`). So a row the last write carried has
-`mirrored_at = last_ok_at` exactly, a row it left out is earlier — KeyCRM
-retired it, and the writer never deletes — and a later one was written round
-the chain. Checked on a real Postgres with the mirror's statements before it
-was built: one transaction, one `now()`, for the rows, the owner rows and the
-watermark alike (one `xmin`). The writer de-duplicates by id, last wins, and
-sorts, so `last_rows` counts distinct rows and two overlapping writes take
-their locks in one order. **Full-catalogue contract**: because each write
-stamps the watermark, a writer handed part of the catalogue would make the
-rest read retired, so a walk holds the writer to the two repository methods
-and those to `full_sync` and the hourly products step.
-
-**"Later than `last_ok_at`" was evidence for one hour only.** The next full
-write moves the watermark past a row written round the chain, and a row KeyCRM
-does not serve — a stray insert, a retired product edited — is not in its
-payload: it read as retired, and the copy-back, whose rule was "`mirrored_at`
-at or after the latch", carried it into DuckDB and released (reproduced by the
-chain-6 review). So each write also keeps, in its own transaction, a record of
-the instants the chain has written at — `writes:<table>` in
-`meta.chain_watermarks`, microseconds since the epoch, pruned to the stamps
-some row still carries, so bounded by the table and not by the number of
-writes — locked before any product so two writes cannot lose each other's
-stamp. From the latch on, "the chain wrote this row" means its `mirrored_at`
-is a recorded stamp, for the watch and the copy-back alike; any other instant
-at or after the latch stays CRITICAL until KeyCRM serves the row again or a
-human deletes or restores it. What it cannot see, and says so: an edit that
-leaves `mirrored_at` alone, or copies a recorded instant — on a retired row
-only a trigger or a migration would date that. The copy-back releases the
-record with the latch.
-
-**E1 reads the record too** (2026-10-14). The daily comparison's
-`chain_shipper_overwrote` took any `last_ok_at` after the owner row for a
-shipment out of DuckDB — true of every chain flipped before this one (chain 3's
-writer stamps it too, but has never been flipped), false here,
-where the writer stamps it on every write. From 2026-10-10 each morning paged
-the chain's own hourly writes CRITICAL, with "restore from the nightly dump" as
-the lever; production's two watermarks were each a stamp in the chain's
-record, and nothing else had written either table since the latch. A chain
-whose writer stamps the watermark now declares the tables
-(`CHAIN_STAMPS_MIRROR_STATE`, held to the code by a walk in
-`tests/unit/test_chain_mirror_stamps.py`), and this one hands E1 the watermark
-and the record in one statement (`read_mirror_stamps`; two reads would let a
-write land between them and look foreign): a recorded instant is the chain's,
-any other after the latch is CRITICAL, and a record nobody can parse is
-CRITICAL saying it could not tell. It sees a foreign stamp only until the
-chain's next write moves the watermark again — the mirror, the one other
-writer that stamps it, ships only with the marker lost, which
-`chain_latch_disagrees` and `owner_row_without_marker` page for as long as it
-lasts. Chain 3 stamps its three bronze watermarks the same way and keeps no
-record, so E1 does not judge those three — a decision written beside its
-declaration, and the only chain the walk lets stamp without one.
-
-**The standing watch** reads both tables four times a day: empty and written
-round (CRITICAL), rows lost (`last_rows − current − around`, CRITICAL, judged
-only once the chain's own write stamped the watermark — the mirror's
-`last_rows` counts a repeated payload id twice; "the chain's own" is
-`last_ok_at` at or after the owner rows' `updated_at`, both Postgres's clock,
-never the local marker's stamp, which a host clock a millisecond ahead of
-Postgres put after its own latching write), retired (INFO, with ids —
-product 1055 in production) and a short write (WARN when the last write left
-out over 5% and 10 rows of what the write before it carried — the record's
-`previous`: the sync's pagination stops on the first short page, so a
-truncated catalogue reads as mass retirement. Measured per write, not as
-retired against the table, which only rises because nothing deletes, and so
-warned after every complete write once ordinary retirements passed 5%). Its watermarks are left to the freshness check (48
-h, 192 h) and inherited from DuckDB until the first write under the flag.
-
-**Two hazards 6a's template did not cover, closed before the flag.** The
-products watermark was read at the top of the incremental tick, ahead of the
-orders, where a flag typo or a Postgres outage would have stopped order
-intake every minute; off DuckDB that read moves into the hourly products step
-(`SyncService._catalogue_step_postgres`), bounded and shielded like the
-buyers', and a failure — the read, a refused catalogue, Postgres down — is
-recorded, published as `write_chains.pg_catalogue_write.sync_step` and retried
-in ten minutes, during which neither KeyCRM nor Postgres is asked anything.
-And `full_sync` wrote both tables uncontained; off DuckDB a failure there now
-leaves the watermark, stamps `meta.mirror_state` failing and carries on with
-the orders. A catalogue Postgres would refuse (a NULL name, a NUL, a price
-outside `NUMERIC(12,2)`) is refused whole before the latch, never row by row —
-a skipped row would read as retired.
-
-**Held on DuckDB until its readers move.** `unmet_precondition()` names chain 1
-not on Postgres (DuckDB's SKU status joins DuckDB's products), the read
-fallback not `off`, and every `warehouse_cutover.WAREHOUSE_READERS` switch not
-on postgres — read through `readers_not_on_postgres`, the one helper the
-step-13 switch files its `reader:*` keys from, so the two cannot disagree.
-Over-inclusive on purpose: the walked list beats a hand-picked one. The warning
-is rate-limited to once an hour.
-
-**Product 1055 is carried before the flip**, by
-`POST /api/mirror/backfill/catalogue` (dry run by default;
-`pg_landing.carry_retired_catalogue`). It ships only the rows the daily
-comparison already calls retired — its own rule, `synced_at <= last_ok_at`,
-pinned row for row against `compare_table` — with a `mirrored_at` before the
-watermark, so they still read as retired, and never touches
-`meta.mirror_state`. It refuses with the mirror off and on either copy of the
-latch. Once carried, Postgres reads of an order line on 1055 name it as DuckDB
-does, and the daily `mirror_retired_rows` INFO goes to zero.
-
-**`last_sync_meilisearch_pg` is not this chain's.** Its value is a Postgres
-clock this chain stamps exactly as the mirror did; by OD-15 it moves with
-whichever of chains 3 and 6 lands last, which is chain 3, and chain 3 declares
-it (see "Chain 3"). A test keeps it off every chain that does not own an order
-table, and requires it on chain 3.
-
-**The way back** is `scripts/chain_copy_back.py catalogue`. Both tables are
-mirrored landing tables there, each its own rewrite clock (`mirrored_at` one
-of the chain's recorded instants, at or after the owner row's `updated_at`),
-compared whole at zero. Before a flip a row on one
-side only, or differing, refuses and names the carry or the next products sync
-(categories: `POST /api/jobs/full_sync_weekly/trigger`); after the latch a row
-the chain re-stamped is the copy's work (INFO) and a retired row that differs,
-one written round the chain since the latch, or one only DuckDB holds,
-refuses. The chain map's "run a full sync" rollback
-is wrong under OD-19 (a): a full sync under a latched chain writes Postgres
-again. No lock-out of its own, and revision 0035 — shipped for the other
-chains #280 registered — holds none of its writers: an image older than the
-chain writes DuckDB from the payload and mirrors the same payload through
-`pg_landing._mirror`, which never asks the revision, stamping the watermark in
-one transaction. What 0035 changes is the evidence: such an image is an outage
-(401, no bot), and its 07:30 comparison fails on the revision instead of
-paging `owner_row_without_marker`.
-
-Proved on PostgreSQL 17.2 (`tests/integration/test_catalogue_writer.py`): the
-one-`xmin` write, retirement, a repeated id, two concurrent full writes with no
-deadlock, three planted defects reaching the watch by name, and the carry →
-handover → flip → copy-back round trip with 1055 landing in DuckDB. Since the
-review: a write round the chain still CRITICAL after the next full write and
-refused by the copy-back, the record locked before any product, the short
-write judged per write (20 ordinary retirements quiet, a truncated write
-warned and cleared), the acquire and statement bounds, and the carry's
-`DO NOTHING` and `W − 1 µs` clamp.
-
-### Chains 9, 10, 11a, 11b: the shadow state (OD-02 (c), all off)
-
-The quality journal (`data_quality_runs`/`_issues`/`_diffs` and the digest's
-beat, chain 9, `KS_WRITE_DQ_JOURNAL`), the watchdogs' samples (`disk_samples`,
-`data_dir_samples`, `memory_samples`, chain 10, `KS_WRITE_WATCHDOGS`) and the
-two send ledgers (chain 11a `KS_WRITE_WEEKLY_LEDGER`, 11b
-`KS_WRITE_TRAFFIC_LEDGER`) move their writer to Postgres **and DuckDB still
-receives every row**. All four default to `duckdb`, which runs the block that
-stood at each call site, moved behind one door per chain (`core/dq_journal.py`,
-`core/watchdog_samples.py`, `core/report_ledger.py`) and walked for anything
-that goes round it. No schema revision: every table has been there since
-stage 3; revision 0035 only comments them and locks images older than the four
-chains out (see "Revision 0035"). `warehouse_refreshes` and
-`reconciliation_log` are not ported — both are frozen at their writer (step
-13, OD-10).
-
-**A third registry state: the copy stops, the comparison continues.** A chain
-module declares `CHAIN_SHADOW = True`. The hourly `replicate_operational`
-stands its tables down like any moved chain's — its full replace out of DuckDB
-would delete every row whose shadow write failed, and for a ledger that is a
-delivered week the next tick sends again. `reconcile_operational` subtracts
-`write_chains.compared_in_shadow()` from what it stands down and compares
-those tables facing Postgres→DuckDB (`compare_shadow`): no watermark gate, each
-side's own clock for the grace, and four findings — `shadow_duckdb_only_rows`
-(CRITICAL: something wrote DuckDB round the chain), `shadow_row_values`
-(CRITICAL), `shadow_missing_in_duckdb` (WARN: a shadow write failed) and
-`shadow_pruned_rows` (INFO: DuckDB's prune ran a tick behind). Only
-`mode == "postgres"` is compared; a typo writes nowhere and stands down with
-`write_chain_flag_invalid` paging.
-
-**Postgres commits first, then DuckDB is handed the same values**
-(`core/shadow_writes.into_duckdb`), never inside `store.connection()`, in one
-DuckDB transaction rolled back on any error. A DuckDB failure is counted and
-never raised — published as `write_chains.<chain>.shadow_failures`, class
-only. A Postgres failure raises and DuckDB is not written, so DuckDB ⊆
-Postgres holds by construction. The latch (OD-19 (a)) is unchanged: a row whose
-shadow failed exists in Postgres alone, so the flag is no more a rollback than
-chain 8's, and the way back is `scripts/chain_copy_back.py dq_journal |
-watchdog | weekly_ledger | traffic_ledger`. It carries `CHAIN_MARKER_KEYS` (the
-digest's beat) with the sync keys, and its handover reads a DuckDB-only sample
-older than everything Postgres still holds as a lagging prune, INFO.
-
-**Readers follow the writer, with no fallback** — chain 7a's rule. Under
-`postgres` the digest, `/api/health`'s layer ages, `/api/health/data-quality`
-and the startup catch-up read Postgres; a Postgres that cannot answer fails the
-digest and gives the canary no `data_quality` block (`dq_block_missing`), never
-DuckDB's, which would read "journal fine" at the moment its writer failed. A
-flag nobody can read keeps the readers on DuckDB, where the whole journal is.
-
-- **Chain 9** allocates `run_id` as `MAX + 1` under
-  `pg_advisory_xact_lock(RUN_ID_LOCK_KEY)` in the writing transaction — no
-  sequence, so no revision; a test walks `core/` for a reused lock key. The beat
-  lives in `meta.chain_watermarks` (the hourly replace of `app.sync_metadata`
-  would wipe it) and is inherited from DuckDB while absent there, or the first
-  digest after a flip restates every standing finding. A Postgres row is
-  rendered in DuckDB's session zone, read from DuckDB itself. **One finding
-  per `(check_name, table_name)` in a run**, which Postgres keys
-  `app.data_quality_issues` on and DuckDB does not: `chain_invariants_unwatched`
-  names the part it could not read — `(<chain>)`, `meta.chain_watermarks`,
-  `(write chains)` for everything, and the table itself for chain 6's
-  catalogue table with no full write recorded, which can be both tables in
-  one run — and the journal's door folds any repeat
-  that still arrives, with an ERROR. Two blind groups under one constant name
-  had Postgres refuse the whole run, or, under `duckdb`, broke the hourly
-  copy of the never-pruned journal for good.
-- **Chain 10** runs each job's whole persistence — the differencing reads, the
-  insert, the prune — as one Postgres transaction, so a read can never be left
-  on the store the insert moved away from; every instant both stores see is
-  computed once. A Postgres that refuses, or a typo, returns no history and the
-  job **still judges capacity and memory**: when the disk fills, Postgres is
-  the first thing to refuse writes. The standing watch adds
-  `chain_samples_stale` and `chain_retention_unbounded`.
-- **Chains 11a/11b are at least once, never twice** (OD-16 (a)). `sent_at` is
-  taken once after the delivery; the record is tried three times (~12 s) and
-  then spooled to `data/report-ledger-pending/<chain>/` (temp, fsync, rename).
-  The gate drains the spool, counts a spooled week as sent, adopts a row only
-  DuckDB holds rather than sending it again, and raises — no send — when
-  Postgres cannot answer. The traffic floor is asked before the ledger.
-  `/api/health` publishes `pending`, the canary warns `report_ledger_pending`,
-  the standing watch adds `chain_report_week_missing` from Wednesday on. The
-  residual: Postgres refusing three times **and** the spool unwritable raises,
-  and the next tick sends again — today's exposure on the `duckdb` path, left
-  as it is because closing it there changes the default. Flip and roll back
-  Wednesday to Sunday. **A spool outlives the flag that wrote it**: the gate
-  under `duckdb` lands it in DuckDB and counts a still-spooled week as sent
-  (a flag put back after a record that never latched, or after a copy-back,
-  sent the week twice before the review); the handover reports the spool —
-  INFO, a file that will not parse CRITICAL — and `--execute` lands it in
-  Postgres before it reads, refusing if anything is left.
-
-**Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
-since its owner rows, a failure counting for the day it was stamped; H2
-(`29_h2`) — the 07:30 run filed no `shadow_*` above INFO (bar
-`shadow_missing_in_duckdb` once web has run `KS_DUCKDB=off`, OD-S5-3 (a)). D8,
-20, 21 and 22 stop gating on the journal's copy once chain 9 writes it directly
-(the flag, the latch, or its owner row); chain 1's preflight does the same on
-the flag or the latch (chain 7b's goals dry run did, until 7b-4 retired it).
-Every guard names its mutation; a run over all of them found five that did not
-catch theirs, now closed in the tests.
-
-### Chain 7b: the goals read Silver, and a GET never writes (OD-14)
-
-The goal calculators — seasonality, YoY, weekly patterns, the growth cap, and
-a smart goal's last-year and recent-months reads — read the whole order
-history. From DN-12 they read it through a bridge: DuckDB `orders` narrowed by
-`silver_sales_type_case` rendered over DuckDB's `managers` and
-`manager_classifications`. Step 13 freezes all three. Three changes, none of
-which moved a number in production by itself; since 7b-4 they read Silver and
-nothing else.
-
-**7b-1 — compute, then store once.** The calculators return and store
-nothing; `recalculate_goal_tables` is the one writer of `seasonal_indices`,
-`growth_metrics` and `weekly_patterns`, reached from the Monday job (the
-first two, as always) and `POST /api/goals/recalculate` (all three, retail
-only — the tables carry no `sales_type`, so the rows mean retail and any other
-value is a 400). It reads everything first and writes in **one** DuckDB
-transaction: they were twelve autocommitted upserts then twelve autocommitted
-YoY updates, so a failure between them left this week's indices beside last
-week's growth. `GET /api/goals/smart` used to recompute and store all three
-whenever `seasonal_indices` held fewer than twelve rows, for any viewer and
-with the viewer's `sales_type`; `GET /api/goals/forecast?recalculate=true`
-did it on request. Neither does now: the smart goal reads only, a short
-table falls back per month as it always did, and `recalculate=true` is a 400
-naming the POST, for an admin too. **The trade, taken knowingly:**
-`weekly_patterns` has no automatic writer now — the Monday job stores the
-other two (OQ-2) and only the POST stores it — so on a host whose goal
-tables start empty, milestone weeks use the default weights (0.23 a week,
-0.08 for the fifth) until an admin POSTs, where the first page view used to
-fill them. Production holds all three (12/60/1 rows), and the Sunday
-compaction exports them: none is in its `DERIVED_TABLES`. A sweep runs every GET under `/api` with
-`seasonal_indices` emptied and every optional boolean switched on, and fails
-on any that changes a goal table. **The YoY crash it fixed** would have come on
-2026-11-02: from the first order dated 1 November the running year has eleven
-months and counted as "full", a second pair of years appeared, and the
-recency weighting multiplied DuckDB `Decimal`s by float weights —
-`TypeError`, in the Monday job and in `GET /api/goals/growth`. The yearly
-read now never takes the current Kyiv year, and every term is a float.
-
-**7b-2 — `KS_GOALS_HISTORY` chose which orders count**: `bridge` (the default
-then) or `silver` — every history read over `{silver_orders}` through
-`_goals_run`, so the engine is `KS_READ_GOALS`', and DN-20's counting and
-refusal cover it. Not `KS_READ_GOALS` reused: that was `postgres` in
-production already, so a reuse would have moved the reads at the deploy; it
-names an engine, this named a row set; and an engine switch put back must
-never change semantics. Not `KS_READ_*` either — the step-13 walk reads those
-as engines. **`is_active_source` is deliberately absent** (OQ-1, the
-owner's): source 3 is the 2024 website on Opencart — 2 055 retail orders,
-₴5.0M, July to December 2024, before Shopify took over — and dropping it
-shrinks 2024, so retail YoY would move from 0.50 to 0.82 and October's retail
-goal from ₴4.0M to ₴4.2M. Without it, Silver selected exactly the bridge's
-orders.
-
-Measured with the built code on the 2026-08-31 production backup, as of
-2026-10-01: the orders each side counts are identical for every sales type
-(retail 42 054), and **1 207 numbers — every calculator for every sales type,
-the Monday job's store and the smart goal for four months — show 0
-differences**. The one rule that could differ is the return: KeyCRM's status
-group decides before the status list (0 orders in production).
-
-**The flip** — `KS_GOALS_HISTORY=silver` with `KS_READ_GOALS=postgres` — was
-made on 2026-10-07 08:20 UTC, on the owner's yes, after
-`scripts/goals_semantics_dryrun.py` exited 0 on that day's backup: its backup
-half ran the real goal methods both ways over a read-only copy, and its
-Postgres half read, as `ks_readonly`, the latest `mirror_landing` run's
-`reconcile_silver` (DuckDB's Silver against Postgres' at one instant), since
-the backup half read DuckDB's Silver on both sides. A three-day soak followed
-(to 2026-10-10 08:20 UTC).
-
-**7b-4 — the bridge deleted, the variable retired. It merges only after the
-flip's soak has ended (2026-10-10 08:20 UTC)**: a merge deploys itself, and
-until then the way back is the bridge this deletes. On this build, unsetting
-the variable — the rollback the soak was run under — reads Silver with
-nothing to say so (`/api/health` shows `silver`, the canary is quiet), and
-setting `bridge` refuses every calculator read. (Once step 13 is in force,
-that rollback on the build before this one is itself step 13's way back,
-since `goals_bridge` is one of its preconditions there.) Every history read has
-one body, `{silver_orders}` through `_goals_run`; the bridge bodies,
-`_orders_sales_type_predicate`, `_bridge_rows`, `history_from_silver`,
-`SALES_TYPE_BRIDGE_TABLES` and `sales_type_bridge_owners` are gone.
-`KS_GOALS_HISTORY` is read only to refuse: **unset and `silver` both read
-Silver; any other value — `bridge` included — raises at every read of the
-calculators' history** (never at import, so web cannot crash-loop on it):
-the goal widget (`/goals/smart`), `/goals/seasonality`, `/goals/growth`,
-`/goals/weekly-patterns`, `/goals/forecast`, `POST /goals/recalculate` and
-the Monday job fail with nothing written. `GET /goals`, `/goals/history` and
-setting or resetting a goal never read that history — a recent window of
-Silver, `is_active_source` included — and answer as before;
-`test_goals_history_silver.py` reads every goal route off the app and holds
-it to one of the two lists. A value naming a history that no longer exists
-is a configuration nobody can satisfy; answering it from Silver in silence
-would hide that. `/api/health` publishes `goals_history {mode: silver |
-null, error}` and the canary pages `goals_history_mode_invalid`, CRITICAL
-like `write_chain_flag_invalid`; its lever, like the refusal, is to set the
-variable to `silver`.
-
-**Retired is not removable: keep production's `.env` line
-(`KS_GOALS_HISTORY=silver`) for as long as an image from before 7b-4 can be
-a rollback target.** Such an image reads unset as `bridge`. Rolled back to
-without the line, it counts the goals from DuckDB's orders and
-classification — frozen copies once chain 3 or 5 has latched, while the
-latch keeps the writes in Postgres — and, after step 13, its own
-`goals_bridge` is unmet, so the start runs as duckdb: the way back, a full
-DuckDB rebuild, a CRITICAL `warehouse_preconditions_unmet`, and the soak
-clock restarting. (An unlatched chain 3 or 5 is held on such an image
-whatever the line says: the bridge is a code constant there.)
-`deploy/step13_rehearsal.sh` keeps the line for the same reason. With the
-line there is no switch back to make: an image from before 7b-4 reads
-Silver under it too.
-
-What guarded the bridge went with it: step 13's `goals_bridge` precondition
-and its registry walk (so step 13's start asks no write chain its mode any
-more; chain 3's guard for an ask before the verdict stays), chains 3 and 5's
-own `goals_bridge`, the CI tripwire in `test_goals_off_duckdb_silver.py`, and
-the dry run, retired rather than reduced — with no bridge there is nothing to
-compare, and no flip left for it to gate. What guards Silver stays: the
-orders it selects, pinned to written-out ids on every branch of the CASE
-(`test_goals_history_silver.py`); every calculator — seasonality, YoY yearly
-and per month, the weekly weights and the cap — against numbers computed in
-Python from the fixture's rows, for every sales type
-(`test_goals_off_duckdb_silver.py`), which replaced the comparison with the
-bridge's bodies: that was the bodies' only independent answer, since the
-two-engine test runs one text on both engines (review of 7b-4: three
-mutations to the seasonality and monthly-YoY bodies passed every goal test
-until then); no goal read naming DuckDB's `orders`,
-`managers` or `manager_classifications`; the two engines answering alike to
-1e-6, with DuckDB's history refused at the statement and its Silver emptied
-(`tests/integration/test_goals_history_two_engines.py`); and step 13's
-`reader:KS_READ_GOALS` and `read_fallback_off`, which make the Silver
-Postgres'. Production's numbers do not move: under `KS_GOALS_HISTORY=silver`
-a before/after run of every calculator, the stored tables, the smart goal for
-four months, the suggested goals and the historical revenue — every sales
-type, on DuckDB and on Postgres Silver, 276 Postgres statements with their
-parameters — over one synthetic three-year store gave the same bytes on the
-commit before 7b-4 and after it, and again with the variable unset. The
-three goal tables' writer moving to Postgres is 7b-3's, below.
-
-### Chain 7b-3: the goal and forecast tables' writer (off)
-
-`KS_WRITE_FORECAST` (`duckdb` default | `postgres`), `core/pg_forecast_write.py`:
-`app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns` and
-`app.revenue_predictions` (revision 0025, ~313 rows; no migration). Until it
-writes Postgres, DuckDB writes all four and the hourly full replace carries
-them. Two writers, one chain: `persist_goal_tables` (the three goal tables —
-the Monday `seasonality_calc`, which stores two, and `POST
-/api/goals/recalculate`, which stores all three) and `store_predictions`
-(every training). Routed in the repository, `_persist_goal_tables` and
-`store_predictions`, where every caller arrives. Either writer's first write
-latches the chain and claims all four owner rows: they move as a unit.
-
-**One transaction, and the YoY must land.** The index upsert never touches
-`yoy_growth`; the YoY is one `UPDATE` per month after it. Split or reordered,
-that UPDATE matches nothing and says nothing, and `generate_smart_goals` then
-reads NULL and silently uses the cap. So both run in one transaction, upsert
-first, and every UPDATE must report `UPDATE 1` or the set rolls back
-(`executemany` returns no per-row status, so it is a loop). One advisory lock
-for the chain (`pg_locks` objid 31491) restores the serialisation DuckDB's
-store lock gave: two `store_predictions` over one range otherwise die on the
-primary key.
-
-**Refused before the latch, NaN included.** DuckDB 1.5.5 refuses NaN, ±inf
-and overflow in `DECIMAL(6,2)`; Postgres 17.2 refuses the last two and
-**stores NaN** (measured). MAPE is unbounded (a zero-revenue validation day),
-so every number goes through `core.pg_numeric.refusal` first, which refuses
-NaN on purpose; and the model's ISO-string dates become `date`s there, since
-asyncpg refuses a string where a DATE goes. `predict_month` swallows a failed
-store, as always, so `_train_impl`'s result (the job's, and `POST
-/api/revenue/forecast/train`'s) now carries `predictions_stored`.
-
-**The reads follow the chain, and only the chain.** While it writes Postgres,
-every statement reading one of the four goes there whatever `KS_READ_GOALS`
-says, with no fallback (7a's rule). A failure there is a **counted refusal**
-in either mode (`read_fallback.chain_refusal`): a 503 naming `goals`, and
-`read_fallback_mode.refused` on `/api/health`, which the canary pages as
-`read_refused` — what the same failure was before the flip under the
-precondition's `off`. Raw, as 7a's reads still are, it reached two handlers
-that let `ReadUnavailable` through and contain everything else:
-`/api/revenue/forecast` answered 200 "Forecast not available yet" and the
-smart goal dropped its ML signal, with nothing counted. While it does not,
-each keeps today's engine: the forecast by `KS_READ_GOALS`, the three goal
-tables from DuckDB.
-The smart goal reads the three in **one** `UNION ALL` statement through
-`_goal_tables_run` — one committed set in either engine, and never
-`KS_READ_GOALS`, which in production would read the replica up to an hour
-behind a POST. `CAST(NULL AS INTEGER)`, because Postgres types a UNION column
-from its first branch. Weekly rows are sorted in Python: the residual goes to
-`max(...)`, which breaks ties by insertion order.
-
-**Held until its inputs are Postgres** (`unmet_precondition`, 6a's
-arrangement): `KS_GOALS_HISTORY` understood (unset or `silver` since 7b-4 —
-anything else refuses every history read), `KS_READ_GOALS=postgres` with a DSN,
-`KS_READ_FALLBACK=off` as configured at start, and `KS_READ_FORECAST_INPUT=
-postgres` (the training frame; on in production since 2026-09-16, so it
-costs nothing and stops a later rollback of that flag training on DuckDB Gold).
-Unmet and unlatched, the chain runs as duckdb for every consumer — writer,
-reads (unlike 7a's `reads_postgres`), shipper, comparison — and the canary
-warns `write_chain_precondition_unmet`.
-
-**Standing watch** (integrity layer, all WARN — every value is recomputable):
-`chain_goal_tables_incomplete` (fewer than 12 months, a NULL `yoy_growth`, no
-measured `yoy_overall`, or the 0.10 placeholder while `period_start` already
-holds two full years — the 2026-08-31 backup's state), `chain_goal_tables_stale`
-and `chain_forecast_stale`, judged against the last slot of the scheduler's
-own constants plus 2 h 30 min, so a missed Monday or Thursday is in that
-morning's 07:00 run. **Training is twice weekly, not daily**; a flat limit
-would have to exceed the Thu→Mon gap.
-
-**The way back.** Flagged and not yet latched: unset, `up -d web`, free.
-Latched: `scripts/chain_copy_back.py forecast` (specs derived, no sequence,
-no sync key; the stamps forgiven as above), then the flag, then
-`replicate_operational`. Recalculating and retraining are the cheaper way to
-fix the *content* — they write wherever the chain writes — but only the
-copy-back releases a latch. The model artefact (`data/revenue_model.joblib`
-and its JSON siblings) is a file and does not move.
-
-**The flip**, after `KS_READ_FALLBACK=off` is live (the goal history is
-Silver's since 7b-4), one flag a day, outside Mon/Thu 03:20–04:40 Kyiv and ≥ 65 min after any
-write to these tables, before step 13: `/api/health` shows the chain
-`duckdb`/unlatched and `goals_history.mode` silver; record `/api/goals/smart`
-and `/api/revenue/forecast`; `docker compose stop web bot`; `chain_copy_back.py
-forecast --handover` exits 0 or no flip; set the flag; `up -d web bot`; then
-trigger `seasonality_calc` and `revenue_prediction_train` (admin, `POST
-/api/jobs/<id>/trigger`) so the first writes happen watched — the trigger
-leaves `weekly_patterns` as they are, on purpose. Expect `retail_months: 12`,
-`predictions_stored: true` and `latched: true`; at +65 min the copy lists the
-four under `stood_down`.
-
-### Every other shipper asks too, and a walk finds them (DN-22b)
-
-The catalogue, the order-level expenses, the buyers and the manager
-classification reached Postgres through paths that never asked who owns the
-table — so registering chain 4, 5 or 6 would have had DuckDB's copy shipped
-over the chain's rows, and for the classification a full replace deleting every
-interval a human set in Postgres since the handover. Now the question has one
-generic home, `core.pg_landing.tables_stood_down(unit)` (the local answer) and
-`tables_stood_down_or_owned(pool, unit)` (plus the owner rows, read as
-themselves too), and the order helpers are its `ORDER_UNIT` case.
-
-- **The sync's shippers** skip with `stood down: a write chain owns …`.
-  `_mirror` (products, categories, expenses, from every sync site) asks the
-  local answer alone: it is the per-tick write path, like the orders mirror.
-  `replicate_managers` and `mirror_buyers` ask it first and then, after
-  `require_revision()`, the owner rows — both before DuckDB is read, the
-  buyers only for a batch that has rows. The review reproduced why: with the
-  marker lost, the classification copy's full replace deleted every interval
-  a human had set in Postgres the first time it ran, hours before the page.
-  It runs from the daily sync and stats job, at startup and on an admin
-  click, so the per-tick argument never applied. An owner read that fails is
-  a failure there like any other — nothing shipped, counted, stamped.
-- **The backfills** (`backfill_buyers`, `backfill_expenses`) refuse; their
-  **hourly diffs** return `{"stood_down": [...]}` without an ERROR;
-  `POST /api/mirror/backfill/expenses` answers 409 (503 when the owner rows
-  cannot be read). All of them hold a pool, so they read the owner rows too,
-  after `require_revision()`.
-- **The comparisons** — `reconcile_mirror`, `reconcile_expenses`,
-  `reconcile_buyers` — file `mirror_stood_down` (INFO) per table on the local
-  answer. On the owner rows alone the answer follows the shipper
-  (`pg_landing.sync_reads_the_owner_rows`): the catalogue and expenses, whose
-  per-tick mirror is still writing over the chain's rows, are
-  `owner_row_without_marker` (CRITICAL); the buyers and the classification,
-  whose shippers have stopped, are `mirror_stood_down` (INFO) naming the
-  latch's own page. A test checks each claim against what its shipper does.
-- **The operational pair reads each owner row as itself too.**
-  `replicate_operational` and `reconcile_operational` expanded owner rows
-  through the registered chains alone, so on an image older than chain 4 the
-  hourly full replace put DuckDB's `app.buyer_gender` over the chain's
-  verdicts, human overrides included, while the buyers' own paths stood down
-  — and the two copies then agreed. Both now stand down on
-  `chain_latch.owned_tables` (the one union every owner-reading path uses),
-  and `reconcile_operational` files **`chain_owner_unregistered`**
-  (CRITICAL, one finding) for owner rows no chain in the build declares. It is
-  not stamped on the watermark: only a later shipment could clear it.
-- **A unit stands down whole**: the buyers with their contacts, the managers
-  with their classifications, the orders with their line items. The units are
-  what one writer writes in one transaction; `tests/unit/test_write_chains.py`
-  derives them from the writers, requires `pg_landing.shipping_units()` to
-  equal them, and fails on a registered chain that splits one.
-
-**The walk replaced a list.** The old test named the operational shipper and
-its comparison, and guarded exactly those two. It now finds every function in
-`core/`, `web/` and `scripts/` that executes a Postgres write naming a
-`bronze.`/`app.` table — or a target it cannot read, which counts rather than
-being assumed foreign — and requires each to ask the registry or be reached
-only from functions that do (`write_orders`, `pg_buyers._write`,
-`write_managers`). The destination side is exempt with a reason: the
-registered chains, the alert journal, ClickHouse, the Postgres-derived layers,
-and three replicators that stand down on a switch of their own (the walk checks
-each evaluates it). Every comparison that reads a spec's Postgres copy of our
-tables is walked the same way.
-
-The review found two writers it passed, and the walk reads both now: a helper
-that transforms the statement it is handed (`conn.execute(numbered(sql))`, or
-hands it on — `_users_run` → `execute(rendered)`), which counts as an executor
-when its statement carries one of its parameters, to a fixed point; and
-`copy_records_to_table`/`copy_to_table`, read by `schema_name` (absent or
-unresolved counts). That also made `_users_run`'s writers visible, so the three
-store helpers that route by a switch of their own (`_sms_run`, `_users_run`,
-`_perms_run`) exempt what goes only through them, each checked to read its
-switch. And "holding a pool" means reaching `get_pool` through a callee too —
-`replicate_managers` held it inside `write_managers`, where the walk did not
-look — with `_mirror` and `upsert_orders` the two named per-tick exemptions.
-Limits that remain: a target held on an object attribute
-(`dialect.silver_orders`) reads as unknown, statements kept in a container
-constant (a dict of SQL) are not rendered, and DuckDB SQL beside a Postgres
-call in one function reads as Postgres's (why `copy_back` is exempt).
-
-**The order watches do not learn the stand-down — chain 3 writes through
-`write_orders`.** DN-22a's review asked what happens to the canary's
-`mirror_stale:bronze.orders` and to `order_versions_stalled` once a chain owns
-the order tables and the sync's mirror stops. Answer: the chain's writer ships
-through `write_orders`, which moves that watermark and captures the version in
-the row's own transaction, so both watches keep meaning what they say. The
-alternative would blind the one liveness check on the one table nothing can
-rebuild at the moment its writer changes hands. Pinned: the order tables and
-the archive each have exactly one writer, a chain module included, and the two
-watches do not ask the registry. Chain 3 runs `write_orders`' own core,
-`_write_order_rows`, on its transaction, and its order step records a failure
-with `_record_failure` as `mirror_orders` did, so `mirror_failing` keeps its
-fast signal.
-
-Production today stands nothing down: no chain declares any of these tables
-and no owner row names one, so the per-tick shippers read no variable and no
-file. What does run is an owner read after a revision check — in each hourly
-diff and again in the backfill it calls, in each of the three daily
-comparisons, in the expenses route, in every classification copy and in the
-buyers mirror when a sync fetched new buyers — and none of them finds a row
-that names these tables; `chain_owner_unregistered` has nothing to report. The
-retail-status route now warns only on a replica that failed, not on one that
-was skipped.
+## History of the DuckDB exit
+
+DuckDB was this system's only store from the first dashboard until August
+2026, and it is not in the code any more. This section is what is left of the
+long account that stood in this file through the exit: what was done and in
+what order, where each decision is written, what is still on disk, and how an
+archive is brought back. The long form of every section it replaced is in git
+— `git log -p -- .claude/CLAUDE.md`, the revisions before step 14's S14-20 —
+and each PR's own description.
+
+### What was done, in order
+
+- **Stages 1–3, «Одна бронза» (2026-08-20 to 2026-09-14).** Postgres got a
+  mirror of landing (`bronze.*`, one parse feeding both stores), a
+  replication of the tables nothing can rebuild (`app.*`: stock movements,
+  SKU history, the manager classification, the bot's state), its own Silver
+  and Gold derivation, and the archive of order versions, which had no
+  DuckDB copy at all. Each copy was compared daily at a tolerance of zero
+  (Reconciliation A) and against KeyCRM (`reconciliation_pg`); ClickHouse
+  derived a second Gold from a round-tripped Silver. Every tab then moved
+  its reads to Postgres behind a `KS_READ_*` switch with a counted fallback
+  to DuckDB (the dashboard first, on 2026-08-28; the other tabs through
+  September).
+- **Stage 4, the write chains (2026-09-17 to 2026-10-15).** Thirteen chains
+  (1, 3, 4, 5, 6, 6a, 7a, 7b-3, 8, 9, 10, 11a, 11b), each a `KS_WRITE_*`
+  flag moving a set of tables' writer to Postgres. A chain's first Postgres
+  write *latched* it (owner decision OD-19 (a)): a marker under
+  `data/write-chain-owners/` and `owner:<table>` rows in
+  `meta.chain_watermarks`, after which the flag was no longer a rollback.
+  The shadow chains (9, 10, 11a, 11b; OD-02 (c)) also kept handing DuckDB
+  every row. Revisions 0034 and 0035 locked out images that did not know
+  the chains. Eleven chains latched; 8 (`app.manual_expenses`) and 7a
+  (`app.revenue_goals`) write Postgres with no first write yet.
+- **The DuckDB-only doors, retired (OD-10, 2026-09-30).** The buyer, order
+  and product cards, two debug routes, `/api/buyers/stats`,
+  `POST /api/duckdb/purge-orders` and the legacy `reconciliation_check` with
+  its routes: none had a caller, and most had stopped working long before.
+  A retired GET answers a JSON 404 (`tests/unit/test_od10_retired_doors.py`).
+  The one repair the legacy job made that nothing else did — an order
+  ordered inside the last 30 days and created before them — belongs to
+  `order_status_refresh` (05:15) since.
+- **`KS_READ_FALLBACK=off` (2026-10-09 08:01 UTC)** made a failed read a
+  503 naming the tab instead of a frozen DuckDB number; the soak that
+  licensed it was shortened by the owner to a clean rehearsal.
+- **Step 13 (2026-10-09 08:18 UTC).** `KS_WRITE_WAREHOUSE=postgres`:
+  Postgres alone derives Silver, Gold and the UTM verdicts, after a
+  rehearsal on copies of production passed eleven checks of eleven. DuckDB's
+  warehouse checks stood down and their Postgres twins stood in.
+- **Stage 5, the week of silence (2026-10-16 to 2026-10-20).** Web ran
+  `KS_DUCKDB=off`: nothing opened `data/analytics.duckdb`, a tripwire
+  counted any open, and an hourly hash on the host watched the file. The
+  second Ark was frozen and shipped before it began. The owner closed the
+  week at 105 hours of 168 and started step 14 on 2026-10-21.
+- **Step 14 (2026-10-28 to 2026-11).** S14-00 made every mode, verdict and
+  routing predicate the constant production published — every chain writes
+  Postgres, web runs `off` whatever `KS_DUCKDB` says — so no later PR could
+  change where anything reads or writes, only delete dead branches. S14-02
+  pinned the archive tools to an image, and S14-01 to S14-18 deleted
+  DuckDB's code: the unplanned tools, the way back (the copy-back), the read routers'
+  fallbacks, /sms and access, the chains' routing and shadow copies, the
+  comparisons, mirrors and copies, the DuckDB integrity scan, step 13's
+  switch, the read fallback, DuckDB's `/api/health` blocks and the store's
+  DuckDB half with the compaction. S14-19 took `duckdb` out of the images;
+  S14-20 is this section. Deleting the file itself is the final stage, on
+  the owner's separate yes, after a rehearsed restore from the second Ark.
+
+### Where the decisions are
+
+The owner's decisions are numbered — OD-NN through stage 5, DN-NN for the
+design notes, "decision N" in the step-14 plan — and each is cited where it
+binds. The plans and handoffs live under `.planning/`, which is not in git
+(the repository is public); the step-14 plan is
+`.planning/DUCKDB_EXIT_STEP14_PLAN.md` and stage 5's register of every
+DuckDB touch point `.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`. What a PR
+decided is also in its description, which names its deviations, its host
+steps and the alert conditions it removed.
+
+### What is left, and why
+
+Kept on disk, untouched by every step-14 PR (rule 5): `data/analytics.duckdb`
+and its `.old`, the nightly backups `data/backups/analytics-*.duckdb`,
+`data/export_parquet/`, the off-site Parquet archive, both Arks (local and on
+the Storage Box), `data/write-chain-owners/`, `data/report-ledger-pending/`,
+`data/warehouse-utm-reparsed-at`, `data/.duckdb_index_short.json` and the
+`marks` in `data/alert-gate-*.json`. The file has not changed since
+2026-10-16; `deploy/duckdb_silence_check.sh` hashes it hourly from root's
+crontab, and P1 of the daily soak report reads that record, until the final
+stage deletes the file.
+
+Kept in Postgres as history, with no writer and no DROP (OD-11):
+`app.sync_metadata`, `app.warehouse_refreshes` and `app.reconciliation_log`;
+the `watch:read_fallbacks` and `watch:duckdb_switch` rows of
+`app.alert_series` and the `lever_used` rows of `app.alert_events`. And live:
+every `owner:*` row, chain 6's `writes:<table>` record and every `last_sync_*`
+key in `meta.chain_watermarks`, under their old names — an image from before
+step 14 continues its sync from them.
+
+Kept in the code while `rollback-step14` can be a rollback target (owner
+decision 8 of the plan: thirty days after S14-19's deploy without a
+rollback, and not before the final stage): a chain's first write still takes
+its marker and owner rows (decision 3), because that image routes by them;
+each chain module keeps its `WRITE_ENV` name; no alert condition that image
+treats as retired is reused or renamed (rule 15); and every `.env` line and
+`environment:` line in `docker-compose.yml` it reads stays — for many of them
+an absent value means `duckdb` there. What to check before such a rollback is
+"Before any rollback to an image from before step 14", under Deployment.
+
+### The week of silence, and its way back
+
+What the week changed on the host stays changed: root's crontab no longer
+runs the Sunday compaction (`scripts/weekly_compact.sh`) or the nightly
+DuckDB snapshot (`deploy/daily_offsite.sh`) — both retired on 2026-10-16 and
+deleted in step 14's S14-18 — and runs the hourly
+`deploy/duckdb_silence_check.sh`. `.env` keeps `KS_DUCKDB=off`, written bare
+on a line of its own: a step-14 web ignores it, but the host scripts read it
+(`deploy/duckdb_env.sh`), `deploy/offsite_check.sh` reports the DuckDB copy as
+frozen on it, and `deploy/restore-test.sh` passes `-e KS_DUCKDB=on` to its
+own sidecar so the drill still runs. The crontab change was made by a person
+from the print of `deploy/duckdb_silence_check.sh --crontab`, never by a
+script, and that print also carries the way back.
+
+**On a step-14 image there is no way back to make**: leave `.env` at
+`KS_DUCKDB=off` and do not re-add those two cron lines — the scripts are gone
+from this checkout, and a step-14 web runs `off` whatever `.env` says. The
+way back is a rollback to an image from before step 14 first ("Before any
+rollback to an image from before step 14"), whose own code knows
+`KS_DUCKDB=on`. If on that image the nightly snapshot's cron line is put
+back, `deploy/backup.env` must set `BACKUP_RESTORE_IMAGE` to the image tagged
+`rollback-step14`, and that tag must be on the host: the snapshot has had no
+default image since S14-02, and without both it refuses every night (exit 2)
+and pages "Daily snapshot FAILED". Starting the week again would then need a
+new Ark, because the file changes the moment web runs `on`.
+
+### What is left on disk, and how to restore it
+
+The archives are read by DuckDB 1.5.5, the version that wrote every one, in
+the image pinned as `keycrm-web:rollback-step14` — never `:latest`, which
+carries no `duckdb` since S14-19. The second Ark is self-describing: the
+schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`. The restore
+drill (`deploy/restore-test.sh`) pulls the newest off-site archive and
+rebuilds a validated warehouse in a throwaway container of that image;
+`deploy/restore_from_export.py` is the one restore path and is never deleted;
+`deploy/duckdb_table_fates_check.py` reads a backup against the frozen
+manifest. The two sections below are how those tools are held to the image,
+and what each table became.
+
+### The archive tools on a pinned image (step 14, S14-02)
+
+Step 14 takes DuckDB out of the code, and since S14-19 out of the images:
+`requirements.lock` installs no `duckdb`, so neither web's image nor the
+bot's carries the driver. `tests/unit/test_images_carry_no_duckdb.py` holds
+it: an AST walk of `core/`, `web/`, `bot/`, `scripts/`, `deploy/` and
+`migrations/` finds no import of the driver in any form (aliased, inside a
+function, `import_module`, `sys.modules`, a `python -c` program in a
+string) but in the three host tools that run on the pinned image, and every
+module under `core/`, `web/`, `bot/` and `scripts/` imports in a fresh
+interpreter in which `duckdb` cannot be found. `requirements-dev.txt` names
+`duckdb==1.5.5` on its own line, for those tools' tests and a few that
+evaluate a SQL fragment in memory; it used to arrive there only through
+`-r requirements.txt`. The
+archives stay: the off-site Parquet archive, the nightly snapshots, two Arks.
+What reads them is DuckDB 1.5.5, the version that wrote every one, with the
+restore code they were proven against — `scripts/compact_duckdb.py`'s phases
+2 and 3, which rebuild the schema from the application's own DDL. Both live in
+every image built before step 14, and the host's `keycrm-web:rollback-step14`
+is the last of them, pinned at S14-00's deploy (the plan's H1/H2; see "Before
+any rollback to an image from before step 14"). A tag is never removed by the
+deploy's `docker image prune -f`; `:latest` moves with every deploy and
+carries no DuckDB since S14-19.
+
+So `deploy/restore-test.sh` and `deploy/ark_ship.sh` — and
+`deploy/daily_offsite.sh`, the nightly snapshot, until S14-18 deleted it —
+no longer default to `:latest`. They take their image
+from `BACKUP_RESTORE_IMAGE` (the Ark: `BACKUP_ARK_IMAGE`, else the same) in
+`deploy/backup.env`, and ask it before anything is fetched, linked or frozen
+(`deploy/archive_image.sh`): a tag that does not move (not `:latest`, not
+untagged), present on the host (nothing pulls it, and `rollback-step14` is on
+no registry), and `import duckdb` inside it saying 1.5.5. Any of them false is
+exit 2 with a line naming `rollback-step14`; the nightly snapshot, which only
+runs on the way back, pages it as a failed night, which is why the way back's
+step 3 sets the variable before it puts the snapshot's cron line back. Every
+container they start carries `--pull never`.
+
+**What is mounted into it imports only what it carries.** The drill mounts
+`restore_from_export.py`, the Ark `ark_freeze.py`, and the table-fate
+check's recipe the check and `core/duckdb_table_fates.py` — files from the
+checkout, run inside that pinned image (the snapshot mounted
+`snapshot_export.py` and `core/snapshot_validation.py` until S14-18 deleted
+all three). A name main gains after it is a name
+the container does not have. `tests/unit/test_archive_image.py` derives the
+mounts from the scripts and their headers' recipes, read as the shell reads
+them (`${PWD}`, `$(pwd)`, variables, function arguments, the `DOCKER_RUN`
+array; a checkout directory mounted whole is refused, and a source it cannot
+resolve must be listed with a reason), and holds every import in them to a
+frozen list of what the pinned image carries: the standard library, `duckdb`,
+`compact_duckdb`'s eight names and the `core` modules they reach today —
+read from 3.0.292's code and checked against 3.0.298's, where both modules it
+names are unchanged. A step-14 PR that deletes `compact_duckdb.py` from main
+changes nothing there; one that has a mounted file import something new fails
+it.
+
+**Response fingerprints.** `deploy/api_fingerprint.py` is how a read PR of
+step 14 shows production answered the same before and after its deploy. It
+asks a fixed list of GET routes, each with a window for one that is absolute
+— by default the last whole month that ended at least 40 days ago, because
+the 05:15 refresh rewrites the last 30 — and keeps each body's sha256 and
+size, never the body. Routes the API offers no window for (cohorts, the SMS
+preview with an absolute period, the stock pages, the goal tables and the
+forecast, the header's filter lookups) are asked anyway and marked `live`.
+So are routes that take a window and still answer something counted from
+today: the smart goals for the window's month (one signal is counted back
+from today), the customer insights (all-time lifetime value, purchase
+frequency and repeat rate beside the window's figures, so any order moves
+them) and the six /margin routes (the window's lines costed at today's
+purchase price, which the hourly stock sync rewrites). A live route that
+moved is a question the hashes cannot answer, so the "before" is taken just
+before the merge and the "after" as soon as the deploy is done. An absolute
+route still reads the catalogue as it is today: a brand renamed or a product
+moved to another category in KeyCRM moves the past-window answers grouped by
+brand or category.
+Routes that need a production id or name in the request (a category's
+drill-down, one campaign's results) are not asked. `compare`
+exits 1 when a past window or any status moved, 3 when only live routes did,
+2 when the two snapshots are not of one window. The admin session comes from
+`KS_FINGERPRINT_SESSION` and nowhere else: never an argument, never printed
+or written, sent only over https (or to loopback) and never after a redirect.
+The token is unrevocable for seven days, so the owner runs it in their own
+terminal (`read -rs`); the header has the commands. Take two "before"
+snapshots first: a past-window route that moves between those is query
+noise, not the deploy. Two "before"s say nothing about a live one.
 
 ### What becomes of every DuckDB table (stage 5's manifest)
+
+**Since step 14's S14-18 the manifest is a frozen literal** (`FATES`, its
+types and their vocabulary, standard library only). The schema, the
+compaction, the snapshot validator and the switches' readers it was walked
+against are deleted, and so are `duckdb_written()` and `STORE_SWITCHES`,
+with the two store predicates they were the last to ask
+(`pg_dashboard_users.user_store_is_postgres`, `core/pg_sms.py`). The test
+holds the literal consistent with itself and with the chains' `CHAIN_TABLES`,
+and `deploy/duckdb_table_fates_check.py` against a fixture file built from
+it; the check, on the pinned image, and the final stage are its readers.
+History below.
 
 `core/duckdb_table_fates.py` names every table and view `analytics.duckdb` can
 hold — the schema, a migration's scratch, and the names only the production
@@ -5889,8 +3278,9 @@ comparisons state, the migrated Postgres schema and the registered chains. **A
 chain that registers names its `KS_WRITE_*` on the tables it takes in the same
 change** — chain 4 was the first the guard stopped, and chains 3, 5, 6, 7b-3,
 9, 10, 11a and 11b met it at the stage-4 integration. A shadow chain's tables
-(OD-02 (c)) read DuckDB-written in either mode, because the shadow still hands
-DuckDB every row. OD-11 is pinned there too:
+(OD-02 (c)) read DuckDB-written in either mode until step 14's S14-10 deleted
+the shadow; they read as every latched chain's since, and the walk finds no
+DuckDB writer of them. OD-11 is pinned there too:
 `DERIVED_TABLES` and the set with no DDL are literals, so a DROP says so in
 the diff.
 
@@ -5904,11 +3294,19 @@ tables a store switch moves is read off the writers**, not declared: the
 statements each router runs, rendered by the router itself, plus every
 literal DuckDB write, and a table belongs to `KS_SMS_STORE`, `KS_USER_STORE`
 or `KS_WRITE_WAREHOUSE` only if every writer runs on the branch where that
-reader says DuckDB. A write naming its table as a `{hole}` — one text for two
-engines, chain 10's watchdog statements — is rendered for DuckDB by its
-module's own function, or says what fills the hole (`TEMPLATED_ELSEWHERE`):
-the walk lost all three sample tables before it read them. `duckdb_written()` is held to the same writers, not to
-`kind` — `schema_migrations` is retired at stage 5 and written until then.
+reader says DuckDB. Since step 14's S14-08 the first two have no DuckDB
+branch left to read: their sets are literals (`STORE_SWITCH_TABLES`, what the
+walk derived the commit before) and the walk requires that no literal DuckDB
+write of those tables is left. That cannot see a DuckDB tail back inside a
+router, since the walk reads every routed statement as Postgres's, so the
+four routers and `_PgTx`'s methods are held to their syntax instead
+(`tests/store_reach.py`): nothing on `self` but what renders the statement,
+no `super`, no way to the store or its file. A write naming its table as a
+`{hole}` — one text for two engines, chain 10's watchdog statements — is
+rendered for DuckDB by its module's own function, or says what fills the hole
+(`TEMPLATED_ELSEWHERE`): the walk lost all three sample tables before it read
+them. `duckdb_written()` is held to the same writers, not to `kind` —
+`schema_migrations` is retired at stage 5 and written until then.
 
 `deploy/duckdb_table_fates_check.py` asks the same of a file: the newest
 nightly backup, opened read-only, never the live database (refused by name, by
@@ -5918,90 +3316,6 @@ It refuses what it cannot see, too: a newest backup over 48 h old (`--file`
 reads an older one on purpose), and a file without `orders`, `sync_metadata`
 and `schema_migrations` or holding under half of today's schema — an empty
 file used to read "clean".
-
-## TODO: Full DuckDB Resync Solution
-
-### Overview
-Reliable solution for completely re-uploading historical data to DuckDB from scratch.
-
-### Requirements
-- Downtime OK (5-10 min)
-- Disk space OK (2x DB size ~200MB)
-- Triggers: CLI script + API endpoint
-- Verification: order counts + revenue totals
-- Smart date detection: find MIN(ordered_at) from KeyCRM, sync from first order
-
-### Flow
-```
-1. PREPARE
-   • Create analytics_resync.duckdb (fresh)
-   • Query KeyCRM for MIN(created_at) to find first order date
-   • Calculate total days to sync
-
-2. SYNC (into new DB)
-   • Managers → Categories → Expense Types → Products
-   • Orders in 90-day chunks (with progress %)
-   • Expenses per order
-
-3. VERIFY
-   • Count orders in new DB vs KeyCRM API
-   • Sum revenue for last 30 days vs KeyCRM
-   • Flag if discrepancy > 1%
-   • Abort if verification fails (keep old DB)
-
-4. SWAP (atomic)
-   • Stop background sync
-   • Close DuckDB connection
-   • mv analytics.duckdb → analytics_old.duckdb
-   • mv analytics_resync.duckdb → analytics.duckdb
-   • Reconnect & resume sync
-
-5. CLEANUP (after 24h or manual)
-   • Delete analytics_old.duckdb
-```
-
-### Files to Create
-
-**Stale — this was built differently.** The admin endpoint exists as
-`POST /duckdb/resync` in `web/routes/api/admin.py:21` and nginx already routes
-it (`nginx.conf:103`). Neither `core/resync_service.py` nor
-`scripts/full_resync.py` was ever created; the CLI equivalent is
-`scripts/force_resync.py`. Kept for the design rationale below, not as a task
-list — do not implement it a second time.
-
-| File | Purpose | Status |
-|------|---------|--------|
-| `core/resync_service.py` | Core resync logic, verification | never created |
-| `scripts/full_resync.py` | CLI interface | superseded by `scripts/force_resync.py` |
-| `web/routes/api.py` | API endpoint (admin) | shipped as `web/routes/api/admin.py:21` |
-
-### CLI Usage
-```bash
-# Full resync with verification
-PYTHONPATH=. python scripts/full_resync.py
-
-# Dry run (verify only, no swap)
-PYTHONPATH=. python scripts/full_resync.py --dry-run
-
-# Keep old DB file after swap
-PYTHONPATH=. python scripts/full_resync.py --keep-old
-
-# In Docker
-docker exec keycrm-web python /app/scripts/full_resync.py
-```
-
-### API Endpoint
-```
-POST /api/admin/resync
-Authorization: Bearer <admin_token>
-
-GET /api/admin/resync/status/{job_id}
-```
-
-### Open Questions
-1. Admin auth for API - use existing auth or simple API key?
-2. Progress storage - file-based or in-memory?
-3. Automatic cleanup - delete old DB after 24h, or manual only?
 
 ---
 
@@ -6018,4 +3332,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-10-09*
+*Last updated: 2026-11-05 (step 14, S14-20)*

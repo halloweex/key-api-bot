@@ -1,5 +1,14 @@
 # Off-site backup setup
 
+> **History since step 14.** Everything here that writes or ships the DuckDB
+> archive is deleted: the weekly compaction (`scripts/compact_duckdb.py`,
+> `scripts/weekly_compact.sh`), `deploy/offsite_parquet.sh`,
+> `deploy/daily_offsite.sh` and `deploy/snapshot_export.py` (S14-18). The
+> archives already on the Storage Box stay, and `deploy/restore-test.sh`
+> still restores them, on the pinned image `keycrm-web:rollback-step14`
+> (`.claude/CLAUDE.md`, "The archive tools on a pinned image"). What leaves
+> this machine since is Postgres, by `deploy/pg_offsite.sh` (`docs/backup_runbook.md`).
+
 One-time, on the server. The daily backup writes to the same volume as the
 database it copies, so on its own it defends against logical corruption and
 nothing else — any failure that takes the volume takes the copies with it.
@@ -104,8 +113,17 @@ one secret that cannot ride along with the thing it decrypts.
 ```bash
 cd /opt/key-api-bot
 cp deploy/backup.env.example deploy/backup.env
-$EDITOR deploy/backup.env      # BACKUP_REMOTE, BACKUP_SSH_KEY, BACKUP_ENV_PASSFILE
+$EDITOR deploy/backup.env      # BACKUP_REMOTE, BACKUP_SSH_KEY, BACKUP_ENV_PASSFILE,
+                               # BACKUP_RESTORE_IMAGE, BACKUP_ARK_IMAGE
 ```
+
+`BACKUP_RESTORE_IMAGE` and `BACKUP_ARK_IMAGE` are the image the restore drill,
+the nightly snapshot and the Ark run in, and since step 14 (S14-02) they have
+no default: a pinned tag on this host carrying DuckDB 1.5.5, which is
+`keycrm-web:rollback-step14` — the last image before step 14, pinned at
+S14-00's deploy. `:latest` loses DuckDB at step 14's S14-19, and each script
+refuses it (exit 2) along with an unset variable, a missing image or another
+DuckDB version (`deploy/archive_image.sh`).
 
 `deploy/backup.env` is git-ignored, and that is what keeps it: the deploy runs
 `git reset --hard <sha>`, so tracked files are replaced on every release and
@@ -114,8 +132,7 @@ ignored ones survive.
 ## 5. Prove it
 
 ```bash
-deploy/offsite_parquet.sh     # ships one archive now, ~8 MB
-deploy/restore-test.sh        # pulls it BACK and rebuilds a validated warehouse
+deploy/restore-test.sh        # pulls the newest archive BACK and rebuilds a validated warehouse
 ```
 
 `restore-test.sh` deliberately restores from the Storage Box rather than the
@@ -187,7 +204,11 @@ Not a drill — the machine is gone and you are rebuilding.
    code can silently drop columns the export has and the target does not. The
    column-coverage report inside phase 2 prints exactly which.
 4. Run `deploy/restore_from_export.py` against a data directory containing
-   `export_parquet/` — the command is in its docstring, and it carries
+   `export_parquet/`, in the pinned image that carries DuckDB 1.5.5 (on a new
+   machine: pull the numbered `keycrm-web` tag `rollback-step14` was pinned
+   from — the version production ran when S14-00 deployed — and tag it
+   `rollback-step14`; never `:latest`, which loses DuckDB at step 14's
+   S14-19) — the command is in its docstring, and it carries
    `-e KS_DUCKDB=on`, because a `.env` taken during the week of silence says
    `KS_DUCKDB=off` and the switch refuses the rebuild under it — then move
    `analytics_clean.duckdb` into place as `analytics.duckdb` and start the

@@ -21,7 +21,9 @@ import pytest
 
 from core.permissions import ACCESS_PRESETS, Role, TAB_FEATURE_KEYS
 from core.sms_refusals import REFUSAL_REASONS
+from core.ga4 import COLUMNS as FUNNEL_STEPS
 from core.utm_classify import FIRST_CHANNEL_OTHER, ORGANIC_CHANNELS
+from web.services.ga4_funnel_service import TYPES as FUNNEL_TYPES
 
 LOCALES = Path(__file__).resolve().parents[2] / "web" / "frontend" / "src" / "locales"
 LANGUAGES = ("en", "uk", "ru")
@@ -57,6 +59,12 @@ VOCABULARIES = {
     # `t(`traffic.firstChannel.${channel}`)` names a pixel-only buyer's first
     # channel when it is neither organic nor an ad platform.
     "traffic.firstChannel.": list(FIRST_CHANNEL_OTHER),
+    # The GA4 funnel block on /traffic names its traffic types and its steps
+    # by interpolation (`traffic.funnelType.${key}`, `traffic.funnelStep.${step}`),
+    # and says under each type what it holds (`traffic.funnelTypeDesc.${key}`).
+    "traffic.funnelType.": list(FUNNEL_TYPES),
+    "traffic.funnelTypeDesc.": list(FUNNEL_TYPES),
+    "traffic.funnelStep.": list(FUNNEL_STEPS),
 }
 
 

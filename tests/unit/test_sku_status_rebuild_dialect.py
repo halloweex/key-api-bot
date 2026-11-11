@@ -114,16 +114,3 @@ class TestTheRulesInsideItAreNotAccidents:
         for dialect in (DUCKDB, POSTGRES):
             assert "COALESCE(os.sku, CAST(os.id AS VARCHAR))" in \
                 sku_status_rebuild_select(dialect)
-
-
-class TestTheRepositoryUsesIt:
-    def test_the_duckdb_rebuild_does_not_carry_its_own_copy(self):
-        import inspect
-
-        from core.repositories import inventory
-
-        src = inspect.getsource(inventory.InventoryMixin._rebuild_sku_inventory_status)
-        assert "sku_status_rebuild_select(DUCKDB)" in src
-        assert "INSERT INTO sku_inventory_status" not in src, (
-            "the rebuild has grown a second copy of the body"
-        )

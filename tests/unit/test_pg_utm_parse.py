@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import pytest
 
 from core import pg_utm_parse as parse
-from core.pg_order_utm import UTM_COLUMNS
+from core.pg_utm_parse import UTM_COLUMNS
 from core.utm_classify import utm_columns
 
 

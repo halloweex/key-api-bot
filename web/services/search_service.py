@@ -5,7 +5,7 @@ Provides fast, typo-tolerant search without LLM involvement.
 """
 from typing import Optional, List, Dict, Any
 
-from core.meilisearch_client import get_meili_client
+from core.meilisearch_client import MeiliUnavailable, get_meili_client
 from core.observability import get_logger
 
 logger = get_logger(__name__)
@@ -61,6 +61,11 @@ class SearchService:
                 len(results["products"])
             )
 
+        except MeiliUnavailable:
+            # Meilisearch did not answer: the route refuses it, counted, as a
+            # 503 naming `search` — never a 200 with nothing in it, which read
+            # as "nobody matches" (L3-04).
+            raise
         except Exception as e:
             logger.error(f"Search failed: {e}")
 

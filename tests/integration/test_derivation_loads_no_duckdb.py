@@ -37,19 +37,19 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 tmp = Path(sys.argv[2])
 
-from core import chain_latch, report_ledger, warehouse_cutover
+from core import chain_latch, report_ledger
 # Never the checkout's own data directory: what the tick reads or writes
-# there goes to this test's tmp_path instead.
+# there goes to this test's tmp_path instead. (Step 13's UTM re-parse marker,
+# `warehouse_cutover.UTM_MARKER`, was redirected too until step 14's S14-15.)
 chain_latch.MARKER_DIR = tmp / "write-chain-owners"
 report_ledger.SPOOL_DIR = tmp / "report-ledger-pending"
-warehouse_cutover.UTM_MARKER = tmp / "warehouse-utm-reparsed-at"
 
 from core.runtime_modes import configure_modes
 from core.scheduler import BackgroundScheduler
 
 
 async def main():
-    configure_modes(web=True)
+    configure_modes()
     try:
         return await BackgroundScheduler()._run_pg_derivation(trigger="probe", force=True)
     finally:

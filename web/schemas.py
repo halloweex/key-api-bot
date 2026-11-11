@@ -22,40 +22,6 @@ class BrandResponse(BaseModel):
     name: str
 
 
-class DuckDBStats(BaseModel):
-    """DuckDB statistics."""
-    status: str = Field(
-        description=(
-            "connected, error, or off: under KS_DUCKDB=off this process does "
-            "not open the DuckDB file, so nothing is counted, `fatal` is null "
-            "and `off` is not a cause of degradation (stage 5)."
-        ),
-    )
-    latency_ms: Optional[float] = None
-    orders: Optional[int] = None
-    products: Optional[int] = None
-    categories: Optional[int] = None
-    managers: Optional[int] = None
-    db_size_mb: Optional[float] = None
-    fatal: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "DuckDB instances a FatalException invalidated in this process: "
-            "`count`, `kinds` (count per kind) and `last_at` (UTC). `index` is "
-            "an index short in the file — the write that met it fails again "
-            "until every CREATE INDEX index is rebuilt (the Sunday compaction, "
-            "or weekly_compact.sh by hand); `other` is any other FATAL. Each "
-            "invalidated instance is dropped and the next use opens the file "
-            "again, so DuckDB keeps answering. `index_short` (`since`, "
-            "`last_at`, `count`) is that index damage as written down beside "
-            "the file, and outlives a restart until a compaction replaces the "
-            "file. `status` reads degraded while either is set: a FATAL of "
-            "this process until web restarts, `index_short` until the "
-            "compaction. Null until one. Never the exception text."
-        ),
-    )
-
-
 class DataQualityFreshness(BaseModel):
     """When a data-quality layer last produced a verdict.
 
@@ -65,11 +31,6 @@ class DataQualityFreshness(BaseModel):
     """
     last_success_at: Optional[str] = Field(None, description="ISO timestamp of the last successful run")
     age_seconds: Optional[int] = Field(None, description="Seconds since that run; null means never succeeded")
-    stood_down: bool = Field(
-        False, description=(
-            "The layer is not written by design — `reconciliation`, DuckDB's arm "
-            "of the 05:30 job, once chain 3 writes the orders to Postgres — so "
-            "its age is not judged"))
 
 
 class MirrorFreshness(BaseModel):
@@ -86,10 +47,9 @@ class MirrorFreshness(BaseModel):
     max_age_s: Optional[int] = Field(
         None,
         description="The age limit this table is judged by, when web declares one. "
-        "Declared for the tables Postgres derives on its own signal, and for "
-        "silver.order_utm once Postgres parses it (KS_UTM_PARSE=postgres), so "
-        "the watchdog's list switches with those flags instead of being kept "
-        "in a second container.",
+        "Declared for the tables Postgres derives on its own signal and for "
+        "silver.order_utm, which it parses, so the watchdog's limits are "
+        "web's and not kept in a second container.",
     )
 
 
@@ -105,33 +65,28 @@ class SyncStatus(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
-    status: str = Field(description="Service status: healthy or degraded")
+    status: str = Field(
+        description=(
+            "Service status: healthy or degraded. Healthy since step 14's "
+            "S14-17, which took the DuckDB block and the DuckDB schema ledger "
+            "out, the only things that degraded it; kept for the canary, "
+            "Docker's healthcheck and the deploy's gate."
+        ),
+    )
     degraded_by: List[str] = Field(
         default_factory=list,
         description=(
-            "Why `status` is degraded, one word per cause: `duckdb` (the store "
-            "did not answer), `migrations` (a step failed), `duckdb_fatal` "
-            "(`duckdb.fatal` is set). Empty when healthy. Never `duckdb` "
-            "under KS_DUCKDB=off, where the store is switched off and "
-            "`duckdb.status` says so."
+            "Why `status` is degraded, one word per cause. Empty since step "
+            "14's S14-17: its three causes — `duckdb`, `migrations`, "
+            "`duckdb_fatal` — were DuckDB's."
         ),
     )
     version: str = Field(description="Application version")
     uptime_seconds: int = Field(description="Uptime in seconds")
     correlation_id: Optional[str] = Field(None, description="Request correlation ID")
-    duckdb: DuckDBStats
     sync: Optional[SyncStatus] = Field(None, description="Background sync service status")
     data_quality: Optional[Dict[str, DataQualityFreshness]] = Field(
         None, description="Per-layer age of the last successful data-quality run"
-    )
-    migrations: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Schema ledger as of connect: how many steps are applied, which are "
-            "pending, and which failed. Named `migrations` rather than `schema` "
-            "because Pydantic already owns that word. `{\"status\": \"off\"}` "
-            "under KS_DUCKDB=off, where no DuckDB migration runs."
-        ),
     )
     alerting: Optional[Dict[str, Any]] = Field(
         None,
@@ -153,55 +108,34 @@ class HealthResponse(BaseModel):
             "can carry a buyer's data — the seconds left before a failed "
             "step retries, and how many buyers of the last batch Postgres "
             "would refuse and chain 4 skipped by id (`last_skipped_bad`). "
-            "Under chain 4 also `watermark_age_s`, the age of the stamp the "
-            "step writes to Postgres, which survives a restart. Null "
+            "Also `watermark_age_s`, the age of the stamp the step writes to "
+            "Postgres, which survives a restart. Null "
             "when this process has not started syncing. Judged by the canary "
-            "as `buyer_sync_stalled` (WARN), and under chain 4 — this step the "
-            "only writer of buyers — as `buyer_sync_stalled_chain` (CRITICAL)."
+            "as `buyer_sync_stalled` (WARN), and — chain 4 making this step "
+            "the only writer of buyers — as `buyer_sync_stalled_chain` "
+            "(CRITICAL)."
         ),
     )
     write_chains: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "Each stage-4 write chain: its KS_WRITE_* variable, the mode it "
-            "writes (duckdb or postgres) and, when the value is not understood, "
-            "the error — that chain's writers raise and its tables are neither "
-            "shipped nor compared until it is corrected. `latched` and "
-            "`latched_at` say the chain has already written Postgres and now "
-            "routes there whatever the variable says (DN-06); `mismatch` is "
-            "that state against a variable which disagrees — a rollback "
-            "somebody believes happened has not, and only "
-            "scripts/chain_copy_back.py undoes it. `unmet_precondition` names "
-            "a chain's own condition for moving that does not hold (chain 6a: "
-            "KS_READ_EXPENSES=postgres; every chain from #280 on: `lockout`, "
-            "the revision that refuses the images built before it, which this "
-            "build does not require yet) — an unlatched chain then writes duckdb "
-            "whatever its variable says, and a latched one writes Postgres "
-            "while its readers read DuckDB. `shadow` says the chain keeps "
-            "feeding DuckDB after it moves (OD-02 (c): chains 9, 10 and 11 — "
-            "Postgres writes first and DuckDB is handed the same row after the "
-            "commit, so the hourly copy stands down while the daily comparison "
-            "keeps comparing); such an entry carries `shadow_failures`, the "
-            "DuckDB halves that failed since start (count, last_at, error "
-            "class) — and under KS_DUCKDB=off `shadow_stood_down` (count, "
-            "last_at), the halves not attempted because the file is switched "
-            "off, which is not a failure — and a report ledger's carries "
-            "`pending`, the delivered "
-            "weeks whose ledger row is still spooled (`unreadable`: the files "
-            "no drain will land, whose row a human writes). Chain 1's entry also "
-            "carries `preflight` (DN-24): `ok` and the `reasons` it may not "
-            "be switched to Postgres yet, null once it already is, with "
-            "`notes` that do not block it; and "
-            "`sync_step`: consecutive Postgres failures of its offers or "
-            "stocks step, the last one's step and error class, and when the "
-            "next attempt is allowed. Chain 3's entry (`pg_orders_write`) "
-            "carries the same two: `preflight` names every unmet "
-            "precondition while its flag is still off, and `sync_step` is "
-            "the order step — failures in a row, ages, the last error's "
-            "class and how many orders Postgres would refuse — judged by the "
-            "canary as `orders_sync_failing` once the chain writes Postgres. "
-            "Chain 6's entry (the catalogue) carries the same `sync_step` for "
-            "its hourly products step."
+            "One entry per registered write chain, `{chain: {sync_step?, "
+            "pending?}}`. Every chain writes Postgres; since step 14's S14-11 "
+            "no KS_WRITE_* is read, and the entries carry no `env`, `mode`, "
+            "`latched`, `latched_at`, `mismatch`, `unmet_precondition` or "
+            "`preflight` any more. `sync_step` is what the chain's half of the "
+            "sync tick last did, where a Postgres failure is recorded instead "
+            "of ending the tick: chain 1's (`pg_inventory_write`) offers and "
+            "stocks step — consecutive failures, the last one's step and "
+            "error class, and when the next attempt is allowed —, chain 3's "
+            "(`pg_orders_write`) order step — failures in a row, ages, the "
+            "last error's class and how many orders Postgres would refuse, "
+            "judged by the canary as `orders_sync_failing` —, chain 5's "
+            "managers step and chain 6's hourly products step. A report "
+            "ledger's entry carries `pending`, the delivered weeks whose "
+            "ledger row is still spooled (`unreadable`: the files no drain "
+            "will land, whose row a human writes), judged as "
+            "`report_ledger_pending`."
         ),
     )
     backups: Optional[Dict[str, Optional[float]]] = Field(
@@ -212,109 +146,39 @@ class HealthResponse(BaseModel):
             "`pitr_drill_age_h` (the weekly PITR drill), "
             "`remote_restore_age_h` (the off-site copy restored) and "
             "`pg_offsite_age_h` (a Postgres dump shipped off the host). Null "
-            "where no marker exists. Chain 3's flip waits on all three "
-            "(`unmet_precondition`). Ages only — no path, host or account."
+            "where no marker exists. Judged by the canary as "
+            "`backup_evidence_stale` (chain 3's flip waited on all three "
+            "until step 14). Ages only — no path, host or account."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "Who derives Postgres' Silver and Gold: `mode` is piggyback or own, "
-            "and `error` names a KS_PG_DERIVE value that was not understood and "
-            "fell back to piggyback. Judged by the canary, because a typo "
-            "otherwise leaves one log line and an operator believing the own "
-            "derivation is running. `marks_dropped_unhealed` counts the "
-            "derivation marks dropped since a validated rebuild last covered "
-            "them, and `last_mark_drop_age_s` is how long ago the latest was "
-            "dropped while that count is above zero — both null under "
-            "piggyback or when Postgres cannot be read. "
-            "`signal_unreadable_ticks` counts the consecutive ticks of this "
-            "process that could not read the derivation's signal; web pages on "
-            "the fifth itself. Null under piggyback."
-        ),
-    )
-    read_fallbacks: Optional[Dict[str, Dict[str, Any]]] = Field(
-        None,
-        description=(
-            "Reads this process answered from DuckDB because Postgres (or, for "
-            "cohorts, ClickHouse) failed, per surface: `count` since the "
-            "process started and `last_at`. Empty is none. Counted by "
-            "`core.read_fallback.fall_back`, which every such site calls; the "
-            "log line beside each one carries the error (DN-20a). Always empty "
-            "under KS_READ_FALLBACK=off, where such a read is refused instead "
-            "and counted under `read_fallback_mode.refused`."
+            "The Postgres derivation's own signal (`meta.derivation_signal`): "
+            "`marks_dropped_unhealed` counts the derivation marks dropped "
+            "since a validated rebuild last covered them, and "
+            "`last_mark_drop_age_s` is how long ago the latest was dropped "
+            "while that count is above zero — both null when Postgres cannot "
+            "be read. `signal_unreadable_ticks` counts the consecutive ticks "
+            "of this process that could not read the signal; web pages on the "
+            "fifth itself. `mode` and `error` (KS_PG_DERIVE) went in step 14's "
+            "S14-15."
         ),
     )
     read_fallback_mode: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "`mode` is KS_READ_FALLBACK as understood at start — duckdb or "
-            "off; under off a read whose engine fails is refused, and an HTTP "
-            "route answers 503 naming the surface (DN-20b) — and `error` "
-            "names a value that was not understood and ran as duckdb; judged "
-            "by the canary. `misconfigured` lists every KS_READ_* naming an "
-            "engine without its address (KS_PG_DSN, KS_CH_URL): under duckdb "
-            "each of those reads is served by DuckDB with nothing failing to "
-            "count, and under off each is refused. `no_engine` lists the "
-            "surfaces only one engine may answer under off whose switch does "
-            "not name it (the cohorts at KS_READ_COHORTS=duckdb): the same, "
-            "with no address missing. Under off only, `refused` "
-            "is `{surface: {count, last_at}}` for the reads refused since the "
-            "process started."
+            "`refused` is `{surface: {count, last_at}}` for the reads refused "
+            "since the process started: the engine a router reads failed, and "
+            "an HTTP route answered 503 naming the surface (DN-20b). Judged by "
+            "the canary as `read_refused` while one is recent. Until step "
+            "14's S14-16 the block also carried `mode`, `error`, "
+            "`misconfigured` and `no_engine`, and `read_fallbacks` stood "
+            "beside it — the reads answered from DuckDB, none since S14-00."
         ),
     )
-    duckdb_switch: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "KS_DUCKDB, the week of silence's switch: `mode` as run (on, the "
-            "default, or off — this process must not open the DuckDB file), "
-            "`value` as read, `error` naming a value that was not understood "
-            "and ran as on. `opened_while_off` is `{site: {count, last_at}}` "
-            "for every open refused under off since the process started, a "
-            "site being the `module:function` that asked; never an "
-            "exception's text. Paged CRITICAL by the canary when non-empty. "
-            "Under KS_DUCKDB=off only, `held_back`: since step 14's S14-00 "
-            "always [] from web, which runs off whatever KS_DUCKDB says. An "
-            "image from before step 14 published there the keys of off's "
-            "coherence verdict web found unmet at its start, so it ran on "
-            "(paged CRITICAL as duckdb_off_held_back), and null before any "
-            "verdict. Keys only, never the details."
-        ),
-    )
-    warehouse_writer_mode: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "KS_WRITE_WAREHOUSE as understood at start (DN-28, DN-29): "
-            "`value` as read, `mode` as run — postgres only when every "
-            "precondition of the switch held — `error` naming a value that "
-            "was not understood and ran as duckdb, `preconditions_unmet` the "
-            "keys of what held postgres back (the canary pages on it), `held` "
-            "while the way back from postgres awaits its first validated full "
-            "DuckDB tick, and `reclassify_needed` when DuckDB's UTM verdicts "
-            "were found empty on it; judged by the canary."
-        ),
-    )
-    utm_parse: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Who writes Postgres' silver.order_utm: `mode` is KS_UTM_PARSE as "
-            "understood at start — duckdb, a copy of DuckDB's parse, or "
-            "postgres, parsed in Postgres as the derivation's last step — and "
-            "`error` names a value that ran as duckdb instead: one not "
-            "understood, or postgres without KS_PG_DERIVE=own. Judged by the "
-            "canary (DN-19)."
-        ),
-    )
-    goals_history: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Which orders the goal calculators count (chain 7b): `mode` is "
-            "silver — Silver is the only history since chain 7b-4 retired "
-            "KS_GOALS_HISTORY — or null with `error` when the variable holds "
-            "anything but unset or silver (bridge included), and then every "
-            "goal history read raises. Judged by the canary."
-        ),
-    )
+    # `duckdb_switch` (KS_DUCKDB as run, and every open of the DuckDB file
+    # refused under off) stood here until step 14's S14-18 deleted the switch.
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(
         None,
         description=(

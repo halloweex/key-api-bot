@@ -7,13 +7,13 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
-from core import warehouse_cutover
+from core import ga4
 from core.pg_utm_parse import reparse_router
-from web.services import dashboard_service
+from web.services import dashboard_service, ga4_funnel_service
 from web.routes.auth import require_admin
 from ._deps import (
     limiter, get_store,
-    validate_period, validate_source_id, validate_sales_type,
+    validate_period, validate_source_id, validate_sales_type, validate_db_int,
     ValidationError,
 )
 
@@ -105,6 +105,36 @@ async def get_traffic_pixel_only(
     )
 
 
+@router.get("/traffic/funnel")
+@limiter.limit("30/minute")
+async def get_traffic_funnel(
+    request: Request,
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+):
+    """The site's purchase funnel from GA4: the period, the one before, a year ago.
+
+    GA4 sees the website only, so the tab's source and sales-type filters do
+    not apply. See ``web/services/ga4_funnel_service.py``.
+    """
+    try:
+        validate_period(period)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not ga4.configured():
+        raise HTTPException(status_code=503, detail="GA4 is not configured")
+    try:
+        return await ga4_funnel_service.get_funnel(
+            _dt.strptime(start, "%Y-%m-%d").date(), _dt.strptime(end, "%Y-%m-%d").date(),
+        )
+    except ga4.GA4Unavailable as e:
+        logger.warning("GA4 funnel unavailable: %s", e)
+        raise HTTPException(status_code=503, detail="GA4 is unavailable")
+
+
 @router.get("/traffic/trend")
 @limiter.limit("30/minute")
 async def get_traffic_trend(
@@ -152,6 +182,7 @@ async def get_traffic_transactions(
     try:
         validate_period(period)
         validate_source_id(source_id)
+        validate_db_int(offset, "offset", bits=64)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -201,6 +232,7 @@ async def get_traffic_utm_campaigns(
     try:
         validate_period(period)
         validate_source_id(source_id)
+        validate_db_int(offset, "offset", bits=64)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -267,32 +299,14 @@ async def refresh_traffic_data(
     request: Request,
     user: dict = Depends(require_admin),
 ):
-    """Force refresh UTM and traffic layers (admin only)."""
-    store = await get_store()
+    """Parse the UTM verdicts that are new or changed, now (admin only).
 
-    if not warehouse_cutover.duckdb_derives():
-        # KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres alone parses.
-        parsed = await _parse_in_postgres_alone(store, full=False, door="Refresh")
-        return {"success": True, "utm_orders_parsed": int(parsed.get("parsed") or 0),
-                "engine": "postgres"}
-
-    try:
-        utm_count = len(await store.refresh_utm_silver_layer())
-        # And on to Postgres, which is what the tab reads. These endpoints do
-        # not mark the warehouse dirty, so without this the reclassification
-        # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. The router ships DuckDB's parse, or
-        # under KS_UTM_PARSE=postgres parses in Postgres what is new; never
-        # raises — see `core/pg_utm_parse.py`.
-        await reparse_router(store)
-
-        return {
-            "success": True,
-            "utm_orders_parsed": utm_count,
-        }
-    except Exception as e:
-        logger.error(f"Traffic refresh failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Refresh failed: {e}")
+    Postgres alone parses (`parse_incremental_locked`, through the router).
+    Until step 14's S14-15 this ran DuckDB's parse first while DuckDB
+    derived; since step 13 it parsed in Postgres alone, as now."""
+    parsed = await _parse_in_postgres(full=False, door="Refresh")
+    return {"success": True, "utm_orders_parsed": int(parsed.get("parsed") or 0),
+            "engine": "postgres"}
 
 
 @router.post("/traffic/reclassify")
@@ -303,20 +317,23 @@ async def reclassify_traffic(
 ):
     """Re-parse ALL UTM data with current classification rules (admin only).
 
-    Use after classification rule changes. Deletes silver_order_utm
-    and re-parses everything from scratch.
+    Use after classification rule changes. Runs `pg_utm_parse.parse_full`
+    through `reparse_router`: every commented order in `bronze.orders` is
+    re-parsed, and `silver.order_utm` is replaced whole — a `DELETE` of every
+    row and the re-parsed verdicts inserted, in one transaction. A result that
+    would shrink the table under `FULL_PARSE_FLOOR_PCT` of its rows is refused
+    (409) and the table keeps what it holds.
 
-    **A 504 in the browser is expected and does not mean it failed.** The work
-    is synchronous and longer than any proxy will wait: 2026-09-09 it took
-    **281 s** for 32,966 orders, while nginx gave up well before that and
-    served the "warming up" page. The application still finished and returned
-    200. Read the outcome in the log, not in the response:
+    **A 504 in the browser does not mean it failed.** The work is synchronous,
+    and a proxy that gives up first serves its own error page while the
+    application finishes and returns 200. Read the outcome in the log, not in
+    the response:
 
-        docker compose logs web | grep -E "Parsed UTM data for|reclassify"
+        docker compose logs web | grep -E "Order UTM parsed in Postgres|reclassify"
 
-    A successful run prints `Parsed UTM data for N orders (M batches)`, then
-    `Request completed ... 200`. It printed a `Refreshed gold_daily_traffic`
-    line between the two until that layer was retired.
+    A successful run prints `Order UTM parsed in Postgres (full): …`, then
+    `Request completed ... 200`. (DuckDB's parse printed `Parsed UTM data for
+    N orders (M batches)` until step 14's S14-15 deleted it.)
 
     Left synchronous on purpose. `backfill-utm` next door is a background task
     with a status endpoint, and copying that shape here would buy a subsystem
@@ -326,66 +343,26 @@ async def reclassify_traffic(
     answer.
 
     A client that hangs up does not stop the work, and the tab does not see
-    the middle of it. DuckDB *is* inconsistent for those minutes — the DELETE
-    commits on its own connection and the re-parse writes in batches of a
-    thousand on theirs — but the page reads Postgres, and Postgres keeps the
-    previous complete copy until `reparse_router` replaces the whole table at
-    the end: shipped from DuckDB by `ship_after_reparse`, or under
-    KS_UTM_PARSE=postgres re-parsed by `parse_full` in one transaction. So the
-    window is invisible from the screen rather than merely short.
+    the middle of it: `parse_full` replaces the whole table in one
+    transaction, so a reader sees the old verdicts or the new ones.
 
-    Under KS_WRITE_WAREHOUSE=postgres (DN-29) DuckDB is neither emptied nor
-    re-parsed: `parse_full` is the whole of the work, and the record notes it
-    so the way back re-parses DuckDB's verdicts too.
+    Postgres alone re-parses. Until step 14's S14-15 the door noted the
+    re-parse for a way back from step 13 first — in DuckDB's recorded writer,
+    or under KS_DUCKDB=off in `data/warehouse-utm-reparsed-at` — so that an
+    image from before step 14, taking the way back, would re-parse DuckDB's
+    verdicts too. Step 13's switch is gone, and the note with it; the marker
+    already on disk is left as it is.
     """
-    store = await get_store()
-
-    if not warehouse_cutover.duckdb_derives():
-        parsed = await _parse_in_postgres_alone(store, full=True, door="Reclassify")
-        return {"success": True, "utm_records": int(parsed.get("rows") or 0),
-                "engine": "postgres"}
-
-    try:
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_order_utm")
-
-        utm_count = len(await store.refresh_utm_silver_layer())
-        # And on to Postgres, which is what the tab reads. These endpoints do
-        # not mark the warehouse dirty, so without this the reclassification
-        # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. `full`: everything was re-parsed, so
-        # under KS_UTM_PARSE=postgres the table is replaced whole — the only
-        # way a rule change reaches orders whose `updated_at` has not moved.
-        # Never raises — see `core/pg_utm_parse.py`.
-        await reparse_router(store, full=True)
-
-        return {
-            "success": True,
-            "utm_records": utm_count,
-        }
-    except Exception as e:
-        logger.error(f"Traffic reclassify failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Reclassify failed: {e}")
+    parsed = await _parse_in_postgres(full=True, door="Reclassify")
+    return {"success": True, "utm_records": int(parsed.get("rows") or 0),
+            "engine": "postgres"}
 
 
-async def _parse_in_postgres_alone(store, *, full: bool, door: str) -> dict:
-    """A door's re-parse under KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres
-    alone, because DuckDB derives no UTM verdict there and a DuckDB failure
-    must not stand between the operator and the table /traffic reads. The
-    router's answer is then the door's answer — there is no DuckDB half that
-    succeeded for it to report instead — so an error is a 500 and a refused
-    full parse a 409. `full` is the reclassify's: noted in the recorded writer
-    first (`warehouse_cutover.note_utm_reparsed_in_postgres`), a note DuckDB
-    fails to take logged and never in the way."""
-    if full:
-        try:
-            await warehouse_cutover.note_utm_reparsed_in_postgres(store)
-        except Exception as exc:  # noqa: BLE001 — the retired engine; logged
-            logger.error(
-                "%s: DuckDB did not take the note that its UTM verdicts are now "
-                "older than the rules; the way back will not re-parse them: %s",
-                door, exc, exc_info=True)
-    parsed = await reparse_router(store, full=full)
+async def _parse_in_postgres(*, full: bool, door: str) -> dict:
+    """A door's re-parse, in Postgres. The router's answer is the door's
+    answer — an error is a 500 and a refused full parse a 409. `full` is the
+    reclassify's."""
+    parsed = await reparse_router(full=full)
     if "error" in parsed or "skipped" in parsed:
         raise HTTPException(
             status_code=500,
@@ -418,236 +395,15 @@ async def _run_backfill(days: int):
 
 
 async def _run_backfill_inner(days: int):
-    from core.duckdb_store import _orders_in_postgres
-    from core.keycrm import get_async_client
+    """The backfill's body: chain 3's (`_run_backfill_postgres`).
 
-    # Under chain 3 the orders are written to Postgres alone, and a comment
-    # restored in DuckDB would be one nobody reads — while `ship_orders_by_id`
-    # stands down and carries nothing. The run goes to the chain instead.
-    if _orders_in_postgres():
-        return await _run_backfill_postgres(days)
-
-    store = await get_store()
-    client = await get_async_client()
-    tz = ZoneInfo("Europe/Kyiv")
-
-    try:
-        async with store.connection() as conn:
-            null_count = conn.execute(
-                "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
-            ).fetchone()[0]
-            total = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-
-        if null_count == 0:
-            _backfill_status.update(running=False, result={
-                "status": "skip", "message": "All orders already have manager_comment",
-            })
-            return
-
-        logger.info(f"UTM backfill: {null_count}/{total} orders missing manager_comment")
-
-        final_end = _dt.now(tz) + timedelta(days=1)
-        chunk_days = 30  # Smaller chunks to stay well within pagination limit
-        current_start = _dt.now(tz) - timedelta(days=days)
-        api_fetched_total = 0
-        db_updated_total = 0
-        pg_shipped_total = 0
-        # Orders this run changed in DuckDB and could not ship. Reported
-        # rather than retried: a re-run cannot find them again, so the list
-        # itself is what an operator needs.
-        pg_failed_ids: list[int] = []
-        chunks_processed = 0
-
-        while current_start < final_end:
-            current_end = min(current_start + timedelta(days=chunk_days), final_end)
-            start_str = current_start.strftime('%Y-%m-%d')
-            end_str = current_end.strftime('%Y-%m-%d')
-            chunks_processed += 1
-
-            orders_by_id = {}
-            try:
-                params = {
-                    "filter[created_between]": f"{start_str}, {end_str}",
-                    "limit": 50,
-                }
-                async for batch in client.paginate("order", params=params, page_size=50):
-                    for order in batch:
-                        mc = order.get("manager_comment")
-                        if mc:
-                            orders_by_id[order["id"]] = mc
-            except Exception as e:
-                logger.warning(f"UTM backfill chunk {start_str}-{end_str} failed: {e}")
-                current_start = current_end
-                continue
-
-            api_fetched_total += len(orders_by_id)
-            chunk_updated = 0
-            chunk_shipped = 0
-
-            if orders_by_id:
-                # Both halves under the scheduler's heavy-job lock, because
-                # they are one write: the UPDATE moves DuckDB and the ship
-                # carries the same rows to `bronze.orders`. That is not what
-                # `/traffic` reads — the tab reads `silver.orders LEFT JOIN
-                # silver.order_utm` and the parsed rows reach Postgres
-                # through `reparse_router` below — it is what the daily
-                # `mirror_landing` fingerprint compares (`manager_comment` is
-                # one of its columns) and what step 9's Postgres UTM parser
-                # reads under KS_UTM_PARSE=postgres. The three scheduled syncs hold this lock across
-                # their own DuckDB write *and* their mirror call, so a chunk
-                # taken under it cannot straddle one — and without it a sync
-                # writing between our UPDATE and our read would leave Postgres
-                # holding whichever copy committed last.
-                #
-                # The KeyCRM pagination above stays outside it: the lock is
-                # for the two stores, and holding it across a network fetch
-                # would stall the two-minute warehouse tick for the length of
-                # a page.
-                from core.pg_backfill import ship_orders_by_id
-                from core.pg_order_versions import BACKFILL
-                from core.scheduler import get_scheduler
-
-                async with get_scheduler()._heavy_job_lock:
-                    async with store.connection() as conn:
-                        # The ids this chunk will actually change, read before
-                        # the UPDATE rather than counted after it. The old
-                        # before/after count over the whole table was both
-                        # racy with the sync and unable to say *which* orders
-                        # moved, and the ship needs exactly that list —
-                        # `COALESCE(EXCLUDED, stored)` means an order whose
-                        # comment did not change has nothing to carry.
-                        changed_ids = [
-                            int(r[0]) for r in conn.execute(
-                                "SELECT id FROM orders WHERE id IN "
-                                f"({', '.join('?' for _ in orders_by_id)}) "
-                                "AND manager_comment IS NULL",
-                                list(orders_by_id),
-                            ).fetchall()
-                        ]
-                        for order_id in changed_ids:
-                            conn.execute(
-                                "UPDATE orders SET manager_comment = ? "
-                                "WHERE id = ? AND manager_comment IS NULL",
-                                [orders_by_id[order_id], order_id],
-                            )
-                        conn.execute("CHECKPOINT")
-                    chunk_updated = len(changed_ids)
-                    db_updated_total += chunk_updated
-                    # Already holding the lock, so the helper is told not to
-                    # take it: `asyncio.Lock` is not reentrant.
-                    #
-                    # Caught per chunk rather than allowed to end the run.
-                    # `ship_orders_by_id` raises — `backfill_orders`' contract
-                    # — but this caller has a second job the helper knows
-                    # nothing about: the DuckDB re-parse below, which was
-                    # Postgres-independent before DN-17 and must stay so. An
-                    # unreachable Postgres (or `web` running ahead of
-                    # `migrate`, where `require_revision()` raises) would
-                    # otherwise abort the run with the comments already
-                    # restored in DuckDB — and since the SELECT above only
-                    # offers rows whose comment is still NULL, a re-run never
-                    # re-offers them. The ids are kept so an operator has the
-                    # list the daily reconciliation will otherwise hand them
-                    # one bucket at a time.
-                    try:
-                        shipped = await ship_orders_by_id(
-                            store, changed_ids, version_kind=BACKFILL,
-                        )
-                        chunk_shipped = shipped["orders_shipped"]
-                        pg_shipped_total += chunk_shipped
-                    except Exception as ship_error:
-                        pg_failed_ids.extend(changed_ids)
-                        logger.error(
-                            "UTM backfill: shipping %d order(s) to Postgres "
-                            "failed, carrying on with the DuckDB re-parse: %s",
-                            len(changed_ids), ship_error, exc_info=True,
-                        )
-
-            logger.info(
-                f"UTM backfill chunk {chunks_processed} ({start_str} to {end_str}): "
-                f"api={len(orders_by_id)}, db_changed={chunk_updated}, "
-                f"pg_shipped={chunk_shipped}"
-            )
-
-            _backfill_status["result"] = {
-                "status": "in_progress",
-                "chunks_processed": chunks_processed,
-                "api_fetched": api_fetched_total,
-                "db_updated": db_updated_total,
-                "pg_shipped": pg_shipped_total,
-                "pg_failed_ids": list(pg_failed_ids),
-            }
-            current_start = current_end
-            # Pause between chunks to avoid tripping the circuit breaker
-            await asyncio.sleep(3)
-
-        logger.info(
-            f"UTM backfill: api_fetched={api_fetched_total}, "
-            f"db_updated={db_updated_total}, pg_shipped={pg_shipped_total} "
-            f"across {chunks_processed} chunks"
-        )
-        if pg_failed_ids:
-            logger.error(
-                "UTM backfill: %d order(s) were restored in DuckDB and never "
-                "reached Postgres. Re-ship them by id; a re-run of this "
-                "endpoint will not, because their comment is no longer NULL. "
-                "Ids: %s", len(pg_failed_ids), pg_failed_ids,
-            )
-
-        # Force final checkpoint before UTM refresh
-        async with store.connection() as conn:
-            conn.execute("CHECKPOINT")
-
-        # Verify the update worked
-        async with store.connection() as conn:
-            remaining_null = conn.execute(
-                "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
-            ).fetchone()[0]
-        logger.info(f"UTM backfill: {remaining_null} orders still have NULL mc (was {null_count})")
-
-        pg_parse_error = None
-        if warehouse_cutover.duckdb_derives():
-            utm_count = len(await store.refresh_utm_silver_layer())
-            # And on to Postgres, which is what the tab reads. These endpoints
-            # do not mark the warehouse dirty, so without this the
-            # reclassification sits in DuckDB until the next dirty tick while
-            # the page keeps rendering the previous one. Not `full`: this run
-            # only adds comments, and under KS_UTM_PARSE=postgres the
-            # incremental parse reads them out of `bronze.orders`, where
-            # `ship_orders_by_id` put them above. Never raises — see
-            # `core/pg_utm_parse.py`.
-            await reparse_router(store)
-        else:
-            # KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres alone parses what
-            # the chunks above shipped; DuckDB derives no verdict. Its answer
-            # is this run's, and a parse that failed makes the run partial —
-            # the next derivation's own parse picks the comments up anyway.
-            parsed = await reparse_router(store)
-            utm_count = int(parsed.get("parsed") or 0)
-            pg_parse_error = parsed.get("error") or parsed.get("skipped")
-
-        logger.info(f"UTM backfill complete: {utm_count} UTM records")
-
-        _backfill_status.update(running=False, result={
-            # `partial` rather than `success` when anything failed to ship:
-            # DuckDB and Postgres disagree about those orders until somebody
-            # re-ships them, and a green status is how that gets forgotten.
-            "status": "partial" if pg_failed_ids or pg_parse_error else "success",
-            **({"pg_parse_error": pg_parse_error} if pg_parse_error else {}),
-            "orders_missing_before": null_count,
-            "orders_remaining_null": remaining_null,
-            "api_fetched": api_fetched_total,
-            "db_updated": db_updated_total,
-            "pg_shipped": pg_shipped_total,
-            "pg_failed_ids": pg_failed_ids,
-            "chunks_processed": chunks_processed,
-            "utm_records_parsed": utm_count,
-        })
-    except Exception as e:
-        logger.error(f"UTM backfill failed: {e}", exc_info=True)
-        _backfill_status.update(running=False, result={
-            "status": "error", "error": "UTM backfill failed — see server logs",
-        })
+    The orders are written to Postgres alone, and a comment restored in
+    DuckDB would be one nobody reads. Until step 14's S14-09 this asked
+    `duckdb_store._orders_in_postgres()` first — a constant since S14-00 —
+    and kept a DuckDB walk (an UPDATE of `orders`, a CHECKPOINT and a ship
+    of the changed rows) for an answer it no longer gave; S14-09 deleted it.
+    """
+    return await _run_backfill_postgres(days)
 
 
 async def _run_backfill_postgres(days: int):
@@ -658,15 +414,14 @@ async def _run_backfill_postgres(days: int):
     which fills in only the orders whose comment Postgres holds as NULL and
     archives each as `kind='backfill'` (OD-20 (b)) in the row's own
     transaction. Nothing is written to DuckDB, whose orders the chain froze.
-    The write holds the scheduler's heavy-job lock, as the DuckDB path does;
-    the KeyCRM pagination stays outside it. Under the chain step 13 is in
+    The write holds the scheduler's heavy-job lock, as the DuckDB path did
+    until step 14's S14-09; the KeyCRM pagination stays outside it. Under the chain step 13 is in
     force, so Postgres alone parses what landed (`reparse_router`).
     """
     from core import pg_orders_read, pg_orders_write
     from core.keycrm import get_async_client
     from core.scheduler import get_scheduler
 
-    store = await get_store()
     client = await get_async_client()
     tz = ZoneInfo("Europe/Kyiv")
     try:
@@ -718,7 +473,7 @@ async def _run_backfill_postgres(days: int):
             await asyncio.sleep(3)
 
         remaining_null = await pg_orders_read.null_comment_count()
-        parsed = await reparse_router(store)
+        parsed = await reparse_router()
         pg_parse_error = parsed.get("error") or parsed.get("skipped")
         _backfill_status.update(running=False, result={
             "status": "partial" if failed_chunks or pg_parse_error else "success",
@@ -749,8 +504,8 @@ async def backfill_utm_data(
 
     Admin for the same reason as its two neighbours above, and one more: the
     job walks up to `days` of KeyCRM through the process-wide circuit breaker
-    and takes the single DuckDB write lock once per chunk to UPDATE and
-    CHECKPOINT. Nothing stops it once started.
+    and takes the scheduler's heavy-job lock once per chunk to write the
+    comments to Postgres. Nothing stops it once started.
     """
     if _backfill_status["running"]:
         return {"status": "already_running", "progress": _backfill_status["result"]}

@@ -278,42 +278,32 @@ def create_conversation_handler() -> ConversationHandler:
 
 
 def _warn_if_tab_access_is_off() -> None:
-    """Say loudly when the bot cannot enforce the tab set it is supposed to.
+    """Say when the bot cannot enforce the tab set it is supposed to.
 
     `may_use` is permissive where it cannot know — the right answer for a
     missing row or an unreachable store, and a silent no-op when the *reason*
-    is configuration. `KS_BOT_STORE` and `KS_USER_STORE` are separate variables
-    in the same .env, and if the second is not `postgres` the bot cannot read
-    the dashboard's list at all: every narrowed account quietly gets every
-    report again, and nothing says so.
+    is configuration. Under `KS_BOT_STORE` other than `postgres` the bot holds
+    no way to the dashboard's list at all (`NoDashboardTabs`), so every
+    narrowed account quietly gets every report again, and this says so.
+
+    It also logged an ERROR when `KS_BOT_STORE=postgres` met a `KS_USER_STORE`
+    that was not: the bot would have written tab sets to a table the dashboard
+    did not read. Since step 14 the dashboard's list is in Postgres whatever
+    that variable says (a constant since S14-00), so the disagreement cannot
+    happen and the branch went with the routing in S14-08.
 
     Logged, not raised. The bot still works and still guards approval; what is
     lost is one layer, and taking a working bot down over a dashboard setting
-    would be the wrong trade. But it is an ERROR, because somebody has to see
-    it.
+    would be the wrong trade.
     """
     import os
 
     bot_store = os.getenv("KS_BOT_STORE", "sqlite").strip().lower()
-    # Postgres whatever `KS_USER_STORE` says since step 14's S14-00
-    # (`core.pg_dashboard_users.user_store_is_postgres`, a constant), so the
-    # disagreement below can no longer happen; it goes with the variable
-    # (S14-08). Not imported: no module under `bot/` but the store's adapter
-    # reaches for `core.pg*` (`tests/unit/test_pg_bot_state.py`).
-    user_store = "postgres"
-    if bot_store == "postgres" and user_store != "postgres":
-        logger.error(
-            "KS_BOT_STORE=postgres but KS_USER_STORE=%r: the bot cannot read "
-            "the dashboard's tab sets, so every approved account will receive "
-            "every report regardless of the tabs it was given. Set "
-            "KS_USER_STORE=postgres, or expect no tab enforcement in the bot.",
-            user_store,
-        )
-    elif bot_store != "postgres":
+    if bot_store != "postgres":
         logger.info(
             "KS_BOT_STORE=%r — tab enforcement in the bot is off by design on "
-            "this engine; the dashboard's list lives in a file this process "
-            "cannot open.", bot_store,
+            "this engine; the dashboard's list is in Postgres, which this "
+            "process's store does not reach.", bot_store,
         )
 
 
@@ -440,32 +430,14 @@ def main() -> None:
             logger.error("Canary job crashed: %s", exc, exc_info=True)
             return
 
-        from bot.canary import (
-            DUCKDB_SWITCH_WATCH_GAP_S, DUCKDB_SWITCH_WATCH_KEY,
-            READ_FALLBACK_WATCH_GAP_S, READ_FALLBACK_WATCH_KEY, defer_flaky,
-        )
-        from core.alert_archive import record_watch
+        from bot.canary import defer_flaky
         from core.alerting import raise_alert, resolve_group
 
-        # The watch over reads answered from DuckDB (OD-07), on every probe that
-        # read the block, whatever else it found and whether or not it pages:
-        # the soak before KS_READ_FALLBACK=off tells a clean week from one
-        # nobody watched by this row. Web's uptime tells the process it read
-        # last time from a new one. Fire-and-forget, never raises.
-        if result.read_fallbacks_clean is not None:
-            record_watch(
-                READ_FALLBACK_WATCH_KEY, clean=result.read_fallbacks_clean,
-                gap_s=READ_FALLBACK_WATCH_GAP_S,
-                web_uptime_s=result.web_uptime_s,
-            )
-        # The week of silence's watch (OD-17 (a)), on the same terms — but only
-        # while web runs KS_DUCKDB=off: under `on`, today, nothing is written.
-        if result.duckdb_silent is not None:
-            record_watch(
-                DUCKDB_SWITCH_WATCH_KEY, clean=result.duckdb_silent,
-                gap_s=DUCKDB_SWITCH_WATCH_GAP_S,
-                web_uptime_s=result.web_uptime_s,
-            )
+        # The week of silence's watch (`watch:duckdb_switch`, OD-17 (a)) was
+        # written here on every probe that read the switch block, until step
+        # 14's S14-18 deleted the switch; the watch over reads answered from
+        # DuckDB (`watch:read_fallbacks`) until S14-16. Both rows stay in
+        # `app.alert_series` as history, and nothing writes them.
 
         defer, canary_prev_failures = defer_flaky(
             list(result.failure_keys), canary_prev_failures,

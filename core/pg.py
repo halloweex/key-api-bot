@@ -48,11 +48,14 @@ VERSION_TABLE = "alembic_version"
 # to everybody; the bot store checks it in `initialise()` and the bot refuses to
 # start; every write chain, the buyers mirror and the paths that stand down on
 # owner rows, the replication, the derivation and the reconciliations raise
-# `SchemaVersionError` and record it. Three writers do not gate: the catalogue
-# mirror of landing (`pg_landing._mirror`), the per-tick orders mirror
-# (`upsert_orders` → `mirror_orders` → `write_orders`) and the alert journal,
-# which stays up on purpose. Compose runs `migrate` first and makes web and bot
-# wait for it, which is what keeps a deploy out of that state.
+# `SchemaVersionError` and record it. Two writers do not gate: the catalogue
+# mirror of landing (`pg_landing._mirror`) and the alert journal, which stays
+# up on purpose. The per-tick orders mirror (`upsert_orders` → `mirror_orders`
+# → `write_orders`) was a third until step 14's S14-09 deleted DuckDB's
+# `upsert_orders`; chain 3's writer, which now runs `write_orders`' core, asks
+# `require_revision()` before its latch. Compose runs `migrate` first and
+# makes web and bot wait for it, which is what keeps a deploy out of that
+# state.
 #
 # 0034 is chain 4's lock (owner decision 16): an image that does not know the
 # buyers chain refuses a database that does. See the revision's docstring for
@@ -64,9 +67,11 @@ VERSION_TABLE = "alembic_version"
 # what it does not hold: the per-tick landing mirrors, which never gated, and
 # DuckDB. An image-only rollback below it needs `alembic downgrade
 # 0034_buyer_chain` with the new migrate image first, and none once one of
-# those chains has latched. Each of the eight names it as its
-# `LOCKOUT_REVISION`, and its flag moves nothing in a build that requires less
-# (`core.chain_latch.lockout_unmet`).
+# those chains has latched. Each of the eight named it as its
+# `LOCKOUT_REVISION`, and its flag moved nothing in a build that required less
+# (`core.chain_latch.lockout_unmet`). Since step 14's S14-00 no flag moves
+# anything; chains 3 and 6 lost the attribute in S14-09, and their lock-out
+# is the literal `tests/unit/test_chain_lockout.LOCKOUT_RETIRED`.
 REQUIRED_REVISION = "0035_batch_e_chains"
 
 _pool: Optional[Any] = None
@@ -141,8 +146,8 @@ async def current_revision(conn=None, *, strict: bool = False) -> Optional[str]:
     version table absent (or empty), and lets every other failure raise: a
     connection lost in the middle of the read is not a database nobody
     migrated, and a caller that asks again must be able to tell them apart
-    (`core.warehouse_cutover`, where after a flip that reading is the way
-    back).
+    (step 13's switch, where after a flip that reading was the way back,
+    asked it so until step 14's S14-15 deleted it).
     """
     sql = (
         f"SELECT version_num FROM {VERSION_TABLE_SCHEMA}.{VERSION_TABLE} LIMIT 1"

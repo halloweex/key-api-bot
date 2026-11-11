@@ -1,4 +1,4 @@
-"""Admin operations: DuckDB management, warehouse, cache, jobs, sync, events."""
+"""Admin operations: sync levers, warehouse, cache, jobs, events."""
 import asyncio
 import contextlib
 import logging
@@ -9,9 +9,10 @@ from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
 from core import read_fallback
+from core.filters import MAX_RANGE_DAYS
 from web.routes.auth import require_admin
 from web.schemas import JobsResponse
-from ._deps import limiter, get_store
+from ._deps import limiter, get_store, validate_db_int
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -20,13 +21,36 @@ logger = logging.getLogger(__name__)
 _BACKGROUND_TASKS: set = set()
 
 
-# ─── DuckDB Admin ─────────────────────────────────────────────────────────────
+# ─── Sync levers ──────────────────────────────────────────────────────────────
+#
+# The four doors that start a sync from KeyCRM by hand live under `/sync/`
+# since step 14's S14-17 (the owner's decision 6 for step 14, OD-S5-8: renamed
+# when the DuckDB code went). They were `/duckdb/…`, a name from the days they
+# wrote DuckDB; each writes Postgres alone since the chains. The old paths
+# stay as aliases out of the schema — the same function, its rate limit
+# shared — until step 14's final stage, so a runbook, a bookmark or a
+# person's habit still reaches the lever. Each limit is shared by its two
+# names (`shared_limit`, scoped by the new path): slowapi scopes a plain
+# `limit` by the request's path, which would give each name a count of its
+# own. `SLOW_ENDPOINTS` and nginx's long timeout name both paths of the two
+# slow ones.
+SYNC_DOORS = {
+    "/sync/resync": "/duckdb/resync",
+    "/sync/refresh-statuses": "/duckdb/refresh-statuses",
+    "/sync/sync-buyers": "/duckdb/sync-buyers",
+    "/sync/sync-all-buyers": "/duckdb/sync-all-buyers",
+}
 
-@router.post("/duckdb/resync")
-@limiter.limit("1/minute")
+
+@router.post("/sync/resync")
+@router.post("/duckdb/resync", include_in_schema=False)
+@limiter.shared_limit("1/minute", scope="sync/resync")
 async def trigger_resync(
     request: Request,
-    days: int = 365,
+    # The dashboard's longest range (`core.filters.MAX_RANGE_DAYS`). Unbounded,
+    # days=10**9 took the heavy lock, ran the catalogue sync and then answered
+    # 500 with the error's text (L3-10).
+    days: int = Query(365, ge=1, le=MAX_RANGE_DAYS),
     admin: dict = Depends(require_admin),
 ):
     """Force a complete resync of orders from KeyCRM API. Requires admin."""
@@ -50,8 +74,9 @@ async def trigger_resync(
         raise HTTPException(status_code=500, detail=f"Resync failed: {str(e)}")
 
 
-@router.post("/duckdb/refresh-statuses")
-@limiter.limit("10/hour")
+@router.post("/sync/refresh-statuses")
+@router.post("/duckdb/refresh-statuses", include_in_schema=False)
+@limiter.shared_limit("10/hour", scope="sync/refresh-statuses")
 async def refresh_order_statuses(
     request: Request,
     days: int = Query(30, ge=1, le=90, description="Days to look back for status changes"),
@@ -103,486 +128,20 @@ async def refresh_order_statuses(
         raise HTTPException(status_code=500, detail=f"Status refresh failed: {str(e)}")
 
 
-# ─── Postgres mirror ───────────────────────────────────────────────────────────
-
-@router.post("/mirror/backfill/orders")
-@limiter.limit("2/hour")
-async def backfill_mirror_orders(
-    request: Request,
-    chunk_size: int = Query(2000, ge=100, le=10000),
-    max_chunks: Optional[int] = Query(None, ge=1, description="Cap one invocation"),
-    background: bool = Query(True, description="Run detached (recommended)"),
-    admin: dict = Depends(require_admin),
-):
-    """Ship the orders Postgres is missing. Idempotent; safe to re-run.
-
-    Step 05. The sync mirrors only what it writes, so Postgres starts at the
-    last few minutes of activity with 46,446 orders of history behind it. This
-    closes that gap, computing the difference fresh on every call rather than
-    remembering a cursor — interrupt it and the next run resumes by definition.
-
-    Foreground for a capped run you want to watch; background for the whole
-    thing, which takes minutes and would otherwise sit on an HTTP request.
-
-    409 once a write chain owns either order table (DN-22a). Answered here,
-    before anything starts, because the background form would otherwise say
-    "started" and leave the refusal in a log line nobody reads.
-
-    On either copy of the latch, as the backfill itself asks: the local
-    answer first, then — with the mirror on, so the backfill would go on to
-    read Postgres anyway — the owner rows, after `require_revision()`. A lost
-    marker leaves only the owner rows to say the tables moved, and asking
-    just the local answer here answered "started" to a run the backfill then
-    refused. An owner read that fails is a 503, never "started": nothing can
-    be verified, and the run it would start would fail the same read in the
-    background.
-
-    And 409 with the mirror switched off, before any of that and without
-    asking Postgres anything: `backfill_orders` refuses a run with
-    `KS_MIRROR_LANDING` off, so the background form answered "started" to a
-    run that then raised into the web log, and the foreground form a 500.
-    """
-    from core.pg_backfill import backfill_orders
-    from core.pg_landing import (
-        enabled, order_tables_stood_down, order_tables_stood_down_or_owned,
-    )
-
-    if not enabled():
-        raise HTTPException(
-            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was started")
-
-    moved = order_tables_stood_down()
-    if not moved:
-        from core.pg import get_pool, require_revision
-
-        try:
-            pool = await get_pool()
-            await require_revision()
-            moved = await order_tables_stood_down_or_owned(pool)
-        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-            logger.error("Mirror backfill: cannot read who owns the order "
-                         "tables: %s: %s", type(e).__name__, e)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Cannot tell whether a write chain owns the order tables, "
-                    f"so nothing was started: {type(e).__name__}: {e}"
-                ),
-            ) from e
-    if moved:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped out of DuckDB; a backfill would overwrite rows only "
-                "Postgres holds and archive each overwrite as an order change."
-            ),
-        )
-
-    store = await get_store()
-
-    async def run():
-        try:
-            from core.scheduler import get_scheduler
-
-            return await backfill_orders(
-                store, chunk_size=chunk_size, max_chunks=max_chunks,
-                lock=get_scheduler()._heavy_job_lock,
-            )
-        except asyncio.CancelledError:
-            logger.warning("Mirror backfill was cancelled")
-            raise
-        except Exception as e:
-            logger.error(f"Mirror backfill failed: {e}", exc_info=True)
-            raise
-
-    if background:
-        task = asyncio.create_task(run(), name="mirror_backfill_orders")
-        # A strong reference, or the loop may collect the task mid-flight.
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
-        task.add_done_callback(
-            lambda t: logger.error(f"Mirror backfill failed: {t.exception()}")
-            if not t.cancelled() and t.exception() else None
-        )
-        return {
-            "status": "started",
-            "message": "Backfill running in background",
-            "note": "Progress is in the web log; re-run to see what is left.",
-        }
-
-    try:
-        return {"status": "success", "stats": await run()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
-
-
-@router.post("/mirror/backfill/expenses")
-@limiter.limit("2/hour")
-async def backfill_mirror_expenses(
-    request: Request,
-    chunk_size: int = Query(1000, ge=100, le=10000),
-    admin: dict = Depends(require_admin),
-):
-    """Ship the order-level expenses Postgres is missing. Idempotent.
-
-    Revision 0020. `mirror_expenses` ships what a sync fetched, so after the
-    first deploy Postgres holds the last few days against DuckDB's 15,020 rows
-    — and until this has run, `reconcile_expenses` reports one
-    `mirror_backfill_pending` and suppresses the row-level comparison, because
-    before it every expense older than the mirror looks exactly like a lost
-    one.
-
-    Foreground, unlike the orders backfill: 15,020 narrow rows is seconds
-    rather than minutes, so a detached task would only make the result harder
-    to read.
-
-    409 once a write chain owns `bronze.expenses` (DN-22b), asked here before
-    anything starts, as the orders route asks: the local answer first, then
-    the owner rows after `require_revision()`. The backfill refuses that state
-    itself, but as a raise, which this route used to turn into a 500 reading
-    "Backfill failed" — about a run that must not happen, not one that broke.
-    An owner read that fails is a 503: nothing can be verified.
-    """
-    from core.pg_expense_backfill import EXPENSES_UNIT, backfill_expenses
-    from core.pg_landing import tables_stood_down, tables_stood_down_or_owned
-
-    moved = tables_stood_down(EXPENSES_UNIT)
-    if not moved:
-        from core.pg import get_pool, require_revision
-
-        try:
-            pool = await get_pool()
-            await require_revision()
-            moved = await tables_stood_down_or_owned(pool, EXPENSES_UNIT)
-        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-            logger.error("Expense backfill: cannot read who owns "
-                         "bronze.expenses: %s: %s", type(e).__name__, e)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Cannot tell whether a write chain owns bronze.expenses, "
-                    f"so nothing was started: {type(e).__name__}: {e}"
-                ),
-            ) from e
-    if moved:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped out of DuckDB; a backfill would overwrite rows only "
-                "Postgres holds."
-            ),
-        )
-
-    store = await get_store()
-    try:
-        return {"status": "success", "stats": await backfill_expenses(
-            store, chunk_size=chunk_size,
-        )}
-    except Exception as e:
-        logger.error(f"Expense backfill failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
-
-
-@router.post("/mirror/backfill/catalogue")
-@limiter.limit("5/minute")
-async def backfill_mirror_catalogue(
-    request: Request,
-    dry_run: bool = Query(True, description="Say what would be carried; write nothing"),
-    admin: dict = Depends(require_admin),
-):
-    """Carry the catalogue rows only DuckDB holds into Postgres — the ones the
-    daily comparison calls retired (`mirror_retired_rows`; product 1055).
-    A dry run by default. Chain 6's pre-flip lever (OD-15 (a)).
-
-    Foreground: production carries about one row. The carried rows keep a
-    `mirrored_at` before the mirror's last whole-catalogue success, so they
-    still read as retired, and `meta.mirror_state` is not touched
-    (`core.pg_landing.carry_retired_catalogue`).
-
-    The expenses route's order, for its reasons: 409 with the mirror off,
-    before Postgres is asked anything; 409 once a write chain owns either
-    table, on the local answer and then on the owner rows after
-    `require_revision()`; 503 when the owner rows cannot be read.
-    """
-    from core.pg_landing import (
-        CatalogueCarryRefused, carry_retired_catalogue, enabled,
-        tables_stood_down, tables_stood_down_or_owned,
-    )
-
-    if not enabled():
-        raise HTTPException(
-            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was carried")
-
-    catalogue = ("bronze.products", "bronze.categories")
-    moved = frozenset().union(*(tables_stood_down((t,)) for t in catalogue))
-    if not moved:
-        from core.pg import get_pool, require_revision
-
-        try:
-            pool = await get_pool()
-            await require_revision()
-            for table in catalogue:
-                moved |= await tables_stood_down_or_owned(pool, (table,))
-        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-            logger.error("Catalogue carry: cannot read who owns the catalogue: "
-                         "%s: %s", type(e).__name__, e)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Cannot tell whether a write chain owns the catalogue, so "
-                    f"nothing was carried: {type(e).__name__}: {e}"
-                ),
-            ) from e
-    if moved:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped by the mirror; a row only DuckDB holds is the copy-back "
-                "handover's to decide now (scripts/chain_copy_back.py catalogue "
-                "--handover)."
-            ),
-        )
-
-    store = await get_store()
-    try:
-        stats = await carry_retired_catalogue(store, dry_run=dry_run)
-    except CatalogueCarryRefused as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except Exception as e:
-        logger.error(f"Catalogue carry failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Carry failed: {e}")
-    return {"status": "dry_run" if dry_run else "success", "stats": stats}
-
-
-@router.post("/mirror/backfill/buyers")
-@limiter.limit("2/hour")
-async def backfill_mirror_buyers(
-    request: Request,
-    chunk_size: int = Query(2000, ge=100, le=10000),
-    admin: dict = Depends(require_admin),
-):
-    """Re-ship every buyer DuckDB holds, with its contacts, into Postgres.
-
-    The lever chain 4's handover names before the flip (decision 5): the
-    hourly ids-diff ships only buyers Postgres is missing, so a buyer on both
-    sides that differs, or a contact only Postgres holds, stays until this
-    rewrites them — `pg_buyers.reship_buyers` says what it does and costs.
-
-    Detached, like `sync-all-buyers`: ~20 000 buyers with a DELETE of each
-    one's contacts is minutes, and a request held that long is answered 504 by
-    the app's own 30 s timeout while the handler keeps writing. Each portion
-    takes the heavy-job lock, waited for boundedly, so it lands between two
-    sync ticks; a lock that stays busy stops the run, and running it again
-    finishes it. The outcome is logged as `Buyer reship:`.
-
-    Idempotent. Refused before anything starts, the other two backfills'
-    arrangement: 409 with the mirror off, 409 while a reship is running (the
-    slot is claimed before the first await, so two requests at once start
-    one), 409 once a write chain
-    owns the buyers or their contacts — asked of the local answer and then of
-    the owner rows after `require_revision()` — and 503 when the owner read
-    fails, because nothing can be verified.
-    """
-    from core.pg_buyers import BUYER_UNIT, reship_buyers
-    from core.pg_landing import enabled, tables_stood_down, tables_stood_down_or_owned
-
-    if not enabled():
-        raise HTTPException(
-            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was started")
-    # Checked and claimed with no await between the two, so two requests in
-    # the same second cannot both pass: the task only exists after the owner
-    # read below, and the review showed a double click starting two reships
-    # through that gap. Released when the run ends or this request refuses.
-    if _RESHIP_SLOT["claimed"] or any(
-            t.get_name() == "reship_buyers" and not t.done() for t in _BACKGROUND_TASKS):
-        raise HTTPException(status_code=409, detail="A buyer reship is already running")
-    _RESHIP_SLOT["claimed"] = True
-    try:
-        moved = tables_stood_down(BUYER_UNIT)
-        if not moved:
-            from core.pg import get_pool, require_revision
-
-            try:
-                pool = await get_pool()
-                await require_revision()
-                moved = await tables_stood_down_or_owned(pool, BUYER_UNIT)
-            except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
-                logger.error("Buyer reship: cannot read who owns the buyers: %s: %s",
-                             type(e).__name__, e)
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "Cannot tell whether a write chain owns the buyers, so "
-                        f"nothing was started: {type(e).__name__}: {e}"
-                    ),
-                ) from e
-        if moved:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"{', '.join(sorted(moved))} is written by a write chain, not "
-                    "shipped out of DuckDB; a reship would overwrite rows only "
-                    "Postgres holds."
-                ),
-            )
-
-        store = await get_store()
-
-        async def run():
-            try:
-                result = await reship_buyers(
-                    store, chunk=chunk_size,
-                    portion_guard=lambda: _heavy_lock(SYNC_ALL_LOCK_WAIT_S),
-                )
-                logger.info(f"Buyer reship: {result}")
-                return result
-            except Exception as e:
-                logger.error(f"Buyer reship failed: {type(e).__name__}: {e}", exc_info=True)
-                raise
-
-        task = asyncio.create_task(run(), name="reship_buyers")
-        # A strong reference, or the loop may collect the task mid-flight.
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
-        task.add_done_callback(_release_reship_slot)
-    except BaseException:
-        _RESHIP_SLOT["claimed"] = False
-        raise
-    return {"status": "started", "message": "Buyer reship started; see web's log "
-            "for 'Buyer reship:'"}
-
-
-# Whether a request has claimed a reship that has not finished. A dict, so the
-# route and the task's callback share it without a `global`.
-_RESHIP_SLOT = {"claimed": False}
-
-
-def _release_reship_slot(_task) -> None:
-    _RESHIP_SLOT["claimed"] = False
-
-
 # ─── Warehouse ─────────────────────────────────────────────────────────────────
 
 @router.get("/warehouse/status")
 @limiter.limit("60/minute")
 async def get_warehouse_status(request: Request):
-    """Get warehouse layer (Silver/Gold) status and last refresh info."""
-    store = await get_store()
-    from core import pg_derivation, warehouse_cutover
+    """The warehouse's state: Postgres derives Silver and Gold alone.
 
-    if warehouse_cutover.writes_postgres():
-        # Postgres alone derives (KS_WRITE_WAREHOUSE=postgres, DN-29): the
-        # Postgres block leads, and DuckDB's last refresh — as old as the
-        # switch — is nested and named for what it is, never the top-level
-        # answer an operator reads as the warehouse's state.
-        status = {"writer": warehouse_cutover.POSTGRES,
-                  "postgres": await _pg_derivation_status(),
-                  "duckdb_frozen": await _duckdb_refresh_status(store)}
-    else:
-        status = await _duckdb_refresh_status(store)
-        # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a
-        # status page that showed only DuckDB's refreshes would describe the
-        # engine the dashboard is leaving.
-        if pg_derivation.owns():
-            status = {**status, "postgres": await _pg_derivation_status()}
-    # Step 13's readiness (DN-28, DN-29): KS_WRITE_WAREHOUSE as this process
-    # read it, what settling the writer found, and every precondition of the
-    # switch still unmet, each by name. Published whatever the mode — the list
-    # is what a person reads before the flip, and after it what a restart
-    # would need to stay switched.
-    try:
-        cutover = await warehouse_cutover.readiness()
-    except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
-        # The class alone, as everywhere readiness reports: the text is a
-        # driver's and names the database user, host and port. Whole in the log.
-        logger.error("cutover readiness raised: %s: %s", type(e).__name__, e)
-        cutover = {**warehouse_cutover.status(),
-                   "readiness_error": type(e).__name__}
-    return {**status, "cutover": cutover}
-
-
-async def _duckdb_refresh_status(store) -> dict:
-    """DuckDB's last warehouse refresh — its own `warehouse_refreshes`, or,
-    under KS_DUCKDB=off, the hourly copy of that table in Postgres.
-
-    Under off the file is not read (stage 5, PR-8). The copy holds the same
-    rows: DuckDB has not derived since step 13, so its last refresh is as old
-    as the switch, and the copy went across before the week began — the
-    table is history there (OD-S5-4). The answer is DuckDB's own keys, plus
-    `status: off` and the table they came from; a Postgres that cannot be
-    read leaves `status: off` and the error's class alone, the way every
-    fact on this page is published. Under on, the store's answer, untouched."""
-    from core import duckdb_switch
-
-    if not duckdb_switch.is_off():
-        return await store.get_warehouse_status()
-    from core.pg_operational import REFRESHES_TABLE
-
-    try:
-        last, recent = await asyncio.wait_for(
-            _read_frozen_refreshes(), _FROZEN_STATUS_TIMEOUT_S)
-    except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
-        logger.error("frozen warehouse_refreshes unreadable: %s: %s",
-                     type(e).__name__, e)
-        return {"status": duckdb_switch.OFF, "error": type(e).__name__}
-    return {"status": duckdb_switch.OFF, "source": REFRESHES_TABLE,
-            **_refresh_fields(last, recent)}
-
-
-# A status page answers; a Postgres that hangs costs this block, not the page.
-_FROZEN_STATUS_TIMEOUT_S = 5
-
-
-async def _read_frozen_refreshes():
-    """The last row and the last hour's count: DuckDB's two statements, over
-    the copy (`core.pg_operational.REFRESHES_TABLE`)."""
-    from core.pg import get_pool
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        last = await conn.fetchrow(
-            "SELECT refreshed_at, trigger, duration_ms, bronze_orders, "
-            "silver_rows, gold_revenue_rows, gold_products_rows, "
-            "checksum_match, validation_passed FROM app.warehouse_refreshes "
-            "ORDER BY id DESC LIMIT 1")
-        recent = await conn.fetchval(
-            "SELECT COUNT(*) FROM app.warehouse_refreshes "
-            "WHERE refreshed_at > now() - INTERVAL '1 hour'")
-    return last, recent
-
-
-def _refresh_fields(last, recent) -> dict:
-    """`DuckDBStore.get_warehouse_status`'s answer, built from a row of the
-    same nine columns in the same order. A test holds the two answers equal,
-    key for key and value for value."""
-    if last is None:
-        return {
-            "last_refresh": None,
-            "last_trigger": None,
-            "last_duration_ms": None,
-            "bronze_orders": 0,
-            "silver_rows": 0,
-            "gold_revenue_rows": 0,
-            "gold_products_rows": 0,
-            "checksum_match": None,
-            "validation_passed": None,
-            "recent_refreshes": 0,
-        }
-    return {
-        "last_refresh": last[0].isoformat() if last[0] else None,
-        "last_trigger": last[1],
-        "last_duration_ms": float(last[2]) if last[2] else None,
-        "bronze_orders": last[3],
-        "silver_rows": last[4],
-        "gold_revenue_rows": last[5],
-        "gold_products_rows": last[6],
-        "checksum_match": last[7],
-        "validation_passed": last[8],
-        "recent_refreshes": recent or 0,
-    }
+    Until step 14's S14-15 the answer also carried `duckdb_frozen` — DuckDB's
+    last refresh, as old as step 13's switch, read from the hourly copy of its
+    `warehouse_refreshes` — and `cutover`, step 13's readiness (the variable,
+    the recorded writer, every precondition by name). The switch is a
+    constant and its module is deleted; nothing read either block, the
+    frontend included. `app.warehouse_refreshes` stays as history (OD-S5-4)."""
+    return {"writer": "postgres", "postgres": await _pg_derivation_status()}
 
 
 async def _pg_derivation_status() -> dict:
@@ -598,9 +157,8 @@ async def _pg_derivation_status() -> dict:
                 "SELECT trigger, started_at, ended_at, validation_passed, error"
                 " FROM meta.derivation_runs ORDER BY id DESC LIMIT 1")
     except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
-        return {"mode": pg_derivation.mode(), "error": f"{type(e).__name__}: {e}"}
+        return {"error": f"{type(e).__name__}: {e}"}
     return {
-        "mode": pg_derivation.mode(),
         "requested": requested,
         "built": built,
         "owed": requested > built,
@@ -616,9 +174,8 @@ async def _pg_derivation_status() -> dict:
 
 
 async def _derive_postgres_now(trigger: str) -> dict:
-    """Run the Postgres derivation immediately, past its floor. Under
-    KS_PG_DERIVE=own only; takes the heavy lock itself, so call it after
-    releasing yours."""
+    """Run the Postgres derivation immediately, past its floor; takes the
+    heavy lock itself, so call it after releasing yours."""
     from core.scheduler import get_scheduler
 
     return await get_scheduler()._run_pg_derivation(trigger=trigger, force=True)
@@ -630,33 +187,12 @@ async def refresh_warehouse(
     request: Request,
     admin: dict = Depends(require_admin),
 ):
-    """Manually trigger warehouse layer refresh (Silver -> Gold). Requires admin."""
-    from core import warehouse_cutover
-    from core.scheduler import get_scheduler
+    """Rebuild the warehouse (Silver -> Gold) now, in Postgres. Requires admin.
 
-    if warehouse_cutover.duckdb_derives():
-        store = await get_store()
-        # Under the heavy-job lock, like the two-minute job that runs the same
-        # code. Without it a manual refresh interleaved with the scheduled one:
-        # a validation reading Bronze/Silver across the other's commits reported
-        # a correct rebuild as failed, and the two raced each other's fired and
-        # resolved notices for the same alert group.
-        async with get_scheduler()._heavy_job_lock:
-            result = await store.refresh_warehouse_layers(trigger="manual")
-    else:
-        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB no longer derives, and
-        # the lever is the Postgres derivation below — own is a precondition
-        # of the switch, so it always runs here.
-        result = {"status": "skipped", "trigger": "manual",
-                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
-    # The lever every Silver/Gold alert names. Under KS_PG_DERIVE=own it
-    # rebuilds the Postgres layers too — otherwise it would repair the engine
-    # the dashboard no longer reads and leave the one it does as it was.
-    from core import pg_derivation
-
-    if pg_derivation.owns():
-        result = {**result, "postgres": await _derive_postgres_now("manual")}
-    return result
+    The lever every Silver/Gold alert names. Until step 14's S14-15 it ran
+    DuckDB's rebuild first while DuckDB derived, and answered `skipped` for
+    that half since step 13; the Postgres derivation is the whole of it now."""
+    return {"trigger": "manual", "postgres": await _derive_postgres_now("manual")}
 
 
 @router.post("/warehouse/rebuild-silver")
@@ -665,45 +201,15 @@ async def rebuild_silver_from_scratch(
     request: Request,
     admin: dict = Depends(require_admin),
 ):
-    """
-    DROP + CREATE + INSERT silver_orders from bronze. Bypasses MVCC —
-    use when silver has corrupted rows blocking DELETE+INSERT rebuild.
-    """
-    from core import warehouse_cutover
-    from core.duckdb_store import (
-        SILVER_ORDERS_DDL, silver_select_sql, silver_pass2_sql,
-    )
+    """Rebuild Silver from scratch — in Postgres, the derivation run past its
+    floor, which rebuilds `silver.orders` whole (TRUNCATE and both passes in
+    one transaction, `core.pg_silver.rebuild_silver`).
 
-    if not warehouse_cutover.duckdb_derives():
-        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB's Silver is frozen on
-        # purpose, and rebuilding it would hand no tick anything to validate —
-        # the refresh job is not registered. The Postgres half below still runs.
-        result = {"status": "skipped",
-                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
-    else:
-        store = await get_store()
-
-        async with store.connection() as conn:
-            conn.execute("DROP TABLE IF EXISTS silver_orders")
-            conn.execute(SILVER_ORDERS_DDL)
-            conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
-            conn.execute(silver_pass2_sql())
-            count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
-            max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
-
-        logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
-        # DROP/CREATE/INSERT are autocommit statements on purpose (this endpoint
-        # exists to bypass the transactional path when Silver is already
-        # misbehaving), so an INSERT that dies leaves Silver empty. Marking dirty
-        # hands the result to the next refresh tick, which validates it and, if it
-        # is half-done, rebuilds it.
-        await store.mark_warehouse_dirty(None)
-        result = {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
-    from core import pg_derivation
-
-    if pg_derivation.owns():
-        result["postgres"] = await _derive_postgres_now("manual")
-    return result
+    Until step 14's S14-15 this DROPped, re-created and re-filled DuckDB's
+    `silver_orders` first — a lever for DuckDB rows that blocked its
+    DELETE+INSERT rebuild — and answered `skipped` for that half since step
+    13, when DuckDB stopped deriving."""
+    return {"postgres": await _derive_postgres_now("manual")}
 
 
 # POST /api/duckdb/purge-orders was retired by the owner's decision OD-10
@@ -772,19 +278,14 @@ async def _sync_all_buyers(store) -> dict:
     `SYNC_ALL_LOCK_WAIT_S` stops the run; what was written stays written — each
     portion is a complete, mirrored upsert — and a rerun writes it again.
     """
-    from core import pg_buyer_sync_read, pg_buyers_write
+    from core import pg_buyer_sync_read
     from core.keycrm import KeyCRMClient
 
-    # Under chain 4 the portions below land in Postgres alone, so DuckDB's
-    # count stands still and "new buyers" would always read zero. Read once:
-    # the first portion may latch the chain, which only confirms "postgres".
-    in_postgres = pg_buyers_write.mode() == "postgres"
-
+    # The portions below land in Postgres alone (chain 4), so the count is
+    # Postgres's: DuckDB's stands still. Until step 14's S14-11 DuckDB's was
+    # read when the chain's flag said duckdb.
     async def count() -> int:
-        if in_postgres:
-            return await pg_buyer_sync_read.count_buyers()
-        async with store.connection() as conn:
-            return conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+        return await pg_buyer_sync_read.count_buyers()
 
     before = await count()
     async with KeyCRMClient() as client:
@@ -803,22 +304,15 @@ async def _sync_all_buyers(store) -> dict:
             "before_count": before, "after_count": after, "new_buyers": after - before}
 
 
-def _refuse_unreadable_buyers_chain() -> None:
-    """409 when `KS_WRITE_BUYERS` is not understood and no latch overrides it:
-    the buyers have nowhere known to be written, and the step would fetch from
-    KeyCRM first. Asked before anything starts, by both doors into the write."""
-    from core import pg_buyers_write
-
-    if pg_buyers_write.mode() is None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{pg_buyers_write.WRITE_ENV} is not understood, so the buyers "
-                   "have nowhere known to be written; correct it, or remove it for "
-                   "DuckDB, and retry")
+# `_refuse_unreadable_buyers_chain` stood here until step 14's S14-11: a 409
+# when `KS_WRITE_BUYERS` was not understood, asked by both doors into the
+# write before anything started. The flag is not read any more; the buyers
+# are written to Postgres whatever it says.
 
 
-@router.post("/duckdb/sync-buyers")
-@limiter.limit("120/minute")
+@router.post("/sync/sync-buyers")
+@router.post("/duckdb/sync-buyers", include_in_schema=False)
+@limiter.shared_limit("120/minute", scope="sync/sync-buyers")
 async def sync_buyers(
     request: Request,
     limit: int = Query(100, ge=1, le=500, description="Maximum buyers to sync"),
@@ -826,7 +320,6 @@ async def sync_buyers(
     """Manually sync missing buyers from KeyCRM. (Admin enforced at router level.)"""
     from core.sync_service import get_sync_service
 
-    _refuse_unreadable_buyers_chain()
     async with _heavy_lock_or_409("Buyer sync"):
         try:
             sync_service = await get_sync_service()
@@ -854,8 +347,9 @@ async def sync_buyers(
     }
 
 
-@router.post("/duckdb/sync-all-buyers")
-@limiter.limit("1/hour")
+@router.post("/sync/sync-all-buyers")
+@router.post("/duckdb/sync-all-buyers", include_in_schema=False)
+@limiter.shared_limit("1/hour", scope="sync/sync-all-buyers")
 async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)):
     """Start a sync of ALL buyers from KeyCRM, detached. Requires admin.
 
@@ -864,16 +358,14 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
     region for every buyer — which moves `customer_profile.city` and the SMS
     audience's city filter. That is a decision, not a test.
 
-    Answers at once and runs in the background, like /mirror/backfill/orders:
-    the fetch alone takes minutes, and a request held that long was answered
-    504 by the app's own 30 s timeout while the handler kept writing behind it,
+    Answers at once and runs in the background: the fetch alone takes
+    minutes, and a request held that long was answered 504 by the app's own
+    30 s timeout while the handler kept writing behind it,
     with its result thrown away. The outcome is logged as `Full buyer sync:`.
     See `_sync_all_buyers` for what one run does.
     """
     if any(t.get_name() == "sync_all_buyers" and not t.done() for t in _BACKGROUND_TASKS):
         raise HTTPException(status_code=409, detail="A full buyer sync is already running")
-    # Before "started", not in the log afterwards: every portion would raise.
-    _refuse_unreadable_buyers_chain()
 
     store = await get_store()
 
@@ -900,8 +392,8 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
 # it reads "all synced" beside a full `silver.orders`, and chain 4 freezes the
 # third table too. The number that mattered, the buyers orders name and nobody
 # has fetched, is what the buyer step's own selection
-# (`get_missing_buyer_ids`, KS_READ_BUYER_SYNC) computes from Postgres; DuckDB's
-# raw counts stay at GET /api/duckdb/stats.
+# (`get_missing_buyer_ids`, KS_READ_BUYER_SYNC) computes from Postgres. DuckDB's
+# raw counts stayed at GET /api/duckdb/stats until step 14's S14-17.
 
 
 # ─── Jobs & Sync ───────────────────────────────────────────────────────────────
@@ -1022,7 +514,7 @@ async def list_managers(request: Request, admin: dict = Depends(require_admin)):
     # is FALSE for them, which is not the same as unclassified — and labelled
     # ₴15.5M of wholesale as `other` on the very screen meant to tell the two
     # apart. There is one CASE for this, it lives in Silver, and this reports
-    # its output — from whichever Silver `KS_READ_SILVER` names.
+    # its output, from Postgres's Silver.
     rows = await store.get_manager_sales_365d()
 
     revenue: dict = {}
@@ -1075,18 +567,12 @@ async def set_manager_retail_status(
     year's reports on the next refresh. Backdating is still available, but it
     is now something you ask for.
     """
-    # Chain 5 (`core/pg_managers_write.py`). A `KS_WRITE_MANAGERS` nobody can
-    # read writes neither store — the writer refuses and the replica stands
-    # down — so it is refused here before anything is read: 409, the variable
-    # is the thing to fix. Off DuckDB, a Postgres failure is a 503 rather than
-    # a 500: the decision was not stored, and nothing fell back to DuckDB.
+    validate_db_int(manager_id, "manager_id", allow_none=False)
+    # Chain 5 (`core/pg_managers_write.py`): a Postgres failure is a 503 rather
+    # than a 500 — the decision was not stored, and nothing fell back to
+    # DuckDB. Until step 14's S14-11 a `KS_WRITE_MANAGERS` nobody could read
+    # was a 409 here, and a chain on DuckDB let the error through as a 500.
     from core import pg_managers_write
-
-    chain_mode = pg_managers_write.mode()
-    if chain_mode is None:
-        raise HTTPException(status_code=409, detail=(
-            f"{pg_managers_write.WRITE_ENV} is not understood, so the "
-            "classification cannot be stored in either store; fix the variable"))
 
     store = await get_store()
     try:
@@ -1116,36 +602,21 @@ async def set_manager_retail_status(
         # field and the kind of value, never the value.
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
-        if chain_mode == "duckdb":
-            raise
         logger.error("Manager %s not classified: Postgres failed under %s: %s",
                      manager_id, pg_managers_write.WRITE_ENV, type(exc).__name__,
                      exc_info=True)
         raise HTTPException(status_code=503, detail=(
             "The classification is written to Postgres, which did not answer; "
             f"nothing was stored ({type(exc).__name__})"))
-    # Step 05. This endpoint is the whole reason the classification cannot be
-    # re-derived on the other side, so Postgres is updated here rather than
-    # waiting for the daily manager sync — otherwise Silver computed in
-    # Postgres would carry yesterday's answer for up to a day.
-    from core.pg_replication import replicate_managers
-
-    replica = await replicate_managers(store)
-    if replica and replica.get("error"):
-        # The classification is stored and the warehouse marked dirty; only
-        # the Postgres copy is behind, until the next manager sync. Said in
-        # the response rather than discovered in the 09:00 digest. A copy
-        # that was skipped — the mirror off, or a write chain owning the
-        # tables (DN-22b) — did not fail, and its reason is in `replica`.
-        logger.warning("Manager %s classified, but the Postgres replica failed: %s",
-                       manager_id, replica.get("error"))
-
+    # Chain 5's writer is the Postgres write, so nothing is copied after it.
+    # Until step 14's S14-13 `replicate_managers` was called here and its
+    # answer returned as `replica` — `{"skipped": "stood down: …"}` ever since
+    # chain 5 owned the two tables; the copy and the key went with it.
     logger.info(
         "Manager %s retail status set to %s from %s by admin %s",
         manager_id, is_retail, effective_from or "today", admin.get("user_id"),
     )
     return {
-        "replica": replica,
         "status": "ok",
         "manager_id": manager_id,
         "is_retail": is_retail,
@@ -1218,7 +689,9 @@ async def reconcile_on_demand(
 # four of the six return statuses, the second's KeyCRM half had raised on every
 # stored order since it was written. The Postgres twin `pg_silver_row_values`
 # asks the same question, on every column, of the store every tab reads — in
-# `dq_integrity_check` (01, 07, 13, 19) under KS_DQ_PG_WAREHOUSE=on.
+# every `dq_integrity_check` run (01, 07, 13, 19). It ran under
+# KS_DQ_PG_WAREHOUSE=on until step 14's S14-14; nothing reads that variable
+# since S14-15.
 
 
 @router.get("/events")
@@ -1252,5 +725,5 @@ async def get_events(
 # GET /api/reconciliation and POST /api/reconciliation/run were retired with the
 # legacy 06:00 job by the owner's decision OD-10 (2026-09-30). The detection is
 # POST /api/reconcile (dq_reconciliation over any window, all three stores);
-# the repair is POST /api/duckdb/refresh-statuses. `reconciliation_log` keeps
+# the repair is POST /api/sync/refresh-statuses. `reconciliation_log` keeps
 # its history in DuckDB and in `app.reconciliation_log`.

@@ -27,10 +27,8 @@ from core.duckdb_store import DuckDBStore
 
 @pytest_asyncio.fixture
 async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "blind.duckdb")
-    await s.connect()
+    s = DuckDBStore()
     yield s
-    await s.close()
 
 
 def _issue(name, severity=Severity.WARN):
@@ -39,8 +37,8 @@ def _issue(name, severity=Severity.WARN):
 
 class TestWhatTheScanCouldNotSee:
     def test_its_conditions_are_unverified(self):
-        assert dq.unverified_conditions(["silver_arc"], []) == [
-            "silver_missing_rows", "silver_orphan_rows", "silver_row_values"]
+        assert dq.unverified_conditions(["inventory_snapshot_continuity"], []) == [
+            "inventory_snapshot_gaps"]
 
     def test_an_unwatched_inventory_calendar_leaves_the_gaps_unverified(self):
         assert dq.unverified_conditions([], [_issue("inventory_continuity_unwatched")]) == [
@@ -49,7 +47,7 @@ class TestWhatTheScanCouldNotSee:
     def test_unwatched_watermarks_leave_the_moved_freshness_unverified(self, monkeypatch):
         """Every chain's watermarks have moved since step 14's S14-00 (a
         constant), so every one of them with a freshness threshold is held."""
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys as stood_down_sync_keys
 
         moved = sorted(f"freshness_{k[len('last_sync_'):]}" for k in stood_down_sync_keys()
                        if k[len("last_sync_"):] in dq.FRESHNESS_THRESHOLDS)
@@ -57,7 +55,7 @@ class TestWhatTheScanCouldNotSee:
         assert dq.unverified_conditions([], [_issue("sync_watermarks_unwatched")]) == moved
 
     def test_a_clean_run_has_nothing_unverified(self):
-        assert dq.unverified_conditions([], [_issue("headline_vs_line_items")]) == []
+        assert dq.unverified_conditions([], [_issue("pg_headline_vs_line_items")]) == []
 
 
 class TestTheResolution:
@@ -72,8 +70,8 @@ class TestTheResolution:
 
     def test_unverified_conditions_are_held_firing(self):
         still = self._still_firing([_issue("integrity_check_raised")],
-                                   unverified=["silver_missing_rows"])
-        assert still == {"silver_missing_rows"}
+                                   unverified=["pg_silver_missing_rows"])
+        assert still == {"pg_silver_missing_rows"}
 
     def test_verified_criticals_still_hold_and_the_rest_resolve(self):
         still = self._still_firing([_issue("fk_orphan_order_products_order_id", Severity.CRITICAL)])

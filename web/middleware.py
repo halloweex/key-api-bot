@@ -29,8 +29,13 @@ logger = get_logger(__name__)
 DEFAULT_REQUEST_TIMEOUT = 30.0
 SLOW_ENDPOINT_TIMEOUT = 300.0  # For heavy analytics endpoints (tune can take minutes)
 
-# Endpoints that get extended timeout
+# Endpoints that get extended timeout. The two sync levers by both their
+# names: `/api/sync/…` since step 14's S14-17, and the `/api/duckdb/…` alias
+# they keep until step 14's final stage — a path left out here is answered 504
+# at 30 s while its handler runs on.
 SLOW_ENDPOINTS = {
+    "/api/sync/resync",
+    "/api/sync/refresh-statuses",
     "/api/duckdb/resync",
     "/api/duckdb/refresh-statuses",
     "/api/goals/recalculate",
@@ -235,3 +240,46 @@ class RequestTimeoutMiddleware(BaseHTTPMiddleware):
                     "correlation_id": get_correlation_id(),
                 }
             )
+
+
+class RejectNulMiddleware:
+    """
+    Answers 400 to an /api/ request carrying a NUL in its path or query string.
+
+    PostgreSQL refuses NUL in text, so no parameter of this API can hold one.
+    One that reached a query failed inside the driver, and the engine routers
+    read that as the store failing: a 503 naming the page and a `read_refused`
+    page, for a request no page sends. Refused here instead, before routing,
+    once for every parameter there is.
+
+    A plain ASGI class rather than BaseHTTPMiddleware: it never looks at a
+    response it lets through, so it should not cost one.
+    """
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Callable, send: Callable) -> None:
+        if scope["type"] == "http" and scope["path"].startswith("/api/"):
+            where = _nul_in(scope)
+            if where:
+                response = JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Validation Error",
+                        "detail": f"{where}: Must not contain a NUL character",
+                    },
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _nul_in(scope: Any) -> str:
+    """Which part of the request holds a NUL, `path` or `query`, or ''."""
+    if "\x00" in scope["path"]:
+        return "path"
+    query = scope.get("query_string") or b""
+    if b"\x00" in query or b"%00" in query:
+        return "query"
+    return ""

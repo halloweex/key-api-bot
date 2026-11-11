@@ -24,6 +24,9 @@ campaign under time pressure. These tests pin which replay shapes survive it:
 
 `record_sms_delivery` is exercised against a real store rather than a mock: the
 binding lives in SQL, and a mock would agree with whatever the test expected.
+The store is Postgres, `/sms`'s only one since step 14's S14-08 (it was
+DuckDB until then; `tests/integration/pg_sms_seed.py`). Skipped without
+`KS_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -31,39 +34,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
 from core.repositories.customers import DlrEventRebound
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import as_tuple, insert, needs_postgres, pg_conn
+
+pytestmark = needs_postgres
 
 
-@pytest.fixture(autouse=True)
-def _sms_on_duckdb(monkeypatch):
-    """This module's engine is DuckDB, as it was before step 14's S14-00 made
-    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
-    from tests.conftest import sms_store_on_duckdb
-
-    sms_store_on_duckdb(monkeypatch)
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(monkeypatch):
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        yield
 
 UTC = timezone.utc
 
 
 async def _store_with_roster(tmp_path: Path) -> DuckDBStore:
     """Two recipients of one campaign, each with the gateway's message id."""
-    store = DuckDBStore(db_path=tmp_path / "dlr.duckdb")
-    await store.connect()
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO sms_campaigns (campaign, ltv_basis, sales_type, "
-            " holdout_pct, criteria) VALUES ('aug', 'revenue', 'retail', 10, '{}')"
-        )
-        for buyer, msg in ((1, "msg-aaa"), (2, "msg-bbb")):
-            conn.execute(
-                "INSERT INTO sms_campaign_members (campaign, buyer_id, phone, "
-                " tier, assignment, orders_at_export, message_id, "
-                " delivery_status) VALUES "
-                f"('aug', {buyer}, '38050000000{buyer}', 'VIP', 'target', 3, "
-                f"'{msg}', 'Accepted')"
-            )
+    store = pg_sms_seed.store(tmp_path, "dlr.duckdb")
+    async with pg_conn() as conn:
+        await insert(conn, "app.sms_campaigns", [dict(
+            campaign="aug", ltv_basis="revenue", sales_type="retail",
+            holdout_pct=10, criteria="{}")])
+        await insert(conn, "app.sms_campaign_members", [
+            dict(campaign="aug", buyer_id=buyer, phone=f"38050000000{buyer}",
+                 tier="VIP", assignment="target", orders_at_export=3,
+                 message_id=msg, delivery_status="Accepted")
+            for buyer, msg in ((1, "msg-aaa"), (2, "msg-bbb"))
+        ])
     return store
 
 
@@ -78,11 +79,11 @@ async def _replay(store, event_id: str, message_id: str, status: str = "DELIVRD"
 
 
 async def _delivered(store, message_id: str):
-    async with store.connection() as conn:
-        return conn.execute(
-            "SELECT delivered, delivery_status FROM sms_campaign_members "
-            "WHERE message_id = ?", [message_id],
-        ).fetchone()
+    async with pg_conn() as conn:
+        return as_tuple(await conn.fetchrow(
+            "SELECT delivered, delivery_status FROM app.sms_campaign_members "
+            "WHERE message_id = $1", message_id,
+        ))
 
 
 class TestTheSupportedReplayShape:
@@ -91,40 +92,31 @@ class TestTheSupportedReplayShape:
     @pytest.mark.asyncio
     async def test_a_message_derived_id_replays_and_replays_again(self, tmp_path):
         store = await _store_with_roster(tmp_path)
-        try:
-            for _attempt in range(2):
-                for msg in ("msg-aaa", "msg-bbb"):
-                    known = await _replay(store, f"replay-{msg}", msg)
-                    assert known is True
+        for _attempt in range(2):
+            for msg in ("msg-aaa", "msg-bbb"):
+                known = await _replay(store, f"replay-{msg}", msg)
+                assert known is True
 
-            assert (await _delivered(store, "msg-aaa"))[0] is True
-            assert (await _delivered(store, "msg-bbb"))[0] is True
-        finally:
-            await store.close()
+        assert (await _delivered(store, "msg-aaa"))[0] is True
+        assert (await _delivered(store, "msg-bbb"))[0] is True
 
     @pytest.mark.asyncio
     async def test_it_survives_the_export_being_reordered(self, tmp_path):
         """The second run sends the same rows in the opposite order, which is
         what happens when someone re-sorts the sheet or filters it down."""
         store = await _store_with_roster(tmp_path)
-        try:
-            for msg in ("msg-aaa", "msg-bbb"):
-                await _replay(store, f"replay-{msg}", msg)
-            for msg in ("msg-bbb", "msg-aaa"):
-                assert await _replay(store, f"replay-{msg}", msg) is True
-        finally:
-            await store.close()
+        for msg in ("msg-aaa", "msg-bbb"):
+            await _replay(store, f"replay-{msg}", msg)
+        for msg in ("msg-bbb", "msg-aaa"):
+            assert await _replay(store, f"replay-{msg}", msg) is True
 
     @pytest.mark.asyncio
     async def test_a_live_callback_afterwards_is_not_refused(self, tmp_path):
         """The gateway's own ids never collide with `replay-` ones, so the
         repair does not spend the event ids real callbacks still need."""
         store = await _store_with_roster(tmp_path)
-        try:
-            await _replay(store, "replay-msg-aaa", "msg-aaa")
-            assert await _replay(store, "gateway-event-1", "msg-aaa") is True
-        finally:
-            await store.close()
+        await _replay(store, "replay-msg-aaa", "msg-aaa")
+        assert await _replay(store, "gateway-event-1", "msg-aaa") is True
 
 
 class TestTheShapeThatBreaks:
@@ -135,18 +127,15 @@ class TestTheShapeThatBreaks:
         self, tmp_path,
     ):
         store = await _store_with_roster(tmp_path)
-        try:
-            for n, msg in enumerate(("msg-aaa", "msg-bbb")):
-                await _replay(store, f"row-{n}", msg)
+        for n, msg in enumerate(("msg-aaa", "msg-bbb")):
+            await _replay(store, f"row-{n}", msg)
 
-            # Same rows, opposite order — `row-0` now names msg-bbb.
-            with pytest.raises(DlrEventRebound) as caught:
-                await _replay(store, "row-0", "msg-bbb")
+        # Same rows, opposite order — `row-0` now names msg-bbb.
+        with pytest.raises(DlrEventRebound) as caught:
+            await _replay(store, "row-0", "msg-bbb")
 
-            assert caught.value.bound_message_id == "msg-aaa"
-            assert caught.value.message_id == "msg-bbb"
-        finally:
-            await store.close()
+        assert caught.value.bound_message_id == "msg-aaa"
+        assert caught.value.message_id == "msg-bbb"
 
 
 class TestTheBindingStillDoesItsJob:
@@ -155,24 +144,18 @@ class TestTheBindingStillDoesItsJob:
     @pytest.mark.asyncio
     async def test_a_captured_pair_cannot_be_repointed(self, tmp_path):
         store = await _store_with_roster(tmp_path)
-        try:
-            await _replay(store, "captured-id", "msg-aaa")
-            with pytest.raises(DlrEventRebound):
-                await _replay(store, "captured-id", "msg-bbb", status="REJECTD")
+        await _replay(store, "captured-id", "msg-aaa")
+        with pytest.raises(DlrEventRebound):
+            await _replay(store, "captured-id", "msg-bbb", status="REJECTD")
 
-            # and the other recipient's state was not touched
-            assert (await _delivered(store, "msg-bbb"))[1] == "Accepted"
-        finally:
-            await store.close()
+        # and the other recipient's state was not touched
+        assert (await _delivered(store, "msg-bbb"))[1] == "Accepted"
 
     @pytest.mark.asyncio
     async def test_an_id_spent_on_an_unknown_message_stays_spent(self, tmp_path):
         """`record_sms_delivery` binds even when the roster does not know the
         message — otherwise an event aimed at nothing stays re-pointable."""
         store = await _store_with_roster(tmp_path)
-        try:
-            assert await _replay(store, "wasted", "msg-not-ours") is False
-            with pytest.raises(DlrEventRebound):
-                await _replay(store, "wasted", "msg-aaa")
-        finally:
-            await store.close()
+        assert await _replay(store, "wasted", "msg-not-ours") is False
+        with pytest.raises(DlrEventRebound):
+            await _replay(store, "wasted", "msg-aaa")

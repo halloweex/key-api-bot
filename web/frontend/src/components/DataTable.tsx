@@ -93,6 +93,8 @@ interface TrProps {
   hover?: boolean
   /** Whole-row dim (e.g. updating in flight). */
   faded?: boolean
+  /** The row every other is read against — a total, "the whole site". */
+  emphasis?: boolean
   /** Pins header tr to top when DataTable stickyHeader is true. */
   sticky?: boolean
   onClick?: (e: MouseEvent<HTMLTableRowElement>) => void
@@ -112,6 +114,7 @@ export const Tr = memo(function Tr({
   header = false,
   hover = true,
   faded = false,
+  emphasis = false,
   sticky = false,
   onClick,
   variant = 'feature',
@@ -119,14 +122,15 @@ export const Tr = memo(function Tr({
   const base = header
     ? `${headerRowBase} ${headerRowVariant[variant]}`
     : 'border-b border-slate-100 transition-colors'
-  const interactive = !header && hover ? 'hover:bg-slate-50/50' : ''
+  const interactive = !header && hover && !emphasis ? 'hover:bg-slate-50/50' : ''
   const stickyClass = sticky ? 'sticky top-0 z-10 bg-white' : ''
   const opacity = faded ? 'opacity-50' : ''
+  const tint = emphasis ? 'bg-blue-50/70' : ''
 
   return (
     <tr
       onClick={onClick}
-      className={`${base} ${interactive} ${stickyClass} ${opacity}`}
+      className={`${base} ${interactive} ${stickyClass} ${opacity} ${tint}`}
     >
       {children}
     </tr>

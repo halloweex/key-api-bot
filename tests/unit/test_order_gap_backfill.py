@@ -5,145 +5,85 @@ and highest id is an order we never stored. 1 660 holes existed as of 2026-08,
 and a full-history comparison confirmed 1 616 of them were real orders — the
 other 44 are gone upstream and must be remembered, or the job asks for them
 again every hour forever.
+
+Proved on Postgres since step 14's S14-09, which deleted the DuckDB bodies
+these tests used to pin: `find_order_id_gaps` is `pg_orders_read.order_id_gaps`
+and `record_backfill_misses` is chain 3's writer of `app.order_backfill_misses`
+(`tests/pg_orders_seed.py`).
 """
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from tests.pg_orders_seed import insert_orders, needs_pg, pg_orders  # noqa: F401 — the fixture
+
+pytestmark = needs_pg
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. The
-    gap scan's and the misses ledger's semantics are pinned here on
-    DuckDB's implementation, the Postgres one's in
-    tests/integration/test_orders_chain_writer.py; S14-09 decides what of
-    this to carry over. So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_orders_write)
-
-
-async def _store(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-    await store.connect()
-    return store
-
-
-def _insert(conn, *ids):
-    for oid in ids:
-        conn.execute("""
-            INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at)
-            VALUES (?, 1, 12, 100.0, '2026-06-10 12:00:00+03')
-        """, [oid])
+async def _misses(pool):
+    async with pool.acquire() as conn:
+        return [(r["order_id"], r["reason"]) for r in await conn.fetch(
+            "SELECT order_id, reason FROM app.order_backfill_misses ORDER BY order_id")]
 
 
 class TestFindOrderIdGaps:
     @pytest.mark.asyncio
-    async def test_finds_the_holes_between_our_lowest_and_highest_id(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert(conn, 1, 4, 9, 10)
-
-            assert await store.find_order_id_gaps() == [2, 3, 5, 6, 7, 8]
-        finally:
-            await store.close()
+    async def test_finds_the_holes_between_our_lowest_and_highest_id(self, pg_orders):
+        store, pool = pg_orders
+        await insert_orders(pool, 1, 4, 9, 10)
+        assert await store.find_order_id_gaps() == [2, 3, 5, 6, 7, 8]
 
     @pytest.mark.asyncio
-    async def test_a_dense_sequence_has_nothing_to_do(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert(conn, 1, 2, 3)
-
-            assert await store.find_order_id_gaps() == []
-        finally:
-            await store.close()
+    async def test_a_dense_sequence_has_nothing_to_do(self, pg_orders):
+        store, pool = pg_orders
+        await insert_orders(pool, 1, 2, 3)
+        assert await store.find_order_id_gaps() == []
 
     @pytest.mark.asyncio
-    async def test_an_empty_table_does_not_explode(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            assert await store.find_order_id_gaps() == []
-        finally:
-            await store.close()
+    async def test_an_empty_table_does_not_explode(self, pg_orders):
+        store, _pool = pg_orders
+        assert await store.find_order_id_gaps() == []
 
     @pytest.mark.asyncio
-    async def test_the_batch_is_bounded(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert(conn, 1, 1000)
-
-            gaps = await store.find_order_id_gaps(limit=5)
-            assert gaps == [2, 3, 4, 5, 6]
-        finally:
-            await store.close()
+    async def test_the_batch_is_bounded(self, pg_orders):
+        store, pool = pg_orders
+        await insert_orders(pool, 1, 1000)
+        assert await store.find_order_id_gaps(limit=5) == [2, 3, 4, 5, 6]
 
     @pytest.mark.asyncio
-    async def test_ids_absent_upstream_are_not_offered_again(self, tmp_path):
+    async def test_ids_absent_upstream_are_not_offered_again(self, pg_orders):
         """Otherwise the job asks KeyCRM for the same 404s every hour."""
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert(conn, 1, 5)
-            assert await store.find_order_id_gaps() == [2, 3, 4]
+        store, pool = pg_orders
+        await insert_orders(pool, 1, 5)
+        assert await store.find_order_id_gaps() == [2, 3, 4]
 
-            await store.record_backfill_misses({3: "not found in KeyCRM"})
+        await store.record_backfill_misses({3: "not found in KeyCRM"})
 
-            assert await store.find_order_id_gaps() == [2, 4]
-        finally:
-            await store.close()
+        assert await store.find_order_id_gaps() == [2, 4]
 
     @pytest.mark.asyncio
-    async def test_the_list_drains_to_empty(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert(conn, 1, 5)
-                _insert(conn, 2, 3, 4)  # repaired
-            assert await store.find_order_id_gaps() == []
-        finally:
-            await store.close()
+    async def test_the_list_drains_to_empty(self, pg_orders):
+        store, pool = pg_orders
+        await insert_orders(pool, 1, 5)
+        await insert_orders(pool, 2, 3, 4)  # repaired
+        assert await store.find_order_id_gaps() == []
 
 
 class TestRecordBackfillMisses:
     @pytest.mark.asyncio
-    async def test_records_and_is_idempotent(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            assert await store.record_backfill_misses({7: "not found"}) == 1
-            assert await store.record_backfill_misses({7: "not found again"}) == 1
-
-            async with store.connection() as conn:
-                rows = conn.execute(
-                    "SELECT order_id, reason FROM order_backfill_misses"
-                ).fetchall()
-            assert rows == [(7, "not found again")]
-        finally:
-            await store.close()
+    async def test_records_and_is_idempotent(self, pg_orders):
+        store, pool = pg_orders
+        assert await store.record_backfill_misses({7: "not found"}) == 1
+        assert await store.record_backfill_misses({7: "not found again"}) == 1
+        assert await _misses(pool) == [(7, "not found again")]
 
     @pytest.mark.asyncio
-    async def test_nothing_to_record_is_a_no_op(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            assert await store.record_backfill_misses({}) == 0
-        finally:
-            await store.close()
+    async def test_nothing_to_record_is_a_no_op(self, pg_orders):
+        store, pool = pg_orders
+        assert await store.record_backfill_misses({}) == 0
+        assert await _misses(pool) == []
 
     @pytest.mark.asyncio
-    async def test_a_long_reason_is_truncated_not_rejected(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            await store.record_backfill_misses({1: "x" * 500})
-
-            async with store.connection() as conn:
-                reason = conn.execute(
-                    "SELECT reason FROM order_backfill_misses WHERE order_id = 1"
-                ).fetchone()[0]
-            assert len(reason) == 200
-        finally:
-            await store.close()
+    async def test_a_long_reason_is_truncated_not_rejected(self, pg_orders):
+        store, pool = pg_orders
+        await store.record_backfill_misses({1: "x" * 500})
+        ((_oid, reason),) = await _misses(pool)
+        assert len(reason) == 200

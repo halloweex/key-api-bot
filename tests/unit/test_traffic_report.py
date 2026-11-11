@@ -9,10 +9,12 @@ attribution, which looks exactly like a week where nothing came from anywhere.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import date, timedelta
 
 import pytest
+import pytest_asyncio
 
 from core.traffic_report import (
     CAMPAIGN_FLOOR,
@@ -25,20 +27,41 @@ from core.traffic_report import (
     format_report,
     format_report_rich,
 )
+from tests.integration.pg_tab_seed import needs_postgres
 from tests.unit.test_rich_report import SUPPORTED_TAGS
 
 
 @pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the report and its delivery, not where the send
-    ledger lives, and it was written against DuckDB. So this module keeps
-    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
-    until their DuckDB branches go."""
-    from core import pg_weekly_ledger_write, pg_traffic_ledger_write
-    from tests.conftest import route_chains_to_duckdb
+def ledger(monkeypatch):
+    """The two send ledgers' Postgres calls (`mark_sent`, `find_sent`) over a
+    dict keyed `(chain, week_start, sales_type)`. Until step 14's S14-10 this
+    module kept the ledger in a DuckDB store under the test; the job goes
+    through the real door, `core.report_ledger`, either way — the ledger's
+    own proof is `tests/unit/test_report_ledger.py` and
+    `tests/integration/test_report_ledger_pg.py`."""
+    from core import pg_traffic_ledger_write, pg_weekly_ledger_write
 
-    route_chains_to_duckdb(monkeypatch, pg_weekly_ledger_write, pg_traffic_ledger_write)
+    rows = {}
+    for chain in (pg_weekly_ledger_write, pg_traffic_ledger_write):
+        async def mark_sent(week_start, sales_type, revenue, orders, sent_at,
+                            chain=chain):
+            rows[(chain.CHAIN, week_start, sales_type)] = dict(
+                week_start=week_start, sales_type=sales_type, revenue=revenue,
+                orders=orders, sent_at=sent_at)
+
+        async def find_sent(week_start, sales_type, chain=chain):
+            return rows.get((chain.CHAIN, week_start, sales_type))
+
+        monkeypatch.setattr(chain, "mark_sent", mark_sent)
+        monkeypatch.setattr(chain, "find_sent", find_sent)
+    return rows
+
+
+async def _traffic_sent(week_start) -> bool:
+    """The gate's answer for the week, through the door the job asks."""
+    from core import report_ledger
+
+    return await report_ledger.already_sent(report_ledger.TRAFFIC, week_start, "retail")
 
 
 def _analytics(scale=1.0, unknown_orders=40, totals_orders=300):
@@ -369,39 +392,66 @@ class TestTheFirstWeekFloor:
 
 # ─── The scheduled job ──────────────────────────────────────────────────────
 
-async def _duck_store(tmp_path):
+async def _job_store(tmp_path):
+    """The store the job is handed: never connected, its DuckDB connection a
+    trap. The report's two reads are `FakeStore`'s (`_wire`), the gate's Gold
+    is Postgres's, and the ledger is `ledger`'s dict."""
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "traffic.duckdb")
-    await store.connect()
+    store = DuckDBStore()
+
+    def _no_duckdb(*_a, **_k):
+        raise AssertionError("the traffic report reached for DuckDB")
+
+    store.connection = _no_duckdb
     return store
 
 
-async def _seed_gold(store, complete=True):
+async def _seed_gold(_store, complete=True):
     """Enough Gold for the readiness gate to pass — the job asks the warehouse
-    how far it has got, not how much traffic there was."""
+    how far it has got, not how much traffic there was.
+
+    Postgres' Gold, roll-up rows, through the pool `core.pg.get_pool` answers
+    with (`_warehouse_in_postgres`): the gate reads Postgres alone since step
+    14's S14-07 (`core.weekly_report.warehouse_max_date`). The store argument
+    is the job's (`_job_store`), and is not written here."""
     from datetime import datetime, timedelta
 
+    from core.pg import get_pool
     from core.scheduler import SCHEDULER_TIMEZONE
     from core.weekly_report import last_complete_week
 
     today = datetime.now(SCHEDULER_TIMEZONE).date()
     start, end = last_complete_week(today)
     last = end if complete else end - timedelta(days=3)
-    async with store.connection() as conn:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         day = start
         while day <= last:
-            conn.execute(
-                "INSERT OR REPLACE INTO gold_daily_revenue "
-                "(date, sales_type, revenue, orders_count) VALUES (?, 'retail', ?, ?)",
-                [day, 5_000, 2],
-            )
+            await conn.execute(
+                "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+                " orders_count, unique_customers, new_customers, returning_customers,"
+                " returns_count, returns_revenue, avg_order_value)"
+                " VALUES ($1, 'retail', NULL, $2, $3, 0, 0, 0, 0, 0, 0)",
+                day, 5_000, 2)
             day += timedelta(days=1)
     return start
 
 
+@needs_postgres
 class TestTheScheduledJob:
     ADMINS = [111, 222]
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _warehouse_in_postgres(self, monkeypatch):
+        """An empty Postgres warehouse for `_seed_gold` to fill."""
+        from tests.integration.pg_tab_seed import tab_in_postgres
+
+        async def _nothing(conn, pool):
+            pass
+
+        async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _nothing):
+            yield
 
     def _wire(self, monkeypatch, store, tmp_path, *, analytics=None, campaigns=None):
         import importlib
@@ -451,26 +501,22 @@ class TestTheScheduledJob:
     ):
         """Checked before the ledger, because this is not a delivery
         question: nothing about that week changes by tomorrow."""
-        from core.traffic_report import FIRST_WEEK_ENV, already_sent
+        from core.traffic_report import FIRST_WEEK_ENV
 
-        store = await _duck_store(tmp_path)
-        try:
-            week_start = await _seed_gold(store)
-            monkeypatch.setenv(
-                FIRST_WEEK_ENV, (week_start + timedelta(days=7)).isoformat())
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
+        store = await _job_store(tmp_path)
+        week_start = await _seed_gold(store)
+        monkeypatch.setenv(
+            FIRST_WEEK_ENV, (week_start + timedelta(days=7)).isoformat())
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
 
-            result = await scheduler._run_traffic_report()
+        result = await scheduler._run_traffic_report()
 
-            assert result["sent"] is False
-            assert result["reason"] == "before_first_week"
-            assert sent["rich"] == [] and sent["text"] == []
-            async with store.connection() as conn:
-                assert not already_sent(conn, week_start, "retail"), (
-                    "skipping a week must not record it as delivered")
-        finally:
-            await store.close()
+        assert result["sent"] is False
+        assert result["reason"] == "before_first_week"
+        assert sent["rich"] == [] and sent["text"] == []
+        assert not await _traffic_sent(week_start), (
+            "skipping a week must not record it as delivered")
 
     @pytest.mark.asyncio
     async def test_the_floor_week_itself_is_sent(self, tmp_path, monkeypatch):
@@ -478,32 +524,26 @@ class TestTheScheduledJob:
         that starts on the 7th is the first one delivered."""
         from core.traffic_report import FIRST_WEEK_ENV
 
-        store = await _duck_store(tmp_path)
-        try:
-            week_start = await _seed_gold(store)
-            monkeypatch.setenv(FIRST_WEEK_ENV, week_start.isoformat())
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
+        store = await _job_store(tmp_path)
+        week_start = await _seed_gold(store)
+        monkeypatch.setenv(FIRST_WEEK_ENV, week_start.isoformat())
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
 
-            result = await scheduler._run_traffic_report()
+        result = await scheduler._run_traffic_report()
 
-            assert result["sent"] is True
-            assert len(sent["rich"]) == 1
-        finally:
-            await store.close()
+        assert result["sent"] is True
+        assert len(sent["rich"]) == 1
 
     @pytest.mark.asyncio
     async def test_it_waits_while_the_warehouse_is_behind(self, tmp_path, monkeypatch):
-        store = await _duck_store(tmp_path)
-        try:
-            await _seed_gold(store, complete=False)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
-            result = await scheduler._run_traffic_report()
-            assert result["sent"] is False and result["reason"] == "warehouse_behind"
-            assert sent["rich"] == [] and sent["text"] == []
-        finally:
-            await store.close()
+        store = await _job_store(tmp_path)
+        await _seed_gold(store, complete=False)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
+        result = await scheduler._run_traffic_report()
+        assert result["sent"] is False and result["reason"] == "warehouse_behind"
+        assert sent["rich"] == [] and sent["text"] == []
 
     @pytest.mark.asyncio
     async def test_orders_with_no_attribution_is_a_missing_read_not_a_finding(
@@ -516,52 +556,43 @@ class TestTheScheduledJob:
             return {"totals": {"orders": 300, "revenue": 700_000},
                     "summary": {}, "by_platform": {}}
 
-        store = await _duck_store(tmp_path)
-        try:
-            await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path, analytics=analytics)
-            sent = self._capture(monkeypatch)
-            result = await scheduler._run_traffic_report()
-            assert result["sent"] is False and result["reason"] == "no_attribution"
-            assert sent["rich"] == [] and sent["text"] == []
-        finally:
-            await store.close()
+        store = await _job_store(tmp_path)
+        await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path, analytics=analytics)
+        sent = self._capture(monkeypatch)
+        result = await scheduler._run_traffic_report()
+        assert result["sent"] is False and result["reason"] == "no_attribution"
+        assert sent["rich"] == [] and sent["text"] == []
 
     @pytest.mark.asyncio
     async def test_it_delivers_once_and_then_stays_quiet(self, tmp_path, monkeypatch):
-        store = await _duck_store(tmp_path)
-        try:
-            week_start = await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
+        store = await _job_store(tmp_path)
+        week_start = await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
 
-            first = await scheduler._run_traffic_report()
-            assert first["sent"] is True and first["rich"] is True
-            assert first["week"] == week_start.isoformat()
-            assert len(sent["rich"]) == 1 and sent["text"] == []
+        first = await scheduler._run_traffic_report()
+        assert first["sent"] is True and first["rich"] is True
+        assert first["week"] == week_start.isoformat()
+        assert len(sent["rich"]) == 1 and sent["text"] == []
 
-            second = await scheduler._run_traffic_report()
-            assert second == {"sent": False, "reason": "already_sent",
-                              "week": week_start.isoformat()}
-            assert len(sent["rich"]) == 1, "the second tick must send nothing"
-        finally:
-            await store.close()
+        second = await scheduler._run_traffic_report()
+        assert second == {"sent": False, "reason": "already_sent",
+                          "week": week_start.isoformat()}
+        assert len(sent["rich"]) == 1, "the second tick must send nothing"
 
     @pytest.mark.asyncio
     async def test_it_writes_only_to_admins(self, tmp_path, monkeypatch):
         """The tab is visible to seventeen of eighteen dashboard accounts;
         this report is not."""
         monkeypatch.delenv(RECIPIENTS_ENV, raising=False)
-        store = await _duck_store(tmp_path)
-        try:
-            await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
-            await scheduler._run_traffic_report()
-            written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
-            assert written_to == set(self.ADMINS)
-        finally:
-            await store.close()
+        store = await _job_store(tmp_path)
+        await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
+        await scheduler._run_traffic_report()
+        written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
+        assert written_to == set(self.ADMINS)
 
     @pytest.mark.asyncio
     async def test_a_listed_reader_is_written_to(self, tmp_path, monkeypatch):
@@ -569,18 +600,15 @@ class TestTheScheduledJob:
         variable reaching an actual send, which is the half that a unit test
         of `audience()` cannot show."""
         monkeypatch.setenv(RECIPIENTS_ENV, "999")
-        store = await _duck_store(tmp_path)
-        try:
-            await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
-            result = await scheduler._run_traffic_report()
+        store = await _job_store(tmp_path)
+        await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
+        result = await scheduler._run_traffic_report()
 
-            written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
-            assert written_to == set(self.ADMINS) | {999}
-            assert result["recipients"] == len(self.ADMINS) + 1
-        finally:
-            await store.close()
+        written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
+        assert written_to == set(self.ADMINS) | {999}
+        assert result["recipients"] == len(self.ADMINS) + 1
 
     @pytest.mark.asyncio
     async def test_a_listed_reader_gets_their_own_language(
@@ -592,22 +620,19 @@ class TestTheScheduledJob:
         handed the admins' English.
         """
         monkeypatch.setenv(RECIPIENTS_ENV, "999")
-        store = await _duck_store(tmp_path)
-        try:
-            await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
-            await scheduler._run_traffic_report()
+        store = await _job_store(tmp_path)
+        await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
+        await scheduler._run_traffic_report()
 
-            assert len(sent["rich"]) == 2, "one send per language, not per reader"
-            by_reader = {uid: call["html"]
-                         for call in sent["rich"] for uid in call["chat_ids"]}
-            # Headings are upper-cased by the house style, so compare folded.
-            assert by_reader[999] != by_reader[self.ADMINS[0]]
-            assert "traffic report" in by_reader[self.ADMINS[0]].lower()
-            assert "звіт по трафіку" in by_reader[999].lower()
-        finally:
-            await store.close()
+        assert len(sent["rich"]) == 2, "one send per language, not per reader"
+        by_reader = {uid: call["html"]
+                     for call in sent["rich"] for uid in call["chat_ids"]}
+        # Headings are upper-cased by the house style, so compare folded.
+        assert by_reader[999] != by_reader[self.ADMINS[0]]
+        assert "traffic report" in by_reader[self.ADMINS[0]].lower()
+        assert "звіт по трафіку" in by_reader[999].lower()
 
     @pytest.mark.asyncio
     async def test_a_malformed_list_still_delivers_to_the_admins(
@@ -616,34 +641,28 @@ class TestTheScheduledJob:
         """One bad character in a variable nobody validates must not be the
         reason a Monday report does not go out."""
         monkeypatch.setenv(RECIPIENTS_ENV, "oops")
-        store = await _duck_store(tmp_path)
-        try:
-            await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch)
-            result = await scheduler._run_traffic_report()
+        store = await _job_store(tmp_path)
+        await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch)
+        result = await scheduler._run_traffic_report()
 
-            assert result["sent"] is True
-            written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
-            assert written_to == set(self.ADMINS)
-        finally:
-            await store.close()
+        assert result["sent"] is True
+        written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
+        assert written_to == set(self.ADMINS)
 
     @pytest.mark.asyncio
     async def test_a_rejected_rich_message_falls_back_to_text(
         self, tmp_path, monkeypatch,
     ):
-        store = await _duck_store(tmp_path)
-        try:
-            await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            sent = self._capture(monkeypatch, rich=0)
-            result = await scheduler._run_traffic_report()
-            assert result["sent"] is True and result["rich"] is False
-            assert len(sent["text"]) == 1
-            assert "Traffic report" in sent["text"][0]["body"] or len(sent["text"]) == 1
-        finally:
-            await store.close()
+        store = await _job_store(tmp_path)
+        await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        sent = self._capture(monkeypatch, rich=0)
+        result = await scheduler._run_traffic_report()
+        assert result["sent"] is True and result["rich"] is False
+        assert len(sent["text"]) == 1
+        assert "Traffic report" in sent["text"][0]["body"] or len(sent["text"]) == 1
 
     @pytest.mark.asyncio
     async def test_a_send_that_reached_nobody_leaves_the_week_pending(
@@ -651,16 +670,10 @@ class TestTheScheduledJob:
     ):
         """Nobody heard it, so it did not happen: tomorrow's tick tries
         again rather than dropping the week."""
-        from core.traffic_report import already_sent
-
-        store = await _duck_store(tmp_path)
-        try:
-            week_start = await _seed_gold(store)
-            scheduler = self._wire(monkeypatch, store, tmp_path)
-            self._capture(monkeypatch, rich=0, text=0)
-            result = await scheduler._run_traffic_report()
-            assert result["sent"] is False and result["reason"] == "not_delivered"
-            async with store.connection() as conn:
-                assert not already_sent(conn, week_start, "retail")
-        finally:
-            await store.close()
+        store = await _job_store(tmp_path)
+        week_start = await _seed_gold(store)
+        scheduler = self._wire(monkeypatch, store, tmp_path)
+        self._capture(monkeypatch, rich=0, text=0)
+        result = await scheduler._run_traffic_report()
+        assert result["sent"] is False and result["reason"] == "not_delivered"
+        assert not await _traffic_sent(week_start)

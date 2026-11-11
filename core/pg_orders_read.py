@@ -11,10 +11,11 @@ orders every two hours, and the backfill-miss ledger — the one table that
 stops a repair asking KeyCRM for what it cannot supply — would be read where
 the chain no longer writes it.
 
-So each DuckDB method routes to the function here at its first statement
-(`duckdb_store._orders_in_postgres()`, which is `pg_orders_write.writes_postgres()`),
+So each DuckDB method routed to the function here at its first statement
+(`duckdb_store._orders_in_postgres()`, which was `pg_orders_write.writes_postgres()`),
 the transliteration of its own SQL: same tables, same window, same order, same
-limit.
+limit. Since step 14's S14-09 the store's methods are these alone: the answer
+was a constant since S14-00, and the DuckDB bodies went.
 
 These raise. A selection that could not be made is not an empty one: the
 callers are repair jobs, each with its own failure handling, and "nothing to
@@ -135,3 +136,26 @@ async def null_comment_count() -> int:
     async with pool.acquire() as conn:
         return int(await conn.fetchval(
             "SELECT count(*) FROM bronze.orders WHERE manager_comment IS NULL"))
+
+
+async def postgres_now() -> datetime:
+    """Postgres' own clock, the one `bronze.orders.mirrored_at` is stamped
+    with — what `repair_orders` reads before it fetches (L1-12)."""
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT now()")
+
+
+async def rewritten_since(ids: Iterable[int], since: datetime) -> List[int]:
+    """Which of `ids` some writer stored after `since`: a payload fetched
+    before then is older than what Postgres holds, and written under force it
+    would put the older state back (L1-12)."""
+    wanted = [int(i) for i in ids]
+    if not wanted:
+        return []
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM bronze.orders WHERE id = ANY($1::int[]) "
+            "AND mirrored_at > $2 ORDER BY id", wanted, since)
+    return [int(r["id"]) for r in rows]

@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from core.keycrm import get_async_client
 from core.duckdb_store import get_store, DuckDBStore
-from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError
+from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError, KeyCRMTruncated
 from core.observability import get_logger, correlation_context
 from core.events import (
     events,
@@ -30,12 +30,7 @@ from core.events import (
     emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
-from core.pg_landing import (
-    mirror_categories,
-    mirror_expenses,
-    mirror_products,
-)
-from core import duckdb_switch, read_fallback, warehouse_cutover
+from core import read_fallback
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -72,21 +67,6 @@ INVENTORY_RETRY_AFTER_S = 600
 
 # The offers and stocks steps' cadence, as the DuckDB path spells it.
 INVENTORY_STEP_EVERY_S = 3600
-
-
-def _inventory_writes_postgres() -> bool:
-    """Whether chain 1's half of the tick takes the Postgres path.
-
-    A `KS_WRITE_INVENTORY` nobody understands is not Postgres: it takes the
-    path it always took, where the chain's own watermark read raises on it
-    (DN-01) — a typo in that variable must still stop that chain loudly.
-    """
-    from core.pg_inventory_write import writes_postgres
-
-    try:
-        return writes_postgres()
-    except RuntimeError:
-        return False
 
 
 class InventoryStepState:
@@ -126,36 +106,62 @@ class InventoryStepState:
         }
 
 
-# ─── Chain 3's half of the tick, once Postgres writes the orders ─────────────
+# ─── Chain 3's half of the tick: the orders, written to Postgres ─────────────
 #
-# Under KS_WRITE_ORDERS=postgres the order step writes Postgres and
-# `core.pg_orders_write` raises by design (OD-13 (a)): there is no DuckDB to
-# fall back to, and an order written nowhere must be loud. But the tick caught
-# only KeyCRM errors, so a Postgres error in the order step would have left
-# `incremental_sync` altogether and cost products, managers, buyers and the
-# inventory steps behind it — a chain's fault must stop that chain and nothing
-# else (DN-01, OD-18 (a)). So on that path a failure that is not KeyCRM's is
-# recorded (`OrdersStepState`, published on /api/health and judged by the
-# canary as `orders_sync_failing`), `last_sync_orders` is left where it was,
-# and the tick goes on. KeyCRM's own errors still end the tick, as they always
-# have. No retry window: the watermark is read from Postgres before anything is
-# fetched, so with Postgres away the step costs KeyCRM nothing, and the next
-# tick's 24-hour window covers everything the failure held back.
+# The order step writes Postgres and `core.pg_orders_write` raises by design
+# (OD-13 (a)): there is no DuckDB to fall back to, and an order written nowhere
+# must be loud. But the tick caught only KeyCRM errors, so a Postgres error in
+# the order step would have left `incremental_sync` altogether and cost
+# products, managers, buyers and the inventory steps behind it — a chain's
+# fault must stop that chain and nothing else (DN-01, OD-18 (a)). So a failure
+# that is not KeyCRM's is recorded (`OrdersStepState`, published on /api/health
+# and judged by the canary as `orders_sync_failing`), `last_sync_orders` is
+# left where it was, and the tick goes on. KeyCRM's own errors still end the
+# tick, as they always have. No retry window: the watermark is read from
+# Postgres before anything is fetched, so with Postgres away the step costs
+# KeyCRM nothing, and the next tick's 24-hour window covers everything the
+# failure held back.
+#
+# Until step 14's S14-09 all of this held only while chain 3 was off DuckDB
+# (`_orders_off_duckdb`, a constant since S14-00), and the DuckDB path let
+# the failure leave the tick; S14-09 deleted that path.
 
 
 # How long the tick waits to stamp `bronze.orders` failing in Postgres, and
 # for `last_sync_orders` out of it.
 ORDERS_FAILURE_RECORD_TIMEOUT_S = 5
+
+# The narrowest window `_fetch_order_window` splits a truncated listing into
+# before it gives up (L1-08): 5 000 orders in an hour is not a shop this size.
+ORDER_WINDOW_MIN_SPAN = timedelta(hours=1)
+
+
+def _window_bound(value: str, *, end_of_day: bool) -> datetime:
+    """A KeyCRM date filter's bound as a datetime. A date alone is widened to
+    the whole day at the end, so a split never asks for less than the window
+    it replaces (a superset is merged away by id; a subset loses orders)."""
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        day = datetime.strptime(value.strip(), "%Y-%m-%d")
+        return day.replace(hour=23, minute=59, second=59) if end_of_day else day
+
+# The step's own statement for the healthy tick after a failure (L4-03). Only
+# a write of an order zeroes `failures_since_ok` (`pg_landing._WATERMARK_OK`),
+# and a healthy tick that finds nothing changed writes nothing — so one failed
+# step left `bronze.orders` failing, and the canary paging
+# `mirror_failing:bronze.orders`, until an order next changed (overnight, hours).
+# `last_ok_at` is not moved: it keeps meaning "the last write", which
+# `mirror_stale` and the soak's S0 judge. `WATERMARK_OK_SQL` is the writers'
+# and stays theirs.
+ORDERS_FAILURE_CLEAR_SQL = """
+UPDATE meta.mirror_state
+   SET failures_since_ok = 0,
+       last_error        = NULL,
+       last_attempted_at = now()
+ WHERE table_name = $1 AND failures_since_ok > 0
+"""
 ORDERS_WATERMARK_TIMEOUT_S = 10
-
-
-def _orders_off_duckdb() -> bool:
-    """Whether chain 3's writes do NOT go to DuckDB: to Postgres, or nowhere
-    anybody can name because `KS_WRITE_ORDERS` is not understood. Never
-    raises — the registry's one answer (`pg_orders_write.mode`)."""
-    from core import pg_orders_write
-
-    return pg_orders_write.mode() != "duckdb"
 
 
 class OrdersStepState:
@@ -260,43 +266,21 @@ def _get_max_updated_at(orders: list) -> Optional[datetime]:
     return max_updated
 
 
-def _expense_types_off_duckdb() -> bool:
-    """Whether chain 6a's writes do NOT go to DuckDB: to Postgres, or nowhere
-    anybody can name because `KS_WRITE_EXPENSE_TYPES` is not understood.
-
-    Read from `core.write_chains.chain_modes()` — the answer the writer, the
-    sync key, the shipper and the comparison all read — and never raises, so
-    `full_sync` can ask it inside an `except` without raising a second time.
-    """
-    from core import pg_expense_types_write
-    from core.write_chains import chain_modes
-
-    return chain_modes()[pg_expense_types_write.CHAIN]["mode"] != "duckdb"
-
-
 # ─── Chain 6's catalogue, contained ──────────────────────────────────────────
 #
-# The products watermark is read at the TOP of the incremental tick, before
-# orders, and the tick catches only KeyCRM errors. Under KS_WRITE_CATALOGUE
-# that getter reads Postgres, and raises on a flag nobody can read — so a typo
-# or a Postgres outage there would stop order intake once a minute (DN-01's
-# class, found designing chain 6). Off DuckDB the read moves into the hourly
-# products step itself, bounded like the buyers' (DN-05a), and a failure is
-# recorded and costs that step alone; the next attempt waits ten minutes,
-# during which neither KeyCRM nor Postgres is asked anything.
+# The products watermark was read at the TOP of the incremental tick, before
+# orders, and the tick catches only KeyCRM errors. Under chain 6 that getter
+# reads Postgres — so a Postgres outage there would stop order intake once a
+# minute (DN-01's class, found designing chain 6). So the read lives in the
+# hourly products step itself, bounded like the buyers' (DN-05a), and a
+# failure is recorded and costs that step alone; the next attempt waits ten
+# minutes, during which neither KeyCRM nor Postgres is asked anything. Until
+# step 14's S14-09 that held only while chain 6 was off DuckDB
+# (`_catalogue_off_duckdb`, a constant since S14-00); S14-09 deleted the
+# DuckDB path, and with it the step's top-of-tick read.
 CATALOGUE_RETRY_AFTER_S = 600
 CATALOGUE_STEP_EVERY_S = 3600
 CATALOGUE_WATERMARK_TIMEOUT_S = 10
-
-
-def _catalogue_off_duckdb() -> bool:
-    """Whether chain 6's writes do NOT go to DuckDB: to Postgres, or nowhere
-    anybody can name because `KS_WRITE_CATALOGUE` is not understood. The
-    registry's one answer (`pg_catalogue_write.mode`); never raises, so the
-    tick asks it before anything else and `full_sync` inside an `except`."""
-    from core import pg_catalogue_write
-
-    return pg_catalogue_write.mode() != "duckdb"
 
 
 # ─── The buyers step, contained ──────────────────────────────────────────────
@@ -343,6 +327,22 @@ class BuyersRefused(ValueError):
     landed nothing must not refresh the clock the canary judges it by — with
     chain 4 there is no other writer of buyers. A data error, so it does not
     count toward `consecutive_failures`; the age still pages."""
+
+
+class OrdersRefused(ValueError):
+    """The order step's window landed nothing — no order written, none found
+    unchanged, no expense — and the parse refused orders in it (AR-02).
+
+    One payload the parse cannot read is refused by id and the rest of the
+    window lands (L1-01). A window in which nothing could be read is not that:
+    it is KeyCRM changing a field's shape for every order, or a parser defect
+    that shipped, and before L1-01 it failed the step on every tick. Reported
+    as a success it moved `last_sync_orders` past orders nobody wrote and kept
+    `orders_sync_failing` quiet until the 05:30 reconciliation. So the step
+    fails on it: the watermark holds, `consecutive_failures` counts it and
+    `meta.mirror_state` marks `bronze.orders` failing, as the TypeError did.
+    Chain 4's `BuyersRefused` for the same shape; unlike it, counted as a
+    failure, because the order step's canary pages on the count."""
 
 
 def _is_data_error(exc: BaseException) -> bool:
@@ -442,6 +442,12 @@ class SyncService:
         # may try again after a failure (a `time.monotonic()` instant).
         self.inventory_step = InventoryStepState()
         self._inventory_retry_at = 0.0
+        # Whether `meta.mirror_state` may still hold an order-step failure:
+        # unknown at a start, so asked once (`_clear_orders_failure`).
+        self._orders_failure_may_stand = True
+        # The KeyCRM error the last offers or stocks fetch ended on, for the
+        # step's published class (`sync_offers` answers None and logs it).
+        self._inventory_keycrm_error: Optional[BaseException] = None
         # Chain 5's managers step, under the chain (`MANAGERS_RETRY_AFTER_S`).
         self.managers_step = ManagersStepState()
         self._managers_retry_at = 0.0
@@ -452,6 +458,8 @@ class SyncService:
         # many orders its last write refused (`UpsertResult.failed`).
         self.orders_step = OrdersStepState()
         self._last_refused = 0
+        # Of those, the ones the parse could not read (`UpsertResult.unparseable`).
+        self._last_unparseable = 0
         # Chain 6's hourly products step off DuckDB — see CATALOGUE_RETRY_AFTER_S.
         self.catalogue_step = InventoryStepState()
         self._catalogue_retry_at = 0.0
@@ -547,27 +555,25 @@ class SyncService:
 
         # Fetch by created_between
         logger.debug(f"Fetching orders created between {start_date} and {end_date}")
-        params = {
-            "include": include,
-            "filter[created_between]": f"{start_date}, {end_date}",
-        }
-        async for batch in client.paginate("order", params=params, page_size=50):
-            for order in batch:
-                orders_by_id[order["id"]] = order
+        await self._fetch_order_window(
+            client, "filter[created_between]", start_date, end_date, include,
+            orders_by_id)
 
         created_count = len(orders_by_id)
 
         # Also fetch by updated_between to catch status changes
         if include_updated:
             logger.debug(f"Fetching orders updated between {start_date} and {end_date}")
-            params = {
-                "include": include,
-                "filter[updated_between]": f"{start_date}, {end_date}",
-            }
             try:
-                async for batch in client.paginate("order", params=params, page_size=50):
-                    for order in batch:
-                        orders_by_id[order["id"]] = order  # Overwrites with latest data
+                # Overwrites with latest data
+                await self._fetch_order_window(
+                    client, "filter[updated_between]", start_date, end_date, include,
+                    orders_by_id)
+            except KeyCRMTruncated:
+                # Not "the filter is unsupported": the window holds more than a
+                # listing can carry even split to an hour, and the step must
+                # fail rather than move its watermark past what it never saw.
+                raise
             except KeyCRMError as e:
                 # filter[updated_between] may not be supported - fall back gracefully
                 logger.warning(f"filter[updated_between] failed: {e}")
@@ -577,6 +583,39 @@ class SyncService:
             logger.info(f"Fetched {created_count} created + {updated_count} updated orders")
 
         return list(orders_by_id.values())
+
+    async def _fetch_order_window(
+        self, client, key: str, start: str, end: str, include: str,
+        into: Dict[Any, Any],
+    ) -> None:
+        """One filtered order listing into `into`, by id; a listing KeyCRM
+        stops at its page cap (`KeyCRMTruncated`) is fetched again as two
+        halves of its window, recursively, down to `ORDER_WINDOW_MIN_SPAN`
+        (L1-08). The cap is 5 000 orders (100 pages of 50); past it the
+        oldest orders of the window were never fetched, and the watermark
+        moved past them. Still truncated at an hour, it raises: the caller's
+        step fails and holds its watermark. A truncated listing adds nothing;
+        its halves add theirs, overlapping at the midpoint, merged by id."""
+        params = {"include": include, key: f"{start}, {end}"}
+        got: list = []
+        try:
+            async for batch in client.paginate("order", params=params, page_size=50):
+                got.extend(batch)
+        except KeyCRMTruncated:
+            lo, hi = _window_bound(start, end_of_day=False), _window_bound(end, end_of_day=True)
+            if hi - lo <= ORDER_WINDOW_MIN_SPAN:
+                raise
+            mid = lo + (hi - lo) / 2
+            logger.warning("Order listing %s %s..%s truncated at the page cap; "
+                           "fetching it as two halves", key, start, end)
+            fmt = "%Y-%m-%d %H:%M:%S"
+            await self._fetch_order_window(
+                client, key, lo.strftime(fmt), mid.strftime(fmt), include, into)
+            await self._fetch_order_window(
+                client, key, mid.strftime(fmt), hi.strftime(fmt), include, into)
+            return
+        for order in got:
+            into[order["id"]] = order
 
     async def _upsert_orders_with_expenses(
         self, orders: list, force_update: bool = False, skip_products: bool = False,
@@ -600,37 +639,27 @@ class SyncService:
         Returns:
             Tuple of (order_count, expense_count)
 
-        Under chain 3 (`core/pg_orders_write.py`) the orders and their
-        expenses are written to Postgres in one transaction, and DuckDB's two
-        writers — which refuse while the chain writes Postgres — are not
-        reached. Raises what the chain raises (OD-13 (a)), including a
-        `KS_WRITE_ORDERS` nobody can read.
+        Chain 3 (`core/pg_orders_write.py`): the orders and their expenses
+        are written to Postgres in one transaction. Raises what the chain
+        raises (OD-13 (a)). DuckDB's two writers, and the mirror of what they
+        wrote, went with step 14's S14-09.
         """
         from core import pg_orders_write
 
-        if pg_orders_write.writes_postgres():
-            result, expense_count = await pg_orders_write.upsert_orders_with_expenses(
-                orders, force_update=force_update, skip_products=skip_products,
-            )
-            if changed_ids_out is not None:
-                changed_ids_out.extend(result.changed_ids)
-            self._last_refused = result.failed
-            return result.count, expense_count
-
-        result = await self.store.upsert_orders(
+        result, expense_count = await pg_orders_write.upsert_orders_with_expenses(
             orders, force_update=force_update, skip_products=skip_products,
         )
         if changed_ids_out is not None:
             changed_ids_out.extend(result.changed_ids)
-
-        # Batch upsert all expenses in a single transaction
-        orders_with_expenses = [o for o in orders if o.get("expenses")]
-        expense_count = await self.store.upsert_expenses_batch(orders_with_expenses)
-        # And the same rows to Postgres. Never raises — a Postgres fault must
-        # not be able to stop a sync — so a miss is carried by the backfill
-        # and reported by the daily comparison, not by this line.
-        await mirror_expenses(orders_with_expenses)
-
+        self._last_refused = result.failed
+        # `(order id, reason)` for every order the writer refused — what the
+        # repairs ledger rather than ask KeyCRM for again (L1-10). An
+        # attribute, like the count, so the many mocks of this method keep
+        # their signature.
+        self._last_refused_ids = tuple(result.refused)
+        # Of those, how many the parse could not read at all: the order step
+        # fails on a window that landed nothing and holds one (`OrdersRefused`).
+        self._last_unparseable = getattr(result, "unparseable", 0)
         return result.count, expense_count
 
     async def sync_managers(self) -> int:
@@ -641,13 +670,13 @@ class SyncService:
             Number of managers synced
         """
         logger.info("Syncing managers...")
-        # Chain 5: off DuckDB — or a flag nobody can read — every failure is
-        # recorded, the watermark held and the step retried after
-        # `MANAGERS_RETRY_AFTER_S`, and nothing escapes into the tick or the
-        # full sync. On DuckDB this method is what it always was.
+        # Chain 5: every failure is recorded, the watermark held and the step
+        # retried after `MANAGERS_RETRY_AFTER_S`, and nothing escapes into the
+        # tick or the full sync. Until step 14's S14-11 that held only while
+        # the chain was off DuckDB (`pg_managers_write.mode()`), and on DuckDB
+        # this method raised as it always had.
         from core import pg_managers_write
 
-        moved = pg_managers_write.mode() != "duckdb"
         try:
             client = await get_async_client()
             managers = []
@@ -662,27 +691,21 @@ class SyncService:
             await self.store.set_last_sync_time("managers")
 
             logger.info(f"Synced {count} managers from KeyCRM")
-            if moved:
-                self.managers_step.succeeded()
+            self.managers_step.succeeded()
             return count
         except KeyCRMConnectionError as e:
             logger.warning(f"Manager sync connection error (will retry): {e}")
-            if moved:
-                self._managers_step_failed(e)
+            self._managers_step_failed(e)
             return 0
         except KeyCRMAPIError as e:
             logger.error(f"Manager sync API error: {e}")
-            if moved:
-                self._managers_step_failed(e)
+            self._managers_step_failed(e)
             return 0
         except KeyCRMError as e:
             logger.error(f"Manager sync error: {e}")
-            if moved:
-                self._managers_step_failed(e)
+            self._managers_step_failed(e)
             return 0
-        except Exception as e:  # noqa: BLE001 — contained under chain 5 only
-            if not moved:
-                raise
+        except Exception as e:  # noqa: BLE001 — contained: chain 5 writes Postgres
             logger.error(
                 "Manager sync failed under %s; last_sync_managers not moved, "
                 "next attempt in %ss: %s: %s", pg_managers_write.WRITE_ENV,
@@ -737,10 +760,10 @@ class SyncService:
         window, so the incremental tick goes on to offers and stocks and does
         not come back for ten minutes.
 
-        The one thing is a read refused under `KS_READ_FALLBACK=off`
+        The one thing is a read refused because its engine failed
         (`read_fallback.ReadUnavailable`, DN-20c): recorded the same way, and
         then passed on, because the caller is the one that can answer it — the
-        tick names it and skips the step, and `POST /duckdb/sync-buyers`
+        tick names it and skips the step, and `POST /sync/sync-buyers`
         answers 503 naming the surface, as every route does. Answered here it
         was "Synced 0 buyers" to the one and a quiet step to the other.
 
@@ -750,21 +773,13 @@ class SyncService:
         Returns:
             Number of buyers synced — 0 on any failure
         """
-        from core import pg_buyers_write
         from core.landing_rows import birthday_is_unreadable
 
         state = self.buyer_sync_state
         state.last_attempt_at = datetime.now(DEFAULT_TZ)
-        # A KS_WRITE_BUYERS nobody can read has nowhere known to write to, and
-        # the write would raise only after KeyCRM had been asked for up to 500
-        # buyers. The tick's watermark getter stops first today; this is for
-        # the doors that call the step directly (`POST /duckdb/sync-buyers`).
-        if pg_buyers_write.mode() is None:
-            exc = RuntimeError(f"{pg_buyers_write.WRITE_ENV} is not understood; "
-                               "the buyers step fetches nothing until it is")
-            logger.error(str(exc))
-            self._buyer_step_failed(exc)
-            return 0
+        # Until step 14's S14-11 a KS_WRITE_BUYERS nobody could read stopped
+        # the step here, before KeyCRM was asked (`pg_buyers_write.mode()`
+        # None). The flag is read by nothing now: the buyers go to Postgres.
         logger.info("Syncing missing buyers...")
         try:
             # Get buyer IDs from orders that don't have buyer records.
@@ -892,7 +907,7 @@ class SyncService:
         """The `buyer_sync` block of /api/health."""
         return self.buyer_sync_state.published(self._buyers_retry_in())
 
-    async def sync_offers(self) -> int:
+    async def sync_offers(self) -> Optional[int]:
         """
         Sync offers (product variations) from KeyCRM API.
 
@@ -900,7 +915,10 @@ class SyncService:
         between offer_stocks and products tables.
 
         Returns:
-            Number of offers synced
+            Number of offers synced, or None when KeyCRM failed (logged, and
+            kept in `_inventory_keycrm_error`). None, not 0: the stocks after
+            it read the offer→product map, and written ahead of their offers a
+            new SKU's movement is recorded with no product (L1-14).
         """
         logger.info("Syncing offers...")
         try:
@@ -914,13 +932,16 @@ class SyncService:
             return count
         except KeyCRMConnectionError as e:
             logger.warning(f"Offers sync connection error (will retry): {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
         except KeyCRMAPIError as e:
             logger.error(f"Offers sync API error: {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
         except KeyCRMError as e:
             logger.error(f"Offers sync error: {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
 
     async def sync_stocks(self) -> int:
         """
@@ -952,12 +973,15 @@ class SyncService:
             return await self.store.upsert_stocks(stocks)
         except KeyCRMConnectionError as e:
             logger.warning(f"Stock sync connection error (will retry): {e}")
+            self._inventory_keycrm_error = e
             return None
         except KeyCRMAPIError as e:
             logger.error(f"Stock sync API error: {e}")
+            self._inventory_keycrm_error = e
             return None
         except KeyCRMError as e:
             logger.error(f"Stock sync error: {e}")
+            self._inventory_keycrm_error = e
             return None
 
     def _inventory_retry_in(self) -> Optional[int]:
@@ -972,6 +996,38 @@ class SyncService:
         """The `sync_step` entry of chain 3 on /api/health."""
         return self.orders_step.published()
 
+    async def _clear_orders_failure(self) -> None:
+        """After an order step that succeeded, idle included: `meta.mirror_state`
+        stops saying `bronze.orders` is failing (`ORDERS_FAILURE_CLEAR_SQL`).
+
+        Asked once per process (a failure recorded before a restart is still
+        there) and after each failure this process recorded, never on every
+        tick. Best effort and bounded the way `_record_orders_failure` is; a
+        clear that did not land is asked again on the next healthy tick."""
+        if not getattr(self, "_orders_failure_may_stand", True):
+            return
+
+        async def clear() -> None:
+            from core.pg import get_pool
+            from core.pg_landing import ORDERS_TABLE
+
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(ORDERS_FAILURE_CLEAR_SQL, ORDERS_TABLE)
+
+        task = asyncio.ensure_future(clear())
+        try:
+            await asyncio.wait_for(asyncio.shield(task), ORDERS_FAILURE_RECORD_TIMEOUT_S)
+            self._orders_failure_may_stand = False
+        except asyncio.TimeoutError:
+            logger.warning("Order step's recorded failure not cleared in "
+                           "meta.mirror_state within %ss",
+                           ORDERS_FAILURE_RECORD_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 — best effort, asked again next tick
+            logger.debug("Order step's recorded failure not cleared: %s", e)
+        finally:
+            task.cancel()
+
     async def _record_orders_failure(self, exc: BaseException) -> None:
         """`mirror_failing`'s fast signal, which the sync's mirror gave before
         chain 3 took the tables (DN-22b): `meta.mirror_state` says
@@ -981,6 +1037,7 @@ class SyncService:
         refuses cannot hold the tick. The class only: the text is a driver's."""
         from core.pg_landing import ORDERS_TABLE, _record_failure
 
+        self._orders_failure_may_stand = True
         task = asyncio.ensure_future(_record_failure(ORDERS_TABLE, type(exc).__name__))
         try:
             await asyncio.wait_for(asyncio.shield(task), ORDERS_FAILURE_RECORD_TIMEOUT_S)
@@ -1008,13 +1065,25 @@ class SyncService:
                     > INVENTORY_STEP_EVERY_S)
 
         step, ran, stocked = "offers", False, False
+        # Which fetch KeyCRM failed, if one did. Not a success: the step used
+        # to publish `last_ok_at` over a fetch that never arrived (L1-14). Not
+        # a store failure either, so no hold — the fetch is what is retried on
+        # the next tick, as it always was.
+        keycrm_failed: Optional[str] = None
+        self._inventory_keycrm_error = None
         try:
             if due(await self.store.get_last_sync_time("offers")):
                 ran = True
-                stats["offers"] = await self.sync_offers()
+                offers = await self.sync_offers()
+                stats["offers"] = offers or 0
+                if offers is None:
+                    keycrm_failed = "offers"
 
             step = "stocks"
-            if due(await self.store.get_last_sync_time("stocks")):
+            # Not after a failed offers fetch: the stocks read the offer→
+            # product map, and a new SKU's movement would be recorded with no
+            # product.
+            if keycrm_failed is None and due(await self.store.get_last_sync_time("stocks")):
                 ran = stocked = True
                 count = await self._upsert_stocks_from_keycrm()
                 stats["stocks"] = count or 0
@@ -1026,6 +1095,8 @@ class SyncService:
                 if count is not None:
                     await self.store.set_last_sync_time("stocks")
                     logger.info(f"Synced {count} offer stocks from KeyCRM")
+                else:
+                    keycrm_failed = "stocks"
         except Exception as exc:  # noqa: BLE001 — recorded, published, retried
             self.inventory_step.failed(step, exc)
             self._inventory_retry_at = time.monotonic() + INVENTORY_RETRY_AFTER_S
@@ -1035,7 +1106,11 @@ class SyncService:
                 exc, exc_info=True)
             return
 
-        if ran:
+        if keycrm_failed is not None:
+            self.inventory_step.failed(
+                keycrm_failed,
+                self._inventory_keycrm_error or KeyCRMError("KeyCRM fetch failed"))
+        elif ran:
             self.inventory_step.succeeded()
         if stocked:
             await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
@@ -1044,19 +1119,18 @@ class SyncService:
         """Fetch the orders window, write it, move `last_sync_orders`.
         Returns the ids actually written. Raises what it meets: the tick
         decides what a failure costs (`incremental_sync`)."""
-        if _orders_off_duckdb():
-            # A Postgres read under chain 3, bounded behind a shield — the
-            # buyers watermark's DN-05a form: a store that neither answers nor
-            # refuses must fail the step, not hold the tick.
-            read = asyncio.ensure_future(self.store.get_last_sync_time("orders"))
-            try:
-                last_orders_sync = await asyncio.wait_for(
-                    asyncio.shield(read), ORDERS_WATERMARK_TIMEOUT_S)
-            finally:
-                read.cancel()
-        else:
-            last_orders_sync = await self.store.get_last_sync_time("orders")
-        # Default to 1 hour ago if never synced
+        # A Postgres read under chain 3, bounded behind a shield — the buyers
+        # watermark's DN-05a form: a store that neither answers nor refuses
+        # must fail the step, not hold the tick.
+        read = asyncio.ensure_future(self.store.get_last_sync_time("orders"))
+        try:
+            last_orders_sync = await asyncio.wait_for(
+                asyncio.shield(read), ORDERS_WATERMARK_TIMEOUT_S)
+        finally:
+            read.cancel()
+        # Default to 1 hour ago if never synced — never, while the key is
+        # absent from Postgres but present in DuckDB's frozen copy: chain 3
+        # inherits that (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
         if not last_orders_sync:
             last_orders_sync = datetime.now(DEFAULT_TZ) - timedelta(hours=1)
 
@@ -1079,24 +1153,24 @@ class SyncService:
         # and rebuilt Gold for all of it every two minutes around the clock.
         changed_ids: list[int] = []
         if orders:
+            self._last_unparseable = 0
             order_count, expense_count = await self._upsert_orders_with_expenses(
                 orders, changed_ids_out=changed_ids,
             )
+            # Nothing landed and the parse refused orders: a shape nothing
+            # could read, not one bad order. A failure, before the watermark
+            # moves (`OrdersRefused`).
+            if not order_count and not expense_count and self._last_unparseable:
+                raise OrdersRefused(
+                    f"none of the {len(orders)} order(s) fetched landed and the "
+                    f"parse could not read {self._last_unparseable} of them; "
+                    "their ids are in the log above")
             stats["orders"] = order_count
             stats["expenses"] = expense_count
-            # Mark warehouse dirty only for orders that actually changed
-            # (separate job handles refresh), and mark it HERE, adjacent to
-            # the write. It used to happen at the end of the tick, after
-            # the hourly catalogue/manager/buyer/stock branches — so a 429
-            # on the products page skipped the mark and the orders just
-            # written stayed out of Silver/Gold until the 05:15 refresh.
-            #
-            # This used to key off stats["orders"], which counts a row
-            # already in the desired state as a success — so it was ~200
-            # every cycle forever and the warehouse was permanently dirty.
-            # Nothing changing now means nothing to rebuild.
-            if changed_ids:
-                await self.store.mark_warehouse_dirty(changed_ids)
+            # The derivation is owed by the writer itself: chain 3 raises
+            # `meta.derivation_signal` in the order's own transaction. The
+            # DuckDB warehouse mark that stood here, a no-op since step 13,
+            # went in step 14's S14-15.
             # Use max(updated_at) from SOURCE data, not now()
             max_updated = _get_max_updated_at(orders)
             # Guard against checkpoint rollback — never go backward
@@ -1137,11 +1211,12 @@ class SyncService:
             type(exc).__name__, exc, exc_info=True)
 
     async def _catalogue_step_postgres(self, client, stats: Dict[str, Any]) -> None:
-        """The hourly products step while chain 6 is off DuckDB. Never raises
-        a chain fault: a watermark it cannot read, a flag nobody can read, a
+        """The hourly products step, chain 6's (step 14's S14-09 deleted the
+        DuckDB one). Never raises a chain fault: a watermark it cannot read, a
         catalogue Postgres refuses or a Postgres that is down is recorded, and
-        the tick goes on to managers, buyers and inventory. A KeyCRM error
-        propagates exactly as it does on the DuckDB path.
+        the tick goes on to managers, buyers and inventory. So does a KeyCRM
+        error, recorded under the step without a `meta.mirror_state` stamp
+        (L1-02); it used to end the tick.
 
         Nothing is put in `stats` but a count: the tick sums it."""
         from core.pg_landing import _record_failure
@@ -1165,8 +1240,17 @@ class SyncService:
 
         logger.info("Syncing products (hourly, chain 6)...")
         products = []
-        async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
-            products.extend(batch)
+        try:
+            async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
+                products.extend(batch)
+        except KeyCRMError as exc:
+            # KeyCRM's, contained like the other steps' (L1-02): an open
+            # breaker or a page that would not decode here used to end the
+            # tick, so managers, buyers and inventory never ran. Recorded under
+            # the step and retried after the hold; nothing in Postgres says
+            # the catalogue is failing, because nothing there failed.
+            self._catalogue_step_failed(exc)
+            return
         try:
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")
@@ -1176,8 +1260,8 @@ class SyncService:
             # over a write that failed on its own data.
             await _record_failure("bronze.products", f"{type(exc).__name__}: {exc}")
             return
-        # No mirror call: this step runs only while the chain is off DuckDB,
-        # where `_mirror` stands down for the catalogue in any case.
+        # No mirror call: chain 6 owns the catalogue, and `_mirror` stands
+        # down for it in any case.
         self.catalogue_step.succeeded()
         await events.emit(SyncEvent.PRODUCTS_SYNCED, {"count": stats["products"]})
 
@@ -1190,12 +1274,12 @@ class SyncService:
         Meili sync are pushed — a no-op tick costs one MAX() query, not a full
         37K re-index. First run (no watermark) falls back to a full sync.
 
-        `KS_READ_SEARCH_INDEX` decides which store the index is built from.
-        Postgres keeps a watermark key of its own, because its stamp is
-        `mirrored_at` on a later clock than DuckDB's `synced_at` — see
-        `core/pg_search_index_read.py`. Everything downstream of the frames
-        (the `isoformat` calls, `to_dict`, the sanitiser, the index) is the same
-        code for both engines, which is what keeps the documents identical.
+        Built from Postgres, under its own watermark key
+        (`pg_search_index_read.WATERMARK_KEY`, `mirrored_at`'s clock) — see
+        `core/pg_search_index_read.py`. One engine since step 14's S14-07:
+        `KS_READ_SEARCH_INDEX` chose DuckDB's frames and its `meilisearch`
+        key before, and both went with S14-07; the documents are the ones
+        both engines rendered alike.
 
         Returns:
             Dict with counts for each synced entity
@@ -1208,22 +1292,14 @@ class SyncService:
         try:
             meili = get_meili_client()
 
-            # The engine is chosen once: the watermark belongs to it. Only what
-            # the index READS moves — the watermark is still `sync_metadata`
-            # bookkeeping, written by DuckDB until chain 3 writes Postgres,
-            # which takes the Postgres one with it (OD-15; the store's getter
-            # and setter route it, `pg_orders_write.CHAIN_SYNC_KEYS`).
-            # Under KS_READ_FALLBACK=off a switch with no address is refused
-            # rather than read from DuckDB, before anything is indexed or the
-            # watermark is touched; the handlers below say who answers it.
-            read_fallback.no_address("search_index", pg_index)
-            use_pg = pg_index.enabled() and pg_index.available()
-            watermark_key = pg_index.WATERMARK_KEY if use_pg else "meilisearch"
+            # The watermark is chain 3's sync key since OD-15
+            # (`pg_orders_write.CHAIN_SYNC_KEYS`): the store's getter and
+            # setter keep it in `meta.chain_watermarks`.
+            watermark_key = pg_index.WATERMARK_KEY
             last_sync = await self.store.get_last_sync_time(watermark_key)
 
             # If nothing has been stamped since the watermark, skip entirely.
-            high_watermark = (await pg_index.high_watermark() if use_pg
-                              else await self._meili_high_watermark())
+            high_watermark = await pg_index.high_watermark()
             if last_sync and high_watermark and high_watermark <= last_sync:
                 logger.debug("Meilisearch sync: no changes since %s, skipping", last_sync)
                 return stats
@@ -1233,14 +1309,13 @@ class SyncService:
             logger.info(
                 "Syncing data to Meilisearch... (%s, from %s)",
                 "full" if full_sync else f"incremental since {last_sync.isoformat()}",
-                "postgres" if use_pg else "duckdb",
+                "postgres",
             )
 
             # ── Buyers ─────────────────────────────────────────────────────
             # Incremental: only buyers whose row was re-synced (profile edit)
             # OR whose order activity was re-synced (order_count changed).
-            buyers_df = (await pg_index.buyers_frame(since) if use_pg
-                         else await self._meili_buyers_frame(since))
+            buyers_df = await pg_index.buyers_frame(since)
             if not buyers_df.empty:
                 if 'created_at' in buyers_df.columns:
                     buyers_df['created_at'] = buyers_df['created_at'].apply(
@@ -1252,9 +1327,7 @@ class SyncService:
             MEILI_CHUNK = 10_000
             offset = 0
             while True:
-                orders_df = (
-                    await pg_index.orders_frame(since, MEILI_CHUNK, offset) if use_pg
-                    else await self._meili_orders_frame(since, MEILI_CHUNK, offset))
+                orders_df = await pg_index.orders_frame(since, MEILI_CHUNK, offset)
 
                 if orders_df.empty:
                     break
@@ -1274,8 +1347,7 @@ class SyncService:
                     break
 
             # ── Products ───────────────────────────────────────────────────
-            products_df = (await pg_index.products_frame(since) if use_pg
-                           else await self._meili_products_frame(since))
+            products_df = await pg_index.products_frame(since)
             if not products_df.empty:
                 stats["products"] = await meili.index_products(products_df.to_dict('records'))
 
@@ -1296,100 +1368,6 @@ class SyncService:
         except Exception as e:
             logger.error(f"Meilisearch sync error: {e}")
             return stats
-
-    # ── The DuckDB reads behind the Meilisearch index ────────────────────────
-    # Moved here verbatim — the SQL is copied, not retyped — so that the index
-    # method can choose an engine in one line per entity and the processing
-    # after it stays identical for both. Their Postgres twins, and the reasons
-    # the frames must match down to the dtype, are in
-    # `core/pg_search_index_read.py`.
-
-    async def _meili_high_watermark(self):
-        async with self.store.connection() as conn:
-            hw_row = conn.execute("""
-                    SELECT MAX(ts) FROM (
-                        SELECT MAX(synced_at) AS ts FROM orders
-                        UNION ALL SELECT MAX(synced_at) FROM buyers
-                        UNION ALL SELECT MAX(synced_at) FROM products
-                    )
-                """).fetchone()
-        return hw_row[0] if hw_row else None
-
-    async def _meili_buyers_frame(self, since):
-        async with self.store.connection() as conn:
-            if since is None:
-                return conn.execute("""
-                        SELECT
-                            b.id, b.full_name, b.phone, b.email, b.city, b.note,
-                            b.manager_id, b.created_at,
-                            COUNT(DISTINCT o.id) as order_count
-                        FROM buyers b
-                        LEFT JOIN silver_orders o ON b.id = o.buyer_id AND NOT o.is_return
-                        GROUP BY b.id, b.full_name, b.phone, b.email, b.city,
-                                 b.note, b.manager_id, b.created_at
-                    """).fetchdf()
-            return conn.execute("""
-                        WITH touched AS (
-                            SELECT id FROM buyers WHERE synced_at > ?
-                            UNION
-                            SELECT DISTINCT buyer_id AS id FROM orders
-                            WHERE synced_at > ? AND buyer_id IS NOT NULL
-                        )
-                        SELECT
-                            b.id, b.full_name, b.phone, b.email, b.city, b.note,
-                            b.manager_id, b.created_at,
-                            COUNT(DISTINCT o.id) as order_count
-                        FROM buyers b
-                        JOIN touched t ON t.id = b.id
-                        LEFT JOIN silver_orders o ON b.id = o.buyer_id AND NOT o.is_return
-                        GROUP BY b.id, b.full_name, b.phone, b.email, b.city,
-                                 b.note, b.manager_id, b.created_at
-                    """, [since, since]).fetchdf()
-
-    async def _meili_orders_frame(self, since, limit: int, offset: int):
-        async with self.store.connection() as conn:
-            if since is None:
-                return conn.execute("""
-                            SELECT
-                                o.id, o.grand_total, o.ordered_at, o.status_id,
-                                o.source_name, o.buyer_id, o.order_date,
-                                b.full_name as buyer_name
-                            FROM silver_orders o
-                            LEFT JOIN buyers b ON o.buyer_id = b.id
-                            ORDER BY o.ordered_at DESC
-                            LIMIT ? OFFSET ?
-                        """, [limit, offset]).fetchdf()
-            return conn.execute("""
-                            SELECT
-                                o.id, o.grand_total, o.ordered_at, o.status_id,
-                                o.source_name, o.buyer_id, o.order_date,
-                                b.full_name as buyer_name
-                            FROM silver_orders o
-                            LEFT JOIN orders src ON src.id = o.id
-                            LEFT JOIN buyers b ON o.buyer_id = b.id
-                            WHERE src.synced_at > ? OR b.synced_at > ?
-                            ORDER BY o.ordered_at DESC
-                            LIMIT ? OFFSET ?
-                        """, [since, since, limit, offset]).fetchdf()
-
-    async def _meili_products_frame(self, since):
-        async with self.store.connection() as conn:
-            if since is None:
-                return conn.execute("""
-                        SELECT
-                            p.id, p.name, p.sku, p.brand, p.price, p.category_id,
-                            c.name as category_name
-                        FROM products p
-                        LEFT JOIN categories c ON p.category_id = c.id
-                    """).fetchdf()
-            return conn.execute("""
-                        SELECT
-                            p.id, p.name, p.sku, p.brand, p.price, p.category_id,
-                            c.name as category_name
-                        FROM products p
-                        LEFT JOIN categories c ON p.category_id = c.id
-                        WHERE p.synced_at > ?
-                    """, [since]).fetchdf()
 
     async def _catalogue_full_sync_failed(
             self, stats: Dict[str, Any], entity: str, exc: BaseException) -> None:
@@ -1468,57 +1446,43 @@ class SyncService:
                 stats["categories"] = await self.store.upsert_categories(categories)
                 await self.store.set_last_sync_time("categories")
             except Exception as exc:
-                # Chain 6, chain 6a's containment: off DuckDB this is the
-                # Postgres write, and its fault stops the catalogue only — on a
-                # boot with an empty DuckDB, aborting here would cost the whole
-                # history. On DuckDB the raise goes out as it always has.
-                if not _catalogue_off_duckdb():
-                    raise
+                # Chain 6, chain 6a's containment: this is the Postgres write,
+                # and its fault stops the catalogue only — on a boot with no
+                # orders held, aborting here would cost the whole history.
                 await self._catalogue_full_sync_failed(stats, "categories", exc)
-            # Step 05. Same payloads, read through the same `landing_rows`;
-            # never raises, so a Postgres fault cannot stop a sync.
-            await mirror_categories(categories)
+            # Chain 6 writes the catalogue to Postgres above. Until step 14's
+            # S14-13 the landing mirror shipped the same payload after it
+            # (`pg_landing.mirror_categories`), standing down since the chain
+            # owned the table; it went with the mirror.
 
             try:
                 stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
                 await self.store.set_last_sync_time("expense_types")
             except Exception as exc:
-                # Chain 6a (DN-26). Under `KS_WRITE_EXPENSE_TYPES=postgres`
-                # both statements above go to Postgres and raise when it
-                # fails; a flag nobody can read raises too. Either way it is
-                # this chain's fault and it stops this chain only (DN-01): the
-                # watermark stays where it was, so the freshness check sees a
-                # dictionary that did not land, and products and orders still
-                # sync. Aborting here would cost a week of orders for 27 names
-                # — and on a boot with an empty DuckDB, the whole history.
-                # With the chain on DuckDB nothing changes: the raise goes out
-                # exactly as it always has.
-                if not _expense_types_off_duckdb():
-                    raise
+                # Chain 6a (DN-26). Both statements above go to Postgres and
+                # raise when it fails. It is this chain's fault and it stops
+                # this chain only (DN-01): the watermark stays where it was, so
+                # the freshness check sees a dictionary that did not land, and
+                # products and orders still sync. Aborting here would cost a
+                # week of orders for 27 names — and on a boot with no orders
+                # held, the whole history. Until step 14's S14-09 the raise
+                # went out while the chain was on DuckDB.
                 stats["expense_types_error"] = f"{type(exc).__name__}: {exc}"
                 logger.error(
                     "Full sync: the expense-type dictionary was not stored (%s); "
                     "its watermark stays where it was and the sync carries on",
                     stats["expense_types_error"], exc_info=True,
                 )
-            # Not mirrored from here. KeyCRM serves this dictionary only to the
-            # weekly full sync, so a payload-fed mirror would leave Postgres
-            # empty for up to a week — and `/expenses` renders the breakdown by
-            # *name*, so that is a collapsed chart and an empty filter, not a
-            # freshness detail. It rides the hourly `replicate_operational`
-            # instead, out of DuckDB, which holds it every minute of that week.
-            # `bronze.offer_stocks` sits in that family for the same reason.
-            # Under chain 6a the write above IS the Postgres write, and the
-            # hourly copy stands down for it (`core/pg_expense_types_write.py`).
+            # Under chain 6a the write above IS the Postgres write
+            # (`core/pg_expense_types_write.py`). Until it, the dictionary
+            # rode the hourly copy out of DuckDB, which went in step 14's
+            # S14-13.
 
             try:
                 stats["products"] = await self.store.upsert_products(products)
                 await self.store.set_last_sync_time("products")
             except Exception as exc:
-                if not _catalogue_off_duckdb():
-                    raise
                 await self._catalogue_full_sync_failed(stats, "products", exc)
-            await mirror_products(products)
 
             # Sync orders with expenses - in chunks to avoid pagination limit (100 pages × 50 = 5000 orders max)
             # IMPORTANT: Save each chunk immediately to preserve progress on timeout/crash
@@ -1550,26 +1514,20 @@ class SyncService:
                     stats["orders"] += order_count
                     stats["expenses"] += expense_count
                     logger.info(f"  Chunk {chunk_num}: Saved {order_count} orders, {expense_count} expenses")
-
-                    # Force WAL checkpoint after each chunk to prevent WAL corruption
-                    # on aarch64 (DuckDB 1.4.x bug with large WAL files).
-                    #
-                    # Not under KS_DUCKDB=off: the store is unconnected there and
-                    # its checkpoint a no-op already, but a no-op by accident is
-                    # one connection away from a CHECKPOINT of a file this
-                    # process must not touch (stage 5, PR-1).
-                    if not duckdb_switch.is_off():
-                        await self.store.checkpoint()
+                    # A DuckDB CHECKPOINT followed each chunk under
+                    # KS_DUCKDB=on until step 14's S14-18 (a WAL bug of
+                    # DuckDB 1.4.x on aarch64); the chunks land in Postgres.
 
                 current_start = current_end + timedelta(days=1)
 
             logger.info(f"All chunks complete. Total: {stats['orders']} orders, {stats['expenses']} expenses")
 
             # Sync offers (needed for proper stock-to-product linking)
-            stats["offers"] = await self.sync_offers()
+            offers = await self.sync_offers()
+            stats["offers"] = offers or 0
 
-            # Sync stocks
-            stats["stocks"] = await self.sync_stocks()
+            # Sync stocks — not after a failed offers fetch, whose map they read
+            stats["stocks"] = await self.sync_stocks() if offers is not None else 0
 
             # Refresh Layer 1: sku_inventory_status
             await self.store.refresh_sku_inventory_status()
@@ -1577,12 +1535,9 @@ class SyncService:
             # Record Layer 2: daily per-SKU snapshot
             await self.store.record_sku_inventory_snapshot()
 
-            # Refresh warehouse layers (Silver → Gold) — DuckDB's own, which
-            # it does not derive under KS_WRITE_WAREHOUSE=postgres (DN-29). On
-            # an empty DuckDB this is the boot's path, so the mode has to be
-            # cached before it: `configure_modes()` runs first in web's startup.
-            if warehouse_cutover.duckdb_derives():
-                await self.store.refresh_warehouse_layers(trigger="full_sync")
+            # DuckDB's own Silver → Gold rebuild stood here until step 14's
+            # S14-15; it did not run since step 13 (DN-29). Postgres derives
+            # off the signal the writers raise.
 
             # Update sync checkpoint with latest order timestamp
             last_order_time = await self.store.get_latest_order_time()
@@ -1631,28 +1586,18 @@ class SyncService:
         try:
             client = await get_async_client()
 
-            # Off DuckDB the products watermark is read inside its own step,
-            # never here (`_catalogue_step_postgres`). Asked before anything
-            # else: it never raises.
-            catalogue_off_duckdb = _catalogue_off_duckdb()
-
-            # The order step. Under chain 3 a failure that is not KeyCRM's is
-            # recorded and the tick goes on (`OrdersStepState`); on DuckDB it
-            # leaves the tick as it always has.
-            orders_off_duckdb = _orders_off_duckdb()
+            # The order step, chain 3's: a failure that is not KeyCRM's is
+            # recorded and the tick goes on (`OrdersStepState`).
             changed_ids: list[int] = []
-            if orders_off_duckdb:
-                self.orders_step.attempted()
+            self.orders_step.attempted()
             self._last_refused = 0
             try:
                 changed_ids = await self._orders_step(client, stats)
-                if orders_off_duckdb:
-                    self.orders_step.succeeded(refused=self._last_refused)
+                self.orders_step.succeeded(refused=self._last_refused)
+                await self._clear_orders_failure()
             except KeyCRMError:
                 raise
             except Exception as exc:
-                if not orders_off_duckdb:
-                    raise
                 self.orders_step.failed(exc)
                 logger.error(
                     "Order step failed under chain 3; last_sync_orders not "
@@ -1660,37 +1605,15 @@ class SyncService:
                     exc_info=True)
                 await self._record_orders_failure(exc)
 
-            last_products_sync = (
-                None if catalogue_off_duckdb
-                else await self.store.get_last_sync_time("products"))
+            # Sync products less frequently (every hour). Chain 6's step reads
+            # its own watermark, and is recorded and retried, never the
+            # tick's end.
+            await self._catalogue_step_postgres(client, stats)
 
-            # Sync products less frequently (every hour)
-            if catalogue_off_duckdb:
-                # Chain 6: recorded and retried, never the tick's end.
-                await self._catalogue_step_postgres(client, stats)
-            elif not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
-                logger.info("Syncing products (hourly)...")
-                products = []
-                async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
-                    products.extend(batch)
-                stats["products"] = await self.store.upsert_products(products)
-                await self.store.set_last_sync_time("products")
-                await mirror_products(products)
-
-                # Emit products synced event
-                await events.emit(SyncEvent.PRODUCTS_SYNCED, {"count": stats["products"]})
-
-            # Sync managers daily (86400 seconds = 24 hours)
-            from core import pg_managers_write
-
-            if pg_managers_write.mode() == "duckdb":
-                last_managers_sync = await self.store.get_last_sync_time("managers")
-                if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
-                    stats["managers"] = await self.sync_managers()
-            else:
-                # Chain 5 off DuckDB, or its flag unreadable: contained, so the
-                # buyers, offers and stocks below run whatever happens here.
-                stats["managers"] = await self._managers_step_postgres()
+            # Sync managers daily. Chain 5's step is contained, so the buyers,
+            # offers and stocks below run whatever happens here (until step
+            # 14's S14-11 only while the chain was off DuckDB).
+            stats["managers"] = await self._managers_step_postgres()
 
             # Sync missing buyers (fetch buyer details for orders that don't have them)
             #
@@ -1733,32 +1656,10 @@ class SyncService:
                         exc_info=True)
                     self._buyer_step_failed(e)
 
-            if _inventory_writes_postgres():
-                # Chain 1 writes Postgres: a failure there is recorded and the
-                # tick goes on (DN-24). See `INVENTORY_RETRY_AFTER_S`.
-                await self._inventory_step_postgres(stats)
-            else:
-                # Sync offers hourly (needed for proper stock-to-product linking)
-                last_offers_sync = await self.store.get_last_sync_time("offers")
-                if not last_offers_sync or (datetime.now(DEFAULT_TZ) - last_offers_sync).total_seconds() > 3600:
-                    stats["offers"] = await self.sync_offers()
-
-                # Sync stocks hourly (same frequency as products)
-                last_stocks_sync = await self.store.get_last_sync_time("stocks")
-                if not last_stocks_sync or (datetime.now(DEFAULT_TZ) - last_stocks_sync).total_seconds() > 3600:
-                    stats["stocks"] = await self.sync_stocks()
-
-                    # Refresh Layer 1: sku_inventory_status (denormalized current state)
-                    await self.store.refresh_sku_inventory_status()
-
-                    # Record Layer 2: daily per-SKU snapshot
-                    await self.store.record_sku_inventory_snapshot()
-
-                    # Legacy: Record aggregated inventory snapshot
-                    await self.store.record_inventory_snapshot()
-
-                    # Emit inventory updated event
-                    await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
+            # Chain 1 writes Postgres: a failure there is recorded and the
+            # tick goes on (DN-24). See `INVENTORY_RETRY_AFTER_S`. Until step
+            # 14's S14-11 a chain on DuckDB took the uncontained path here.
+            await self._inventory_step_postgres(stats)
 
             # Silver reads only `orders`, but Gold joins products and categories,
             # THE CATALOGUE NO LONGER HAS TO ASK FOR ITSELF
@@ -1807,46 +1708,9 @@ class SyncService:
 
         return stats
 
-    async def sync_today(self) -> Dict[str, Any]:
-        """
-        Sync only today's orders for real-time dashboard.
-
-        Returns:
-            Dict with sync statistics
-        """
-        stats = {"orders": 0, "expenses": 0}
-
-        try:
-            client = await get_async_client()
-            today = datetime.now(DEFAULT_TZ).date()
-            tomorrow = today + timedelta(days=1)
-
-            # Sync today's orders using the smart date filter helper
-            orders = await self._fetch_orders_with_date_filter(
-                client,
-                str(today),
-                str(tomorrow)
-            )
-
-            if orders:
-                order_count, expense_count = await self._upsert_orders_with_expenses(
-                    orders,
-                )
-                stats["orders"] = order_count
-                stats["expenses"] = expense_count
-                logger.debug(f"Today sync: {stats['orders']} orders, {stats['expenses']} expenses")
-
-                # Refresh warehouse layers (Silver → Gold), while DuckDB
-                # derives them (DN-29).
-                if warehouse_cutover.duckdb_derives():
-                    await self.store.refresh_warehouse_layers(trigger="sync_today")
-
-        except KeyCRMConnectionError as e:
-            logger.debug(f"Today sync connection error (will retry): {e}")
-        except KeyCRMError as e:
-            logger.error(f"Today sync error: {e}")
-
-        return stats
+    # `sync_today` stood here until step 14's S14-18: today's orders, fetched
+    # and written, with no caller anywhere (the stage 5 entry-point walk listed
+    # it dead). The incremental sync covers today every minute.
 
     async def refresh_order_statuses(self, days_back: int = 30) -> Dict[str, Any]:
         """
@@ -1863,6 +1727,10 @@ class SyncService:
 
         Returns:
             Dict with sync statistics
+
+        Raises:
+            KeyCRMConnectionError: KeyCRM could not be reached, an open
+                circuit breaker included — so the run is recorded as failed.
         """
         stats = {"orders": 0, "expenses": 0, "days_back": days_back}
 
@@ -1888,8 +1756,6 @@ class SyncService:
             orders = list(orders_by_id.values())
 
             if orders:
-                order_ids = [o["id"] for o in orders if "id" in o]
-
                 # Use force_update=True because KeyCRM doesn't update updated_at on status changes
                 # Without this, orders with changed status but same updated_at won't be updated
                 order_count, expense_count = await self._upsert_orders_with_expenses(
@@ -1911,16 +1777,10 @@ class SyncService:
                         f"(sample: {dict(list(api_returns.items())[:5])})"
                     )
 
-                # Incremental warehouse refresh — only rebuild Silver for changed
-                # orders instead of DELETE+INSERT all 36K rows (prevents OOM).
-                # DuckDB's own, so not under KS_WRITE_WAREHOUSE=postgres
-                # (DN-29): the headers written above raise Postgres' signal in
-                # the mirror, and the derivation rebuilds from it.
-                if warehouse_cutover.duckdb_derives():
-                    await self.store.refresh_warehouse_layers(
-                        trigger="status_refresh",
-                        changed_order_ids=order_ids,
-                    )
+                # The headers written above raise Postgres' derivation signal
+                # in their own transaction, and the derivation rebuilds from
+                # it. (DuckDB's incremental rebuild of these ids stood here
+                # until step 14's S14-15; it did not run since step 13.)
                 # No read-back of Silver here. A sample of twenty return orders
                 # used to be compared with DuckDB's `silver_orders`, and all it
                 # produced was a log line. `dq_reconciliation` checks every
@@ -1933,7 +1793,13 @@ class SyncService:
             stats["backdated"] = await self._refresh_backdated_orders(start_date.date())
 
         except KeyCRMConnectionError as e:
-            logger.warning(f"Status refresh connection error (will retry): {e}")
+            # Raised, the way `full_sync` raises it: returned as stats, a
+            # morning KeyCRM did not answer read in /api/jobs as a successful
+            # run that refreshed 0 orders. An open breaker is one of these
+            # since it became a `KeyCRMConnectionError` (A10), and raised past
+            # this handler until then.
+            logger.warning(f"Status refresh connection error: {e}")
+            raise
         except KeyCRMError as e:
             logger.error(f"Status refresh error: {e}")
 
@@ -2012,6 +1878,21 @@ class SyncService:
             return {"requested": 0, "attempted": 0, "repaired": 0,
                     "failed": 0, "remaining": 0, "failures": {}}
 
+        # Postgres' clock before the first fetch (L1-12): an order some writer
+        # stores after this instant is newer than the payload we are about to
+        # fetch, and written under force the payload would put the older state
+        # back — the 05:15 refresh's status, overwritten by a stale fetch that
+        # carried the same `updated_at`. Best effort: unread, nothing is
+        # skipped, and a Postgres that cannot answer fails the write anyway.
+        try:
+            from core.pg_orders_read import postgres_now
+
+            fetch_began = await postgres_now()
+        except Exception as exc:  # noqa: BLE001 — see above
+            logger.warning("Order repair: Postgres' clock unread, every fetched "
+                           "order is written: %s", type(exc).__name__)
+            fetch_began = None
+
         client = await get_async_client()
         for order_id in attempted:
             try:
@@ -2028,15 +1909,37 @@ class SyncService:
                 failures[order_id] = f"{type(exc).__name__}: {exc}"
 
         repaired = 0
+        rewritten: list = []
+        refused: list = []
         if fetched:
             held = lock if lock is not None else contextlib.nullcontext()
             async with held:
+                # Under the lock, so nothing the sync writes can land between
+                # this read and the write below.
+                if fetch_began is not None:
+                    try:
+                        from core.pg_orders_read import rewritten_since
+
+                        rewritten = await rewritten_since(
+                            [o["id"] for o in fetched], fetch_began)
+                    except Exception as exc:  # noqa: BLE001 — as for the clock
+                        logger.warning("Order repair: could not ask which orders "
+                                       "were rewritten: %s", type(exc).__name__)
+                if rewritten:
+                    newer = set(rewritten)
+                    fetched = [o for o in fetched if int(o["id"]) not in newer]
                 # force_update: the whole point is to overwrite what we hold,
                 # and KeyCRM's updated_at may well be older than our last touch.
-                repaired, _ = await self._upsert_orders_with_expenses(
-                    fetched, force_update=True,
-                )
-                await self.store.mark_warehouse_dirty([o["id"] for o in fetched])
+                if fetched:
+                    self._last_refused_ids = ()
+                    repaired, _ = await self._upsert_orders_with_expenses(
+                        fetched, force_update=True,
+                    )
+                    refused = list(getattr(self, "_last_refused_ids", ()))
+        # A refused order is a failure the caller can ledger, so the id scan
+        # moves on instead of asking KeyCRM for it every run (L1-10).
+        for order_id, why in refused:
+            failures[int(order_id)] = f"Postgres refused: {why}"
 
         result = {
             "requested": len(ids),
@@ -2048,6 +1951,8 @@ class SyncService:
             # permanently absent and must never be asked for again; handing it
             # ten of thirty-seven meant the rest came round every hour forever.
             "failures": failures,
+            # Fetched, and not written: Postgres held a newer write of them.
+            "rewritten_since_fetch": sorted(rewritten),
         }
         logger.info(
             "Order repair: %s",
@@ -2081,35 +1986,18 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
     Called on application startup.
     """
     store = await get_store()
-    # What a change of warehouse writer owes, before the sync below writes a
-    # row (DN-29): under KS_WRITE_WAREHOUSE=postgres the writer is recorded and
-    # the DuckDB tick's alert group closed, once; back under duckdb, a full
-    # DuckDB rebuild is marked and the DuckDB checks are held until it
-    # validates. A no-op when neither applies — the default path. A settle that
-    # raises costs this boot nothing: the scheduler's start and every refresh
-    # tick try again before the first DuckDB rebuild or check.
-    try:
-        await warehouse_cutover.settle_writer(store)
-    except Exception as e:
-        logger.error(f"Warehouse writer not settled at boot: {e}", exc_info=True)
-    # The orders held where they are written — Postgres under chain 3, whose
+    # Step 13's settle of the warehouse writer stood here until step 14's
+    # S14-15 (`core/warehouse_cutover.py`, deleted): under KS_DUCKDB=off it read
+    # the record's frozen copy in Postgres, `app.sync_metadata`, and closed the
+    # `warehouse` alert group once. The record stays there, untouched: an image
+    # from before step 14 reads it.
+    # The orders held where they are written — Postgres, chain 3's, whose
     # DuckDB copy never grows and on a fresh DuckDB would read as empty on
-    # every boot, pulling 730 days from KeyCRM each time (`orders_held`). On
-    # DuckDB the count `get_stats` already read.
-    #
-    # Under KS_DUCKDB=off (stage 5, PR-1) `get_stats` is not asked at all: it
-    # counts DuckDB's tables, which is the one thing this boot must not do,
-    # and the only number taken from it was the orders — `orders_held` asks
-    # the store they are written to. Without chain 3 that store is DuckDB,
-    # and the refusal leaves here for web's startup to contain.
-    stats = None
-    if duckdb_switch.is_off():
-        held = await store.orders_held()
-    else:
-        stats = await store.get_stats()
-        held = stats["orders"]
-        if _orders_off_duckdb():
-            held = await store.orders_held()
+    # every boot, pulling 730 days from KeyCRM each time (`orders_held`).
+    # Until step 14's S14-18 a process under KS_DUCKDB=on also counted
+    # DuckDB's products for the log line below (`get_stats`); the store has
+    # no DuckDB to count since.
+    held = await store.orders_held()
 
     # If no orders, do a full sync
     if held == 0:
@@ -2117,10 +2005,7 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
         sync_service = await get_sync_service()
         await sync_service.full_sync(days_back=full_sync_days)
     else:
-        if stats is None:
-            logger.info(f"{held} orders held (KS_DUCKDB=off: no DuckDB counts)")
-        else:
-            logger.info(f"{held} orders held, DuckDB has {stats['products']} products")
+        logger.info(f"{held} orders held")
         # Do incremental sync
         sync_service = await get_sync_service()
         await sync_service.incremental_sync()

@@ -21,14 +21,13 @@ under a plain upsert.
 
 Since step 14's S14-00 chain 3 writes the orders, a constant, so the sync's
 mirror stands down: what the sync ships, and the kill switch, went with it.
-The shared rows and the write statement are chain 3's writer's too, and stay.
+Since S14-13 the mirror itself is gone (`mirror_orders`, and the tests that it
+never raised). The shared rows and the write statement are chain 3's writer's
+too, and stay.
 """
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
-
-import pytest
 
 from core import pg_landing
 from core.landing_rows import (
@@ -65,13 +64,6 @@ def _payload(order_id, *, ordered_at=WHEN, total="100.00", products=2,
             for i in range(products)
         ],
     }
-
-
-@pytest.fixture(autouse=True)
-def _clean():
-    pg_landing.reset_health()
-    yield
-    pg_landing.reset_health()
 
 
 class TestTheSharedRow:
@@ -141,51 +133,3 @@ class TestTheWriteStatement:
         assert pg_landing._numeric(100.10) == Decimal("100.10")
         assert pg_landing._numeric(None) is None
         assert pg_landing._numeric(Decimal("7.00")) == Decimal("7.00")
-
-
-class TestTheMirrorNeverRaises:
-    @pytest.mark.asyncio
-    async def test_a_failed_write_is_reported_not_thrown(self):
-        rows = landed_orders([_payload(1)])
-        with patch("core.pg_landing.write_orders", side_effect=RuntimeError("nope")), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            outcomes = await pg_landing.mirror_orders(rows.orders, rows.products)
-
-        assert [o.ok for o in outcomes] == [False, False]
-        assert all("RuntimeError" in o.error for o in outcomes)
-        assert pg_landing.health()["failures"] == {
-            "bronze.orders": 1, "bronze.order_products": 1,
-        }
-
-    @pytest.mark.asyncio
-    async def test_a_success_clears_the_failure_count(self):
-        rows = landed_orders([_payload(1)])
-        with patch("core.pg_landing.write_orders", side_effect=RuntimeError("nope")), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            await pg_landing.mirror_orders(rows.orders, rows.products)
-        with patch("core.pg_landing.write_orders", new=AsyncMock()):
-            outcomes = await pg_landing.mirror_orders(rows.orders, rows.products)
-
-        assert all(o.ok for o in outcomes)
-        assert pg_landing.health()["failures"] == {}
-
-    @pytest.mark.asyncio
-    async def test_nothing_to_ship_does_not_move_the_watermark(self):
-        """A watermark is a claim about a shipment; an empty one made none."""
-        with patch("core.pg_landing.write_orders", new=AsyncMock()) as w:
-            outcomes = await pg_landing.mirror_orders([], [])
-        w.assert_not_called()
-        assert [o.skipped for o in outcomes] == ["no rows", "no rows"]
-
-    @pytest.mark.asyncio
-    async def test_a_status_only_refresh_leaves_the_products_watermark_alone(self):
-        """`skip_products=True` never looked at line items, so it must not
-        date-stamp them as current."""
-        rows = landed_orders([_payload(1)], with_products=False)
-        with patch("core.pg_landing.write_orders", new=AsyncMock()):
-            outcomes = await pg_landing.mirror_orders(
-                rows.orders, [], replace_products=False,
-            )
-        assert [o.table for o in outcomes] == ["bronze.orders"]
-
-

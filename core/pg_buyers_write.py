@@ -50,7 +50,8 @@ A person's decision is never overwritten (`override_by_human`), and a verdict
 equal to the stored one is not rewritten, so `decided_at` keeps the moment the
 answer last changed. `decided_at` is the web process's UTC clock, passed in —
 the clock DuckDB's rows carry and the copy-back's handover orders by
-(`chain_transfer._shared_clock`) — never Postgres' `now()`.
+(`chain_transfer._shared_clock`; an image from before step 14 still orders by
+it, since S14-04 deleted this build's) — never Postgres' `now()`.
 
 FAILURE POLICY: THE BUYERS RAISE, THE VERDICTS DO NOT, THE DERIVATION NEVER
 
@@ -78,39 +79,32 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` and before its transaction, and claims the three owner rows
 inside that transaction. From the first buyer written here only
-`scripts/chain_copy_back.py buyers` can move the writes back to DuckDB. Two
-things are done before the latch so that a write which could not have landed
-does not spend the rollback: the refusal check above, and the derivation's
-read of what is pending — an hourly run with nothing to decide latches
-nothing.
+`scripts/chain_copy_back.py buyers` could move the writes back to DuckDB
+(deleted in step 14's S14-04; the way back since is an image from before
+step 14, `core.rollback_lever`). Two things are done before the latch so that
+a write which could not have landed does not spend the rollback: the refusal
+check above, and the derivation's read of what is pending — an hourly run
+with nothing to decide latches nothing.
 
-A PRECONDITION THE FLAG ENFORCED — UNTIL S14-00
+A PRECONDITION THE FLAG ENFORCED — UNTIL STEP 14
 
-Since step 14's S14-00 the chain writes Postgres whatever its flag says and
-asks no precondition (`writes_postgres`, `mode`, `unmet_precondition` are
-constants; the readers' list `READERS` is gone with it). What follows is the
-history.
-
-Three readers show buyers on screen: the SMS audience (`KS_SMS_STORE`), the
-search index (`KS_READ_SEARCH_INDEX`) and the dashboard's buyer reads
-(`KS_READ_DASHBOARD`). Each can still read DuckDB, and once this chain writes
-Postgres, DuckDB's buyers are a copy that stopped. So `unmet_precondition()`
-names any of the three not on postgres, and until all are an unlatched chain
-runs as duckdb whatever `KS_WRITE_BUYERS` says — DN-26's rule, which chain 6a
-made generic in the registry for this chain (DN-27). Each flag is read through
-its own reader's parser, all of which raise on a typo; a raise is unmet.
-
-The warning that says so is rate-limited. Chain 6a warns on every call, which
-is once a week for it; this chain's key is read by every incremental tick, so
-the same sentence would reach the log once a minute for as long as the
-readers lag. `/api/health` publishes the reason on every read and the canary
-warns on it (`write_chain_precondition_unmet`), which is where it is read.
+Until step 14's S14-00 `unmet_precondition()` held an unlatched chain on
+DuckDB until the three readers that show buyers on screen — the SMS audience
+(`KS_SMS_STORE`), the search index (`KS_READ_SEARCH_INDEX`) and the
+dashboard's buyer reads (`KS_READ_DASHBOARD`) — read Postgres (DN-27), and the
+canary warned `write_chain_precondition_unmet` while they did not. S14-00
+made every answer a constant, and S14-11 deleted them with the flag:
+`writes_postgres`, `mode`, `unmet_precondition` and `env_writes_postgres`
+are gone, and the buyers step, the hourly gender rider, the two admin doors
+and `scripts/backfill_gender.py` write here and ask nothing. Kept: `WRITE_ENV`
+as a name (revision 0034's comments name it, and an image from before step
+14 reads it) and the latch and its owner rows (decision 3: that image routes
+by them).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -127,8 +121,9 @@ WRITE_ENV = "KS_WRITE_BUYERS"
 CHAIN = "pg_buyers_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper (`app.buyer_gender`), the buyers mirror, the daily
-# comparisons and the copy-back. The two bronze tables are `pg_buyers.BUYER_UNIT`
+# the hourly shipper (`app.buyer_gender`), the buyers mirror and the daily
+# comparisons (and the copy-back, until step 14's S14-04 deleted it). The two
+# bronze tables are `pg_buyers.BUYER_UNIT`
 # — what one writer writes in one transaction changes hands as one — and the
 # gender rides with them because it is decided from their names.
 CHAIN_TABLES: Tuple[str, ...] = (
@@ -177,62 +172,6 @@ NUMERIC_COLUMNS = {
     "loyalty_discount": (5, 2),
     "loyalty_amount": (12, 2),
 }
-
-# How often the unmet-precondition warning may repeat for one reason.
-UNMET_WARN_EVERY_S = 3600.0
-_unmet_warned: Dict[str, float] = {}
-
-
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_BUYERS` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands it down, and the
-    buyers step refuses before it fetches (`SyncService.sync_missing_buyers`).
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and nothing it waited on is asked any more —
-    production met every clause, and the readers it named read Postgres.
-    Kept for the registry's `unmet_precondition` field, which keeps its shape
-    until S14-11."""
-    return None
-
-
-def _warn_unmet(reason: str) -> None:
-    now = time.monotonic()
-    last = _unmet_warned.get(reason)
-    if last is not None and now - last < UNMET_WARN_EVERY_S:
-        return
-    _unmet_warned[reason] = now
-    logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, reason)
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
-    nor a precondition routes any more; the first write in a process still
-    takes the latch (decision 3), which the images before step 14 route by.
-    Last consumers:
-    the buyers step, the gender rider and the registry — S14-11.
-    """
-    return True
-
-
-def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", a constant since step 14's
-    S14-00 — never None, since no flag is read for it."""
-    return "postgres"
-
 
 def _latch() -> str:
     """Take the local half of the latch before this process writes Postgres.
@@ -307,10 +246,12 @@ def _refusal(row, contacts) -> Optional[str]:
     NUMERIC, a contact naming another buyer or carrying such text. The parse
     already strips NUL, writes 'Unknown' for a blank name and reads a birthday
     DuckDB would refuse as NULL. A first batch the server refused whole after
-    the latch would leave the marker with no owner row behind it — CRITICAL
-    `chain_latch_disagrees` the next morning and a copy-back that refuses — so
-    what can be foreseen is refused here; what cannot is retried buyer by
-    buyer and skipped (`upsert_buyers`)."""
+    the latch would leave the marker with no owner row behind it — a
+    direction nothing files since step 14's S14-12 (the integrity layer's
+    chain invariants judge only owner rows with no marker), and one an image
+    from before step 14 pages as CRITICAL `chain_latch_disagrees` — so what
+    can be foreseen is refused here; what cannot is retried buyer by buyer
+    and skipped (`upsert_buyers`)."""
     from core.pg_numeric import refusal
 
     for column in type(row)._fields:

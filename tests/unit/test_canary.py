@@ -25,13 +25,14 @@ def _healthy_payload():
         "status": "healthy",
         "version": "1.2.3",
         "uptime_seconds": 100,
-        "duckdb": {"status": "connected", "latency_ms": 5},
+        # No `duckdb` block and no ledger since step 14's S14-17.
+        "degraded_by": [],
         "sync": {"status": "active", "seconds_since_sync": 30},
         "data_quality": {
             "integrity": {"last_success_at": "2026-08-08T19:00:00+03:00", "age_seconds": 1800},
-            "reconciliation": {"last_success_at": "2026-08-08T05:00:00+03:00", "age_seconds": 52200},
             "mirror_landing": {"last_success_at": "2026-08-08T07:30:00+03:00", "age_seconds": 43200},
-            # The same 05:30 job's Postgres half (DN-21).
+            # The 05:30 job's Postgres half (DN-21); its DuckDB half,
+            # `reconciliation`, went in step 14's S14-12.
             "reconciliation_pg": {"last_success_at": "2026-08-08T05:30:00+03:00", "age_seconds": 50400},
             # …and its ClickHouse half (OD-08 (a)).
             "reconciliation_ch": {"last_success_at": "2026-08-08T05:30:00+03:00", "age_seconds": 50400},
@@ -149,19 +150,30 @@ def _dq_payload(**layers):
 def test_dq_freshness_passes_when_all_layers_recent():
     failures, ages = canary.check_dq_freshness(_healthy_payload())
     assert failures == []
-    assert ages == {"integrity": 1800, "reconciliation": 52200,
+    assert ages == {"integrity": 1800,
                     "mirror_landing": 43200, "reconciliation_pg": 50400,
                     "reconciliation_ch": 50400}
 
 
 def test_dq_freshness_flags_stale_reconciliation():
     payload = _healthy_payload()
-    payload["data_quality"]["reconciliation"]["age_seconds"] = 3 * 86400
+    payload["data_quality"]["reconciliation_pg"]["age_seconds"] = 3 * 86400
     failures, ages = canary.check_dq_freshness(payload)
     keys = [k for k, _ in failures]
-    assert keys == ["dq_stale:reconciliation"]
+    assert keys == ["dq_stale:reconciliation_pg"]
     assert "3d" in failures[0][1]
-    assert ages["reconciliation"] == 3 * 86400
+    assert ages["reconciliation_pg"] == 3 * 86400
+
+
+def test_dq_freshness_ignores_the_layer_nothing_writes():
+    """`reconciliation`, the 05:30 job's DuckDB half, went in step 14's
+    S14-12: an old web that still publishes it is not judged on it, and its
+    absence is no failure. Mutation: put it back in `DQ_MAX_AGE_S`."""
+    payload = _healthy_payload()
+    payload["data_quality"]["reconciliation"] = {
+        "last_success_at": "2026-08-01T05:00:00+03:00", "age_seconds": 40 * 86400}
+    failures, ages = canary.check_dq_freshness(payload)
+    assert failures == [] and "reconciliation" not in ages
 
 
 def test_dq_freshness_missing_block_is_a_failure():
@@ -180,17 +192,16 @@ def test_dq_freshness_missing_layer_is_a_failure():
     payload = _dq_payload(integrity={"age_seconds": 60})
     failures, ages = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
-        "dq_missing:mirror_landing", "dq_missing:reconciliation",
+        "dq_missing:mirror_landing",
         "dq_missing:reconciliation_ch", "dq_missing:reconciliation_pg",
     ]
-    assert ages["reconciliation"] is None
+    assert ages["reconciliation_pg"] is None
 
 
 def test_dq_freshness_never_succeeded_is_a_failure():
     """A layer whose only runs all errored reports a null age, not a big one."""
     payload = _dq_payload(
         integrity={"last_success_at": None, "age_seconds": None},
-        reconciliation={"last_success_at": None, "age_seconds": None},
         mirror_landing={"last_success_at": None, "age_seconds": None},
         reconciliation_pg={"last_success_at": None, "age_seconds": None},
         reconciliation_ch={"last_success_at": None, "age_seconds": None},
@@ -198,8 +209,7 @@ def test_dq_freshness_never_succeeded_is_a_failure():
     failures, _ = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
         "dq_never:integrity", "dq_never:mirror_landing",
-        "dq_never:reconciliation", "dq_never:reconciliation_ch",
-        "dq_never:reconciliation_pg",
+        "dq_never:reconciliation_ch", "dq_never:reconciliation_pg",
     ]
 
 
@@ -355,26 +365,27 @@ async def test_run_canary_all_green():
     assert result.cert_days_remaining and result.cert_days_remaining > 50
 
 
-def _healthy_payload_under_duckdb_off():
-    """What web publishes under KS_DUCKDB=off with nothing opened (stage 5,
-    PR-3): the `duckdb` block and the ledger say `off`, nothing degrades for
-    them, and the switch's block is empty."""
+def _payload_with_the_switch_block():
+    """What an image from before step 14's S14-18 published: the
+    `duckdb_switch` block, here as loud as it could be — opens refused under
+    off, a held-back verdict, a value not understood."""
     payload = _healthy_payload()
-    payload["degraded_by"] = []
-    payload["duckdb"] = {"status": "off", "latency_ms": None, "fatal": None}
-    payload["migrations"] = {"status": "off"}
-    payload["duckdb_switch"] = {"mode": "off", "value": "off", "error": None,
-                                "opened_while_off": {}}
+    payload["duckdb_switch"] = {"mode": "on", "value": "of", "error": "junk",
+                                "opened_while_off": {"core.x:f": {"count": 3,
+                                                                  "last_at": None}},
+                                "held_back": ["user_store"]}
     return payload
 
 
 @pytest.mark.asyncio
-async def test_run_canary_a_healthy_payload_under_duckdb_off_is_green():
-    """The week of silence's healthy probe: nothing pages, and the probe can
-    say the week holds. Mutation: judge `duckdb.status != "connected"` as a
-    failure — every probe of the week would page `health_status`."""
+async def test_run_canary_a_payload_still_carrying_the_switch_block_is_green():
+    """S14-18 deleted the DuckDB switch and the canary's three pages over its
+    block (`duckdb_opened_while_off`, `duckdb_mode_invalid`,
+    `duckdb_off_held_back`): a payload that still carries one pages nothing,
+    whatever it says. Mutation: put any of the three checks back in
+    `run_canary`."""
     def handler(request):
-        return httpx.Response(200, json=_healthy_payload_under_duckdb_off())
+        return httpx.Response(200, json=_payload_with_the_switch_block())
 
     future = datetime.now(timezone.utc) + timedelta(days=60)
     fake_cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
@@ -385,7 +396,11 @@ async def test_run_canary_a_healthy_payload_under_duckdb_off_is_green():
     assert result.ok is True and result.severity == "ok", result.failures
     assert result.failure_keys == []
     assert result.health_status == "healthy"
-    assert result.duckdb_silent is True
+    for gone in ("duckdb_opened_while_off", "duckdb_mode_invalid",
+                 "duckdb_off_held_back"):
+        assert gone not in result.unjudged_keys
+        assert gone not in dict(canary._ACTIONS)
+        assert not hasattr(canary, "check_duckdb_switch")
 
 
 @pytest.mark.asyncio
@@ -415,73 +430,50 @@ async def _judge(payload):
             return await run_canary(DASHBOARD, client=client)
 
 
-def _fatal_payload(fatal, degraded_by=("duckdb_fatal",)):
-    payload = _healthy_payload()
-    payload["status"] = "degraded"
-    payload["degraded_by"] = list(degraded_by)
-    payload["duckdb"]["fatal"] = fatal
-    return payload
+class TestADegradedWebIsAnOutage:
+    """Web publishes `healthy` and `degraded_by: []` since step 14's S14-17,
+    which took out the three causes there were — `duckdb`, `migrations` and
+    `duckdb_fatal`, all DuckDB's — and with them the page a DuckDB FATAL
+    alone had of its own ("DuckDB index short", or a warning for a FATAL
+    the reconnect answered past). A web that still says degraded — one this
+    canary does not know — is the outage it always was: CRITICAL, titled
+    DOWN, the causes it names in the line and a lever that names no
+    migration. Mutation: keep reading `duckdb.fatal` — the FATAL alone
+    would be a warning again."""
 
-
-class TestADuckDBFatalIsNamed:
-    """`/api/health` reads degraded after a DuckDB FATAL (the kill guard's
-    choice: the existing page, `health_status`). The page used to read
-    "Dashboard DOWN", "status=degraded" and "a restart won't fix a
-    migration" — while web answered, for a FATAL the reconnect had already
-    answered past, and for a short index that a restart does not heal and
-    the compaction does (batch-E review). Mutation: judge `health_status` as
-    before, whatever `degraded_by` says."""
-
+    @pytest.mark.parametrize("degraded_by, line", [
+        (["duckdb_fatal"], "status=degraded (duckdb_fatal)"),
+        (["migrations", "duckdb"], "status=degraded (migrations, duckdb)"),
+        ([], "status=degraded"),
+        (None, "status=degraded"),
+    ])
     @pytest.mark.asyncio
-    async def test_a_short_index_is_critical_and_names_the_compaction(self):
-        result = await _judge(_fatal_payload({
-            "count": 2, "kinds": {"index": 2}, "last_at": "2026-10-08T10:00:00+00:00",
-            "index_short": {"since": "2026-10-08T09:00:00+00:00", "count": 2}}))
-        assert result.failure_keys == ["health_status"]
-        assert result.severity == "critical" and result.duckdb_fatal == "index"
-        msg = canary.format_alert(result, DASHBOARD)
-        assert msg.splitlines()[0].endswith("<b>DuckDB index short</b>"), msg
-        assert "index is short" in msg and "2026-10-08T09:00:00" in msg
-        assert "weekly_compact.sh" in msg and "migration" not in msg
-
-    @pytest.mark.asyncio
-    async def test_after_a_restart_the_written_down_damage_still_pages(self):
-        """The process that saw the FATAL is gone (`count` 0, no kinds); the
-        file still holds the short index."""
-        result = await _judge(_fatal_payload({
-            "count": 0, "kinds": {}, "last_at": None,
-            "index_short": {"since": "2026-10-08T09:00:00+00:00", "count": 1}}))
-        assert result.duckdb_fatal == "index" and result.severity == "critical"
-        assert "found before web last restarted" in result.failures[0]
-
-    @pytest.mark.asyncio
-    async def test_a_fatal_the_reconnect_answered_past_is_a_warning(self):
-        result = await _judge(_fatal_payload({
-            "count": 1, "kinds": {"other": 1}, "last_at": "2026-10-08T10:00:00+00:00",
-            "index_short": None}))
-        assert result.failure_keys == ["health_status"]
-        assert result.severity == "warn" and result.duckdb_fatal == "other"
-        msg = canary.format_alert(result, DASHBOARD)
-        assert "Dashboard DOWN" not in msg and "Dashboard warning" in msg
-        assert "DuckDB FATAL" in msg and "reads answer" in msg
-        assert "'DuckDB FATAL'" in msg and "migration" not in msg
-
-    @pytest.mark.parametrize("degraded_by", [
-        ("migrations", "duckdb_fatal"), ("duckdb", "duckdb_fatal"), ("migrations",), None])
-    @pytest.mark.asyncio
-    async def test_any_other_cause_is_the_outage_it_always_was(self, degraded_by):
-        """A FATAL beside a failed migration or a store that did not answer
-        is still DOWN, with the old lever — and so is a web that does not
-        say why (`degraded_by` absent: an older build)."""
-        payload = _fatal_payload({"count": 1, "kinds": {"other": 1}, "last_at": "x"},
-                                 degraded_by or ())
+    async def test_it_is_critical_and_names_its_causes(self, degraded_by, line):
+        payload = _healthy_payload()
+        payload["status"] = "degraded"
+        payload["degraded_by"] = degraded_by
         if degraded_by is None:
             payload.pop("degraded_by")
+        # An image from before S14-17 published the FATAL here; it is read
+        # by nothing.
+        payload["duckdb"] = {"status": "connected", "fatal": {
+            "count": 1, "kinds": {"other": 1}, "last_at": "2026-10-08T10:00:00+00:00",
+            "index_short": {"since": "2026-10-08T09:00:00+00:00", "count": 1}}}
         result = await _judge(payload)
-        assert result.duckdb_fatal is None and result.severity == "critical"
-        assert result.failures[0] == "status=degraded"
+        assert result.failure_keys == ["health_status"]
+        assert result.severity == "critical"
+        assert result.failures == [line]
+        assert not hasattr(result, "duckdb_fatal")
         msg = canary.format_alert(result, DASHBOARD)
-        assert "Dashboard DOWN" in msg and "migration" in msg
+        assert msg.splitlines()[0].endswith("<b>Dashboard DOWN</b>"), msg
+        lever = next(l for l in msg.splitlines() if l.startswith("→"))
+        assert "degraded_by" in lever
+        assert "migration" not in lever and "index" not in lever and "restart" not in lever
+
+    def test_the_fatal_page_is_gone(self):
+        assert not hasattr(canary, "duckdb_fatal_only")
+        assert not hasattr(canary, "_FATAL_ACTIONS")
+        assert "duckdb_fatal" not in canary.CanaryResult.__dataclass_fields__
 
 
 @pytest.mark.asyncio
@@ -529,7 +521,7 @@ async def test_run_canary_cert_failure_alone_is_warn():
 @pytest.mark.asyncio
 async def test_run_canary_flags_stale_reconciliation_as_warn():
     payload = _healthy_payload()
-    payload["data_quality"]["reconciliation"]["age_seconds"] = 4 * 86400
+    payload["data_quality"]["reconciliation_pg"]["age_seconds"] = 4 * 86400
 
     def handler(request):
         return httpx.Response(200, json=payload)
@@ -542,8 +534,8 @@ async def test_run_canary_flags_stale_reconciliation_as_warn():
             result = await run_canary(DASHBOARD, client=client)
     assert result.ok is False
     assert result.severity == "warn"
-    assert result.failure_keys == ["dq_stale:reconciliation"]
-    assert result.dq_ages["reconciliation"] == 4 * 86400
+    assert result.failure_keys == ["dq_stale:reconciliation_pg"]
+    assert result.dq_ages["reconciliation_pg"] == 4 * 86400
 
 
 @pytest.mark.asyncio
@@ -625,11 +617,7 @@ def test_format_alert_includes_failures_and_extras():
     (["health_status"], "Dashboard DOWN"),
     ([], "Dashboard DOWN"),
     (["cert_expiring"], "Dashboard critical"),
-    (["write_chain_flag_invalid"], "Dashboard critical"),
-    (["warehouse_preconditions_unmet"], "Warehouse switch held back"),
-    (["duckdb_off_held_back"], "DuckDB switch held back"),
-    # Step 13 held makes `warehouse_postgres` off's symptom: its title first.
-    (["duckdb_off_held_back", "warehouse_preconditions_unmet"], "Warehouse switch held back"),
+    (["orders_sync_failing"], "Dashboard critical"),
     (["cert_expiring", "health_status"], "Dashboard DOWN"),
 ])
 def test_a_critical_title_says_down_only_for_an_outage(keys, title):
@@ -660,12 +648,21 @@ def test_format_alert_includes_dq_ages():
 
 
 @pytest.mark.asyncio
-async def test_run_canary_warns_on_a_derivation_mode_web_did_not_understand():
-    """The wiring, not only the judge: a KS_PG_DERIVE typo reaches a failure
-    key and a warn, and the site is otherwise healthy."""
+async def test_run_canary_judges_no_step_13_block_an_older_image_publishes():
+    """The wiring: an image from before step 14 still publishes `derivation`'s
+    `mode` and `error`, `warehouse_writer_mode` and `utm_parse`, and a
+    step-14 bot judges none of them (S14-15 deleted the six checks with
+    KS_PG_DERIVE, KS_UTM_PARSE and step 13's switch). Until then a
+    KS_PG_DERIVE typo here was a warn under `derivation_mode_invalid`."""
     payload = _healthy_payload()
     payload["derivation"] = {"mode": "piggyback",
                              "error": "KS_PG_DERIVE='owned' is not one of ('piggyback', 'own')"}
+    payload["warehouse_writer_mode"] = {
+        "mode": "duckdb", "value": "postgress", "error": "not understood",
+        "preconditions_unmet": ["pg_revision"], "held": True,
+        "held_for_s": 10 * 3600, "reclassify_needed": True,
+        "way_back_refused": ["pg_orders_write"]}
+    payload["utm_parse"] = {"mode": "duckdb", "error": "postgres without own"}
 
     def handler(request):
         return httpx.Response(200, json=payload)
@@ -675,8 +672,8 @@ async def test_run_canary_warns_on_a_derivation_mode_web_did_not_understand():
     async with _mock_transport(handler) as client:
         with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
             result = await run_canary(DASHBOARD, client=client)
-    assert result.severity == "warn"
-    assert result.failure_keys == ["derivation_mode_invalid"]
+    assert result.severity == "ok", result.failure_keys
+    assert result.failure_keys == []
 
 
 # ─── the buyers step (chain 4, PR-1) ─────────────────────────────────────────
@@ -748,17 +745,10 @@ class TestBuyerSync:
     # ── chain 4: the step as the only writer of buyers ──
 
     @classmethod
-    def _chain(cls, mode="postgres", **kw):
-        payload = cls._block(**kw)
-        payload["write_chains"] = {canary.BUYER_CHAIN: {"mode": mode}}
-        return payload
-
-    def test_the_chain_name_is_the_chains(self):
-        """Spelled in the canary, because nothing under bot/ may import
-        core.pg*; pinned here so a rename cannot silence the page."""
-        from core import pg_buyers_write
-
-        assert canary.BUYER_CHAIN == pg_buyers_write.CHAIN
+    def _chain(cls, **kw):
+        # Since step 14's S14-11 the CRITICAL is judged on `buyer_sync`
+        # alone: no `write_chains` entry gates it.
+        return cls._block(**kw)
 
     def test_under_chain_4_three_hours_without_a_success_pages(self):
         stale = canary.BUYER_SYNC_CHAIN_STALE_S + 1
@@ -770,15 +760,17 @@ class TestBuyerSync:
         assert canary.check_buyer_sync_chain(
             self._chain(last_ok_age_s=canary.BUYER_SYNC_CHAIN_STALE_S)) == []
 
-    def test_only_under_the_chain(self):
-        """A web on DuckDB, or one publishing no chain block, still has the
-        mirror behind every buyer: the WARN is the whole judgement there."""
+    def test_judged_whatever_a_chain_entry_says(self):
+        """Chain 4 writes Postgres, a constant: an older web's entry saying
+        duckdb, or none at all, gates nothing since step 14's S14-11; with no
+        `buyer_sync` block there is nothing to judge."""
         stale = canary.BUYER_SYNC_CHAIN_STALE_S + 1
-        assert canary.check_buyer_sync_chain(
-            self._chain(mode="duckdb", last_ok_age_s=stale)) == []
-        assert canary.check_buyer_sync_chain(
-            self._chain(mode=None, last_ok_age_s=stale)) == []
-        assert canary.check_buyer_sync_chain(self._block(last_ok_age_s=stale)) == []
+        for chains in (None, {"pg_buyers_write": {"mode": "duckdb"}}, {}):
+            payload = self._chain(last_ok_age_s=stale, last_attempt_age_s=60)
+            if chains is not None:
+                payload["write_chains"] = chains
+            [(key, _)] = canary.check_buyer_sync_chain(payload)
+            assert key == "buyer_sync_stalled_chain", chains
         assert canary.check_buyer_sync_chain(None) == []
 
     def test_a_restart_does_not_reset_the_stall(self):
@@ -837,88 +829,8 @@ class TestBuyerSync:
         assert "KeyCRMConnectionError" in message
 
 
-# ─── KS_DUCKDB=off held back (stage 5's PR-2) ────────────────────────────────
-
-class TestOffHeldBack:
-    """Web read KS_DUCKDB=off and runs `on` because a precondition of off is
-    unmet (core/duckdb_off.py, OD-S5-1 (a)): CRITICAL, titled for what it is
-    — the site serves — and the week-of-silence watch is not written."""
-
-    @staticmethod
-    def _held(keys):
-        payload = _healthy_payload()
-        payload["duckdb_switch"] = {"mode": "on", "value": "off", "error": None,
-                                    "opened_while_off": {}, "held_back": keys}
-        return payload
-
-    async def _probe(self, payload):
-        def handler(request):
-            return httpx.Response(200, json=payload)
-
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(handler) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                return await run_canary(DASHBOARD, client=client)
-
-    @pytest.mark.parametrize("block", [
-        None, {}, {"mode": "on", "opened_while_off": {}},
-        {"mode": "off", "value": "off", "held_back": []},
-        {"mode": "off", "value": "off", "held_back": None},
-        {"mode": "on", "held_back": "user_store"},
-    ])
-    def test_off_holding_or_no_verdict_says_nothing(self, block):
-        payload = {} if block is None else {"duckdb_switch": block}
-        assert canary.check_duckdb_off_held_back(payload) == []
-
-    def test_it_names_every_unmet_key(self):
-        [(key, line)] = canary.check_duckdb_off_held_back(
-            {"duckdb_switch": {"held_back": ["chain:pg_orders_write", "user_store"]}})
-        assert key == "duckdb_off_held_back"
-        assert line == canary.DUCKDB_HELD_BACK_LINE + "chain:pg_orders_write, user_store"
-
-    @pytest.mark.asyncio
-    async def test_it_pages_critical_with_its_title_and_lever(self):
-        """Mutation: make the severity `warn` in `run_canary`."""
-        result = await self._probe(self._held(["writer_record"]))
-        assert result.severity == "critical"
-        assert result.failure_keys == ["duckdb_off_held_back"]
-        message = canary.format_alert(result, DASHBOARD)
-        assert message.splitlines()[0] == "\U0001f6a8 <b>DuckDB switch held back</b>"
-        assert "DOWN" not in message
-        assert canary._what_to_do(result).startswith("web runs on;")
-        assert result.duckdb_silent is None, "web runs on: the week's watch is not written"
-
-    @pytest.mark.asyncio
-    async def test_step_13_held_names_its_own_lever_first(self):
-        payload = self._held(["warehouse_postgres"])
-        payload["warehouse_writer_mode"] = {"mode": "duckdb", "value": "postgres",
-                                            "error": None,
-                                            "preconditions_unmet": ["pg_revision"]}
-        result = await self._probe(payload)
-        assert set(result.failure_keys) == {"duckdb_off_held_back",
-                                            "warehouse_preconditions_unmet"}
-        assert "cutover.unmet" in canary._what_to_do(result)
-
-    def test_it_is_a_registered_condition_and_its_lever_one_line(self):
-        from core.alerting import REGISTRY, Kind
-
-        assert REGISTRY["duckdb_off_held_back"].kind is Kind.CONDITION
-        action = dict(canary._ACTIONS)["duckdb_off_held_back"]
-        assert "\n" not in action and len(action) <= 150
-
-    def test_its_lever_says_what_a_hold_stops_and_both_ways_out(self):
-        """Review of PR-2: the host's sidecars read `.env`, not web's
-        verdict, so while web is held back the nightly DuckDB snapshot and
-        the Sunday compaction are refused as web writes the file on. The page
-        is where the operator learns a hold is a state to leave — and that
-        putting `KS_DUCKDB=on` back is a way out as much as meeting the keys,
-        the same two the condition's resolution names. Mutation: the old
-        lever, which named neither."""
-        from core.alerting import REGISTRY
-        from core.duckdb_switch import ENV, ON
-
-        action = dict(canary._ACTIONS)["duckdb_off_held_back"]
-        assert f"{ENV}={ON}" in action and "meet each key" in action
-        assert "snapshots" in action and "compacts" in action
-        assert f"{ENV}={ON}" in REGISTRY["duckdb_off_held_back"].clears
+# `TestOffHeldBack` stood here until step 14's S14-18: KS_DUCKDB=off held on
+# `on` by an unmet precondition (`duckdb_off_held_back`, CRITICAL, titled
+# "DuckDB switch held back"). The switch and its block are deleted; a block a
+# payload still carries pages nothing
+# (`test_run_canary_a_payload_still_carrying_the_switch_block_is_green`).

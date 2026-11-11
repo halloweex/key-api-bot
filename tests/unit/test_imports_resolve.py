@@ -324,13 +324,13 @@ def test_every_import_of_ours_resolves():
 
 @pytest.mark.parametrize("source, found", [
     ("from core import no_such_module_s14\n", "no such name"),
-    ("from core.duckdb_switch import no_such_name_s14\n", "no such name"),
+    ("from core.read_fallback import no_such_name_s14\n", "no such name"),
     ("import core.no_such_module_s14\n", "no such module"),
-    ("def f():\n    from core import duckdb_switch\n    return duckdb_switch.hold\n",
+    ("def f():\n    from core import read_fallback\n    return read_fallback.hold\n",
      "has no 'hold'"),
-    ("from core import duckdb_switch as sw\nsw.no_such_attr_s14()\n",
+    ("from core import read_fallback as sw\nsw.no_such_attr_s14()\n",
      "has no 'no_such_attr_s14'"),
-    ("import core.duckdb_switch\ncore.duckdb_switch.no_such_attr_s14\n",
+    ("import core.read_fallback\ncore.read_fallback.no_such_attr_s14\n",
      "has no 'no_such_attr_s14'"),
     ("import importlib\nimportlib.import_module('core.duckdb_off')\n",
      "no such module"),
@@ -339,13 +339,13 @@ def test_every_import_of_ours_resolves():
     # removed from the scheduler; the last is `/api/health`'s import of a
     # name `core.config` never had, which published `sync: null` from
     # 2026-02-12 to 2026-10-21.
-    ("def f(found):\n    try:\n        from core import duckdb_off, duckdb_switch\n"
-     "        if not duckdb_switch.is_off():\n"
+    ("def f(found):\n    try:\n        from core import duckdb_off, read_fallback\n"
+     "        if not read_fallback.refusals():\n"
      "            duckdb_off.note_history_reported(found)\n"
      "    except Exception:\n        pass\n",
      "from core import duckdb_off — no such name"),
-    ("def f():\n    try:\n        from core import duckdb_switch\n"
-     "        duckdb_switch.hold(['x'])\n    except Exception:\n        pass\n",
+    ("def f():\n    try:\n        from core import read_fallback\n"
+     "        read_fallback.hold(['x'])\n    except Exception:\n        pass\n",
      "has no 'hold'"),
     ("try:\n    from core.duckdb_off import settle\nexcept:\n    settle = None\n",
      "core.duckdb_off — no such module"),
@@ -371,18 +371,18 @@ def test_it_finds(tmp_path, source, found):
 
 
 @pytest.mark.parametrize("source", [
-    "from core import duckdb_switch\nduckdb_switch.guard\n",
-    "from core import duckdb_switch\ndef f(duckdb_switch):\n    return duckdb_switch.anything\n",
-    "from core import duckdb_switch\nduckdb_switch.no_such_attr_s14 = 1\n",
+    "from core import read_fallback\nread_fallback.refuse\n",
+    "from core import read_fallback\ndef f(read_fallback):\n    return read_fallback.anything\n",
+    "from core import read_fallback\nread_fallback.no_such_attr_s14 = 1\n",
     "import pytest\nwith pytest.raises(ImportError):\n    from core import gone_s14\n",
     "try:\n    from core import gone_s14\nexcept ImportError:\n    pass\n",
     "try:\n    from core import gone_s14\nexcept (ModuleNotFoundError, OSError):\n    pass\n",
     "import builtins\ntry:\n    from core import gone_s14\nexcept builtins.ImportError:\n    pass\n",
     # An import written to fail still binds its name, so a read through it
     # is not judged against the module-level import of the same name.
-    "from core import duckdb_switch\ndef f():\n    try:\n"
-    "        from bot import duckdb_switch\n    except ImportError:\n        return\n"
-    "    return duckdb_switch.anything_s14\n",
+    "from core import read_fallback\ndef f():\n    try:\n"
+    "        from bot import read_fallback\n    except ImportError:\n        return\n"
+    "    return read_fallback.anything_s14\n",
 ])
 def test_it_leaves_alone(tmp_path, source):
     """What is not a read of a deleted name: a name that exists, a parameter

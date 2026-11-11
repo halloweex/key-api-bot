@@ -20,42 +20,21 @@ The members now carry KeyCRM's labels; the names this codebase used before
 are preserved in `LEGACY_STATUS_NAMES`, because whether the CRM's labels are
 right is a question about the business and it is not settled here.
 """
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
-from core.data_quality import KNOWN_STATUS_IDS
-from core.duckdb_store import DuckDBStore
+from core.pg_warehouse_dq import KNOWN_STATUS_IDS
 from core.models import (
     LEGACY_STATUS_NAMES,
     LOST_STATUS_GROUP_ID,
     Order,
     OrderStatus,
 )
-
-
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module pins the status-group rule in the Silver body both engines
-    render, seeded through DuckDB's order writer. So this module keeps
-    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
-    until their DuckDB branches go."""
-    from core import pg_orders_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+from tests.pg_orders_seed import needs_pg, pg_orders  # noqa: F401 — the fixture
 
 
 # The mapping the API returned, as measured.
 MEASURED_GROUPS = {1: 1, 9: 4, 12: 5, 15: 6, 19: 6, 20: 4, 21: 6, 22: 6, 23: 6}
-
-
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    return store
 
 
 def _api_order(oid: int, status_id: int, group_id=None, total="1000.00"):
@@ -160,104 +139,53 @@ class TestOrderPrefersTheGroup:
         assert order.status_group_id == 6
 
 
+@needs_pg
 class TestSilverUsesIt:
-    @pytest.mark.asyncio
-    async def test_the_group_overrides_the_id_list_in_silver(self, tmp_path):
-        store = await _make_store(tmp_path)
+    """The status-group rule in the Silver body, on Postgres: seeded through
+    chain 3's writer and derived by `pg_silver.rebuild_silver`. It ran on
+    DuckDB's writer and DuckDB's Silver until step 14's S14-09 deleted the
+    writer; the body is the one both engines rendered
+    (`core.warehouse_sql.silver_select_sql`)."""
+
+    @staticmethod
+    async def _silver(pool, payloads):
+        from core import pg_orders_write
+        from core.pg_silver import rebuild_silver
+
+        await pg_orders_write.upsert_orders_with_expenses(payloads)
         try:
-            # Same status id, opposite groups.
-            await store.upsert_orders([
-                _api_order(1, status_id=12, group_id=5),   # revenue
-                _api_order(2, status_id=12, group_id=6),   # lost/cancel
-            ])
-            await store.refresh_warehouse_layers(trigger="manual")
-
-            async with store.connection() as conn:
-                rows = dict(conn.execute(
-                    "SELECT id, is_return FROM silver_orders ORDER BY id"
-                ).fetchall())
-            assert rows[1] is False
-            assert rows[2] is True
+            await rebuild_silver(pool)
+            async with pool.acquire() as conn:
+                return {r["id"]: r["is_return"] for r in await conn.fetch(
+                    "SELECT id, is_return FROM silver.orders ORDER BY id")}
         finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_rows_without_a_group_keep_the_old_verdict(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_orders([
-                _api_order(1, status_id=19),   # excluded by the list
-                _api_order(2, status_id=20),   # revenue: not in the list
-            ])
-            await store.refresh_warehouse_layers(trigger="manual")
-
-            async with store.connection() as conn:
-                rows = dict(conn.execute(
-                    "SELECT id, is_return FROM silver_orders ORDER BY id"
-                ).fetchall())
-            assert rows[1] is True
-            assert rows[2] is False
-        finally:
-            await store.close()
-
-
-class TestTheColumnArrivesOnAnExistingDatabase:
-    """`CREATE TABLE IF NOT EXISTS` does not add columns to a table that
-    already exists. Production learned this the hard way: every warehouse
-    refresh failed on `Table "o" does not have a column named
-    status_group_id` until the migration shipped."""
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM silver.orders")
 
     @pytest.mark.asyncio
-    async def test_a_pre_existing_orders_table_gains_the_column(self, tmp_path):
-        import duckdb
+    async def test_the_group_overrides_the_id_list_in_silver(self, pg_orders):
+        _store, pool = pg_orders
+        # Same status id, opposite groups.
+        rows = await self._silver(pool, [
+            _api_order(1, status_id=12, group_id=5),   # revenue
+            _api_order(2, status_id=12, group_id=6),   # lost/cancel
+        ])
+        assert rows[1] is False
+        assert rows[2] is True
 
-        db = tmp_path / "legacy.duckdb"
-        conn = duckdb.connect(str(db))
-        # The orders table exactly as production held it before this change.
-        conn.execute("""
-            CREATE TABLE orders (
-                id INTEGER PRIMARY KEY,
-                source_id INTEGER NOT NULL,
-                status_id INTEGER NOT NULL,
-                grand_total DECIMAL(12, 2) NOT NULL,
-                ordered_at TIMESTAMP WITH TIME ZONE,
-                created_at TIMESTAMP WITH TIME ZONE,
-                updated_at TIMESTAMP WITH TIME ZONE,
-                buyer_id INTEGER,
-                manager_id INTEGER,
-                manager_comment TEXT,
-                promocode VARCHAR,
-                synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                update_count INTEGER DEFAULT 0
-            )
-        """)
-        conn.execute("""
-            INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,
-                                created_at, updated_at, buyer_id)
-            VALUES (1, 4, 19, 100.00, '2026-08-01T10:00:00+03:00',
-                    '2026-08-01T10:00:00+03:00', '2026-08-01T10:00:00+03:00', 10)
-        """)
-        conn.close()
+    @pytest.mark.asyncio
+    async def test_rows_without_a_group_keep_the_old_verdict(self, pg_orders):
+        _store, pool = pg_orders
+        rows = await self._silver(pool, [
+            _api_order(1, status_id=19),   # excluded by the list
+            _api_order(2, status_id=20),   # revenue: not in the list
+        ])
+        assert rows[1] is True
+        assert rows[2] is False
 
-        store = DuckDBStore(db_path=db)
-        await store.connect()
-        try:
-            async with store.connection() as c:
-                cols = {r[1] for r in c.execute("PRAGMA table_info('orders')").fetchall()}
-                assert "status_group_id" in cols
-                # The rows that were already there keep their verdict.
-                value = c.execute(
-                    "SELECT status_group_id FROM orders WHERE id = 1"
-                ).fetchone()[0]
-                assert value is None
 
-            # And the Silver rule that reads the column now binds.
-            res = await store.refresh_warehouse_layers(trigger="manual")
-            assert res["status"] == "success"
-            async with store.connection() as c:
-                assert c.execute(
-                    "SELECT is_return FROM silver_orders WHERE id = 1"
-                ).fetchone()[0] is True
-        finally:
-            await store.close()
+# `TestTheColumnArrivesOnAnExistingDatabase` stood here until step 14's
+# S14-18: DuckDB's migration that added `status_group_id` to an `orders`
+# table created before it (`CREATE TABLE IF NOT EXISTS` adds no column).
+# DuckDB's schema and migrations went with the store; Postgres's column is
+# revision 0003's.

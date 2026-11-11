@@ -10,47 +10,62 @@ from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
+# The cost side, one row per SKU. `offer_stocks` is keyed by offer, and nothing
+# stops two offers carrying one SKU: only `id` is unique, the `sku` index is
+# not. Joined as it stood, such a SKU counted each of its lines once per offer —
+# revenue, units and cost alike. Production held none on 2026-10-29 (918 rows,
+# 911 SKUs, all distinct), so on its data this changes no number.
+_SKU_COST = """(
+                SELECT sku, MAX(purchased_price) AS purchased_price
+                FROM {offer_stocks}
+                WHERE sku IS NOT NULL
+                GROUP BY sku
+            )"""
+
+# A category's root, however deep it sits. The CTE this replaced went up one
+# level, so a grandchild was filed under its parent. A category whose parent
+# is missing is a root, as it was before.
+_ROOT_CAT = """root_cat AS (
+                SELECT c.id, c.name AS root_name
+                FROM {categories} c
+                WHERE c.parent_id IS NULL
+                   OR NOT EXISTS (SELECT 1 FROM {categories} p WHERE p.id = c.parent_id)
+                UNION ALL
+                SELECT c.id, r.root_name
+                FROM {categories} c
+                JOIN root_cat r ON c.parent_id = r.id
+            )"""
+
 
 class MarginMixin:
     """Margin analysis queries using silver_orders + offer_stocks."""
 
-    # ─── Which engine answers `/margin` ──────────────────────────────────
+    # ─── What answers `/margin` ──────────────────────────────────────────
     #
-    # Six methods, three tables, and all three are already in Postgres:
-    # `silver.order_lines` (a view whose body is the same text DuckDB uses),
-    # `bronze.offer_stocks` and `bronze.categories`. No migration, no
-    # replication, no new hole in `Dialect`.
-    #
-    # The choice is made BEFORE any connection is taken — `/inventory`'s §34
-    # invariant: a read bound for Postgres must not first queue behind
-    # DuckDB's single writer, or the flag has moved the bottleneck rather than
-    # left it behind.
-    #
-    # **Never call this from inside `self.connection()`.** The store lock is
-    # not reentrant and the deadlock does not raise — it hangs.
+    # Six methods, three tables, all in Postgres: `silver.order_lines` (a
+    # view), `bronze.offer_stocks` and `bronze.categories`.
 
     async def _margin_run(
         self, sql: str, params: "list | None" = None, *, mode: str = "all",
     ):
-        """Run one margin statement against whichever engine the flag names."""
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        """Run one margin statement against Postgres.
+
+        One path since step 14's S14-05: the Postgres read, and on any
+        failure a refusal — the 503 naming `margin` that `fall_back` gave
+        under `KS_READ_FALLBACK=off`, production's mode since 2026-10-09.
+        `KS_READ_MARGIN` is not read here; without `KS_PG_DSN` the pool
+        raises and that is the refusal.
+        """
+        from core.sql_dialect import POSTGRES, render_tables
 
         from core import pg_margin_read
 
         params = list(params or [])
-        read_fallback.no_address("margin", pg_margin_read)
-        if pg_margin_read.enabled() and pg_margin_read.available():
-            try:
-                rows = await pg_margin_read.fetch(
-                    render_tables(sql, POSTGRES), params,
-                )
-                return (rows[0] if rows else None) if mode == "one" else rows
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("margin", exc)
-
-        async with self.connection() as conn:
-            cursor = conn.execute(render_tables(sql, DUCKDB), params)
-            return cursor.fetchone() if mode == "one" else cursor.fetchall()
+        try:
+            rows = await pg_margin_read.fetch(render_tables(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("margin", exc)
+        return (rows[0] if rows else None) if mode == "one" else rows
 
     def _margin_base_where(self, sales_type: str, params: list) -> str:
         """The line predicate, which is not margin's to define — see
@@ -79,7 +94,7 @@ class MarginMixin:
                 COUNT(DISTINCT l.sku) as total_skus,
                 COALESCE(SUM(l.quantity), 0) as total_units
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
         """, params, mode="one")
 
@@ -125,7 +140,7 @@ class MarginMixin:
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
               AND TRIM(l.brand) != '' AND l.brand IS NOT NULL
             GROUP BY 1
@@ -168,12 +183,7 @@ class MarginMixin:
         where = self._margin_base_where(sales_type, params)
 
         rows = await self._margin_run(f"""
-            WITH root_cat AS (
-                SELECT c1.id,
-                       COALESCE(c2.name, c1.name) as root_name
-                FROM {{categories}} c1
-                LEFT JOIN {{categories}} c2 ON c1.parent_id = c2.id
-            )
+            WITH RECURSIVE {_ROOT_CAT}
             SELECT
                 COALESCE(rc.root_name, 'Uncategorized') as category,
                 SUM(l.quantity) as total_units,
@@ -182,10 +192,14 @@ class MarginMixin:
                     THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs,
+                -- NULLIF: a window whose lines sum to zero (a day of free
+                -- b2b or blogger shipments; five days in the year to
+                -- 2026-10-29) divided by zero, which Postgres raises and the
+                -- page answered 503. The share is NULL there, read as 0 below.
                 ROUND(100.0 * SUM(l.line_amount)
-                    / SUM(SUM(l.line_amount)) OVER (), 1) as rev_share_pct
+                    / NULLIF(SUM(SUM(l.line_amount)) OVER (), 0), 1) as rev_share_pct
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             LEFT JOIN root_cat rc ON l.category_id = rc.id
             WHERE {where}
             GROUP BY 1
@@ -240,7 +254,7 @@ class MarginMixin:
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs,
                 ROUND(SUM(l.line_amount), 2) as total_revenue
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
             GROUP BY 1
             ORDER BY 1
@@ -275,12 +289,7 @@ class MarginMixin:
         where = self._margin_base_where(sales_type, params)
 
         rows = await self._margin_run(f"""
-            WITH root_cat AS (
-                SELECT c1.id,
-                       COALESCE(c2.name, c1.name) as root_name
-                FROM {{categories}} c1
-                LEFT JOIN {{categories}} c2 ON c1.parent_id = c2.id
-            )
+            WITH RECURSIVE {_ROOT_CAT}
             SELECT
                 COALESCE(NULLIF(TRIM(l.brand), ''), 'Unknown') as brand,
                 COALESCE(rc.root_name, 'Uncategorized') as category,
@@ -291,7 +300,7 @@ class MarginMixin:
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             LEFT JOIN root_cat rc ON l.category_id = rc.id
             WHERE {where}
             GROUP BY 1, 2
@@ -345,7 +354,7 @@ class MarginMixin:
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
             GROUP BY 1
             HAVING SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0

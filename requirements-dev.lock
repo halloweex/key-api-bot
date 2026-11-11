@@ -1,9 +1,9 @@
 # GENERATED — do not hand-edit. What CI installs.
 #
-# `requirements.lock` plus the fourteen packages CI needs and the runtime
+# `requirements.lock` plus the fifteen packages CI needs and the runtime
 # images must not carry. A strict superset: verified at generation time that
-# installing the dev tools moved **no** runtime package — same 64 versions,
-# plus alembic, basedpyright, coverage, greenlet, iniconfig, mako,
+# installing the dev tools moved **no** runtime package — same 66 versions,
+# plus alembic, basedpyright, coverage, duckdb, greenlet, iniconfig, mako,
 # nodejs-wheel-binaries, pluggy, pyflakes, pygments, pytest, pytest-asyncio,
 # pytest-cov and sqlalchemy.
 #
@@ -15,6 +15,14 @@
 # `basedpyright==1.40.2`, frozen in python:3.14-slim at the images' digest.
 # It brings one package, `nodejs-wheel-binaries` — the Node runtime pyright
 # is written for, as a wheel — so the diff is those two lines.
+#
+# duckdb (2026-11-05, step 14's S14-19) left requirements.lock and stayed
+# here, now from its own line in requirements-dev.txt: the images carry no
+# driver, the tests of the frozen host tools still need one. Frozen in
+# python:3.14-slim at the images' digest as the new requirements.lock plus
+# requirements-dev.txt, constrained to the previous version of this file:
+# the same 81 packages at the same versions, so the diff is this paragraph
+# and the three lines `sort` moved, as in requirements.lock.
 #
 # That property is the point. If the dev install were allowed to nudge, say,
 # `pydantic`, CI would be testing a set production does not run — which is the
@@ -48,9 +56,11 @@ asyncpg==0.31.0
 basedpyright==1.40.2
 camel-converter==5.1.1
 certifi==2026.7.22
+cffi==2.1.1
 charset-normalizer==3.5.1
 click==8.4.2
 coverage==7.15.4
+cryptography==50.0.2
 docstring_parser==0.18.0
 duckdb==1.5.5
 et_xmlfile==2.0.0
@@ -80,6 +90,7 @@ packaging==26.3
 pandas==3.0.5
 pillow==12.3.0
 pluggy==1.6.0
+pycparser==3.12
 pydantic==2.13.4
 pydantic_core==2.46.4
 pyflakes==3.4.0

@@ -1,5 +1,13 @@
 """The weekly sales report, read from Postgres.
 
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+The weekly report reads Postgres and nowhere else: `core.weekly_report`'s
+`_weekly_run` and `fetch_channels` ask this module, as production has since
+`KS_READ_WEEKLY=postgres` went on. A Postgres failure — a lost DSN line
+included — raises, as it always did here, so the daily tick defers (below).
+The flag chooses nothing now.
+
 Stage 1 of the DuckDB exit moved sixteen *dashboard repository* methods behind
 `KS_READ_*` flags. This module exists because that count was of repository
 methods, not of readers — and the weekly report was never one of them. It has
@@ -34,37 +42,9 @@ was built for. A wrong report cannot be recalled from anybody's phone.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_WEEKLY"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the weekly report should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. Note this is the opposite
-    of `KS_WEEKLY_REPORT_RICH`, which deliberately does *not* raise: that one
-    decides what a message looks like, and taking the report down over a
-    misspelling is the worse failure. This one decides which store the numbers
-    come from, and serving the wrong store's numbers silently is worse than
-    stopping.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

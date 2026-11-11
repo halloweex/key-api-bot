@@ -100,11 +100,20 @@ async def ensure_database(name: str, *, execute=None) -> None:
 # is written for data that never needs it, because a format that is correct
 # only for today's values breaks silently.
 
+# ClickHouse's own TabSeparated escapes, both ways (L2-12). It writes \b, \f
+# and \0 for backspace, form feed and NUL, and this read `\b` back as a plain
+# "b": a promocode with a control character in it came back from the round
+# trip as another string, and the zero-tolerance comparison blamed the copy.
+_ESCAPES = (("\\", "\\\\"), ("\t", "\\t"), ("\n", "\\n"), ("\r", "\\r"),
+            ("\x08", "\\b"), ("\x0c", "\\f"), ("\x00", "\\0"))
+_UNESCAPES = {"t": "\t", "n": "\n", "r": "\r", "\\": "\\",
+              "b": "\x08", "f": "\x0c", "0": "\x00"}
+
+
 def escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\").replace("\t", "\\t")
-        .replace("\n", "\\n").replace("\r", "\\r")
-    )
+    for raw, escaped in _ESCAPES:          # the backslash first
+        value = value.replace(raw, escaped)
+    return value
 
 
 def unescape(value: str) -> str:
@@ -114,7 +123,7 @@ def unescape(value: str) -> str:
         ch = value[i]
         if ch == "\\" and i + 1 < len(value):
             nxt = value[i + 1]
-            out.append({"t": "\t", "n": "\n", "r": "\r", "\\": "\\"}.get(nxt, nxt))
+            out.append(_UNESCAPES.get(nxt, nxt))
             i += 2
         else:
             out.append(ch)

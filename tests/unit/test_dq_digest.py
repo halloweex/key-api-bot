@@ -6,8 +6,7 @@ therefore never been said out loud. These tests pin the surface that says them.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -19,11 +18,7 @@ from core.data_quality import (
     Severity,
     alert_fingerprint,
     build_digest,
-    fetch_previous_run,
-    fetch_run_issues,
-    persist_run,
 )
-from core.duckdb_store import DuckDBStore
 
 
 def _issue(check_name: str, count: int, severity=Severity.WARN, description=""):
@@ -98,7 +93,7 @@ class TestBuildDigest:
     def test_quiet_day_sends_nothing(self):
         sections = [
             DigestSection(layer="integrity", run=_run("PASS"), age_hours=2),
-            DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=4),
+            DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=4),
         ]
         assert build_digest(sections) is None
 
@@ -106,8 +101,8 @@ class TestBuildDigest:
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
             issues=[
-                _row("headline_vs_line_items", 1184, "grand_total = 0 but 4,196,208.36 in line items"),
-                _row("orders_without_line_items", 523),
+                _row("pg_headline_vs_line_items", 1184, "grand_total = 0 but 4,196,208.36 in line items"),
+                _row("pg_orders_without_line_items", 523),
             ],
         )]
         msg = build_digest(sections)
@@ -119,8 +114,8 @@ class TestBuildDigest:
     def test_delta_against_the_previous_run(self):
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", 1184), _row("new_check", 7)],
-            previous_issues=[_row("headline_vs_line_items", 1182)],
+            issues=[_row("pg_headline_vs_line_items", 1184), _row("new_check", 7)],
+            previous_issues=[_row("pg_headline_vs_line_items", 1182)],
         )]
         msg = build_digest(sections)
         assert "1,184 (+2)" in msg
@@ -129,27 +124,27 @@ class TestBuildDigest:
     def test_a_standing_problem_reads_as_unchanged(self):
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("orders_without_line_items", 523)],
-            previous_issues=[_row("orders_without_line_items", 523)],
+            issues=[_row("pg_orders_without_line_items", 523)],
+            previous_issues=[_row("pg_orders_without_line_items", 523)],
         )]
         assert "(=)" in build_digest(sections)
 
     def test_stale_layer_is_called_out(self):
         sections = [
-            DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=52),
+            DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=52),
         ]
         msg = build_digest(sections)
         assert msg is not None
         assert "silent 52h" in msg
 
     def test_layer_that_never_ran_is_called_out(self):
-        msg = build_digest([DigestSection(layer="reconciliation", run=None)])
+        msg = build_digest([DigestSection(layer="reconciliation_pg", run=None)])
         assert msg is not None
         assert "no successful run" in msg
 
     def test_discrepancies_are_listed(self):
         sections = [DigestSection(
-            layer="reconciliation", run=_run("CRITICAL"), age_hours=3,
+            layer="reconciliation_pg", run=_run("CRITICAL"), age_hours=3,
             diffs=[{
                 "month": "2026-04", "source_id": 1, "field": "orders",
                 "dk_value": 565.0, "kc_value": 566.0,
@@ -164,7 +159,7 @@ class TestBuildDigest:
         arrives every day regardless stops being read on the day it matters."""
         sections = [DigestSection(
             layer="integrity", run=_run("PASS"), age_hours=2,
-            issues=[_row("goods_shipped_without_sale", 448, severity="INFO")],
+            issues=[_row("pg_goods_shipped_without_sale", 448, severity="INFO")],
         )]
         assert build_digest(sections) is None
 
@@ -172,8 +167,8 @@ class TestBuildDigest:
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
             issues=[
-                _row("headline_vs_line_items", 12),
-                _row("goods_shipped_without_sale", 448, severity="INFO"),
+                _row("pg_headline_vs_line_items", 12),
+                _row("pg_goods_shipped_without_sale", 448, severity="INFO"),
             ],
         )]
         msg = build_digest(sections)
@@ -201,8 +196,8 @@ class TestStandingFindingsGoQuiet:
     def _standing(self, count=414):
         return [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", count)],
-            previous_issues=[_row("headline_vs_line_items", count)],
+            issues=[_row("pg_headline_vs_line_items", count)],
+            previous_issues=[_row("pg_headline_vs_line_items", count)],
         )]
 
     def test_unchanged_warn_stays_quiet_the_day_after_it_was_sent(self):
@@ -234,8 +229,8 @@ class TestStandingFindingsGoQuiet:
         wait six days behind the cooldown of the number it grew from."""
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", 415)],
-            previous_issues=[_row("headline_vs_line_items", 414)],
+            issues=[_row("pg_headline_vs_line_items", 415)],
+            previous_issues=[_row("pg_headline_vs_line_items", 414)],
         )]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
@@ -245,8 +240,8 @@ class TestStandingFindingsGoQuiet:
     def test_a_new_check_beside_a_standing_one_is_news(self):
         sections = [DigestSection(
             layer="integrity", run=_run("WARN"), age_hours=2,
-            issues=[_row("headline_vs_line_items", 414), _row("fk_orphans", 3)],
-            previous_issues=[_row("headline_vs_line_items", 414)],
+            issues=[_row("pg_headline_vs_line_items", 414), _row("fk_orphans", 3)],
+            previous_issues=[_row("pg_headline_vs_line_items", 414)],
         )]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
@@ -255,7 +250,7 @@ class TestStandingFindingsGoQuiet:
     def test_a_stale_layer_speaks_through_the_quiet(self):
         """Silence has to mean "nothing changed", never "the checks stopped"."""
         sections = self._standing() + [
-            DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=52),
+            DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=52),
         ]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
@@ -279,8 +274,8 @@ class TestStandingFindingsGoQuiet:
         """A week of silence does not turn blogger seeding into a problem."""
         sections = [DigestSection(
             layer="integrity", run=_run("PASS"), age_hours=2,
-            issues=[_row("goods_shipped_without_sale", 774, severity="INFO")],
-            previous_issues=[_row("goods_shipped_without_sale", 774, severity="INFO")],
+            issues=[_row("pg_goods_shipped_without_sale", 774, severity="INFO")],
+            previous_issues=[_row("pg_goods_shipped_without_sale", 774, severity="INFO")],
         )]
         assert build_digest(
             sections, last_sent_at=self.NOW - timedelta(days=30), now=self.NOW,
@@ -317,7 +312,7 @@ class TestStandingDiscrepancies:
 
     def _section(self, diffs, previous_diffs):
         return [DigestSection(
-            layer="reconciliation", run=_run("WARN"), age_hours=3,
+            layer="reconciliation_pg", run=_run("WARN"), age_hours=3,
             diffs=diffs, previous_diffs=previous_diffs,
         )]
 
@@ -349,7 +344,7 @@ class TestStandingDiscrepancies:
         """A layer going clean is the one change nobody should have to notice
         by the absence of a message."""
         msg = build_digest(
-            [DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=3,
+            [DigestSection(layer="reconciliation_pg", run=_run("PASS"), age_hours=3,
                            diffs=[], previous_diffs=[self._diff()])],
             last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
         )
@@ -373,82 +368,12 @@ class TestStandingDiscrepancies:
         assert "weekly restatement" in msg
 
 
-# ─── fetch_previous_run ─────────────────────────────────────────────────────
-
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await s.connect()
-    return s
-
-
-class TestFetchPreviousRun:
-    @pytest.mark.asyncio
-    async def test_skips_failed_runs(self, tmp_path):
-        """A failed run's zero counts would read as 'fixed, then broke again'."""
-        store = await _make_store(tmp_path)
-        try:
-            t0 = datetime.now(timezone.utc) - timedelta(days=2)
-            async with store.connection() as conn:
-                first = persist_run(
-                    conn, started_at=t0, ended_at=t0, as_of=t0,
-                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
-                    layer="integrity", issues=[_issue("headline_vs_line_items", 1182)],
-                    discrepancies=[],
-                )
-                persist_run(
-                    conn, started_at=t0 + timedelta(days=1), ended_at=t0 + timedelta(days=1),
-                    as_of=t0, window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
-                    layer="integrity", issues=[], discrepancies=[],
-                    error_message="KeyCRMAPIError: 429",
-                )
-                current = persist_run(
-                    conn, started_at=t0 + timedelta(days=2), ended_at=t0 + timedelta(days=2),
-                    as_of=t0, window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
-                    layer="integrity", issues=[_issue("headline_vs_line_items", 1184)],
-                    discrepancies=[],
-                )
-                previous = fetch_previous_run(conn, "integrity", current)
-                previous_issues = fetch_run_issues(conn, previous["run_id"])
-
-            assert previous["run_id"] == first
-            assert previous_issues[0]["count"] == 1182
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_returns_none_when_there_is_no_earlier_run(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                run_id = persist_run(
-                    conn, started_at=now, ended_at=now, as_of=now,
-                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
-                    layer="integrity", issues=[], discrepancies=[],
-                )
-                assert fetch_previous_run(conn, "integrity", run_id) is None
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_does_not_cross_layers(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                persist_run(
-                    conn, started_at=now, ended_at=now, as_of=now,
-                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
-                    layer="reconciliation", issues=[], discrepancies=[],
-                )
-                integrity_run = persist_run(
-                    conn, started_at=now, ended_at=now, as_of=now,
-                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
-                    layer="integrity", issues=[], discrepancies=[],
-                )
-                assert fetch_previous_run(conn, "integrity", integrity_run) is None
-        finally:
-            await store.close()
+# ─── The previous run ───────────────────────────────────────────────────────
+#
+# `fetch_previous_run`'s cases — failed runs skipped, no earlier run, layers not
+# crossed — were proved here on DuckDB until step 14's S14-10 deleted DuckDB's
+# readers of the journal; they run on Postgres, through chain 9's reader, in
+# `tests/integration/test_dq_journal_semantics_pg.py` (`TestThePreviousRun`).
 
 
 # ─── _send_dq_alert_throttled keys per problem, not per layer ───────────────

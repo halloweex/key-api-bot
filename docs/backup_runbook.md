@@ -1,8 +1,15 @@
 # Backup & Restore Runbook (A9-1)
 
-Two databases leave this machine, and they leave by different routes. The
-warehouse is below; **Postgres is the one that cannot be rebuilt from
-anything**, so start with it if you are reading this during a recovery.
+Two databases left this machine, by different routes. **Postgres is the one
+that cannot be rebuilt from anything**, so start with it if you are reading
+this during a recovery. It is also the only one that still leaves: the DuckDB
+warehouse below is a frozen archive since 2026-10-16, and step 14 deleted
+everything that wrote or shipped it — the `db_backup` job (S14-00 stopped
+registering it), the weekly compaction, `deploy/daily_offsite.sh`,
+`deploy/offsite_parquet.sh` and `deploy/snapshot_export.py` (S14-18). The
+DuckDB sections below are kept as the record of what the existing archives
+are and how they restore; the restore drill (`deploy/restore-test.sh`) still
+runs, on the pinned image `keycrm-web:rollback-step14`.
 
 ## Postgres off-site (DN-09)
 
@@ -99,8 +106,8 @@ Bronze/Silver/Gold are rebuildable from KeyCRM, but a full re-sync costs
 thousands of API calls — dominated by one request per buyer — and is the third
 line of defence, not the second.
 
-## How the backup works
-A daily scheduler job (`db_backup`, 04:30 Europe/Kyiv) calls
+## How the backup worked (until step 14)
+A daily scheduler job (`db_backup`, 04:30 Europe/Kyiv) called
 `DuckDBStore.backup_database(keep=2)`:
 1. Acquires the store lock + `CHECKPOINT` (folds the WAL into the main file).
 2. Copies the file **while the lock is held** → byte-consistent snapshot (no
@@ -123,8 +130,9 @@ now a script instead, because a requirement whose enforcement mechanism is that
 someone remembers is not an enforcement mechanism — and a runbook line, unlike a
 cron entry, cannot tell you whether it ran.
 
-**Setup: `docs/offsite_backup_setup.md`.** In short — the weekly compact calls
-`deploy/offsite_parquet.sh`, which ships `data/export_parquet/` (the whole
+**Setup: `docs/offsite_backup_setup.md`.** In short — the weekly compact
+called `deploy/offsite_parquet.sh` (both deleted in step 14's S14-18, the
+archives they left kept), which shipped `data/export_parquet/` (the whole
 non-derived warehouse as ZSTD Parquet, plus the encrypted `.env`) to a Hetzner
 Storage Box and prunes to `BACKUP_RETAIN` archives. At this size off-site
 retention is close to free — a year of weekly archives is a rounding error on
@@ -135,9 +143,12 @@ anything is the one on the server.
   Daily is a scheduling change once the backup object itself moves to Parquet.
 - **Restore drill: `deploy/restore-test.sh`** — pulls the newest archive back
   from the Storage Box and rebuilds a validated warehouse in a throwaway
-  container. Quarterly. An untested backup is a hypothesis.
-- **Staleness: `deploy/offsite_check.sh`** in the host crontab, daily. Alerts if
-  no copy has left in 36 h — this line said "9 days" until 2026-09-18, a
+  container of `BACKUP_RESTORE_IMAGE`, the pinned image that carries DuckDB
+  1.5.5 (`keycrm-web:rollback-step14` since step 14; never `:latest`, which
+  loses DuckDB at S14-19). Quarterly. An untested backup is a hypothesis.
+- **Staleness: `deploy/offsite_check.sh`** in the host crontab, daily. Since
+  the week of silence it reports the DuckDB copy as frozen and judges the
+  Postgres marker. It alerted if no copy had left in 36 h — this line said "9 days" until 2026-09-18, a
   threshold the script stopped using when the push moved off the weekly
   compact to `deploy/daily_offsite.sh`. It lives in host cron rather than the app
   scheduler because an in-process check cannot attest to its own liveness: a

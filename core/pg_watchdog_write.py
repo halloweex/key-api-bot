@@ -1,4 +1,4 @@
-"""Chain 10: the watchdogs' samples, written to Postgres and shadowed in DuckDB.
+"""Chain 10: the watchdogs' samples, written to Postgres.
 
 `disk_samples`, `data_dir_samples` and `memory_samples` are the history the
 two resource watchdogs difference against: the disk job reads the sample
@@ -8,22 +8,22 @@ way an OOM kill before a recreate is still visible after it) and the 24 h
 peak. Nothing re-derives a sample: it is what the disk or the cgroup said at
 that moment.
 
-THE SHAPE: SHADOW (owner decision OD-02 (c), 2026-10-01)
+THE SHAPE: SHADOW, UNTIL STEP 14'S S14-10 (owner decision OD-02 (c), 2026-10-01)
 
 Under `KS_WRITE_WATCHDOGS=postgres` each job's whole persistence — the
-differencing reads, the insert and the prune — is one Postgres transaction,
-and DuckDB is handed the same insert and the same prune right after it
-(`core/shadow_writes.py`). The chain map's warning is met by construction:
-"move an insert to Postgres and leave its read on DuckDB and the watchdog
-reports growth of zero forever" — here the reads travel with the insert, in
-the same transaction. The hourly copy stands down; the daily comparison keeps
-comparing, facing Postgres→DuckDB (`compare_shadow`), and reads a DuckDB prune
-that lagged as `shadow_pruned_rows` INFO, not as a defect.
+differencing reads, the insert and the prune — is one Postgres transaction.
+The chain map's warning is met by construction: "move an insert to Postgres
+and leave its read on DuckDB and the watchdog reports growth of zero forever"
+— here the reads travel with the insert, in the same transaction. Until
+S14-10 DuckDB was handed the same insert and the same prune right after it
+(`core/shadow_writes.py`), and the daily comparison compared the two facing
+Postgres→DuckDB; since S14-00 the shadow stood down in web, which runs
+`KS_DUCKDB=off`, and S14-10 deleted it. The hourly copy stands down, as for
+every moved chain.
 
-One value set for both stores: the sample's `sampled_at`, the directory set's
-one `sampled_at`, and both prune cutoffs are computed once by the router
-(`core/watchdog_samples.py`) and handed to both, so the stores prune at the
-same instant and hold the same rows.
+One value set for the tick: the sample's `sampled_at`, the directory set's
+one `sampled_at`, and both prune cutoffs are computed once by the door
+(`core/watchdog_samples.py`) and handed here.
 
 THE EVALUATION NEVER WAITS ON THE STORE
 
@@ -35,13 +35,13 @@ file; the task this was built for put them in Postgres, and the design names
 what the file variant would change.
 
 Everything else — the latch on the first Postgres write (OD-19 (a)), the
-owner rows, the copy-back (`scripts/chain_copy_back.py watchdog`) — is the
-frozen chains' machinery unchanged.
+owner rows and, until step 14's S14-04 deleted it, the copy-back
+(`scripts/chain_copy_back.py watchdog`) — is the frozen chains' machinery
+unchanged.
 """
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
@@ -54,11 +54,7 @@ CHAIN = "pg_watchdog_write"
 CHAIN_TABLES: Tuple[str, ...] = (
     "app.disk_samples", "app.data_dir_samples", "app.memory_samples",
 )
-CHAIN_SHADOW = True
 
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # How far back the disk job's three differencing reads look — the job's own
 # numbers, spelled once for both stores.
@@ -92,31 +88,14 @@ def retention_days() -> Dict[str, int]:
             "app.memory_samples": MEMORY_RETENTION_DAYS}
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_WATCHDOGS` alone says; an unknown value raises (OD-18 (a))."""
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and the lock-out it waited on is not asked any
-    more — production requires 0035 and has latched the chain. Kept for the
-    registry's `unmet_precondition` field until S14-11."""
-    return None
-
-
-def writes_postgres() -> bool:
-    """True, a constant since step 14's S14-00: neither the flag, nor the
-    latch, nor the lock-out routes any more; the first write in a process
-    still takes the latch (decision 3). Last consumers: the watchdogs' door
-    and the registry — S14-10."""
-    return True
+# `env_writes_postgres`, `unmet_precondition` and `writes_postgres` stood
+# here until step 14's S14-11, with `CHAIN_SHADOW` (the shape the registry
+# published as `shadow` after S14-10 deleted the shadow itself) and
+# `LOCKOUT_REVISION` (the revision a flip waited for — 0035, which
+# `tests/unit/test_chain_lockout.py` keeps as a literal). S14-00 made the
+# answers constants and S14-11 deleted them with the flag: the chain writes
+# Postgres, a constant. `WRITE_ENV` stays a name (revision 0035's comments and
+# an image from before step 14 read it).
 
 
 def _latch() -> str:

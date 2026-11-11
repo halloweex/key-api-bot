@@ -20,32 +20,17 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.data_quality import DiscrepancyClass, Severity
+from core.data_quality import DiscrepancyClass
 from core.reconciliation_io import (
-    duckdb_orders_in_window,
     postgres_orders_in_window,
     rollup_from_orders,
 )
 from core.scheduler import BackgroundScheduler
-
-
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the Postgres arm's verdict; the run it reads back
-    is written to the quality journal, kept in DuckDB here. So this module
-    keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_dq_journal_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
 
 
 AS_OF = datetime(2026, 8, 24, 3, 0, tzinfo=timezone.utc)
@@ -54,7 +39,7 @@ START, END = date(2026, 5, 26), date(2026, 8, 24)
 def _body(fn):
     """A function's source with its docstring removed.
 
-    These tests compare the two extractors' SQL, and prose that *explains* an
+    These tests read the extractor's SQL, and prose that *explains* an
     expression contains the same words as the expression.
 
     Sliced by line number from the AST, not by `source.replace(fn.__doc__, "")`
@@ -77,7 +62,6 @@ def _body(fn):
     return "".join(lines[: first.lineno - 1] + lines[first.end_lineno :])
 
 
-DK_SQL = _body(duckdb_orders_in_window)
 PG_SQL = _body(postgres_orders_in_window)
 
 
@@ -91,44 +75,42 @@ def _facts(order_id, **over):
     return {order_id: base}
 
 
-class TestTheTwoExtractorsAskTheSameQuestion:
-    """Drift between the two sides is drift the comparison invents."""
+class TestTheExtractorAsksTheKeyCrmSidesQuestion:
+    """Drift between KeyCRM's side and the store's is drift the comparison
+    invents. Until step 14's S14-12 these held the Postgres extractor to
+    DuckDB's, expression for expression; DuckDB's went with the job's DuckDB
+    arm, and the fragments both carried are pinned here as literals."""
 
-    def test_the_kyiv_date_is_written_identically(self):
-        """The one expression here worth doubting. A day's difference on one
-        side moves orders between months and invents a whole rollup cell."""
-        fragment = "AT TIME ZONE 'Europe/Kyiv'"
-        assert DK_SQL.count(fragment) == PG_SQL.count(fragment) == 2
+    def test_the_kyiv_date_is_written_as_keycrms_side_reads_it(self):
+        """The one expression here worth doubting. A day's difference moves
+        orders between months and invents a whole rollup cell. DuckDB's
+        extractor carried it twice too."""
+        assert PG_SQL.count("AT TIME ZONE 'Europe/Kyiv'") == 2
 
-    def test_both_filter_to_the_active_sources(self):
-        assert "o.source_id IN ({" in DK_SQL
+    def test_it_filters_to_the_active_sources(self):
         assert "o.source_id IN ({sources})" in PG_SQL
 
-    def test_both_honour_the_watermark_the_same_way(self):
-        assert "o.updated_at IS NULL OR o.updated_at <" in DK_SQL
+    def test_it_honours_the_watermark(self):
         assert "o.updated_at IS NULL OR o.updated_at <" in PG_SQL
 
-    def test_both_exclude_the_in_flight_ids(self):
-        """KeyCRM's cut is the wider one, so both sides must honour its list."""
-        assert "list_contains" in DK_SQL
+    def test_it_excludes_the_in_flight_ids(self):
+        """KeyCRM's cut is the wider one, so the store's side honours its list."""
         assert "o.id = ANY($4::bigint[])" in PG_SQL
 
-    def test_line_items_are_aggregated_by_the_same_expression(self):
-        fragment = "ROUND(SUM(price_sold * quantity), 2) AS amount"
-        assert fragment in DK_SQL and fragment in PG_SQL
+    def test_line_items_are_aggregated_by_the_one_expression(self):
+        assert "ROUND(SUM(price_sold * quantity), 2) AS amount" in PG_SQL
 
-    def test_the_postgres_side_reads_the_mirror_and_not_the_warehouse(self):
+    def test_it_reads_the_mirror_and_not_the_warehouse(self):
         assert "bronze.orders" in PG_SQL and "bronze.order_products" in PG_SQL
         assert "FROM orders o" not in PG_SQL
 
-    def test_both_produce_the_same_shape(self):
+    def test_it_produces_the_shape_the_rollup_reads(self):
         """`rollup_from_orders` is the only place a rollup is computed, and it
-        can only be that if both extractors hand it the same dict."""
-        for source in (DK_SQL, PG_SQL):
-            for key in ("status_id", "source_id", "manager_id", "buyer_id",
-                        "grand_total", "order_date", "n_lines", "qty",
-                        "line_amount"):
-                assert f'"{key}":' in source
+        can only be that if every extractor hands it the same dict."""
+        for key in ("status_id", "source_id", "manager_id", "buyer_id",
+                    "grand_total", "order_date", "n_lines", "qty",
+                    "line_amount"):
+            assert f'"{key}":' in PG_SQL
 
 
 class TestItCostsNothing:
@@ -156,22 +138,16 @@ class TestItCostsNothing:
 
     @pytest.mark.asyncio
     async def test_the_persisted_run_records_zero_api_calls(self):
+        """Through the journal's door, `dq_journal.journal_run` (until step
+        14's S14-10 through DuckDB's `persist_run` behind it, the chain
+        routed back to DuckDB for the test)."""
         captured = {}
 
-        def _persist(conn, **kw):
+        async def journal_run(**kw):
             captured.update(kw)
             return 1
 
-        class _Conn:
-            async def __aenter__(self): return object()
-            async def __aexit__(self, *a): return False
-
-        class _Store:
-            def connection(self): return _Conn()
-
-        with patch("core.data_quality.persist_run", new=_persist), \
-             patch("core.duckdb_store.get_store",
-                   new=AsyncMock(return_value=_Store())):
+        with patch("core.dq_journal.journal_run", new=journal_run):
             await BackgroundScheduler()._persist_postgres_reconciliation(
                 {"issues": [], "discrepancies": [], "error": None},
                 started_at=AS_OF, as_of=AS_OF,
@@ -277,9 +253,9 @@ class TestItIsWatchedOnItsOwn:
         assert DIGEST_MAX_AGE_HOURS["reconciliation_pg"] == 30
 
     def test_it_does_not_repair(self):
-        """The DuckDB layer re-fetches what it is missing. Postgres has a
-        different answer — the backfill — and re-fetching here would repair
-        the wrong store."""
+        """The persistence of the Postgres verdict repairs nothing: the job
+        re-fetches what Postgres is missing after every arm has persisted
+        (`_run_dq_reconciliation`), so a repair here would run twice."""
         source = inspect.getsource(
             BackgroundScheduler._persist_postgres_reconciliation
         )

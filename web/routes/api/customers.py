@@ -13,6 +13,7 @@ from pydantic import ValidationError as PydanticValidationError
 from typing import Annotated, List, Optional
 
 from core.gender import CONFIDENCE_LADDER, GENDERS
+from core.validators import INT32_MAX
 from core.sms_refusals import REFUSAL_REASONS
 from core.repositories.customers import (
     BUILTIN_AUDIENCE_PRESETS, DEFAULT_WINDOW_DAYS, MAX_AUDIENCE_GROUPS,
@@ -23,12 +24,13 @@ from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
     ViberMessage, count_segments,
 )
+from web.csv_cells import text_cell
 from web.routes.auth import has_permission, require_permission
 from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
     validate_period, validate_source_id, validate_brand_name, validate_sales_type,
-    validate_promocode,
+    validate_promocode, validate_db_int,
     ValidationError,
 )
 
@@ -217,11 +219,19 @@ def _int_list(raw: Optional[str], label: str) -> list:
         if not piece:
             continue
         try:
-            out.append(int(piece))
+            value = int(piece)
         except ValueError:
             raise HTTPException(
                 status_code=400, detail=f"{label} must be a comma-separated list of ids",
             )
+        # Held to the column it meets, as every integer parameter is: past it
+        # asyncpg refused the statement and the route answered 500 (L3-01).
+        # `_DbInt` is the JSON form's twin.
+        try:
+            validate_db_int(value, label, allow_none=False)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        out.append(value)
     return out
 
 
@@ -280,6 +290,12 @@ _Text = Annotated[str, Field(max_length=200)]
 _MAX_WINDOW_DAYS = 3650
 
 
+# An id inside `or_groups`, held to the INTEGER column it meets — the bound
+# `_int_list` gives the flat form (`validate_db_int`). Unbounded, an id past
+# it reached asyncpg and answered 500 (L3-01).
+_DbInt = Annotated[int, Field(ge=-INT32_MAX - 1, le=INT32_MAX)]
+
+
 class _AudienceGroupParams(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -298,8 +314,8 @@ class _AudienceGroupParams(BaseModel):
     gender: Optional[List[_Text]] = Field(None, max_length=2)
     gender_min_confidence: Optional[str] = Field(None, max_length=10)
     brand: Optional[List[_Text]] = Field(None, max_length=100)
-    category_id: Optional[List[int]] = Field(None, max_length=100)
-    source_id: Optional[List[int]] = Field(None, max_length=20)
+    category_id: Optional[List[_DbInt]] = Field(None, max_length=100)
+    source_id: Optional[List[_DbInt]] = Field(None, max_length=20)
     promocode_used: Optional[str] = Field(None, max_length=40)
     bought_within_days: Optional[int] = Field(None, ge=1, le=3650)
     period_orders_min: Optional[int] = Field(None, ge=1, le=1000)
@@ -847,11 +863,12 @@ async def export_sms_segments_csv(
     for c in rows:
         writer.writerow([
             c["buyerId"],
-            c["fullName"],
+            # Typed by the customer: never a formula in the spreadsheet (L3-07).
+            text_cell(c["fullName"]),
             # E.164 — what SMS gateways expect, and Excel keeps it as text
             # instead of mangling a 12-digit number into scientific notation.
             f"+{c['phone']}",
-            c["city"] or "",
+            text_cell(c["city"] or ""),
             c["tier"],
             c["assignment"],
             c["orders"],
@@ -868,7 +885,7 @@ async def export_sms_segments_csv(
             c["lastOrderId"] or "",
             c["lastOrderTotal"],
             c["lastOrderItemCount"],
-            c["lastOrderItems"] or "",
+            text_cell(c["lastOrderItems"] or ""),
         ])
 
     # Name the file after what is in it: several tiers join with a dash, so a
@@ -1602,6 +1619,7 @@ async def add_marketing_optout(
     stoplist and never suppress the number it names — the phone column exists
     precisely to catch the same number under a second buyer record.
     """
+    validate_db_int(buyer_id, "buyer_id", allow_none=False)
     normalised_phone = _require_ua_phone(phone) if phone is not None else None
     store = await get_store()
     result = await store.add_marketing_optout(

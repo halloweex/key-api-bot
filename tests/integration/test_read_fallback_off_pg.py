@@ -1,20 +1,22 @@
-"""DN-20b against a real PostgreSQL: `off` refuses a failure, never a working read.
+"""DN-20b against a real PostgreSQL: a failure is refused, never a working read.
 
 `tests/unit/test_read_fallback_http.py` proves the refusal with a pool that
 raises on first touch. What it cannot prove is the other half, and it is the
-half that would take the dashboard down: that under `KS_READ_FALLBACK=off` a
-Postgres that answers is simply read. A refusal wired one step too early — a
-benign "no rows" or a routing answer taken for a failure — would pass every
-unit test and turn every tab into a 503 the day `off` is set.
+half that would take the dashboard down: that a Postgres that answers is
+simply read. A refusal wired one step too early — a benign "no rows" or a
+routing answer taken for a failure — would pass every unit test and turn
+every tab into a 503.
 
-So each router DN-20b covers is asked here, under `off`, of a live Postgres at
-the current head: it answers, nothing is refused, nothing falls back, and the
-pool is actually reached. The dashboard's summary is seeded differently in
-the two stores, so the number itself says which one answered. Then the same
-pool is closed — an outage asyncpg reports on its own, not a mock's
-exception — and each router refuses, naming its surface. (Under `duckdb`
-the same outage was answered by DuckDB; since step 14's S14-00 the mode is
-`off` whatever the variable says.)
+So each router is asked here of a live Postgres at the current head: it
+answers, nothing is refused, and the pool is actually reached. The
+dashboard's summary is seeded differently in the two stores, so the number
+itself says which one answered. Then the same pool is closed — an outage
+asyncpg reports on its own, not a mock's exception — and each router
+refuses, naming its surface.
+
+Until step 14's S14-16 each test here set `KS_READ_FALLBACK=off` first and
+held that nothing fell back to DuckDB; nothing reads that variable since,
+and nothing counts such a read.
 
 Cohorts are ClickHouse's and CI has no ClickHouse; their refusal is unit-tested.
 """
@@ -103,16 +105,9 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
     monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
 
-    saved = (read_fallback._mode, read_fallback._mode_error,
-             list(read_fallback._misconfigured))
     read_fallback.reset_counts()
 
-    store = DuckDBStore(db_path=tmp_path / "off.duckdb")
-    await store.connect()
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO gold_daily_revenue (date, sales_type, revenue, "
-            "orders_count) VALUES (?, 'retail', ?, 1)", [DAY, DUCK_REVENUE])
+    store = DuckDBStore()
 
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
@@ -140,22 +135,13 @@ async def stores(tmp_path, monkeypatch):
         await cleanup.close()
         if not pool._closed:
             await pool.close()
-        await store.close()
-        read_fallback._mode, read_fallback._mode_error = saved[0], saved[1]
-        read_fallback._misconfigured = saved[2]
         read_fallback.reset_counts()
-
-
-def _mode(monkeypatch, value: str) -> None:
-    monkeypatch.setenv("KS_READ_FALLBACK", value)
-    read_fallback.configure_mode()
 
 
 class TestOffReadsAWorkingPostgres:
     @pytest.mark.asyncio
     async def test_every_covered_router_answers_and_nothing_is_refused(self, stores):
         store, _pool, get_pool, env = stores
-        _mode(env, "off")
 
         for surface, method, args in READS:
             before = get_pool.await_count
@@ -163,12 +149,10 @@ class TestOffReadsAWorkingPostgres:
             assert get_pool.await_count > before, (
                 f"{method} never asked Postgres — the test would prove nothing")
             assert read_fallback.refusals() == {}, f"{method} refused a working read"
-            assert read_fallback.counts() == {}, f"{method} fell back to DuckDB"
 
     @pytest.mark.asyncio
     async def test_the_number_is_postgres_s(self, stores):
         store, _pool, _get_pool, env = stores
-        _mode(env, "off")
         summary = await store.get_summary_stats(DAY, DAY)
         assert summary["totalRevenue"] == PG_REVENUE
         assert summary["totalOrders"] == 3
@@ -189,12 +173,10 @@ class TestAnOutage:
         self, stores, surface, method, args,
     ):
         store, pool, _get_pool, env = stores
-        _mode(env, "off")
         await pool.close()
 
         with pytest.raises(read_fallback.ReadUnavailable) as refused:
             await getattr(store, method)(*args)
         assert refused.value.surface == surface
-        assert read_fallback.counts() == {}
         assert read_fallback.refusals()[surface]["count"] >= 1
 

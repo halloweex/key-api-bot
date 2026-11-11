@@ -23,10 +23,14 @@ rollback that looks healthy in between (`replicate_sms`' recorded failure).
 THE ANSWER THE OWNER CHOSE (OD-19 (a), 2026-09-17): THE LATCH WINS
 
 The first Postgres write a chain performs *latches* it. From then on
-`writes_postgres()` answers True whatever the environment says, every consumer
-reads that one answer, and the only way back is `scripts/chain_copy_back.py`
-(DN-08), which copies the rows to DuckDB, compares them at zero and then
-releases both copies of the latch. An environment that disagrees with the latch
+`writes_postgres()` answered True whatever the environment said, every
+consumer read that one answer (until step 14's S14-11 deleted it with the
+flags: a step-14 image writes Postgres, a constant), and the only way back was `scripts/chain_copy_back.py`
+(DN-08), which copied the rows to DuckDB, compared them at zero and then
+released both copies of the latch. Step 14 deleted it (S14-04): a step-14 image
+routes by neither copy (S14-00) and has no way back but an image from before
+step 14, which routes by both — `core.rollback_lever`, the line every page
+about a chain's ownership names. An environment that disagrees with the latch
 is not silently obeyed and not silently ignored: it is published in
 `/api/health`, paged as WARN by the canary, and stamped on the chain's tables
 in `meta.mirror_state` by the shipper.
@@ -65,7 +69,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, FrozenSet, Mapping, Optional, Sequence
@@ -77,6 +81,7 @@ from typing import Dict, FrozenSet, Mapping, Optional, Sequence
 from core.atomic_file import fsync_dir as _fsync_dir
 from core.atomic_file import write_atomic as _write_marker
 from core.paths import DATA_DIR
+from core.rollback_lever import ROLLBACK_RUNBOOK
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +97,8 @@ MARKER_DIR: Path = DATA_DIR / "write-chain-owners"
 OWNER_PREFIX = "owner:"
 
 # `{chain: latched_at}` — loaded from the markers once and cached, because
-# `writes_postgres()` is asked on every write and every stand-down question.
+# `latch()` is asked on every write (and until step 14's S14-11 every
+# chain's `writes_postgres()` and every stand-down question asked it too).
 # None means "not loaded yet", which is different from "nothing is latched".
 _latched: Optional[Dict[str, str]] = None
 
@@ -146,6 +152,34 @@ def _stamp_of(path: Path) -> str:
         path.stat().st_mtime, timezone.utc).isoformat()
 
 
+def markers_on_disk() -> Dict[str, str]:
+    """`{chain: latched_at}` for every marker on disk now, read afresh and
+    never into the cache: the standing watch asks whether a marker is still
+    there (`chain_latch_disagrees` in `core.pg_chain_invariants`), and the
+    cache would answer for the moment the process started. A directory that
+    does not exist holds no marker; one that cannot be read raises `OSError`
+    — an unreadable directory is not a lost marker, and the caller says it
+    could not look.
+
+    Listed with `os.scandir`, never `Path.glob` or `Path.exists`: both
+    swallow the `PermissionError` of a directory that cannot be listed (3.12
+    and 3.14 alike) and answer "nothing here", which turned every chain with
+    owner rows into a false CRITICAL lost marker. A marker removed between the
+    listing and its stamp is gone, which is what the caller asks."""
+    try:
+        with os.scandir(MARKER_DIR) as entries:
+            names = sorted(entry.name for entry in entries if entry.is_file())
+    except FileNotFoundError:
+        return {}
+    found: Dict[str, str] = {}
+    for name in names:
+        try:
+            found[name] = _stamp_of(MARKER_DIR / name)
+        except FileNotFoundError:
+            continue
+    return found
+
+
 def _cache() -> Dict[str, str]:
     if _latched is None:
         load()
@@ -184,23 +218,25 @@ def latch(chain: str, env: str = "") -> str:
         {"chain": chain, "env": env, "latched_at": stamp}, ensure_ascii=False))
     _cache()[chain] = stamp
     logger.warning(
-        "chain latch: %s now owns its tables in Postgres (%s). Only "
-        "scripts/chain_copy_back.py releases this.", chain, stamp)
+        "chain latch: %s now owns its tables in Postgres (%s). Nothing in "
+        "this build releases it; an image from before step 14 routes by this "
+        "marker, so keep it (%s).", chain, stamp, ROLLBACK_RUNBOOK)
     return stamp
 
 
 def release(chain: str) -> bool:
-    """Drop the local marker. DN-08's copy-back is the only caller there should
-    ever be; the tests use it to prove the unlatched behaviour is still real.
+    """Drop the local marker. DN-08's copy-back was the only production caller
+    until step 14's S14-04 deleted it; the tests use it to put a marker back
+    the way they found it.
 
     **The removal is as durable as the creation**, and it has to be for the
     same reason one step later. `_write_marker` fsyncs the directory so a
     rename that never reached the disk cannot unlatch a chain on the next
-    power cut; the copy-back releases the latch *after* it has copied the rows
-    into DuckDB and put `KS_WRITE_*` back, so an unlink that never reached the
-    disk brings the marker back to a chain whose rows are now in both stores —
-    two writers allocating `stock_movements` ids, the state revision 0030
-    forbids and the one this module exists to prevent.
+    power cut; the copy-back released the latch *after* it had copied the
+    rows into DuckDB and put `KS_WRITE_*` back, so an unlink that never
+    reached the disk brought the marker back to a chain whose rows were then
+    in both stores — two writers allocating `stock_movements` ids, the state
+    revision 0030 forbids and the one this module exists to prevent.
     """
     try:
         marker_path(chain).unlink()
@@ -264,12 +300,14 @@ def claimed_chains(owners: Mapping[str, str]) -> Dict[str, str]:
     well, and stands down on either copy. It costs one query per run of the
     hourly and daily jobs that ask it — the operational pair here, the order
     paths through `pg_landing.order_tables_stood_down_or_owned` (DN-22a) — and
-    it cannot be done on the write path itself: that is the read
-    `writes_postgres()` exists to avoid.
+    it cannot be done on the write path itself: that is the read the
+    chains' `writes_postgres()` existed to avoid (step 14's S14-11 deleted it
+    with the flags).
 
     A chain, not a table: ownership passes for a chain as a unit, so one owner
-    row holds all of its tables down. DN-08's copy-back deletes both copies, so
-    a chain released deliberately is not held by this.
+    row holds all of its tables down. DN-08's copy-back deleted both copies,
+    so a chain it released was not held by this; nothing releases one since
+    step 14's S14-04.
     """
     from core.write_chains import WRITE_CHAINS, chain_name
 
@@ -305,9 +343,10 @@ def owned_tables(owners: Mapping[str, str]) -> FrozenSet[str]:
     the hour, and the two copies then agreed, so the daily comparison had
     nothing to say. `chain_owner_unregistered` is what says it instead.
 
-    Every path that holds a pool and stands down on the owner rows reads this
-    one answer — the operational pair and `pg_landing.owned_among` — so no two
-    of them can disagree about which tables have changed hands.
+    Every path that held a pool and stood down on the owner rows read this
+    one answer — the operational pair, until step 14's S14-12 and S14-13
+    deleted it, and `pg_landing.owned_among` — so no two of them could
+    disagree about which tables had changed hands.
     """
     return claimed_tables(owners) | frozenset(owners)
 
@@ -315,7 +354,7 @@ def owned_tables(owners: Mapping[str, str]) -> FrozenSet[str]:
 def unregistered_owned_tables(owners: Mapping[str, str]) -> Dict[str, str]:
     """`{table: latched_at}` for every owner row that names a table no chain in
     this build declares — an image older than the chain, or a chain dropped
-    from `WRITE_CHAINS` without its copy-back. Held down by `owned_tables`,
+    from `WRITE_CHAINS`. Held down by `owned_tables`,
     reported by the daily comparison as `chain_owner_unregistered`."""
     from core.write_chains import WRITE_CHAINS
 
@@ -323,103 +362,24 @@ def unregistered_owned_tables(owners: Mapping[str, str]) -> Dict[str, str]:
     return {table: at for table, at in owners.items() if table not in declared}
 
 
-# ─── A chain that stamps the mirror's watermark itself ──────────────────────
+# ─── A chain that stamped the mirror's watermark itself ─────────────────────
 #
-# The daily comparison reads `meta.mirror_state.last_ok_at` after the owner
-# row as a shipment out of DuckDB over the chain's rows
-# (`chain_shipper_overwrote`, the stage-4 plan's E1). That holds for a chain
-# whose writer never stamps the watermark, and it does not hold for one that
-# does: chain 6 stamps it on every write by design (OD-15 (a)), and from
-# 2026-10-10 every morning's comparison paged the chain's own hourly writes as
-# a shipment over them, CRITICAL, with "restore from the nightly dump" as its
-# lever. So a chain whose writer stamps it declares the tables
-# (`CHAIN_STAMPS_MIRROR_STATE`), and a chain that also keeps a record of its own
-# write instants hands E1 the watermark and the record together
-# (`read_mirror_stamps(conn)`, answering in this shape). A chain that declares
-# the tables and keeps no record is not judged by E1 on them: its writes and a
-# shipment's look alike, and saying otherwise every morning would be noise.
-# `tests/unit/test_chain_mirror_stamps.py` walks every registered chain for a
-# writer that stamps the watermark and holds the declaration to it.
+# The daily comparison read `meta.mirror_state.last_ok_at` after the owner row
+# as a shipment out of DuckDB over the chain's rows (`chain_shipper_overwrote`,
+# the stage-4 plan's E1), and a chain whose writer stamps the watermark itself
+# handed it the watermark and its record of its own write instants together
+# (`MirrorStamp`, chain 6's `read_mirror_stamps`). Step 14's S14-12 deleted the
+# comparison and both.
 
 
-@dataclass(frozen=True)
-class MirrorStamp:
-    """One table's `meta.mirror_state.last_ok_at` and the chain's record of its
-    own write instants, read in ONE statement. Two reads would let a chain
-    write land between them, leaving a watermark the record no longer carries —
-    which reads exactly like a shipment.
-
-    `last_ok_us` is that instant in whole microseconds since the epoch, worked
-    out by Postgres with the record's own arithmetic, so the two compare as
-    integers whatever the session renders. `stamps` is empty when the chain has
-    kept no record of the table yet — then no instant is the chain's. Never the
-    record's `previous`: that is the watermark as the chain's last write found
-    it, which after a shipment is the shipment's own instant. `unreadable` says
-    why a record nobody can parse was not read; then nothing it would have said
-    is known, and nothing is taken to be the chain's."""
-    last_ok_at: Optional[datetime]
-    last_ok_us: Optional[int]
-    stamps: FrozenSet[int] = frozenset()
-    unreadable: Optional[str] = None
-
-
-# ─── The lock-out a flip waits for ──────────────────────────────────────────
+# ─── The lock-out a flip waited for — until step 14's S14-11 ──────────────────
 #
-# Once a chain has latched, an image built before the chain must not run
-# against its tables: it would write DuckDB, and ship round the chain through
-# every path that never asks who owns a table, without knowing the chain
-# exists. What refuses such an image is a revision `REQUIRED_REVISION` moved to
-# after the chain was registered — 0034 for chain 4, 0035 for the eight chains
-# #280 registered — so every gated path of the older image refuses the
-# database. That holds only if the build that flips the chain already requires
-# that revision. #280's build did not: images 3.0.271 and 3.0.272 carry the
-# eight chains and require 0034, so a flag set there latched a chain with every
-# older image still admitted, and nothing but the order of an operator's steps
-# stood in the way (reproduced 2026-10-09 against a 0034 database: chain 11a
-# latched, owner row and ledger row written, no revision consulted).
-#
-# So a chain registered from #280 on names its lock-out (`LOCKOUT_REVISION`),
-# and its flag moves the writes only in a build whose `REQUIRED_REVISION` is
-# that revision or a later one — an unmet precondition like any other: the
-# chain runs as duckdb, `/api/health` publishes the reason and the canary warns
-# `write_chain_precondition_unmet`. Its writers ask `require_revision()` before
-# the latch, so the database is then at that revision as well: the flip waits
-# for the lock-out at runtime, in every build that carries this rule. A chain
-# that names none is unmet. A latched chain is not held (OD-19 (a)).
-#
-# "Or later" is read off the four digits every revision id starts with: the
-# migrations are one line numbered in order, which
-# `tests/unit/test_chain_lockout.py` holds, so the number is the ancestry. That
-# needs neither the migrations directory, which the web and bot images do not
-# carry, nor Postgres, which `/api/health` must answer without.
-
-LOCKOUT_KEY = "lockout"
-
-
-def _revision_number(revision: str) -> int:
-    head = revision.split("_", 1)[0]
-    if len(head) != 4 or not head.isdigit():
-        raise ValueError(f"{revision!r} is not a revision id")
-    return int(head)
-
-
-def lockout_unmet(lockout_revision: Optional[str]) -> Optional[str]:
-    """Why a chain whose lock-out is `lockout_revision` may not move its writes
-    in this build, or None when this build requires that revision or a later
-    one. Never raises and never asks Postgres; names revisions only."""
-    from core import pg
-
-    if not lockout_revision:
-        return (f"{LOCKOUT_KEY}: no revision refuses the images built before "
-                "this chain, so one of them still starts against its tables "
-                "after the flip; ship one (revision 0035's shape) and name it "
-                "in the chain's LOCKOUT_REVISION first")
-    try:
-        if _revision_number(lockout_revision) <= _revision_number(pg.REQUIRED_REVISION):
-            return None
-    except Exception as exc:  # noqa: BLE001 — unreadable is unmet
-        return f"{LOCKOUT_KEY}: the revisions could not be compared ({exc})"
-    return (f"{LOCKOUT_KEY}: this build requires {pg.REQUIRED_REVISION}, not "
-            f"{lockout_revision}, so an image built before this chain still "
-            "starts against its tables after the flip; deploy the build that "
-            f"requires {lockout_revision} first")
+# Every chain registered from #280 on named the revision that refuses the
+# images built before it (`LOCKOUT_REVISION`, 0035 for the eight #280
+# registered), and its flag moved the writes only in a build that required
+# that revision or a later one (`lockout_unmet`, read off the four digits
+# every revision id starts with). Since S14-00 no flag moves anything, and
+# S14-11 deleted the constants and `lockout_unmet` with the flags; which
+# revision knows each chain's tables is the literal `LOCKOUT` in
+# `tests/unit/test_chain_lockout.py`, which still holds every chain to a
+# revision that comments its tables.

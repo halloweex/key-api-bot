@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import os
 import textwrap
 from contextlib import ExitStack
 from datetime import date, datetime, timedelta, timezone
@@ -210,7 +211,9 @@ class TestChain8Expenses:
         read = "\n".join(conn.sql)
         assert "app.manual_expenses_id_seq" in read
         assert "FROM app.manual_expenses" in read
-        for chain_1 in ("stock_movements", "inventory", "offers", "chain_watermarks"):
+        # `key = ANY`: chain 1's watermark read. (The owner rows are read for
+        # every chain since step 14's S14-11, from the same table.)
+        for chain_1 in ("stock_movements", "inventory", "offers", "key = ANY"):
             assert chain_1 not in read, chain_1
         # Zero rows: an allocator with nothing to collide with, no NULLs.
         assert inv.check_chain_invariants(facts) == []
@@ -354,7 +357,7 @@ class TestChain7aGoals:
         assert facts.expense_types is None
         read = "\n".join(conn.sql)
         assert "FROM app.revenue_goals" in read
-        for other in ("manual_expenses", "stock_movements", "chain_watermarks"):
+        for other in ("manual_expenses", "stock_movements", "key = ANY"):
             assert other not in read, other
         assert inv.check_chain_invariants(facts) == []
 
@@ -507,11 +510,15 @@ class TestChain4Buyers:
         assert issue.table_name == "bronze.buyer_contacts"
 
     def test_a_null_name_names_the_copy_back_it_blocks(self):
+        """The copy-back is the rollback image's since step 14's S14-04, and
+        the row is corrected before any rollback to it."""
         facts = self._facts(UTC_NOW, null_names=1)
         (issue,) = inv.check_chain_invariants(facts)
         assert issue.check_name == inv.COLUMN_NULL
         assert issue.table_name == "bronze.buyers"
-        assert "chain_copy_back.py" in issue.description
+        assert "the copy-back of an image from before step 14" in issue.description
+        assert "before any rollback to rollback-step14" in issue.description
+        assert "chain_copy_back.py" not in issue.description
         assert "landing_rows.buyer_row" in issue.description
         assert "recorded_at" not in issue.description
 
@@ -524,7 +531,7 @@ class TestChain4Buyers:
         (issue,) = inv.check_chain_invariants(facts)
         assert "hand edit or a writer that went round the parse" in issue.description
         assert "carried across" not in issue.description
-        assert "chain_copy_back.py" in issue.description
+        assert "the copy-back of an image from before step 14" in issue.description
 
     def test_an_orphan_says_the_copy_back_leaves_it_behind(self):
         """It does not refuse them: contacts are read through their buyers and
@@ -533,6 +540,8 @@ class TestChain4Buyers:
         (issue,) = inv.check_chain_invariants(facts)
         assert "does not refuse them" in issue.description
         assert "refuses what DuckDB could not hold" not in issue.description
+        assert "before any rollback to rollback-step14" in issue.description
+        assert "chain_copy_back.py" not in issue.description
 
     def test_an_unreadable_buyers_group_is_blindness_not_silence(self):
         facts = inv.Facts(watched=("pg_buyers_write",), now=UTC_NOW,
@@ -629,24 +638,43 @@ class TestWhoIsWatched:
                 monkeypatch.setenv(chain.WRITE_ENV, flag)
         assert inv.watched_chains() == {chain_name(c): None for c in WRITE_CHAINS}
 
-    def test_a_latched_chain_brings_its_stamp(self, monkeypatch):
-        """The latch no longer routes, but its stamp is still when the
-        since-the-handover invariants measure from."""
-        monkeypatch.setenv("KS_WRITE_INVENTORY", "duckdb")
+    def test_the_local_marker_dates_nothing(self, monkeypatch):
+        """Since step 14's S14-11 the handover is dated by the owner rows
+        (below), not the local marker: a lost `./data` must not make every
+        "since the handover" invariant forget it. Mutation: read the marker's
+        stamp here again."""
         _latch("pg_inventory_write")
         watched = inv.watched_chains()
-        assert watched["pg_inventory_write"] == UTC_NOW.isoformat()
+        assert watched["pg_inventory_write"] is None
         assert watched["pg_expenses_write"] is None
 
-    def test_the_state_comes_from_write_chains_and_not_from_the_environment(self):
-        """Reused, not re-derived — a second reading of `KS_WRITE_*` here is
-        how a latched chain with a flipped-back variable would end up
-        unwatched by the check that exists for it."""
+    @pytest.mark.asyncio
+    async def test_the_handover_is_the_chains_earliest_owner_row(self, monkeypatch):
+        """No marker on disk, and chain 8's owner row in Postgres: the facts
+        carry its stamp. Mutation: date the handover by the marker again."""
+        _watch_only(monkeypatch, "pg_expenses_write")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+        stamp = "2026-10-15T08:00:00+00:00"
+
+        class _Owners(_Recorder):
+            async def fetch(self, sql, *args):
+                self._see(sql)
+                if "key LIKE" in sql:
+                    return [{"key": "owner:app.manual_expenses", "value": stamp}]
+                return []
+
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(_Owners()))
+        assert facts.expenses.latched_at == datetime.fromisoformat(stamp)
+
+    def test_every_chain_is_watched_asking_no_flag(self):
+        """Read off the registry, never off the environment or a chain's
+        answer (`chain_modes`, gone with the flags)."""
         source = textwrap.dedent(inspect.getsource(inv.watched_chains))
         calls = {n.func.id for n in ast.walk(ast.parse(source))
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "chain_modes" in calls
-        assert "getenv" not in source
+        assert "chain_modes" not in calls
+        assert "getenv" not in source and "WRITE_CHAINS" in source
 
 
 class TestBlindnessIsReported:
@@ -865,7 +893,9 @@ class TestTheWatermarks:
         failed read looked exactly like a chain with no sync keys at all."""
         _watch_only(monkeypatch, "pg_inventory_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        conn = _Recorder(fail_on="meta.chain_watermarks")
+        # The watermark read alone (`key = ANY`): the owner rows, read from
+        # the same table first since step 14's S14-11, answer.
+        conn = _Recorder(fail_on="key = ANY")
         with patch("core.pg.require_revision", new=AsyncMock()):
             facts = await inv.read_facts(pool=_Pool(conn))
         assert isinstance(facts.inventory, inv.Inventory)
@@ -919,7 +949,7 @@ class TestTheWiring:
         from core import pg_warehouse_dq
 
         others |= set(pg_warehouse_dq.UNWATCHED_NAMES.values())
-        others |= {pg_warehouse_dq.WHOLE_UNWATCHED, pg_warehouse_dq.FLAG_INVALID}
+        others.add(pg_warehouse_dq.WHOLE_UNWATCHED)
         assert others and not {n for n in others if n.startswith(inv.PREFIX)}
 
     def test_the_window_follows_the_continuity_check(self):
@@ -943,25 +973,22 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def job(self, tmp_path, monkeypatch):
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
-
-        from core import pg_dq_journal_write
-        from tests.conftest import route_chains_to_duckdb
+        from tests.journal_fake import install_journal
 
         for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_DQ_PG_WAREHOUSE"):
             monkeypatch.delenv(env, raising=False)
-        # The job's flow is the subject; the journal it persists to is read
-        # back from this DuckDB, chain 9's store until S14-10.
-        route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
-        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
-        await store.connect()
+        # The job's flow is the subject; the journal it persists to goes
+        # through chain 9's door into a list (`tests/journal_fake.py`). Until
+        # S14-10 it was read back from this DuckDB, the chain routed to it.
+        journal = install_journal(monkeypatch)
+        store = DuckDBStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
         resolve = AsyncMock(return_value=0)
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.alerting.resolve_group", resolve):
-            yield scheduler, store, sent, resolve
-        await store.close()
+            yield scheduler, journal, sent, resolve
 
     @staticmethod
     async def _run(scheduler, facts, *, duckdb_raises: bool):
@@ -975,11 +1002,8 @@ class TestTheJobWhenTheDuckDBHalfFails:
             return await scheduler._run_dq_integrity()
 
     @staticmethod
-    async def _persisted(store, run_id):
-        from core.data_quality import fetch_run_issues
-
-        async with store.connection() as conn:
-            return {r["check_name"]: r for r in fetch_run_issues(conn, run_id)}
+    async def _persisted(journal, run_id):
+        return {r["check_name"]: r for r in journal.issues(run_id)}
 
     @staticmethod
     def _chain_resolves(resolve):
@@ -988,12 +1012,12 @@ class TestTheJobWhenTheDuckDBHalfFails:
 
     @pytest.mark.asyncio
     async def test_a_chain_critical_is_persisted_and_pages(self, job):
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         result = await self._run(scheduler, _expenses(next_id=2, max_id=2),
                                  duckdb_raises=True)
 
         assert "DuckDB file will not open" in result["error"]
-        persisted = await self._persisted(store, result["run_id"])
+        persisted = await self._persisted(journal, result["run_id"])
         assert persisted[inv.SEQUENCE_BEHIND]["severity"] == "CRITICAL"
         assert persisted[inv.SEQUENCE_BEHIND]["table_name"] == "app.manual_expenses"
         assert sent.await_count == 1
@@ -1005,11 +1029,11 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def test_a_chain_that_could_not_be_read_pages_nobody_and_clears_nothing(
         self, job,
     ):
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         blind = inv.Facts.blind(("pg_expenses_write",), "Postgres is unreachable")
         result = await self._run(scheduler, blind, duckdb_raises=True)
 
-        assert inv.UNWATCHED in await self._persisted(store, result["run_id"])
+        assert inv.UNWATCHED in await self._persisted(journal, result["run_id"])
         assert sent.await_count == 0
         (call,) = self._chain_resolves(resolve)
         assert set(inv.CONDITIONS) <= set(call.kwargs["still_firing"])
@@ -1018,7 +1042,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def test_with_no_chain_watched_nothing_of_theirs_is_announced(self, job):
         """Nothing looked at the chains this run; a page left over from one that
         has stood down clears on the next run whose DuckDB half finishes."""
-        scheduler, _store, sent, resolve = job
+        scheduler, _journal, sent, resolve = job
         await self._run(scheduler, inv.Facts(), duckdb_raises=True)
         assert sent.await_count == 0
         assert not self._chain_resolves(resolve)
@@ -1027,12 +1051,12 @@ class TestTheJobWhenTheDuckDBHalfFails:
     async def test_with_the_duckdb_half_healthy_the_chain_critical_pages_and_is_not_held(
         self, job,
     ):
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         result = await self._run(scheduler, _expenses(next_id=2, max_id=2),
                                  duckdb_raises=False)
 
         assert result["error"] is None
-        assert inv.SEQUENCE_BEHIND in await self._persisted(store, result["run_id"])
+        assert inv.SEQUENCE_BEHIND in await self._persisted(journal, result["run_id"])
         assert sent.await_count == 1
         assert inv.SEQUENCE_BEHIND in sent.await_args.kwargs["conditions"]
         (layer,) = [c for c in resolve.await_args_list if not c.kwargs.get("only_prefix")]
@@ -1046,7 +1070,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
     ):
         """The layer's own resolution must hold them too: `data_quality`'s
         `unverified_conditions` no longer knows these conditions exist."""
-        scheduler, store, sent, resolve = job
+        scheduler, journal, sent, resolve = job
         blind = inv.Facts.blind(("pg_expenses_write",), "Postgres is unreachable")
         result = await self._run(scheduler, blind, duckdb_raises=False)
 
@@ -1075,3 +1099,129 @@ def test_read_facts_never_raises_on_an_unreachable_store(monkeypatch):
         facts = asyncio.run(inv.read_facts())
     assert facts.whole is not None and "refused" in facts.whole.reason
     assert [i.check_name for i in inv.check_chain_invariants(facts)] == [inv.UNWATCHED]
+
+
+class TestTheLatchsTwoCopies:
+    """`chain_latch_disagrees`, judged here since step 14's S14-12 (decision
+    12): the daily `reconcile_operational` judged it until the comparison went.
+    Only one direction is filed — owner rows standing with no marker, which is
+    what an image from before step 14 would route by its flag again — and it
+    is CRITICAL, on the integrity layer, under the `chain_` family."""
+
+    OWNERS = {"bronze.orders": "2026-10-15T08:04:08+00:00",
+              "bronze.order_products": "2026-10-15T08:04:08+00:00",
+              "bronze.expenses": "2026-10-15T08:04:09+00:00"}
+
+    def _issues(self, owners, markers):
+        latch = inv._latch_facts(owners, markers)
+        return inv.check_chain_invariants(inv.Facts(watched=("pg_orders_write",),
+                                                     latch=latch))
+
+    def test_owner_rows_with_no_marker_are_critical(self):
+        from core.data_quality import Severity
+
+        (issue,) = self._issues(self.OWNERS, {})
+        assert issue.check_name == inv.LATCH_DISAGREES == "chain_latch_disagrees"
+        assert issue.severity is Severity.CRITICAL
+        assert issue.table_name == "pg_orders_write"
+        assert issue.count == 3
+        # The earliest stamp is the latch: the marker's content to restore.
+        assert "latched_at = 2026-10-15T08:04:08+00:00" in issue.description
+        assert "3 of its 4 table(s)" in issue.description
+
+    def test_a_marker_present_files_nothing(self):
+        assert self._issues(self.OWNERS, {"pg_orders_write": "x"}) == []
+
+    def test_a_marker_with_no_owner_row_files_nothing(self):
+        """The other direction — a first write that failed after its marker —
+        is the safe one and no step-14 build reads either copy to route;
+        decision 12 let it go. Mutation: judge both directions."""
+        assert self._issues({}, {"pg_orders_write": "x"}) == []
+
+    def test_an_unreadable_directory_is_blindness_not_a_lost_marker(self):
+        facts = inv.Facts(watched=("pg_orders_write",),
+                          latch=inv.Unwatched("data/write-chain-owners unreadable"))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert (issue.check_name, issue.table_name) == (inv.UNWATCHED, inv.MARKERS_PART)
+        # …and blindness holds every condition, this one included.
+        assert inv.LATCH_DISAGREES in inv.unverified_conditions([issue])
+
+    def test_it_is_one_of_the_family_the_integrity_job_resolves(self):
+        assert inv.LATCH_DISAGREES in inv.CONDITIONS
+        assert inv.LATCH_DISAGREES.startswith(inv.PREFIX)
+
+    def test_the_markers_are_read_afresh_from_disk(self, monkeypatch, tmp_path):
+        """Not the process's cache: a marker lost while web runs is a marker
+        lost. Mutation: answer from `chain_latch._cache()`."""
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "owners")
+        assert chain_latch.markers_on_disk() == {}
+        _latch("pg_orders_write")
+        assert set(chain_latch.markers_on_disk()) == {"pg_orders_write"}
+        (tmp_path / "owners" / "pg_orders_write").unlink()
+        assert chain_latch.latched("pg_orders_write")      # the cache still says so
+        assert chain_latch.markers_on_disk() == {}
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root lists a directory whatever its mode")
+    @pytest.mark.parametrize("mode", [0o000, 0o300, 0o600],
+                             ids=["no-access", "no-read", "no-search"])
+    def test_a_directory_that_cannot_be_read_raises(self, monkeypatch, tmp_path, mode):
+        """The real read, not a hand-built fact: `Path.glob('*')` and
+        `Path.exists()` swallow the PermissionError and answered "no
+        markers", so every chain with owner rows read as a lost marker — a
+        false CRITICAL with a restore instruction — and the `OSError` branch
+        in `read_facts` could not be reached. Mutation: list with
+        `MARKER_DIR.glob('*')` again."""
+        owners = tmp_path / "owners"
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", owners)
+        _latch("pg_orders_write")
+        owners.chmod(mode)
+        try:
+            with pytest.raises(OSError):
+                chain_latch.markers_on_disk()
+        finally:
+            owners.chmod(0o700)
+        assert set(chain_latch.markers_on_disk()) == {"pg_orders_write"}
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root lists a directory whatever its mode")
+    def test_a_parent_that_cannot_be_searched_raises_too(self, monkeypatch, tmp_path):
+        """`Path.exists()` reads False on 3.14 for any OSError, so a `data/`
+        that cannot be searched also read as "no markers". Only a directory
+        that is really not there is the empty answer."""
+        parent = tmp_path / "data"
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", parent / "owners")
+        _latch("pg_orders_write")
+        parent.chmod(0o600)
+        try:
+            with pytest.raises(OSError):
+                chain_latch.markers_on_disk()
+        finally:
+            parent.chmod(0o700)
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "absent")
+        assert chain_latch.markers_on_disk() == {}
+
+    def test_a_marker_removed_after_the_listing_is_gone_not_blindness(
+            self, monkeypatch, tmp_path):
+        """Removed between the listing and its stamp: the answer is the one a
+        later read would give, not an unreadable directory."""
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "owners")
+        _latch("pg_orders_write")
+        _latch("pg_buyers_write")
+        stamp_of = chain_latch._stamp_of
+
+        def vanished(path):
+            if path.name == "pg_buyers_write":
+                path.unlink()
+            return stamp_of(path)
+
+        monkeypatch.setattr(chain_latch, "_stamp_of", vanished)
+        assert set(chain_latch.markers_on_disk()) == {"pg_orders_write"}
+
+    def test_the_job_that_judged_it_no_longer_does(self):
+        """It left `dq_mirror_landing` with `reconcile_operational`; nothing
+        there files it."""
+        from core import mirror_reconciliation
+
+        assert not hasattr(mirror_reconciliation, "reconcile_operational")
+        assert not hasattr(mirror_reconciliation, "_chain_latch_findings")

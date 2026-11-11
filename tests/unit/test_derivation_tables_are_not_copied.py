@@ -13,7 +13,9 @@ CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 
 
 def test_no_copy_or_comparison_names_the_derivation_tables():
-    for name in ("pg_operational.py", "mirror_reconciliation.py", "pg_replication.py"):
+    # `pg_operational.py` and `pg_replication.py`, the copies, were two more
+    # until step 14's S14-13 deleted them.
+    for name in ("mirror_reconciliation.py",):
         tree = ast.parse((CORE / name).read_text(encoding="utf-8"))
         docstrings = {id(n.value) for n in ast.walk(tree)
                       if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}

@@ -263,10 +263,11 @@ class TestTheCaptureReadsWhatWasWritten:
 
 
 class TestItCannotLoseAVersionTheMirrorWouldHaveLost:
-    """`mirror_orders` never raises, because the backfill can ship whatever it
-    missed. The archive has no backfill and cannot have one, so it must not
+    """`mirror_orders` never raised, because the backfill could ship whatever
+    it missed. The archive has no backfill and cannot have one, so it must not
     inherit that contract — it has to be inside the transaction that writes the
-    row it describes."""
+    row it describes. (The mirror and its backfill went in step 14's S14-13,
+    and with them the test that the swallowing wrapper captured nothing.)"""
 
     def test_capture_is_called_inside_the_transaction_block(self):
         """Since chain 3's PR-1 the statements live in `_write_order_rows`,
@@ -294,19 +295,6 @@ class TestItCannotLoseAVersionTheMirrorWouldHaveLost:
         assert any(
             _calls(block, "_write_order_rows") for block in blocks
         ), "the header and its version are not written inside the transaction"
-
-    def test_capture_is_not_called_from_the_swallowing_wrapper(self):
-        """`mirror_orders` is the one that catches. A capture there would be a
-        version lost quietly, which is the whole failure this design exists to
-        prevent."""
-        from core import pg_landing
-
-        tree = ast.parse(inspect.getsource(pg_landing))
-        fn = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.AsyncFunctionDef) and n.name == "mirror_orders"
-        )
-        assert not _calls(fn, "capture_versions")
 
     def test_it_takes_a_connection_and_never_a_pool(self):
         """A second connection would put the version outside the transaction

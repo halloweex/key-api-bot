@@ -10,7 +10,8 @@ WHERE THE PATH LIVES
 
 `DB_PATH` is read at call time, not captured at construction, so a test can
 redirect it by rebinding this module's global — the same arrangement
-`core/duckdb_store.py` has, and for the same reason: a value bound once is a
+`core/duckdb_store.py` had (the store is `core/store.py` since step 14),
+and for the same reason: a value bound once is a
 production path nothing can patch.
 
 TWO CLOCKS, AND THE ADAPTER OWNS BOTH
@@ -523,10 +524,12 @@ class SqliteCache:
 class NoDashboardTabs:
     """`dashboard`, when there is no way to reach it.
 
-    The dashboard's user list lives in DuckDB under `KS_USER_STORE=duckdb`, and
-    DuckDB takes a single writer that the web container holds — a bot process
-    cannot open that file at all. This is the same wall `core/bot_prefs.py`
-    documents from the other side.
+    The dashboard's user list lives in Postgres (`app.dashboard_users`, its
+    only store since step 14's S14-08), and this store is chosen when the
+    bot's own state is SQLite — `KS_BOT_STORE` other than `postgres` — so it
+    has no way to the list. Until S14-08 the list could also be in DuckDB
+    under `KS_USER_STORE=duckdb`, whose single writer the web container
+    holds.
 
     So the answer is `available() -> False` and nothing else pretends. The
     approval the admin taps still grants **bot** access, the person is still
@@ -634,7 +637,7 @@ class SqliteBotStore:
 
             # The interface language, and the language the weekly report arrives
             # in. Read from the *web* container too — see core/bot_prefs.py —
-            # because the report is built where DuckDB lives and this file is
+            # because the report is built in web (where DuckDB lived) and this file is
             # the only place a user's choice is recorded.
             try:
                 cursor.execute("ALTER TABLE user_preferences ADD COLUMN language TEXT DEFAULT 'en'")

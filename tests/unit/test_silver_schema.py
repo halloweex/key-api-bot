@@ -14,9 +14,31 @@ import re
 from pathlib import Path
 
 from core import pg
-from core.duckdb_store import SILVER_ORDERS_DDL
 from core.sql_dialect import POSTGRES
 from core.warehouse_sql import silver_select_sql
+
+# DuckDB's `silver_orders` as its store declared it, a literal taken from
+# `core/duckdb_store.py` at 50cc367b just before step 14's S14-18 deleted the
+# schema (rule 9). The Postgres table was built to mirror it, and these checks
+# still say that it does.
+SILVER_ORDERS_DDL = """CREATE TABLE IF NOT EXISTS silver_orders (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL,
+            status_id INTEGER NOT NULL,
+            grand_total DECIMAL(12, 2) NOT NULL,
+            ordered_at TIMESTAMP WITH TIME ZONE,
+            buyer_id INTEGER,
+            manager_id INTEGER,
+            order_date DATE NOT NULL,
+            is_return BOOLEAN NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            is_active_source BOOLEAN NOT NULL,
+            source_name VARCHAR NOT NULL,
+            is_new_customer BOOLEAN NOT NULL DEFAULT FALSE,
+            buyer_first_order_date DATE,
+            promocode VARCHAR
+)"""
+
 
 REPO = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(

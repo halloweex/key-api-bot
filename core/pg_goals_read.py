@@ -1,5 +1,16 @@
 """Reading `/goals` from Postgres — the four of its thirteen that can move.
 
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+Every goal read is Postgres': `GoalsMixin._goals_run` and `_goal_tables_run`
+ask this module and nothing else, and a failure — a lost DSN line included —
+is refused as a 503 naming `goals` (`read_fallback.refuse`). `KS_READ_GOALS`
+chooses nothing now, and `KS_GOALS_HISTORY` is not read at all: the refusal
+of any value but unset and `silver`, its `/api/health` block `goals_history`
+and the canary's `goals_history_mode_invalid` went with S14-07. The line stays
+in production's `.env` (`KS_GOALS_HISTORY=silver`), because images from before
+7b-4 read it unset as the bridge. The paragraphs below are the history.
+
 WHAT IS HERE AND WHAT IS NOT
 
 `/goals` is the last tab untouched by the migration, and it splits cleanly:
@@ -55,7 +66,7 @@ now. Invisible for twenty-one hours out of twenty-four, which is why it is
 written down rather than left to a differential test that runs under one
 timezone.
 
-WHY THIS FALLS BACK, AND WHERE IT MUST NOT
+WHY IT FELL BACK, AND WHERE IT MUST NOT, UNTIL S14-07
 
 Revenue history and Gold diverge nowhere: they are derived layers DuckDB keeps
 current, so a fault costs the engine rather than the page —
@@ -85,9 +96,9 @@ three — and step 13 freezes them. `KS_GOALS_HISTORY` chose between the two
 2026-10-07 08:20 UTC, after a dry run over that day's backup found every
 number equal; 7b-4 deleted the bridge.
 
-So the variable is retired, and read only to refuse: unset and `silver` both
-mean Silver, and any other value raises at every history read — `bridge`
-included, with a message of its own. A value naming a history that no longer
+So the variable was retired, and from 7b-4 to step 14's S14-07 read only to
+refuse: unset and `silver` both meant Silver, and any other value raised at
+every history read — `bridge` included, with a message of its own. A value naming a history that no longer
 exists is a configuration nobody can satisfy, and answering it from Silver in
 silence would hide that. Refusing fails what reads the calculators' history:
 the smart goal (the dashboard's goal widget), `/goals/smart`,
@@ -95,15 +106,15 @@ the smart goal (the dashboard's goal widget), `/goals/smart`,
 `/goals/forecast`, `POST /goals/recalculate` and the Monday job.
 `GET /goals`, `/goals/history` and setting or resetting a goal never read it —
 they read a recent window of Silver, `is_active_source` included — and
-answer as before. `/api/health` publishes the error, which the canary pages
+answer as before. `/api/health` published the error, which the canary paged
 as `goals_history_mode_invalid` (CRITICAL). Never at import or at startup, so
-web, the only syncer, cannot crash-loop on it.
+web, the only syncer, could not crash-loop on it. Since S14-07 nothing reads
+the variable, so no value of it refuses anything.
 
-**Retired is not removable.** Unset reads Silver on this build, but every
-image from before 7b-4 reads unset as `bridge`. So production keeps the line
+**Retired is not removable.** This build reads nothing, but every image from
+before 7b-4 reads unset as `bridge`. So production keeps the line
 `KS_GOALS_HISTORY=silver` for as long as such an image can be a rollback
-target, and the refusal and the canary's lever both say "set it to `silver`",
-never "remove it".
+target.
 
 It never was `KS_READ_GOALS` reused, nor named `KS_READ_*`: the step-13
 readiness reads every such name as an engine switch that must equal
@@ -112,94 +123,9 @@ readiness reads every such name as an engine switch that must equal
 from __future__ import annotations
 
 import logging
-import os
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_GOALS"
-_VALID = ("duckdb", "postgres")
-
-HISTORY_ENV = "KS_GOALS_HISTORY"
-SILVER = "silver"
-# The history chain 7b-4 deleted; named only so its refusal can say so.
-RETIRED_BRIDGE = "bridge"
-
-
-def history_mode_of(raw: Optional[str]) -> str:
-    """`raw` — a `KS_GOALS_HISTORY` value, None for unset — as the history it
-    names, which is `silver` or nothing. Pure. Unset, blank and `silver` (any
-    case, any surrounding space) are `silver`; anything else raises, `bridge`
-    with the deletion named."""
-    value = (raw or "").strip().lower() or SILVER
-    if value == SILVER:
-        return SILVER
-    if value == RETIRED_BRIDGE:
-        raise ValueError(
-            f"{HISTORY_ENV}={value!r} — the DN-12 bridge was deleted (chain "
-            f"7b-4) and the goal calculators read Silver only. Set it to "
-            f"{SILVER!r} and keep the line: an image from before 7b-4 reads "
-            f"the variable unset as the bridge. A value naming a history that "
-            f"no longer exists must stop the read, not be answered from Silver "
-            f"in silence."
-        )
-    raise ValueError(
-        f"{HISTORY_ENV}={value!r} — unknown history. The variable is retired "
-        f"(chain 7b-4) and Silver is the only history. Set it to {SILVER!r} "
-        f"and keep the line: unset reads Silver too here, but an image from "
-        f"before 7b-4 reads it as the bridge. A typo here must stop the read, "
-        f"not quietly count a different set of orders."
-    )
-
-
-def history_mode() -> str:
-    """`silver`, which is every history read's answer since chain 7b-4 —
-    whatever `KS_GOALS_HISTORY` says, since step 14's S14-00: production
-    keeps `silver` in `.env` for the images before step 14, and this code
-    reads the
-    variable for nothing, so no value of it can refuse a read. The canary's
-    `goals_history_mode_invalid` goes with the block (S14-07)."""
-    return SILVER
-
-
-def history_state() -> dict:
-    """`KS_GOALS_HISTORY` as a history read would take it now: since S14-00
-    always `mode` `silver` and no `error`. Never raises.
-
-    The raise is at the read, so a refused value stops every read of the
-    calculators' history — the dashboard's goal widget (`/goals/smart`), the
-    other calculator GETs under `/goals/`, `POST /goals/recalculate` and the
-    Monday job; `GET /goals`, `/goals/history` and setting a goal do not read
-    it — and none of those pages anybody: a 500 on a page and a job error in
-    a log. So `/api/health` publishes this, and the canary pages the error as
-    `goals_history_mode_invalid`. The value is the variable's own, which is
-    not a secret, as `read_fallback_mode` publishes its siblings'."""
-    try:
-        return {"mode": history_mode(), "error": None}
-    except ValueError as exc:
-        return {"mode": None, "error": str(exc)}
-
-
-def enabled() -> bool:
-    """Whether the goal reads should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working tab into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

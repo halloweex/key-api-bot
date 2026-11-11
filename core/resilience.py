@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Optional, Callable, Any, TypeVar
 from functools import wraps
 
+from core.exceptions import KeyCRMConnectionError
 from core.observability import get_logger
 
 logger = get_logger(__name__)
@@ -119,9 +120,16 @@ class CircuitBreaker:
         return self.state == CircuitState.OPEN
 
 
-class CircuitOpenError(Exception):
-    """Raised when circuit breaker is open."""
-    pass
+class CircuitOpenError(KeyCRMConnectionError):
+    """Raised when circuit breaker is open.
+
+    A `KeyCRMConnectionError`: an open breaker is KeyCRM being unavailable,
+    and every step that tells KeyCRM's failures from its own store's reads it
+    by that family. As a bare `Exception` it was chain 3's: the order step
+    recorded it in `meta.mirror_state` as a Postgres failure and paged
+    `mirror_failing:bronze.orders` for a KeyCRM outage (L1-02). It is raised
+    before the retry wrapper, so no backoff ever retries an open breaker.
+    """
 
 
 @dataclass

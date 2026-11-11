@@ -59,31 +59,35 @@ against (`core.pg_chain_invariants`).
 From the latch on, "the chain wrote this row" is `mirrored_at` being one of the
 recorded stamps: the watch reads any other instant at or after the latch as
 written round the chain, CRITICAL for as long as the row keeps it, however many
-full writes pass; the copy-back counts only recorded rows as the chain's work
-(`chain_transfer._rewritten_since_latch`). It clears when KeyCRM serves the
-row again (the next full write re-stamps it) or when a human deletes it or
-restores it, `mirrored_at` included, from DuckDB's frozen copy.
+full writes pass; the copy-back counted only recorded rows as the chain's
+work (`chain_transfer._rewritten_since_latch`), until S14-04 deleted it. It
+clears when KeyCRM serves the row again (the next full write re-stamps it) or
+when a human deletes it or restores it, `mirrored_at` included, from DuckDB's
+frozen copy.
 
-The watermark is read the same way. The daily comparison takes a
-`last_ok_at` after the owner row for a shipment over the chain's rows
-(`chain_shipper_overwrote`), and every write here stamps one; at a recorded
-instant it is this chain's own write, at any other it is not
-(`read_mirror_stamps`, one statement for both). Until that was asked, every
-write after the latch was paged CRITICAL as a shipment over itself, every
-morning from 2026-10-10. It sees a stamp that is not the chain's only until
+The watermark was read the same way, until step 14's S14-12 deleted the daily
+comparison that read it: it took a `last_ok_at` after the owner row for a
+shipment over the chain's rows (`chain_shipper_overwrote`), and every write
+here stamps one; at a recorded instant it was this chain's own write, at any
+other it was not (`read_mirror_stamps`, one statement for both). Until that was
+asked, every write after the latch was paged CRITICAL as a shipment over
+itself, every morning from 2026-10-10. It sees a stamp that is not the chain's only until
 the next write moves the watermark again — within the hour for the products,
 the week for the categories — and it is not the only thing that would: the
 sync's mirror (`pg_landing._mirror`), the one other writer that stamps this
-watermark, ships only while the chain is routed to DuckDB, and with owner rows
-in Postgres that is the marker lost, which `chain_latch_disagrees` and
-`owner_row_without_marker` say for as long as it lasts.
+watermark, ships only while the chain is routed to DuckDB. A step-14 image
+routes no chain there (S14-00), so its mirror never ships these tables; in an
+image from before step 14, with owner rows in Postgres, that is the marker
+lost, which `chain_latch_disagrees` and `owner_row_without_marker` say for as
+long as it lasts.
 
 What it cannot see, named rather than claimed: a write that leaves
 `mirrored_at` alone, or copies an instant the chain did write. On a row KeyCRM
 serves the next full write overwrites it within the hour; on a retired one
 nothing in Postgres dates it — a trigger or a per-row history would, and both
-are a migration. The copy-back still refuses such an edit on a row retired
-before the flip, where DuckDB's frozen copy disagrees.
+are a migration. The copy-back refused such an edit on a row retired before
+the flip, where DuckDB's frozen copy disagrees; an image from before step 14
+still does, and S14-04 deleted this build's.
 
 The record row is locked FIRST, before any product: two full writes of one
 table queue on it and never interleave, so neither loses the other's stamp,
@@ -117,41 +121,28 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` — with a bound, chain 4's — and claims both owner rows inside
 its transaction. From the first catalogue written here only
-`scripts/chain_copy_back.py catalogue` moves the writes back to DuckDB.
+`scripts/chain_copy_back.py catalogue` moved the writes back to DuckDB
+(deleted in step 14's S14-04; the way back since is an image from before
+step 14, `core.rollback_lever`).
 
-A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
+A PRECONDITION THE FLAG ENFORCED — UNTIL STEP 14
 
-Since step 14's S14-00 the chain writes Postgres whatever its flag says and
-asks no precondition (`writes_postgres`, `unmet_precondition`, `mode` are
-constants). What follows is the history.
-
-Nearly every reader on the dashboard joins the catalogue — directly, or
-through `silver_order_lines` — and each can still read DuckDB, whose catalogue
-stops changing the moment this chain writes Postgres. So `unmet_precondition()`
-holds an unlatched chain on DuckDB until:
-
-- this build requires `LOCKOUT_REVISION` (0035), which refuses every image
-  built before the chain (`chain_latch.lockout_unmet`);
-- chain 1 writes Postgres: DuckDB's `refresh_sku_inventory_status` joins
-  DuckDB's products, and its result is what the hourly copy ships;
-- `KS_READ_FALLBACK=off`: under `duckdb` a failed Postgres read is answered
-  from DuckDB, here from a frozen catalogue;
-- every read switch of the warehouse (`warehouse_cutover.WAREHOUSE_READERS`)
-  is postgres — the list step 13 checks, kept complete by a walk of every
-  `KS_READ_*` name in the tree, read through the one helper the switch reads
-  (`readers_not_on_postgres`), so the two cannot disagree. Over-inclusive on
-  purpose: a hand-picked subset of "catalogue readers" would be a second list
-  with no walker.
-
-The warning that says so is rate-limited (chain 4's reason): the incremental
-tick asks for the products watermark every minute.
+Until step 14's S14-00 an unlatched chain was held on DuckDB until the
+lock-out revision was required, chain 1 wrote Postgres, `KS_READ_FALLBACK` was
+`off` and every warehouse read switch was postgres — nearly every reader on
+the dashboard joins the catalogue, and each could still read DuckDB, whose
+catalogue stops changing the moment this chain writes Postgres. S14-00 made
+the answers constants; S14-09 deleted them, with the routing they fed: the
+hourly products step, `full_sync` and the store's two writers ask nothing.
+Kept: `WRITE_ENV` as a name (revision 0035's comments name it, and an image
+from before step 14 reads it) and the latch and its owner rows (decision 3:
+that image routes by them). `env_writes_postgres` and `writes_postgres()`,
+which the registry read until then, went in S14-11 with the flag.
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
-import time
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
@@ -166,21 +157,18 @@ WRITE_ENV = "KS_WRITE_CATALOGUE"
 
 # What this chain is called in `core.write_chains`, in the local latch marker
 # and in the `/api/health` block. One spelling, so a marker written by one
-# release is still read by the next. `chain_copy_back.py catalogue` resolves it.
+# release is still read by the next.
 CHAIN = "pg_catalogue_write"
 
 PRODUCTS = "bronze.products"
 CATEGORIES = "bronze.categories"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the mirror (`pg_landing._mirror`), the daily comparison (`reconcile_mirror`),
-# the carry of retired rows and the copy-back. Each is a unit of its own
-# (`pg_landing.unit_of`): one writer, one table, one transaction.
+# the mirror (`pg_landing._mirror`), the daily comparison (`reconcile_mirror`)
+# and the carry of retired rows (and the copy-back, until step 14's S14-04
+# deleted it). Each is a unit of its own (`pg_landing.unit_of`): one writer,
+# one table, one transaction.
 CHAIN_TABLES: Tuple[str, ...] = (PRODUCTS, CATEGORIES)
-
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # What the two full-catalogue sync sites stamp after the rows land. The store's
 # getter and setter route them through `core.write_chains.chain_for_sync_key`
@@ -202,12 +190,14 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_products", "last_sync_categories"
 # one stall twice under two names (chain 6a's reasoning).
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 
-# Until the first write under the flag stamps a key in
-# `meta.chain_watermarks`, `_freshness_check` judges DuckDB's frozen stamp
-# instead of calling the entity never synced — the categories move on Sunday
-# only, so a mid-week flip would file "never synced" on every integrity run
-# until then. Chain 6a's arrangement.
-CHAIN_WATERMARK_INHERITS_DUCKDB = True
+# `CHAIN_WATERMARK_INHERITS_DUCKDB` stood here until step 14's S14-09: until
+# the first write under the flag stamped a key in `meta.chain_watermarks`,
+# `_freshness_check` judged DuckDB's frozen stamp instead of calling the entity
+# never synced. Production holds both keys (H6, 2026-10-29), and an absent one
+# costs nothing the stand-in would save: the hourly products step syncs at once
+# when `last_sync_products` is absent, nothing reads `last_sync_categories`
+# back, and the freshness check then says "never synced", which is true
+# (`tests/unit/test_absent_chain_keys.py`).
 
 # A share of the previous full write's rows that the LAST write left out,
 # above which it is not KeyCRM retiring goods: it is a catalogue that arrived
@@ -233,39 +223,20 @@ STATEMENT_TIMEOUT = "30s"
 # The record of the chain's own write instants (module docstring). The key
 # lives beside the owner rows in `meta.chain_watermarks`; nothing reads that
 # table except by an exact key or the `owner:` prefix, so a third family of
-# keys is seen by nobody but its readers: the watch, the copy-back and the
-# daily comparison (`read_mirror_stamps`).
+# keys is seen by nobody but its readers: the watch and the daily comparison
+# (`read_mirror_stamps`) — and the copy-back, until step 14's S14-04 deleted
+# it.
 RECORD_PREFIX = "writes:"
 
 # A row's `mirrored_at` as the record keeps it: whole microseconds since the
 # epoch. `extract(epoch …)` is exact to the microsecond from PostgreSQL 14 on.
 STAMP_SQL = "(extract(epoch FROM mirrored_at) * 1000000)::bigint"
 
-# The tables whose `meta.mirror_state.last_ok_at` this chain's own writer
-# stamps (`_land`, OD-15 (a)) — all of them. Declared for the daily
-# comparison, which otherwise reads every write here after the latch as a
-# shipment over the chain's rows (`core.chain_latch.MirrorStamp`), and which
-# tells the two apart through `read_mirror_stamps` below.
-CHAIN_STAMPS_MIRROR_STATE: Tuple[str, ...] = CHAIN_TABLES
-
-# The watermark and the record of each table, in ONE statement: a write
-# committing between two reads would leave a `last_ok_at` the record no longer
-# carries (it keeps only the stamps some row still carries). `last_ok_us` is
-# `STAMP_SQL`'s arithmetic on the watermark, so the instant is the integer the
-# record holds and no rendering of a timestamp is compared. A table with no
-# watermark or no record still answers, with NULLs.
-_MIRROR_STAMPS_SQL = (
-    "SELECT t.table_name, m.last_ok_at, "
-    "(extract(epoch FROM m.last_ok_at) * 1000000)::bigint AS last_ok_us, "
-    "w.value AS record "
-    "FROM unnest($1::text[]) AS t(table_name) "
-    "LEFT JOIN meta.mirror_state m ON m.table_name = t.table_name "
-    "LEFT JOIN meta.chain_watermarks w ON w.key = $2::text || t.table_name")
-
-# Released with the owner rows by `scripts/chain_copy_back.py catalogue`: the
-# record describes writes DuckDB owns again, and a later flip starts a new one.
-CHAIN_RELEASED_KEYS: Tuple[str, ...] = tuple(
-    f"{RECORD_PREFIX}{table}" for table in CHAIN_TABLES)
+# This chain's own writer stamps `meta.mirror_state.last_ok_at` on both tables
+# (`_land`, OD-15 (a)). The daily comparison read that watermark and this
+# record together (`read_mirror_stamps`, `CHAIN_STAMPS_MIRROR_STATE`) to tell
+# the chain's own writes from a shipment out of DuckDB over them
+# (`chain_shipper_overwrote`); step 14's S14-12 deleted the comparison and both.
 
 _EMPTY_RECORD_TEXT = '{"stamps": [], "previous": null}'
 # Created empty if absent, then locked: the first statement of a write after
@@ -288,10 +259,6 @@ _RECORD_WRITE_SQL = (
     "'previous', (extract(epoch FROM $3::timestamptz) * 1000000)::bigint"
     ")::text WHERE key = $1")
 
-# How often the unmet-precondition warning may repeat for one reason.
-UNMET_WARN_EVERY_S = 3600.0
-_unmet_warned: Dict[str, float] = {}
-
 _INT32 = (-2 ** 31, 2 ** 31 - 1)
 # `price NUMERIC(12,2)` (revision 0002), DuckDB's `DECIMAL(12,2)` beside it.
 PRICE_NUMERIC = (12, 2)
@@ -305,8 +272,9 @@ class CatalogueRefused(ValueError):
 
 class WriteRecordUnreadable(ValueError):
     """`writes:<table>` holds something `parse_record` cannot read. The write
-    stops, the watch is blind and the copy-back refuses — none of them may
-    guess which instants were the chain's."""
+    stops and the watch is blind (and the copy-back refused, until step 14's
+    S14-04 deleted it) — none of them may guess which instants were the
+    chain's."""
 
 
 @dataclass(frozen=True)
@@ -344,83 +312,12 @@ def parse_record(value: str) -> WriteRecord:
     return WriteRecord(stamps=frozenset(stamps), previous=previous)
 
 
-async def read_mirror_stamps(conn) -> Dict[str, chain_latch.MirrorStamp]:
-    """`{table: MirrorStamp}` for every table in `CHAIN_STAMPS_MIRROR_STATE`:
-    its watermark and this chain's record, read by one statement on the
-    connection the caller hands in. For the daily comparison's
-    `chain_shipper_overwrote` (`core.chain_latch.MirrorStamp`).
-
-    Reads only. A record nobody can parse is answered as `unreadable`, never
-    raised and never as an empty record: the comparison must say it could not
-    tell, and the rest of its run must still compare. No record at all is an
-    empty one — the copy-back's and the watch's rule — so a table the chain has
-    not written yet (latched through the other one) has no instant of its own.
-    Only `stamps` is handed on, never `previous`."""
-    out: Dict[str, chain_latch.MirrorStamp] = {}
-    for row in await conn.fetch(_MIRROR_STAMPS_SQL,
-                                list(CHAIN_STAMPS_MIRROR_STATE), RECORD_PREFIX):
-        stamps: FrozenSet[int] = frozenset()
-        unreadable: Optional[str] = None
-        if row["record"] is not None:
-            try:
-                stamps = parse_record(row["record"]).stamps
-            except WriteRecordUnreadable as exc:
-                unreadable = str(exc)
-        out[row["table_name"]] = chain_latch.MirrorStamp(
-            last_ok_at=row["last_ok_at"], last_ok_us=row["last_ok_us"],
-            stamps=stamps, unreadable=unreadable)
-    return out
-
-
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_CATALOGUE` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands it down, the hourly
-    products step records it, and `full_sync` contains it.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def unmet_precondition() -> Optional[str]:
-    """None, a constant since step 14's S14-00: the chain writes Postgres
-    whatever its flag says, and nothing it waited on is asked any more —
-    production met every clause, and the readers it named read Postgres.
-    Kept for the registry's `unmet_precondition` field, which keeps its shape
-    until S14-11."""
-    return None
-
-
-def _warn_unmet(reason: str) -> None:
-    now = time.monotonic()
-    last = _unmet_warned.get(reason)
-    if last is not None and now - last < UNMET_WARN_EVERY_S:
-        return
-    _unmet_warned[reason] = now
-    logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, reason)
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads:
-    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
-    nor a precondition routes any more; the first write in a process still
-    takes the latch (decision 3), which the images before step 14 route by.
-    Last consumers:
-    the products step, `full_sync` and the registry — S14-09.
-    """
-    return True
-
-
-def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", a constant since step 14's
-    S14-00 — never None, since no flag is read for it."""
-    return "postgres"
+# `env_writes_postgres` and `writes_postgres` stood here until step 14's
+# S14-11. S14-09 left them for the registry alone — `error` and `mismatch` in
+# `/api/health`, and the store's sync-key getter and setter — and S14-11
+# deleted them with the flag and those readers: the chain writes Postgres, a
+# constant. `WRITE_ENV` stays a name (revision 0035's comments and an image
+# from before step 14 read it).
 
 
 def _latch() -> str:

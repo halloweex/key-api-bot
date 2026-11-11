@@ -3,25 +3,31 @@
 `manager_comment` is free text, and what a chart on /traffic calls an order —
 paid Facebook, organic Instagram, a pixel with no channel — is decided here, by
 regexes over that text and then a chain of rules. Nothing else in the system
-computes it: `silver_order_utm` in DuckDB stores what this returned when it
-last looked, `silver.order_utm` in Postgres is a copy of that, and revision
-0018 explains why a SQL re-derivation would be a second classifier that drifts
-from the first.
+computes it: `silver.order_utm` in Postgres stores what this returned when it
+last looked (Postgres's own parse since KS_UTM_PARSE=postgres; until then a
+copy of DuckDB's `silver_order_utm`, whose parse step 14's S14-15 deleted), and
+revision 0018 explains why a SQL re-derivation would be a second classifier
+that drifts from the first.
 
 WHY IT IS A MODULE AND NOT TWO METHODS ON THE MIXIN
 
 It lived as two static methods on `TrafficMixin` (`core/repositories/traffic.py`)
 until DN-15, step 9a of the DuckDB exit. They were already pure — `re` and
-nothing else, no store, no clock — so moving them costs nothing, and three
-readers need them without a DuckDB store in hand:
+nothing else, no store, no clock — so moving them cost nothing, and the
+readers needed them without a DuckDB store in hand. Today they are:
 
-- the mixin itself, which still parses in the warehouse tick and the four
-  re-parse doors, and now delegates here;
+- the Postgres parse (`core/pg_utm_parse.py`, step 9b, DN-18), which reads
+  `bronze.orders` as the derivation's last step and for the four re-parse
+  doors, and calls `utm_columns`;
 - `scripts/utm_reclassify_dryrun.py`, which recomputes every stored verdict in
   memory to say what a reclassify would move before anybody runs one;
-- the Postgres parse of step 9b (DN-18), which will read `bronze.orders`
-  instead of DuckDB's `orders` and must reach the same verdict on the same
-  comment.
+- the tab's reads on `TrafficMixin` (`core/repositories/traffic.py`), which
+  name channels from the stored tags (`tab_platform`, `organic_channel`,
+  `organic_detail`, `first_order_channel`) and keep the two moved methods
+  bound under their old names for existing callers.
+
+The mixin itself parsed DuckDB's `orders` in the warehouse tick and the four
+doors, delegating here, until step 14's S14-15 deleted that parse.
 
 Moved verbatim. `tests/unit/test_utm_classify_golden.py` holds the outputs the
 methods produced before the move, frozen as literals, and fails on any change
@@ -253,7 +259,7 @@ def classify_traffic(utm_data: Dict[str, Any]) -> Tuple[str, str]:
 
 # The columns a parse writes for one order, in the order `utm_columns` returns
 # them: everything in `silver.order_utm` except the key and the two stamps.
-# `core.pg_order_utm.UTM_COLUMNS` is this with `order_id` in front and
+# `core.pg_utm_parse.UTM_COLUMNS` is this with `order_id` in front and
 # `parsed_at` behind, and a test holds the two together.
 UTM_VERDICT_COLUMNS: Tuple[str, ...] = (
     "utm_source", "utm_medium", "utm_campaign", "utm_content",
@@ -272,8 +278,8 @@ def utm_columns(
     """The row a parse writes for `comment`, as `UTM_VERDICT_COLUMNS`.
 
     One place for the shape, because two readers build it and must build the
-    same one: the DuckDB parse writes it, and the reclassify dry run compares
-    against it. The shape has one rule that is not obvious from the two
+    same one: the Postgres parse writes it (the DuckDB parse did, until step
+    14's S14-15), and the reclassify dry run compares against it. The shape has one rule that is not obvious from the two
     functions above: a comment with no tracking data at all is written as
     NULLs, *not* as `classify_traffic({})`'s `('unknown', 'unattributed')`.
     The NULLs are what let the readers' `COALESCE` fall through to the

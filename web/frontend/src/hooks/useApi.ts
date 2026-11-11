@@ -1,5 +1,5 @@
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import { useQueryParams, useFilterStore } from '../store/filterStore'
 import type { FilterStore } from '../types/filters'
 
@@ -42,6 +42,7 @@ import type {
   TrafficAnalyticsResponse,
   TrafficOrganicResponse,
   TrafficPixelOnlyResponse,
+  TrafficFunnelResponse,
   UtmCampaignsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
@@ -133,6 +134,7 @@ export const queryKeys = {
   trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
   trafficOrganic: (params: string) => ['trafficOrganic', params] as const,
   trafficPixelOnly: (params: string) => ['trafficPixelOnly', params] as const,
+  trafficFunnel: (params: string) => ['trafficFunnel', params] as const,
   trafficTrend: (params: string) => ['trafficTrend', params] as const,
   trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
   trafficROAS: (params: string) => ['trafficROAS', params] as const,
@@ -209,6 +211,10 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
   const wantsForecast = (isCurrentPeriod || hasFutureDates) && !sourceId && !categoryId && !brand && !promocode
   if (wantsForecast) {
     fullParams += '&include_forecast=true'
+  }
+  // The whole history by day is a thousand bars whose labels repeat every year.
+  if (period === 'all_time') {
+    fullParams += '&granularity=monthly'
   }
 
   return useQuery<RevenueTrendResponse>({
@@ -651,6 +657,49 @@ export function useTrafficPixelOnly() {
   return useQuery<TrafficPixelOnlyResponse>({
     queryKey: queryKeys.trafficPixelOnly(queryParams),
     queryFn: () => api.getTrafficPixelOnly(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+/**
+ * The site's purchase funnel from GA4. A 503 means GA4 is not connected or
+ * not answering, which a retry a second later does not change, so it is shown
+ * at once rather than asked again.
+ */
+export function useTrafficFunnel() {
+  const queryParams = useQueryParams()
+
+  return useQuery<TrafficFunnelResponse>({
+    queryKey: queryKeys.trafficFunnel(queryParams),
+    queryFn: () => api.getTrafficFunnel(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+    retry: (count, error) => !(error instanceof ApiError && error.status === 503) && count < 2,
+  })
+}
+
+/** KeyCRM's source for orders placed on the website (Shopify). */
+const WEBSITE_SOURCE_ID = 4
+
+/**
+ * The website's orders in the CRM over exactly these days, every sales type:
+ * what the funnel's "bought", which counts people and misses purchases that
+ * skip the cart, is set beside. The dates are the funnel's own, so nothing
+ * from the header's filters reaches this.
+ */
+export function useSiteOrders(start: string | undefined, end: string | undefined) {
+  const params = new URLSearchParams()
+  if (start && end) {
+    params.set('start_date', start)
+    params.set('end_date', end)
+  }
+  params.set('source_id', String(WEBSITE_SOURCE_ID))
+  params.set('sales_type', 'all')
+  const query = params.toString()
+
+  return useQuery<SummaryResponse>({
+    queryKey: queryKeys.summary(query),
+    queryFn: () => api.getSummary(query),
+    enabled: !!start && !!end && start <= end,
     staleTime: CACHE_TTL.STANDARD,
   })
 }

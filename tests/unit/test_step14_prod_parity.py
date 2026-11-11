@@ -125,6 +125,109 @@ STOPPED_READING = (
 )
 JUNK = "junk-s14"
 
+# What a later step-14 PR took away on purpose, by the plan, and which PR:
+# `EXPECTED` and `H0` stay as captured, every comparison leaves these out, and
+# `/api/health` is asserted to publish none of them. S14-07 deleted the
+# `KS_GOALS_HISTORY` refusal with its health block and canary check.
+RETIRED = {"goals_history": "S14-07",
+           # S14-11 deleted the registry's per-chain answer with the flags.
+           "chain_modes": "S14-11",
+           # S14-14 deleted KS_DQ_PG_WAREHOUSE's reader, a constant `on`.
+           "pg_twins_flag": "S14-14",
+           # S14-15 deleted step 13's switch (`core/warehouse_cutover.py`),
+           # KS_PG_DERIVE's and KS_UTM_PARSE's modes, and the landing mirror's
+           # `enabled`/`mirror_on` — and from `/api/health` the
+           # `warehouse_writer_mode` and `utm_parse` blocks and `derivation`'s
+           # `mode` and `error`, the only fields of it captured here.
+           "warehouse_cutover": "S14-15",
+           "pg_derivation": "S14-15",
+           "pg_utm_parse": "S14-15",
+           "mirror": "S14-15",
+           "warehouse_writer_mode": "S14-15",
+           "utm_parse": "S14-15",
+           "derivation": "S14-15",
+           # S14-16 deleted the read fallback's mode and the configurations it
+           # published (`mode`, `mode_error`, `refusing`, `misconfigured`,
+           # `no_engine_routes`); the block's fields on `/api/health` are
+           # `RETIRED_FIELDS`', since the block itself stays, as `{refused}`.
+           "read_fallback": "S14-16",
+           # S14-18 deleted the DuckDB switch (`core/duckdb_switch.py`) with
+           # its block on `/api/health`, and the two store predicates the
+           # table-fate manifest was the last to ask
+           # (`user_store_is_postgres`, `sms_store_is_postgres`).
+           "duckdb_switch": "S14-18",
+           "stores": "S14-18"}
+
+# The same for single fields, by their path in a capture. S14-09 deleted chain
+# 3's, 6's and 6a's routing answers the capture asks of the modules themselves
+# (`mode`, `unmet_precondition`, chain 3's hold) and chain 3's preflight from
+# `/api/health`. The registry's own `mode` and `unmet_precondition` for those
+# chains (`chain_modes`) stay until S14-11, and are still compared.
+RETIRED_FIELDS = {
+    ("chains", "pg_orders_write", "mode"): "S14-09",
+    ("chains", "pg_orders_write", "unmet_precondition"): "S14-09",
+    ("chains", "pg_orders_write", "unmet_reasons"): "S14-09",
+    ("chains", "pg_orders_write", "settle_hold"): "S14-09",
+    ("chains", "pg_orders_write", "held"): "S14-09",
+    ("chains", "pg_catalogue_write", "mode"): "S14-09",
+    ("chains", "pg_catalogue_write", "unmet_precondition"): "S14-09",
+    ("chains", "pg_expense_types_write", "unmet_precondition"): "S14-09",
+    ("health", "write_chains", "pg_orders_write", "preflight"): "S14-09",
+    # S14-10 deleted the shadow chains' comparison and the registry's answer
+    # to which of their tables it compared (empty since S14-00).
+    ("registry", "compared_in_shadow"): "S14-10",
+    # S14-11 deleted every chain's routing answer with the flags, the
+    # registry's mismatch list, and the `write_chains` entries' flag fields;
+    # `stood_down_tables`/`stood_down_sync_keys` are asked of
+    # `chain_tables()`/`sync_keys()` there, and compared.
+    ("registry", "mismatched_chains"): "S14-11",
+    # S14-12 deleted the DuckDB comparisons and the 05:30 job's DuckDB arm,
+    # and with them the predicate the comparisons stood down on and chain 3's
+    # answer to which layer that arm wrote.
+    ("warehouse_cutover", "warehouse_checks_stand_down"): "S14-12",
+    ("chains", "pg_orders_write", "stood_down_layers"): "S14-12",
+    # S14-14 deleted the DuckDB integrity scan, and with it the sets its
+    # checks stood down by: step 13's (published by `status()` too) and
+    # chain 3's.
+    ("warehouse_cutover", "stood_down_duckdb_checks"): "S14-14",
+    ("warehouse_cutover", "status", "stood_down_duckdb_checks"): "S14-14",
+    ("chains", "pg_orders_write", "landing_checks_stood_down"): "S14-14",
+    # S14-15 stopped configuring the three modes it deleted, so
+    # `configure_modes()` names them no more.
+    **{(call, name): "S14-15"
+       for call in ("configure_modes", "configure_modes_again")
+       for name in ("KS_PG_DERIVE", "KS_UTM_PARSE", "KS_WRITE_WAREHOUSE")},
+    # S14-16 stopped configuring KS_READ_FALLBACK, and `/api/health`'s
+    # `read_fallback_mode` keeps only `refused`, which the capture never
+    # asked (a count, not a constant).
+    **{(call, "KS_READ_FALLBACK"): "S14-16"
+       for call in ("configure_modes", "configure_modes_again")},
+    **{("health", "read_fallback_mode", name): "S14-16"
+       for name in ("mode", "error", "misconfigured", "no_engine")},
+    # S14-18 stopped configuring KS_DUCKDB: `configure_modes()` names no mode
+    # any more.
+    **{(call, "KS_DUCKDB"): "S14-18"
+       for call in ("configure_modes", "configure_modes_again")},
+}
+_S14_11_HEALTH_FIELDS = ("env", "mode", "error", "latched", "mismatch",
+                         "unmet_precondition", "shadow", "preflight")
+
+
+def _without_retired(result: dict) -> dict:
+    """`result`, a capture or a literal, without the blocks `RETIRED` names
+    and the fields `RETIRED_FIELDS` names."""
+    result = json.loads(json.dumps(result))
+    for key in RETIRED:
+        result.pop(key, None)
+        result.get("health", {}).pop(key, None)
+    for path in RETIRED_FIELDS:
+        node = result
+        for step in path[:-1]:
+            node = node.get(step, {}) if isinstance(node, dict) else {}
+        if isinstance(node, dict):
+            node.pop(path[-1], None)
+    return result
+
 # Captured on 57fd7c22 — see the module's docstring. Not to be edited by hand:
 # a difference here is a change of behaviour, and the answer is a recapture
 # with the command above and a reason in the commit.
@@ -675,6 +778,16 @@ EXPECTED = json.loads(r"""
 }
 """)
 
+# S14-11's per-chain retirements, read off the literal: every routing
+# answer under `chains` (chain 3's two stand-down sets went in S14-12 and
+# S14-14) and every flag field of each `write_chains` entry.
+for _name, _entry in EXPECTED["chains"].items():
+    for _field in _entry:
+        if _field not in ("stood_down_layers", "landing_checks_stood_down"):
+            RETIRED_FIELDS.setdefault(("chains", _name, _field), "S14-11")
+    for _field in _S14_11_HEALTH_FIELDS:
+        RETIRED_FIELDS[("health", "write_chains", _name, _field)] = "S14-11"
+
 # H0: what production's `/api/health` published on 2026-10-21, before S14-00.
 H0 = json.loads(r"""
 {
@@ -873,10 +986,13 @@ def _stub_the_old_start() -> None:
     and expenses history, off's frozen record, its copy and the owner rows —
     as production holds them. The code after S14-00 asks none of them, and
     has none of these to stub."""
-    from core import warehouse_cutover as wc
     from core.pg import REQUIRED_REVISION
 
-    if hasattr(wc, "_read_postgres_in_a_worker"):
+    try:
+        from core import warehouse_cutover as wc   # deleted in S14-15
+    except ImportError:
+        wc = None
+    if wc is not None and hasattr(wc, "_read_postgres_in_a_worker"):
         wc._read_postgres_in_a_worker = lambda env: {
             "revision": REQUIRED_REVISION, "revision_error": None,
             "expenses_backfilled": True, "expenses_backfill_error": None,
@@ -906,27 +1022,79 @@ def capture() -> dict:
     """Every mode and predicate the plan's S14-00 lists, as this process
     answers it after web's `configure_modes`. Only names both sides of
     S14-00 define."""
-    from core import (duckdb_switch, pg_dashboard_users, pg_derivation, pg_goals_read,
-                      pg_landing, pg_sms, pg_utm_parse, pg_warehouse_dq, read_fallback,
-                      runtime_modes, warehouse_cutover as wc, write_chains)
+    import importlib
+    import importlib.util
+    import inspect
+
+    from core import (pg_dashboard_users, pg_derivation,
+                      pg_landing, pg_utm_parse, pg_warehouse_dq, read_fallback,
+                      runtime_modes, write_chains)
     from core import pg_forecast_write, pg_managers_write, pg_orders_write
 
+    try:
+        from core import warehouse_cutover as wc   # deleted in S14-15
+    except ImportError:
+        wc = None
+
     out: dict = {}
-    out["configure_modes"] = runtime_modes.configure_modes(web=True)
+    # `web=True` until S14-18, which deleted the switch it configured.
+    web = ({"web": True} if "web" in inspect.signature(
+        runtime_modes.configure_modes).parameters else {})
+    out["configure_modes"] = runtime_modes.configure_modes(**web)
     # The scheduler configures again, in the same process.
-    out["configure_modes_again"] = runtime_modes.configure_modes(web=True)
-    out["duckdb_switch"] = {
-        "mode": duckdb_switch.mode(), "value": duckdb_switch.value(),
-        "error": duckdb_switch.mode_error(), "is_off": duckdb_switch.is_off(),
-        "held_back": list(duckdb_switch.held_back() or ()),
-        "health_block": duckdb_switch.health_block(),
-    }
+    out["configure_modes_again"] = runtime_modes.configure_modes(**web)
+    # Deleted in S14-18 (`RETIRED`), with their modules: asked by name where
+    # they still exist — the import walk reads a literal module name, and
+    # `module.<name>`, as a claim it exists.
+    def _old(module: str):
+        name = f"core.{module}"
+        return (importlib.import_module(name)
+                if importlib.util.find_spec(name) is not None else None)
+
+    switch = _old("duckdb_switch")
+    if switch is not None:
+        out["duckdb_switch"] = {
+            name: getattr(switch, fn)() for name, fn in (
+                ("mode", "mode"), ("value", "value"), ("error", "mode_error"),
+                ("is_off", "is_off"), ("health_block", "health_block"))}
+        out["duckdb_switch"]["held_back"] = list(getattr(switch, "held_back")() or ())
+    pg_sms = _old("pg_sms")
+    # Deleted in S14-15 (`RETIRED`) with their modules or names; asked where
+    # they still exist, by name, so the capture still runs against the trees
+    # before it — the import walk reads `module.<name>` as a claim it exists.
+    if wc is not None:
+        out.update(_step13(wc))
+    if hasattr(pg_derivation, "owns"):
+        out["pg_derivation"] = {name: getattr(pg_derivation, fn)() for name, fn in (
+            ("mode", "mode"), ("owns", "owns"), ("error", "mode_error"))}
+    if hasattr(pg_utm_parse, "parses_in_postgres"):
+        out["pg_utm_parse"] = {name: getattr(pg_utm_parse, fn)() for name, fn in (
+            ("mode", "mode"), ("parses_in_postgres", "parses_in_postgres"),
+            ("error", "mode_error"))}
+    # Deleted in S14-16 (`RETIRED`), asked by name where it still exists.
+    if hasattr(read_fallback, "misconfigured"):
+        out["read_fallback"] = {name: getattr(read_fallback, fn)() for name, fn in (
+            ("mode", "mode"), ("error", "mode_error"), ("refusing", "refusing"),
+            ("misconfigured", "misconfigured"), ("no_engine", "no_engine_routes"))}
+    twins_flag = getattr(pg_warehouse_dq, "flag", None)
+    if twins_flag is not None:
+        out["pg_twins_flag"] = list(twins_flag())
+    if hasattr(pg_landing, "mirror_on"):
+        out["mirror"] = {"enabled": getattr(pg_landing, "enabled")(),
+                         "mirror_on": getattr(pg_landing, "mirror_on")(
+                             os.environ.get("KS_MIRROR_LANDING"))}
+    out.update(_after_step13(pg_dashboard_users, pg_sms, write_chains,
+                             pg_forecast_write, pg_managers_write, pg_orders_write))
+    return json.loads(json.dumps(out, default=str))
+
+
+def _step13(wc) -> dict:
+    """What `core.warehouse_cutover` answered, while it existed (S14-15)."""
+    out: dict = {}
     status = wc.status()
     out["warehouse_cutover"] = {
         "mode": wc.mode(), "value": wc.value(), "error": wc.mode_error(),
         "writes_postgres": wc.writes_postgres(), "duckdb_derives": wc.duckdb_derives(),
-        "warehouse_checks_stand_down": wc.warehouse_checks_stand_down(),
-        "stood_down_duckdb_checks": sorted(wc.stood_down_duckdb_checks()),
         "preconditions_unmet": [u.key for u in wc.preconditions_unmet()],
         "way_back_refused": list(wc.way_back_refused()),
         "held": wc.held(), "held_for_s": wc.held_for_s(),
@@ -935,60 +1103,100 @@ def capture() -> dict:
         "status": {k: status[k] for k in (
             "variable", "value", "mode", "error", "switch_built", "preconditions_unmet",
             "writer", "held", "held_since", "reclassify_needed",
-            "stood_down_duckdb_checks", "way_back_refused")},
+            "stood_down_duckdb_checks", "way_back_refused") if k in status},
     }
-    out["pg_derivation"] = {"mode": pg_derivation.mode(), "owns": pg_derivation.owns(),
-                            "error": pg_derivation.mode_error()}
-    out["pg_utm_parse"] = {"mode": pg_utm_parse.mode(),
-                           "parses_in_postgres": pg_utm_parse.parses_in_postgres(),
-                           "error": pg_utm_parse.mode_error()}
-    out["read_fallback"] = {"mode": read_fallback.mode(), "error": read_fallback.mode_error(),
-                            "refusing": read_fallback.refusing(),
-                            "misconfigured": read_fallback.misconfigured(),
-                            "no_engine": read_fallback.no_engine_routes()}
-    out["goals_history"] = {"mode": pg_goals_read.history_mode(),
-                            "state": pg_goals_read.history_state()}
-    out["pg_twins_flag"] = list(pg_warehouse_dq.flag())
-    out["mirror"] = {"enabled": pg_landing.enabled(),
-                     "mirror_on": pg_landing.mirror_on(os.environ.get(pg_landing.MIRROR_ENV))}
-    out["stores"] = {"user_store_is_postgres": pg_dashboard_users.user_store_is_postgres(),
-                     "sms_store_is_postgres": pg_sms.sms_store_is_postgres()}
+    # Deleted in S14-14 (`RETIRED_FIELDS`, `RETIRED`); asked where they still
+    # exist, by name, so the capture still runs against the trees before it.
+    stood = getattr(wc, "stood_down_duckdb_checks", None)
+    if stood is not None:
+        out["warehouse_cutover"]["stood_down_duckdb_checks"] = sorted(stood())
+    # Deleted in S14-12 (`RETIRED_FIELDS`); asked where it still exists, by
+    # name, so the capture still runs against the trees before it.
+    stand_down = getattr(wc, "warehouse_checks_stand_down", None)
+    if stand_down is not None:
+        out["warehouse_cutover"]["warehouse_checks_stand_down"] = stand_down()
+    return out
+
+
+def _after_step13(pg_dashboard_users, pg_sms, write_chains, pg_forecast_write,
+                  pg_managers_write, pg_orders_write) -> dict:
+    """The rest of `capture`: the store switches, the chains, the registry
+    and `/api/health`."""
+    out: dict = {}
+    # Deleted in S14-18 (`RETIRED`); asked by name where they still exist.
+    if pg_sms is not None and hasattr(pg_dashboard_users, "user_store_is_postgres"):
+        out["stores"] = {
+            "user_store_is_postgres": getattr(pg_dashboard_users, "user_store_is_postgres")(),
+            "sms_store_is_postgres": getattr(pg_sms, "sms_store_is_postgres")()}
     chains = {}
+    # Every routing answer went in S14-11 (`RETIRED_FIELDS`); asked where they
+    # still exist, by name, so the capture still runs against the trees
+    # before it — the import walk reads `module.<name>` as a claim it exists.
     for chain in write_chains.WRITE_CHAINS:
         name = write_chains.chain_name(chain)
-        entry = {"writes_postgres": chain.writes_postgres(),
-                 "unmet_precondition": chain.unmet_precondition()
-                 if hasattr(chain, "unmet_precondition") else "<none>"}
+        entry = {}
+        if hasattr(chain, "writes_postgres"):
+            entry["writes_postgres"] = getattr(chain, "writes_postgres")()
+            entry["unmet_precondition"] = (getattr(chain, "unmet_precondition")()
+                                           if hasattr(chain, "unmet_precondition")
+                                           else "<none>")
         if hasattr(chain, "mode"):
-            entry["mode"] = chain.mode()
+            entry["mode"] = getattr(chain, "mode")()
         if hasattr(chain, "reads_postgres"):
-            entry["reads_postgres"] = chain.reads_postgres()
+            entry["reads_postgres"] = getattr(chain, "reads_postgres")()
         if hasattr(chain, "reads_the_chain"):
             holes = getattr(chain, "TABLE_HOLES", None) or (getattr(chain, "TABLE_HOLE"),)
-            entry["reads_the_chain"] = [chain.reads_the_chain(" ".join(holes)),
-                                        chain.reads_the_chain("SELECT 1")]
+            reads = getattr(chain, "reads_the_chain")
+            entry["reads_the_chain"] = [reads(" ".join(holes)), reads("SELECT 1")]
         chains[name] = entry
-    chains["pg_forecast_write"]["_routes_postgres"] = pg_forecast_write._routes_postgres(log=False)
-    chains["pg_orders_write"].update(
-        stood_down_layers=sorted(pg_orders_write.stood_down_layers()),
-        landing_checks_stood_down=sorted(pg_orders_write.landing_checks_stood_down()),
-        unmet_reasons=pg_orders_write.unmet_reasons(),
-        settle_hold=pg_orders_write.settle_hold(),
-        held=pg_orders_write._held)
-    chains["pg_managers_write"]["unmet_reasons"] = pg_managers_write.unmet_reasons()
+    if hasattr(pg_forecast_write, "_routes_postgres"):
+        chains["pg_forecast_write"]["_routes_postgres"] = getattr(
+            pg_forecast_write, "_routes_postgres")(log=False)
+    landing = getattr(pg_orders_write, "landing_checks_stood_down", None)
+    if landing is not None:
+        chains["pg_orders_write"]["landing_checks_stood_down"] = sorted(landing())
+    # Deleted in S14-12 (`RETIRED_FIELDS`); asked where it still exists, so
+    # the capture still runs against the trees before it.
+    layers = getattr(pg_orders_write, "stood_down_layers", None)
+    if layers is not None:
+        chains["pg_orders_write"]["stood_down_layers"] = sorted(layers())
+    # Deleted in S14-09 (`RETIRED_FIELDS`); asked where they still exist, so
+    # the capture still runs against the trees before it.
+    for name, field in (("unmet_reasons", "unmet_reasons"), ("settle_hold", "settle_hold"),
+                        ("_held", "held")):
+        if hasattr(pg_orders_write, name):
+            value = getattr(pg_orders_write, name)
+            chains["pg_orders_write"][field] = value() if callable(value) else value
+    if hasattr(pg_managers_write, "unmet_reasons"):
+        chains["pg_managers_write"]["unmet_reasons"] = getattr(
+            pg_managers_write, "unmet_reasons")()
     out["chains"] = chains
-    out["chain_modes"] = {
-        name: {k: state[k] for k in ("env", "mode", "error", "latched", "latched_at",
-                                     "mismatch", "unmet_precondition", "shadow")}
-        for name, state in write_chains.chain_modes().items()}
-    out["registry"] = {
-        "compared_in_shadow": sorted(write_chains.compared_in_shadow()),
-        "stood_down_tables": sorted(write_chains.stood_down_tables()),
-        "stood_down_sync_keys": sorted(write_chains.stood_down_sync_keys()),
-        "mismatched_chains": sorted(write_chains.mismatched_chains()),
-    }
+    modes = getattr(write_chains, "chain_modes", None)
+    if modes is not None:
+        out["chain_modes"] = {
+            name: {k: state[k] for k in ("env", "mode", "error", "latched", "latched_at",
+                                         "mismatch", "unmet_precondition", "shadow")}
+            for name, state in modes().items()}
+    # Since S14-11 the stand-down sets are every chain's tables and keys,
+    # asked by name — `stood_down_*` before it, `chain_tables`/`sync_keys`
+    # after — and compared against the same literal.
+    tables = (getattr(write_chains, "stood_down_tables", None)
+              or getattr(write_chains, "chain_tables"))
+    keys = (getattr(write_chains, "stood_down_sync_keys", None)
+            or getattr(write_chains, "sync_keys"))
+    out["registry"] = {"stood_down_tables": sorted(tables()),
+                       "stood_down_sync_keys": sorted(keys())}
+    mismatched = getattr(write_chains, "mismatched_chains", None)
+    if mismatched is not None:
+        out["registry"]["mismatched_chains"] = sorted(mismatched())
+    # Deleted in S14-10 (`RETIRED_FIELDS`); asked where it still exists, so the
+    # capture still runs against the trees before it. By name, as S14-09's
+    # are: the import walk reads `write_chains.<name>` as a claim it exists.
+    compared = getattr(write_chains, "compared_in_shadow", None)
+    if compared is not None:
+        out["registry"]["compared_in_shadow"] = sorted(compared())
     out["health"] = _health()
-    return json.loads(json.dumps(out, default=str))
+    return out
 
 
 def _health() -> dict:
@@ -1008,7 +1216,9 @@ def _health() -> dict:
         "status_code": response.status_code,
         "duckdb_switch": body.get("duckdb_switch"),
         "warehouse_writer_mode": body.get("warehouse_writer_mode"),
-        "derivation": {k: (body.get("derivation") or {}).get(k) for k in ("mode", "error")},
+        # `mode` and `error` alone, and absent once they are (S14-15).
+        "derivation": ({k: (body.get("derivation") or {}).get(k) for k in ("mode", "error")}
+                       if "mode" in (body.get("derivation") or {}) else None),
         "utm_parse": body.get("utm_parse"),
         "read_fallback_mode": {k: (body.get("read_fallback_mode") or {}).get(k)
                                for k in ("mode", "error", "misconfigured", "no_engine")},
@@ -1021,9 +1231,10 @@ def _health() -> dict:
 
 
 def _latched_out(result: dict) -> dict:
-    """`result` without what depends on the markers, and that, apart."""
+    """`result` without what depends on the markers, and that, apart. Empty
+    from S14-11 on: nothing published depends on them any more."""
     latched = {}
-    for name, state in result["chain_modes"].items():
+    for name, state in result.get("chain_modes", {}).items():
         latched[name] = (state.pop("latched"), state.pop("latched_at"),
                          result["health"]["write_chains"][name].pop("latched"))
     return latched
@@ -1033,17 +1244,17 @@ def _constants(result: dict) -> dict:
     """`result` without what is published as read — a variable's value, a
     chain flag's error and the mismatch it makes with a latch — which a junk
     value changes by design (rule 3: the answer must not)."""
-    result = json.loads(json.dumps(result))
-    for block in (result["duckdb_switch"], result["duckdb_switch"]["health_block"],
-                  result["health"]["duckdb_switch"], result["warehouse_cutover"],
-                  result["warehouse_cutover"]["status"],
-                  result["health"]["warehouse_writer_mode"]):
+    result = _without_retired(result)
+    # The switch's blocks published `value` as read until S14-18 retired them.
+    switch = result.get("duckdb_switch") or {}
+    for block in (switch, switch.get("health_block") or {},
+                  result["health"].get("duckdb_switch") or {}):
         block.pop("value", None)
-    for state in (*result["chain_modes"].values(),
+    for state in (*result.get("chain_modes", {}).values(),
                   *result["health"]["write_chains"].values()):
         state.pop("error", None)
         state.pop("mismatch", None)
-    result["registry"].pop("mismatched_chains")
+    result["registry"].pop("mismatched_chains", None)
     return result
 
 
@@ -1068,6 +1279,7 @@ def main(argv) -> int:
         data.mkdir()
         from core import chain_latch, duckdb_store
 
+        # The DuckDB store's file, where the tree still has one (until S14-18).
         duckdb_store.DB_DIR, duckdb_store.DB_PATH = data, data / "analytics.duckdb"
         chain_latch.MARKER_DIR = data / "write-chain-owners"
         _place_files(data, markers == "11")
@@ -1099,8 +1311,10 @@ def production(monkeypatch, tmp_path):
             monkeypatch.setenv(name, value)
         data = tmp_path / "data"
         data.mkdir(exist_ok=True)
-        monkeypatch.setattr(duckdb_store, "DB_DIR", data)
-        monkeypatch.setattr(duckdb_store, "DB_PATH", data / "analytics.duckdb")
+        # The DuckDB store held a file until S14-18; set where it still does.
+        monkeypatch.setattr(duckdb_store, "DB_DIR", data, raising=False)
+        monkeypatch.setattr(duckdb_store, "DB_PATH", data / "analytics.duckdb",
+                            raising=False)
         monkeypatch.setattr(backup_evidence, "DATA_DIR", data)
         _place_files(data, markers)
 
@@ -1116,10 +1330,9 @@ def test_every_answer_is_what_the_code_before_s14_00_gave(production, markers):
     production(markers=markers)
     result = capture()
     latched = _latched_out(result)
-    assert result == EXPECTED
-    for name, (flag, at, published) in latched.items():
-        stamp = PROD_MARKERS.get(name) if markers else None
-        assert (flag, at, published) == (stamp is not None, stamp, stamp is not None), name
+    assert _without_retired(result) == _without_retired(EXPECTED)
+    # Since S14-11 nothing published depends on the markers.
+    assert latched == {}
 
 
 def test_the_literal_is_what_production_published(production):
@@ -1129,12 +1342,24 @@ def test_the_literal_is_what_production_published(production):
     production(markers=True)
     health = capture()["health"]
     assert health["status_code"] == 200
-    for block in ("duckdb_switch", "warehouse_writer_mode", "derivation", "utm_parse",
-                  "read_fallback_mode", "goals_history"):
-        assert health[block] == H0[block], block
+    kept = _without_retired({"health": health})["health"]
+    live = _without_retired({"health": H0})["health"]
+    for block in ("duckdb_switch", "read_fallback_mode"):
+        if block not in RETIRED:
+            assert kept[block] == live[block], block
+    for block in RETIRED:
+        assert health.get(block) is None, f"{block} went with {RETIRED[block]}"
+    for path, pr in RETIRED_FIELDS.items():
+        if path[0] == "health":
+            node = health
+            for step in path[1:-1]:
+                node = node[step]
+            assert node.get(path[-1]) is None, f"{'.'.join(path)} went with {pr}"
     for name, entry in H0["write_chains"].items():
         published = health["write_chains"][name]
-        assert {k: published[k] for k in entry} == entry, name
+        kept = {k: v for k, v in entry.items()
+                if ("health", "write_chains", name, k) not in RETIRED_FIELDS}
+        assert {k: published[k] for k in kept} == kept, name
 
 
 @pytest.mark.parametrize("how", ["junk", "absent"])

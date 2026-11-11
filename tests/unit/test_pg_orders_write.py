@@ -1,4 +1,4 @@
-"""Chain 3: the orders writer, its preconditions, its decision and its routing.
+"""Chain 3: the orders writer, its decision and the paths that reach it.
 
 `core/pg_orders_write.py` writes the orders, their line items, their expenses
 and the backfill-miss ledger to Postgres once `KS_WRITE_ORDERS=postgres` and
@@ -13,9 +13,11 @@ Each test names the mutation it exists to fail on.
 
 Since step 14's S14-00 the chain writes Postgres whatever its flag says, with
 no precondition and no start hold, so the tests of the flag off, of a typo,
-of each precondition and of the hold went with them; the preflight answers
-"already writes Postgres". What stays is the writer, its decision, what
-Postgres would refuse, the routing and the order step's containment.
+of each precondition and of the hold went with them. S14-09 deleted those
+answers, the preflight and DuckDB's own order writers: DuckDB's decision is
+pinned as a literal of what it answered (`TestTheDecisionIsDuckDBs`), and what
+stays is the writer, its decision, what Postgres would refuse, the paths that
+reach it and the order step's containment.
 """
 from __future__ import annotations
 
@@ -55,7 +57,6 @@ def _payload(oid, *, updated=T0, comment=None, total="100.00", products=1,
 def flags(monkeypatch):
     for chain in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(chain.WRITE_ENV, raising=False)
-    pow_._unmet_warned.clear()
     return monkeypatch
 
 
@@ -69,13 +70,31 @@ def met(flags):
 # ─── G1: the flag, the latch, the declaration ────────────────────────────────
 
 
-class TestTheFlag:
-    def test_a_latched_chain_is_never_held(self, met):
-        """The latch outranks the hold as it outranks every precondition."""
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        met.setattr(pow_, "_held", ("2026-10-01T08:00:00+00:00", "pitr_drill: old"))
-        chain_latch.latch(pow_.CHAIN)
-        assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
+class TestTheRoutingIsGone:
+    """S14-09 deleted what routed the chain: the flag's answer as a decision,
+    the preconditions, the start hold, the preflight, `mode()` and DuckDB's
+    own order writers. Kills: any of them put back, which would make a later
+    reader believe the chain could still be on DuckDB."""
+
+    @pytest.mark.parametrize("name", [
+        "unmet_precondition", "unmet_reasons", "settle_hold", "_held", "HELD_KEY",
+        "preflight", "LOCKOUT_REVISION", "mode", "ChainOwnsOrders",
+        "UNMET_WARN_EVERY_S", "_unmet_warned", "_warn_unmet", "_BACKFILLED"])
+    def test_the_chain_module_carries_none_of_it(self, name):
+        assert not hasattr(pow_, name)
+
+    @pytest.mark.parametrize("name", ["upsert_orders", "upsert_expenses_batch"])
+    def test_the_store_has_no_order_writer_of_its_own(self, name):
+        from core.duckdb_store import DuckDBStore
+
+        assert not hasattr(DuckDBStore, name)
+
+    @pytest.mark.parametrize("name", ["writes_postgres", "env_writes_postgres"])
+    def test_and_s14_11_took_what_stayed(self, name):
+        """`writes_postgres` stayed for the registry's sync-key routing and
+        `env_writes_postgres` for its published `error` until S14-11, which
+        deleted both with the flags."""
+        assert not hasattr(pow_, name)
 
 
 class TestTheDeclaration:
@@ -91,20 +110,21 @@ class TestTheDeclaration:
         assert pow_.CHAIN_SYNC_KEYS == ("last_sync_orders", "last_sync_meilisearch_pg")
         assert pow_.CHAIN_WATERMARK_MAX_AGE_MIN is None
         # The order step's window starts at this key (the chain-3 review;
-        # `TestTheFirstTickAfterTheFlip`).
+        # `TestTheFirstTickAfterTheFlip`), kept by S14-09
+        # (`tests/unit/test_absent_chain_keys.py`).
         assert pow_.CHAIN_WATERMARK_INHERITS_DUCKDB is True
 
     def test_the_archive_is_not_a_chain_table(self):
         """`app.order_versions` has one writer in both modes and no DuckDB
-        copy; declaring it would make `chain_specs` raise."""
+        copy (declaring it made the copy-back's `chain_specs` raise, until
+        step 14's S14-04 deleted it)."""
         assert "app.order_versions" not in pow_.CHAIN_TABLES
         assert "bronze.expense_types" not in pow_.CHAIN_TABLES   # chain 6a's
 
-    def test_registered_and_resolved_by_its_short_name(self):
-        from core.chain_transfer import resolve_chain
-
+    def test_registered_and_found_by_its_sync_key(self):
+        """It was resolved by its short name too, by the copy-back that step
+        14's S14-04 deleted."""
         assert pow_ in write_chains.WRITE_CHAINS
-        assert resolve_chain("orders") is pow_
         assert write_chains.chain_for_sync_key("last_sync_orders") is pow_
 
 
@@ -118,52 +138,78 @@ class TestTheDeclaration:
 async def duck(tmp_path, flags):
     from core.duckdb_store import DuckDBStore
 
-    store = DuckDBStore(db_path=tmp_path / "orders.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     flags.setenv("KS_MIRROR_LANDING", "0")
     yield store
-    await store.close()
 
 
 class TestTheDecisionIsDuckDBs:
-    """`decide` against `DuckDBStore.upsert_orders` itself, on a grid of
-    stored and incoming stamps, force and skip_products. Mutations: drop the
-    header-only deferral; compare without reading a naive stamp as UTC."""
+    """`decide` against what `DuckDBStore.upsert_orders` itself answered, on
+    a grid of stored and incoming stamps, force and skip_products. Until step
+    14's S14-09 the grid ran DuckDB's writer beside the decider; S14-09
+    deleted the writer, and `DUCKDB_ANSWERED` is its answer on this grid,
+    recorded on the commit before (`d544144c`), where both were asserted
+    equal in the same run (rule 9) — written, skipped as unchanged, or
+    deferred to a full writer. Mutations: drop the header-only deferral;
+    compare without reading a naive stamp as UTC; write a stored order whose
+    payload has no stamp."""
 
     STORED = [None, T0 - timedelta(hours=1), T0, T0 + timedelta(hours=1)]
     INCOMING = [T0, None]
+    # (stored index, incoming index, force_update, skip_products) → verdict.
+    DUCKDB_ANSWERED = {
+        (0, 0, False, False): 'written',
+        (0, 0, False, True): 'deferred',
+        (0, 0, True, False): 'written',
+        (0, 0, True, True): 'deferred',
+        (0, 1, False, False): 'written',
+        (0, 1, False, True): 'deferred',
+        (0, 1, True, False): 'written',
+        (0, 1, True, True): 'deferred',
+        (1, 0, False, False): 'written',
+        (1, 0, False, True): 'written',
+        (1, 0, True, False): 'written',
+        (1, 0, True, True): 'written',
+        (1, 1, False, False): 'skipped',
+        (1, 1, False, True): 'skipped',
+        (1, 1, True, False): 'skipped',
+        (1, 1, True, True): 'skipped',
+        (2, 0, False, False): 'skipped',
+        (2, 0, False, True): 'skipped',
+        (2, 0, True, False): 'written',
+        (2, 0, True, True): 'written',
+        (2, 1, False, False): 'skipped',
+        (2, 1, False, True): 'skipped',
+        (2, 1, True, False): 'skipped',
+        (2, 1, True, True): 'skipped',
+        (3, 0, False, False): 'skipped',
+        (3, 0, False, True): 'skipped',
+        (3, 0, True, False): 'skipped',
+        (3, 0, True, True): 'skipped',
+        (3, 1, False, False): 'skipped',
+        (3, 1, False, True): 'skipped',
+        (3, 1, True, False): 'skipped',
+        (3, 1, True, True): 'skipped',
+    }
 
-    @pytest.mark.asyncio
-    async def test_on_a_grid(self, duck, monkeypatch):
-        # DuckDB's own upsert is the reference, so chain 3 is routed back to
-        # it for this test: since step 14's S14-00 it writes Postgres, a
-        # constant, and DuckDB's writer refuses. The grid is the evidence the
-        # chain's decider is DuckDB's, until S14-09 makes it a literal.
-        from tests.conftest import route_chains_to_duckdb
+    def test_the_grid_is_whole(self):
+        assert set(self.DUCKDB_ANSWERED) == set(itertools.product(
+            range(len(self.STORED)), range(len(self.INCOMING)), [False, True], [False, True]))
 
-        route_chains_to_duckdb(monkeypatch, pow_)
-        cases = list(itertools.product(range(len(self.STORED)), range(len(self.INCOMING)),
-                                       [False, True], [False, True]))
-        for n, (si, ii, force, skip) in enumerate(cases):
-            oid = 1000 + n
-            stored = self.STORED[si]
-            if stored is not None:
-                await duck.upsert_orders([_payload(oid, updated=stored)])
-            incoming = _payload(oid, updated=self.INCOMING[ii])
-            existing = {}
-            if stored is not None:
-                async with duck.connection() as conn:
-                    existing = {r[0]: r[1] for r in conn.execute(
-                        "SELECT id, updated_at FROM orders WHERE id = ?", [oid]).fetchall()}
-            rows = landed_orders([incoming], with_products=not skip).orders
-            to_write, skipped, deferred = pow_.decide(
-                rows, existing, force_update=force, skip_products=skip)
-            result = await duck.upsert_orders([incoming], force_update=force,
-                                              skip_products=skip)
-            case = (stored, self.INCOMING[ii], force, skip)
-            assert [r.id for r in to_write] == result.changed_ids, case
-            assert len(skipped) == result.skipped_unchanged, case
-            assert deferred == result.deferred_to_full_sync, case
+    @pytest.mark.parametrize("case", sorted(DUCKDB_ANSWERED))
+    def test_on_a_grid(self, case):
+        si, ii, force, skip = case
+        oid = 1000
+        stored = self.STORED[si]
+        existing = {} if stored is None else {oid: stored}
+        rows = landed_orders([_payload(oid, updated=self.INCOMING[ii])],
+                             with_products=not skip).orders
+        to_write, skipped, deferred = pow_.decide(
+            rows, existing, force_update=force, skip_products=skip)
+        verdict = ("written" if to_write else "skipped" if skipped
+                   else "deferred" if deferred else "nothing")
+        assert (len(to_write), len(skipped), deferred) in ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+        assert verdict == self.DUCKDB_ANSWERED[case], (stored, self.INCOMING[ii], force, skip)
 
     def test_a_payload_without_a_stamp_never_rewrites_a_stored_order(self):
         """DuckDB reads the missing stamp as pandas' NaT, which no comparison
@@ -243,8 +289,9 @@ class TestWhatPostgresWouldRefuse:
 class TestTheRouting:
     @pytest.mark.asyncio
     async def test_the_sync_s_one_write_goes_to_postgres(self, met, duck):
-        """Mutation: remove the branch in `_upsert_orders_with_expenses` —
-        DuckDB's writer then refuses, and the order step fails."""
+        """The sync's one order write is the chain's, and DuckDB is handed
+        nothing. Mutation: hand `_upsert_orders_with_expenses` anything but
+        the chain's writer."""
         from core.pg_orders_write import UpsertResult
         from core.sync_service import SyncService
 
@@ -259,28 +306,6 @@ class TestTheRouting:
         assert counts == (1, 1) and out == [1]
         writer.assert_awaited_once()
         assert writer.await_args.kwargs == {"force_update": True, "skip_products": True}
-        async with duck.connection() as conn:
-            assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 0
-            assert conn.execute("SELECT count(*) FROM expenses").fetchone()[0] == 0
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("state", ["flag", "latched", "typo"])
-    async def test_duckdb_s_order_writers_refuse(self, met, duck, state):
-        """Mutation: remove the refusal from `upsert_orders` or
-        `upsert_expenses_batch` — a caller that goes round the sync would
-        write the store nobody reads."""
-        if state == "flag":
-            met.setenv("KS_WRITE_ORDERS", "postgres")
-        elif state == "latched":
-            chain_latch.latch(pow_.CHAIN)
-        else:
-            met.setenv("KS_WRITE_ORDERS", "pgsql")
-        with pytest.raises(pow_.ChainOwnsOrders):
-            await duck.upsert_orders([_payload(1)])
-        with pytest.raises(pow_.ChainOwnsOrders):
-            await duck.upsert_expenses_batch([_payload(1, expenses=[9])])
-        with pytest.raises(pow_.ChainOwnsOrders):
-            await duck.upsert_orders([])                     # not payload-dependent
 
     @pytest.mark.asyncio
     async def test_the_misses_go_where_the_scans_read_them(self, met, duck):
@@ -289,9 +314,6 @@ class TestTheRouting:
         met.setattr(pow_, "record_backfill_misses", writer)
         assert await duck.record_backfill_misses({1: "gone", 2: "empty"}) == 2
         writer.assert_awaited_once_with({1: "gone", 2: "empty"})
-        async with duck.connection() as conn:
-            assert conn.execute(
-                "SELECT count(*) FROM order_backfill_misses").fetchone()[0] == 0
 
 
 # ─── G8: the selections follow the writes ────────────────────────────────────
@@ -339,7 +361,6 @@ class TestTheSelectionsFollow:
         monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
         monkeypatch.setattr(mod, "get_sync_service", AsyncMock(return_value=service))
         monkeypatch.setattr(mod, "init_meilisearch", AsyncMock(return_value=False))
-        monkeypatch.setattr(mod.warehouse_cutover, "settle_writer", AsyncMock())
         await mod.init_and_sync()
         service.full_sync.assert_not_awaited()
         service.incremental_sync.assert_awaited_once()
@@ -439,14 +460,16 @@ class TestTheOrderStepIsContained:
             await asyncio.wait_for(svc._orders_step(MagicMock(), {}), 5)
 
 
-async def _duckdbs_own_stamp(store, key: str, value) -> None:
-    """The stamp DuckDB's `sync_metadata` froze at the flip, written as the
-    flag off wrote it. Since step 14's S14-00 `set_last_sync_time` writes a
-    chain's key to Postgres whatever the flag says, so it is written here."""
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-            "VALUES (?, ?, CURRENT_TIMESTAMP)", [f"last_sync_{key}", value.isoformat()])
+def _duckdbs_own_stamp(monkeypatch, key: str, value) -> None:
+    """The stamp DuckDB's `sync_metadata` froze at the flip, as Postgres's
+    copy of that table holds it (`app.sync_metadata`, read by
+    `core.pg_frozen_metadata`). Since step 14's S14-11 the store's getter
+    inherits from that copy alone; until then a process under `KS_DUCKDB=on`
+    read DuckDB's own row, which this wrote."""
+    async def frozen_value(k):
+        return value.isoformat() if k == f"last_sync_{key}" else None
+
+    monkeypatch.setattr("core.pg_frozen_metadata.frozen_value", frozen_value)
 
 
 class TestTheFirstTickAfterTheFlip:
@@ -485,7 +508,7 @@ class TestTheFirstTickAfterTheFlip:
         from core.sync_service import SyncService
 
         frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3)
-        await _duckdbs_own_stamp(duck, "orders", frozen)
+        _duckdbs_own_stamp(monkeypatch, "orders", frozen)
         met.setenv("KS_WRITE_ORDERS", "postgres")
         monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
         asked = self._recording_fetch(monkeypatch)
@@ -504,7 +527,7 @@ class TestTheFirstTickAfterTheFlip:
 
         frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3)
         live = frozen + timedelta(days=2, hours=23)
-        await _duckdbs_own_stamp(duck, "orders", frozen)
+        _duckdbs_own_stamp(monkeypatch, "orders", frozen)
         met.setenv("KS_WRITE_ORDERS", "postgres")
         monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=live))
         asked = self._recording_fetch(monkeypatch)
@@ -521,9 +544,7 @@ class TestTheFirstTickAfterTheFlip:
         from core import pg_chain_watermarks, pg_inventory_write
 
         assert not getattr(pg_inventory_write, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
-        await _duckdbs_own_stamp(duck, "offers", datetime.now(UTC) - timedelta(minutes=5))
-        flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        assert pg_inventory_write.writes_postgres()
+        _duckdbs_own_stamp(monkeypatch, "offers", datetime.now(UTC) - timedelta(minutes=5))
         monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
         assert await duck.get_last_sync_time("offers") is None
 
@@ -547,7 +568,7 @@ class TestTheSearchCursorMovesWithTheChain:
         from core.pg_search_index_read import WATERMARK_KEY
 
         frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
-        await _duckdbs_own_stamp(duck, WATERMARK_KEY, frozen)
+        _duckdbs_own_stamp(monkeypatch, WATERMARK_KEY, frozen)
         met.setenv("KS_WRITE_ORDERS", "postgres")
         written = {}
 
@@ -561,15 +582,6 @@ class TestTheSearchCursorMovesWithTheChain:
         later = frozen + timedelta(hours=1)
         await duck.set_last_sync_time(WATERMARK_KEY, later)
         assert written == {"last_sync_meilisearch_pg": later.isoformat()}
-        async with duck.connection() as conn:              # DuckDB's stays frozen
-            assert conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = 'last_sync_meilisearch_pg'"
-            ).fetchone()[0] == frozen.isoformat()
-
-    def test_the_copy_back_carries_it_and_the_release_deletes_it(self):
-        from core.chain_transfer import _carried_keys
-
-        assert "last_sync_meilisearch_pg" in _carried_keys(pow_)
 
     @pytest.mark.asyncio
     async def test_the_freshness_check_does_not_call_it_unwatched(self, flags, duck):
@@ -583,13 +595,9 @@ class TestTheSearchCursorMovesWithTheChain:
 
         chain_latch.latch(pow_.CHAIN)
         now = datetime.now(UTC)
-        async with duck.connection() as conn:
-            for key in ("orders", "meilisearch_pg"):
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    [f"last_sync_{key}", (now - timedelta(minutes=5)).isoformat()])
-            issues = dq._freshness_check(conn, now)            # no chain_watermarks
+        rows = {f"last_sync_{key}": (now - timedelta(minutes=5)).isoformat()
+                for key in ("orders", "meilisearch_pg")}
+        issues = dq._freshness_check(now, frozen_rows=rows)   # no chain_watermarks
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
         # Since S14-00 every chain's keys are moved, so every one with a
         # threshold is named — the search cursor still never is.
@@ -720,13 +728,15 @@ class TestTheCanary:
             assert key == "orders_sync_failing" and says in message
 
     @pytest.mark.parametrize("mode", ["duckdb", None])
-    def test_not_under_duckdb(self, mode):
-        """Mutation: ignore `mode` — a web on DuckDB, whose orders also ship
-        through the mirror, would page about a step that is not the only
-        writer of anything."""
+    def test_whatever_an_entry_says_of_its_mode(self, mode):
+        """Since step 14's S14-11 the step is judged on its own: chain 3 is
+        the only writer of orders, a constant, and no entry publishes a
+        `mode` (until then one that said duckdb was not judged). Mutation:
+        gate the check on `mode` again."""
         from bot.canary import check_orders_sync_chain
 
-        assert check_orders_sync_chain(self._payload(mode, consecutive_failures=9)) == []
+        (key, _), = check_orders_sync_chain(self._payload(mode, consecutive_failures=9))
+        assert key == "orders_sync_failing"
         assert check_orders_sync_chain({}) == []
 
     def test_the_text_never_reaches_the_page(self):
@@ -745,132 +755,90 @@ class TestTheCanary:
 
 
 class TestThePreflight:
+    """Chain 3's preflight went in step 14's S14-09 and chains 1's and 5's
+    in S14-11, with the bound they shared. What stays is the order step
+    under the chain's entry, which the canary judges."""
 
-
-    @pytest.mark.asyncio
-    async def test_once_the_chain_writes_postgres_the_question_is_over(self, flags):
-        chain_latch.latch(pow_.CHAIN)
-        assert await pow_.preflight() == {"ok": None, "reasons": []}
-
-    @pytest.mark.asyncio
-    async def test_health_publishes_it_and_the_step_under_the_chain_s_entry(self, flags):
+    @staticmethod
+    def _quiet_steps(monkeypatch):
         from web.routes.api import health
 
-        with patch.object(health, "_orders_preflight",
-                          new=AsyncMock(return_value={"ok": False, "reasons": ["x"]})), \
-                patch.object(health, "_orders_sync_step",
-                             new=AsyncMock(return_value={"consecutive_failures": 0})), \
-                patch.object(health, "_inventory_preflight", new=AsyncMock(return_value={})), \
-                patch.object(health, "_inventory_sync_step", new=AsyncMock(return_value=None)):
-            block = await health._write_chains_block()
-        entry = block["pg_orders_write"]
-        assert entry["preflight"] == {"ok": False, "reasons": ["x"]}
-        assert entry["sync_step"] == {"consecutive_failures": 0}
+        monkeypatch.setattr(health, "_inventory_sync_step", AsyncMock(return_value=None))
+        monkeypatch.setattr(health, "_managers_sync_step", AsyncMock(return_value=None))
+        monkeypatch.setattr(health, "_catalogue_sync_step", AsyncMock(return_value=None))
 
     @pytest.mark.asyncio
-    async def test_with_postgres_hung_the_two_preflights_cost_one_bound(self, flags):
-        """Each preflight is bounded at `_PREFLIGHT_TIMEOUT_S` (5 s). Asked one
-        after the other, a hung Postgres cost 10 s — the canary's whole
-        `HEALTH_TIMEOUT_S` — before anything else `/api/health` builds (the
-        chain-3 review). Mutation: await the two in turn.
-
-        Judged by order, not by the clock: both must be asked before the
-        first bound expires. A stopwatch round the block measured everything
-        else it builds too, and a CI runner once took 1.30 s against a limit
-        of 0.85 — more than two bounds in a row would have cost."""
-        from core import pg_inventory_write
+    async def test_health_publishes_the_step_and_no_preflight_under_the_entry(
+            self, flags, monkeypatch):
+        """Mutation: a preflight put back under chain 3's entry, or the step
+        taken away — the canary would no longer judge the only writer of
+        orders (`orders_sync_failing`)."""
         from web.routes.api import health
 
-        seen = []
+        self._quiet_steps(monkeypatch)
+        monkeypatch.setattr(health, "_orders_sync_step", AsyncMock(
+            return_value={"consecutive_failures": 0}))
+        block = await health._write_chains_block()
+        assert block["pg_orders_write"] == {"sync_step": {"consecutive_failures": 0}}
 
-        async def hang():
-            seen.append("asked")
-            await asyncio.sleep(3600)
 
-        bounded = health._bounded_preflight
+class TestTheCanaryReadsWhatHealthNowPublishes:
+    """S14-09 changed the shape of chain 3's `/api/health` entry (its
+    preflight went): the CRITICAL that is the only page for "nobody writes
+    the orders" must still read it. End to end, through the real block and
+    the real check. Since S14-11 the entry is `{sync_step}` alone. Mutation:
+    drop `sync_step` from the entry — the canary then judges nothing."""
 
-        async def bounded_and_seen(preflight):
-            answer = await bounded(preflight)
-            if preflight is hang:          # it never answers: the bound expired
-                seen.append("bound expired")
-            return answer
+    @staticmethod
+    async def _block(monkeypatch, step_state):
+        from types import SimpleNamespace
 
-        bound = 0.5
-        health._preflight_cache.update(data=None, expires_at=0)
-        health._orders_preflight_cache.update(data=None, expires_at=0)
-        try:
-            with patch.object(pg_inventory_write, "preflight", hang), \
-                    patch.object(pow_, "preflight", hang), \
-                    patch.object(health, "_bounded_preflight", bounded_and_seen), \
-                    patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                block = await health._write_chains_block()
-        finally:
-            health._preflight_cache.update(data=None, expires_at=0)
-            health._orders_preflight_cache.update(data=None, expires_at=0)
-        assert seen == ["asked", "asked", "bound expired", "bound expired"], (
-            f"the second preflight was not asked before the first bound expired: {seen}")
-        for chain in (pg_inventory_write.CHAIN, pow_.CHAIN):
-            assert block[chain]["preflight"]["ok"] is False
-            assert "did not answer" in block[chain]["preflight"]["reasons"][0]
+        from core import sync_service as sync_mod
+        from web.routes.api import health
+
+        TestThePreflight._quiet_steps(monkeypatch)
+        service = SimpleNamespace(orders_step_health=step_state.published)
+        monkeypatch.setattr(sync_mod, "get_sync_service", AsyncMock(return_value=service))
+        return {"write_chains": await health._write_chains_block()}
 
     @pytest.mark.asyncio
-    async def test_the_bound_holds_when_the_cancel_itself_hangs(self, flags):
-        """A Postgres read cut inside a query unwinds into asyncpg's cancel
-        request, which a paused server does not answer: unshielded, the
-        "5 s" answer came after 60 s for chain 3 and 30 s for chain 1, and
-        each held its cache lock — and every later /api/health — meanwhile
-        (batch-E review). A hang that cancels promptly, as above, cannot see
-        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`.
+    async def test_a_failing_step_pages(self, flags, monkeypatch):
+        from bot import canary
+        from core.sync_service import OrdersStepState
 
-        Judged by order, not by the clock: the cancel request is answered
-        only after the block has answered, so the block must answer while
-        every cut read is still unwinding — and every one must then unwind.
-        It was `took < 1.7 × bound`, a margin of 0.21 s for whatever else the
-        block builds, the margin a CI runner overran in the test above."""
-        from core import pg_inventory_write, pg_managers_write
+        state = OrdersStepState()
+        for _ in range(3):
+            state.attempted()
+            state.failed(ConnectionRefusedError("down"))
+        payload = await self._block(monkeypatch, state)
+        (key, message), = canary.check_orders_sync_chain(payload)
+        assert key == "orders_sync_failing" and "ConnectionRefusedError" in message
+        assert "orders_sync_failing" not in canary.unjudged_keys(payload)
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_step_is_quiet_and_judged(self, flags, monkeypatch):
+        from bot import canary
+        from core.sync_service import OrdersStepState
+
+        state = OrdersStepState()
+        state.attempted()
+        state.succeeded()
+        payload = await self._block(monkeypatch, state)
+        assert canary.check_orders_sync_chain(payload) == []
+        assert "orders_sync_failing" not in canary.unjudged_keys(payload)
+
+    @pytest.mark.asyncio
+    async def test_no_step_holds_the_key(self, flags, monkeypatch):
+        from bot import canary
+        from core import sync_service as sync_mod
         from web.routes.api import health
 
-        bound = 0.3
-        cancel_answered = asyncio.Event()
-        unwound = []
-
-        async def cancel_hangs():
-            try:
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                await cancel_answered.wait()        # the cancel request, unanswered
-                unwound.append("unwound")
-                raise
-
-        caches = (health._preflight_cache, health._orders_preflight_cache,
-                  health._managers_preflight_cache)
-        for cache in caches:
-            cache.update(data=None, expires_at=0)
-        try:
-            with patch.object(pg_inventory_write, "preflight", cancel_hangs), \
-                    patch.object(pow_, "preflight", cancel_hangs), \
-                    patch.object(pg_managers_write, "preflight", cancel_hangs), \
-                    patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                # Not a limit on the answer: a block that waits for the
-                # unwind waits for ever, and this turns that into a failure.
-                try:
-                    block = await asyncio.wait_for(health._write_chains_block(), 10)
-                except asyncio.TimeoutError:
-                    pytest.fail("the answer waited for the cut reads to unwind")
-                unwound_at_answer = list(unwound)
-                cancel_answered.set()
-                for _ in range(200):                 # let the left-behind reads end
-                    if len(unwound) == 3:
-                        break
-                    await asyncio.sleep(0.01)
-        finally:
-            cancel_answered.set()
-            for cache in caches:
-                cache.update(data=None, expires_at=0)
-        assert unwound_at_answer == [], "the answer waited for a cut read to unwind"
-        assert unwound == ["unwound"] * 3, "a read cut at the bound was not cancelled"
-        for chain in (pg_inventory_write.CHAIN, pow_.CHAIN, pg_managers_write.CHAIN):
-            assert "did not answer" in block[chain]["preflight"]["reasons"][0]
+        TestThePreflight._quiet_steps(monkeypatch)
+        monkeypatch.setattr(sync_mod, "get_sync_service",
+                            AsyncMock(side_effect=RuntimeError("no store")))
+        payload = {"write_chains": await health._write_chains_block()}
+        assert payload["write_chains"][pow_.CHAIN]["sync_step"] is None
+        assert "orders_sync_failing" in canary.unjudged_keys(payload)
 
 
 class TestTheDefaultShipsWhatMainShipped:
@@ -878,12 +846,13 @@ class TestTheDefaultShipsWhatMainShipped:
     `pg_landing._write_order_rows`, which chain 3 split out of `write_orders`.
     The data was identical, the statements were not: the savepoint around the
     derivation mark was opened whether or not derivation is owned (the
-    chain-3 review)."""
+    chain-3 review). Since step 14's S14-15 derivation is always owned — the
+    `owns()` the writer asked went with KS_PG_DERIVE — so the mark and its
+    savepoint are always there, once."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("owned", [False, True])
-    async def test_the_mark_s_savepoint_only_where_there_is_a_mark(self, owned, monkeypatch):
-        """Mutation: open the savepoint whatever `owns()` says."""
+    async def test_the_mark_runs_in_one_savepoint_of_its_own(self, monkeypatch):
+        """Mutation: drop the savepoint, or mark twice."""
         from core import pg_derivation, pg_landing, pg_order_versions
 
         marked = []
@@ -892,7 +861,6 @@ class TestTheDefaultShipsWhatMainShipped:
             marked.append(layer)
             return True
 
-        monkeypatch.setattr(pg_derivation, "owns", lambda: owned)
         monkeypatch.setattr(pg_derivation, "mark", mark)
         monkeypatch.setattr(pg_order_versions, "capture_versions", AsyncMock(return_value=0))
 
@@ -922,5 +890,5 @@ class TestTheDefaultShipsWhatMainShipped:
         await pg_landing._write_order_rows(
             conn, [tuple(r) for r in landed.orders], [tuple(p) for p in landed.products],
             replace_products=True, version_kind="change")
-        assert conn.savepoints == (1 if owned else 0)
-        assert marked == ([pg_derivation.LAYER] if owned else [])
+        assert conn.savepoints == 1
+        assert marked == [pg_derivation.LAYER]

@@ -174,40 +174,36 @@ class TestEmitterWiring:
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            scheduler = BackgroundScheduler()
+        store = DuckDBStore()
+        scheduler = BackgroundScheduler()
 
-            def sample(pct, free):
-                return {"sampled_at": datetime.now(timezone.utc),
-                        "db_size_mb": 2480, "disk_pct_used": pct,
-                        "disk_free_gb": free}
+        def sample(pct, free):
+            return {"sampled_at": datetime.now(timezone.utc),
+                    "db_size_mb": 2480, "disk_pct_used": pct,
+                    "disk_free_gb": free}
 
-            # `_archived()` like every other test here that resolves for
-            # real. Without it this reaches the actual ledger, and
-            # `write_resolved_now` gives a pool it must *create* a one-second
-            # budget: alone on a quiet host that is enough, but inside the
-            # full suite on the deploy gate's box it is not, the write fails,
-            # and the resolution is held back exactly as designed — so the
-            # test failed on behaviour that was working.
-            with patch("core.duckdb_store.get_store",
-                       AsyncMock(return_value=store)), \
-                 _archived(), \
-                 patch("bot.main.send_admin_message",
-                       new=AsyncMock(return_value=2)) as send:
-                with patch("core.disk_monitor.sample_disk_state",
-                           return_value=sample(92.0, 6.0)):
-                    await scheduler._run_disk_watchdog()
-                assert send.await_count == 1  # the breach
-                with patch("core.disk_monitor.sample_disk_state",
-                           return_value=sample(40.0, 60.0)):
-                    await scheduler._run_disk_watchdog()
-                assert send.await_count == 2  # the recovery
-                assert "✅ Resolved:" in send.await_args.args[0]
-                assert "disk:CRITICAL" in send.await_args.args[0]
-        finally:
-            await store.close()
+        # `_archived()` like every other test here that resolves for
+        # real. Without it this reaches the actual ledger, and
+        # `write_resolved_now` gives a pool it must *create* a one-second
+        # budget: alone on a quiet host that is enough, but inside the
+        # full suite on the deploy gate's box it is not, the write fails,
+        # and the resolution is held back exactly as designed — so the
+        # test failed on behaviour that was working.
+        with patch("core.duckdb_store.get_store",
+                   AsyncMock(return_value=store)), \
+             _archived(), \
+             patch("bot.main.send_admin_message",
+                   new=AsyncMock(return_value=2)) as send:
+            with patch("core.disk_monitor.sample_disk_state",
+                       return_value=sample(92.0, 6.0)):
+                await scheduler._run_disk_watchdog()
+            assert send.await_count == 1  # the breach
+            with patch("core.disk_monitor.sample_disk_state",
+                       return_value=sample(40.0, 60.0)):
+                await scheduler._run_disk_watchdog()
+            assert send.await_count == 2  # the recovery
+            assert "✅ Resolved:" in send.await_args.args[0]
+            assert "disk:CRITICAL" in send.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_a_disk_step_down_resolves_the_critical(self, tmp_path):
@@ -219,40 +215,36 @@ class TestEmitterWiring:
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            scheduler = BackgroundScheduler()
+        store = DuckDBStore()
+        scheduler = BackgroundScheduler()
 
-            def sample(pct, free):
-                return {"sampled_at": datetime.now(timezone.utc),
-                        "db_size_mb": 2480, "disk_pct_used": pct,
-                        "disk_free_gb": free}
+        def sample(pct, free):
+            return {"sampled_at": datetime.now(timezone.utc),
+                    "db_size_mb": 2480, "disk_pct_used": pct,
+                    "disk_free_gb": free}
 
-            with patch("core.duckdb_store.get_store",
-                       AsyncMock(return_value=store)), \
-                 _archived(), \
-                 patch("bot.main.send_admin_message",
-                       new=AsyncMock(return_value=2)) as send:
-                with patch("core.disk_monitor.sample_disk_state",
-                           return_value=sample(92.0, 6.0)):
-                    await scheduler._run_disk_watchdog()
-                # The page: the message carries the icon, not the key.
-                assert any("🚨" in str(c.args[0]) for c in send.await_args_list)
+        with patch("core.duckdb_store.get_store",
+                   AsyncMock(return_value=store)), \
+             _archived(), \
+             patch("bot.main.send_admin_message",
+                   new=AsyncMock(return_value=2)) as send:
+            with patch("core.disk_monitor.sample_disk_state",
+                       return_value=sample(92.0, 6.0)):
+                await scheduler._run_disk_watchdog()
+            # The page: the message carries the icon, not the key.
+            assert any("🚨" in str(c.args[0]) for c in send.await_args_list)
 
-                sent_before = send.await_count
-                # Between the capacity lines: still WARN, no longer CRITICAL.
-                with patch("core.disk_monitor.sample_disk_state",
-                           return_value=sample(80.0, 20.0)):
-                    await scheduler._run_disk_watchdog()
+            sent_before = send.await_count
+            # Between the capacity lines: still WARN, no longer CRITICAL.
+            with patch("core.disk_monitor.sample_disk_state",
+                       return_value=sample(80.0, 20.0)):
+                await scheduler._run_disk_watchdog()
 
-                after = [str(c.args[0]) for c in send.await_args_list[sent_before:]]
-                resolved = [m for m in after if "✅ Resolved:" in m]
-                assert resolved, f"no resolve notice on the step down: {after!r}"
-                assert "disk:CRITICAL" in resolved[0]
-                assert "disk:WARN" not in resolved[0]
-        finally:
-            await store.close()
+            after = [str(c.args[0]) for c in send.await_args_list[sent_before:]]
+            resolved = [m for m in after if "✅ Resolved:" in m]
+            assert resolved, f"no resolve notice on the step down: {after!r}"
+            assert "disk:CRITICAL" in resolved[0]
+            assert "disk:WARN" not in resolved[0]
 
     @pytest.mark.asyncio
     async def test_a_disk_step_up_does_not_call_the_warn_resolved(self, tmp_path):
@@ -262,35 +254,31 @@ class TestEmitterWiring:
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            scheduler = BackgroundScheduler()
+        store = DuckDBStore()
+        scheduler = BackgroundScheduler()
 
-            def sample(pct, free):
-                return {"sampled_at": datetime.now(timezone.utc),
-                        "db_size_mb": 2480, "disk_pct_used": pct,
-                        "disk_free_gb": free}
+        def sample(pct, free):
+            return {"sampled_at": datetime.now(timezone.utc),
+                    "db_size_mb": 2480, "disk_pct_used": pct,
+                    "disk_free_gb": free}
 
-            with patch("core.duckdb_store.get_store",
-                       AsyncMock(return_value=store)), \
-                 _archived(), \
-                 patch("bot.main.send_admin_message",
-                       new=AsyncMock(return_value=2)) as send:
-                with patch("core.disk_monitor.sample_disk_state",
-                           return_value=sample(80.0, 20.0)):
-                    await scheduler._run_disk_watchdog()
-                sent_before = send.await_count
-                with patch("core.disk_monitor.sample_disk_state",
-                           return_value=sample(92.0, 6.0)):
-                    await scheduler._run_disk_watchdog()
+        with patch("core.duckdb_store.get_store",
+                   AsyncMock(return_value=store)), \
+             _archived(), \
+             patch("bot.main.send_admin_message",
+                   new=AsyncMock(return_value=2)) as send:
+            with patch("core.disk_monitor.sample_disk_state",
+                       return_value=sample(80.0, 20.0)):
+                await scheduler._run_disk_watchdog()
+            sent_before = send.await_count
+            with patch("core.disk_monitor.sample_disk_state",
+                       return_value=sample(92.0, 6.0)):
+                await scheduler._run_disk_watchdog()
 
-                after = [str(c.args[0]) for c in send.await_args_list[sent_before:]]
-                assert not any("✅ Resolved:" in m for m in after), (
-                    f"a step up announced something resolved: {after!r}"
-                )
-        finally:
-            await store.close()
+            after = [str(c.args[0]) for c in send.await_args_list[sent_before:]]
+            assert not any("✅ Resolved:" in m for m in after), (
+                f"a step up announced something resolved: {after!r}"
+            )
 
     @pytest.mark.asyncio
     async def test_a_failed_dq_run_resolves_nothing(self):
@@ -330,12 +318,20 @@ class TestPageConditionsAreCriticalOnly:
     '✅ mirror_retired_rows — stood 0m' about a standing INFO that had not
     gone anywhere. The page is about what pages; the digest owns the rest."""
 
-    def test_the_five_dq_sites_pass_critical_only(self):
+    def test_the_four_dq_sites_pass_critical_only(self):
+        """Five until step 14's S14-12 deleted the DuckDB arm of
+        `dq_reconciliation` and its page."""
         import pathlib
 
         src = pathlib.Path("core/scheduler.py").read_text()
+        # The two reconciliation arms add their discrepancy conditions after
+        # the bracket (L4-01): CRITICAL-only too, by `discrepancy_conditions`.
         assert src.count(
             "if i.severity == Severity.CRITICAL],"
-        ) == 5
+        ) == 2
+        assert src.count(
+            "if i.severity == Severity.CRITICAL]\n"
+            "                + discrepancy_conditions(layer, discrepancies),"
+        ) == 2
         # And the old unfiltered form is extinct.
         assert "conditions=[i.check_name for i in issues]," not in src

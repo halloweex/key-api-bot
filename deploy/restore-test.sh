@@ -21,6 +21,14 @@
 # `--env-file`, because the only DuckDB file it can open is the one it builds
 # in its scratch directory. And the newest archive is then frozen, not stale:
 # the nightly snapshot stands down for the week, so its age is the week's.
+#
+# The rebuild runs in BACKUP_RESTORE_IMAGE, which must be set in
+# deploy/backup.env and is asked before anything is fetched (step 14, S14-02;
+# deploy/archive_image.sh): a pinned tag, on this host, carrying DuckDB 1.5.5 —
+# the image tagged rollback-step14, the last image before step 14, pinned at
+# S14-00's deploy. It used to default to :latest, which loses DuckDB at step
+# 14's S14-19 and then could rebuild nothing. Exit 2 when it refuses the
+# image, 1 when the drill fails.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
@@ -42,7 +50,7 @@ SSH_PORT="${BACKUP_SSH_PORT:-23}"
 SSH_KEY="${BACKUP_SSH_KEY:-$HOME/.ssh/storagebox_ed25519}"
 REMOTE="${BACKUP_REMOTE:-}"
 REMOTE_DIR="${BACKUP_REMOTE_DIR:-key-api-bot}"
-IMAGE="${BACKUP_RESTORE_IMAGE:-halloweex/keycrm-web:latest}"
+IMAGE="${BACKUP_RESTORE_IMAGE:-}"
 MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-36}"   # nightly + slack
 
 # Two arrays, because the port flag is not the same letter in both tools:
@@ -58,6 +66,16 @@ if [ -z "$REMOTE" ]; then
     echo "      See deploy/backup.env.example and docs/offsite_backup_setup.md" >&2
     exit 1
 fi
+
+# The image is asked before the archive is fetched: a drill that downloads and
+# unpacks, then finds nothing it can rebuild with, has proved nothing.
+# shellcheck source=/dev/null
+source deploy/archive_image.sh
+if ! why="$(archive_image_ready BACKUP_RESTORE_IMAGE "$IMAGE")"; then
+    echo "REFUSED: $why" >&2
+    exit 2
+fi
+echo "image: $IMAGE (DuckDB $ARCHIVE_DUCKDB_VERSION)"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -151,7 +169,9 @@ echo "rebuilding in $IMAGE ..."
 # service runs, and a restore drill is operator tooling. Mounting it keeps the
 # drill in step with the checkout without an image rebuild, and a real restore
 # has the repo anyway — the archive records the deploy SHA precisely so you can
-# check out the commit that wrote it.
+# check out the commit that wrote it. The checkout's file runs in the pinned
+# image, so it imports only what that image carries: compact_duckdb from its
+# /app/scripts, the standard library and duckdb (tests/unit/test_archive_image.py).
 #
 # `-e KS_DUCKDB=on`: under KS_DUCKDB=off in .env the switch would refuse the
 # rebuild before it imported a row, and the drill that proves the archive
@@ -159,7 +179,7 @@ echo "rebuilding in $IMAGE ..."
 # whichever comes first (measured, engine 24.0.7), and the sidecar sees only
 # $TMP/data — never the live file, which the week keeps still. Under `on` it
 # changes nothing.
-docker run --rm \
+docker run --rm --pull never \
   --memory=6500m \
   -e DUCKDB_MEMORY_LIMIT=4GB \
   -v "$TMP/data:/app/data" \

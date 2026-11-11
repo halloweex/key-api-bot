@@ -17,14 +17,16 @@ what the other sees.
   (`test_read_fallback_consumers.build_graph`, over `bot/` and `core/`): no
   function in `bot/` may reach, through any call the walk resolves, one that
   imports DuckDB or the store, or asks for the store (`get_store`,
-  `DuckDBStore(...)`, `get_sync_service`, `open_file`). A call the walk
+  `DuckDBStore()`, `get_sync_service`, `open_file`). A call the walk
   resolves by its name alone is left out — `self._thread.start()` is not
   `BackgroundScheduler.start` — and so is anything the walk cannot read: a
   `getattr`, a table of callables.
 
 Web runs bot code too — the bot store behind the sign-ins and the access
-requests, `send_admin_message` behind the alerts. That is web's process, and
-the stage 5 sweep (`test_duckdb_off_sweep.py`) runs those paths there.
+requests, `send_admin_message` behind the alerts. That is web's process; the
+stage 5 sweep (`test_duckdb_off_sweep.py`) ran those paths there until step
+14's S14-18 deleted it with the last opener, and since S14-19 the images carry
+no `duckdb` at all (`test_images_carry_no_duckdb.py`).
 """
 from __future__ import annotations
 
@@ -37,11 +39,14 @@ from typing import Dict, Set
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
-# What the bot's process must never hold: the driver, and the store that is
-# the one reach for it (`core/duckdb_switch.py`).
-FORBIDDEN = ("duckdb", "core.duckdb_store")
+# What the bot's process must never hold: the driver, and the store that was
+# the one reach for it — `core.duckdb_store`, a shim of `core.store` since
+# step 14's S14-18, and `core.store` itself (the switch,
+# `core/duckdb_switch.py`, went in S14-18).
+FORBIDDEN = ("duckdb", "core.duckdb_store", "core.store")
 # A function that asks for the store or the file by these names.
-STORE_CALLS = {"get_store", "DuckDBStore", "get_sync_service", "open_file"}
+STORE_CALLS = {"get_store", "DuckDBStore", "AnalyticsStore", "get_sync_service",
+               "open_file"}
 
 
 def _module_name(path: pathlib.Path) -> str:
@@ -105,8 +110,9 @@ class TestWhatTheBotImports:
         imports only inside functions."""
         modules = bot_imports()
         assert {"bot.main", "bot.canary", "bot.store_postgres"} <= modules
-        # Imported only inside functions of `bot/`.
-        assert {"core.bot_store", "core.alert_archive", "core.dashboard_access"} <= modules
+        # Imported only inside functions of `bot/`. (`core.alert_archive` was
+        # one, for the week of silence's watch, until step 14's S14-18.)
+        assert {"core.bot_store", "core.dashboard_access", "core.alerting"} <= modules
 
 
 def _store_touches(fn) -> bool:
@@ -115,12 +121,12 @@ def _store_touches(fn) -> bool:
 
     for node in _own(fn.node):
         if isinstance(node, ast.Import):
-            if any(a.name.split(".")[0] == "duckdb" or a.name == "core.duckdb_store"
+            if any(a.name.split(".")[0] == "duckdb" or a.name in FORBIDDEN
                    for a in node.names):
                 return True
         elif isinstance(node, ast.ImportFrom):
             if node.module and (node.module.split(".")[0] == "duckdb"
-                                or node.module == "core.duckdb_store"):
+                                or node.module in FORBIDDEN):
                 return True
         elif isinstance(node, ast.Call):
             f = node.func
@@ -178,4 +184,8 @@ class TestWhatTheBotCalls:
 
         keys = {fn.key for fn in store_reaching(build_graph(("bot", "core")))}
         assert "core/permissions.py:get_permissions_for_role_async" in keys
-        assert "core/scheduler.py:BackgroundScheduler._run_dq_digest" in keys
+        # The full sync, not the integrity job any more: step 14's S14-14
+        # took the store out of the integrity job (S14-10 had taken it out of
+        # the digest, whose journal is Postgres's alone).
+        assert "core/scheduler.py:BackgroundScheduler._run_full_sync" in keys
+        assert "core/scheduler.py:BackgroundScheduler._run_dq_integrity" not in keys

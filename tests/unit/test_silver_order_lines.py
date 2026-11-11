@@ -10,104 +10,94 @@ What is pinned here is the property that makes the level trustworthy — under
 Gold's own predicate it reproduces `gold_daily_products` exactly. A level that
 disagrees with the aggregate built beside it is a third revenue number, and
 this project already has two.
+
+Postgres's level since step 14's S14-18: `silver.order_lines`, the view
+revision 0011 renders from the one body (`core.sql_dialect.order_lines_select`),
+over Silver derived from Bronze by the derivation's own rebuild. Until then
+these ran on DuckDB's `silver_order_lines` view; the answers they assert are
+DuckDB's on the same fixture, and Postgres gives them (rule 9).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    DSN, derive, needs_postgres, seed, tab_in_postgres,
+)
+
+pytestmark = needs_postgres
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "lines.duckdb")
-    await s.connect()
-    return s
-
-
-async def _seed(store, *, with_uncatalogued: bool = True):
+def _fixture(*, with_uncatalogued: bool = True):
     """Two orders, four lines, one of them for a product the catalog lost."""
     now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        conn.execute("INSERT INTO categories (id, name, parent_id) VALUES (1, 'Care', NULL)")
-        conn.execute("INSERT INTO categories (id, name, parent_id) VALUES (2, 'Serums', 1)")
-        conn.execute(
-            "INSERT INTO products (id, name, category_id, brand, sku, price) "
-            "VALUES (100, 'Serum', 2, 'BrandA', 'SKU-1', 500.0)"
-        )
-        for oid, days in ((1, 3), (2, 5)):
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
-                "buyer_id, manager_id) VALUES (?, 1, 1, 1000.0, ?, 7, NULL)",
-                [oid, now - timedelta(days=days)],
-            )
-        conn.execute(
-            "INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold) "
-            "VALUES (1, 1, 100, 'Serum', 2, 500.0), (2, 1, 100, 'Serum', 1, 400.0), "
-            "(3, 2, 100, 'Serum', 3, 300.0)"
-        )
-        if with_uncatalogued:
-            conn.execute(
-                "INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold) "
-                "VALUES (4, 2, NULL, 'Gone from the catalog', 1, 250.0)"
-            )
-    await store.refresh_warehouse_layers(trigger="manual")
+    lines = [(1, 1, 100, "Serum", 2, 500.0), (2, 1, 100, "Serum", 1, 400.0),
+             (3, 2, 100, "Serum", 3, 300.0)]
+    if with_uncatalogued:
+        lines.append((4, 2, None, "Gone from the catalog", 1, 250.0))
+    return dict(
+        categories=[(1, "Care", None), (2, "Serums", 1)],
+        products=[(100, "Serum", 2, "BrandA", "SKU-1", 500.0)],
+        orders=[(oid, 1, 1, 1000.0, now - timedelta(days=days), 7, None, None)
+                for oid, days in ((1, 3), (2, 5))],
+        lines=lines,
+    )
+
+
+async def _seeded(monkeypatch, *queries, before_derive=None):
+    """Seed the fixture, derive, and answer each `(sql, fetch)` in turn."""
+    async def populate(conn, pool):
+        await seed(conn, **_fixture())
+        if before_derive:
+            await conn.execute(before_derive)
+
+    out = []
+    async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+        await derive(pool)
+        async with pool.acquire() as conn:
+            for sql in queries:
+                out.append(await conn.fetch(sql))
+    return out
 
 
 class TestTheLevel:
     @pytest.mark.asyncio
-    async def test_the_grain_is_the_line(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                lines = conn.execute("SELECT COUNT(*) FROM silver_order_lines").fetchone()[0]
-                raw = conn.execute("SELECT COUNT(*) FROM order_products").fetchone()[0]
-            assert lines == raw == 4
-        finally:
-            await store.close()
+    async def test_the_grain_is_the_line(self, monkeypatch):
+        lines, raw = await _seeded(
+            monkeypatch, "SELECT COUNT(*) AS n FROM silver.order_lines",
+            "SELECT COUNT(*) AS n FROM bronze.order_products")
+        assert lines[0]["n"] == raw[0]["n"] == 4
 
     @pytest.mark.asyncio
-    async def test_a_line_whose_product_left_the_catalog_survives(self, tmp_path):
+    async def test_a_line_whose_product_left_the_catalog_survives(self, monkeypatch):
         """31 % of production lines have no category and 8.2 % no product_id.
 
         A level that inner-joins the catalog is a filter wearing a level's name,
         and it would drop revenue quietly — which is how ₴13–27M of product
         revenue went uncategorised without anyone seeing a number move.
         """
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                row = conn.execute(
-                    "SELECT product_name, brand, category_id, line_amount "
-                    "FROM silver_order_lines WHERE product_id IS NULL"
-                ).fetchone()
-            assert row is not None, "the uncatalogued line was dropped"
-            assert row[1] is None and row[2] is None
-            assert float(row[3]) == 250.0
-        finally:
-            await store.close()
+        (rows,) = await _seeded(
+            monkeypatch,
+            "SELECT product_name, brand, category_id, line_amount "
+            "FROM silver.order_lines WHERE product_id IS NULL")
+        assert rows, "the uncatalogued line was dropped"
+        row = rows[0]
+        assert row["brand"] is None and row["category_id"] is None
+        assert float(row["line_amount"]) == 250.0
 
     @pytest.mark.asyncio
-    async def test_it_carries_the_order_answer_rather_than_deriving_one(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                mismatches = conn.execute("""
-                    SELECT COUNT(*) FROM silver_order_lines l
-                    JOIN silver_orders s ON s.id = l.order_id
-                    WHERE l.sales_type IS DISTINCT FROM s.sales_type
-                       OR l.order_date IS DISTINCT FROM s.order_date
-                       OR l.is_return IS DISTINCT FROM s.is_return
-                       OR l.is_active_source IS DISTINCT FROM s.is_active_source
-                """).fetchone()[0]
-            assert mismatches == 0
-        finally:
-            await store.close()
+    async def test_it_carries_the_order_answer_rather_than_deriving_one(self, monkeypatch):
+        (rows,) = await _seeded(monkeypatch, """
+                SELECT COUNT(*) AS n FROM silver.order_lines l
+                JOIN silver.orders s ON s.id = l.order_id
+                WHERE l.sales_type IS DISTINCT FROM s.sales_type
+                   OR l.order_date IS DISTINCT FROM s.order_date
+                   OR l.is_return IS DISTINCT FROM s.is_return
+                   OR l.is_active_source IS DISTINCT FROM s.is_active_source
+            """)
+        assert rows[0]["n"] == 0
 
     # `test_it_reproduces_gold_to_the_kopeck` stood here.
     #
@@ -128,48 +118,19 @@ class TestTheLevel:
 
 
     @pytest.mark.asyncio
-    async def test_it_holds_what_gold_excludes_rather_than_hiding_it(self, tmp_path):
+    async def test_it_holds_what_gold_excludes_rather_than_hiding_it(self, monkeypatch):
         """Returns and dead sources belong to the caller's predicate, not the level."""
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                conn.execute("UPDATE orders SET status_id = 19 WHERE id = 2")
-            await store.refresh_warehouse_layers(trigger="manual")
+        total, counted, returned = await _seeded(
+            monkeypatch,
+            "SELECT ROUND(SUM(line_amount), 2) AS v FROM silver.order_lines",
+            "SELECT ROUND(COALESCE(SUM(line_amount), 0), 2) AS v FROM silver.order_lines "
+            "WHERE NOT is_return AND is_active_source",
+            "SELECT ROUND(SUM(line_amount), 2) AS v FROM silver.order_lines WHERE is_return",
+            before_derive="UPDATE bronze.orders SET status_id = 19 WHERE id = 2")
+        total, counted, returned = total[0]["v"], counted[0]["v"], returned[0]["v"]
+        assert float(returned) > 0, "the fixture did not actually produce a return"
+        assert float(total) == float(counted) + float(returned)
 
-            async with store.connection() as conn:
-                total = conn.execute(
-                    "SELECT ROUND(SUM(line_amount), 2) FROM silver_order_lines"
-                ).fetchone()[0]
-                counted = conn.execute(
-                    "SELECT ROUND(COALESCE(SUM(line_amount), 0), 2) FROM silver_order_lines "
-                    "WHERE NOT is_return AND is_active_source"
-                ).fetchone()[0]
-                returned = conn.execute(
-                    "SELECT ROUND(SUM(line_amount), 2) FROM silver_order_lines WHERE is_return"
-                ).fetchone()[0]
-            assert float(returned) > 0, "the fixture did not actually produce a return"
-            assert float(total) == float(counted) + float(returned)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_it_still_resolves_after_silver_is_rebuilt_from_scratch(self, tmp_path):
-        """`rebuild-silver` drops the table. DuckDB resolves a view by name at
-        query time, so it survives — but only as long as the shape does, which
-        is why Silver's DDL has exactly one home."""
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            from core.duckdb_store import SILVER_ORDERS_DDL, silver_select_sql
-            async with store.connection() as conn:
-                conn.execute("DROP TABLE IF EXISTS silver_orders")
-                conn.execute(SILVER_ORDERS_DDL)
-                conn.execute(
-                    "INSERT INTO silver_orders SELECT " + silver_select_sql() + " FROM orders o"
-                )
-                assert conn.execute(
-                    "SELECT COUNT(*) FROM silver_order_lines"
-                ).fetchone()[0] == 4
-        finally:
-            await store.close()
+    # `test_it_still_resolves_after_silver_is_rebuilt_from_scratch` stood here
+    # until step 14's S14-15 deleted DuckDB's half of `rebuild-silver`, the
+    # DROP and re-CREATE of `silver_orders` it was about.

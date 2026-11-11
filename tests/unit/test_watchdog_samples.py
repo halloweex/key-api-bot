@@ -1,8 +1,10 @@
-"""Chain 10: the watchdogs' samples behind `KS_WRITE_WATCHDOGS`, shadowed in DuckDB.
+"""Chain 10: the watchdogs' samples, written to and read from Postgres alone.
 
 The parts that need no database; the real-Postgres half is
-`tests/integration/test_watchdog_samples_pg.py`. Every guard names, in its
-docstring, the mutation it exists to catch.
+`tests/integration/test_watchdog_samples_pg.py`. Until step 14's S14-10 the
+samples had a DuckDB shadow and a `duckdb` branch behind `KS_WRITE_WATCHDOGS`;
+their tests went with them. Every guard names, in its docstring, the mutation
+it exists to catch.
 """
 from __future__ import annotations
 
@@ -10,24 +12,24 @@ import ast
 import pathlib
 import re
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytest_asyncio
 
-from core import pg_watchdog_write as chain, shadow_writes, watchdog_samples
-from core.duckdb_store import DuckDBStore
+from core import pg_watchdog_write as chain, watchdog_samples
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
 def flag(monkeypatch):
+    """No chain's flag. The flag routes nothing since S14-00; it is set only
+    to show that."""
     from core import write_chains
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
-    shadow_writes.reset()
 
     def set_(value):
         if value is None:
@@ -35,15 +37,17 @@ def flag(monkeypatch):
         else:
             monkeypatch.setenv(chain.WRITE_ENV, value)
     yield set_
-    shadow_writes.reset()
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "samples.duckdb")
-    await s.connect()
-    yield s
-    await s.close()
+@pytest.fixture
+def no_duckdb(monkeypatch):
+    """Any reach for DuckDB's store fails the test."""
+    from core import duckdb_store
+
+    def connection(self):
+        raise AssertionError("the samples opened a DuckDB connection")
+
+    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
 
 
 def _sample(at=None, pct=40.0, free=100.0):
@@ -55,23 +59,10 @@ MEM = {"working_set": 600 * 1024 * 1024, "page_cache": 100 * 1024 * 1024,
        "limit": 1024 * 1024 * 1024, "oom_kills": 0}
 
 
-def _record(store, events):
-    real = store.connection
-
-    def connection():
-        events.append("duckdb")
-        return real()
-
-    store.connection = connection
-
-
-async def _count(store, table):
-    async with store.connection() as conn:
-        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-
-
 # ─── The one door ─────────────────────────────────────────────────────────────
 
+# DuckDB's writers and readers of the samples. S14-10 deleted them; their
+# names stay here so one coming back is caught.
 _DOOR_FUNCS = {
     "insert_sample", "prune_old_samples", "insert_dir_samples",
     "prune_old_dir_samples", "fetch_sample_at_age", "fetch_dir_sample_at_age",
@@ -80,12 +71,11 @@ _DOOR_FUNCS = {
 _DEFINERS = {"core/disk_monitor.py", "core/memory_monitor.py",
              "core/watchdog_samples.py", "core/pg_watchdog_write.py"}
 # SQL over the three tables: their own modules, the router, and the stores'
-# machinery (DDL, migrations, the hourly copy, its comparison, the copy-back,
-# the standing watch).
+# machinery (DDL, migrations, the hourly copy, its comparison, the standing
+# watch; the copy-back went with step 14's S14-04).
 _SQL_ALLOWED = _DEFINERS | {
-    "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
-    "core/chain_transfer.py", "core/pg_chain_invariants.py",
-    "core/snapshot_validation.py",
+    "core/migrations.py", "core/mirror_reconciliation.py",
+    "core/pg_chain_invariants.py", "core/snapshot_validation.py",
 }
 _SAMPLES_SQL = re.compile(
     r"\b(SELECT|INSERT|UPDATE|DELETE|FROM)\b[\s\S]*\b"
@@ -121,9 +111,9 @@ def _offenders_in(tree, rel):
 class TestTheOneDoor:
     def test_nothing_goes_round_the_router(self):
         """Mutation: `insert_sample(conn, sample)` back in `_run_disk_watchdog`
-        — under `postgres` the sample lands in DuckDB alone while the 24 h and
-        168 h reads ask Postgres, and the watchdog reports growth of zero for
-        ever (the chain map's warning)."""
+        — the sample would land in DuckDB alone while the 24 h and 168 h reads
+        ask Postgres, and the watchdog would report growth of zero for ever
+        (the chain map's warning)."""
         offenders = []
         for d in ("core", "web", "bot", "scripts"):
             for path in sorted((ROOT / d).rglob("*.py")):
@@ -136,138 +126,91 @@ class TestTheOneDoor:
                          "    conn.execute('DELETE FROM memory_samples')\n")
         assert len(_offenders_in(tree, "core/scheduler.py")) == 2
 
+    def test_duckdbs_sample_statements_are_gone(self):
+        """S14-10 deleted them, and the statements render for Postgres alone.
+        Mutation: put `insert_sample(conn, ...)` back in `core/disk_monitor.py`,
+        or the `duckdb` entry back in `SAMPLE_TABLES`."""
+        from core import disk_monitor, memory_monitor
 
-# ─── duckdb: the default, byte for byte ──────────────────────────────────────
+        for module in (disk_monitor, memory_monitor):
+            assert not {n for n in _DOOR_FUNCS if hasattr(module, n)}, module.__name__
+        assert set(disk_monitor.SAMPLE_TABLES) == {"postgres"}
+        assert set(memory_monitor.MEMORY_TABLES) == {"postgres"}
+        with pytest.raises(KeyError):
+            disk_monitor.sample_sql(disk_monitor.DISK_INSERT_SQL, "duckdb")
+        with pytest.raises(KeyError):
+            memory_monitor.memory_sql(memory_monitor.MEMORY_INSERT_SQL, "duckdb")
+        assert (disk_monitor.sample_sql(disk_monitor.DISK_INSERT_SQL)
+                == "INSERT INTO app.disk_samples (sampled_at, db_size_mb, "
+                   "disk_pct_used, disk_free_gb) VALUES ($1, $2, $3, $4)")
+        assert (memory_monitor.memory_sql(memory_monitor.MEMORY_PRUNE_SQL)
+                == "DELETE FROM app.memory_samples WHERE sampled_at < $1 "
+                   "RETURNING sampled_at")
 
 
-# ─── postgres: the tick, then the shadow ─────────────────────────────────────
+# ─── The tick: one Postgres transaction, nothing after it ─────────────────────
 
 
-class TestUnderPostgres:
+class TestTheTick:
     @pytest.mark.asyncio
-    async def test_postgres_then_duckdb_with_one_set_of_instants(
-            self, flag, store, monkeypatch):
-        """The sample's `sampled_at`, the directory set's and both cutoffs are
-        computed once and handed to both stores. Mutation: compute any per
-        store — the comparison then reports every sample as differing."""
-        flag("postgres")
+    @pytest.mark.parametrize("value", [None, "duckdb", "postgres", "pgsql-typo"])
+    async def test_one_set_of_instants_handed_to_postgres(
+            self, flag, no_duckdb, monkeypatch, value):
+        """The directory set's `sampled_at` and both cutoffs are computed once,
+        from one `now`, whatever the flag says. Mutation: compute any of them
+        twice, or route by the flag."""
+        flag(value)
         seen = {}
-        events = []
 
         async def disk_tick(sample, dir_now, **kw):
-            events.append("postgres")
-            seen.update(kw)
+            seen.update(kw, dir_now=dir_now)
             return {"history": None, "dir_week_ago": None, "dir_six_ago": None,
                     "remainder": [], "deleted": 0}
 
         monkeypatch.setattr(chain, "disk_tick", disk_tick)
-        _record(store, events)
-        sample = _sample()
-        reads = await watchdog_samples.disk_tick(store, sample, {"duckdb": 7})
-        assert events == ["postgres", "duckdb"] and reads["persisted"] is True
-        async with store.connection() as conn:
-            (dir_at,) = conn.execute(
-                "SELECT DISTINCT sampled_at FROM data_dir_samples").fetchone()
-            (disk_at,) = conn.execute("SELECT sampled_at FROM disk_samples").fetchone()
-        assert dir_at == seen["dir_sampled_at"]
-        assert disk_at == sample["sampled_at"]
+        reads = await watchdog_samples.disk_tick(_sample(), {"duckdb": 7})
+        assert reads["persisted"] is True
+        assert seen["dir_now"] == {"duckdb": 7}
+        assert seen["dir_sampled_at"] == seen["now"]
         assert seen["disk_cutoff"] == seen["now"] - timedelta(days=14)
         assert seen["dir_cutoff"] == seen["now"] - timedelta(days=21)
 
     @pytest.mark.asyncio
-    async def test_the_shadow_prunes_at_the_cutoff_postgres_was_handed(
-            self, flag, store, monkeypatch):
-        flag("postgres")
-        old = datetime.now(timezone.utc) - timedelta(days=15)
-        async with store.connection() as conn:
-            from core.disk_monitor import insert_sample
-
-            insert_sample(conn, _sample(at=old))
-        cutoffs = {}
-
-        async def disk_tick(sample, dir_now, **kw):
-            cutoffs.update(kw)
-            return {"history": None, "dir_week_ago": None, "dir_six_ago": None,
-                    "remainder": [], "deleted": 1}
-
-        monkeypatch.setattr(chain, "disk_tick", disk_tick)
-        await watchdog_samples.disk_tick(store, _sample(), {})
-        async with store.connection() as conn:
-            remaining = [r[0] for r in conn.execute(
-                "SELECT sampled_at FROM disk_samples").fetchall()]
-        assert all(at >= cutoffs["disk_cutoff"] for at in remaining) and len(remaining) == 1
-
-    @pytest.mark.asyncio
-    async def test_every_shadow_prune_uses_the_routers_instant(
-            self, flag, store, monkeypatch):
-        """The router's clock is put an hour behind the wall, and each table
-        is seeded with a row half an hour inside its retention as the router
-        sees it — half an hour outside it as the wall does. Mutation: let any
-        DuckDB prune compute its own cutoff (`retention_days=` for `cutoff=`)
-        — DuckDB would then drop a row Postgres kept, and the comparison would
-        read every edge sample as `shadow_pruned_rows`. The test above cannot
-        see it: the two instants it compares are microseconds apart."""
-        flag("postgres")
-
-        class _Behind(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return datetime.now(tz) - timedelta(hours=1)
-
-        monkeypatch.setattr(watchdog_samples, "datetime", _Behind)
-        seen = _Behind.now(timezone.utc)
-        inside = timedelta(minutes=30)
-        edge = {"disk_samples": seen - timedelta(days=14) + inside,
-                "data_dir_samples": seen - timedelta(days=21) + inside,
-                "memory_samples": seen - timedelta(days=14) + inside}
-        async with store.connection() as conn:
-            from core.disk_monitor import insert_dir_samples, insert_sample
-            from core.memory_monitor import insert_sample as insert_memory
-
-            insert_sample(conn, _sample(at=edge["disk_samples"]))
-            insert_dir_samples(conn, {"duckdb": 5}, sampled_at=edge["data_dir_samples"])
-            insert_memory(conn, MEM, sampled_at=edge["memory_samples"])
-
-        async def disk_tick(sample, dir_now, **kw):
-            return {"history": None, "dir_week_ago": None, "dir_six_ago": None,
-                    "remainder": [], "deleted": 0}
+    async def test_the_memory_tick_samples_and_prunes_at_one_instant(
+            self, flag, no_duckdb, monkeypatch):
+        seen = {}
 
         async def memory_tick(mem, **kw):
+            seen.update(kw)
             return {"last": None, "peak_24h": None}
 
-        monkeypatch.setattr(chain, "disk_tick", disk_tick)
         monkeypatch.setattr(chain, "memory_tick", memory_tick)
-        await watchdog_samples.disk_tick(store, _sample(), {"duckdb": 6})
-        await watchdog_samples.memory_tick(store, MEM)
-        async with store.connection() as conn:
-            for table, at in edge.items():
-                kept = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE sampled_at = ?",
-                                    [at]).fetchone()[0]
-                assert kept >= 1, f"{table}: the shadow pruned a row Postgres was told to keep"
+        reads = await watchdog_samples.memory_tick(MEM)
+        assert reads == {"last": None, "peak_24h": None, "persisted": True}
+        assert seen["sampled_at"] == seen["now"]
+        assert seen["cutoff"] == seen["now"] - timedelta(days=14)
 
     @pytest.mark.asyncio
-    async def test_a_refusing_postgres_returns_no_history_and_writes_nothing(
-            self, flag, store, monkeypatch):
-        """Mutation: let the failure propagate under postgres — the disk job
-        would raise before judging capacity, on the day the disk is full."""
-        flag("postgres")
+    async def test_a_refusing_postgres_returns_no_history(self, flag, no_duckdb,
+                                                          monkeypatch):
+        """Mutation: let the failure propagate — the disk job would raise
+        before judging capacity, on the day the disk is full."""
         monkeypatch.setattr(chain, "disk_tick", AsyncMock(side_effect=OSError("no space")))
         monkeypatch.setattr(chain, "memory_tick", AsyncMock(side_effect=OSError("no space")))
-        assert await watchdog_samples.disk_tick(store, _sample(), {"duckdb": 1}) == \
+        assert await watchdog_samples.disk_tick(_sample(), {"duckdb": 1}) == \
             watchdog_samples.EMPTY_DISK
-        assert await watchdog_samples.memory_tick(store, MEM) == watchdog_samples.EMPTY_MEMORY
-        assert await _count(store, "disk_samples") == 0
-        assert await _count(store, "memory_samples") == 0
+        assert await watchdog_samples.memory_tick(MEM) == watchdog_samples.EMPTY_MEMORY
 
     @pytest.mark.asyncio
     async def test_the_capacity_page_goes_out_with_postgres_down(
-            self, flag, store, monkeypatch):
+            self, flag, no_duckdb, monkeypatch, tmp_path):
         """The job end to end: a full disk and a Postgres that refuses. The
-        alert is the one that must still be sent."""
+        alert is the one that must still be sent. The store is the job's only
+        for its file's path (the sample's `db_size_mb`)."""
         from core.scheduler import BackgroundScheduler
 
-        flag("postgres")
         monkeypatch.setattr(chain, "disk_tick", AsyncMock(side_effect=OSError("no space")))
+        store = SimpleNamespace(db_path=tmp_path / "analytics.duckdb")
         with patch("core.disk_monitor.sample_disk_state",
                    return_value=_sample(pct=97.0, free=1.5)), \
              patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
@@ -277,18 +220,12 @@ class TestUnderPostgres:
         assert result["db_24h_ago_mb"] is None
 
     @pytest.mark.asyncio
-    async def test_the_oom_delta_reads_the_writers_previous_sample(
-            self, flag, store, monkeypatch):
-        """Mutation: read DuckDB's previous sample — under shadow a failed
-        shadow leaves DuckDB a sample behind, and an OOM kill would be counted
-        against the wrong one, or never."""
+    async def test_the_oom_delta_reads_postgres_previous_sample(
+            self, flag, no_duckdb, monkeypatch):
+        """Mutation: read the previous sample anywhere else — an OOM kill
+        would be counted against the wrong sample, or never. The memory job
+        asks no store since S14-10."""
         from core.scheduler import BackgroundScheduler
-
-        flag("postgres")
-        async with store.connection() as conn:
-            from core.memory_monitor import insert_sample
-
-            insert_sample(conn, {**MEM, "oom_kills": 3})     # DuckDB's stale view
 
         async def memory_tick(mem, **kw):
             return {"last": {"oom_kills": 0}, "peak_24h": 600.0}
@@ -305,10 +242,12 @@ class TestUnderPostgres:
         # The evaluation's input is what this guards, so the evaluation itself
         # is replaced and the alert path is not reached.
         monkeypatch.setattr("core.memory_monitor.evaluate_memory", evaluate_memory)
-        with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)):
+        get_store = AsyncMock(side_effect=AssertionError("the memory job asked a store"))
+        with patch("core.duckdb_store.get_store", get_store):
             result = await BackgroundScheduler()._run_memory_monitor()
-        assert judged["previous_oom_kills"] == 0, judged       # Postgres's, not DuckDB's 3
+        assert judged["previous_oom_kills"] == 0, judged
         assert result["peak_working_set_mb_24h"] == 600
+        assert not get_store.await_count
 
 
 # ─── The standing watch ──────────────────────────────────────────────────────

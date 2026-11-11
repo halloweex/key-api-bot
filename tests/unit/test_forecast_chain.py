@@ -75,7 +75,6 @@ from zoneinfo import ZoneInfo  # noqa: E402
 import pytest  # noqa: E402
 
 from core import chain_latch, pg_forecast_write as chain, read_fallback  # noqa: E402
-from core import write_chains  # noqa: E402
 
 KYIV = ZoneInfo("Europe/Kyiv")
 DSN = "postgresql://nobody@127.0.0.1:1/none"
@@ -85,59 +84,28 @@ DSN = "postgresql://nobody@127.0.0.1:1/none"
 def ready(monkeypatch):
     """Every precondition met, the chain's own flag unset. A test that sets
     KS_WRITE_FORECAST=postgres means it; one that takes a clause away says
-    which. `KS_READ_FALLBACK` is the configured mode, set the way
-    `configure_modes()` leaves it — the environment alone is not it."""
+    which. (`KS_READ_FALLBACK`'s configured mode was set here too until step
+    14's S14-16 deleted it.)"""
     monkeypatch.delenv(chain.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
-    monkeypatch.setattr(read_fallback, "_mode_error", None)
     return monkeypatch
 
 
-def _state():
-    return write_chains.chain_modes()[chain.CHAIN]
+# `TestTheLatchOutranks` stood here until step 14's S14-11: the latch
+# outranking any flag in `writes_postgres()`/`reads_postgres()`, which went
+# with `KS_WRITE_FORECAST`.
 
 
-class TestTheLatchOutranks:
-
-    @pytest.mark.parametrize("value", ["duckdb", "postgre", None])
-    def test_any_flag_once_latched(self, ready, value):
-        if value is not None:
-            ready.setenv(chain.WRITE_ENV, value)
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.writes_postgres() is True and chain.reads_postgres() is True
-
-
-class TestReadsTheChain:
-    OTHER = ("SELECT goal_amount FROM {revenue_goals}",
-             "SELECT SUM(revenue) FROM {gold_daily_revenue}",
-             "SELECT * FROM seasonal_indices")
-
-    @pytest.mark.parametrize("hole", chain.TABLE_HOLES)
-    def test_each_hole_follows_once_latched(self, ready, hole):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.reads_the_chain(f"SELECT * FROM {hole}") is True
-
-    @pytest.mark.parametrize("sql", OTHER)
-    def test_nothing_else_follows(self, ready, sql):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.reads_the_chain(sql) is False
-
-
-    @pytest.mark.parametrize("table", chain.CHAIN_TABLES)
-    def test_each_table_the_chain_owns_follows_once_latched(self, ready, table):
-        """Parametrised over `CHAIN_TABLES`, not `TABLE_HOLES`, so a hole
-        dropped from the second is a failure here rather than a case that
-        quietly disappears. Mutation: `{growth_metrics}` removed from
-        `TABLE_HOLES` — a read of that table would go by `KS_READ_GOALS`, with
-        a fallback, to DuckDB's frozen copy."""
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        hole = "{%s}" % table.split(".", 1)[1]
-        assert chain.reads_the_chain(f"SELECT * FROM {hole}") is True
+class TestTheHoles:
+    """`reads_the_chain`, which sent a statement carrying one of these holes
+    to Postgres once the chain was latched, went in step 14's S14-11: every
+    goal and forecast read goes to Postgres
+    (`tests/unit/test_goals_reads_follow_chain.py`). The holes stay, and
+    are the tables the chain owns."""
 
     def test_the_holes_are_the_tables_the_chain_owns(self):
         assert {"app." + h.strip("{}") for h in chain.TABLE_HOLES} == \
@@ -559,28 +527,12 @@ TABLES = {
 }
 
 
-def _goal_rows(store_path):
-    async def read():
-        store = DuckDBStore(db_path=store_path)
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                return {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
-                        for t in ("seasonal_indices", "growth_metrics",
-                                  "weekly_patterns", "revenue_predictions")}
-        finally:
-            await store.close()
-    return asyncio.run(read())
 
 
 def _with_store(path, step):
     async def run():
-        store = DuckDBStore(db_path=path)
-        await store.connect()
-        try:
-            return await step(store)
-        finally:
-            await store.close()
+        store = DuckDBStore()
+        return await step(store)
     return asyncio.run(run())
 
 
@@ -593,7 +545,6 @@ class TestTheRepositoryRoutes:
             self, ready, tmp_path):
         ready.setenv(chain.WRITE_ENV, "postgres")
         path = tmp_path / "g.duckdb"
-        before = _goal_rows(path)
         writer = AsyncMock(return_value={})
         with patch.object(chain, "persist_goal_tables", new=writer):
             _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
@@ -605,7 +556,6 @@ class TestTheRepositoryRoutes:
         assert monthly == {1: 0.25, 2: 0.3}
         assert [list(r) for r in weekly] == [[1, 1, 0.25, 3], [1, 2, 0.24, 3]]
         assert now is NOW
-        assert _goal_rows(path) == before
 
 
     PREDICTIONS = [{"date": "2026-10-07", "predicted_revenue": 1000.0},
@@ -626,7 +576,6 @@ class TestTheRepositoryRoutes:
         assert preds == self.PREDICTIONS and sales_type == "retail"
         assert metrics == self.METRICS
         assert created_at.tzinfo is not None and created_at >= before
-        assert _goal_rows(path)["revenue_predictions"] == []
 
 
     def test_nothing_to_store_asks_no_chain(self, ready, tmp_path):
@@ -822,7 +771,6 @@ class TestAFailedChainReadIsRefused:
             _forecast(_failing_on("revenue_predictions"))
         assert raised.value.surface == "goals"
         assert read_fallback.refusals()["goals"]["count"] == 1
-        assert read_fallback.counts() == {}, "nothing was answered from DuckDB"
 
     def test_the_smart_goal_is_not_computed_without_its_ml_signal(self, latched):
         now = datetime.now(KYIV)
@@ -847,7 +795,8 @@ class TestAFailedChainReadIsRefused:
         """Non-vacuity: with Postgres answering, the forecast is read from it."""
         async def fetch(sql, params=()):
             if "revenue_predictions" in sql:
-                return [(date.today(), 1234.0, 1.0, 2.0, 3.0)]
+                return [(date.today(), 1234.0, 1.0, 2.0, 3.0,
+                         datetime(2026, 11, 2, 1, 30, tzinfo=timezone.utc))]
             return [(1000.0,)]
 
         result = _forecast(fetch)
@@ -867,7 +816,6 @@ class TestTheForecastRouteUnderTheChain:
         monkeypatch.setenv("KS_PG_DSN", DSN)
         monkeypatch.setenv("KS_READ_FALLBACK", "off")
         monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-        fresh_read_fallback.configure_mode()
         chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
         monkeypatch.setattr("core.pg_goals_read.fetch",
                             _failing_on("revenue_predictions"))
@@ -879,5 +827,5 @@ class TestTheForecastRouteUnderTheChain:
         assert "statement timeout" not in response.text
         assert fresh_read_fallback.refusals()["goals"]["count"] == 1
         health = admin_client.get("/api/health").json()
-        assert health["read_fallbacks"] == {}
+        assert "read_fallbacks" not in health
         assert health["read_fallback_mode"]["refused"]["goals"]["count"] == 1

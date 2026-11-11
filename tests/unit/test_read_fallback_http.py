@@ -1,36 +1,40 @@
-"""DN-20b: under `KS_READ_FALLBACK=off` a route refuses instead of reading DuckDB.
+"""DN-20b: when the engine behind a route fails, the route answers 503 naming
+the surface.
 
-After step 13 every fallback to DuckDB serves frozen Silver and Gold, and after
-the first Sunday compaction empty ones, behind a page that looks as if it
-works. Under `off`, `core.read_fallback.fall_back` raises `ReadUnavailable`
-instead of letting the caller read DuckDB, and one handler in `web/main.py`
-turns that — from any route — into a 503 naming the surface.
+Every router reads one engine and refuses its failure
+(`core.read_fallback.refuse`), and one handler in `web/main.py` turns that —
+from any route — into a 503 naming the surface. After step 13 a DuckDB
+answer would have served frozen Silver and Gold, and after the first Sunday
+compaction empty ones, behind a page that looks as if it works; a 503 is an
+outage somebody can see.
 
 What is proved here, through the real app and a Postgres pool that raises:
 
-- under `off`, 503 naming the surface for each router DN-20b covers — the
-  dashboard's summary and trend, goals, traffic, expenses (both through the
-  history gate `backfilled()` and through the router), margin, products
-  intel, inventory, and cohorts — and, because the raise is one, every other
-  router an HTTP route reaches (reports, marketing, the dashboard's own
-  router, the filter lookups, the managers screen); nothing is counted as a
-  fallback, and the refusal is counted and published beside the mode instead;
-- the trend's forecast overlay, whose reads already degrade to "no forecast",
-  drops under a refusal while the chart answers — no DuckDB number reaches
-  the page, and the refusal is counted — while the forecast's own endpoint,
-  `/api/revenue/forecast`, answers 503 like any route rather than "Forecast
-  not available yet";
-- a switch naming Postgres with no `KS_PG_DSN` at all is refused under `off`
-  exactly like a failed read, for every one of those routes — the gate is
-  simply false there, and a lost DSN line would otherwise put the whole
-  dashboard back on DuckDB with nothing failing — and under `duckdb` it
-  still answers what DuckDB answers, counting nothing;
-- cohorts under `off` are answered by a live ClickHouse or not at all: a
-  switch naming no configured ClickHouse is refused too, and a live one
-  answers 200;
-- under `duckdb`, the default, each of those routes answers exactly what
-  DuckDB answers with the switch unset — the fallback is unchanged;
+- a 503 naming the surface for each router — the dashboard's summary and
+  trend, goals, traffic, expenses (both through the history gate
+  `backfilled()` and through the router), margin, products intel,
+  inventory, reports, marketing, the dashboard's customer block, the filter
+  lookups and the cohorts — and the refusal counted and published under
+  `read_fallback_mode.refused`;
+- the trend's forecast overlay, whose reads already degrade to "no
+  forecast", drops under a refusal while the chart answers, and the refusal
+  is counted — while the forecast's own endpoint, `/api/revenue/forecast`,
+  answers 503 like any route rather than "Forecast not available yet";
+- no `KS_PG_DSN` at all is the same 503: the pool's own refusal to guess a
+  database is the failure refused;
+- the cohorts are answered by a live ClickHouse or not at all;
+- no read switch is read: any value of one, or none, is the same 503;
+- **every GET route under `/api/`, read off the app** (`TestEveryRoute`):
+  with the engine failing, or with no address for it, any request that left
+  a refusal counted answered 503 naming it — and the routes of every tab
+  that reads a store are among the refused;
 - no handler on an HTTP path catches `ReadUnavailable` without raising it.
+
+Until step 14's S14-16 this also held what `KS_READ_FALLBACK` made of a
+fallback — `off` refused it, `duckdb` answered from DuckDB — and that a read
+switch with no address was refused (`no_address`). Since S14-07 no router
+has a DuckDB tail and no switch routes a read, and S14-16 deleted the mode
+and the address question with the counts of reads answered from DuckDB.
 
 The walk over every fallback site is `tests/unit/test_read_fallback_sites.py`.
 """
@@ -98,11 +102,11 @@ CASES: List[Case] = [
     # reads, and deliberately drops instead (below).
     Case("forecast", "goals", {"KS_READ_GOALS": "postgres"},
          "/api/revenue/forecast"),
-    # Beyond the plan's list, and not by choice: `fall_back` is one raise, so
-    # every other router behind an HTTP route refuses too. Each is here to
-    # prove that nothing between it and the handler turns the refusal into a
-    # 500 or a quiet answer — the filter bar's lookups included, which under
-    # `off` are refused on every tab at once, exactly like the tab they sit on.
+    # Beyond DN-20b's list: every other router behind an HTTP route refuses
+    # too. Each is here to prove that nothing between it and the handler
+    # turns the refusal into a 500 or a quiet answer — the filter bar's
+    # lookups included, which are refused on every tab at once, exactly like
+    # the tab they sit on.
     Case("reports", "reports", {"KS_READ_REPORTS": "postgres"},
          "/api/reports/summary", WINDOW),
     Case("marketing", "marketing", {"KS_READ_MARKETING": "postgres"},
@@ -118,11 +122,28 @@ CASES: List[Case] = [
 # Routes whose first read is a write chain's table. Since step 14's S14-00
 # every chain writes Postgres — production's state since those chains' flips —
 # and a read of its table asks Postgres with no fallback and no refusal, so a
-# failed engine is that route's 500, not a 503: chain 7a's goals (production
-# runs `KS_WRITE_GOALS=postgres`) and chain 5's classification behind the
-# managers screen. Chain 7b-3's forecast refuses (`chain_refusal`) and stays.
-CHAIN_FIRST = frozenset({"goals", "managers"})
+# failed engine is that route's 500, not a 503: chain 5's classification
+# behind the managers screen. Chain 7a's goals were the other until S14-07,
+# whose `_goals_run` refuses every failure, theirs included.
+CHAIN_FIRST = frozenset({"managers"})
 REFUSING = [case for case in CASES if case.name not in CHAIN_FIRST]
+# The routers step 14's S14-05 to S14-07 left with no DuckDB tail: they read
+# Postgres whatever their switch says (`case.env` is not read for them), and
+# refuse a failure — a DSN that is not there included. Every router is one
+# since S14-07: no route is switched (and S14-16 deleted `no_address`).
+POSTGRES_ONLY = frozenset({"traffic", "margin", "products_intel", "reports",
+                           "marketing", "lookups",
+                           # The dashboard's, step 14's S14-06.
+                           "summary", "trend", "insights",
+                           # `/expenses`, `/inventory` and `/goals` with its
+                           # forecast, step 14's S14-07: none is left.
+                           "goals", "expenses_history", "inventory", "forecast"})
+UNSWITCHED = [case for case in CASES if case.name in POSTGRES_ONLY]
+# The managers screen's Silver read left `KS_READ_SILVER` in S14-06 as well,
+# but its route reads chain 5's classification first, which raises rather
+# than refuses (`CHAIN_FIRST`): it is asked only where that read answers
+# (`TestUnderDuckdbOff`, whose fixture makes it).
+MANAGERS = next(case for case in CASES if case.name == "managers")
 
 COHORTS = "/api/customers/cohort-retention"
 COHORT_PARAMS = {"include_revenue": "false"}
@@ -145,28 +166,18 @@ def stores(monkeypatch, fresh_read_fallback):
     return fresh_read_fallback
 
 
-def _mode(monkeypatch, value: Optional[str]) -> None:
-    """Set KS_READ_FALLBACK and read it the way web's startup does."""
-    if value is None:
-        monkeypatch.delenv("KS_READ_FALLBACK", raising=False)
-    else:
-        monkeypatch.setenv("KS_READ_FALLBACK", value)
-    read_fallback.configure_mode()
-
-
 def _switches(monkeypatch, env: Dict[str, str]) -> None:
     for name, value in env.items():
         monkeypatch.setenv(name, value)
 
 
-# ─── Under off: a 503 naming the surface, and nothing served from DuckDB ───
+# ─── A failed engine: a 503 naming the surface ─────────────────────────────
 
 class TestOffRefuses:
     @pytest.mark.parametrize("case", REFUSING, ids=repr)
     def test_a_failed_engine_is_a_503_naming_the_surface(
         self, case, admin_client, stores, monkeypatch, caplog,
     ):
-        _mode(monkeypatch, "off")
         _switches(monkeypatch, case.env)
 
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
@@ -178,8 +189,7 @@ class TestOffRefuses:
         assert body["error"] == "Service Unavailable"
         assert "connection refused" not in response.text, (
             "the cause stays in the log; the response is public to the page")
-        # Refused, not served: no fallback counted, the refusal counted.
-        assert read_fallback.counts() == {}
+        # Refused, and the refusal counted.
         assert read_fallback.refusals()[case.surface]["count"] >= 1
         # The soak greps for this phrase; a refusal must not say it.
         assert "falling back to DuckDB" not in caplog.text
@@ -188,15 +198,17 @@ class TestOffRefuses:
     def test_the_refusal_is_published_beside_the_mode(
         self, admin_client, stores, monkeypatch,
     ):
-        _mode(monkeypatch, "off")
+        """Under the block's old name, `read_fallback_mode`, which the
+        canary judges; since step 14's S14-16 the refusals are all it
+        holds."""
         _switches(monkeypatch, {"KS_READ_TRAFFIC": "postgres"})
         assert admin_client.get("/api/traffic/analytics",
                                 params=WINDOW).status_code == 503
 
         health = admin_client.get("/api/health").json()
-        assert health["read_fallbacks"] == {}
+        assert "read_fallbacks" not in health
         block = health["read_fallback_mode"]
-        assert block["mode"] == "off"
+        assert set(block) == {"refused"}
         assert block["refused"]["traffic"]["count"] == 1
         assert block["refused"]["traffic"]["last_at"]
         assert "connection refused" not in str(block)
@@ -205,12 +217,11 @@ class TestOffRefuses:
         self, admin_client, stores, monkeypatch,
     ):
         """`backfilled()` is the gate that served DuckDB under words nobody
-        grepped for. Under off, its unreadable watermark is a 503 — and so is
-        every call in the minute after, which reuses that failure rather than
-        asking Postgres again."""
+        grepped for. Its unreadable watermark is a 503 — and so is every call
+        in the minute after, which reuses that failure rather than asking
+        Postgres again."""
         from core import pg_expenses_read
 
-        _mode(monkeypatch, "off")
         _switches(monkeypatch, {"KS_READ_EXPENSES": "postgres"})
         for _ in range(2):
             response = admin_client.get("/api/expenses/summary", params=WINDOW)
@@ -218,7 +229,6 @@ class TestOffRefuses:
             assert response.json()["surface"] == "expenses"
         assert pg_expenses_read._check_failed is not None
         assert read_fallback.refusals()["expenses"]["count"] >= 2
-        assert read_fallback.counts() == {}
 
     def test_a_confirmed_history_still_refuses_at_the_router(
         self, admin_client, stores, monkeypatch,
@@ -228,50 +238,63 @@ class TestOffRefuses:
         from core import pg_expenses_read
 
         monkeypatch.setattr(pg_expenses_read, "_backfilled", True)
-        _mode(monkeypatch, "off")
         _switches(monkeypatch, {"KS_READ_EXPENSES": "postgres"})
         response = admin_client.get("/api/expenses/summary", params=WINDOW)
         assert response.status_code == 503
         assert response.json()["surface"] == "expenses"
 
+    @pytest.mark.parametrize("params", [
+        {"period": "month"},
+        {"period": "week"},
+        {"start_date": date.today().isoformat(),
+         "end_date": (date.today() + timedelta(days=5)).isoformat()},
+    ], ids=["month", "week", "future-range"])
     def test_a_refused_forecast_drops_the_overlay_not_the_chart(
-        self, admin_client, stores, monkeypatch,
+        self, params, admin_client, stores, monkeypatch,
     ):
         """The trend's forecast is an overlay, and its reads already degrade
         to "no forecast" on any failure (`get_forecast_data`, and the handler
         around it in the route). A refusal there is one of those failures:
         the chart answers without the overlay, nothing is served from DuckDB,
         and the refusal is still counted — so a broken goals port stays
-        visible under `read_fallback_mode.refused`. What `off` forbids is
-        DuckDB's numbers, and none reach the page. The forecast's own
-        endpoint is not an overlay and answers 503 (the `forecast` case)."""
-        _mode(monkeypatch, "off")
+        visible under `read_fallback_mode.refused`. The forecast's own
+        endpoint is not an overlay and answers 503 (the `forecast` case).
+
+        The chart's own series is Gold's in Postgres since step 14's S14-06,
+        so it is given an answer here — the pool still raises for the
+        forecast's reads, which is what this asks about. The week and a
+        future range read the stored forecast as the month does since
+        2026-11-04, so the same refusal is theirs."""
         _switches(monkeypatch, {"KS_READ_GOALS": "postgres"})
+        monkeypatch.setattr("core.pg_gold_read.fetch_series",
+                            AsyncMock(return_value=[]))
         response = admin_client.get("/api/revenue/trend", params={
-            "period": "month", "include_forecast": "true"})
+            **params, "include_forecast": "true"})
         assert response.status_code == 200, response.text
         assert "forecast" not in response.json()
         assert read_fallback.refusals()["goals"]["count"] >= 1
-        assert read_fallback.counts() == {}
 
-    @pytest.mark.parametrize("dsn", [True, False], ids=["dsn", "no_dsn"])
-    def test_a_switch_left_at_duckdb_is_not_a_fallback(
-        self, dsn, admin_client, stores, monkeypatch,
+    @pytest.mark.parametrize("value", [None, "duckdb", "junk-s14-05"],
+                             ids=["unset", "duckdb", "junk"])
+    @pytest.mark.parametrize("case", UNSWITCHED, ids=repr)
+    def test_a_switch_it_no_longer_reads_still_asks_postgres(
+        self, case, value, admin_client, stores, monkeypatch,
     ):
-        """`off` refuses a fallback, not DuckDB as the engine a switch names:
-        a Postgres-backed tab whose switch says `duckdb` is a routing
-        decision, published nowhere and refused nowhere — with a DSN or
-        without one. The cohorts are the exception, below."""
-        if not dsn:
-            monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setenv("KS_READ_TRAFFIC", "duckdb")
-        _mode(monkeypatch, "off")
-        response = admin_client.get("/api/traffic/analytics", params=WINDOW)
-        assert response.status_code == 200
-        assert read_fallback.refusals() == {}
+        """Step 14's S14-05: the six read Postgres whatever their switch
+        says, so here — where the pool raises — every value is the same 503
+        naming the surface, never DuckDB's answer and never a 500."""
+        (switch, _on), = case.env.items()
+        if value is None:
+            monkeypatch.delenv(switch, raising=False)
+        else:
+            monkeypatch.setenv(switch, value)
+        response = admin_client.get(case.path, params=case.params)
+        assert response.status_code == 503, response.text
+        assert response.json()["surface"] == case.surface
+        assert read_fallback.refusals()[case.surface]["count"] >= 1
 
 
-# ─── A switch with no address: refused under off, unchanged under duckdb ───
+# ─── No address: the same refusal ──────────────────────────────────────────
 
 @pytest.fixture
 def no_dsn(stores, monkeypatch):
@@ -282,40 +305,48 @@ def no_dsn(stores, monkeypatch):
 
 
 class TestNoAddress:
-    @pytest.mark.parametrize("case", REFUSING, ids=repr)
-    def test_under_off_it_is_a_503_naming_the_surface(
-        self, case, admin_client, no_dsn, monkeypatch, caplog,
+    @pytest.mark.parametrize("case", UNSWITCHED, ids=repr)
+    def test_with_no_dsn_the_pool_refuses_and_that_is_the_503(
+        self, case, admin_client, monkeypatch, fresh_read_fallback, caplog,
     ):
+        """No pool patched and no `KS_PG_DSN`: `core.pg.dsn()` refusing to
+        guess a database is the failure the router refuses — the same 503
+        naming the surface, with the DSN named in the log beside it. (Until
+        step 14's S14-07 a switch asked `no_address` first, and S14-16
+        deleted it.)"""
+        from core import pg, pg_expenses_read
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setattr(pg, "_pool", None)
+        # The expenses' history latch, as `stores` leaves it: never asked. A
+        # test before this one may have left it within its recheck window,
+        # where it answers without asking the pool (since S14-07 that is
+        # the explicit "no history" refusal, not the DSN's).
+        monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
+        monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
+        monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
         _switches(monkeypatch, case.env)
-        _mode(monkeypatch, "off")
-        (switch, value), = case.env.items()
-        assert read_fallback.misconfigured() == [
-            f"{switch}={value} without KS_PG_DSN"]
 
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
             response = admin_client.get(case.path, params=case.params)
 
         assert response.status_code == 503, response.text
         assert response.json()["surface"] == case.surface
-        assert read_fallback.counts() == {}
         assert read_fallback.refusals()[case.surface]["count"] >= 1
-        assert f"{switch}=postgres without KS_PG_DSN" in caplog.text
+        assert (f"read refused: {case.surface} — its engine failed") in caplog.text
+        assert "KS_PG_DSN is not set" in caplog.text
         assert "falling back to DuckDB" not in caplog.text
-
-
-# ─── Under duckdb: exactly what it was ─────────────────────────────────────
 
 
 # ─── Under KS_DUCKDB=off: DuckDB answers nothing (stage 5, PR-8) ───────────
 
 class TestUnderDuckdbOff:
-    """With the file switched off, a read DuckDB would answer is refused —
-    whatever `KS_READ_FALLBACK` says, and whatever engine the switch names.
-    Each refusal is a 503 naming the surface, counted as a refusal and never
-    as a fallback, and nothing reaches for the file: without this each was
-    the tripwire's, a 503 naming `duckdb` and a CRITICAL page that named no
-    switch. Under on, `test_a_switch_left_at_duckdb_is_not_a_fallback` above
-    holds what was.
+    """With the file switched off — web's state since step 14's S14-00 — a
+    failed engine is a 503 naming the surface, counted as a refusal, and
+    nothing reaches for the file: without that each was the tripwire's, a
+    503 naming `duckdb` and a CRITICAL page that named no switch. Since step
+    14's S14-07 no router reads its switch at all, so what is held is that
+    the switch at `duckdb` is not read.
 
     The managers screen reads the classification before its read switch,
     and that list is chain 5's under off — a chain short of Postgres holds
@@ -324,32 +355,41 @@ class TestUnderDuckdbOff:
 
     @pytest.fixture(autouse=True)
     def _chain5_moved(self, monkeypatch):
-        from core import pg_managers_read, pg_managers_write
+        from core import pg_managers_read
 
-        monkeypatch.setattr(pg_managers_write, "reads_postgres", lambda: True)
+        # Chain 5 reads Postgres asking nothing since step 14's S14-11
+        # (`reads_postgres`, patched here until then, went with the flag).
         monkeypatch.setattr(pg_managers_read, "fetch_all_managers",
                             AsyncMock(return_value=[]))
 
-    @pytest.mark.parametrize("fallback", [None, "off"], ids=["unset", "off"])
-    @pytest.mark.parametrize("case", [c for c in CASES if c.name != "goals"], ids=repr)
-    def test_a_switch_left_at_duckdb_is_a_503_naming_the_surface(
-        self, case, fallback, admin_client, stores, duckdb_off, monkeypatch, caplog,
+    @pytest.mark.parametrize("case", UNSWITCHED + [MANAGERS], ids=repr)
+    def test_a_switch_it_no_longer_reads_asks_postgres(
+        self, case, admin_client, stores, monkeypatch, caplog,
     ):
-        from core import duckdb_switch
+        """S14-05's six and S14-06's dashboard and managers screen: the
+        switch at `duckdb` is not read, the router asks Postgres, and
+        Postgres failing is the refusal — nothing reaches for the file (the
+        store's connection a trap: since step 14's S14-18 it would be a
+        refusal naming `duckdb`, not this tab), and the log names no
+        switch."""
+        from core import duckdb_store
 
+        def _no_duckdb(self):
+            raise AssertionError("the route reached for the DuckDB connection")
+
+        monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", _no_duckdb)
         (switch, _value), = case.env.items()
         monkeypatch.setenv(switch, "duckdb")
-        _mode(monkeypatch, fallback)
 
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
             response = admin_client.get(case.path, params=case.params)
 
         assert response.status_code == 503, response.text
         assert response.json()["surface"] == case.surface
-        assert read_fallback.counts() == {}
         assert read_fallback.refusals()[case.surface]["count"] >= 1
-        assert f"{switch}=duckdb while KS_DUCKDB=off" in caplog.text
-        assert duckdb_switch.opened() == {}
+        assert f"{switch}=duckdb" not in caplog.text
+        assert "its engine failed" in caplog.text
+        assert "duckdb" not in read_fallback.refusals()
 
 
 # ─── Cohorts: a live ClickHouse or nothing ─────────────────────────────────
@@ -371,11 +411,9 @@ class TestCohorts:
     def test_under_off_a_failed_clickhouse_is_a_503(
         self, admin_client, stores, clickhouse, monkeypatch,
     ):
-        _mode(monkeypatch, "off")
         response = admin_client.get(COHORTS, params=COHORT_PARAMS)
         assert response.status_code == 503
         assert response.json()["surface"] == "cohorts"
-        assert read_fallback.counts() == {}
         assert read_fallback.refusals()["cohorts"]["count"] == 1
 
     @pytest.mark.parametrize("switch", [None, "duckdb", "clickhouse"],
@@ -383,13 +421,12 @@ class TestCohorts:
     def test_under_off_no_live_clickhouse_is_a_503(
         self, switch, admin_client, stores, monkeypatch,
     ):
-        """No Postgres body, so DuckDB is the only other engine — and under
-        off it may not answer, whatever the switch names."""
+        """No Postgres body: ClickHouse answers the cohorts or nobody does,
+        whatever the switch names."""
         if switch is None:
             monkeypatch.delenv("KS_READ_COHORTS", raising=False)
         else:
             monkeypatch.setenv("KS_READ_COHORTS", switch)
-        _mode(monkeypatch, "off")
         response = admin_client.get(COHORTS, params=COHORT_PARAMS)
         assert response.status_code == 503
         assert response.json()["surface"] == "cohorts"
@@ -400,7 +437,6 @@ class TestCohorts:
     ):
         clickhouse.side_effect = None
         clickhouse.return_value = []
-        _mode(monkeypatch, "off")
         response = admin_client.get(COHORTS, params=COHORT_PARAMS)
         assert response.status_code == 200, response.text
         assert clickhouse.await_count >= 1
@@ -416,6 +452,37 @@ NETWORK_ROUTES = {
         "streams a conversation with the Anthropic API for as long as it "
         "lasts; what the assistant makes of a refusal is DN-20c's"),
 }
+
+# The /traffic GET routes that read no store: the backfill's status is the
+# process's own dict, and the site's funnel asks Google Analytics
+# (`core/ga4.py`). Every other route of the tab refuses when Postgres does.
+TRAFFIC_READS_NOTHING = frozenset({"/api/traffic/backfill-utm/status", "/api/traffic/funnel"})
+
+# The dashboard's GET routes (step 14, S14-06): every one reads Postgres
+# alone through `core/repositories/revenue.py`'s readers, and refuses when it
+# fails.
+DASHBOARD_ROUTES = frozenset({
+    "/api/summary", "/api/revenue/trend", "/api/sales/by-source",
+    "/api/products/top", "/api/products/performance", "/api/brands/analytics",
+    "/api/categories/breakdown", "/api/returns", "/api/customers/insights",
+})
+
+# The third set's GET routes (step 14, S14-07), beside the goal routes the
+# sweep reads off the app by prefix: `/expenses` and `/inventory` by theirs,
+# the cohorts and the forecast by name, since they share none. Every one
+# reads Postgres alone (the cohorts ClickHouse alone) through its router,
+# and refuses when it fails.
+EXPENSES_PREFIX = "/api/expense"           # /api/expenses*, /api/expense-types
+INVENTORY_PREFIX = "/api/stocks/"
+COHORT_ROUTES = frozenset({
+    "/api/customers/cohort-retention", "/api/customers/cohort-ltv",
+    "/api/customers/purchase-timing", "/api/customers/at-risk",
+})
+FORECAST_ROUTES = frozenset({"/api/revenue/forecast"})
+# The training frame's own route: its reader has no fallback, so a failure is
+# its own error, a 500 counted nowhere (S14-07's deviation 7), never a
+# refusal. Named, and held to exist and not to refuse.
+TRAINING_FRAME_ROUTES = frozenset({"/api/revenue/forecast/evaluate"})
 
 # Example values for required parameters a route validates itself, where a
 # generic value would end the request with a 400 before anything is read.
@@ -486,31 +553,16 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", refuse)
 
 
-def _every_switch_on(monkeypatch) -> None:
-    """Every read switch the fallback walk finds, set to the engine it names."""
-    import importlib
-
-    from tests.unit.test_read_fallback_sites import read_switch_modules
-
-    for name in read_switch_modules():
-        module = importlib.import_module(f"core.{name}")
-        monkeypatch.setenv(module.ENV,
-                           "clickhouse" if name.startswith("ch_") else "postgres")
-    # `KS_GOALS_HISTORY` is not set: since chain 7b-4 the goal calculators'
-    # history is Silver's whatever it says (and refused unless unset or
-    # silver), read through the goal router, so it can be refused here.
-
-
 class TestEveryRoute:
-    """Every GET route under /api, read off the app rather than listed: under
-    `off`, any request that leaves a refusal counted answered 503 naming a
-    surface it refused. A handler anywhere between a route and a router that
-    turns the refusal into an answer — `except Exception: return {}` in a
-    service — is found here whether or not anybody thought to list the
-    route. The ways a gate refuses are swept apart: an engine that fails, a
-    switch with no address, and — under `KS_DUCKDB=off`, with
-    `KS_READ_FALLBACK` left at its default — every switch left at DuckDB
-    (stage 5, PR-8)."""
+    """Every GET route under /api, read off the app rather than listed: any
+    request that leaves a refusal counted answered 503 naming a surface it
+    refused. A handler anywhere between a route and a router that turns the
+    refusal into an answer — `except Exception: return {}` in a service — is
+    found here whether or not anybody thought to list the route. Swept three
+    ways: an engine that fails, no address for it, and an engine that fails
+    under `KS_DUCKDB=off` — web's state since step 14's S14-00 — with every
+    switch unset. (Until S14-16 the first two set every read switch on its
+    engine first; no switch is read since S14-07.)"""
 
     @pytest.mark.parametrize("state", ["engine_fails", "no_address",
                                        "switches_at_duckdb_off"])
@@ -522,19 +574,17 @@ class TestEveryRoute:
         from web.ratelimit import limiter
 
         if state == "switches_at_duckdb_off":
-            # Every switch unset, as `stores` leaves them: each names DuckDB.
-            request.getfixturevalue("duckdb_off")
-            _mode(monkeypatch, None)
+            # Every switch unset, as `stores` leaves them. KS_DUCKDB=off was
+            # set here, the way web read it, until step 14's S14-18 deleted
+            # the switch: nothing reads it since.
+            monkeypatch.setenv("KS_DUCKDB", "off")
+        elif state == "engine_fails":
+            monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
+            monkeypatch.setattr(ch_cohorts, "fetch",
+                                AsyncMock(side_effect=OSError("clickhouse down")))
         else:
-            _every_switch_on(monkeypatch)
-            if state == "engine_fails":
-                monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
-                monkeypatch.setattr(ch_cohorts, "fetch",
-                                    AsyncMock(side_effect=OSError("clickhouse down")))
-            else:
-                monkeypatch.delenv("KS_PG_DSN", raising=False)
-                monkeypatch.delenv("KS_CH_URL", raising=False)
-            _mode(monkeypatch, "off")
+            monkeypatch.delenv("KS_PG_DSN", raising=False)
+            monkeypatch.delenv("KS_CH_URL", raising=False)
 
         routes = swept_routes(app)
         refused_routes, violations = [], []
@@ -544,8 +594,6 @@ class TestEveryRoute:
             path, params = _request_for(endpoint)
             response = sweep_client.get(path, params=params)
             refused = read_fallback.refusals()
-            assert read_fallback.counts() == {}, (
-                f"{endpoint.path}: a fallback counted under off")
             if not refused:
                 continue
             refused_routes.append(endpoint.path)
@@ -570,15 +618,64 @@ class TestEveryRoute:
         # read a calculator's history on the store's own connection again
         # (the deleted bridge's way), and its route answers from DuckDB —
         # named here.
-        # `GET /api/goals` itself reads chain 7a's table first, which since
-        # S14-00 asks Postgres with no refusal (`CHAIN_FIRST`).
+        # `GET /api/goals` itself included since step 14's S14-07: it reads
+        # chain 7a's table first, which asked Postgres with no refusal from
+        # S14-00 (`CHAIN_FIRST`) until `_goals_run` refused it too.
         goal_routes = {e.path for e in routes if e.path.startswith("/api/goals")}
-        assert {"/api/goals/seasonality", "/api/goals/growth",
+        assert {"/api/goals", "/api/goals/seasonality", "/api/goals/growth",
                 "/api/goals/weekly-patterns", "/api/goals/smart",
-                "/api/goals/forecast"} <= goal_routes, goal_routes
-        goal_routes -= {"/api/goals"}
+                "/api/goals/forecast", "/api/goals/history"} <= goal_routes, goal_routes
         assert goal_routes <= set(refused_routes), (
             f"goal routes not refused: {sorted(goal_routes - set(refused_routes))}")
+        # Every /traffic route that reads refuses too, in every state: since
+        # S14-05 the tab reads Postgres alone, whatever its switch says, and
+        # the pool raises here. Read off the app by prefix, so a route added
+        # to the tab is held the day it lands — the pixel-only breakdown was
+        # one. What this adds to the violations above: a reader calling
+        # Postgres round the router counts no refusal, so its uncounted 500
+        # was invisible there. Mutation: `await pg_traffic_read.fetch(...)`
+        # in `get_traffic_pixel_only` with no `try`.
+        traffic_routes = {e.path for e in routes if e.path.startswith("/api/traffic/")}
+        assert TRAFFIC_READS_NOTHING <= traffic_routes, "a named route is gone"
+        assert not TRAFFIC_READS_NOTHING & set(refused_routes), (
+            "a route said to read nothing was refused")
+        traffic_routes -= TRAFFIC_READS_NOTHING
+        assert len(traffic_routes) >= 7, traffic_routes
+        assert traffic_routes <= set(refused_routes), (
+            f"traffic routes not refused: {sorted(traffic_routes - set(refused_routes))}")
+        # The dashboard's routes the same way, since S14-06 put them on
+        # Postgres alone. Listed, because the dashboard shares no prefix; each
+        # must be on the app. `/api/managers` is not among them: it reads
+        # chain 5's classification first, which raises rather than refuses
+        # (`CHAIN_FIRST`). Mutation: `await pg_dashboard_read.fetch(...)` in
+        # `get_sales_by_source` with no `try`.
+        assert DASHBOARD_ROUTES <= {e.path for e in routes}, (
+            f"a named route is gone: {sorted(DASHBOARD_ROUTES - {e.path for e in routes})}")
+        assert DASHBOARD_ROUTES <= set(refused_routes), (
+            f"dashboard routes not refused: {sorted(DASHBOARD_ROUTES - set(refused_routes))}")
+        # The third set's the same way, since S14-07 left each with one
+        # engine: `/expenses` and `/inventory` read off the app by prefix,
+        # so a route added to either is held the day it lands; the cohorts
+        # and the forecast by name. What this adds to the violations above,
+        # as for /traffic: a reader calling its engine round the router
+        # counts no refusal, so its uncounted 500 was invisible there.
+        # Mutations: `await pg_inventory_read.fetch_many(...)` in
+        # `get_stock_summary`, `await ch_cohorts.fetch(...)` in
+        # `get_cohort_ltv`, each with no `try`. (One in
+        # `get_cohort_retention` passes here: the route's default asks the
+        # enhanced form. `TestCohorts` and the walk in
+        # `test_tab_routers_postgres_only.py` see that one.)
+        on_app = {e.path for e in routes}
+        third = {p for p in on_app if p.startswith((EXPENSES_PREFIX, INVENTORY_PREFIX))}
+        assert len({p for p in third if p.startswith(EXPENSES_PREFIX)}) >= 4, third
+        assert len({p for p in third if p.startswith(INVENTORY_PREFIX)}) >= 10, third
+        named = COHORT_ROUTES | FORECAST_ROUTES | TRAINING_FRAME_ROUTES
+        assert named <= on_app, f"a named route is gone: {sorted(named - on_app)}"
+        third |= COHORT_ROUTES | FORECAST_ROUTES
+        assert third <= set(refused_routes), (
+            f"S14-07's routes not refused: {sorted(third - set(refused_routes))}")
+        assert not TRAINING_FRAME_ROUTES & set(refused_routes), (
+            "the training frame's route was refused: its reader has no fallback")
 
     def test_the_sweep_is_read_off_the_app(self):
         """Every GET route but the named network ones — and a route added

@@ -106,3 +106,33 @@ export const Sortable: Story = {
   args: { children: null },
   render: () => <SortableDemo />,
 }
+
+/** A total row the others are read against: `emphasis`. */
+export const WithTotalRow: Story = {
+  args: { children: null },
+  render: () => (
+    <DataTable variant="feature">
+      <thead>
+        <Tr header>
+          <Th>Brand</Th>
+          <Th align="right">Qty</Th>
+          <Th align="right">Revenue</Th>
+        </Tr>
+      </thead>
+      <tbody>
+        <Tr emphasis hover={false}>
+          <Td bold>All brands</Td>
+          <Td align="right" tabular bold>{ROWS.reduce((s, r) => s + r.qty, 0)}</Td>
+          <Td align="right" tabular bold>₴{ROWS.reduce((s, r) => s + r.revenue, 0).toLocaleString('uk-UA')}</Td>
+        </Tr>
+        {ROWS.map((r) => (
+          <Tr key={r.name}>
+            <Td>{r.brand}</Td>
+            <Td align="right" tabular>{r.qty}</Td>
+            <Td align="right" tabular>₴{r.revenue.toLocaleString('uk-UA')}</Td>
+          </Tr>
+        ))}
+      </tbody>
+    </DataTable>
+  ),
+}

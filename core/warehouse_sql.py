@@ -1,12 +1,12 @@
 """The warehouse rule every engine renders: Silver's projection and Gold's measures.
 
-One text, three engines. `silver_select_sql` and `silver_pass2_sql` are what
-Postgres runs to derive `silver.orders` (`core.pg_silver`), what DuckDB ran to
-derive `silver_orders`, and `silver_recompute_ctes` is what the row-values
-checks recompute it with (`core.pg_warehouse_dq`, `core.data_quality`).
-`GOLD_MEASURES` is rendered verbatim by Postgres (`core.pg_gold`), by
-ClickHouse (`core.ch_silver.derive_gold_sql`) and by DuckDB
-(`core.duckdb_store.GOLD_REVENUE_SELECT_SQL`).
+One text, and once three engines. `silver_select_sql` and `silver_pass2_sql`
+are what Postgres runs to derive `silver.orders` (`core.pg_silver`) — and what
+DuckDB ran to derive `silver_orders`, until step 14's S14-15 — and
+`silver_recompute_ctes` is what the row-values checks recompute it with
+(`core.pg_warehouse_dq`). `GOLD_MEASURES` is rendered verbatim by Postgres
+(`core.pg_gold`) and by ClickHouse (`core.ch_silver.derive_gold_sql`); DuckDB
+rendered it into `core.duckdb_store.GOLD_REVENUE_SELECT_SQL` until S14-15.
 
 They lived in `core/duckdb_store.py` until step 14's S14-01, so every
 Postgres derivation tick imported the DuckDB store lazily — and with it the
@@ -15,12 +15,16 @@ Postgres derivation tick imported the DuckDB store lazily — and with it the
 and `tests/unit/test_warehouse_sql.py` holds every rendering to the bytes the
 code before the move produced.
 
-The defaults are still DuckDB (`dialect=None` → `core.sql_dialect.DUCKDB`):
-they change when that dialect goes, in S14-07. Nothing here imports `duckdb`.
+Every builder takes its dialect since step 14's S14-07, when the default —
+`core.sql_dialect.DUCKDB` — stopped being one. The DuckDB renderings that
+named `DUCKDB` at the call (the store's own rebuild, its row-values check, the
+DuckDB half of `POST /api/warehouse/rebuild-silver`) went in S14-15 and S14-18;
+nothing in `core/`, `web/` or `bot/` renders `DUCKDB` since. Nothing here
+imports `duckdb`.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict
 
 from core.duckdb_constants import (
     B2B_MANAGER_ID, EXHIBITION_SOURCE_ID, RETAIL_MANAGER_IDS, REVENUE_SOURCE_IDS,
@@ -45,7 +49,7 @@ if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cost
 # copy appears.
 
 
-def silver_sales_type_case(dialect: "Optional[Dialect]" = None) -> str:
+def silver_sales_type_case(dialect: "Dialect") -> str:
     """`sales_type`, the one place it is decided.
 
     The exhibition branch is first on purpose: that fair was staffed by a
@@ -60,9 +64,6 @@ def silver_sales_type_case(dialect: "Optional[Dialect]" = None) -> str:
     first for a manager with no interval, the second for a database whose
     `managers` table has not synced yet.
     """
-    from core.sql_dialect import DUCKDB
-
-    dialect = dialect or DUCKDB
     classifications = dialect.classifications
     managers = dialect.managers
     manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
@@ -88,17 +89,14 @@ def silver_sales_type_case(dialect: "Optional[Dialect]" = None) -> str:
         END"""
 
 
-def silver_select_sql(dialect: "Optional[Dialect]" = None) -> str:
+def silver_select_sql(dialect: "Dialect") -> str:
     """Every column of a Silver row, selected `FROM <dialect.orders> o`.
 
-    One text, two engines. The default is DuckDB, so every existing caller is
-    unchanged; `core.sql_dialect.POSTGRES` renders the same rule against
-    `bronze.orders`. See that module for the two — and only two — places the
-    dialects differ.
+    `core.sql_dialect.POSTGRES` renders the rule against `bronze.orders`;
+    `DUCKDB` rendered it against DuckDB's `orders` until step 14 (its callers
+    went in S14-15 and S14-18). See that module for the two — and only two —
+    places the dialects differ.
     """
-    from core.sql_dialect import DUCKDB
-
-    dialect = dialect or DUCKDB
     # KeyCRM's own grouping decides when we have it; the id list covers rows
     # synced before the column existed. Verified equal for every status the
     # warehouse holds — see core/models.py.
@@ -128,15 +126,13 @@ def silver_select_sql(dialect: "Optional[Dialect]" = None) -> str:
     """
 
 
-def silver_pass2_sql(buyer_filter: str = "", dialect: "Optional[Dialect]" = None) -> str:
+def silver_pass2_sql(buyer_filter: str = "", *, dialect: "Dialect") -> str:
     """Recompute `is_new_customer` from each buyer's MIN(order_date).
 
     Empty `buyer_filter` runs on every Silver row (full mode); otherwise it is
-    scoped to the affected buyers, keeping the write set bounded.
+    scoped to the affected buyers, keeping the write set bounded. `dialect`
+    is keyword-only: every caller already named it so.
     """
-    from core.sql_dialect import DUCKDB
-
-    dialect = dialect or DUCKDB
     # Aliased on purpose. PostgreSQL cannot qualify the UPDATE target by its
     # schema in SET/WHERE — `silver.orders.buyer_id` is read as a column of a
     # column — so both dialects address the target through one short alias and
@@ -175,7 +171,7 @@ def silver_pass2_sql(buyer_filter: str = "", dialect: "Optional[Dialect]" = None
     """
 
 
-def silver_recompute_ctes(dialect: "Optional[Dialect]" = None) -> str:
+def silver_recompute_ctes(dialect: "Dialect") -> str:
     """Every Silver row as pass 1 then pass 2 would write it — as three CTEs,
     `pass1`, `baseline` and `recomputed`, for a caller that writes
     `WITH {this} SELECT ... FROM recomputed r`.
@@ -194,9 +190,6 @@ def silver_recompute_ctes(dialect: "Optional[Dialect]" = None) -> str:
     semantics for a buyer with no qualifying order — the real UPDATE joins
     those rows away and leaves pass 1's `FALSE` / `NULL` standing.
     """
-    from core.sql_dialect import DUCKDB
-
-    dialect = dialect or DUCKDB
     return f"""
         pass1 AS (
             SELECT {silver_select_sql(dialect)} FROM {dialect.orders} o
