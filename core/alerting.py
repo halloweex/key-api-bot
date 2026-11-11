@@ -406,11 +406,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_silver_unreachable": _c("ClickHouse answers again"),
     "ch_silver_sync_failed": _c("the next hourly ship succeeds"),
     "ch_silver_roundtrip": _c("the copy reads back equal"),
-    "ch_gold_unreachable": _c("ClickHouse answers again"),
-    "ch_gold_ship_failed": _c("the next hourly ship succeeds"),
-    "ch_gold_row_missing": _c("the next ship carries the row"),
-    "ch_gold_row_extra": _c("the next ship drops the row"),
-    "ch_gold_value_mismatch": _c("the engines' aggregations agree again"),
+    # Gold's copy mode (step 4) filed five more until the owner's decision
+    # O11 (a) (2026-11-11) deleted it from `core/ch_gold.py`: step 5's
+    # derivation had superseded it and nothing ran it. `ch_gold_unreachable`,
+    # `ch_gold_ship_failed`, `ch_gold_row_missing`, `ch_gold_row_extra` and
+    # `ch_gold_value_mismatch` are not reused.
     "ch_engines_gold_missing": _c("both engines hold the cell"),
     "ch_engines_gold_extra": _c("the extra cell disappears on re-derivation"),
     "ch_engines_gold_mismatch": _c("the engines' aggregations agree again"),
