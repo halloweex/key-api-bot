@@ -355,7 +355,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # deleted with it in S14-12. None may be reused while an image from before
     # step 14 is the rollback target (rule 15).
     "gold_rollup_mismatch": _c("fine rows add up to the roll-up again"),
-    "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
+    # `customer_profile_mismatch`: `reconcile_customer_profile`'s, deleted with
+    # the витрина's rebuild by the owner's decision O6 (2026-11-11). Never
+    # reused (`tests/unit/test_customer_profile_frozen.py`).
 
     # ── data-quality findings: Postgres twins of the Silver checks ──
     # Chain 2 step 8a. They ran behind KS_DQ_PG_WAREHOUSE until step 14's

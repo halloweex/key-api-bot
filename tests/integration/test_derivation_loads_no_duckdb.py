@@ -6,8 +6,8 @@ driver and pandas — measured in a fresh interpreter on S14-00's tree, the
 stack was `_run_pg_derivation → _derive_and_journal_pg_layers → rebuild_silver
 → pass1_sql`. The unit test beside the move (`tests/unit/test_warehouse_sql.py`)
 renders every statement; this runs the tick itself — the signal read, Silver,
-Gold, the customer profile, the validation, the journal row and the UTM parse
-— against a real Postgres, in a fresh interpreter, and looks at what it
+Gold, the validation, the journal row and the UTM parse — against a real
+Postgres, in a fresh interpreter, and looks at what it
 loaded.
 
 It writes what a tick writes, so it resets what

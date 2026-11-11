@@ -515,7 +515,7 @@ class TestHealthPublishesTheCount:
         assert "_signal_reads" in called
 
 
-_STEPS = ("silver", "gold", "profile", "validate", "complete", "record_run")
+_STEPS = ("silver", "gold", "validate", "complete", "record_run")
 
 
 def _derive(job, *, reads=((3, 2, None),), journal_attempt=None, verdict=None,
@@ -524,7 +524,7 @@ def _derive(job, *, reads=((3, 2, None),), journal_attempt=None, verdict=None,
     `raising` names the steps that raise; `reads` are what successive signal
     reads return or raise. Returns the result and the mocks."""
     values = {"silver": {"rows": 1}, "gold": {"rows": 1, "cells": 1},
-              "profile": {"rows": 1}, "validate": verdict or _verdict(),
+              "validate": verdict or _verdict(),
               "complete": None, "record_run": 1}
     mocks = {name: (AsyncMock(side_effect=RuntimeError(f"{name} boom")) if name in raising
                     else AsyncMock(return_value=values[name])) for name in _STEPS}
@@ -540,7 +540,6 @@ def _derive(job, *, reads=((3, 2, None),), journal_attempt=None, verdict=None,
          patch("core.pg_utm_parse.parse_incremental_locked", mocks["utm"]), \
          patch("core.pg_silver.rebuild_silver", mocks["silver"]), \
          patch("core.pg_gold.rebuild_gold", mocks["gold"]), \
-         patch("core.pg_vitrina.rebuild_customer_profile", mocks["profile"]), \
          patch("core.pg_landing._record_failure", mocks["record_failure"]), \
          patch.object(pg_derivation, "read_owed", AsyncMock(side_effect=list(reads) * 2)), \
          patch.object(pg_derivation, "last_attempt_at", AsyncMock(return_value=journal_attempt)), \
@@ -607,15 +606,26 @@ class TestTheFloorOutlivesAnUnwritableJournal:
 
 
 class TestEveryStageIsRecorded:
-    """Silver and Gold were recorded against their watermarks; the profile and
-    the run's tail were not, so a failure there left every row reading clean."""
+    """Silver and Gold were recorded against their watermarks; the run's tail
+    was not, so a failure there left every row reading clean. (The customer
+    profile was a stage of its own until the owner's decision O6.)"""
 
-    def test_the_profile_raising_is_recorded_against_its_table(self, job):
-        from core.pg_vitrina import PROFILE_TABLE
+    def test_the_run_has_no_profile_stage(self, job):
+        """O6 (2026-11-11): the derivation rebuilds Silver and Gold and goes
+        straight to the tail; nothing counts or journals profile rows.
+        Mutation: put `rebuild_customer_profile` back between Gold and the
+        validation."""
+        from core.scheduler import BackgroundScheduler
 
-        result, mocks = _derive(job, raising=("profile",))
-        assert result["stage"] == PROFILE_TABLE == "app.customer_profile"
-        assert _recorded(mocks) == [PROFILE_TABLE]
+        result, mocks = _derive(job)
+        assert result["status"] == "success" and "profile_rows" not in result
+        counts = mocks["record_run"].await_args.kwargs["counts"]
+        assert set(counts) == {"silver_rows", "gold_rows", "gold_cells"}
+        source = inspect.getsource(BackgroundScheduler._derive_and_journal_pg_layers)
+        tree = ast.parse(textwrap.dedent(source))
+        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                    for a in n.names}
+        assert not {n for n in imported if "profile" in n.lower()}, imported
 
     @pytest.mark.parametrize("step", ["validate", "complete", "record_run"])
     def test_the_tail_raising_is_recorded_against_the_journal(self, job, step):
@@ -680,21 +690,3 @@ class TestClearingTheTail:
         the next completed run clears."""
         conn = _Conn(error=ConnectionError("gone"))
         assert asyncio.run(pg_derivation.clear_tail_failures(conn)) is False
-
-
-class TestTheProfileStampsItsWatermark:
-    def test_in_the_transaction_that_rebuilds_it(self):
-        """A failure is recorded against `app.customer_profile`; only a success
-        stamped here makes `failures_since_ok` mean "still failing"."""
-        from core.pg_vitrina import rebuild_customer_profile
-
-        tree = ast.parse(textwrap.dedent(inspect.getsource(rebuild_customer_profile)))
-        transaction = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncWith)
-                           and any(isinstance(i.context_expr, ast.Call)
-                                   and getattr(i.context_expr.func, "attr", "") == "transaction"
-                                   for i in n.items))
-        stamped = [n for n in ast.walk(transaction) if isinstance(n, ast.Call)
-                   and getattr(n.func, "attr", "") == "execute" and n.args
-                   and isinstance(n.args[0], ast.Name) and n.args[0].id == "_WATERMARK_OK"]
-        assert stamped, "rebuild_customer_profile does not stamp its watermark in its transaction"
-        assert [a.id for a in stamped[0].args[1:2]] == ["PROFILE_TABLE"]

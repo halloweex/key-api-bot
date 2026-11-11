@@ -1,9 +1,10 @@
 """The Postgres derivation on its own signal, against a real Postgres.
 
 Chain 2, steps 3–6 under `KS_PG_DERIVE=own`: landing writers raise the signal,
-the job rebuilds Silver, Gold and the profile when something is owed, validates
-what it built, journals every attempt, and on a failure leaves the rebuild owed
-and says so.
+the job rebuilds Silver and Gold when something is owed, validates what it
+built, journals every attempt, and on a failure leaves the rebuild owed and
+says so. (It rebuilt `app.customer_profile` too, between Gold and the
+validation, until the owner's decision O6 of 2026-11-11.)
 """
 from __future__ import annotations
 
@@ -194,33 +195,51 @@ async def _watermark(pool, table):
             " FROM meta.mirror_state WHERE table_name = $1", table)
 
 
-class TestEveryStageLeavesAWatermark:
-    """DN-05a: Silver and Gold recorded their failures and the profile and the
-    run's tail did not, so a failure there left every row in meta.mirror_state
-    reading clean. Each is recorded now, and each is cleared by the success
-    that follows it — a count nothing resets says only that it happened once."""
+class TestTheProfileIsLeftAlone:
+    """The owner's decision O6 (2026-11-11): nothing read `app.customer_profile`,
+    and every derivation rebuilt it between Gold and the validation — a tenth
+    of the run's row writes, and a failure there skipped the validation of
+    Silver and Gold and paged `derive_failed`. The derivation no longer
+    touches it: the table keeps its last contents, its watermark row stays as
+    it was, and the journal's `profile_rows` is NULL."""
+
+    SENTINEL = 970999
 
     @pytest.mark.asyncio
-    async def test_the_profile_raising_is_recorded_and_the_next_rebuild_clears_it(self, own):
-        pool, scheduler, raise_alert = own
-        with patch("core.pg_vitrina.rebuild_customer_profile",
-                   AsyncMock(side_effect=RuntimeError("profile boom"))):
-            result = await scheduler._run_pg_derivation()
+    async def test_a_run_keeps_the_tables_last_contents_and_journals_null(self, own):
+        from core.pg_landing import write_orders
 
-        assert result["status"] == "error" and result["stage"] == "app.customer_profile"
-        state = await _watermark(pool, "app.customer_profile")
-        assert state["failures_since_ok"] == 1 and "profile boom" in state["last_error"]
-        assert state["last_ok_at"] is None
-        assert await _signal(pool) == (1, 0), "a failed rebuild settled the debt"
-        assert _alerted(raise_alert) == ["warehouse_pg:derive_failed"]
+        pool, scheduler, _a = own
+        await write_orders([_order(IDS[0], total=120)], [], replace_products=False)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app.customer_profile (buyer_id, first_order_date,"
+                " last_order_date, orders_count, ltv, avg_order, returns_count,"
+                " city, refreshed_at) VALUES ($1, '2026-01-02', '2026-03-04', 7,"
+                " 700, 100, 1, 'Kyiv', '2026-11-10T00:00:00Z')", self.SENTINEL)
+            before = await conn.fetch("SELECT * FROM app.customer_profile ORDER BY buyer_id")
 
         result = await scheduler._run_pg_derivation()
 
-        assert result["status"] == "success", result
-        state = await _watermark(pool, "app.customer_profile")
-        assert state["failures_since_ok"] == 0 and state["last_error"] is None
-        assert state["last_ok_at"] == state["last_attempted_at"]
-        assert state["last_rows"] == result["profile_rows"]
+        assert result["status"] == "success" and result["validation_passed"] is True, result
+        assert "profile_rows" not in result
+        async with pool.acquire() as conn:
+            after = await conn.fetch("SELECT * FROM app.customer_profile ORDER BY buyer_id")
+        # Mutation: put the rebuild back between Gold and the validation — it
+        # empties the table first, and the sentinel's buyer has no order.
+        assert [dict(r) for r in after] == [dict(r) for r in before]
+        assert await _watermark(pool, "app.customer_profile") is None
+        runs = await _runs(pool)
+        assert len(runs) == 1 and runs[0]["profile_rows"] is None
+        assert runs[0]["silver_rows"] >= 1 and runs[0]["gold_rows"] >= 1
+
+
+class TestEveryStageLeavesAWatermark:
+    """DN-05a: Silver and Gold recorded their failures and the run's tail did
+    not, so a failure there left every row in meta.mirror_state reading clean.
+    Each is recorded now, and each is cleared by the success that follows it —
+    a count nothing resets says only that it happened once. (The profile's
+    stage was recorded the same way until O6 removed it.)"""
 
     @pytest.mark.asyncio
     async def test_the_tail_raising_is_recorded_against_the_journal_and_cleared(self, own):
@@ -301,17 +320,17 @@ class TestEveryStageLeavesAWatermark:
 class TestValidation:
     @staticmethod
     def _tamper(sql):
-        """Run the real profile rebuild, then damage Gold before validation."""
-        from core import pg_vitrina
+        """Run the real Gold rebuild, then damage Gold before validation."""
+        from core import pg_gold
 
-        real = pg_vitrina.rebuild_customer_profile
+        real = pg_gold.rebuild_gold
 
         async def hook(pool=None):
             out = await real(pool)
             async with pool.acquire() as conn:
                 await conn.execute(sql)
             return out
-        return patch("core.pg_vitrina.rebuild_customer_profile", hook)
+        return patch("core.pg_gold.rebuild_gold", hook)
 
     @pytest.mark.asyncio
     async def test_a_missing_roll_up_cell_fails_validation(self, own):
@@ -403,18 +422,18 @@ class TestADroppedMarkHeals:
     async def test_a_drop_recorded_during_the_run_is_not(self, own):
         """Its writer may commit after Silver's snapshot, so this rebuild
         cannot vouch for its rows; the next validated run will."""
-        from core import pg_vitrina
+        from core import pg_gold
         from core.pg_landing import _record_failure
 
         pool, scheduler, _a = own
         await self._write(pool)
-        real = pg_vitrina.rebuild_customer_profile
+        real = pg_gold.rebuild_gold
 
         async def drop_while_running(pool=None):
             await _record_failure("meta.derivation_signal", "LockNotAvailableError: mid-run")
             return await real(pool)
 
-        with patch("core.pg_vitrina.rebuild_customer_profile", drop_while_running):
+        with patch("core.pg_gold.rebuild_gold", drop_while_running):
             result = await scheduler._run_pg_derivation()
 
         assert result["status"] == "success" and result["validation_passed"] is True, result

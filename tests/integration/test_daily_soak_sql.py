@@ -199,7 +199,8 @@ class TestTheFiles:
         sql = _uncommented((SQL_DIR / "09_d8_mirror_landing.sql").read_text(encoding="utf-8"))
         block = re.search(r"derived AS \((.*?)\n\),", sql, flags=re.S).group(1)
         named = set(re.findall(r"'(\w+)'", block.split("i.check_name IN", 1)[1]))
-        assert named == {"gold_rollup_mismatch", "customer_profile_mismatch"}
+        # `customer_profile_mismatch` went with the check that filed it (O6).
+        assert named == {"gold_rollup_mismatch"}
         assert named <= set(REGISTRY)
 
     def test_d9s_watched_series_are_registered_conditions(self):

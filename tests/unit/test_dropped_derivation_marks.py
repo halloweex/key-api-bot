@@ -92,8 +92,6 @@ class TestTheJobHealsOnlyAValidatedRun:
         try:
             with patch("core.pg_silver.rebuild_silver", AsyncMock(return_value={"rows": 1})), \
                  patch("core.pg_gold.rebuild_gold", gold), \
-                 patch("core.pg_vitrina.rebuild_customer_profile",
-                       AsyncMock(return_value={"rows": 1})), \
                  patch("core.pg_landing._record_failure", AsyncMock()), \
                  patch.object(pg_derivation, "read_owed", AsyncMock(return_value=(3, 2, None))), \
                  patch.object(pg_derivation, "validate", AsyncMock(return_value=_validation(passed))), \

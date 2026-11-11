@@ -103,7 +103,11 @@ def signal_unreadable_ticks() -> int:
 
 # Every function that writes a table the derivation reads, and so must raise
 # the signal in its own transaction. Silver reads `bronze.orders` and the
-# manager classification; the customer profile reads `bronze.buyers`. A test
+# manager classification. `bronze.buyers` was read by the customer profile,
+# which the derivation stopped rebuilding by the owner's decision O6
+# (2026-11-11); its writer still marks, so a buyer write still owes a rebuild
+# — dropping that mark changes chain 4's writer and when the derivation runs,
+# which O6 did not decide. A test
 # walks the code for writers of those tables and fails on one not listed here,
 # and fails on a listed one that does not call `mark`. The buyers'
 # writer is `core.pg_buyer_rows`, which chain 4's writer runs (the landing
@@ -189,8 +193,8 @@ async def read_owed(conn, layer: str = LAYER) -> Tuple[int, int, Optional[dateti
 
     The derivation reads it on a connection of its own, autocommit, before the
     rebuild begins (`_derive_and_journal_pg_layers` in `core/scheduler.py`),
-    not inside the rebuild's transaction: Silver, Gold and the profile each
-    take their snapshot later, on connections of their own. That is the safe
+    not inside the rebuild's transaction: Silver and Gold each take their
+    snapshot later, on connections of their own. That is the safe
     direction. Every mark counted in `requested` committed with its rows
     before the read, so the rebuild sees them; a mark that commits after the
     read may be rebuilt as well, but it is not in `seen`, so `complete` leaves
@@ -253,8 +257,8 @@ async def heal_dropped_marks(conn, started: datetime) -> bool:
     WHY A DROP RECORDED BEFORE `started` IS COVERED. `mark` records the drop on a
     second connection while the writer's transaction is still open, and the
     writer commits one statement later — so the rows a dropped mark stood for
-    become visible just *after* `last_attempted_at`, not at it. Silver, Gold and
-    the profile each read bronze in a transaction opened after `started`, so
+    become visible just *after* `last_attempted_at`, not at it. Silver and Gold
+    each read bronze in a transaction opened after `started`, so
     they see every writer that committed before `started`:
 
     - the writers that hold `_heavy_job_lock` across their write — the sync
@@ -288,7 +292,7 @@ async def heal_dropped_marks(conn, started: datetime) -> bool:
 
 # ─── The run's own tail, as a row in meta.mirror_state (DN-05a) ─────────────
 #
-# Silver, Gold and the profile each stamp their watermark in the transaction
+# Silver and Gold each stamp their watermark in the transaction
 # that rebuilds them, so a failure there is recorded against the table that
 # raised and the next rebuild clears it. The tail of a run — validate, settle
 # the debt, write the journal row — has no table of its own to stamp, and until
@@ -302,7 +306,7 @@ async def heal_dropped_marks(conn, started: datetime) -> bool:
 # verdict of "not passed" is not a failure of the tail — it is recorded in the
 # journal and alerted as `warehouse_pg:validation_failed`.
 #
-# Nothing reads this row yet, nor the profile's — a deliberate follow-up, and
+# Nothing reads this row yet — a deliberate follow-up, and
 # `BackgroundScheduler._derive_and_journal_pg_layers` says why.
 RUNS_TABLE = "meta.derivation_runs"
 

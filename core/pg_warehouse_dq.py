@@ -695,7 +695,7 @@ def _row_values_sql() -> str:
     takes its snapshot, and committed with the rows or not at all. That is the
     one record of a rebuild under **both** modes — `KS_PG_DERIVE=piggyback`,
     production's, rebuilds on DuckDB's tick and writes no journal row, and an
-    own-mode run whose Gold or profile failed after Silver committed journals
+    own-mode run whose Gold failed after Silver committed journals
     an error over a Silver that was rebuilt. The journal's last error-free
     `started_at` is the other stamp, the one the spec named; it precedes its
     own run's watermark, so where both exist the watermark decides.
