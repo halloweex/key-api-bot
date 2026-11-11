@@ -37,11 +37,20 @@ spec and two critics). What this module takes from it:
   `pg_<group>_unwatched`; two or more, or the whole snapshot, file one
   `pg_warehouse_unwatched`. `data_quality.unverified_conditions` holds their
   conditions firing rather than announcing a recovery nobody verified.
-- **One snapshot under PG_LAYER_LOCK, with a hold budget.** Every TRUNCATE of
-  silver.orders and silver.order_utm happens under that lock, so a REPEATABLE
-  READ snapshot alone could still catch an emptied Silver. The derivation and
-  the DuckDB tick wait for this lock while holding the heavy lock the sync needs,
-  so the hold is capped at HOLD_BUDGET_S whatever Postgres is doing.
+- **One snapshot under PG_LAYER_LOCK, with a hold budget.** Every rebuild of
+  silver.orders and silver.order_utm in this process happens under that lock.
+  It was taken for a TRUNCATE: Silver's rebuild cleared its table with one
+  until the review's A23, a TRUNCATE is not MVCC-safe, and a REPEATABLE READ
+  snapshot alone could read the table emptied. No clear in this process is a
+  TRUNCATE any more: Silver's rebuild and silver.order_utm's full parse each
+  DELETE inside the transaction that refills the table (`pg_silver` and
+  `pg_utm_parse` say why), so a snapshot reads each table whole, as it was
+  before a replacement or after it. What the lock still gives is a snapshot
+  taken between derivations, never inside one: a derivation commits Silver,
+  Gold and its journal row in separate transactions, and the twins read
+  Silver beside that journal. The derivation waits for this lock while
+  holding the heavy lock the sync needs, so the hold is capped at
+  HOLD_BUDGET_S whatever Postgres is doing.
 - **Line items compared, not repeated** (until S14-14). While DuckDB's own
   headline and goods checks looked, the twins did not file a second standing
   row each; they filed `pg_line_items_disagree` when the engines differed by
@@ -57,8 +66,9 @@ It stands alone: it compares Postgres with Postgres, not with DuckDB, because
 it is the check that has to keep working once DuckDB stops deriving.
 
 - **One recompute text for both engines.** `silver_recompute_ctes` renders pass
-  1 and a SELECT form of pass 2; DuckDB's `silver_row_values` reads the same
-  function, and the tolerances are its `_SILVER_ROW_COLUMNS`.
+  1 and a SELECT form of pass 2; DuckDB's `silver_row_values` read the same
+  function, and the tolerances are its `_SILVER_ROW_COLUMNS`. Since the
+  review's A23 it is also what the rebuild inserts (`pg_silver.insert_sql`).
 - **A row is judged by when its inputs last changed**, not by its own stamp
   alone: `bronze.orders.mirrored_at`; the classification's `mirrored_at` when
   `sales_type` is what moved; and, when a pass-2 column moved, the latest
@@ -698,7 +708,7 @@ def _row_values_sql() -> str:
     takes its snapshot, and committed with the rows or not at all. That is the
     one record of a rebuild under **both** modes — `KS_PG_DERIVE=piggyback`,
     production's, rebuilds on DuckDB's tick and writes no journal row, and an
-    own-mode run whose Gold or profile failed after Silver committed journals
+    own-mode run whose Gold failed after Silver committed journals
     an error over a Silver that was rebuilt. The journal's last error-free
     `started_at` is the other stamp, the one the spec named; it precedes its
     own run's watermark, so where both exist the watermark decides.

@@ -20,6 +20,9 @@
 -- deleted the comparison against DuckDB that filed it, and a test holds every
 -- name listed here to the registry.
 --
+-- `customer_profile_mismatch` was watched too, until the owner's decision O6
+-- (2026-11-11) deleted the check that filed it with the витрина's rebuild.
+--
 -- `derivation_mode_invalid` was watched too, until step 14's S14-15 deleted
 -- it with KS_PG_DERIVE: a step-14 web cannot fire it, and a series still
 -- `firing` under it is history an image from before step 14 left.
@@ -36,7 +39,7 @@ watched AS (
                               'mirror_failing:silver.orders', 'mirror_failing:gold.daily_revenue',
                               'mirror_block_missing',
                               'integrity_check_raised',
-                              'gold_rollup_mismatch', 'customer_profile_mismatch',
+                              'gold_rollup_mismatch',
                               'dq_stale:mirror_landing')
 ),
 agg AS (

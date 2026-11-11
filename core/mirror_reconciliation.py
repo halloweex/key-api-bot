@@ -20,9 +20,10 @@ that still has a copy:
 * `reconcile_bot_state` — `data/bot.db` against its copy in `app.*`, while the
   bot still writes SQLite.
 
-The job adds `reconcile_customer_profile` (`core.pg_vitrina`) and the
-ClickHouse comparisons (`core.ch_silver`, `core.ch_history`). Report only:
-nothing here repairs anything.
+The job adds the ClickHouse comparisons (`core.ch_silver`,
+`core.ch_history`). Report only: nothing here repairs anything. (It added
+`reconcile_customer_profile` too, until the owner's decision O6 of
+2026-11-11 stopped rebuilding and checking `app.customer_profile`.)
 
 The catalogue specs and `fetch_duckdb_rows` stayed for one more reader,
 `core.pg_landing.carry_retired_catalogue`, until step 14's S14-13 deleted it
@@ -953,7 +954,7 @@ OPERATIONAL_GRACE_MINUTES = 90
 # before it, a scheduler that has stopped runs nothing — so
 # `failures_since_ok` stays at zero, only `last_ok_at` ages, and an age names
 # no order. (The parse runs after the derivation whatever the derivation did,
-# so a Gold or profile fault does not stop it.) The watermark is also the wrong
+# so a Gold fault does not stop it.) The watermark is also the wrong
 # shape: the incremental parse stamps it on every success, zero rows included,
 # so "the parser ran since the order arrived" does not mean "it read that
 # order". (Until step 14's S14-15 it was the ship's watermark, the copy out of

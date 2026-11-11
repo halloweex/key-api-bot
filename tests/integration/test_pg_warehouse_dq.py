@@ -405,10 +405,12 @@ class TestTheRowValues:
 
     @pytest.mark.asyncio
     async def test_every_branch_of_the_rule_recomputes_to_what_the_rebuild_wrote(self, rv):
-        """The recompute's pass 2 is a SELECT, the rebuild's an UPDATE
-        (`silver_pass2_sql`): two statements of one rule, and nothing ties them
-        but a fixture on which both run. So this one takes the branches that
-        decide pass 2's inputs — each sales_type, a return by group and by the
+        """The recompute and the rebuild are one text since the review's A23
+        (`silver_recompute_ctes`, inserted by `pg_silver.insert_sql`); until
+        then the rebuild's pass 2 was an UPDATE (`silver_pass2_sql`), two
+        statements of one rule tied by nothing but a fixture on which both
+        ran. This keeps that fixture: it takes the branches that decide the
+        first-order columns' inputs — each sales_type, a return by group and by the
         legacy status list, an inactive source first in a buyer's history, a
         return on the buyer's first day, no buyer, a promocode, and an order
         whose Kyiv date is not its UTC date — and the real rebuild must
@@ -586,9 +588,9 @@ class TestTheRowValues:
         async with rv.acquire() as conn:
             await conn.execute("DELETE FROM meta.derivation_runs")
             await _landed(conn, x, source=3, buyer=97301, days_ago=6)   # first, inactive source
-        real = pg_silver.pass2_sql
-        monkeypatch.setattr(pg_silver, "pass2_sql",
-                            lambda: real().replace("AND s.is_active_source", "", 1))
+        real = pg_silver.insert_sql
+        monkeypatch.setattr(pg_silver, "insert_sql",
+                            lambda: real().replace("AND p.is_active_source", "", 1))
         await pg_silver.rebuild_silver(rv)                               # the piggyback rebuild
 
         values, judged = await self._read(rv)
@@ -653,8 +655,8 @@ class TestTheRowValues:
     async def test_this_processs_first_rebuild_covers_what_it_read(self, rv, monkeypatch, quiet_min):
         """Production's order: `core.pg_silver` is first imported on the first
         rebuild's own call path, so the rule loads a fraction of a second
-        before that rebuild begins. The rebuild is faulty (pass 2 ignores the
-        source) and piggyback writes no journal; then `quiet_min` minutes pass
+        before that rebuild begins. The rebuild is faulty (its first-order
+        rule ignores the source) and piggyback writes no journal; then `quiet_min` minutes pass
         with no other rebuild. It is covered — a rebuild at fault, whose lever
         is not another rebuild — at once and after a quiet night alike. Found
         reviewing DN-13: dated by the import it read as in flight, then as
@@ -666,9 +668,9 @@ class TestTheRowValues:
         async with rv.acquire() as conn:
             await conn.execute("DELETE FROM meta.derivation_runs")
             await _landed(conn, x, source=3, buyer=97301, days_ago=6)   # first, inactive source
-        real = pg_silver.pass2_sql
-        monkeypatch.setattr(pg_silver, "pass2_sql",
-                            lambda: real().replace("AND s.is_active_source", "", 1))
+        real = pg_silver.insert_sql
+        monkeypatch.setattr(pg_silver, "insert_sql",
+                            lambda: real().replace("AND p.is_active_source", "", 1))
         monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
         monkeypatch.setattr(pg_silver, "RULE_LOADED_AT", datetime.now(timezone.utc))
         await pg_silver.rebuild_silver(rv)                               # the first rebuild
@@ -702,7 +704,7 @@ class TestTheRowValues:
         from core import pg_silver
 
         monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
-        monkeypatch.setattr(pg_silver, "pass2_sql", lambda: "SELECT no_such_column FROM silver.orders")
+        monkeypatch.setattr(pg_silver, "insert_sql", lambda: "SELECT no_such_column FROM silver.orders")
         with pytest.raises(asyncpg.PostgresError):
             await pg_silver.rebuild_silver(rv)
         assert pg_silver.FIRST_REBUILT_AT is None
@@ -723,9 +725,9 @@ class TestTheRowValues:
         async with rv.acquire() as conn:
             await conn.execute("DELETE FROM meta.derivation_runs")
             await _landed(conn, x, source=3, buyer=97301, days_ago=6)
-        real = pg_silver.pass2_sql
-        monkeypatch.setattr(pg_silver, "pass2_sql",
-                            lambda: real().replace("AND s.is_active_source", "", 1))
+        real = pg_silver.insert_sql
+        monkeypatch.setattr(pg_silver, "insert_sql",
+                            lambda: real().replace("AND p.is_active_source", "", 1))
         monkeypatch.setattr(pg_silver, "RULE_LOADED_AT",
                             datetime.now(timezone.utc) - timedelta(minutes=loaded_min))
         monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
@@ -744,9 +746,9 @@ class TestTheRowValues:
 
     @pytest.mark.asyncio
     async def test_a_flipped_is_new_customer_is_caught(self, rv):
-        """Bronze untouched, Silver's pass-2 column wrong: only a recompute of
-        pass 2 from landing can see it, since the real pass 2 would take its
-        baseline from the Silver that is wrong."""
+        """Bronze untouched, Silver's first-order column wrong: only a
+        recompute from landing can see it, since a rule that read stored
+        Silver would take its baseline from the Silver that is wrong."""
         from core.data_quality import Severity
 
         b = ROW_IDS[1]

@@ -1,9 +1,10 @@
-"""One check that raises must not silence the other seven.
+"""One check that raises must not silence the other six.
 
-`dq_mirror_landing` runs eight checks in one job — the UTM verdicts'
+`dq_mirror_landing` runs seven checks in one job — the UTM verdicts'
 completeness, Gold's two grains, the bot's state, the order archive, the
-buyers' completeness, the vitrina, ClickHouse and its archive. (Seventeen until
-step 14's S14-12 deleted the comparisons against DuckDB.) It used to wrap all
+buyers' completeness, ClickHouse and its archive. (Seventeen until step 14's
+S14-12 deleted the comparisons against DuckDB; eight until the owner's
+decision O6 of 2026-11-11 stopped checking the vitrina.) It used to wrap all
 of them in ONE try, so an exception anywhere skipped every check after it, and
 the alert gate's `and not error_message` then withheld the page for any
 CRITICAL already found above the failure.
@@ -35,7 +36,6 @@ CHECKS_BY_MODULE = {
         "reconcile_bot_state", "reconcile_order_versions",
         "reconcile_buyer_completeness",
     ],
-    "core.pg_vitrina": ["reconcile_customer_profile"],
     "core.ch_silver": ["reconcile_clickhouse"],
     "core.ch_history": ["reconcile_ch_history"],
 }
@@ -63,9 +63,9 @@ def check_order() -> list:
 
 
 class TestEveryCheckIsIsolated:
-    def test_all_eight_run_through_check_and_each_exactly_once(self):
+    def test_all_seven_run_through_check_and_each_exactly_once(self):
         assert check_order() == ALL_CHECKS
-        assert len(check_order()) == len(set(check_order())) == 8
+        assert len(check_order()) == len(set(check_order())) == 7
 
     def test_nothing_reads_duckdb(self):
         """The comparisons against DuckDB went in step 14's S14-12; the job

@@ -1,10 +1,12 @@
 """The warehouse rule every engine renders: Silver's projection and Gold's measures.
 
-One text, and once three engines. `silver_select_sql` and `silver_pass2_sql`
-are what Postgres runs to derive `silver.orders` (`core.pg_silver`) — and what
-DuckDB ran to derive `silver_orders`, until step 14's S14-15 — and
-`silver_recompute_ctes` is what the row-values checks recompute it with
-(`core.pg_warehouse_dq`). `GOLD_MEASURES` is rendered verbatim by Postgres
+One text, and once three engines. `silver_recompute_ctes` — `silver_select_sql`
+and each buyer's first order, in one SELECT — is what Postgres inserts to
+derive `silver.orders` (`core.pg_silver`) and what the row-values check
+recomputes it with (`core.pg_warehouse_dq`). DuckDB ran `silver_select_sql`
+and a second pass, an UPDATE (`silver_pass2_sql`), to derive `silver_orders`
+until step 14's S14-15; Postgres ran the same two passes until the review's
+A23 (2026-11) folded the UPDATE into the INSERT and deleted it. `GOLD_MEASURES` is rendered verbatim by Postgres
 (`core.pg_gold`) and by ClickHouse (`core.ch_silver.derive_gold_sql`); DuckDB
 rendered it into `core.duckdb_store.GOLD_REVENUE_SELECT_SQL` until S14-15.
 
@@ -126,69 +128,35 @@ def silver_select_sql(dialect: "Dialect") -> str:
     """
 
 
-def silver_pass2_sql(buyer_filter: str = "", *, dialect: "Dialect") -> str:
-    """Recompute `is_new_customer` from each buyer's MIN(order_date).
-
-    Empty `buyer_filter` runs on every Silver row (full mode); otherwise it is
-    scoped to the affected buyers, keeping the write set bounded. `dialect`
-    is keyword-only: every caller already named it so.
-    """
-    # Aliased on purpose. PostgreSQL cannot qualify the UPDATE target by its
-    # schema in SET/WHERE — `silver.orders.buyer_id` is read as a column of a
-    # column — so both dialects address the target through one short alias and
-    # the text stays identical apart from the table name.
-    target = dialect.silver_orders
-    inner_filter = "buyer_id IS NOT NULL" if not buyer_filter else f"buyer_id IN ({buyer_filter})"
-    outer_filter = "" if not buyer_filter else f"AND s.buyer_id IN ({buyer_filter})"
-    return f"""
-                UPDATE {target} AS s SET
-                    buyer_first_order_date = fo.first_order_date,
-                    is_new_customer = CASE
-                        WHEN s.buyer_id IS NOT NULL
-                             AND NOT s.is_return
-                             AND s.is_active_source
-                             AND s.order_date = fo.first_order_date
-                        THEN TRUE ELSE FALSE
-                    END
-                FROM (
-                    -- The baseline deliberately does NOT filter is_active_source.
-                    -- A purchase on a retired channel is still a purchase: with
-                    -- Opencart excluded here, 419 buyers whose first order was
-                    -- placed there counted as brand new the next time they bought
-                    -- on Instagram — 422 orders and ₴1,081,979.59 of repeat
-                    -- business booked as acquisition, overstating new customers
-                    -- by 3.9% across 2025.
-                    -- Returns stay excluded: a cancelled first order is not a
-                    -- purchase, so the next one genuinely is their first.
-                    SELECT buyer_id, MIN(order_date) AS first_order_date
-                    FROM {target}
-                    WHERE {inner_filter}
-                      AND NOT is_return
-                    GROUP BY buyer_id
-                ) fo
-                WHERE s.buyer_id = fo.buyer_id
-                  {outer_filter}
-    """
-
-
 def silver_recompute_ctes(dialect: "Dialect") -> str:
-    """Every Silver row as pass 1 then pass 2 would write it — as three CTEs,
-    `pass1`, `baseline` and `recomputed`, for a caller that writes
-    `WITH {this} SELECT ... FROM recomputed r`.
+    """Every Silver row as the rule writes it — as three CTEs, `pass1`,
+    `baseline` and `recomputed`, for a caller that writes
+    `WITH {this} ... SELECT ... FROM recomputed`.
 
-    The two checks that ask whether stored Silver is what the rule says today
-    read this one text: DuckDB's `silver_row_values` and its Postgres twin,
-    `pg_silver_row_values` (chain 2, step 8b). It used to live inside the
-    DuckDB check; a Postgres copy of it would have been a third statement of
-    pass 2, and the first time pass 2 changed the twin would have asked a
-    different question from the rebuild it watches.
+    The rebuild inserts exactly this (`core.pg_silver.insert_sql`, since the
+    review's A23), and the check that asks whether stored Silver is still what
+    the rule says, `pg_silver_row_values` (chain 2, step 8b), recomputes with
+    it — one text, so the two cannot state the rule two ways. (Until A23 the
+    rebuild was this projection and then a full-table UPDATE, `silver_pass2_sql`,
+    and these CTEs were its SELECT form, held equal to it by a fixture.)
 
-    Pass 2 is recomputed from the recomputed rows rather than from stored
-    Silver. That is the point: the real pass 2 takes its baseline from whatever
-    Silver currently holds, so a stale baseline reproduces itself, and only a
-    recompute from landing can tell. The LEFT JOIN reproduces pass 2's own
-    semantics for a buyer with no qualifying order — the real UPDATE joins
-    those rows away and leaves pass 1's `FALSE` / `NULL` standing.
+    The first-order columns are computed from the projected rows, never from
+    stored Silver: a baseline taken from what Silver holds would reproduce a
+    stale one, and only a recompute from landing can tell. A buyer with no
+    qualifying order (only returns) and an order with no buyer meet no
+    `baseline` row, so the LEFT JOIN leaves `is_new_customer` FALSE and
+    `buyer_first_order_date` NULL — exactly what the UPDATE, which joined
+    those rows away, left standing.
+
+    **The baseline deliberately does NOT filter `is_active_source`.** A
+    purchase on a retired channel is still a purchase: with Opencart excluded
+    from it, 419 buyers whose first order was placed there counted as brand
+    new the next time they bought on Instagram — 422 orders and ₴1,081,979.59
+    of repeat business booked as acquisition, overstating new customers by
+    3.9% across 2025. Returns stay excluded: a cancelled first order is not a
+    purchase, so the next one genuinely is their first. (This said so in an
+    SQL comment inside the UPDATE until A23 deleted it; here it stays out of
+    the text, which is pinned byte for byte.)
     """
     return f"""
         pass1 AS (

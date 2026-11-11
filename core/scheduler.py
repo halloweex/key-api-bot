@@ -788,7 +788,7 @@ class BackgroundScheduler:
         # `KS_PG_DERIVE` (`own` since step 13, a constant since S14-00).
         self._add_job(
             job_id="pg_warehouse_derive",
-            name="Postgres: derive Silver, Gold and the customer profile",
+            name="Postgres: derive Silver and Gold",
             description="Rebuild the derived layers when meta.derivation_signal says one is owed",
             func=self._run_pg_derivation,
             trigger=IntervalTrigger(minutes=1),
@@ -1469,8 +1469,8 @@ class BackgroundScheduler:
         **In its own try, after the journal row, and whatever the derivation
         did.** Nothing is computed from `silver.order_utm`, so nothing waits
         for it; but after step 9 this parse is the only classifier there is,
-        and inside the derivation's try a persistent Gold or profile fault
-        would stop it too — every new order falling through the COALESCE to
+        and inside the derivation's try a persistent Gold fault would stop
+        it too — every new order falling through the COALESCE to
         organic or unattributed for the length of an unrelated outage, with
         the page naming Gold (the chain-2 review, "the order of steps inside
         the derivation job"). So the derivation journals itself first, and
@@ -1509,25 +1509,29 @@ class BackgroundScheduler:
         from core.pg_gold import GOLD_TABLE, rebuild_gold
         from core.pg_landing import _record_failure
         from core.pg_silver import PG_LAYER_LOCK, SILVER_TABLE, rebuild_silver
-        from core.pg_vitrina import PROFILE_TABLE, rebuild_customer_profile
 
         # Where a failure at each stage is recorded in `meta.mirror_state`. The
-        # three layers against their own watermark, which their next rebuild
+        # two layers against their own watermark, which their next rebuild
         # clears; the tail against the journal (`pg_derivation.RUNS_TABLE`
         # says why). Not the signal read inside the lock: its failure is the
         # journal row and the alert below, and the signal's own row counts
         # dropped marks, which the canary pages on by that name.
         #
-        # The profile's row and the tail's have no reader yet, on purpose.
-        # Neither is in WATCHED_MIRRORS or DERIVED_TABLES, so /api/health does
-        # not publish them and the canary does not judge them, and soak check
-        # D6 lists Silver and Gold alone. A failure there reaches a human as
-        # `warehouse_pg:derive_failed`, as it did before; the rows are the
-        # record, kept so that whoever decides to watch them has one. Which of
-        # health, the canary or D6 reads them is the owner's follow-up — a
+        # The tail's row has no reader yet, on purpose. It is not in
+        # WATCHED_MIRRORS or DERIVED_TABLES, so /api/health does not publish
+        # it and the canary does not judge it, and soak check D6 lists Silver
+        # and Gold alone. A failure there reaches a human as
+        # `warehouse_pg:derive_failed`, as it did before; the row is the
+        # record, kept so that whoever decides to watch it has one. Which of
+        # health, the canary or D6 reads it is the owner's follow-up — a
         # watched row is a new page, and this change does not add one quietly.
+        #
+        # `app.customer_profile` was a third stage between Gold and the tail
+        # until the owner's decision O6 (2026-11-11): nothing read it, it was
+        # a tenth of the run's row writes, and its failure skipped the
+        # validation of Silver and Gold. The table keeps its last contents and
+        # the journal's `profile_rows` is written NULL.
         failure_rows = {SILVER_TABLE: SILVER_TABLE, GOLD_TABLE: GOLD_TABLE,
-                        PROFILE_TABLE: PROFILE_TABLE,
                         "validation": derivation.RUNS_TABLE}
 
         if not await _acquire_within(PG_LAYER_LOCK, DERIVE_LOCK_WAIT_S):
@@ -1555,8 +1559,6 @@ class BackgroundScheduler:
                 stage = GOLD_TABLE
                 gold = await rebuild_gold(pool)
                 counts["gold_rows"], counts["gold_cells"] = gold["rows"], gold["cells"]
-                stage = PROFILE_TABLE
-                counts["profile_rows"] = (await rebuild_customer_profile(pool))["rows"]
                 stage = "validation"
                 async with pool.acquire() as conn:
                     validation = await derivation.validate(conn)
@@ -2082,10 +2084,9 @@ class BackgroundScheduler:
                 # an order names exists — Postgres alone (chain 4 PR-1 step 4).
                 await check("reconcile_buyer_completeness",
                             lambda: reconcile_buyer_completeness())
-                # And the витрина, which rebuilds itself and then checks the
-                # materialisation against the same Silver snapshot.
-                from core.pg_vitrina import reconcile_customer_profile
-                await check("reconcile_customer_profile", lambda: reconcile_customer_profile())
+                # `reconcile_customer_profile` rebuilt the витрина and checked
+                # it here until the owner's decision O6 (2026-11-11) stopped
+                # both; its `customer_profile_mismatch` is never reused.
                 # And the third engine — steps 5–6. Silver round-trips, then
                 # the two engines' independent Gold aggregations are set
                 # against each other («сверка навсегда»), then the archive's

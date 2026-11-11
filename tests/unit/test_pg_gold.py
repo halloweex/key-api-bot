@@ -192,6 +192,28 @@ class TestOneDefinitionOfAGoldMeasure:
     # `test_duckdb_column_order_matches_its_positional_insert` stood here
     # until step 14's S14-15 deleted DuckDB's positional Gold INSERT.
 
+
+class TestTheRebuildsWriteShape:
+    """The review's A23: Gold was cleared with `TRUNCATE`, which made every
+    dashboard read of Gold wait for the rebuild. It is a `DELETE` under a
+    bounded `lock_timeout` now, in one transaction with the INSERT."""
+
+    def test_the_statements_in_order(self):
+        """Mutation: a `TRUNCATE` back as the clear, or the bound dropped."""
+        import re
+
+        from core.pg_gold import CLEAR_SQL, rebuild_gold
+        from core.pg_silver import REBUILD_LOCK_TIMEOUT
+        from tests.unit.test_pg_silver import _recorded
+
+        conn = _recorded(rebuild_gold)
+        assert conn.transactions == 1
+        statements = conn.statements
+        assert statements[0] == f"SET LOCAL lock_timeout = '{REBUILD_LOCK_TIMEOUT}'"
+        assert statements[1] == CLEAR_SQL == f"DELETE FROM {GOLD_TABLE}"
+        assert statements[2] == " ".join(insert_sql().split())
+        assert not [s for s in statements if re.match(r"(UPDATE|TRUNCATE)\b", s)]
+
 # ── the projection, executed ─────────────────────────────────────────────────
 
 

@@ -45,16 +45,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class TestEveryRenderingIsTheBytesFrom57fd7c22:
     def test_the_literal_covers_what_the_plan_names(self):
-        """Pass 1, pass 2 with and without the buyer filter, the recompute,
-        and Gold for Postgres and ClickHouse — a literal that lost a key would
-        pass the parametrised test below by having nothing to compare."""
+        """Silver's rebuild, the recompute, and Gold for Postgres and
+        ClickHouse — a literal that lost a key would pass the parametrised
+        test below by having nothing to compare. (Pass 1 and pass 2, with and
+        without the buyer filter, until the review's A23 made the rebuild one
+        INSERT, re-recorded under the owner's decision O1 (a).)"""
         assert set(RENDERINGS) == {
             "silver_sales_type_case(POSTGRES)",
             "silver_select_sql(POSTGRES)",
-            "pg_silver.pass1_sql()",
-            "pg_silver.pass2_sql()",
-            "silver_pass2_sql(dialect=POSTGRES)",
-            'silver_pass2_sql("?,?,?", dialect=POSTGRES)',
+            "pg_silver.insert_sql()",
             "silver_recompute_ctes(POSTGRES)",
             "pg_warehouse_dq._row_values_sql()",
             "pg_gold.select_sql()",
@@ -87,8 +86,8 @@ class TestEveryRenderingIsTheBytesFrom57fd7c22:
         back."""
         import inspect
 
-        from core.warehouse_sql import (silver_pass2_sql, silver_recompute_ctes,
-                                        silver_sales_type_case, silver_select_sql)
+        from core.warehouse_sql import (silver_recompute_ctes, silver_sales_type_case,
+                                        silver_select_sql)
 
         for builder in (silver_sales_type_case, silver_select_sql,
                         silver_recompute_ctes):
@@ -96,12 +95,6 @@ class TestEveryRenderingIsTheBytesFrom57fd7c22:
                 builder()
             assert inspect.signature(builder).parameters["dialect"].default \
                 is inspect.Parameter.empty
-        with pytest.raises(TypeError):
-            silver_pass2_sql()
-        with pytest.raises(TypeError):
-            silver_pass2_sql("?")
-        assert inspect.signature(silver_pass2_sql).parameters["dialect"].kind \
-            is inspect.Parameter.KEYWORD_ONLY
 
     def test_no_builder_of_the_module_defaults_its_dialect(self):
         """The same, read off S14-01's module rather than named: a builder
@@ -115,7 +108,7 @@ class TestEveryRenderingIsTheBytesFrom57fd7c22:
             name: fn for name, fn in inspect.getmembers(warehouse_sql, inspect.isfunction)
             if fn.__module__ == warehouse_sql.__name__
             and "dialect" in inspect.signature(fn).parameters}
-        assert {"silver_sales_type_case", "silver_select_sql", "silver_pass2_sql",
+        assert {"silver_sales_type_case", "silver_select_sql",
                 "silver_recompute_ctes"} <= set(builders), sorted(builders)
         defaulted = sorted(name for name, fn in builders.items()
                            if inspect.signature(fn).parameters["dialect"].default
@@ -126,7 +119,7 @@ class TestEveryRenderingIsTheBytesFrom57fd7c22:
 # ─── The re-exports ──────────────────────────────────────────────────────────
 
 SHARED_SQL = (
-    "silver_sales_type_case", "silver_select_sql", "silver_pass2_sql",
+    "silver_sales_type_case", "silver_select_sql",
     "silver_recompute_ctes", "GOLD_MEASURES", "_GOLD_EARNING_ROWS",
     "_GOLD_RETURNED_ROWS", "_GOLD_REVENUE_EXPR", "_GOLD_ORDERS_EXPR",
 )
@@ -243,7 +236,8 @@ class TestTheOldNamesAreTheNewObjects:
 
 # The modules S14-01 repointed, and the three it created. None of them may
 # name a DuckDB module, at any depth of a function: the lazy import inside
-# `pg_silver.pass1_sql` is exactly what put the driver on every tick.
+# `pg_silver.pass1_sql` (`insert_sql` since A23) is exactly what put the
+# driver on every tick.
 NEUTRAL = (
     "core/warehouse_sql.py", "core/paths.py", "core/atomic_file.py",
     "core/pg_silver.py", "core/pg_gold.py", "core/ch_silver.py",
@@ -313,8 +307,8 @@ sys.path.insert(0, sys.argv[1])
 import core.pg_silver, core.pg_gold, core.ch_silver, core.pg_orders_write, core.pg_warehouse_dq
 from core.sql_dialect import POSTGRES
 from core import warehouse_sql
-core.pg_silver.pass1_sql(); core.pg_silver.pass2_sql()
-warehouse_sql.silver_pass2_sql("?", dialect=POSTGRES)
+core.pg_silver.insert_sql()
+warehouse_sql.silver_recompute_ctes(POSTGRES)
 core.pg_gold.select_sql(); core.pg_gold.insert_sql()
 core.ch_silver.derive_gold_sql()
 core.pg_warehouse_dq._row_values_sql()

@@ -1044,6 +1044,23 @@ CLICKHOUSE_ANALYTICS = AnalyticsDialect(
 )
 
 
+# WHO IS IN A COHORT, AND WHAT COUNTS INSIDE IT (owner's decision O5,
+# 2026-11-11). A buyer's cohort — whether they are in one, and which month —
+# is read from every non-return order of the sales type on any source. On
+# sources this follows Silver's first-order rule (`core/warehouse_sql.py`,
+# `silver_recompute_ctes`): a purchase on a retired channel is still a
+# purchase, so a buyer whose first order was on Opencart belongs to that
+# order's month and is never "acquired" by a later Instagram order. On sales
+# types it does not: Silver reads every sales type, a cohort only the one
+# asked for, so a retail cohort takes in a buyer whose first order was
+# internal, b2b or at the exhibition (see "First purchase" in CLAUDE.md). What is
+# measured inside the cohort — the months a buyer was active in, the revenue,
+# the order counts, the recency and the second purchase — reads active
+# sources only (`is_active_source`, `REVENUE_SOURCE_IDS`), as Gold, the SMS
+# audience and customer insights do. Until O5 the five bodies counted
+# Opencart's orders and money as well; the default 12-month view held none,
+# the 24-month view's cohorts of November and December 2024 did.
+#
 # Everything else in this body was run on DuckDB 1.5.5 and ClickHouse
 # 24.8.14.39 against the same rows: `DATE_TRUNC`, `DATEDIFF`, `median`,
 # `FILTER (WHERE …)`, CTEs, `COUNT(DISTINCT …)` and `ROUND` all agree, and
@@ -1070,6 +1087,7 @@ _COHORT_RETENTION_BODY = """
                 FROM {silver_orders} o
                 JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
                 WHERE NOT o.is_return
+                  AND o.is_active_source
                   {sales_type_filter}
             ),
             cohort_sizes AS (
@@ -1146,6 +1164,7 @@ _ENHANCED_COHORT_RETENTION_SELECT_BODY = """            WITH customer_first_orde
                 LEFT JOIN {silver_orders} o ON c.buyer_id = o.buyer_id
                     AND DATE_TRUNC('month', o.order_date) = c.cohort_month
                     AND NOT o.is_return
+                    AND o.is_active_source
                     {sales_type_filter}
                 GROUP BY c.buyer_id, c.cohort_month
             ),
@@ -1159,6 +1178,7 @@ _ENHANCED_COHORT_RETENTION_SELECT_BODY = """            WITH customer_first_orde
                 FROM {silver_orders} o
                 JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
                 WHERE NOT o.is_return
+                  AND o.is_active_source
                   {sales_type_filter}
             ),
             cohort_sizes AS (
@@ -1214,6 +1234,7 @@ _DAYS_TO_SECOND_PURCHASE_SELECT_BODY = """            WITH customer_orders_ranke
                 SELECT
                     o.buyer_id,
                     o.order_date,
+                    o.is_active_source,
                     ROW_NUMBER() OVER (PARTITION BY o.buyer_id ORDER BY o.order_date) AS order_num
                 FROM {silver_orders} o
                 WHERE o.buyer_id IS NOT NULL
@@ -1221,15 +1242,19 @@ _DAYS_TO_SECOND_PURCHASE_SELECT_BODY = """            WITH customer_orders_ranke
                   {sales_type_filter}
             ),
             second_purchase AS (
+                -- The first purchase is the buyer's start, on any source; the
+                -- second is their next order on an active one (O5).
                 SELECT
                     c1.buyer_id,
-                    DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
+                    DATEDIFF('day', c1.order_date, MIN(c2.order_date)) AS days_to_second
                 FROM customer_orders_ranked c1
                 JOIN customer_orders_ranked c2
                     ON c1.buyer_id = c2.buyer_id
                     AND c1.order_num = 1
-                    AND c2.order_num = 2
+                    AND c2.order_num > 1
                 WHERE c1.order_date >= {today} - INTERVAL '{months_back} months'
+                  AND c2.is_active_source
+                GROUP BY c1.buyer_id, c1.order_date
             ),
             bucketed AS (
                 SELECT
@@ -1306,6 +1331,7 @@ _COHORT_LTV_SELECT_BODY = """            WITH customer_cohorts AS (
                 FROM {silver_orders} o
                 JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
                 WHERE NOT o.is_return
+                  AND o.is_active_source
                   {sales_type_filter}
                 GROUP BY o.buyer_id, c.cohort_month, DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date))
             ),
@@ -1356,10 +1382,15 @@ _AT_RISK_CUSTOMERS_SELECT_BODY = """            WITH customer_activity AS (
                 SELECT
                     o.buyer_id,
                     DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
-                    MAX(o.order_date) AS last_order_date,
-                    DATEDIFF('day', MAX(o.order_date), {today}) AS days_since_last,
-                    COUNT(*) AS total_orders,
-                    SUM(o.grand_total) AS total_revenue
+                    -- The cohort month reads every order; the activity reads
+                    -- active sources only (O5). A buyer with none has no
+                    -- recency, and is neither at risk nor churned.
+                    MAX(CASE WHEN o.is_active_source THEN o.order_date END) AS last_order_date,
+                    DATEDIFF('day', MAX(CASE WHEN o.is_active_source THEN o.order_date END),
+                             {today}) AS days_since_last,
+                    COUNT(CASE WHEN o.is_active_source THEN 1 END) AS total_orders,
+                    COALESCE(SUM(CASE WHEN o.is_active_source THEN o.grand_total END), 0)
+                        AS total_revenue
                 FROM {silver_orders} o
                 WHERE o.buyer_id IS NOT NULL
                   AND NOT o.is_return

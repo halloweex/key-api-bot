@@ -38,20 +38,26 @@ answer.
 
 WHY A FULL REBUILD, AND WHY ONE TRANSACTION
 
-`pg_silver`'s reasons, unchanged and if anything stronger: 5,684 rows is
+`pg_silver`'s reasons, unchanged and if anything stronger: ~6,000 rows is
 nothing, an incremental scope is somewhere for a cell to be left behind, and a
-partially-written Gold is a number somebody could read. `TRUNCATE` then one
-`INSERT`, and nothing outside the transaction sees the gap.
+partially-written Gold is a number somebody could read. `DELETE`
+then one `INSERT`, and nothing outside the transaction sees the gap; `DELETE`
+rather than `TRUNCATE` since the review's A23, so that no read of Gold waits
+for the rebuild — `pg_silver` says why and what it was measured to cost.
+The same `lock_timeout` bounds the wait for a conflicting lock.
 
 Gold is rebuilt *after* Silver and from the same caller, so it never reads a
 Silver that the same tick is about to replace.
 
 WHAT IT DOES NOT DO
 
-It does not touch DuckDB, which keeps computing its own Gold for the whole
-parallel period — the owner's decision of 2026-08-23. Comparing the two is
-`reconcile_gold`'s job in `core/mirror_reconciliation.py`, not this module's:
-a rebuild that also reconciled would be marking its own homework.
+It does not reconcile. Gold is checked by others: its two grains against each
+other (`pg_gold_internal_check`, daily) and against ClickHouse's own
+derivation from a round-tripped Silver (`core.ch_silver`), and the
+derivation's validation checks it against the Silver it was built from. A
+rebuild that also reconciled would be marking its own homework. (DuckDB
+computed a Gold of its own, and `reconcile_gold` compared the two, until step
+14 deleted both.)
 """
 from __future__ import annotations
 
@@ -62,6 +68,9 @@ from typing import Any, Dict, Tuple
 logger = logging.getLogger(__name__)
 
 GOLD_TABLE = "gold.daily_revenue"
+
+# The rebuild's first statement; `core.pg_silver` says why it is a `DELETE`.
+CLEAR_SQL = f"DELETE FROM {GOLD_TABLE}"
 
 # The write order, and the projection's own order. Unlike DuckDB's positional
 # INSERT this one names its columns, but the two must still agree — so the
@@ -134,12 +143,13 @@ def insert_sql() -> str:
 async def rebuild_gold(pool=None) -> Dict[str, Any]:
     """Replace `gold.daily_revenue` from `silver.orders`. Raises.
 
-    Loud, for `pg_silver`'s reason: nothing reads this table yet, so there is
-    no working system to protect by staying quiet, and a rebuild that reports
-    success while writing nothing is the worst available outcome.
+    Loud, for `pg_silver`'s reason: the derivation records the failure and the
+    previous Gold stays whole, and a rebuild that reports success while
+    writing nothing is the worst available outcome.
     """
     from core.pg import get_pool, require_revision
     from core.pg_landing import _WATERMARK_OK
+    from core.pg_silver import REBUILD_LOCK_TIMEOUT
 
     started = time.monotonic()
     pool = pool or await get_pool()
@@ -147,7 +157,8 @@ async def rebuild_gold(pool=None) -> Dict[str, Any]:
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(f"TRUNCATE {GOLD_TABLE}")
+            await conn.execute(f"SET LOCAL lock_timeout = '{REBUILD_LOCK_TIMEOUT}'")
+            await conn.execute(CLEAR_SQL)
             await conn.execute(insert_sql())
             rows = await conn.fetchval(f"SELECT count(*) FROM {GOLD_TABLE}")
             cells = await conn.fetchval(

@@ -1164,7 +1164,9 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
     ("gold_", "POST /api/warehouse/refresh rebuilds Silver and Gold in Postgres"),
-    ("customer_profile_", "Rebuilt on the same tick; survives one — suspect Silver"),
+    # `customer_profile_` had its line here until the owner's decision O6
+    # (2026-11-11) stopped rebuilding and checking `app.customer_profile`;
+    # `customer_profile_mismatch` is never reused.
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
     ("integrity_check_raised",
      "A check's table is gone or renamed — find which in the ERROR log; its findings are absent, not clean"),

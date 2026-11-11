@@ -7,7 +7,7 @@ import math
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Dict, Any, List, Sequence, Union
+from typing import Optional, Dict, Any, List, Sequence, Tuple, Union
 
 from core import read_fallback
 from core.filters import by_month
@@ -824,6 +824,34 @@ _INSIGHTS_PERIOD_SQL = """
     WHERE {where}
 """
 
+def insights_period_query(
+    start_date: date, end_date: date, *, sales_type: str = "retail",
+    promocode: Optional[str] = None,
+) -> Tuple[str, List[Any]]:
+    """The period's customers over Silver, and its parameters: distinct
+    buyers, and of them the new and the returning, on active sources,
+    returns left out.
+
+    Two readers ask it — the dashboard's customer block
+    (`CustomersMixin.get_customer_insights`) and the assistant's
+    `get_customer_insights` tool (`core/chat_tools.py`) — so the two cannot
+    count customers two ways. The assistant summed Gold's *daily* distinct
+    counts until the review's A22: a buyer who came back on Tuesday was two
+    customers, and one buyer read as a 50 % repeat rate. Rendered later by
+    the caller's runner (`{silver_orders}` is still a hole).
+    """
+    where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return",
+             "s.is_active_source", "s.buyer_id IS NOT NULL"]
+    params: List[Any] = [start_date, end_date]
+    if sales_type != "all":
+        where.append("s.sales_type = ?")
+        params.append(sales_type)
+    if promocode:
+        where.append("UPPER(s.promocode) = UPPER(?)")
+        params.append(promocode)
+    return _INSIGHTS_PERIOD_SQL.replace("{where}", " AND ".join(where)), params
+
+
 _INSIGHTS_ALLTIME_SQL = """
     WITH customer_orders AS (
         SELECT s.buyer_id, COUNT(DISTINCT s.id) AS order_count
@@ -1008,19 +1036,8 @@ class CustomersMixin:
         # Gold sums *daily* distinct counts, so a buyer who came back on
         # Tuesday is two customers there. These are the numbers that reach the
         # screen; Gold's are not read at all.
-        pf_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return",
-                    "s.is_active_source", "s.buyer_id IS NOT NULL"]
-        pf_params: List[Any] = [start_date, end_date]
-        if sales_type != "all":
-            pf_where.append("s.sales_type = ?")
-            pf_params.append(sales_type)
-        if promocode:
-            pf_where.append("UPPER(s.promocode) = UPPER(?)")
-            pf_params.append(promocode)
-
-        rows = await self._dashboard_run(
-            _INSIGHTS_PERIOD_SQL.replace("{where}", " AND ".join(pf_where)),
-            pf_params)
+        rows = await self._dashboard_run(*insights_period_query(
+            start_date, end_date, sales_type=sales_type, promocode=promocode))
         pf_result = rows[0] if rows else (0, 0, 0)
         unique_buyers = int(pf_result[0] or 0)
         new_customers = int(pf_result[1] or 0)

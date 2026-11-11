@@ -62,10 +62,14 @@ DUCK = AnalyticsDialect(name="duckdb", silver_orders="silver_orders",
 def _run(rows, sales_type_filter):
     con = duckdb.connect(":memory:")
     try:
+        # `is_active_source` since the owner's decision O5: every row here
+        # is on an active source (tests/unit/test_cohort_active_sources.py
+        # holds the retired ones).
         con.execute("CREATE TABLE silver_orders (id INTEGER, buyer_id INTEGER, "
                     "order_date DATE, is_return BOOLEAN, sales_type VARCHAR, "
-                    "grand_total DECIMAL(14,2))")
-        con.executemany("INSERT INTO silver_orders VALUES (?, ?, ?, ?, ?, ?)", rows)
+                    "grand_total DECIMAL(14,2), is_active_source BOOLEAN DEFAULT TRUE)")
+        con.executemany("INSERT INTO silver_orders (id, buyer_id, order_date, is_return,"
+                        " sales_type, grand_total) VALUES (?, ?, ?, ?, ?, ?)", rows)
         sql = enhanced_cohort_retention_select(
             DUCK, sales_type_filter=sales_type_filter, months_back=12)
         return [tuple(float(v) if hasattr(v, "is_finite") else v for v in r)

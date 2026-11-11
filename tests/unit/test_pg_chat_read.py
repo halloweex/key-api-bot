@@ -50,8 +50,10 @@ class TestOneDoorToTheStore:
             joined = "".join(strings)
             if "gold_daily_revenue}" in joined:
                 texts[name] = joined
-        assert set(texts) == {"_revenue_totals_sql", "_get_source_breakdown",
-                              "_get_customer_insights"}, sorted(texts)
+        # `_get_customer_insights` had a Gold body of its own until the
+        # review's A22; it reads Gold through `_revenue_totals_sql` since, and
+        # its customers from Silver (`insights_period_query`).
+        assert set(texts) == {"_revenue_totals_sql", "_get_source_breakdown"}, sorted(texts)
         for name, text in texts.items():
             has = "gold_revenue_rollup}" in text
             assert has is (name != "_get_source_breakdown"), name

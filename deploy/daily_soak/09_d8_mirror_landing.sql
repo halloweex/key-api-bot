@@ -5,8 +5,12 @@
 -- tolerance of zero: ClickHouse re-derives Gold from a round-tripped Silver
 -- and the two engines' Gold are set against each other — the one independent
 -- re-aggregation left — beside the Postgres-alone checks of the same tables
--- (`gold_rollup_mismatch`, `customer_profile_mismatch`, the UTM verdicts'
--- completeness). Zero findings on the derived tables, every day.
+-- (`gold_rollup_mismatch`, the UTM verdicts' completeness). Zero findings on
+-- the derived tables, every day.
+--
+-- `app.customer_profile` and `customer_profile_mismatch` were read here too,
+-- until the owner's decision O6 (2026-11-11) stopped rebuilding and checking
+-- the table: nothing files on it any more.
 --
 -- Until step 14's S14-12 the run also set Postgres' Silver, Gold and UTM
 -- against DuckDB's (`reconcile_silver`, `reconcile_order_utm`,
@@ -79,9 +83,8 @@ derived AS (
     SELECT i.run_id, i.check_name, i.table_name, i.severity, i.count
     FROM app.data_quality_issues i
     JOIN runs USING (run_id)
-    WHERE i.table_name IN ('silver.orders', 'gold.daily_revenue',
-                           'app.customer_profile', 'silver.order_utm')
-       OR i.check_name IN ('gold_rollup_mismatch', 'customer_profile_mismatch')
+    WHERE i.table_name IN ('silver.orders', 'gold.daily_revenue', 'silver.order_utm')
+       OR i.check_name IN ('gold_rollup_mismatch')
 ),
 grace_checks AS (
     SELECT unnest(ARRAY['pg_order_utm_in_flight']) AS check_name

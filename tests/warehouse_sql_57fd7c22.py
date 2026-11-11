@@ -22,7 +22,18 @@ it is given, so an empty diff is the proof. The same run against 6ac33044
 (3.0.298's code but for the version, the image production ran on 2026-10-25)
 and against S14-00's tip (ca684f5a) printed this file unchanged.
 
-POSTGRES renderings of the Silver passes and the recompute (the only ones
+**Re-recorded once, for the review's A23 (2026-11), under the owner's decision
+O1 (a)**: a fix of a reproduced defect may change a pinned rendering, in the
+same PR, listing it. Silver's rebuild was two statements — `pg_silver.pass1_sql()`
+(INSERT with `is_new_customer = FALSE`) and `pg_silver.pass2_sql()`, a
+full-table UPDATE from `silver_pass2_sql` — and is one,
+`pg_silver.insert_sql()`, which inserts `silver_recompute_ctes(POSTGRES)`.
+Those three keys and `silver_pass2_sql`'s two left the block and
+`pg_silver.insert_sql()` joined it; this module run as a script against the
+A23 tree reproduces every other key byte for byte from 57fd7c22, so the diff
+of the block is exactly those keys.
+
+POSTGRES renderings of the Silver rebuild and the recompute (the only ones
 production runs), and the Gold projections for Postgres and ClickHouse. The
 DuckDB renderings are left out on purpose: DuckDB derives nothing in
 production, and its dialect goes in S14-07 (owner's decision, 2026-10-21: a
@@ -53,14 +64,10 @@ def render() -> Dict[str, object]:
         "silver_sales_type_case(POSTGRES)":
             lambda: home.silver_sales_type_case(POSTGRES),
         "silver_select_sql(POSTGRES)": lambda: home.silver_select_sql(POSTGRES),
-        "pg_silver.pass1_sql()": pg_silver.pass1_sql,
-        "pg_silver.pass2_sql()": pg_silver.pass2_sql,
-        "silver_pass2_sql(dialect=POSTGRES)":
-            lambda: home.silver_pass2_sql(dialect=POSTGRES),
-        # The buyer filter's shape is the one its only caller passes: one
-        # placeholder per affected buyer.
-        'silver_pass2_sql("?,?,?", dialect=POSTGRES)':
-            lambda: home.silver_pass2_sql("?,?,?", dialect=POSTGRES),
+        # A23: the rebuild's one statement, where 57fd7c22 had pass 1 and
+        # pass 2 (`pg_silver.pass1_sql()`, `pg_silver.pass2_sql()`, and
+        # `silver_pass2_sql` with and without its buyer filter).
+        "pg_silver.insert_sql()": pg_silver.insert_sql,
         "silver_recompute_ctes(POSTGRES)":
             lambda: home.silver_recompute_ctes(POSTGRES),
         "pg_warehouse_dq._row_values_sql()": pg_warehouse_dq._row_values_sql,
@@ -139,9 +146,10 @@ RENDERINGS: Dict[str, object] = {
         '            o.promocode\n'
         '    '
     ),
-    'pg_silver.pass1_sql()': (
-        'INSERT INTO silver.orders (id, source_id, status_id, grand_total, ordered_at, buyer_id, manager_id, order_date, is_return, sales_type, is_active_source, source_name, is_new_customer, buyer_first_order_date, promocode)\n'
-        'SELECT \n'
+    'pg_silver.insert_sql()': (
+        'WITH \n'
+        '        pass1 AS (\n'
+        '            SELECT \n'
         '            o.id, o.source_id, o.status_id, o.grand_total,\n'
         '            o.ordered_at, o.buyer_id, o.manager_id,\n'
         "            (timezone('Europe/Kyiv', o.ordered_at))::date AS order_date,\n"
@@ -180,101 +188,33 @@ RENDERINGS: Dict[str, object] = {
         '            FALSE AS is_new_customer,\n'
         '            NULL  AS buyer_first_order_date,\n'
         '            o.promocode\n'
+        '     FROM bronze.orders o\n'
+        '        ),\n'
+        '        baseline AS (\n'
+        '            SELECT buyer_id, MIN(order_date) AS first_order_date\n'
+        '            FROM pass1\n'
+        '            WHERE buyer_id IS NOT NULL AND NOT is_return\n'
+        '            GROUP BY buyer_id\n'
+        '        ),\n'
+        '        recomputed AS (\n'
+        '            SELECT p.id, p.source_id, p.status_id, p.grand_total, p.ordered_at,\n'
+        '                   p.buyer_id, p.manager_id, p.order_date, p.is_return,\n'
+        '                   p.sales_type, p.is_active_source, p.source_name,\n'
+        '                   CASE\n'
+        '                       WHEN p.buyer_id IS NOT NULL\n'
+        '                            AND NOT p.is_return\n'
+        '                            AND p.is_active_source\n'
+        '                            AND p.order_date = b.first_order_date\n'
+        '                       THEN TRUE ELSE FALSE\n'
+        '                   END AS is_new_customer,\n'
+        '                   b.first_order_date AS buyer_first_order_date,\n'
+        '                   p.promocode\n'
+        '            FROM pass1 p\n'
+        '            LEFT JOIN baseline b ON b.buyer_id = p.buyer_id\n'
+        '        )\n'
         '    \n'
-        'FROM bronze.orders o'
-    ),
-    'pg_silver.pass2_sql()': (
-        '\n'
-        '                UPDATE silver.orders AS s SET\n'
-        '                    buyer_first_order_date = fo.first_order_date,\n'
-        '                    is_new_customer = CASE\n'
-        '                        WHEN s.buyer_id IS NOT NULL\n'
-        '                             AND NOT s.is_return\n'
-        '                             AND s.is_active_source\n'
-        '                             AND s.order_date = fo.first_order_date\n'
-        '                        THEN TRUE ELSE FALSE\n'
-        '                    END\n'
-        '                FROM (\n'
-        '                    -- The baseline deliberately does NOT filter is_active_source.\n'
-        '                    -- A purchase on a retired channel is still a purchase: with\n'
-        '                    -- Opencart excluded here, 419 buyers whose first order was\n'
-        '                    -- placed there counted as brand new the next time they bought\n'
-        '                    -- on Instagram — 422 orders and ₴1,081,979.59 of repeat\n'
-        '                    -- business booked as acquisition, overstating new customers\n'
-        '                    -- by 3.9% across 2025.\n'
-        '                    -- Returns stay excluded: a cancelled first order is not a\n'
-        '                    -- purchase, so the next one genuinely is their first.\n'
-        '                    SELECT buyer_id, MIN(order_date) AS first_order_date\n'
-        '                    FROM silver.orders\n'
-        '                    WHERE buyer_id IS NOT NULL\n'
-        '                      AND NOT is_return\n'
-        '                    GROUP BY buyer_id\n'
-        '                ) fo\n'
-        '                WHERE s.buyer_id = fo.buyer_id\n'
-        '                  \n'
-        '    '
-    ),
-    'silver_pass2_sql(dialect=POSTGRES)': (
-        '\n'
-        '                UPDATE silver.orders AS s SET\n'
-        '                    buyer_first_order_date = fo.first_order_date,\n'
-        '                    is_new_customer = CASE\n'
-        '                        WHEN s.buyer_id IS NOT NULL\n'
-        '                             AND NOT s.is_return\n'
-        '                             AND s.is_active_source\n'
-        '                             AND s.order_date = fo.first_order_date\n'
-        '                        THEN TRUE ELSE FALSE\n'
-        '                    END\n'
-        '                FROM (\n'
-        '                    -- The baseline deliberately does NOT filter is_active_source.\n'
-        '                    -- A purchase on a retired channel is still a purchase: with\n'
-        '                    -- Opencart excluded here, 419 buyers whose first order was\n'
-        '                    -- placed there counted as brand new the next time they bought\n'
-        '                    -- on Instagram — 422 orders and ₴1,081,979.59 of repeat\n'
-        '                    -- business booked as acquisition, overstating new customers\n'
-        '                    -- by 3.9% across 2025.\n'
-        '                    -- Returns stay excluded: a cancelled first order is not a\n'
-        '                    -- purchase, so the next one genuinely is their first.\n'
-        '                    SELECT buyer_id, MIN(order_date) AS first_order_date\n'
-        '                    FROM silver.orders\n'
-        '                    WHERE buyer_id IS NOT NULL\n'
-        '                      AND NOT is_return\n'
-        '                    GROUP BY buyer_id\n'
-        '                ) fo\n'
-        '                WHERE s.buyer_id = fo.buyer_id\n'
-        '                  \n'
-        '    '
-    ),
-    'silver_pass2_sql("?,?,?", dialect=POSTGRES)': (
-        '\n'
-        '                UPDATE silver.orders AS s SET\n'
-        '                    buyer_first_order_date = fo.first_order_date,\n'
-        '                    is_new_customer = CASE\n'
-        '                        WHEN s.buyer_id IS NOT NULL\n'
-        '                             AND NOT s.is_return\n'
-        '                             AND s.is_active_source\n'
-        '                             AND s.order_date = fo.first_order_date\n'
-        '                        THEN TRUE ELSE FALSE\n'
-        '                    END\n'
-        '                FROM (\n'
-        '                    -- The baseline deliberately does NOT filter is_active_source.\n'
-        '                    -- A purchase on a retired channel is still a purchase: with\n'
-        '                    -- Opencart excluded here, 419 buyers whose first order was\n'
-        '                    -- placed there counted as brand new the next time they bought\n'
-        '                    -- on Instagram — 422 orders and ₴1,081,979.59 of repeat\n'
-        '                    -- business booked as acquisition, overstating new customers\n'
-        '                    -- by 3.9% across 2025.\n'
-        '                    -- Returns stay excluded: a cancelled first order is not a\n'
-        '                    -- purchase, so the next one genuinely is their first.\n'
-        '                    SELECT buyer_id, MIN(order_date) AS first_order_date\n'
-        '                    FROM silver.orders\n'
-        '                    WHERE buyer_id IN (?,?,?)\n'
-        '                      AND NOT is_return\n'
-        '                    GROUP BY buyer_id\n'
-        '                ) fo\n'
-        '                WHERE s.buyer_id = fo.buyer_id\n'
-        '                  AND s.buyer_id IN (?,?,?)\n'
-        '    '
+        'INSERT INTO silver.orders (id, source_id, status_id, grand_total, ordered_at, buyer_id, manager_id, order_date, is_return, sales_type, is_active_source, source_name, is_new_customer, buyer_first_order_date, promocode)\n'
+        'SELECT id, source_id, status_id, grand_total, ordered_at, buyer_id, manager_id, order_date, is_return, sales_type, is_active_source, source_name, is_new_customer, buyer_first_order_date, promocode FROM recomputed'
     ),
     'silver_recompute_ctes(POSTGRES)': (
         '\n'

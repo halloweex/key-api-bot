@@ -86,8 +86,10 @@ async def _write_buyer_rows(
             await conn.executemany(_INSERT_CONTACT, buyer_contacts)
             written += len(buyer_contacts)
 
-    # `app.customer_profile` joins `bronze.buyers`. `core/pg_derivation.py`
-    # says why the mark cannot cost this transaction.
+    # `bronze.buyers` is a source table of the derivation (`SOURCE_TABLES`,
+    # which says why it stays one since the customer profile stopped being
+    # rebuilt). `core/pg_derivation.py` says why the mark cannot cost this
+    # transaction.
     from core.pg_derivation import mark
 
     async with conn.transaction():

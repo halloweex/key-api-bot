@@ -44,7 +44,7 @@ def collect_static_check_names() -> set:
     names = set()
     for path in ("core/data_quality.py", "core/mirror_reconciliation.py",
                  "core/ch_silver.py", "core/ch_gold.py", "core/ch_history.py",
-                 "core/pg_order_versions.py", "core/pg_vitrina.py",
+                 "core/pg_order_versions.py",
                  "core/pg_warehouse_dq.py",
                  # The scheduler builds two gating findings of its own:
                  # mirror_backfill_pending (the PG arm) and

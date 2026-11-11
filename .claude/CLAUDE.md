@@ -690,6 +690,24 @@ keep. Set it via `POST /api/managers/{id}/retail-status`, which raises the
 derivation signal in the same transaction, because `sales_type` only changes
 on a rebuild.
 
+**"First purchase" has four definitions, kept on purpose** (owner's decision
+O7, 2026-11-11). Silver's (`silver_recompute_ctes`, which Gold's
+`new_customers` counts): the earliest non-return order on any source and of any
+sales type, and `is_new_customer` only on an active-source order of that day.
+`app.customer_profile`'s: retail orders on active sources (frozen since O6).
+The SMS audience's: retail order lines on active sources, so an order without
+lines does not count. The cohorts' (`core/sql_dialect.py`): the earliest
+non-return order of the requested sales type on any source, so a retail
+cohort takes in a buyer whose first order was internal, b2b or at the
+exhibition, whom Silver counts as not new. Measured on production for the 365
+days to 2026-11-11:
+8 168 buyers made a first retail order, and Silver's rule counts 63 of them as
+not new, exactly the gap to Gold's 8 105 — 40 because their first order was on
+Opencart (intended: a purchase on a retired channel is still a purchase), 21
+because it was an internal shipment (9 of them with no money), one b2b and one
+at the exhibition. The SMS audience disagrees with the order-based rule for 2
+of 19 413 retail buyers, both for want of line items.
+
 ### The audience of an SMS campaign
 Until 2026-08-26 the page had exactly one cohort: three value tiers over a
 270-day window, from six thresholds hardcoded in the API. Two knobs were on
@@ -1230,11 +1248,11 @@ whole reason the group is read from the source now.
 
 | Job | Trigger | What it does |
 |---|---|---|
-| `pg_warehouse_derive` | every 1 min | Postgres derives Silver, Gold and the customer profile when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
+| `pg_warehouse_derive` | every 1 min | Postgres derives Silver and Gold when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses included (Postgres only, O3 (a)) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
-| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, the витрина, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
+| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
@@ -1832,7 +1850,16 @@ nanohryvnia.
 rather than receives. `core/pg_gold.py` writes it from `silver.orders`, in the
 same call that rebuilds Silver and immediately after it — one floor, one tick,
 so Gold can never aggregate a Silver the next statement is about to replace.
-`TRUNCATE` then one `INSERT`, in one transaction, for `pg_silver`'s reasons.
+`DELETE` then one `INSERT`, in one transaction, under `SET LOCAL lock_timeout
+= '5s'`, for `pg_silver`'s reasons — and Silver is the same shape: one `INSERT`
+of `silver_recompute_ctes`, where it was an INSERT and a full-table pass-2
+UPDATE. Both tables were cleared with `TRUNCATE` until the review's A23
+(2026-11), and every read of them waited for the rebuild; a `DELETE` blocks
+no reader, and a conflicting lock costs one failed, journalled run that the
+next tick retries. The price, a dead version of every row for autovacuum, was
+measured first: at production's pace (the 600-second floor) both tables
+settle under twice a fresh build; back to back, which only forced refreshes
+can do, they grow until vacuum catches up.
 
 **The measures are shared; the shape is not.** The eight aggregates live in
 `GOLD_MEASURES` (`core/warehouse_sql.py`) and are rendered verbatim into the
@@ -2353,7 +2380,10 @@ retail-клиента, **факты без уровней** (пороги — п
 законен, потому что обе стороны видят один Silver. Ключ контактов —
 натуральная тройка, sequence-id DuckDB намеренно не переносится. Куда витрине
 переезжать (этот Postgres или магазина) — открытый вопрос владельца; она
-derived, переезд стоит одну пересборку.
+derived, переезд стоит одну пересборку. **С решения владельца O6
+(2026-11-11) витрину не пересобирают и не сверяют** — её никто не читал: таблица
+держит последнее содержимое, `meta.derivation_runs.profile_rows` пишется NULL,
+а `customer_profile_mismatch` не переиспользуется.
 
 Проверено на одноразовом PostgreSQL 17.2 (миграции 0001→0011 + initdb):
 читатели шага 1 сходятся с независимо посчитанной правдой по каждой ячейке;
@@ -2570,7 +2600,9 @@ TRUNCATE не MVCC-безопасен: снимок, взятый до комм�
 Воспроизведено с настоящим `rebuild_silver`: exit 0, «no orders» за все
 12 недель, а с `--snapshot` — файл на 0 строк, «сверенный» с таблицей.
 LOCK снимка не фиксирует и пережидает тик; пустой Silver рядом с непустой
-бронзой всё равно роняет прогон (exit 1). Платформы в отчёте — в именах
+бронзой всё равно роняет прогон (exit 1). С A23 (11.11.2026) Silver и Gold
+чистятся `DELETE`, а не `TRUNCATE`: LOCK тика больше не ждёт, снимок читает
+предыдущий Silver целиком, а проверка пустого Silver остаётся страховкой. Платформы в отчёте — в именах
 вкладки: Google делится на `google_ads`/`google_organic` одной функцией
 `core.utm_classify.tab_platform`, которую зовёт и `get_traffic_analytics`.
 

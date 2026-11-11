@@ -202,8 +202,8 @@ async def rebuild_silver_from_scratch(
     admin: dict = Depends(require_admin),
 ):
     """Rebuild Silver from scratch — in Postgres, the derivation run past its
-    floor, which rebuilds `silver.orders` whole (TRUNCATE and both passes in
-    one transaction, `core.pg_silver.rebuild_silver`).
+    floor, which rebuilds `silver.orders` whole (one transaction,
+    `core.pg_silver.rebuild_silver`).
 
     Until step 14's S14-15 this DROPped, re-created and re-filled DuckDB's
     `silver_orders` first — a lever for DuckDB rows that blocked its
@@ -355,8 +355,8 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
 
     DO NOT RUN THIS IN PRODUCTION TO SEE WHETHER IT WORKS. It is the only path
     that fetches buyers with `include=loyalty,shipping`, so it fills city and
-    region for every buyer — which moves `customer_profile.city` and the SMS
-    audience's city filter. That is a decision, not a test.
+    region for every buyer — which moves the SMS audience's city filter. That
+    is a decision, not a test.
 
     Answers at once and runs in the background: the fetch alone takes
     minutes, and a request held that long was answered 504 by the app's own
