@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.340
+
+- docs: the derive row and the UTM dry-run paragraph after O6 and A23
+- docs(cohorts): the fourth first-purchase rule, and the витрина no longer checked (review D-2, D-3)
+- docs(derivation): no clear in this process is a TRUNCATE since A23 (review D-1)
+- docs(derivation): the numbers that chose DELETE over TRUNCATE (A23)
+- test(cohorts): a second purchase on a retired source, by its answer (O5)
+- test(derivation): name what each mutation of the recompute moves (A23)
+- fix(assistant): type the single-row results; shrink the typecheck baseline
+- docs(assistant): say plainly why the mean of daily averages was wrong (A22)
+- docs(claude): the three definitions of a first purchase, kept (O7)
+- fix(assistant): AOV over the period, customers as distinct buyers (A22, O1 a)
+- fix(cohorts): measure cohorts on active sources only, assign from every order (O5)
+- fix(derivation): one INSERT per layer, cleared under lock_timeout (A23, O1 a)
+- fix(derivation): stop rebuilding and checking app.customer_profile (O6)
+
+
 ## 3.0.339
 
 - docs(claude): what the 05:30 expense comparison leaves out, and how it reads money
