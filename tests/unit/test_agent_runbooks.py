@@ -11,7 +11,9 @@ that no longer runs. What this holds:
 - every registered `warehouse_pg:*` key reaches the warehouse runbook, and no
   key the routing names by a DuckDB-era prefix is still registered;
 - no runbook describes DuckDB as a live store or names a lever that went with
-  it (the compaction, `DUCKDB_MEMORY_LIMIT` as a knob, DuckDB's FATAL block).
+  it (the compaction, `DUCKDB_MEMORY_LIMIT` as a knob, DuckDB's FATAL block);
+- and since the final stage (2026-11-12), none describes the file as on disk:
+  the file, its backups, the export and the hourly hash of the file are gone.
 """
 from __future__ import annotations
 
@@ -77,6 +79,10 @@ STALE = (
     ("лежат в DuckDB", "the DQ journal is written in Postgres (S14-10)"),
     ("часовой копии журнала", "nothing copies the DQ journal (S14-13)"),
     ("поднять лимит или DUCKDB_MEMORY_LIMIT", "a step-14 web loads no DuckDB"),
+    ("duckdb_silence_check", "the file's hourly hash went with the file (final stage)"),
+    ("замороженный архив", "the DuckDB file is deleted, not frozen (final stage)"),
+    ("удалять его нельзя (решение владельца, финальный этап",
+     "the final stage deleted the file, its backups and the export"),
 )
 
 
@@ -88,6 +94,11 @@ def test_no_runbook_describes_duckdb_as_live(path):
     assert not found, (path.name, found)
 
 
-def test_the_common_part_says_the_file_is_an_archive():
+def test_the_common_part_says_the_file_is_gone():
+    """The final stage (2026-11-12) deleted the file, its backups and the
+    export, and the hourly hash went with them. Mutation: call the file a
+    frozen archive again, or name its hash check."""
     text = (REPO / "deploy" / "agent" / "runbooks" / "_common.md").read_text(encoding="utf-8")
-    assert "замороженный архив" in text and "duckdb_silence_check.sh" in text
+    assert "Файла DuckDB (data/analytics.duckdb) больше нет" in text
+    assert "удалил финальный этап 12.11.2026" in text
+    assert "Ковчег" in text

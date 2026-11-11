@@ -3256,17 +3256,22 @@ an absent value means `duckdb` there. What to check before such a rollback is
 What the week changed on the host stays changed: root's crontab no longer
 runs the Sunday compaction (`scripts/weekly_compact.sh`) or the nightly
 DuckDB snapshot (`deploy/daily_offsite.sh`) — both retired on 2026-10-16 and
-deleted in step 14's S14-18 — and runs the hourly
-`deploy/duckdb_silence_check.sh`. `.env` keeps `KS_DUCKDB=off`, written bare
-on a line of its own: a step-14 web ignores it, but the host scripts read it
-(`deploy/duckdb_env.sh`), `deploy/offsite_check.sh` reports the DuckDB copy as
-frozen on it, and `deploy/restore-test.sh` passes `-e KS_DUCKDB=on` to its
-own sidecar so the drill still runs. The crontab change was made by a person
-from the print of `deploy/duckdb_silence_check.sh --crontab`, never by a
-script, and that print also carries the way back.
+deleted in step 14's S14-18. It ran the hourly hash of the file,
+`deploy/duckdb_silence_check.sh`, from the week's start until the final
+stage: on 2026-11-12, after the restore from the second Ark was rehearsed on
+2026-11-11, its line came out of the crontab, the file was deleted, and the
+script went from this checkout. Its record under `/root/duckdb-silence`
+stays, as history. `.env` keeps `KS_DUCKDB=off`, written bare on a line of
+its own: a step-14 web ignores it, `deploy/restore-test.sh` reads it
+(`deploy/duckdb_env.sh`) and passes `-e KS_DUCKDB=on` to its own sidecar so
+the drill still runs, and an image from before step 14 runs without the file
+only under it. `deploy/offsite_check.sh` reported the DuckDB copy as frozen
+on it until the final stage, which took every judgement of that copy out of
+the check. The crontab changes were made by a person from the print of
+`deploy/duckdb_silence_check.sh --crontab`, never by a script.
 
 **On a step-14 image there is no way back to make**: leave `.env` at
-`KS_DUCKDB=off` and do not re-add those two cron lines — the scripts are gone
+`KS_DUCKDB=off` and do not re-add those three cron lines — the scripts are gone
 from this checkout, and a step-14 web runs `off` whatever `.env` says. The
 way back is a rollback to an image from before step 14 first ("Before any
 rollback to an image from before step 14"), whose own code knows
@@ -3274,8 +3279,9 @@ rollback to an image from before step 14"), whose own code knows
 back, `deploy/backup.env` must set `BACKUP_RESTORE_IMAGE` to the image tagged
 `rollback-step14`, and that tag must be on the host: the snapshot has had no
 default image since S14-02, and without both it refuses every night (exit 2)
-and pages "Daily snapshot FAILED". Starting the week again would then need a
-new Ark, because the file changes the moment web runs `on`.
+and pages "Daily snapshot FAILED". And since the final stage there is no
+file for `on` to open: that image runs under `off`, and `on` would first need
+a warehouse rebuilt from the second Ark (`deploy/restore_from_export.py`).
 
 ### What is left on disk, and how to restore it
 
