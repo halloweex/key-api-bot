@@ -686,27 +686,29 @@ async def upsert_orders_with_expenses(
     # them, deduplicated by id keeping the last (`INSERT OR REPLACE`'s outcome).
     # Parsed order by order, for the same reason as the headers. Beside them,
     # which orders' payloads LIST their expenses — a list under the key, empty
-    # included — and the ids they list: what KeyCRM no longer lists under such
-    # an order is deleted (O2 (a)); a payload without the key says nothing.
+    # included — and every expense id any payload of the batch lists, read off
+    # the payload itself, its order refused or not: what KeyCRM no longer lists
+    # under such an order is deleted (O2 (a)), an id it lists anywhere never,
+    # and a payload without the key says nothing.
     parsed_expenses = []
-    listing: Dict[int, set] = {}
+    listing: set = set()
+    all_listed: set = set()
     for p in payloads:
         if not isinstance(p, dict):
             continue
+        carried = p.get("expenses")
+        if isinstance(carried, list):
+            all_listed.update(
+                i for i in (_int_or_none(e.get("id")) if isinstance(e, dict) else None
+                            for e in carried) if i is not None)
         if _int_or_none(p.get("id")) in refusals:
             continue
-        carried = p.get("expenses")
-        lists = isinstance(carried, list) and _int_or_none(p.get("id")) is not None
+        if isinstance(carried, list) and _int_or_none(p.get("id")) is not None:
+            listing.add(int(p["id"]))
         if not carried:
-            if lists:
-                listing.setdefault(int(p["id"]), set())
             continue
         try:
-            rows = expense_rows([p])
-            parsed_expenses.extend(rows)
-            if lists:
-                listing.setdefault(int(p["id"]), set()).update(
-                    i for i in (_int_or_none(e.id) for e in rows) if i is not None)
+            parsed_expenses.extend(expense_rows([p]))
         except _UNPARSEABLE as exc:
             why = f"unparseable expenses: {type(exc).__name__}: {exc}"
             logger.error("orders: order %r not written to Postgres: %s", p.get("id"), why)
@@ -743,9 +745,7 @@ async def upsert_orders_with_expenses(
             kept_expenses.append(row)
 
     # The orders whose expense listing is acted on: not refused, by the parse
-    # or by the checks above (O2 (a)). Every id any payload lists, refused or
-    # not, is kept: an expense KeyCRM lists somewhere is never deleted.
-    all_listed = set().union(*listing.values()) if listing else set()
+    # or by the checks above (O2 (a)).
     listed = {oid for oid in listing if oid not in refusals}
 
     def failed() -> int:

@@ -235,6 +235,21 @@ class TestWhatIsNeverDeleted:
         assert set(await _costs(pool, BASE + 1)) == {moved}
         assert result.expenses_deleted == 0
 
+    @pytest.mark.asyncio
+    async def test_an_id_listed_under_a_refused_order_is_not_deleted(self, pool):
+        """KeyCRM moved the expense to an order the parse cannot read: that
+        order is refused and writes nothing, and the expense is still listed
+        in the page, so the old order's empty list does not delete it.
+        Mutation: read the ids to keep from the payloads that were parsed."""
+        moved = BASE * 10
+        await _write([_payload(BASE, [_cost(moved)])])
+        unreadable = _payload(BASE + 1, [_cost(moved)])
+        unreadable["grand_total"] = "not a number"
+        result, _ = await _write([_payload(BASE, []), unreadable])
+        assert result.failed == 1
+        assert set(await _costs(pool, BASE)) == {moved}
+        assert result.expenses_deleted == 0
+
 
 class TestAnUnchangedExpenseIsNotRewritten:
     @pytest.mark.asyncio
