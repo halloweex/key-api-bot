@@ -13,7 +13,7 @@ import { plural, type T } from './plural'
 import { formatDay, kyivToday } from './smsDates'
 import {
   conversion, perBase, roughly,
-  type Change, type Conclusion, type CountChange, type StepMove, type Transition,
+  type Change, type Conclusion, type CountChange, type StepMove,
 } from './funnel'
 import type { FunnelCounts } from '../types/api'
 
@@ -77,47 +77,46 @@ export function countsSentence(buyers: CountChange, entered: CountChange, t: T):
   return t(buyers.move === entered.move ? 'traffic.funnel.counts.and' : 'traffic.funnel.counts.but', { a, b })
 }
 
+/** What a step's change made or cost, in buyers: «— минус около 80
+ *  покупателей». A sign, not «это»: «это около 80 покупателей» beside a step
+ *  read as the people at that step. */
 function cost(move: StepMove, t: T): string {
   if (move.buyers == null) return ''
   const n = roughly(move.buyers)
   if (n === 0) return ''
-  const word = move.buyers < 0 ? 'word.buyersGen' : 'word.extraBuyersGen'
-  return t('traffic.funnel.cost', { n: formatNumber(n), word: plural(t, word, n) })
+  return t(move.buyers < 0 ? 'traffic.funnel.costLost' : 'traffic.funnel.costGained', {
+    n: formatNumber(n), word: plural(t, 'word.buyersGen', n),
+  })
 }
 
+/** «▼ Просел один шаг: корзина → оформление — минус около 80 покупателей.»
+ *  The step's own shares stand under its bar, so they are not said again. */
 function moveLine(move: StepMove, lead: 'one' | 'many', t: T): Line {
   const better = move.change === 'better'
   return {
     tone: better ? 'good' : 'bad',
     lead: t(`traffic.funnel.lead.${lead === 'one' ? 'one' : 'many'}${better ? 'Better' : 'Worse'}`),
-    text: `${t(`traffic.funnel.move.${move.step}`, { now: stepPct(move.now), was: stepPct(move.was) })}${cost(move, t)}.`,
+    text: `${t(`traffic.funnel.pair.${move.step}`)}${cost(move, t)}.`,
   }
 }
 
-export interface Said {
-  headline: Line
-  lines: Line[]
-}
-
-export function sayConclusion(c: Conclusion, t: T): Said {
+/**
+ * The conclusion as plain sentences, and nothing the screen already says
+ * (the owner, 2026-11-05: «слишком много текста… ты теряешься»). No headline:
+ * «Конверсия упала: было X, стало Y» and «Всё в пределах колебаний» repeated
+ * the number above them. No sentence on where people leave: the bars mark
+ * that step. What is left is what nothing else on the screen says — the
+ * counts, each step that moved beyond noise with what it cost, and the mix.
+ * Every step that moved gets its own sentence; none is cut.
+ */
+export function sayConclusion(c: Conclusion, t: T): Line[] {
   const lines: Line[] = []
-  let headline: Line
-
   if (c.headline.kind === 'conversion') {
-    const up = c.headline.change === 'better'
-    headline = {
-      tone: up ? 'good' : 'bad',
-      text: t(`traffic.funnel.headline.${up ? 'conversionUp' : 'conversionDown'}`, {
-        was: convPct(c.headline.was), now: convPct(c.headline.now),
-      }),
-    }
     if (c.strongest) {
       const s = c.strongest
       lines.push({
         tone: 'neutral',
-        text: `${t(`traffic.funnel.strongest.${s.change}`, {
-          pair: t(`traffic.funnel.pair.${s.step}`), was: stepPct(s.was), now: stepPct(s.now),
-        })}${cost(s, t)}.`,
+        text: `${t(`traffic.funnel.strongest.${s.change}`, { pair: t(`traffic.funnel.pair.${s.step}`) })}${cost(s, t)}.`,
       })
     }
     for (const m of c.moves) lines.push(moveLine(m, 'many', t))
@@ -125,42 +124,19 @@ export function sayConclusion(c: Conclusion, t: T): Said {
       lines.push({
         tone: 'neutral',
         text: t(`traffic.funnel.mix.${c.mix.change === 'better' ? 'up' : 'down'}`, {
-          who: t(`traffic.funnel.mixWho.${c.mix.type}${c.mix.more ? 'More' : 'Fewer'}`),
+          who: t(`traffic.funnel.mixWho.${c.mix.type}${c.mix.more ? 'More' : 'Fewer'}`, {
+            from: groupPct(c.mix.shareWas), to: groupPct(c.mix.shareNow),
+          }),
         }),
       })
     }
-  } else if (c.headline.kind === 'counts') {
-    headline = { tone: 'neutral', text: countsSentence(c.buyers, c.entered, t) }
-    const detail = c.buyers.move === 'same' && c.entered.move === 'more' ? 'extraBoughtNothing'
-      : c.buyers.move === 'same' && c.entered.move === 'fewer' ? 'lostBoughtNothing'
-        : 'plain'
-    lines.push({
-      tone: 'neutral',
-      text: t(`traffic.funnel.detail.${detail}`, {
-        now: formatNumber(c.buyersNow), word: plural(t, 'word.buyers', c.buyersNow), was: formatNumber(c.buyersWas),
-      }),
-    })
-    for (const m of c.moves) lines.push(moveLine(m, c.moves.length === 1 ? 'one' : 'many', t))
-  } else {
-    headline = { tone: 'neutral', text: t('traffic.funnel.headline.steady') }
-    if (c.buyers.move !== 'same' || c.entered.move !== 'same') {
-      lines.push({ tone: 'neutral', text: `${countsSentence(c.buyers, c.entered, t)}.` })
-    }
+    return lines
   }
-
-  const leakLine = sayLeak(c.leak, t)
-  if (leakLine) lines.push(leakLine)
-  return { headline, lines }
-}
-
-export function sayLeak(leak: Conclusion['leak'], t: T): Line | null {
-  if (!leak) return null
-  const where = t(`traffic.funnel.between.${leak.step}`)
-  const share = stepPct(leak.leftShare)
-  const text = leak.asBefore ? t('traffic.funnel.leak.asBefore', { where, share })
-    : leak.was != null ? t('traffic.funnel.leak.was', { where, share, was: stepPct(leak.was) })
-      : t('traffic.funnel.leak.plain', { where, share })
-  return { tone: 'neutral', text }
+  if (c.headline.kind === 'counts' || c.buyers.move !== 'same' || c.entered.move !== 'same') {
+    lines.push({ tone: 'neutral', text: `${countsSentence(c.buyers, c.entered, t)}.` })
+  }
+  for (const m of c.moves) lines.push(moveLine(m, c.moves.length === 1 ? 'one' : 'many', t))
+  return lines
 }
 
 // ─── The headline number ─────────────────────────────────────────────────────
@@ -173,11 +149,24 @@ export function perBaseText(now: FunnelCounts, t: T): string | null {
   return t('traffic.funnel.hero.per', { base: formatNumber(base), n: formatNumber(count) })
 }
 
-/** «было 2,33 % — в пределах обычных колебаний»; the verdict only when judged. */
-export function wasText(was: number | null, change: Change | null, t: T, form: 'hero' | 'total'): Line | null {
+export interface HeroWas {
+  /** «было 2,33 %». */
+  was: string
+  /** «в пределах колебаний», «хуже обычного», «лучше обычного»; null when
+   *  the windows were too small to judge. */
+  verdict: string | null
+  tone: Tone
+}
+
+/** What the conversion was and the verdict on it, as two pieces set beside the
+ *  number rather than one sentence under it. */
+export function heroWas(was: number | null, change: Change | null, t: T): HeroWas | null {
   if (was == null) return null
-  const verdict = change === 'worse' ? 'Worse' : change === 'better' ? 'Better' : change === 'same' ? 'Same' : 'Plain'
-  return { tone: toneOf(change), text: t(`traffic.funnel.${form}.was${verdict}`, { was: convPct(was) }) }
+  return {
+    was: t('traffic.funnel.hero.was', { was: convPct(was) }),
+    verdict: change ? t(`traffic.funnel.hero.verdict.${change}`) : null,
+    tone: toneOf(change),
+  }
 }
 
 // ─── The breakdown ───────────────────────────────────────────────────────────
@@ -190,11 +179,6 @@ export function gapText(gap: number, by: 'type' | 'channel' | 'device', t: T): s
   return gap > 0
     ? t(`traffic.funnel.table.short${what}`, { n: formatNumber(n), word: plural(t, 'word.peopleGen', n) })
     : t(`traffic.funnel.table.over${what}`, { n: formatNumber(n) })
-}
-
-/** The step a transition names, for the words between the bars. */
-export function transitionText(step: Transition, t: T, short: boolean): string {
-  return t(`traffic.funnel.${short ? 'transitionShort' : 'transition'}.${step}`)
 }
 
 /** When the figures on screen were fetched, in Kyiv: «10:42» today, or
