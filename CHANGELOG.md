@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.341
+
+- fix(marketing): the report counts customers as people, as the dashboard does
+
+
 ## 3.0.340
 
 - docs: the derive row and the UTM dry-run paragraph after O6 and A23
