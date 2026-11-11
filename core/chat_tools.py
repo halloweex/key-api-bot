@@ -416,8 +416,15 @@ async def _chat_run(sql: str, params, *, mode: str = "all"):
 
 
 def _revenue_totals_sql(sales_type: str) -> str:
-    """The totals body `_get_revenue_summary` and `_get_revenue_by_dates` share
-    — it was written out twice, identically."""
+    """The totals body `_get_revenue_summary`, `_get_revenue_by_dates` and
+    `_get_customer_insights` share — it was written out twice, identically.
+
+    The average order value is the period's revenue over its orders, as the
+    dashboard's (`CustomersMixin.get_customer_insights`). It was the mean of
+    the days' averages until the review's A22, so a day with no sale — every
+    day a return or a retired source left a Gold row of zeros — pulled it
+    down, and a ₴190 period read ₴550 or ₴0 by which days it held.
+    """
     sales_filter = ""
     if sales_type == "retail":
         sales_filter = "AND sales_type = 'retail'"
@@ -427,7 +434,8 @@ def _revenue_totals_sql(sales_type: str) -> str:
             SELECT
                 COALESCE(SUM(revenue), 0) as total_revenue,
                 COALESCE(SUM(orders_count), 0) as total_orders,
-                COALESCE(AVG(avg_order_value), 0) as avg_order_value,
+                COALESCE(SUM(revenue) / NULLIF(SUM(orders_count), 0), 0)
+                    as avg_order_value,
                 COALESCE(SUM(returns_revenue), 0) as returns_revenue,
                 COALESCE(SUM(returns_count), 0) as returns_count
             FROM {{gold_daily_revenue}}
@@ -725,24 +733,28 @@ async def _compare_date_ranges(
 
 
 async def _get_customer_insights(period: str) -> Dict[str, Any]:
-    """Get customer insights for a period."""
+    """Get customer insights for a period: the dashboard's numbers.
+
+    The customers are the dashboard's customer block's, by its own statement
+    (`insights_period_query`): distinct buyers over Silver. Until the
+    review's A22 this summed Gold's daily distinct counts, so one buyer who
+    bought on two days was two customers, one new and one returning — a
+    50 % repeat rate. The repeat rate is the dashboard's `repeatRate`, the
+    period's returning buyers over its buyers. The average order value is
+    the period's revenue over its orders (`_revenue_totals_sql`).
+    """
+    from core.repositories.customers import insights_period_query
+
     start_date, end_date = _get_date_range(period)
 
-    result = await _chat_run("""
-            SELECT
-                COALESCE(SUM(unique_customers), 0) as total_customers,
-                COALESCE(SUM(new_customers), 0) as new_customers,
-                COALESCE(SUM(returning_customers), 0) as returning_customers,
-                COALESCE(AVG(avg_order_value), 0) as avg_order_value
-            FROM {gold_daily_revenue}
-            WHERE date BETWEEN ? AND ?
-                AND {gold_revenue_rollup}
-                AND sales_type = 'retail'
-        """, [start_date, end_date], mode="one")
+    customers = await _chat_run(
+        *insights_period_query(start_date, end_date, sales_type="retail"), mode="one")
+    totals = await _chat_run(
+        _revenue_totals_sql("retail"), [start_date, end_date], mode="one")
 
-    total = int(result[0] or 0)
-    new_customers = int(result[1] or 0)
-    returning = int(result[2] or 0)
+    total = int(customers[0] or 0) if customers else 0
+    new_customers = int(customers[1] or 0) if customers else 0
+    returning = int(customers[2] or 0) if customers else 0
     repeat_rate = (returning / total * 100) if total > 0 else 0
 
     return {
@@ -751,7 +763,7 @@ async def _get_customer_insights(period: str) -> Dict[str, Any]:
         "new_customers": new_customers,
         "returning_customers": returning,
         "repeat_rate": round(repeat_rate, 1),
-        "avg_order_value": float(result[3] or 0)
+        "avg_order_value": float(totals[2] or 0) if totals else 0.0,
     }
 
 
