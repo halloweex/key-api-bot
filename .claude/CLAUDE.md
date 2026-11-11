@@ -690,13 +690,17 @@ keep. Set it via `POST /api/managers/{id}/retail-status`, which raises the
 derivation signal in the same transaction, because `sales_type` only changes
 on a rebuild.
 
-**"First purchase" has three definitions, kept on purpose** (owner's decision
+**"First purchase" has four definitions, kept on purpose** (owner's decision
 O7, 2026-11-11). Silver's (`silver_recompute_ctes`, which Gold's
 `new_customers` counts): the earliest non-return order on any source and of any
 sales type, and `is_new_customer` only on an active-source order of that day.
 `app.customer_profile`'s: retail orders on active sources (frozen since O6).
 The SMS audience's: retail order lines on active sources, so an order without
-lines does not count. Measured on production for the 365 days to 2026-11-11:
+lines does not count. The cohorts' (`core/sql_dialect.py`): the earliest
+non-return order of the requested sales type on any source, so a retail
+cohort takes in a buyer whose first order was internal, b2b or at the
+exhibition, whom Silver counts as not new. Measured on production for the 365
+days to 2026-11-11:
 8 168 buyers made a first retail order, and Silver's rule counts 63 of them as
 not new, exactly the gap to Gold's 8 105 — 40 because their first order was on
 Opencart (intended: a purchase on a retired channel is still a purchase), 21
@@ -1248,7 +1252,7 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
-| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, the витрина, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
+| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |

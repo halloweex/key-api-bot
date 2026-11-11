@@ -1046,11 +1046,14 @@ CLICKHOUSE_ANALYTICS = AnalyticsDialect(
 
 # WHO IS IN A COHORT, AND WHAT COUNTS INSIDE IT (owner's decision O5,
 # 2026-11-11). A buyer's cohort — whether they are in one, and which month —
-# is read from every non-return order of the sales type, as Silver's
-# first-order rule reads a buyer's first order (`core/warehouse_sql.py`,
+# is read from every non-return order of the sales type on any source. On
+# sources this follows Silver's first-order rule (`core/warehouse_sql.py`,
 # `silver_recompute_ctes`): a purchase on a retired channel is still a
 # purchase, so a buyer whose first order was on Opencart belongs to that
-# order's month and is never "acquired" by a later Instagram order. What is
+# order's month and is never "acquired" by a later Instagram order. On sales
+# types it does not: Silver reads every sales type, a cohort only the one
+# asked for, so a retail cohort takes in a buyer whose first order was
+# internal, b2b or at the exhibition (see "First purchase" in CLAUDE.md). What is
 # measured inside the cohort — the months a buyer was active in, the revenue,
 # the order counts, the recency and the second purchase — reads active
 # sources only (`is_active_source`, `REVENUE_SOURCE_IDS`), as Gold, the SMS
