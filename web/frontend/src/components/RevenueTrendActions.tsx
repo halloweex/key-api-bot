@@ -14,6 +14,8 @@ interface ActionsProps {
   growthData: GrowthTotals | undefined
   isLoading: boolean
   compareType: CompareType
+  /** False when the period has nothing before it: no comparison to pick. */
+  canCompare?: boolean
   onCompareTypeChange: (type: CompareType) => void
   t: (key: string) => string
 }
@@ -23,6 +25,7 @@ export function RevenueTrendActions({
   growthData,
   isLoading,
   compareType,
+  canCompare = true,
   onCompareTypeChange,
   t,
 }: ActionsProps) {
@@ -48,16 +51,18 @@ export function RevenueTrendActions({
         </div>
       )}
 
-      <Select
-        variant="pill"
-        options={getCompareTypeOptions(t).map((opt) => ({
-          value: opt.value,
-          label: `${t('chart.vs')} ${opt.shortLabel}`,
-        }))}
-        value={compareType}
-        onChange={(v) => v && onCompareTypeChange(v as CompareType)}
-        allowEmpty={false}
-      />
+      {canCompare && (
+        <Select
+          variant="pill"
+          options={getCompareTypeOptions(t).map((opt) => ({
+            value: opt.value,
+            label: `${t('chart.vs')} ${opt.shortLabel}`,
+          }))}
+          value={compareType}
+          onChange={(v) => v && onCompareTypeChange(v as CompareType)}
+          allowEmpty={false}
+        />
+      )}
     </div>
   )
 }

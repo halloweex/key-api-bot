@@ -2,7 +2,8 @@
 Meilisearch async client wrapper for typo-tolerant search.
 
 Provides fast, typo-tolerant search for buyers, orders, and products.
-Syncs data from DuckDB to Meilisearch for optimal search performance.
+Syncs data from Postgres to Meilisearch (from DuckDB until step 14) for optimal
+search performance.
 """
 import asyncio
 import math
@@ -40,6 +41,20 @@ def _sanitize_documents(docs: List[dict]) -> List[dict]:
     return [_sanitize_for_json(doc) for doc in docs]
 
 
+# How long a search may wait for Meilisearch. The client the index writers use
+# has no timeout, and a search through it waited 15.3 s on an unroutable host
+# before answering 200 with nothing in it (L3-04). A person is waiting for a
+# search; a writer is not.
+SEARCH_TIMEOUT_S = 3
+
+
+class MeiliUnavailable(Exception):
+    """A search Meilisearch could not answer: unreachable, slow past
+    `SEARCH_TIMEOUT_S`, or refusing. The searches used to answer [] for it,
+    so "Meilisearch is down" read as "nobody matches" (L3-04); their callers
+    turn it into a counted refusal (`read_fallback.refuse("search", …)`)."""
+
+
 class MeiliClient:
     """Async wrapper for Meilisearch client."""
 
@@ -47,6 +62,7 @@ class MeiliClient:
         self.url = url
         self.master_key = master_key
         self._client: Optional[meilisearch.Client] = None
+        self._search_client: Optional[meilisearch.Client] = None
         self._initialized = False
 
     @property
@@ -55,6 +71,15 @@ class MeiliClient:
         if self._client is None:
             self._client = meilisearch.Client(self.url, self.master_key)
         return self._client
+
+    @property
+    def search_client(self) -> meilisearch.Client:
+        """The searches' client: the same server, bounded by
+        `SEARCH_TIMEOUT_S`, no retry. The index writers keep `client`."""
+        if self._search_client is None:
+            self._search_client = meilisearch.Client(
+                self.url, self.master_key, timeout=SEARCH_TIMEOUT_S)
+        return self._search_client
 
     async def health_check(self) -> dict:
         """Check Meilisearch health status."""
@@ -167,10 +192,13 @@ class MeiliClient:
 
         Returns:
             List of matching buyers with highlights
+
+        Raises:
+            MeiliUnavailable: Meilisearch did not answer.
         """
         try:
             loop = asyncio.get_event_loop()
-            index = self.client.index("buyers")
+            index = self.search_client.index("buyers")
 
             search_params = {
                 "limit": limit,
@@ -194,7 +222,7 @@ class MeiliClient:
 
         except Exception as e:
             logger.warning(f"Buyer search failed: {e}")
-            return []
+            raise MeiliUnavailable(f"buyers search: {type(e).__name__}") from e
 
     async def search_orders(
         self,
@@ -213,7 +241,7 @@ class MeiliClient:
         """
         try:
             loop = asyncio.get_event_loop()
-            index = self.client.index("orders")
+            index = self.search_client.index("orders")
 
             result = await loop.run_in_executor(
                 None,
@@ -229,7 +257,7 @@ class MeiliClient:
 
         except Exception as e:
             logger.warning(f"Order search failed: {e}")
-            return []
+            raise MeiliUnavailable(f"orders search: {type(e).__name__}") from e
 
     async def search_products(
         self,
@@ -250,7 +278,7 @@ class MeiliClient:
         """
         try:
             loop = asyncio.get_event_loop()
-            index = self.client.index("products")
+            index = self.search_client.index("products")
 
             search_params = {
                 "limit": limit,
@@ -273,7 +301,7 @@ class MeiliClient:
 
         except Exception as e:
             logger.warning(f"Product search failed: {e}")
-            return []
+            raise MeiliUnavailable(f"products search: {type(e).__name__}") from e
 
     async def index_buyers(self, buyers: List[dict]) -> int:
         """

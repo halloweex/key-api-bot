@@ -9,11 +9,14 @@ import logging
 
 import httpx
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
+from tests.integration import pg_sms_seed
 from web.main import app
 from web.routes.api import webhooks
 from web.routes.auth import PUBLIC_API_PATHS
+
 
 PATH = "/api/webhooks/turbosms"
 SECRET = "s3cret"
@@ -193,8 +196,17 @@ class TestTheSignedIdIsBoundToItsMessage:
     campaign's measured lift is computed from.
 
     These run against a real store, not the fake: what is being proved is that
-    the write does not land, and a fake cannot show that.
+    the write does not land, and a fake cannot show that. The store is
+    Postgres, `/sms`'s only one since step 14's S14-08 (it was DuckDB until
+    then; `tests/integration/pg_sms_seed.py`); skipped without `KS_PG_DSN`.
     """
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _postgres(self, monkeypatch):
+        if not pg_sms_seed.DSN:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+        async with pg_sms_seed.on_postgres(monkeypatch):
+            yield
 
     @staticmethod
     def _member(buyer_id: int) -> dict:
@@ -206,10 +218,7 @@ class TestTheSignedIdIsBoundToItsMessage:
 
     async def _campaign(self, tmp_path, monkeypatch):
         """A sent campaign with two recipients, and the webhook wired to it."""
-        from core.duckdb_store import DuckDBStore
-
-        store = DuckDBStore(db_path=tmp_path / "dlr.duckdb")
-        await store.connect()
+        store = pg_sms_seed.store(tmp_path, "dlr.duckdb")
         await store.freeze_sms_campaign(
             campaign="aug", customers=[self._member(1), self._member(2)],
             criteria={}, ltv_basis="margin", sales_type="retail", holdout_pct=0,
@@ -237,11 +246,11 @@ class TestTheSignedIdIsBoundToItsMessage:
 
     @staticmethod
     async def _row(store, message_id: str) -> tuple:
-        async with store.connection() as conn:
-            return conn.execute(
-                "SELECT delivery_status, delivered FROM sms_campaign_members"
-                " WHERE message_id = ?", [message_id],
-            ).fetchone()
+        async with pg_sms_seed.pg_conn() as conn:
+            return pg_sms_seed.as_tuple(await conn.fetchrow(
+                "SELECT delivery_status, delivered FROM app.sms_campaign_members"
+                " WHERE message_id = $1", message_id,
+            ))
 
     @pytest.mark.asyncio
     async def test_a_captured_pair_cannot_be_repointed_at_another_message(
@@ -266,7 +275,6 @@ class TestTheSignedIdIsBoundToItsMessage:
             "computed from, and a callback that never referred to them "
             "must not touch it"
         )
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_the_rejection_is_counted_under_its_own_condition(
@@ -284,7 +292,6 @@ class TestTheSignedIdIsBoundToItsMessage:
 
         assert webhooks._dlr_counts["event_rebound"] == 1
         assert webhooks._dlr_counts["accepted"] == 1, "the forged one is not accepted"
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_the_gateways_nine_retries_are_still_recorded(
@@ -308,7 +315,6 @@ class TestTheSignedIdIsBoundToItsMessage:
 
         assert await self._row(store, "mid-victim") == ("DELIVRD", True)
         assert webhooks._dlr_counts["accepted"] == 9
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_a_second_event_for_the_same_message_still_records(
@@ -324,7 +330,6 @@ class TestTheSignedIdIsBoundToItsMessage:
 
         assert r.status_code == 200
         assert await self._row(store, "mid-victim") == ("DELIVRD", True)
-        await store.close()
 
 
 class TestDiagnosis:

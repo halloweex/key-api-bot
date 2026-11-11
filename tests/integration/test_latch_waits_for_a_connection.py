@@ -1,7 +1,8 @@
 """The latch waits for a connection: every chain's writers, against a live pool.
 
-The latch is permanent — only `scripts/chain_copy_back.py` releases it — so a
-write that never reaches Postgres must not take it. `core.pg.get_pool` sets no
+The latch is permanent — `scripts/chain_copy_back.py` was the only thing that
+released it, and step 14's S14-04 deleted it — so a write that never reaches
+Postgres must not take it. `core.pg.get_pool` sets no
 acquire timeout, so a pool with no free connection makes a writer *wait*, and
 until 2026-09-25 chains 1, 8 and 7a took the marker before that wait began:
 between getting the pool and `pool.acquire()`. Whatever then ended the wait
@@ -13,9 +14,8 @@ proves what the order buys, per writer, through the repository method every
 caller actually reaches:
 
 - while the writer waits for a connection there is no marker, and an acquire
-  that then fails leaves no marker file and no owner row, and the flag is still
-  the whole answer — for the three ways asyncpg's acquire ends without a
-  connection (the `refusing` fixture);
+  that then fails leaves no marker file and no owner row — for the three ways
+  asyncpg's acquire ends without a connection (the `refusing` fixture);
 - a write that rolls back takes no owner row with it, for every writer: the
   claim is in the writer's transaction, not beside it;
 - a chain's first write that succeeds takes the marker and claims every owner
@@ -26,6 +26,12 @@ Only the writer's own acquire is interfered with. Anything the store reaches
 first — `set_goal` computes a suggestion before it writes — gets the live pool,
 so a test cannot pass because something upstream failed first; the pool counts
 what it handled and every test requires exactly the writer's one.
+
+No chain routes by its flag since step 14 (chains 3, 6 and 6a since S14-09,
+the rest since S14-11), so every writer is driven in the state step 14
+promises: no flag, the flag at `duckdb` and a value nobody could read
+(`FLAG_VALUES`). A writer that asked its flag again would stop before its
+acquire, or raise, in one of the three.
 """
 from __future__ import annotations
 
@@ -50,7 +56,7 @@ from core import (  # noqa: E402 — the shadow chains' block
     pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
     pg_weekly_ledger_write,
 )
-from core import pg_forecast_write, read_fallback
+from core import pg_forecast_write
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -384,14 +390,41 @@ def _writer_name(key: str) -> str:
     return key.split(":", 1)[0]
 
 
+# The values every writer is driven under, since no chain's flag routes
+# anything (S14-09 for chains 3, 6 and 6a, S14-11 for the rest): absent,
+# `duckdb` — what routed them to DuckDB until S14-00 — and one the flags'
+# readers refused until S14-11 deleted them.
+FLAG_VALUES = (None, "duckdb", "pgsql-typo")
+
+
+def _flags_for(chain) -> tuple:
+    return FLAG_VALUES
+
+
+def _cases(keys, chain_of) -> list:
+    """`(key, flag)` for every key, each flagless chain's under every value."""
+    return [pytest.param(key, flag, id=f"{key}-{flag or 'unset'}")
+            for key in keys for flag in _flags_for(chain_of(key))]
+
+
+def _set_flag(env, chain, flag) -> None:
+    if flag is None:
+        env.delenv(chain.WRITE_ENV, raising=False)
+    else:
+        env.setenv(chain.WRITE_ENV, flag)
+    # The point of the case: a chain is never driven at the value that would
+    # make a writer reading its flag again look correct.
+    assert os.environ.get(chain.WRITE_ENV) != "postgres"
+
+
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
     """A real DuckDB, a live Postgres, and no chain's flag set.
 
-    `KS_READ_EXPENSES=postgres` because chain 6a moves nothing without it
-    (`pg_expense_types_write.unmet_precondition`); it routes reads only, and
-    no test here reads expenses. The three buyer readers for chain 4's, for
-    the same reason: none of them is read here.
+    `KS_READ_EXPENSES=postgres` because chain 6a once moved nothing without
+    it, and the three buyer readers for chain 4's; since step 14 none of
+    them routes anything, and none is read here. Chains 3, 6 and 6a have no
+    precondition left to stand in for since S14-09.
     """
     from core.duckdb_store import DuckDBStore
 
@@ -401,35 +434,19 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
-    # Chain 3 moves nothing until chain 7b, step 13, chain 1 and the backup
-    # evidence hold (`pg_orders_write.unmet_precondition`); none of them is
-    # what this module is about, and every one is a local read.
-    monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
-    # Chain 5 is held on DuckDB by facts no environment variable sets (step
-    # 13, chain 3); this harness proves where its latch is taken, not whether
-    # it may move.
-    monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
-    # Chain 6's precondition taken as met: setting KS_WRITE_INVENTORY=postgres
-    # here would move chain 1's own calls; the precondition itself is proved
-    # in tests/unit/test_catalogue_chain.py.
-    monkeypatch.setattr(pg_catalogue_write, "unmet_precondition", lambda: None)
-    # Chain 7b-3's four preconditions: its inputs on Postgres, and the
-    # fallback off as configured. The goal history then reads an empty
+    # Chain 7b-3's four preconditions (none routes anything since step 14): its inputs on Postgres
+    # (and the fallback off, which nothing reads since S14-16). The goal history then reads an empty
     # `silver.orders`, which still writes a placeholder growth row.
     monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
-    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
-    monkeypatch.setattr(read_fallback, "_mode_error", None)
-    store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(live)
     with patch("core.pg.require_revision", new=AsyncMock()):
         yield store, live, monkeypatch
     await _clean(live)
     await live.close()
-    await store.close()
 
 
 def _nobody_listening() -> str:
@@ -525,16 +542,28 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
         assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
 
 
+def test_every_chain_is_driven_with_no_flag():
+    """Each writer, and each first write, runs under every value of
+    `FLAG_VALUES` and never under `postgres` — what keeps the proofs below in
+    step 14's state rather than production's flag. Mutation: drive a chain at
+    `postgres` again."""
+    for key, (chain, _call) in WRITERS.items():
+        flags = {p.values[1] for p in _cases([key], lambda k: WRITERS[k][0])}
+        assert flags == set(FLAG_VALUES), key
+    for chain_name, (key, *_row) in FIRST_WRITES.items():
+        flags = {p.values[1] for p in _cases([chain_name], _first_write_chain)}
+        assert flags == set(FLAG_VALUES), chain_name
+
+
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
-    @pytest.mark.parametrize("writer", list(WRITERS))
+    @pytest.mark.parametrize("writer, flag", _cases(WRITERS, lambda k: WRITERS[k][0]))
     @pytest.mark.asyncio
-    async def test_no_marker_no_owner_row_and_the_flag_still_decides(
-        self, stores, refusing, writer,
+    async def test_no_marker_and_no_owner_row(
+        self, stores, refusing, writer, flag,
     ):
         store, live, env = stores
         chain, call = WRITERS[writer]
-        env.setenv(chain.WRITE_ENV, "postgres")
-        assert chain.writes_postgres(), "the flag did not move the chain"
+        _set_flag(env, chain, flag)
         pool = _RefusesTheWriter(live, refusing.pool, chain.__name__)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
@@ -566,10 +595,10 @@ class TestAnAcquireThatFailsLeavesTheChainUnlatched:
         chain_latch._latched = None                 # read the disk, not the cache
         assert not chain_latch.latched(chain.CHAIN)
         assert await chain_latch.read_owners(live) == {}
-
-        # And so the rollback this chain came with is still there.
-        env.setenv(chain.WRITE_ENV, "duckdb")
-        assert chain.writes_postgres() is False
+        # Until step 14's S14-00 the flag put back to duckdb then routed the
+        # chain to DuckDB again. Nothing routes by the flag now; what still
+        # matters is that an image from before step 14, which does, would find
+        # no marker.
 
 
 class TestAClaimRollsBackWithItsWrite:
@@ -581,12 +610,12 @@ class TestAClaimRollsBackWithItsWrite:
     same thing for one writer per chain on a write that commits; this one
     needs no row to read back, so `delete_expense` is covered too."""
 
-    @pytest.mark.parametrize("writer", list(WRITERS))
+    @pytest.mark.parametrize("writer, flag", _cases(WRITERS, lambda k: WRITERS[k][0]))
     @pytest.mark.asyncio
-    async def test_a_write_that_rolls_back_leaves_no_owner_row(self, stores, writer):
+    async def test_a_write_that_rolls_back_leaves_no_owner_row(self, stores, writer, flag):
         store, live, env = stores
         chain, call = WRITERS[writer]
-        env.setenv(chain.WRITE_ENV, "postgres")
+        _set_flag(env, chain, flag)
         pool = _RollsBackTheWriter(live, chain.__name__)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
@@ -627,20 +656,24 @@ FIRST_WRITES = {
 }
 
 
+def _first_write_chain(chain_name: str):
+    return WRITERS[FIRST_WRITES[chain_name][0]][0]
+
+
 class TestAFirstWriteLatchesAndClaimsInItsOwnTransaction:
     def test_every_registered_chain_has_a_first_write_here(self):
         assert set(FIRST_WRITES) == {write_chains.chain_name(c)
                                      for c in write_chains.WRITE_CHAINS}
 
-    @pytest.mark.parametrize("chain_name", list(FIRST_WRITES))
+    @pytest.mark.parametrize("chain_name, flag", _cases(FIRST_WRITES, _first_write_chain))
     @pytest.mark.asyncio
     async def test_the_owner_rows_and_the_row_share_one_transaction(
-        self, stores, chain_name,
+        self, stores, chain_name, flag,
     ):
         store, live, env = stores
         writer, table, key_column, key = FIRST_WRITES[chain_name]
         chain, call = WRITERS[writer]
-        env.setenv(chain.WRITE_ENV, "postgres")
+        _set_flag(env, chain, flag)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=live)):
             await call(store)

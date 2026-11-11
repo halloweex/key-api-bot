@@ -7,15 +7,15 @@ accruing anyway — see below.
 
 **There is deliberately no percentage-growth alert here.** There was one,
 and it could not work. The weekly compact (`scripts/weekly_compact.sh`,
-Sunday 02:00 UTC) rebuilds the DB from Parquet and drops it to ~80 MB, so
-the 24h-ago baseline resets every week. Against a baseline that small a
-perfectly healthy +620 MB/day reads as +456% on Monday and +33.7% by
+Sunday 02:00 UTC) rebuilt the DuckDB file from Parquet and dropped it to
+~80 MB, so the 24h-ago baseline reset every week. Against a baseline that
+small a perfectly healthy +620 MB/day read as +456% on Monday and +33.7% by
 Wednesday: the same measured rate, with a deceleration manufactured
 entirely by the denominator. Ten consecutive real samples in August 2026
 varied by ±6% as MB/day and by 1350% as reported percentages.
 
 To read below the old 10% WARN line the baseline had to exceed 6300 MB.
-The weekly pre-compact peak is 4.4 GB. So the check could not return "OK"
+The weekly pre-compact peak was 4.4 GB. So the check could not return "OK"
 at any point in any week — 15 CRITICAL, 9 WARN and 0 quiet evaluations
 per week, by construction, forever. The better the compact worked, the
 lower the floor and the louder the false alarm. It ran that way for
@@ -25,8 +25,15 @@ files alongside it that `sample_disk_state` does not look at.
 
 Its replacement is absolute growth measured over a whole directory with
 per-path attribution, so an alert can name what grew. That is written and
-live — `evaluate_dir_growth` below, differenced at the compact's own 168h
-period so the sawtooth cancels and only trend survives.
+live — `evaluate_dir_growth` below, differenced at 168 h, the compact's own
+period, so the sawtooth cancelled and only trend survived.
+
+The compaction is history: its cron line was retired on 2026-10-16, when
+the week of silence began, and step 14's S14-18 deleted the script and
+`scripts/compact_duckdb.py`, so its sawtooth is gone from the samples. The
+lag, the floor and every threshold below are kept as they were chosen
+against it — a week-over-week difference still reads trend — and were not
+re-derived.
 
 It reaches past the directory as well. Only `./data` and `./logs` are
 mounted into this container, so three of the largest things on the host
@@ -48,10 +55,12 @@ from core.data_quality import Severity
 
 # Thresholds — tuned for the 75 GB Hetzner host.
 #
-# 90% of 75 GB leaves 7.5 GB free, and the compact needs
-# `source × 0.50 + 1.0 GB` (compact_duckdb.compute_disk_requirements) —
-# ~3.2 GB at the current 4.4 GB weekly peak. So CRITICAL still leaves room
-# to compact our way out.
+# Chosen while the weekly compaction ran: 90% of 75 GB leaves 7.5 GB free,
+# and the compact needed `source × 0.50 + 1.0 GB`
+# (compact_duckdb.compute_disk_requirements) — ~3.2 GB at the 4.4 GB weekly
+# peak of the time. So CRITICAL left room to compact our way out. The
+# compaction and that function went in step 14's S14-18; the line is kept as
+# it was, not re-derived.
 #
 # An earlier comment here justified the 90% line against an empirical
 # "compact preflight needs 22 GB free". That number was
@@ -143,32 +152,36 @@ def sample_disk_state(db_path: str, mount_path: str = "/") -> dict:
     }
 
 
-# ─── Persistence (writes to / reads from disk_samples) ────────────────────────
+# ─── Persistence (disk_samples, data_dir_samples) ─────────────────────────────
 
 
-# The tables' names as holes, so each statement below is one text for both
-# stores: DuckDB's bare names by default, `app.*` with `?` numbered once chain
-# 10 (`core/pg_watchdog_write.py`, OD-02 (c)) writes the samples to Postgres.
+# The tables' names as holes. Chain 10 (`core/pg_watchdog_write.py`, OD-02 (c))
+# writes and reads the samples in Postgres, in one transaction per tick, and
+# renders each statement below for it: `app.*`, `?` numbered. The same texts
+# served DuckDB's bare names until step 14's S14-10 deleted its writers and
+# readers; the hole stays so the rendering is byte for byte the one chain 10
+# ran, and any engine but `postgres` is a `KeyError`.
 SAMPLE_TABLES = {
-    "duckdb": {"disk_samples": "disk_samples", "data_dir_samples": "data_dir_samples"},
     "postgres": {"disk_samples": "app.disk_samples",
                  "data_dir_samples": "app.data_dir_samples"},
 }
 
 
-def sample_sql(sql: str, engine: str = "duckdb") -> str:
-    rendered = sql.format(**SAMPLE_TABLES[engine])
-    if engine == "postgres":
-        from core.sql_dialect import numbered
+def sample_sql(sql: str, engine: str = "postgres") -> str:
+    from core.sql_dialect import numbered
 
-        return numbered(rendered)
-    return rendered
+    return numbered(sql.format(**SAMPLE_TABLES[engine]))
 
 
 DISK_INSERT_SQL = (
     "INSERT INTO {disk_samples} (sampled_at, db_size_mb, disk_pct_used, disk_free_gb) "
     "VALUES (?, ?, ?, ?)"
 )
+# The sample taken closest to `hours` ago, looked for within `hours ± slack`
+# (`at_age_window`): that handles missed runs — the job did not fire exactly
+# 24 h ago because the scheduler was down for a deploy — without going stale
+# by much. No sample in the window is no row, and the caller skips the growth
+# check (bootstrap behaviour).
 DISK_AT_AGE_SQL = """
         SELECT sampled_at, db_size_mb, disk_pct_used, disk_free_gb
         FROM {disk_samples}
@@ -178,13 +191,15 @@ DISK_AT_AGE_SQL = """
     """
 DISK_PRUNE_SQL = "DELETE FROM {disk_samples} WHERE sampled_at < ? RETURNING sampled_at"
 
-# Retention, one number per table for every writer of it.
+# Retention, one number per table. The directory sets keep longer than the
+# disk samples: differencing at a 168 h lag needs a week of history to still
+# be there, plus slack for a scheduler that missed runs.
 DISK_RETENTION_DAYS = 14
 DIR_RETENTION_DAYS = 21
 
 
 def disk_row(sample: dict) -> list:
-    """The values one disk sample is stored as — the same list to both stores."""
+    """The values one disk sample is stored as."""
     return [sample["sampled_at"], sample["db_size_mb"],
             sample["disk_pct_used"], sample["disk_free_gb"]]
 
@@ -215,40 +230,6 @@ def prune_cutoff(retention_days: int, now: Optional[datetime] = None) -> datetim
     return (now or datetime.now(timezone.utc)) - timedelta(days=retention_days)
 
 
-def insert_sample(conn, sample: dict) -> None:
-    """Persist a sample to disk_samples. Single INSERT, cheap."""
-    conn.execute(sample_sql(DISK_INSERT_SQL), disk_row(sample))
-
-
-def fetch_sample_at_age(conn, hours: int = 24, slack_hours: int = 2) -> Optional[dict]:
-    """Return the sample taken closest to `hours` ago.
-
-    Looks for samples within [hours-slack_hours, hours+slack_hours]. This
-    handles missed runs (e.g. job didn't fire exactly 24h ago because the
-    scheduler was down for a deploy) without going stale by too much.
-
-    Returns None when no sample exists in window — caller should skip
-    growth check (bootstrap behaviour).
-    """
-    from datetime import timezone
-    now = datetime.now(timezone.utc)
-    lo, hi, target = at_age_window(now, hours, slack_hours)
-    row = conn.execute(sample_sql(DISK_AT_AGE_SQL), [lo, hi, target]).fetchone()
-    return disk_sample_dict(row)
-
-
-def prune_old_samples(conn, retention_days: int = DISK_RETENTION_DAYS,
-                      cutoff: Optional[datetime] = None) -> int:
-    """Delete samples older than retention_days. Tiny table; cheap to clean.
-
-    `cutoff`, when given, is the instant itself: chain 10 computes it once and
-    hands it to both stores, so the two prune at the same moment."""
-    if cutoff is None:
-        cutoff = prune_cutoff(retention_days)
-    result = conn.execute(sample_sql(DISK_PRUNE_SQL), [cutoff]).fetchall()
-    return len(result)
-
-
 # ─── Growth: the whole data directory, attributed by path ────────────────────
 #
 # This is the replacement promised when the percentage rule was deleted, and it
@@ -261,12 +242,15 @@ def prune_old_samples(conn, retention_days: int = DISK_RETENTION_DAYS,
 # changed. An alert that cannot say *what* grew is worse than none, because it
 # sends the reader somewhere specific and wrong.
 #
-# **It compares at the signal's own period.** The compact runs weekly, so the
-# sawtooth is cron-locked to 168 hours. Differencing at exactly that lag cancels
-# everything periodic and leaves only trend, which is the quantity anyone
-# actually wants. That is why this survived a change of retention policy while
-# a threshold derived from a fixed disk budget did not: ratios to a trailing
-# window and differences at the signal's period travel; budgets do not.
+# **It compared at the signal's own period.** The compact ran weekly, so the
+# sawtooth was cron-locked to 168 hours. Differencing at exactly that lag
+# cancelled everything periodic and left only trend, which is the quantity
+# anyone actually wants. That is why this survived a change of retention policy
+# while a threshold derived from a fixed disk budget did not: ratios to a
+# trailing window and differences at the signal's period travel; budgets do
+# not. The compaction is gone (retired 2026-10-16, deleted in S14-18) and the
+# 168 h lag stays: without its sawtooth it is a week-over-week difference,
+# which still cancels anything else that recurs weekly.
 
 # Path groups. Deliberately coarse — the point is to name a culprit, not to
 # itemise. `other` is the catch-all that makes the parts sum to the total, so a
@@ -285,9 +269,10 @@ def _classify_path(name: str) -> str:
     return "other"
 
 
-# Week-over-week drift on a healthy system is business growth: pre-compact peaks
-# moved 3.3 → 4.4 GB over ten weeks, and under the current retention the
-# residual footprint drift is ≈ +0.22 GB/week. These are 3.4x and 9x that.
+# Week-over-week drift on a healthy system is business growth. Measured while
+# the compaction ran: pre-compact peaks moved 3.3 → 4.4 GB over ten weeks, and
+# under the retention of the time the residual footprint drift was
+# ≈ +0.22 GB/week. These are 3.4x and 9x that.
 #
 # Sized to catch a step change, not a trend. The 2026-08-05 event was +8.93 GB
 # in an afternoon: 12x the CRITICAL line, detected at the next 6-hourly sample
@@ -419,7 +404,8 @@ def evaluate_dir_growth(
 
     Returns:
         GrowthAlert when the total grew past a threshold, else None. Shrinkage
-        is never an alert: that is the compact, or a prune, doing its job.
+        is never an alert: that is a prune doing its job (and the weekly
+        compact, while it ran).
     """
     if not baseline:
         return None
@@ -750,11 +736,21 @@ def sample_data_dir(data_dir: str, disk_used_bytes: Optional[int] = None) -> dic
 DIR_INSERT_SQL = (
     "INSERT INTO {data_dir_samples} (sampled_at, path_group, bytes) VALUES (?, ?, ?)"
 )
+# Per-group bytes from the sample set closest to `hours` ago: the rows of one
+# run share a `sampled_at`, so the nearest timestamp inside the window is
+# found first and that whole set read — never a mix of two runs, which would
+# difference groups against different moments and invent growth.
 DIR_NEAREST_SQL = (
     "SELECT sampled_at FROM {data_dir_samples} WHERE sampled_at BETWEEN ? AND ? "
     "ORDER BY ABS(EXTRACT(EPOCH FROM (sampled_at - ?))) LIMIT 1"
 )
 DIR_SET_SQL = "SELECT path_group, bytes FROM {data_dir_samples} WHERE sampled_at = ?"
+# `(sampled_at, bytes)` for the remainder over the last hours, oldest first.
+# The whole series rather than two points, because that is the difference the
+# detector turns on: `evaluate_remainder_growth` needs a spread at both ends
+# to tell a held rise from a spike, and 180 h covers the 168 h baseline plus
+# its slack in one read. Retention caps it at 21 days (`DIR_RETENTION_DAYS`),
+# so it can never grow unbounded.
 REMAINDER_SQL = (
     "SELECT sampled_at, bytes FROM {data_dir_samples} "
     "WHERE path_group = ? AND sampled_at >= ? ORDER BY sampled_at"
@@ -763,61 +759,5 @@ DIR_PRUNE_SQL = "DELETE FROM {data_dir_samples} WHERE sampled_at < ? RETURNING s
 
 
 def dir_rows(totals: dict, sampled_at) -> list:
-    """One row per path group, all under one `sampled_at` — for both stores."""
+    """One row per path group, all under one `sampled_at`."""
     return [[sampled_at, group, int(size)] for group, size in totals.items()]
-
-
-def insert_dir_samples(conn, totals: dict, sampled_at=None) -> None:
-    """Persist one row per path group."""
-    from datetime import timezone
-    if sampled_at is None:
-        sampled_at = datetime.now(timezone.utc)
-    for row in dir_rows(totals, sampled_at):
-        conn.execute(sample_sql(DIR_INSERT_SQL), row)
-
-
-def fetch_dir_sample_at_age(conn, hours: int = 168, slack_hours: int = 12) -> Optional[dict]:
-    """Per-group bytes from the sample set closest to `hours` ago.
-
-    Rows share a `sampled_at`, so this finds the nearest timestamp inside the
-    window and returns that whole set — never a mix of two runs, which would
-    difference groups against different moments and invent growth.
-    """
-    from datetime import timezone
-    now = datetime.now(timezone.utc)
-    lo, hi, target = at_age_window(now, hours, slack_hours)
-    row = conn.execute(sample_sql(DIR_NEAREST_SQL), [lo, hi, target]).fetchone()
-    if not row:
-        return None
-    rows = conn.execute(sample_sql(DIR_SET_SQL), [row[0]]).fetchall()
-    return {g: int(b) for g, b in rows}
-
-
-def fetch_remainder_series(conn, hours: int = 180):
-    """`(sampled_at, bytes)` for the remainder over the last `hours`, oldest first.
-
-    The whole series rather than two points, because that is the difference
-    this detector turns on: `evaluate_remainder_growth` needs a spread at both
-    ends to tell a held rise from a spike, and 180h covers the 168h baseline
-    plus its slack in one read.
-
-    Retention caps what is available at 21 days (`prune_old_dir_samples`), so
-    this can never grow unbounded.
-    """
-    from datetime import timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    rows = conn.execute(sample_sql(REMAINDER_SQL), [UNATTRIBUTED, cutoff]).fetchall()
-    return [(ts, int(b)) for ts, b in rows]
-
-
-def prune_old_dir_samples(conn, retention_days: int = DIR_RETENTION_DAYS,
-                          cutoff: Optional[datetime] = None) -> int:
-    """Delete samples older than retention_days.
-
-    Longer than disk_samples keeps: differencing at a 168h lag needs a week of
-    history to still be there, plus slack for a scheduler that missed runs.
-    `cutoff`, when given, is the instant itself (chain 10's shadow).
-    """
-    if cutoff is None:
-        cutoff = prune_cutoff(retention_days)
-    return len(conn.execute(sample_sql(DIR_PRUNE_SQL), [cutoff]).fetchall())

@@ -32,6 +32,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.archive_mounts import walk as walk_mounts
+
 REPO = Path(__file__).resolve().parents[2]
 
 _ALL_SHELL = sorted(
@@ -90,9 +92,11 @@ def test_the_walk_found_the_family():
     """If either list empties or halves, the derivation has gone wrong and
     every assertion below would pass by looking at nothing."""
     names = {p.name for p in BACKUP_SCRIPTS}
-    assert len(names) >= 6, names
-    assert {"pg_offsite.sh", "pg_restore_drill.sh", "offsite_check.sh",
-            "offsite_parquet.sh"} <= names
+    # `offsite_parquet.sh` and `daily_offsite.sh`, the DuckDB archive's
+    # shipment and its nightly driver, were two of these until step 14's
+    # S14-18 deleted them.
+    assert len(names) >= 5, names
+    assert {"pg_offsite.sh", "pg_restore_drill.sh", "offsite_check.sh"} <= names
 
     # And the library the two rules below have to reach. It is where
     # `remote_rm` lives, so a retention written by age would be written there.
@@ -170,7 +174,7 @@ def test_a_passphrase_is_never_on_a_command_line():
             f"{path.relative_to(REPO)} runs gpg without --passphrase-file"
         )
 
-    assert {"offsite_parquet.sh", "pg_offsite.sh", "pg_restore_drill.sh"} <= set(users), users
+    assert {"pg_offsite.sh", "pg_restore_drill.sh"} <= set(users), users
 
 
 def test_gpg_runs_only_through_gpg_safe():
@@ -208,7 +212,7 @@ def test_gpg_runs_only_through_gpg_safe():
                 f"{path.relative_to(REPO)} calls gpg_safe without sourcing "
                 f"deploy/gpg_safe.sh"
             )
-    assert {"offsite_parquet.sh", "pg_offsite.sh", "pg_restore_drill.sh",
+    assert {"pg_offsite.sh", "pg_restore_drill.sh",
             "ark_ship.sh"} <= set(callers), callers
 
     # The walk itself, on the shape a review found it missing: a call whose
@@ -301,3 +305,53 @@ def test_the_remote_drill_vouches_only_after_pass():
         "pg_restore_drill_remote_last_ok")
     assert body.rindex('fail "') < body.index("pg_restore_drill_remote_last_ok")
     assert 'mv -f "$marker.tmp" "$marker"' in body
+
+
+# The family's DuckDB archive tools (step 14, S14-02): every backup script
+# that mounts a Python file of this checkout into a container — code from main
+# running inside an image. Derived by that behaviour, not named: a fourth such
+# script inherits the rule by existing. Read two ways: any `-v` of a `.py`, and
+# the mount walk of tests/archive_mounts.py, which resolves `${PWD}`, `$(pwd)`,
+# variables and function arguments to the checkout file they name — a mount
+# spelled so the first regex misses it still makes its script an archive tool.
+def _mounts_checkout_python(path: Path) -> bool:
+    found = walk_mounts(path.read_text(), path.name,
+                        is_checkout_file=lambda rel: (REPO / rel).is_file()).found
+    return bool(found)
+
+
+ARCHIVE_TOOLS = [p for p in BACKUP_SCRIPTS
+                 if re.search(r'-v "[^"\s]*\.py:', _calls(p.read_text()))
+                 or _mounts_checkout_python(p)]
+
+# A container started by a command: at the start of a line, in `$( … )`, or
+# as the first word of an array. Never the words inside a message.
+_DOCKER_RUN = re.compile(r"(?:^\s*|\$\(|=\()docker run\b[^\n]*", re.M)
+
+
+def test_the_archive_tools_run_only_a_pinned_image():
+    """Step 14 takes DuckDB out of the images at S14-19, and these three read
+    archives DuckDB 1.5.5 wrote. Each takes its image from a variable with no
+    default, sources deploy/archive_image.sh and asks the image before it
+    uses it, names no image of its own in code, and never pulls. Mutation:
+    put `:-halloweex/keycrm-web:latest` back on any of them, or drop a
+    `--pull never`."""
+    names = {p.name for p in ARCHIVE_TOOLS}
+    # `daily_offsite.sh` was the third until step 14's S14-18 deleted it.
+    assert names >= {"restore-test.sh", "ark_ship.sh"}, names
+    for path in ARCHIVE_TOOLS:
+        code = _calls(path.read_text())
+        where = path.relative_to(REPO)
+        assert re.search(r"^\s*source deploy/archive_image\.sh\s*$", code, re.M), where
+        assert re.search(r"\barchive_image_(?:ready|probe) ", code), (
+            f"{where}: the image is never asked whether it carries DuckDB 1.5.5")
+        defaults = re.findall(r"\$\{BACKUP_\w*IMAGE:-([^}]*)\}", code)
+        assert all(d == "" or d.startswith("${BACKUP_") for d in defaults), (
+            f"{where}: an image variable defaults to {defaults}; the archive tools "
+            f"run only the image backup.env names")
+        assert not re.search(r"[\w.-]+/keycrm-[\w-]+", code), (
+            f"{where}: names an image in code; it comes from backup.env")
+        runs = _DOCKER_RUN.findall(code)
+        assert runs, f"{where}: the walk found no container to judge"
+        for run in runs:
+            assert "--pull never" in run, f"{where}: {run.strip()!r} may pull"

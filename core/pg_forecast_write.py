@@ -59,7 +59,12 @@ where they are written. One difference from 7a: `reads_postgres` honours the
 precondition, or a flagged-but-held chain would send reads to a Postgres the
 hourly copy is still filling while the writes go to DuckDB.
 
-A PRECONDITION THE FLAG ENFORCES
+A PRECONDITION THE FLAG ENFORCED — UNTIL STEP 14
+
+Since step 14's S14-00 the chain wrote Postgres whatever its flag said and
+asked no precondition, and since S14-11 the flag and every answer that read
+it are gone (`writes_postgres`, `unmet_precondition`, `reads_postgres`,
+`reads_the_chain`). What follows is the history.
 
 `unmet_precondition()` — chain 6a's arrangement. The calculators' inputs must
 already be Postgres, or the chain would store, in the only copy left, numbers
@@ -85,11 +90,13 @@ Until all four hold, an unlatched chain runs as duckdb whatever
 
 THE WAY BACK
 
-`scripts/chain_copy_back.py forecast`, the only thing that releases the latch.
-The four tables are small and carried whole. Recalculating
-(`POST /api/goals/recalculate`) and retraining
-(`POST /api/revenue/forecast/train`) are the cheaper way to fix their CONTENT —
-they write wherever the chain writes — but not a way around the copy-back.
+`scripts/chain_copy_back.py forecast` was the only thing that released the
+latch (deleted in step 14's S14-04; the way back since is an image from
+before step 14, `core.rollback_lever`). The four tables are small, and it
+carried them whole. Recalculating (`POST /api/goals/recalculate`) and
+retraining (`POST /api/revenue/forecast/train`) are the cheaper way to fix
+their CONTENT — they write wherever the chain writes — but they were never a
+way around the copy-back, and are not one around the image now.
 
 The model artefact (`data/revenue_model.joblib` and its JSON siblings) is a
 file, not a table, and does not move.
@@ -97,9 +104,8 @@ file, not a table, and does not move.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date, datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from core import chain_latch
 
@@ -109,24 +115,24 @@ WRITE_ENV = "KS_WRITE_FORECAST"
 
 # What this chain is called in `core.write_chains`, in the local latch marker
 # and in the `/api/health` block. One spelling, so a marker written by one
-# release is still read by the next. `chain_copy_back.py forecast`.
+# release is still read by the next.
 CHAIN = "pg_forecast_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper, the daily comparison and the copy-back. No sync keys:
-# none of the four has a `last_sync_*` watermark.
+# the hourly shipper and the daily comparison (and the copy-back, until step
+# 14's S14-04 deleted it). No sync keys: none of the four has a `last_sync_*`
+# watermark.
 CHAIN_TABLES: Tuple[str, ...] = (
     "app.seasonal_indices", "app.growth_metrics",
     "app.weekly_patterns", "app.revenue_predictions",
 )
 
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
-
 # The holes every shared statement that reads one of these tables carries —
 # `core.sql_dialect.render_tables` fills them with the bare DuckDB name or the
-# `app.` one. `reads_the_chain` recognises a read of the chain by them.
+# `app.` one. `tests/unit/test_goals_reads_follow_chain.py` walks every
+# statement carrying one to a router that reads Postgres alone
+# (`reads_the_chain` recognised a read of the chain by them until step 14's
+# S14-11).
 TABLE_HOLES: Tuple[str, ...] = (
     "{seasonal_indices}", "{growth_metrics}",
     "{weekly_patterns}", "{revenue_predictions}",
@@ -162,129 +168,13 @@ SALES_TYPE_MAX = 32
 _INT32_MAX = 2 ** 31 - 1
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_FORECAST` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands its tables down,
-    and the two writers raise.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def _unmet_clauses() -> List[str]:
-    """One sentence per unmet clause, names only — the block is public."""
-    from core import pg_forecast_read, pg_goals_read, read_fallback
-
-    unmet: List[str] = []
-    try:
-        pg_goals_read.history_mode()    # `silver`, or it raises (chain 7b-4)
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        unmet.append(f"{pg_goals_read.HISTORY_ENV} is not understood ({exc})")
-    try:
-        if not pg_goals_read.enabled():
-            unmet.append(f"{pg_goals_read.ENV} is not postgres")
-        elif not pg_goals_read.available():
-            unmet.append(f"{pg_goals_read.ENV}=postgres but KS_PG_DSN is not set")
-    except Exception as exc:  # noqa: BLE001
-        unmet.append(f"{pg_goals_read.ENV} is not understood ({exc})")
-    # The mode this process was configured with, not the live environment: the
-    # process refuses (or falls back) by the configured value.
-    if read_fallback.mode_error():
-        unmet.append(f"{read_fallback.ENV} is not understood")
-    elif read_fallback.mode() != read_fallback.OFF:
-        unmet.append(f"{read_fallback.ENV} is not {read_fallback.OFF} "
-                     f"(as configured at start)")
-    try:
-        if not pg_forecast_read.enabled():
-            unmet.append(f"{pg_forecast_read.ENV} is not postgres")
-        elif not pg_forecast_read.available():
-            unmet.append(f"{pg_forecast_read.ENV}=postgres but KS_PG_DSN is not set")
-    except Exception as exc:  # noqa: BLE001
-        unmet.append(f"{pg_forecast_read.ENV} is not understood ({exc})")
-    return unmet
-
-
-def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_FORECAST=postgres` must not move the writes yet, or None.
-
-    Never raises and never asks Postgres: `/api/health` reads it through the
-    registry and must answer with Postgres down. A flag nobody can parse is
-    unmet, because nobody can then say where the inputs come from. The
-    lock-out (`chain_latch.lockout_unmet`) comes first."""
-    reasons = [why for why in (chain_latch.lockout_unmet(LOCKOUT_REVISION),
-                               _inputs_unmet()) if why]
-    return "; ".join(reasons) if reasons else None
-
-
-def _inputs_unmet() -> Optional[str]:
-    try:
-        unmet = _unmet_clauses()
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        unmet = [f"the inputs could not be read ({exc})"]
-    if not unmet:
-        return None
-    return ("; ".join(unmet) + ", so the goal and forecast calculators could "
-            "read DuckDB while their results are stored in the only copy left; "
-            "move the inputs to Postgres first")
-
-
-def _routes_postgres(*, log: bool) -> bool:
-    """Latch, then flag, then precondition. Raises on an unreadable flag of an
-    unlatched chain."""
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        if log:
-            logger.warning("%s=postgres, but the chain stays on DuckDB: %s",
-                           WRITE_ENV, unmet)
-        return False
-    return True
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and a value nobody can read.
-    Unlatched, the flag moves the writes only once `unmet_precondition()`
-    holds. Raises on a flag nobody can read while unlatched.
-    """
-    return _routes_postgres(log=True)
-
-
-def reads_postgres() -> bool:
-    """Whether a read of this chain's tables must ask Postgres, whatever the
-    page's own read flag says — `writes_postgres()` applied to reads.
-
-    Two differences. An unreadable flag on a chain that never wrote here
-    hands the choice back to today's engines instead of raising (7a's rule:
-    the writers refuse and the tables stand down, so neither copy moves).
-    And no WARNING here: this is asked on every page view.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    try:
-        return _routes_postgres(log=False)
-    except RuntimeError:
-        return False
-
-
-def reads_the_chain(sql: str) -> bool:
-    """Whether this statement reads one of the chain's tables while the chain
-    owns them. Decided from the body, so a statement that starts reading one
-    of the four tomorrow follows the chain through whichever router carries
-    it; `tests/unit/test_goals_reads_follow_chain.py` walks `core/` for every
-    such statement and fails if its router does not ask."""
-    return any(hole in sql for hole in TABLE_HOLES) and reads_postgres()
+# `env_writes_postgres`, `unmet_precondition`, `_routes_postgres`,
+# `writes_postgres`, `reads_postgres` and `reads_the_chain` stood here until
+# step 14's S14-11. S14-00 made every answer a constant — the two writers
+# write Postgres, and every read of the four tables asks Postgres, whatever
+# `KS_WRITE_FORECAST` says — and S14-11 deleted them with the flag. What the
+# chain guards is unchanged: the YoY UPDATE that must land (`persist_goal_tables`)
+# and the refusal of NaN and overflow before the latch (`_fits`).
 
 
 def _fits(column: str, value, *, nullable: bool) -> None:

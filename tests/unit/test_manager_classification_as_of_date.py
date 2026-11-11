@@ -1,200 +1,30 @@
 """Reclassifying a manager must not restate the reports already written.
 
-`sales_type` is materialised into Silver from the manager's classification at
-*rebuild* time. That made every classification retroactive by construction:
-flipping one manager moved every order they had ever taken, so last year's
-revenue changed on the next two-minute refresh and nothing said so. The owner
-ruled that out on 2026-08-20 — the answer is resolved as of the order's own
-date, from `manager_classifications`.
+`sales_type` is materialised into Silver from the manager's classification
+as of the order's own date (the owner's ruling of 2026-08-20), from
+`manager_classifications`, by one CASE every consumer derives it from
+(`silver_sales_type_case`).
 
-The second class of test here covers the other half of the same seam. Silver
-stores the answer; ten of the eleven `_build_sales_type_filter` call sites used
-to re-derive it from `manager_id`, which is a second definition wearing a
-different hat — and the two had already diverged over source 5. That filter
-then read Silver's stored column; from DN-12 the goal calculators — its last
-consumers — rendered the one definition, `silver_sales_type_case`, over DuckDB
-`orders` (a bridge), and since chain 7b-4 deleted that bridge they read
-Silver's column again, through the goal router
-(`core/repositories/goals._silver_history_where`). Either way it is one
-definition, never a second copy, and the exhibition case below is the one
-that proves it.
+Until step 14's S14-11 this module pinned those semantics on DuckDB's writer
+and DuckDB's own warehouse rebuild — a change applying forward, three eras
+intact, a baseline for every synced manager, a failed write leaving the open
+interval open, and an exhibition order never counted as retail. That writer
+went with `KS_WRITE_MANAGERS`, and DuckDB derives nothing since step 13. The
+same properties are held in Postgres: chain 5's writer by
+`tests/integration/test_managers_chain_writer.py` (forward close-and-open in
+one transaction, the same date twice is one row, a failure before the insert
+leaves everything as it was, a baseline for every manager), and Postgres'
+Silver, every sales type on every branch with classified intervals and the
+exhibition source, by `tests/unit/test_goals_history_silver.py` and
+`tests/unit/test_goals_off_duckdb_silver.py`. What stays here is the one
+pure rule the goal history's filter keeps.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
-
 import pytest
-
-from core.duckdb_constants import EXHIBITION_SOURCE_ID, RETAIL_MANAGER_IDS
-from core.duckdb_store import DuckDBStore
-
-UNLISTED = 34  # deliberately not in RETAIL_MANAGER_IDS
-
-
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await s.connect()
-    return s
-
-
-def _api_manager(mid: int, name: str = "Someone"):
-    return {"id": mid, "name": name, "email": f"{mid}@example.com", "status": "active"}
-
-
-def _insert_order(conn, oid: int, manager_id, when: datetime, source_id: int = 1):
-    conn.execute(
-        "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
-        "buyer_id, manager_id) VALUES (?, ?, 1, 1000.0, ?, 1, ?)",
-        [oid, source_id, when, manager_id],
-    )
-
-
-async def _sales_types(store) -> dict[int, str]:
-    async with store.connection() as conn:
-        return dict(conn.execute("SELECT id, sales_type FROM silver_orders").fetchall())
-
-
-class TestClassificationIsResolvedAsOfTheOrderDate:
-    @pytest.mark.asyncio
-    async def test_a_change_applies_forward_and_leaves_the_past_alone(self, tmp_path):
-        """The test that fails against every version of this code before 2026-08-20."""
-        store = await _make_store(tmp_path)
-        try:
-            assert UNLISTED not in RETAIL_MANAGER_IDS
-            await store.upsert_managers([_api_manager(UNLISTED)])
-
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, UNLISTED, now - timedelta(days=400))
-                _insert_order(conn, 2, UNLISTED, now - timedelta(days=100))
-
-            await store.set_manager_retail_status(
-                UNLISTED, True,
-                effective_from=(now - timedelta(days=200)).date(),
-            )
-            await store.refresh_warehouse_layers(trigger="manual")
-
-            types = await _sales_types(store)
-            assert types[1] == "internal", "an order before the change was restated"
-            assert types[2] == "retail", "the change did not apply going forward"
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_without_a_date_the_change_starts_today(self, tmp_path):
-        """Silence means forward-only. Backdating is a thing you ask for."""
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers([_api_manager(UNLISTED)])
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, UNLISTED, now - timedelta(days=30))
-
-            await store.set_manager_retail_status(UNLISTED, True)
-            await store.refresh_warehouse_layers(trigger="manual")
-
-            assert (await _sales_types(store))[1] == "internal"
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_two_changes_leave_three_eras_intact(self, tmp_path):
-        """Intervals compose; the middle era is the one a single flag cannot hold."""
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers([_api_manager(UNLISTED)])
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, UNLISTED, now - timedelta(days=400))
-                _insert_order(conn, 2, UNLISTED, now - timedelta(days=200))
-                _insert_order(conn, 3, UNLISTED, now - timedelta(days=30))
-
-            await store.set_manager_retail_status(
-                UNLISTED, True, effective_from=(now - timedelta(days=300)).date())
-            await store.set_manager_retail_status(
-                UNLISTED, False, effective_from=(now - timedelta(days=100)).date())
-            await store.refresh_warehouse_layers(trigger="manual")
-
-            types = await _sales_types(store)
-            assert [types[1], types[2], types[3]] == ["internal", "retail", "internal"]
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_manager_nobody_classified_behaves_exactly_as_before(self, tmp_path):
-        """The fallback matters more than the feature: no interval, no change."""
-        store = await _make_store(tmp_path)
-        try:
-            known_retail = RETAIL_MANAGER_IDS[0]
-            await store.upsert_managers([_api_manager(known_retail)])
-            async with store.connection() as conn:
-                conn.execute("DELETE FROM manager_classifications")
-                _insert_order(conn, 1, known_retail,
-                              datetime.now(timezone.utc) - timedelta(days=10))
-
-            await store.refresh_warehouse_layers(trigger="manual")
-            assert (await _sales_types(store))[1] == "retail"
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_every_synced_manager_gets_a_baseline_interval(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers(
-                [_api_manager(RETAIL_MANAGER_IDS[0]), _api_manager(UNLISTED)]
-            )
-            await store._run_migrations()
-
-            async with store.connection() as conn:
-                rows = dict(conn.execute(
-                    "SELECT manager_id, is_retail FROM manager_classifications "
-                    "WHERE valid_from = DATE '1970-01-01'"
-                ).fetchall())
-            assert rows[RETAIL_MANAGER_IDS[0]] is True
-            assert rows[UNLISTED] is False
-        finally:
-            await store.close()
 
 
 class TestConsumersUseTheOneDefinition:
-    @pytest.mark.asyncio
-    async def test_an_exhibition_order_is_not_counted_as_retail(self, tmp_path):
-        """#101 gave source 5 its own sales_type; the filter never heard about it.
-
-        On production that was 176 orders and ₴267,416 counted as exhibition by
-        Gold and as retail by every endpoint that went through this filter.
-        """
-        from core.repositories.goals import _silver_history_where
-
-        store = await _make_store(tmp_path)
-        try:
-            staffed_by = RETAIL_MANAGER_IDS[0]
-            await store.upsert_managers([_api_manager(staffed_by)])
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, staffed_by, now - timedelta(days=10))
-                _insert_order(conn, 2, staffed_by, now - timedelta(days=10),
-                              source_id=EXHIBITION_SOURCE_ID)
-
-            await store.refresh_warehouse_layers(trigger="manual")
-
-            def ids(sales_type):
-                clause, params = _silver_history_where(sales_type)
-                return [r[0] for r in conn.execute(
-                    f"SELECT s.id FROM silver_orders s WHERE {clause} ORDER BY s.id",
-                    params).fetchall()]
-
-            async with store.connection() as conn:
-                retail = ids("retail")
-                exhibition = ids("exhibition")
-
-            assert retail == [1], "the exhibition order leaked back into retail"
-            assert exhibition == [2]
-        finally:
-            await store.close()
-
     def test_an_unknown_sales_type_is_refused_rather_than_read_as_retail(self):
         """It used to fall through the else and quietly mean 'retail'."""
         from core.repositories.goals import _silver_history_where
@@ -202,49 +32,3 @@ class TestConsumersUseTheOneDefinition:
         with pytest.raises(ValueError):
             _silver_history_where("wholsale")
         assert _silver_history_where("all") == ("NOT s.is_return", [])
-
-
-class TestTheClassificationWriteIsAllOrNothing:
-    """Four autocommit statements used to be able to close the open interval
-    and then fail to open the new one, leaving a manager with no open interval:
-    every order from that day on resolved to `internal`, and the admin's
-    decision silently did not take. The failure is injected for real — a value
-    DuckDB cannot store as BOOLEAN dies on the INSERT, after the UPDATE."""
-
-    @pytest.mark.asyncio
-    async def test_a_failed_write_leaves_the_open_interval_open(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers([_api_manager(UNLISTED)])
-            first = date(2026, 1, 1)
-            await store.set_manager_retail_status(UNLISTED, True, effective_from=first)
-
-            with pytest.raises(Exception):
-                await store.set_manager_retail_status(
-                    UNLISTED, "not-a-bool", effective_from=date(2026, 6, 1),
-                )
-
-            async with store.connection() as conn:
-                rows = conn.execute(
-                    "SELECT valid_from, valid_to, is_retail FROM manager_classifications "
-                    "WHERE manager_id = ? ORDER BY valid_from", [UNLISTED],
-                ).fetchall()
-                is_retail = conn.execute(
-                    "SELECT is_retail FROM managers WHERE id = ?", [UNLISTED],
-                ).fetchone()[0]
-
-            open_intervals = [r for r in rows if r[1] is None]
-            assert open_intervals == [(first, None, True)], rows
-            assert not any(r[0] == date(2026, 6, 1) for r in rows)
-            assert is_retail is True, "managers.is_retail must not move on a failed write"
-
-            # The next, valid write still works on the same connection.
-            await store.set_manager_retail_status(UNLISTED, False, effective_from=date(2026, 6, 1))
-            async with store.connection() as conn:
-                open_now = conn.execute(
-                    "SELECT valid_from, is_retail FROM manager_classifications "
-                    "WHERE manager_id = ? AND valid_to IS NULL", [UNLISTED],
-                ).fetchall()
-            assert open_now == [(date(2026, 6, 1), False)]
-        finally:
-            await store.close()

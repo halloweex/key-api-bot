@@ -4,8 +4,8 @@ When a fresh incident's alert is delivered, the Gate drops one small JSON
 file into ``data/alert-tasks/pending/``. A systemd path-unit on the VPS host
 picks it up and runs a headless Claude agent with the condition family's
 runbook — read-only by construction: docker logs, Postgres through the
-``ks_readonly`` role, ``/api/health``, ``du``/``df``, and the latest DuckDB
-backup. The diagnosis arrives as a second Telegram message, through
+``ks_readonly`` role, ``/api/health``, ``du``/``df`` (and the latest DuckDB
+backup, while there was a live DuckDB). The diagnosis arrives as a second Telegram message, through
 ``deploy/notify.sh`` — the same signature, kill switch and archive as every
 other outbound message.
 

@@ -10,21 +10,17 @@ root's crontab with nobody watching it:
   script stands down when either reads off, so a quoted `off`, one with an
   inline comment, an indented one, `export KS_DUCKDB=off` and
   `KS_DUCKDB = off` all stand it down.
-* `deploy/daily_offsite.sh` — under `off` its sidecar is refused (a "Daily
-  snapshot FAILED" page the first night) and web registers no db_backup, so
-  every later night refuses a backup past 30 h. It now stands down before its
-  cleanup trap exists: nothing read, linked, started, shipped or deleted.
+* `deploy/daily_offsite.sh` — the nightly snapshot, which stood down under
+  `off` before its cleanup trap existed. Its cron line was retired on
+  2026-10-16, and step 14's S14-18 deleted it with the Sunday compaction
+  (`scripts/weekly_compact.sh`) and both their stand-down tests.
 * `deploy/duckdb_silence_check.sh --crontab` — the week's crontab change,
-  printed and never installed. The lines it prints are the ones each
-  script's own header documents, compared here so the two cannot drift.
+  printed and never installed (`test_duckdb_silence_check.py`).
 
-The scripts run in a scratch repository root against fakes on PATH that
-record every call — `docker`, `chown`, and the real `rm` and `ln` behind a
-recorder — which is how "nothing was deleted" is a fact about a run and not
-a reading of the code. The Sunday compaction's stand-down is proved the same
-way in `test_weekly_compact_wrapper.py`, and offsite_check's frozen branch
-and the .env that now rides with every Postgres shipment in
-`test_pg_offsite_scripts.py`.
+What is left here: the reader, the history of the week in CLAUDE.md (its
+runbook until step 14's S14-20), and the restore drill, which runs in a scratch repository root against fakes on PATH that
+record every call. offsite_check's frozen branch and the .env that rides with
+every Postgres shipment are in `test_pg_offsite_scripts.py`.
 """
 from __future__ import annotations
 
@@ -33,7 +29,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -47,101 +42,12 @@ pytestmark = pytest.mark.skipif(
     not (shutil.which("bash") and shutil.which("sed")), reason="needs bash and sed")
 
 
-def _recorder(name: str, real: "str | None") -> str:
-    """A fake that records its arguments and then runs the real command —
-    or, without one, succeeds doing nothing."""
-    tail = f'exec {real} "$@"' if real else "exit 0"
-    return (f"#!/usr/bin/env bash\n"
-            f"printf '%s %s\\n' {name} \"$*\" >> \"$FAKE_CALLS\"\n{tail}\n")
+# `_recorder`, the snapshot's `FAKE_DOCKER`, `FAKE_STAT`, `FAKE_PUSH`, `Box`
+# and its fixtures stood here until step 14's S14-18 deleted
+# `deploy/daily_offsite.sh`, the script they ran.
 
-
-# `docker run --entrypoint id … -u` asks the image who it runs as; every other
-# docker call succeeds and does nothing — except the snapshot sidecar under
-# FAKE_SIDECAR_REFUSES, which exits 1 the way the switch inside it refuses a
-# sidecar started from a `.env` that says off.
-FAKE_DOCKER = r"""#!/usr/bin/env bash
-printf 'docker %s\n' "$*" >> "$FAKE_CALLS"
-case " $* " in
-    *" --entrypoint id "*) echo 999 ;;
-    *" python /app/deploy/snapshot_export.py"*) [ -n "${FAKE_SIDECAR_REFUSES:-}" ] && exit 1 ;;
-esac
-exit 0
-"""
-
-# GNU `stat -c` on a laptop whose stat is BSD's: the script runs on Linux and
-# says `stat -c %Y`; this lets the on-path be driven here as well as in CI.
-FAKE_STAT = f"""#!/usr/bin/env bash
-real={shutil.which("stat")}
-if "$real" -c %Y / >/dev/null 2>&1; then exec "$real" "$@"; fi
-if [ "$1" = "-c" ]; then
-    fmt="$2"; shift 2
-    case "$fmt" in %Y) fmt=%m ;; %s) fmt=%z ;; esac
-    exec "$real" -f "$fmt" "$@"
-fi
-exec "$real" "$@"
-"""
-
-# The Parquet push it ends with: recorded, never run — its own tests are its own.
-FAKE_PUSH = """#!/usr/bin/env bash
-printf 'offsite_parquet.sh %s\\n' "${BACKUP_EXPORT_DIR:-}" >> "$FAKE_CALLS"
-exit 0
-"""
-
-
-class Box:
-    """A scratch repository root holding daily_offsite.sh and what it sources."""
-
-    def __init__(self, root: Path, bin_dir: Path):
-        self.root = root
-        self.bin = bin_dir
-        (root / "deploy").mkdir(parents=True)
-        for name in ("daily_offsite.sh", "duckdb_env.sh", "notify.sh"):
-            shutil.copy(DEPLOY / name, root / "deploy" / name)
-        push = root / "deploy" / "offsite_parquet.sh"
-        push.write_text(FAKE_PUSH)
-        push.chmod(0o755)
-        self.backups = root / "data" / "backups"
-        self.backups.mkdir(parents=True)
-        self.calls = root / "calls.log"
-
-    def backup(self, age_h: float = 1) -> Path:
-        path = self.backups / "analytics-20261014-013000.duckdb"
-        path.write_bytes(b"DUCK" * 64)
-        when = time.time() - age_h * 3600
-        os.utime(path, (when, when))
-        return path
-
-    def run(self, env_text: str, **extra: str):
-        # The kill switch in every .env, so notify() returns before it can
-        # reach Telegram or the alert archive, and says so on stderr.
-        (self.root / ".env").write_text("KS_ALERTS_DISABLED=1\n" + env_text)
-        self.calls.write_text("")
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("FAKE_", "BACKUP_", "KS_"))}
-        env.update({"PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
-                    "FAKE_CALLS": str(self.calls), **extra})
-        done = subprocess.run(["bash", str(self.root / "deploy" / "daily_offsite.sh")],
-                              env=env, capture_output=True, text=True, timeout=60)
-        return done.returncode, done.stdout + done.stderr, self.calls.read_text().splitlines()
-
-
-@pytest.fixture(scope="module")
-def fake_bin(tmp_path_factory):
-    bin_dir = tmp_path_factory.mktemp("bin")
-    for name, body in (("docker", FAKE_DOCKER),
-                       ("chown", _recorder("chown", None)),
-                       ("rm", _recorder("rm", shutil.which("rm"))),
-                       ("ln", _recorder("ln", shutil.which("ln"))),
-                       ("stat", FAKE_STAT)):
-        (bin_dir / name).write_text(body)
-        (bin_dir / name).chmod(0o755)
-    return bin_dir
-
-
-@pytest.fixture
-def box(tmp_path, fake_bin):
-    return Box(tmp_path / "repo", fake_bin)
-
+# The image the archive tools run in since step 14 (S14-02).
+PINNED = "halloweex/keycrm-web:rollback-step14"
 
 # ── the reader ────────────────────────────────────────────────────────────────
 
@@ -163,9 +69,8 @@ def box(tmp_path, fake_bin):
 # Re-measure before editing a row: the review that added half of them found
 # the reader's guesses wrong for four forms compose reads as off.
 #
-# deploy/stage4_soak.sh's P4 reads the file through the same reader; its
-# test (test_stage4_soak_script.TestStage5.test_env_reads_as_the_host_scripts_
-# read_it) feeds the soak rows of this table and holds it to this reading.
+# deploy/stage4_soak.sh's P4 read the file through the same reader until step
+# 14's S14-02 retired it with the week it judged.
 ENV_FORMS = [
     # (id, text, docker, web)
     ("off", "KS_DUCKDB=off\n", "off", "off"),
@@ -225,7 +130,6 @@ ks_duckdb_env_read "$2"
 printf '%s|%s|%s|%s|%s\n' "$KS_DUCKDB_ENV" "$KS_DUCKDB_ENV_WEB" \
     "$KS_DUCKDB_ENV_MEANT_OFF" "$KS_DUCKDB_ENV_READ" "$KS_DUCKDB_ENV_VALUE"
 if ks_duckdb_stands_down; then echo DOWN; else echo RUNS; fi
-ks_duckdb_env_note
 """
 
 
@@ -236,8 +140,10 @@ def _read(tmp_path: Path, text: "str | None"):
     done = subprocess.run(["bash", "-c", READ, "_", str(DEPLOY / "duckdb_env.sh"),
                            str(env_file)], capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
-    fields, verdict, note = done.stdout.split("\n", 2)
-    return fields.split("|"), verdict, note
+    fields, verdict, rest = (done.stdout.split("\n", 2) + [""])[:3]
+    # Whatever else was printed: `ks_duckdb_env_note`'s sentence until S14-20
+    # deleted it, nothing since.
+    return fields.split("|"), verdict, rest
 
 
 class TestTheReader:
@@ -268,30 +174,9 @@ class TestTheReader:
         (env, web, meant, read, _), verdict, _ = _read(tmp_path, None)
         assert (env, web, meant, read, verdict) == ("on", "on", "0", "0", "RUNS")
 
-    def test_the_note_names_the_hold_and_what_the_line_costs(self, tmp_path):
-        """A host script reads `.env`, never web's verdict, so its stand-down
-        says what a web held back on `on` means (HELD_BACK_NOTE's sentence),
-        and a line docker reads otherwise than compose what that costs —
-        each with the one line to write instead."""
-        _, _, note = _read(tmp_path, "KS_DUCKDB=off\n")
-        assert "duckdb_switch.held_back" in note and "KS_DUCKDB=on" in note
-        assert "quotes" not in note and "refuses" not in note
-        _, _, note = _read(tmp_path, "  KS_DUCKDB=off\n")
-        assert "quotes" not in note and "refuses" not in note
-        for text in ('KS_DUCKDB="off"\n', "KS_DUCKDB=off # week of silence\n"):
-            _, _, note = _read(tmp_path, text)
-            assert "written with quotes or a comment" in note, note
-            assert "a sidecar would" in note and "run on" in note, note
-            assert "write KS_DUCKDB=off as a line of its own" in note, note
-        for text in ("export KS_DUCKDB=off\n", "KS_DUCKDB = off\n"):
-            _, _, note = _read(tmp_path, text)
-            assert "docker run --env-file refuses" in note, note
-            assert "the restore drill" in note, note
-            assert "write KS_DUCKDB=off as a line of its own" in note, note
-        _, _, note = _read(tmp_path, "KS_DUCKDB:off\n")
-        assert "docker run --env-file skips" in note and "run on" in note, note
-        _, _, note = _read(tmp_path, "KS_DUCKDB=off\nKS_DUCKDB:on\n")
-        assert "web runs on" in note and "would be refused" in note, note
+    # `test_the_note_names_the_hold_and_what_the_line_costs` held
+    # `ks_duckdb_env_note`'s sentence, until step 14's S14-20 deleted the
+    # function: its callers went in S14-18.
 
     def test_a_value_is_quoted_back_bounded_and_printable(self, tmp_path):
         """The value is quoted in log lines; `.env` is not a file to echo.
@@ -317,195 +202,98 @@ class TestTheReader:
 
 # ── the nightly snapshot ──────────────────────────────────────────────────────
 
-class TestTheNightlySnapshotStandsDown:
-    def test_off_reads_links_starts_ships_and_deletes_nothing(self, box):
-        """Every command the snapshot would run is recorded, and under `off`
-        there is none — not even its cleanup trap's `rm -rf`, which is why the
-        stand-down sits above it. Mutation: move the stand-down below `trap
-        cleanup EXIT`, or below the `ln`."""
-        box.backup()
-        leftover = box.root / "data" / ".snapshot_tmp" / "leftover"
-        leftover.parent.mkdir(parents=True)
-        leftover.write_text("a run's scratch, not this one's to delete")
-        code, out, calls = box.run("KS_DUCKDB=off\n")
-        assert code == 0, out
-        assert calls == [], calls
-        assert leftover.exists()
-        assert "KS_DUCKDB=off in .env: no DuckDB snapshot tonight" in out
-        assert "remove daily_offsite.sh from root's crontab" in out
-        assert "deploy/pg_offsite.sh" in out
-        assert "duckdb_switch.held_back" in out
-
-    def test_off_pages_nobody(self, box):
-        """The first night under `off` its sidecar was refused and the ERR
-        trap paged "Daily snapshot FAILED"; every night after, the newest
-        backup was past 30 h (web registers no db_backup under off). Now a
-        fresh backup — the first night's shape — is not even looked at.
-        Mutation: drop the stand-down — the sidecar is refused, the ERR trap
-        notifies, and the run exits 1."""
-        box.backup()
-        code, out, _ = box.run("KS_DUCKDB=off\n", FAKE_SIDECAR_REFUSES="1")
-        assert code == 0, out
-        assert "notify suppressed" not in out
-        assert "Daily snapshot FAILED" not in out
-
-    def test_off_with_quotes_stands_down_and_says_why(self, box):
-        box.backup()
-        code, out, calls = box.run("KS_DUCKDB=\"off\"\n")
-        assert code == 0, out
-        assert calls == [] and "written with quotes" in out
-
-    @pytest.mark.parametrize("env_text", [
-        "KS_DUCKDB=off  # week of silence\n", "  KS_DUCKDB=off\n",
-        "export KS_DUCKDB=off\n", "KS_DUCKDB = off\n",
-    ], ids=["inline-comment", "leading-space", "export", "spaces-around-equals"])
-    def test_every_off_compose_reads_stands_it_down(self, box, env_text):
-        """Each of these is off to compose, so web runs off. The review of
-        PR-10 ran the snapshot with the leading-space line and the sidecar
-        refusing, and it paged "Daily snapshot FAILED"; the comment line
-        would have shipped the file the week keeps still, its sidecar handed
-        `off # …` and running on. Mutation: read the line the way the first
-        reader did, `^KS_DUCKDB=` and nothing else."""
-        box.backup()
-        code, out, calls = box.run(env_text, FAKE_SIDECAR_REFUSES="1")
-        assert code == 0, out
-        assert calls == [], calls
-        assert "KS_DUCKDB=off in .env: no DuckDB snapshot tonight" in out
-        assert "Daily snapshot FAILED" not in out and "notify suppressed" not in out
-
-    @pytest.mark.parametrize("env_text", ["", "KS_DUCKDB=on\n", "KS_DUCKDB=off\nKS_DUCKDB=on\n"],
-                             ids=["unset", "on", "on-last"])
-    def test_on_snapshots_and_ships_as_it_always_did(self, box, env_text):
-        """Nothing changes under `on`: the backup is linked, the image asked
-        who it runs as, the sidecar started with `.env`, the push called, and
-        the scratch directory removed. Mutation: stand down on anything but
-        a line that says off."""
-        backup = box.backup()
-        code, out, calls = box.run(env_text)
-        assert code == 0, out
-        kinds = [c.split()[0] for c in calls]
-        assert kinds[0] == "rm" and "ln" in kinds and "offsite_parquet.sh" in kinds, calls
-        assert any(c.startswith("docker run --rm --memory=6500m") and "--env-file .env" in c
-                   for c in calls), calls
-        assert calls[-1].startswith("rm -rf data/.snapshot_tmp"), calls
-        assert "KS_DUCKDB" not in out
-        assert backup.exists()
-
-    def test_a_typo_runs_on_with_a_line(self, box):
-        box.backup()
-        code, out, calls = box.run("KS_DUCKDB=of\n")
-        assert code == 0, out
-        assert any(c.startswith("offsite_parquet.sh") for c in calls), calls
-        assert "KS_DUCKDB=of in .env is not a value the switch understands" in out
-
-    def test_on_still_refuses_a_stale_backup(self, box):
-        """The on-path's own guard, unchanged: a backup older than a day means
-        db_backup stopped. It is also what every night of a week under `off`
-        would have ended on, which is why `off` must never reach it."""
-        box.backup(age_h=50)
-        code, out, calls = box.run("KS_DUCKDB=on\n")
-        assert code == 1, out
-        assert "db_backup has stopped" in out
-        assert not any(c.startswith("docker") for c in calls), calls
+# `TestTheNightlySnapshotStandsDown` stood here until step 14's S14-18
+# deleted `deploy/daily_offsite.sh`: under `off` it stood down before its
+# cleanup trap, read, linked, started, shipped and deleted nothing, and paged
+# nobody; under `on` it refused an image that was not the pinned one and a
+# backup past 30 h.
 
 
-# ── the runbook ───────────────────────────────────────────────────────────────
+# ── the history ───────────────────────────────────────────────────────────────
 
-def _runbook() -> str:
+def _history() -> str:
+    """CLAUDE.md's "The week of silence, and its way back": what is left of
+    the runbook "Starting the week of silence", compressed into the history
+    of the DuckDB exit by step 14's S14-20."""
     text = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-    start = text.index("### Starting the week of silence")
+    start = text.index("### The week of silence, and its way back")
     return text[start:text.index("\n### ", start + 1)]
 
 
 @needs_checkout
-class TestTheRunbook:
-    """CLAUDE.md, "Starting the week of silence": the one runbook, read by a
-    person on the host. What it names has to be there to run."""
+class TestTheHistory:
+    """The week's runbook was a person's procedure for the host, and it is
+    history since S14-20. What it still tells a person on the host has to be
+    true: the scripts it names exist or are said to be gone, the crontab is
+    changed from the print and never from the text, and on a step-14 image
+    there is no way back to make. The runbook's own steps — the start, the
+    preconditions, the Ark's SOURCE RELEASED, the `.env` copy — went with it
+    (their tests are in S14-20's list)."""
 
-    def test_every_tool_it_names_exists(self):
-        """Mutation: rename a script without the runbook."""
-        named = set(re.findall(r"(?:deploy|scripts)/[\w./-]+\.(?:sh|py)", _runbook()))
-        assert {"deploy/duckdb_silence_check.sh", "deploy/ark_ship.sh",
-                "deploy/pg_offsite.sh", "deploy/offsite_check.sh",
-                "scripts/weekly_compact.sh", "deploy/daily_offsite.sh",
-                "deploy/duckdb_env.sh", "deploy/stage4_soak.sh",
-                "deploy/duckdb_table_fates_check.py"} <= named, named
-        for path in named:
+    # Named by the history, deleted in step 14's S14-18 with their cron lines
+    # long retired; the history says so.
+    DELETED = frozenset({"scripts/weekly_compact.sh", "deploy/daily_offsite.sh"})
+
+    def test_every_tool_it_names_exists_or_is_said_gone(self):
+        """Mutation: rename a script without the history — or delete one
+        without the history saying it is gone."""
+        text = _history()
+        named = set(re.findall(r"(?:deploy|scripts)/[\w./-]+\.(?:sh|py)", text))
+        assert {"deploy/duckdb_silence_check.sh", "deploy/duckdb_env.sh",
+                "deploy/offsite_check.sh", "deploy/restore-test.sh"} <= named, named
+        assert self.DELETED <= named, named
+        for path in named - self.DELETED:
             assert (REPO / path).is_file(), path
+        for path in self.DELETED:
+            assert not (REPO / path).exists(), path
+        joined = " ".join(text.split())
+        assert "deleted in step 14's S14-18" in joined, joined
 
     def test_it_changes_the_crontab_from_the_print_only(self):
-        """The runbook never spells a crontab line of its own: the lines are
+        """The history never spells a crontab line of its own: the lines are
         the ones `--crontab` prints, which a test holds to the scripts'
-        headers. Mutation: write `0 2 * * 0` into the runbook."""
-        text = _runbook()
+        headers. Mutation: write `0 2 * * 0` into the section."""
+        text = _history()
         assert "--crontab" in text
         assert not re.search(r"[0-9*]+ [0-9*]+ \* \* [0-9*]", text)
 
-    def test_the_env_copy_is_the_documented_one(self):
-        """`.env` is copied before it is edited, mode 600, to the directory
-        CLAUDE.md names for every copy of it — never the repository root."""
-        text = _runbook()
-        assert "install -m 600 /opt/key-api-bot/.env\n   /root/env-backups/key-api-bot/" in text
-        assert "never by printing the file" in text
+    def test_the_way_back_on_a_step_14_image_is_the_image_rollback(self):
+        """Since step 14's S14-00 web runs off whatever `.env` says, so
+        `KS_DUCKDB=on` changes nothing in web and only re-arms the host
+        scripts that read `.env`. The history says so, and names the rollback
+        section that exists. Mutation: drop the paragraph, or rename the
+        Deployment section without the history."""
+        joined = " ".join(_history().split())
+        assert "On a step-14 image there is no way back to make" in joined, joined
+        assert "leave `.env` at `KS_DUCKDB=off`" in joined
+        assert "do not re-add those two cron lines" in joined
+        assert "a step-14 web runs `off` whatever `.env` says" in joined
+        section = "Before any rollback to an image from before step 14"
+        assert f'"{section}"' in joined
+        whole = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert f"\n### {section}\n" in whole
 
-    @staticmethod
-    def _item(heading: str, number: int) -> str:
-        """Item `number` of the numbered list under the bold `heading`, its
-        lines joined, so a phrase the text wraps is still one phrase."""
-        text = _runbook()
-        block = text[text.index(f"**{heading}**"):]
-        start = block.index(f"\n{number}. ") + 1
-        end = re.search(r"\n(\d+\. |\*\*|\n)", block[start:])
-        item = block[start:start + end.start()] if end else block[start:]
-        return " ".join(item.split())
+    def test_the_way_back_names_the_snapshots_image(self):
+        """On an image from before step 14, the nightly snapshot's cron line
+        put back has no default image since S14-02: without the variable in
+        deploy/backup.env, or without the rollback-step14 tag on the host,
+        every night refuses (exit 2) and pages "Daily snapshot FAILED". The
+        variable is the one `deploy/daily_offsite.sh` read (a literal since
+        S14-18 deleted the script, read at 50cc367b). Mutation: drop the
+        sentence."""
+        joined = " ".join(_history().split())
+        for words in ("`BACKUP_RESTORE_IMAGE`", "`deploy/backup.env`", "`rollback-step14`",
+                      "Daily snapshot FAILED"):
+            assert words in joined, (words, joined)
 
-    def test_precondition_four_asks_what_the_verdict_asks(self):
-        """It is read so the start is not the first time anybody asks
-        core/duckdb_off.py's questions, so it asks those and no others. The
-        verdict wants every chain writing Postgres, by latch or by flag, and
-        a latch — marker and owner rows — only of the chains that keep a value
-        in DuckDB's `sync_metadata`: a flagged chain with nothing written
-        latches on its first write, mid-week, and counting it once held a
-        start back. The first runbook asked for a marker per chain, which six
-        chains can rightly lack. Mutation: name another chain as needing a
-        latch, or go back to "a marker per chain"."""
-        from core.duckdb_off import chains_keeping_sync_metadata
-        from core.write_chains import WRITE_CHAINS, chain_name
-
-        item = self._item("Preconditions", 4)
-        assert "a marker per chain" not in item
-        assert "`mode` `postgres`" in item and "by its latch or by its flag" in item
-        latched = set(re.findall(r"`(pg_\w+_write)`", item))
-        assert latched == {chain_name(c) for c in chains_keeping_sync_metadata()}, latched
-        assert latched < {chain_name(c) for c in WRITE_CHAINS}
-
-    def test_web_waits_for_the_freeze_not_the_upload(self):
-        """deploy/ark_ship.sh prints SOURCE RELEASED once nothing after it
-        reads the file — test_ark_ship_script holds that line before anything
-        leaves the host — and under off web never opens the file, so steps
-        4-6 may begin there. The first runbook kept web and the bot stopped
-        until ARK SHIPPED AND VERIFIED: the dashboard down and orders waiting
-        through the upload, the download, the decrypt and L0-L2 of the
-        downloaded copy, the longest outage of the procedure, for nothing —
-        while the script said the opposite. The crontab print and the
-        snapshot's header said step 4 waited for the Ark off-site. Mutation:
-        put "until `ARK SHIPPED AND VERIFIED`" back into step 3."""
-        step3 = self._item("Starting the week", 3)
-        assert "SOURCE RELEASED" in step3 and "ARK SHIPPED AND VERIFIED" in step3
-        assert "until `ARK SHIPPED AND VERIFIED`" not in step3
-        assert "steps 4-6" in step3.replace("–", "-")
-        for n in (4, 5, 6):
-            assert "ARK SHIPPED" not in self._item("Starting the week", n), n
-        header = " ".join(re.sub(r"^\s*#[\s#]*", "", ln)
-                          for ln in (DEPLOY / "ark_ship.sh").read_text().splitlines())
-        assert "the week's later steps need not wait for the upload" in header
+    def test_the_crontab_print_names_this_section(self):
+        """The print is what a person pastes from; it points at the section
+        by its name. Mutation: rename the section without the script."""
         printed = subprocess.run(["bash", str(DEPLOY / "duckdb_silence_check.sh"), "--crontab"],
                                  capture_output=True, text=True, timeout=30)
         assert printed.returncode == 0, printed.stderr
-        assert "once the second Ark is off-site" not in printed.stdout
-        assert "SOURCE RELEASED" in printed.stdout
-        snapshot = " ".join((DEPLOY / "daily_offsite.sh").read_text().split())
-        assert "once the second Ark is off-site" not in snapshot
+        assert '"The week of silence, and its way back"' in " ".join(printed.stdout.split())
+        assert "Starting the week of silence" not in printed.stdout
 
 
 # ── the restore drill ─────────────────────────────────────────────────────────
@@ -522,6 +310,15 @@ exit 0
 
 FAKE_RECORDING_DOCKER = """#!/usr/bin/env bash
 printf 'docker %s\\n' "$*" >> "$FAKE_CALLS"
+case " $* " in
+    *" image inspect "*) [ -n "${FAKE_NO_IMAGE:-}" ] && exit 1 ;;
+    *"import duckdb"*)
+        if [ "${FAKE_DUCKDB:-1.5.5}" = absent ]; then
+            echo "ModuleNotFoundError: No module named 'duckdb'" >&2
+            exit 1
+        fi
+        echo "${FAKE_DUCKDB:-1.5.5}" ;;
+esac
 exit 0
 """
 
@@ -550,7 +347,8 @@ class TestTheRestoreDrill:
     def drill(self, tmp_path):
         root = tmp_path / "repo"
         (root / "deploy").mkdir(parents=True)
-        for name in ("restore-test.sh", "duckdb_env.sh", "restore_from_export.py"):
+        for name in ("restore-test.sh", "duckdb_env.sh", "restore_from_export.py",
+                     "archive_image.sh"):
             shutil.copy(DEPLOY / name, root / "deploy" / name)
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -560,7 +358,7 @@ class TestTheRestoreDrill:
             (bin_dir / name).chmod(0o755)
         calls = tmp_path / "calls.log"
 
-        def run(env_text: str, age_h: int = 2):
+        def run(env_text: str, age_h: int = 2, **extra: str):
             import datetime
             import tarfile
 
@@ -581,7 +379,8 @@ class TestTheRestoreDrill:
                    if not k.startswith(("FAKE_", "BACKUP_", "KS_"))}
             env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                         "FAKE_CALLS": str(calls), "FAKE_ARCHIVE": str(archive),
-                        "BACKUP_REMOTE": "u1@storage.invalid"})
+                        "BACKUP_REMOTE": "u1@storage.invalid",
+                        "BACKUP_RESTORE_IMAGE": PINNED, **extra})
             done = subprocess.run(["bash", str(root / "deploy" / "restore-test.sh")],
                                   env=env, capture_output=True, text=True, timeout=60)
             return done.returncode, done.stdout + done.stderr, calls.read_text().splitlines()
@@ -597,8 +396,10 @@ class TestTheRestoreDrill:
         Mutation: drop the `-e KS_DUCKDB=on`."""
         code, out, calls = drill(env_text)
         assert code == 0, out
-        [rebuild] = [c for c in calls if c.startswith("docker run")]
+        [rebuild] = [c for c in calls if c.startswith("docker run")
+                     and "restore_from_export.py" in c]
         assert "--env-file .env" in rebuild and "-e KS_DUCKDB=on" in rebuild, rebuild
+        assert "--pull never" in rebuild and f" {PINNED} " in rebuild, rebuild
         assert "python /app/deploy/restore_from_export.py" in rebuild
         assert "/opt/key-api-bot/data" not in rebuild and ":/app/data " in rebuild
         assert "PASS — the off-site archive rebuilt a validated warehouse." in out
@@ -623,6 +424,33 @@ class TestTheRestoreDrill:
         assert code == 1, out
         assert calls == [], calls
         assert "docker run --env-file refuses" in out and "KS_DUCKDB=off" in out
+
+    def test_the_image_is_asked_before_the_archive_is_fetched(self, drill):
+        """Step 14 (S14-02): the pinned image, present, with DuckDB 1.5.5 —
+        asked first, so a drill that could rebuild nothing fetches nothing.
+        Mutation: probe after the download."""
+        code, out, calls = drill("KS_DUCKDB=off\n")
+        assert code == 0, out
+        assert calls[0] == f"docker image inspect {PINNED}", calls
+        assert "import duckdb" in calls[1] and "--network none" in calls[1], calls
+        assert calls[2].startswith("sftp "), calls
+
+    @pytest.mark.parametrize("image, extra, words", [
+        ("", {}, "BACKUP_RESTORE_IMAGE is not set"),
+        ("halloweex/keycrm-web:latest", {}, "moves with every deploy"),
+        (PINNED, {"FAKE_NO_IMAGE": "1"}, "this does not pull"),
+        (PINNED, {"FAKE_DUCKDB": "absent"}, "cannot import duckdb"),
+        (PINNED, {"FAKE_DUCKDB": "1.4.3"}, "carries DuckDB 1.4.3, not 1.5.5"),
+    ], ids=["unset", "latest", "no-image", "no-duckdb", "another-version"])
+    def test_a_drill_without_the_pinned_image_refuses(self, drill, image, extra, words):
+        """It used to default to :latest, which after step 14's S14-19 has no
+        DuckDB to rebuild with. Exit 2 — refused, not failed — naming the tag
+        to use, and nothing fetched. Mutation: put the default back."""
+        code, out, calls = drill("KS_DUCKDB=off\n", BACKUP_RESTORE_IMAGE=image, **extra)
+        assert code == 2, out
+        assert words in out and "rollback-step14" in out, out
+        assert not [c for c in calls if c.startswith("sftp")], calls
+        assert not [c for c in calls if "restore_from_export.py" in c], calls
 
     @needs_checkout
     def test_the_real_restore_carries_it_too(self):

@@ -26,18 +26,11 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def mode(monkeypatch):
-    before = (pg_derivation._mode, pg_derivation._mode_error)
-
-    def set_mode(value):
-        if value is None:
-            monkeypatch.delenv(pg_derivation.ENV, raising=False)
-        else:
-            monkeypatch.setenv(pg_derivation.ENV, value)
-        return pg_derivation.configure_mode()
-
-    yield set_mode
-    pg_derivation._mode, pg_derivation._mode_error = before
+def mode():
+    """The cached KS_PG_DERIVE mode's setter until step 14's S14-15 removed
+    the mode; kept as a fixture that sets nothing, so a test still says it
+    was written for `own` — the only state there is."""
+    return lambda _value: None
 
 
 class _Conn:
@@ -195,7 +188,7 @@ class TestHealthPublishesTheDrops:
         dropped = datetime.now(timezone.utc) - timedelta(minutes=80)
         conn = _Conn(row={"failures_since_ok": 3, "last_attempted_at": dropped})
         block, _ = self._read(conn)
-        assert set(block) == {"mode", "error", "signal_unreadable_ticks",
+        assert set(block) == {"signal_unreadable_ticks",
                               "marks_dropped_unhealed", "last_mark_drop_age_s"}
         assert block["marks_dropped_unhealed"] == 3
         assert 80 * 60 <= block["last_mark_drop_age_s"] <= 80 * 60 + 5
@@ -218,15 +211,6 @@ class TestHealthPublishesTheDrops:
         mode("own")
         block, _ = self._read(pool_error=RuntimeError("no dsn"))
         assert (block["marks_dropped_unhealed"], block["last_mark_drop_age_s"]) == (None, None)
-
-    def test_under_piggyback_it_is_not_asked(self, mode):
-        """Nothing marks and nothing heals there, so a count left from an
-        earlier soak would page for ever."""
-        mode(None)
-        block, get_pool = self._read(_Conn(row={"failures_since_ok": 5,
-                                                "last_attempted_at": datetime.now(timezone.utc)}))
-        assert (block["marks_dropped_unhealed"], block["last_mark_drop_age_s"]) == (None, None)
-        assert get_pool.await_count == 0
 
     def test_the_endpoint_carries_the_block(self):
         tree = ast.parse((REPO / "web/routes/api/health.py").read_text(encoding="utf-8"))

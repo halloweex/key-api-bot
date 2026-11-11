@@ -115,19 +115,9 @@ class TestFallbackWiring:
         application.bot.send_message.assert_awaited_once()
         assert application.bot.send_message.await_args.kwargs["chat_id"] == 777
 
-    @pytest.mark.asyncio
-    async def test_warehouse_alert_reaches_the_transport(self, monkeypatch):
-        """The path that stayed silent in production, end to end."""
-        from core.duckdb_store import DuckDBStore
-
-        monkeypatch.setattr(bot_main, "_application", None)
-        sender = AsyncMock(return_value=1)
-        store = DuckDBStore.__new__(DuckDBStore)
-        with patch("core.telegram_alerts.send_admin_message_http", sender):
-            await store._send_warehouse_alert("🚨 CRITICAL: validation failed 4x")
-
-        sender.assert_awaited_once()
-        assert "CRITICAL" in sender.await_args.args[0]
+    # `test_warehouse_alert_reaches_the_transport` stood here until step 14's
+    # S14-18: the DuckDB store's `_send_warehouse_alert`, whose last caller was
+    # the nightly DuckDB backup, went with the backup.
 
 
 class TestTheSuiteCannotReachTelegram:

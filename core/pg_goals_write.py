@@ -23,7 +23,7 @@ AND THE READS OF THE TABLE FOLLOW IT
 Every read of `app.revenue_goals` — `get_goals`, `get_smart_goals`, the
 /marketing target line — goes to Postgres while this chain does, whatever
 `KS_READ_GOALS` or `KS_READ_MARKETING` say, and never falls back to DuckDB
-(`reads_the_chain` below). The first version left them on those two flags,
+(`reads_the_chain`, until step 14's S14-11). The first version left them on those two flags,
 chain 8's arrangement, and made "both at `postgres`" a precondition of the
 flip that only whoever flipped it could check. That precondition does not
 hold for long: putting a read flag back is the documented rollback of every
@@ -38,6 +38,13 @@ the same question but a frozen one: nothing writes it and the hourly replace
 no longer runs. A Postgres failure on these reads raises, so the page fails
 where it can be seen instead of showing a goal nobody typed last.
 
+**Since step 14's S14-05 the /marketing target line no longer asks
+`reads_the_chain`.** `_marketing_run` has one path, Postgres, whatever
+`KS_READ_MARKETING` says, and a failure there is the page's counted refusal
+(`read_fallback.refuse("marketing", exc)`, a 503 naming `marketing`) rather
+than a raw raise. `get_goals` and `get_smart_goals` asked it until S14-07
+made `_goals_run` Postgres alone, and S14-11 deleted it.
+
 THE ONE WRITER EVERY CALLER GOES THROUGH
 
 `set_goal` is the table's only writer: `POST /api/goals` calls it directly and
@@ -45,29 +52,34 @@ THE ONE WRITER EVERY CALLER GOES THROUGH
 routing therefore lives inside `GoalsMixin.set_goal`, where both arrive —
 chain 8's reason for putting it in the repository rather than the route.
 
-THE FLAG GATES BOTH ENDS
+THE FLAG GATED BOTH ENDS — UNTIL STEP 14
 
-Under the flag the write comes here AND the hourly `replicate_operational`
-stands down for `app.revenue_goals`, and the daily comparison with it. The
+Under the flag the write came here AND the hourly `replicate_operational`
+stood down for `app.revenue_goals`, and the daily comparison with it. The
 replica is a full replace out of DuckDB, so a write here without the
 stand-down would be rolled back within the hour, out of a DuckDB that never
-saw it, looking healthy in between. Both ask
-`core.write_chains.stood_down_tables()`, so they cannot disagree.
+saw it, looking healthy in between. Both asked
+`core.write_chains.stood_down_tables()`, so they could not disagree; since
+step 14's S14-11 both stand down on every chain's tables
+(`write_chains.chain_tables()`), no flag read.
 
 AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
 connection has come out of the pool and before the transaction opens. From
 the first goal typed here the flag cannot move the writes back to DuckDB; only
-`scripts/chain_copy_back.py goals` can, and it carries the three rows back and
-compares them at zero before it releases anything.
+`scripts/chain_copy_back.py goals` could, carrying the three rows back and
+comparing them at zero before it released anything (deleted in step 14's
+S14-04; the way back since is an image from before step 14,
+`core.rollback_lever`).
 
 ONE CLOCK FOR BOTH STORES
 
 `updated_at` is supplied by the caller — the web container's clock, the same
 `datetime.now(DEFAULT_TZ)` DuckDB's branch stamps — never Postgres' `now()`.
 It is the column the copy-back's handover orders two versions of one goal by
-(`chain_transfer._shared_clock`), and a version DuckDB stamped against one
+(`chain_transfer._shared_clock`; an image from before step 14 still orders
+by it, since S14-04 deleted this build's), and a version DuckDB stamped against one
 written here must be compared on one clock, not on two machines' idea of it.
 The Postgres column has no default, so a writer that forgot it would leave
 the handover nothing to order by; `core/pg_chain_invariants.py` watches for
@@ -76,7 +88,6 @@ that.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 from typing import Any, Optional, Tuple
 
@@ -92,7 +103,8 @@ WRITE_ENV = "KS_WRITE_GOALS"
 CHAIN = "pg_goals_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper, the daily comparison and the copy-back.
+# the hourly shipper and the daily comparison (and the copy-back, until step
+# 14's S14-04 deleted it).
 CHAIN_TABLES: Tuple[str, ...] = ("app.revenue_goals",)
 
 # The period types `set_goal` accepts. The repository refuses anything else
@@ -102,69 +114,19 @@ PERIOD_TYPES: Tuple[str, ...] = ("daily", "weekly", "monthly")
 
 # The hole every shared statement that reads this chain's table carries —
 # `core.sql_dialect.render_tables` fills it with `revenue_goals` or
-# `app.revenue_goals`. `reads_the_chain` recognises a goal read by it.
+# `app.revenue_goals`. `tests/unit/test_goals_reads_follow_chain.py` walks
+# every statement carrying it to a router that reads Postgres alone
+# (`reads_the_chain` recognised a goal read by it until step 14's S14-11).
 TABLE_HOLE = "{revenue_goals}"
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_GOALS` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule, and chain 8's: a
-    typo in the variable deciding which store holds a number nobody else can
-    reconstruct must not quietly pick the other store. Since DN-01 it stops
-    this chain and nothing else.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and a value nobody can read: once
-    a goal has been written here, setting the variable back must not start a
-    second writer beside the first.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres()
-
-
-def reads_postgres() -> bool:
-    """Whether a read of this chain's table must ask Postgres, whatever the
-    page's own read flag says — `writes_postgres()` applied to reads.
-
-    One difference, and only for a flag nobody can read on a chain that has
-    never written here: the writer then refuses in both stores and the hourly
-    replace stands down, so neither copy moves, and the page's own flag
-    chooses between them as it did before this chain existed. Raising here
-    instead would take the page down over a variable about writes; the typo
-    is published by `core.write_chains.chain_modes()` and paged by the
-    canary. A latched chain never reaches the question.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    try:
-        return env_writes_postgres()
-    except RuntimeError:
-        return False
-
-
-def reads_the_chain(sql: str) -> bool:
-    """Whether this statement reads the chain's table while the chain owns it.
-
-    Decided from the body, `_expenses_run`'s arrangement for `{expenses}`: a
-    router asks this of every statement it is handed, so a query that starts
-    reading `{revenue_goals}` tomorrow follows the chain the day it does,
-    through whichever router carries it. `tests/unit/test_goals_reads_follow_chain.py`
-    walks `core/` for every such statement and fails if its router does not ask.
-    """
-    return TABLE_HOLE in sql and reads_postgres()
+# `env_writes_postgres`, `writes_postgres`, `reads_postgres` and
+# `reads_the_chain` stood here until step 14's S14-11. S14-00 made the three
+# answers constants — every goal is written and read in Postgres whatever
+# `KS_WRITE_GOALS` says — S14-07 left no router that asked `reads_the_chain`,
+# and S14-11 deleted them with the flag: `set_goal` writes here and asks
+# nothing. `WRITE_ENV` stays a name (revision 0034's comments and an image
+# from before step 14 read it), and the latch with it (decision 3).
 
 
 # `NUMERIC(precision, scale)` of the columns a caller's number lands in —
@@ -182,8 +144,10 @@ def _fits(column: str, value: Optional[float], *, nullable: bool) -> None:
     **Asked before the latch, because the latch is permanent.** A value
     Postgres rejects raises inside the write, after `_latch()` has written the
     marker: the chain is then latched for good, with no owner row behind it —
-    a CRITICAL `chain_latch_disagrees` the next morning and a copy-back that
-    refuses — for an input DuckDB would have refused without a trace. The
+    a direction nothing files since step 14's S14-12 (the integrity layer's
+    chain invariants judge only owner rows with no marker), and one an image
+    from before step 14 pages as CRITICAL `chain_latch_disagrees` — for an
+    input DuckDB would have refused without a trace. The
     route bounds `amount` only from below, so ₴10 000 000 000 is one typing
     slip away.
 

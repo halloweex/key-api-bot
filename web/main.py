@@ -15,9 +15,10 @@ from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
 from web.ratelimit import limiter
 from web.routes import api, pages, auth, chat, websocket
 from web.routes.auth import api_gate, require_admin
-from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
+from web.middleware import (
+    RejectNulMiddleware, RequestLoggingMiddleware, RequestTimeoutMiddleware,
+)
 from bot.database import init_database
-from core import duckdb_switch
 from core.duckdb_store import get_store, close_store
 from core.sync_service import init_and_sync
 from core.runtime_modes import configure_modes
@@ -61,7 +62,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 
 # Centralized exception handlers for consistent error responses
-from core.exceptions import ValidationError, QueryTimeoutError
+from core.exceptions import ValidationError
 from core.read_fallback import ReadUnavailable
 
 
@@ -73,20 +74,14 @@ async def validation_error_handler(request: Request, exc: ValidationError):
     )
 
 
-@app.exception_handler(QueryTimeoutError)
-async def query_timeout_handler(request: Request, exc: QueryTimeoutError):
-    logger.error(f"Query timeout on {request.url.path}: {exc}")
-    return JSONResponse(
-        status_code=504,
-        content={"error": "Query Timeout", "detail": str(exc)}
-    )
+# `QueryTimeoutError`'s handler (504) stood here until step 14's S14-18: the
+# DuckDB store's reads raised it, and they went with the store's DuckDB half.
 
 
 @app.exception_handler(ReadUnavailable)
 async def read_unavailable_handler(request: Request, exc: ReadUnavailable):
-    """A read refused under `KS_READ_FALLBACK=off` (DN-20b), or of a table a
-    write chain owns under either mode (`read_fallback.chain_refusal`): its
-    engine failed, and DuckDB may not answer in its place.
+    """A read refused because its one engine failed (DN-20b,
+    `read_fallback.refuse`): there is no other store to answer in its place.
 
     One handler for every route, so no router has to know it is behind HTTP:
     `core.read_fallback` raises, this answers. 503, not 500 — nothing here
@@ -118,25 +113,11 @@ async def sms_refusal_handler(request: Request, exc: SmsRefusal):
                         headers=exc.headers)
 
 
-@app.exception_handler(duckdb_switch.DuckDBOpenedWhileOff)
-async def duckdb_opened_while_off_handler(request: Request,
-                                          exc: duckdb_switch.DuckDBOpenedWhileOff):
-    """A route reached for the DuckDB file under `KS_DUCKDB=off` and was
-    refused (stage 5, PR-1). It used to fall through to the 500 below — a
-    bug, in the frontend's reading, where nothing is broken: the file is
-    switched off, and the 503 says it is the store behind the page that is
-    unavailable, as `ReadUnavailable` does. The refusal is already counted
-    and logged at CRITICAL where it was raised (`duckdb_switch.guard`) and
-    published on /api/health; the site and the count stay there, since a
-    response is public to the page."""
-    return JSONResponse(
-        status_code=503,
-        content={
-            "error": "Service Unavailable",
-            "detail": "This page needs the DuckDB file, which is switched off.",
-            "surface": "duckdb",
-        },
-    )
+# `DuckDBOpenedWhileOff`'s handler (503 naming `duckdb`) stood here until step
+# 14's S14-18 deleted the switch that raised it (`core/duckdb_switch.py`). A
+# caller still reaching for the store's DuckDB connection meets
+# `core.store.StoreRemoved`, a `ReadUnavailable`, which the handler above
+# answers with the same 503 naming `duckdb`, counted.
 
 
 @app.exception_handler(Exception)
@@ -147,6 +128,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         content={"error": "Internal Server Error", "detail": "An unexpected error occurred."}
     )
 
+
+# Refuse a NUL in an /api/ path or query string before routing (400). Added
+# first, so it sits innermost and the logging middleware still records it.
+app.add_middleware(RejectNulMiddleware)
 
 # Add request logging middleware (adds correlation IDs and timing)
 app.add_middleware(RequestLoggingMiddleware)
@@ -195,13 +180,12 @@ async def startup_event():
     # Log sync mode for visibility
     from core.config import config as app_config
 
-    # A half-enabled read switch is the same trap as a typo in it: the flag
-    # says postgres, the missing DSN quietly serves the old store, and nobody
-    # learns until the numbers disagree. This used to be checked here for
-    # KS_READ_GOLD alone; `configure_modes()` below now checks every
-    # `KS_READ_*` that names an engine without its address, logs each once and
-    # publishes them on /api/health (`read_fallback_mode.misconfigured`) —
-    # without raising, because web is the only process that syncs orders.
+    # A half-enabled read switch was the same trap as a typo in it: the flag
+    # said postgres, the missing DSN quietly served the old store. It was
+    # checked here for KS_READ_GOLD alone, then by `configure_modes()` for
+    # every `KS_READ_*` (`read_fallback_mode.misconfigured` on /api/health)
+    # until step 14's S14-16: no switch routes a read since S14-07, and a
+    # missing DSN is a refusal on every tab, a 503 naming the surface.
 
     # Validate configuration early - fail fast with clear errors
     try:
@@ -218,83 +202,27 @@ async def startup_event():
     # The cached modes, before the boot sync below writes a single order. The
     # scheduler used to be the only caller, and it starts after that sync — so
     # the boot's orders landed in Postgres unmarked under KS_PG_DERIVE=own.
-    # See `core/runtime_modes.py`. `web=True`: under KS_DUCKDB=off, this is
-    # where off's coherence verdict is reached (stage 5's PR-2).
-    configure_modes(web=True)
+    # See `core/runtime_modes.py`.
+    configure_modes()
 
-    # Initialize DuckDB analytics store and sync from API
-    logger.info("Initializing DuckDB analytics store...")
+    # The boot sync, into Postgres. The store opens nothing — it holds no
+    # connection (`core/store.py`) — so a failure here is the sync's, and the
+    # scheduler retries it: web, the only syncer, must not crash-loop over a
+    # Postgres or a KeyCRM that is down at boot. Until step 14's S14-18 this
+    # also counted DuckDB's tables for the log (`get_stats`) under KS_DUCKDB=on,
+    # and caught the switch's refusal under off; web has run off since
+    # 2026-10-16, and both went with the switch.
+    logger.info("Boot sync...")
     store = None
     try:
         await init_and_sync(full_sync_days=730)
         store = await get_store()
-        if duckdb_switch.is_off():
-            # The store `get_store()` hands out under off is unconnected
-            # (stage 5, PR-1), and `get_stats` would be the one call here
-            # that opens the file — to log counts nothing reads.
-            logger.info("Boot sync done; KS_DUCKDB=off, so DuckDB is not "
-                        "opened for its counts")
-        else:
-            stats = await store.get_stats()
-            logger.info(
-                f"DuckDB ready: {stats['orders']} orders, "
-                f"{stats['products']} products, "
-                f"{stats['categories']} categories, "
-                f"{stats['db_size_mb']} MB"
-            )
-    except duckdb_switch.DuckDBOpenedWhileOff:
-        # KS_DUCKDB=off, and something on the boot sync's path still reached
-        # for the file — orders held in DuckDB because chain 3 is not on, or
-        # a path stage 5 has not decoupled yet. Web must not die of it: the
-        # refusal is already counted, and only a web that answers /api/health
-        # lets the canary page it (`duckdb_opened_while_off`). The store is
-        # the unconnected one `get_store()` publishes under off, so what goes
-        # through it to Postgres still works; every later path that reaches
-        # for the file is refused and counted too. Under `on` this branch
-        # cannot be taken: nothing raises it.
-        logger.critical(
-            "KS_DUCKDB=off: the boot sync reached for the DuckDB file and was "
-            "refused. Web starts without it; the site is published under "
-            "duckdb_switch on /api/health")
-        store = await get_store()
+        logger.info("Boot sync done")
     except Exception as e:
-        logger.error(f"DuckDB sync failed on startup: {e}", exc_info=True)
-        # Don't crash if store has data — serve stale data, scheduler will retry sync
-        #
-        # If it was the store's connect that failed rather than the sync, this
-        # is a second, complete attempt at it — schema and migrations included
-        # — and a second failure ends the startup, as a file that cannot be
-        # opened always has. It used to hand back the half-connected store the
-        # first attempt left behind, and serve it with no migration applied.
-        # A view that cannot be built is not such a failure: the store
-        # connects with it published on /api/health (`_build_view`), so what
-        # still ends the startup here is a file, a table or a ledger.
+        logger.error(f"Boot sync failed on startup: {e}", exc_info=True)
         store = await get_store()
-        if duckdb_switch.is_off():
-            # Nothing below may be asked of DuckDB under off: `get_stats`
-            # raised a second refusal out of this handler, uncaught — a crash
-            # loop of the only syncer over any failed boot sync. So the switch
-            # is asked first, and the startup never ends here: the scheduler
-            # retries the sync (stage 5, PR-1). Under `on` the branch below is
-            # what it always was.
-            logger.warning("Serving with the boot sync failed under "
-                           "KS_DUCKDB=off — the scheduler retries the sync")
-        else:
-            stats = await store.get_stats()
-            # Under chain 3 the orders are written to Postgres, so DuckDB's
-            # count says nothing about whether there is history to serve: a
-            # Postgres that failed this boot's sync is retried by the
-            # scheduler, and web — the only syncer — must not crash-loop over
-            # it (`pg_orders_write`).
-            from core import pg_orders_write
-
-            if pg_orders_write.mode() != "duckdb":
-                logger.warning("Serving with the boot sync failed under chain 3 — "
-                               "the scheduler retries the order step")
-            elif stats.get("orders", 0) == 0:
-                raise  # Fail fast only if DuckDB has no data at all
-            else:
-                logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
+        logger.warning("Serving with the boot sync failed — the scheduler "
+                       "retries the order step")
 
     # Migrate users from SQLite to DuckDB (one-time, idempotent)
 
@@ -309,8 +237,8 @@ async def startup_event():
     #
     # The write fills NULLs only, so this is a no-op on every boot after the
     # first, and it can never overwrite a campaign the app recorded itself.
-    # Through the SMS router (`_sms_run`), so under KS_SMS_STORE=postgres it
-    # writes Postgres whatever KS_DUCKDB says; the store is only its host.
+    # Through the SMS router (`_sms_run`), so it writes Postgres whatever
+    # KS_DUCKDB says; the store is only its host.
     if store is not None:
         try:
             restored = await store.backfill_sms_campaign_record(
@@ -359,7 +287,7 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Prediction service initialization skipped: {e}")
 
-    logger.info(f"Dashboard ready (KS_DUCKDB={duckdb_switch.mode()})")
+    logger.info("Dashboard ready")
 
 
 # `_migrate_sqlite_users_to_duckdb` lived here until 2026-09-07.
@@ -493,10 +421,10 @@ async def shutdown_event():
     except Exception as e:
         logger.warning(f"Error closing KeyCRM client: {e}")
 
-    # Close DuckDB
+    # Forget the store: it holds no connection, so there is nothing to close
+    # (`core/store.py`); the Postgres pool is `core.pg`'s.
     try:
         await close_store()
-        logger.info("DuckDB closed")
     except Exception as e:
-        logger.warning(f"Error closing DuckDB: {e}")
+        logger.warning(f"Error releasing the store: {e}")
     logger.info("KoreanStory Dashboard stopped")

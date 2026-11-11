@@ -25,6 +25,31 @@ from core.disk_monitor import (
 )
 
 
+@pytest.fixture(autouse=True)
+def samples(monkeypatch):
+    """Chain 10's Postgres tick (`pg_watchdog_write.disk_tick`) over a list:
+    every call's sample and directory set are recorded, and the history it
+    hands back is what a test put in `samples.history`. This module's subject
+    is the watchdog's judgement; the statements the tick runs are proved on
+    Postgres in `tests/integration/test_watchdog_samples_pg.py`. (Until step
+    14's S14-10 this module kept the samples in a DuckDB store instead.)"""
+    from types import SimpleNamespace
+
+    from core import pg_watchdog_write
+
+    state = SimpleNamespace(calls=[], history=None, dir_week_ago=None,
+                            dir_six_ago=None, remainder=[])
+
+    async def disk_tick(sample, dir_now, **kw):
+        state.calls.append({"sample": sample, "dir_now": dir_now, **kw})
+        return {"history": state.history, "dir_week_ago": state.dir_week_ago,
+                "dir_six_ago": state.dir_six_ago, "remainder": list(state.remainder),
+                "deleted": 0}
+
+    monkeypatch.setattr(pg_watchdog_write, "disk_tick", disk_tick)
+    return state
+
+
 # Ten consecutive samples read out of production `disk_samples` on
 # 2026-08-12, covering 2026-08-10 07:00 → 2026-08-12 19:00 Kyiv.
 # Measured growth across them: 607-682 MB/24h. A flat line.
@@ -196,123 +221,28 @@ class TestProductionScenarios:
         assert result.severity == Severity.WARN
 
 
-# ─── Persistence: insert / fetch_at_age / prune ───────────────────────────────
+# ─── Persistence ──────────────────────────────────────────────────────────────
+#
+# The sample nearest an age inside its slack and the prune were proved here on
+# DuckDB, through the writers and readers step 14's S14-10 deleted
+# (`insert_sample`, `fetch_sample_at_age`, `prune_old_samples`). The same
+# cases run on Postgres, through chain 10's tick, in
+# `tests/integration/test_watchdog_samples_pg.py` (`TestTheDiskStatements`).
 
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from core.disk_monitor import (
-    fetch_sample_at_age,
-    insert_sample,
-    prune_old_samples,
-)
-from core.duckdb_store import DuckDBStore
+from types import SimpleNamespace
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await s.connect()
-    return s
+REPO = Path(__file__).resolve().parents[2]
 
 
-class TestPersistence:
-    @pytest.mark.asyncio
-    async def test_insert_then_fetch_latest(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                # 24h-ago sample
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(hours=24),
-                    "db_size_mb": 7_000, "disk_pct_used": 25.0,
-                    "disk_free_gb": 55.0,
-                })
-                sample = fetch_sample_at_age(conn, hours=24)
-            assert sample is not None
-            assert sample["db_size_mb"] == 7_000
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_no_sample_in_window_returns_none(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                # Only have a recent sample, nothing from 24h ago
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(hours=1),
-                    "db_size_mb": 7_000, "disk_pct_used": 25.0,
-                    "disk_free_gb": 55.0,
-                })
-                sample = fetch_sample_at_age(conn, hours=24, slack_hours=2)
-            assert sample is None
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_fetch_at_age_within_slack(self, tmp_path):
-        """A sample taken 22h or 26h ago still counts for "24h ago"."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(hours=22),
-                    "db_size_mb": 6_500, "disk_pct_used": 25.0,
-                    "disk_free_gb": 55.0,
-                })
-                sample = fetch_sample_at_age(conn, hours=24, slack_hours=2)
-            assert sample is not None
-            assert sample["db_size_mb"] == 6_500
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_picks_closest_when_multiple_in_window(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                # Both within ±2h of -24h. Closer one should win.
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(hours=22, minutes=30),
-                    "db_size_mb": 1, "disk_pct_used": 25.0, "disk_free_gb": 55.0,
-                })
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(hours=24, minutes=10),
-                    "db_size_mb": 2, "disk_pct_used": 25.0, "disk_free_gb": 55.0,
-                })
-                sample = fetch_sample_at_age(conn, hours=24, slack_hours=2)
-            assert sample["db_size_mb"] == 2  # closer to -24h
-
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_prune_old_samples(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(days=20),  # old
-                    "db_size_mb": 1, "disk_pct_used": 0, "disk_free_gb": 0,
-                })
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(days=5),   # keep
-                    "db_size_mb": 2, "disk_pct_used": 0, "disk_free_gb": 0,
-                })
-                deleted = prune_old_samples(conn, retention_days=14)
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM disk_samples"
-                ).fetchone()[0]
-            assert deleted == 1
-            assert count == 1
-        finally:
-            await store.close()
+def _store(tmp_path: Path):
+    """The store the job read its file's size through until step 14's S14-18;
+    it asks for no store since (the file is `DATA_DIR / DUCKDB_FILE_NAME`), so
+    what the tests below hand it is never read."""
+    return SimpleNamespace(db_path=tmp_path / "test.duckdb")
 
 
 # ─── Scheduler integration ────────────────────────────────────────────────────
@@ -323,153 +253,185 @@ from unittest.mock import AsyncMock, patch
 
 class TestSchedulerJob:
     @pytest.mark.asyncio
-    async def test_bootstrap_run_persists_sample_no_alert(self, tmp_path):
-        """First run: no history → no 24h delta to report, sample inserted."""
+    async def test_bootstrap_run_persists_sample_no_alert(self, tmp_path, samples):
+        """First run: no history → no 24h delta to report, the sample handed
+        to the tick to store."""
         from core.scheduler import BackgroundScheduler
-        from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-        await store.connect()
-        try:
-            scheduler = BackgroundScheduler()
+        store = _store(tmp_path)
+        scheduler = BackgroundScheduler()
+        sample = {"sampled_at": datetime.now(timezone.utc), "db_size_mb": 7_200,
+                  "disk_pct_used": 25.0, "disk_free_gb": 55.0}
+        with patch("core.disk_monitor.sample_disk_state", return_value=sample), \
+             patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+             patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
+            result = await scheduler._run_disk_watchdog()
 
-            with patch(
-                "core.disk_monitor.sample_disk_state",
-                return_value={
-                    "sampled_at": datetime.now(timezone.utc),
-                    "db_size_mb": 7_200, "disk_pct_used": 25.0,
-                    "disk_free_gb": 55.0,
-                },
-            ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
-                result = await scheduler._run_disk_watchdog()
+        assert result["alert_fired"] is False
+        assert result["db_24h_ago_mb"] is None
+        assert result["db_growth_mb_24h"] is None
+        send.assert_not_called()
 
-            assert result["alert_fired"] is False
-            assert result["db_24h_ago_mb"] is None
-            assert result["db_growth_mb_24h"] is None
-            send.assert_not_called()
+        # The heartbeat host cron reads. Without it, a watchdog that has
+        # stopped sampling is indistinguishable from one with nothing to
+        # say — which is how this one went blind for eleven weeks.
+        beat = tmp_path / "health" / "watchdog_last_sample"
+        assert beat.exists(), "the run must leave evidence outside the process"
+        assert beat.read_text().startswith(str(datetime.now(timezone.utc).year))
 
-            # The heartbeat host cron reads. Without it, a watchdog that has
-            # stopped sampling is indistinguishable from one with nothing to
-            # say — which is how this one went blind for eleven weeks.
-            beat = tmp_path / "health" / "watchdog_last_sample"
-            assert beat.exists(), "the run must leave evidence outside the process"
-            assert beat.read_text().startswith(str(datetime.now(timezone.utc).year))
-
-            async with store.connection() as conn:
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM disk_samples"
-                ).fetchone()[0]
-            assert count == 1
-        finally:
-            await store.close()
+        (call,) = samples.calls
+        assert call["sample"] is sample
 
     @pytest.mark.asyncio
-    async def test_growth_is_measured_and_reported_but_never_paged(self, tmp_path):
+    async def test_the_file_the_directory_and_the_heartbeat_are_the_data_directory_s(
+            self, tmp_path, monkeypatch):
+        """Step 14's S14-01 took the directory sampled and the heartbeat off
+        the DuckDB store, and S14-18 the file's own path (the store holds no
+        file since): the file is `DATA_DIR / DUCKDB_FILE_NAME`, the directory
+        `DATA_DIR`, and the heartbeat `DATA_DIR/health/watchdog_last_sample`
+        — the path host cron reads (`deploy/offsite_check.sh`'s
+        `WATCHDOG_MARKER`, relative to the checkout whose `data/` is the
+        container's `/app/data`). A heartbeat written anywhere else reads, the
+        next morning, as CRITICAL "disk watchdog has stopped sampling".
+        Mutation: write it to another directory or name, sample another file,
+        or move the default in offsite_check.sh alone."""
+        import core.disk_monitor as disk_monitor
+        import core.scheduler as scheduler_module
+        from core import paths, watchdog_samples
+        from core.scheduler import BackgroundScheduler
+
+        # The scheduler's own name for the directory is `core.paths`' (the
+        # conftest redirects that name for every test, so it is read here as
+        # the import the module makes).
+        assert ("from core.paths import DATA_DIR, DUCKDB_FILE_NAME"
+                in (REPO / "core" / "scheduler.py").read_text(encoding="utf-8"))
+        assert paths.DATA_DIR == REPO / "data"
+        assert paths.DUCKDB_FILE_NAME == "analytics.duckdb"
+        check = (REPO / "deploy" / "offsite_check.sh").read_text(encoding="utf-8")
+        assert ('WATCHDOG_MARKER="${WATCHDOG_MARKER:-data/health/watchdog_last_sample}"'
+                in check)
+
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "something").write_bytes(b"x" * 4096)
+        monkeypatch.setattr(scheduler_module, "DATA_DIR", data)
+
+        disk_states, dirs = [], []
+        real_sample_data_dir = disk_monitor.sample_data_dir
+
+        def disk_state(path):
+            disk_states.append(path)
+            return {"sampled_at": datetime.now(timezone.utc), "db_size_mb": 10.0,
+                    "disk_pct_used": 25.0, "disk_free_gb": 55.0}
+
+        def data_dir(path, **kwargs):
+            dirs.append(path)
+            return real_sample_data_dir(path, **kwargs)
+
+        async def _no_store():
+            raise AssertionError("the watchdog asked for the store")
+
+        with patch("core.disk_monitor.sample_disk_state", side_effect=disk_state), \
+             patch("core.disk_monitor.sample_data_dir", side_effect=data_dir), \
+             patch("core.duckdb_store.get_store", _no_store), \
+             patch("core.store.get_store", _no_store), \
+             patch.object(watchdog_samples, "disk_tick",
+                          AsyncMock(return_value=dict(watchdog_samples.EMPTY_DISK))), \
+             patch("core.alerting.resolve_group", new=AsyncMock()), \
+             patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
+            result = await BackgroundScheduler()._run_disk_watchdog()
+
+        assert disk_states == [str(data / "analytics.duckdb")]
+        assert dirs == [str(data)]
+        assert result["data_dir_mb"] is not None
+        beat = data / "health" / "watchdog_last_sample"
+        assert beat.is_file()
+        assert sorted(p.relative_to(data).as_posix() for p in (data / "health").iterdir()) \
+            == ["health/watchdog_last_sample"]
+        send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_growth_is_measured_and_reported_but_never_paged(self, tmp_path,
+                                                                   samples):
         """A mid-week sawtooth reading: +618 MB in 24h, the exact delta that
         paged CRITICAL on 2026-08-12. The number must reach the job result
         and the log. It must not reach anyone's phone."""
         from core.scheduler import BackgroundScheduler
-        from core.duckdb_store import DuckDBStore
-        from core.disk_monitor import insert_sample
 
-        store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-        await store.connect()
-        try:
+        now = datetime.now(timezone.utc)
+        samples.history = {"sampled_at": now - timedelta(hours=24),
+                           "db_size_mb": 1_463.76, "disk_pct_used": 61.2,
+                           "disk_free_gb": 25.8}
+        scheduler = BackgroundScheduler()
+        with patch(
+            "core.disk_monitor.sample_disk_state",
+            return_value={
+                "sampled_at": now,
+                "db_size_mb": 2_082.0, "disk_pct_used": 61.8,
+                "disk_free_gb": 25.4,
+            },
+        ), patch("core.duckdb_store.get_store", AsyncMock(return_value=_store(tmp_path))), \
+           patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
+            result = await scheduler._run_disk_watchdog()
 
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(hours=24),
-                    "db_size_mb": 1_463.76, "disk_pct_used": 61.2,
-                    "disk_free_gb": 25.8,
-                })
-
-            scheduler = BackgroundScheduler()
-            with patch(
-                "core.disk_monitor.sample_disk_state",
-                return_value={
-                    "sampled_at": now,
-                    "db_size_mb": 2_082.0, "disk_pct_used": 61.8,
-                    "disk_free_gb": 25.4,
-                },
-            ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
-                result = await scheduler._run_disk_watchdog()
-
-            assert result["alert_fired"] is False
-            assert result["db_growth_mb_24h"] == pytest.approx(618.24)
-            send.assert_not_called()
-        finally:
-            await store.close()
+        assert result["alert_fired"] is False
+        assert result["db_growth_mb_24h"] == pytest.approx(618.24)
+        send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_capacity_breach_fires_alert(self, tmp_path):
         from core.scheduler import BackgroundScheduler
-        from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-        await store.connect()
-        try:
+        scheduler = BackgroundScheduler()
+        with patch(
+            "core.disk_monitor.sample_disk_state",
+            return_value={
+                "sampled_at": datetime.now(timezone.utc),
+                "db_size_mb": 2_480, "disk_pct_used": 92.0,
+                "disk_free_gb": 6.0,
+            },
+        ), patch("core.duckdb_store.get_store", AsyncMock(return_value=_store(tmp_path))), \
+           patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
+            result = await scheduler._run_disk_watchdog()
 
-            scheduler = BackgroundScheduler()
-            with patch(
-                "core.disk_monitor.sample_disk_state",
-                return_value={
-                    "sampled_at": datetime.now(timezone.utc),
-                    "db_size_mb": 2_480, "disk_pct_used": 92.0,
-                    "disk_free_gb": 6.0,
-                },
-            ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
-                result = await scheduler._run_disk_watchdog()
-
-            assert result["alert_fired"] is True
-            send.assert_called_once()
-            msg = send.call_args[0][0]
-            assert "Disk" in msg and "92" in msg
-        finally:
-            await store.close()
+        assert result["alert_fired"] is True
+        send.assert_called_once()
+        msg = send.call_args[0][0]
+        assert "Disk" in msg and "92" in msg
 
     @pytest.mark.asyncio
     async def test_repeated_breach_throttled(self, tmp_path):
         """A persistent breach must not page admins every 6h."""
         from core.scheduler import BackgroundScheduler
-        from core.duckdb_store import DuckDBStore
-        import time as _time
 
-        store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-        await store.connect()
-        try:
-            # Pretend we alerted 1 minute ago
-            # A delivery 60s ago, recorded where the policy now lives: the Gate.
-            # Both halves of what `raise_alert` records on a delivery: the
-            # bucket's cooldown and the condition's delivered-notice. Seeding
-            # only the first describes a condition that has since been
-            # announced resolved — and a resolved condition coming back is
-            # news, which is the Gate working, not a throttle failing.
-            from core.alerting import _gate
-            for bucket in ("disk:WARN", "disk:CRITICAL"):
-                _gate.decide(bucket, has_condition=True, conditions=[bucket])
-                _gate.record_delivery(bucket)
-                _gate.note_delivered_conditions([bucket], "disk")
+        store = _store(tmp_path)
+        # Pretend we alerted 1 minute ago
+        # A delivery 60s ago, recorded where the policy now lives: the Gate.
+        # Both halves of what `raise_alert` records on a delivery: the
+        # bucket's cooldown and the condition's delivered-notice. Seeding
+        # only the first describes a condition that has since been
+        # announced resolved — and a resolved condition coming back is
+        # news, which is the Gate working, not a throttle failing.
+        from core.alerting import _gate
+        for bucket in ("disk:WARN", "disk:CRITICAL"):
+            _gate.decide(bucket, has_condition=True, conditions=[bucket])
+            _gate.record_delivery(bucket)
+            _gate.note_delivered_conditions([bucket], "disk")
 
-            scheduler = BackgroundScheduler()
-            with patch(
-                "core.disk_monitor.sample_disk_state",
-                return_value={
-                    "sampled_at": datetime.now(timezone.utc),
-                    "db_size_mb": 2_480, "disk_pct_used": 92.0,
-                    "disk_free_gb": 6.0,
-                },
-            ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
-                result = await scheduler._run_disk_watchdog()
+        scheduler = BackgroundScheduler()
+        with patch(
+            "core.disk_monitor.sample_disk_state",
+            return_value={
+                "sampled_at": datetime.now(timezone.utc),
+                "db_size_mb": 2_480, "disk_pct_used": 92.0,
+                "disk_free_gb": 6.0,
+            },
+        ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+           patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
+            result = await scheduler._run_disk_watchdog()
 
-            assert result["alert_fired"] is False
-            send.assert_not_called()  # throttled
-        finally:
-            await store.close()
+        assert result["alert_fired"] is False
+        send.assert_not_called()  # throttled
 
 
 # ─── Growth across the whole data directory ───────────────────────────────────
@@ -479,9 +441,6 @@ from core.disk_monitor import (  # noqa: E402
     CRITICAL_GROWTH_GB_168H,
     WARN_GROWTH_GB_168H,
     evaluate_dir_growth,
-    fetch_dir_sample_at_age,
-    insert_dir_samples,
-    prune_old_dir_samples,
     sample_data_dir,
 )
 
@@ -592,52 +551,11 @@ class TestDirSampling:
     def test_a_missing_directory_is_empty_not_an_exception(self, tmp_path):
         assert sample_data_dir(str(tmp_path / "nope")) == {}
 
-    @pytest.mark.asyncio
-    async def test_a_sample_set_round_trips(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_dir_samples(conn, HEALTHY_DIR, sampled_at=now - timedelta(hours=168))
-                fetched = fetch_dir_sample_at_age(conn, hours=168, slack_hours=12)
-            assert fetched == HEALTHY_DIR
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_groups_never_come_from_two_different_runs(self, tmp_path):
-        """Differencing a mix of timestamps would invent growth out of nothing.
-        The fetch pins one sampled_at and returns only that set."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_dir_samples(conn, {"live_db": 1, "backups": 2},
-                                   sampled_at=now - timedelta(hours=170))
-                insert_dir_samples(conn, {"live_db": 999},
-                                   sampled_at=now - timedelta(hours=166))
-                fetched = fetch_dir_sample_at_age(conn, hours=168, slack_hours=12)
-            assert fetched in ({"live_db": 1, "backups": 2}, {"live_db": 999})
-            assert not (fetched.get("live_db") == 999 and "backups" in fetched)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_retention_outlives_the_comparison_window(self, tmp_path):
-        """Pruning at 14 days would delete the baseline a 168h lag needs on a
-        scheduler that missed a few runs. 21 days leaves slack."""
-        store = await _make_store(tmp_path)
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_dir_samples(conn, {"live_db": 1}, sampled_at=now - timedelta(days=25))
-                insert_dir_samples(conn, {"live_db": 2}, sampled_at=now - timedelta(days=8))
-                deleted = prune_old_dir_samples(conn, retention_days=21)
-                kept = conn.execute("SELECT COUNT(*) FROM data_dir_samples").fetchone()[0]
-            assert deleted == 1
-            assert kept == 1
-        finally:
-            await store.close()
+    # The round trip of a directory set, one run's set never mixed with
+    # another's, and the 21-day retention were proved here on DuckDB; S14-10
+    # deleted those statements' DuckDB callers, and the cases run on Postgres
+    # in `tests/integration/test_watchdog_samples_pg.py`
+    # (`TestTheDirectoryStatements`).
 
 
 from core.disk_monitor import (  # noqa: E402

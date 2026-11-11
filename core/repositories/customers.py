@@ -138,15 +138,14 @@ from core.sms_holdout import assign_arm
 from core.sms_refusals import SmsCampaignRefused
 from core.sql_dialect import (
     AT_RISK_TYPES, CLICKHOUSE_ANALYTICS, COHORT_LTV_TYPES,
-    COHORT_RETENTION_TYPES, DAYS_TO_SECOND_TYPES, DUCKDB_ANALYTICS,
+    COHORT_RETENTION_TYPES, DAYS_TO_SECOND_TYPES,
     ENHANCED_RETENTION_TYPES, at_risk_customers_select,
     cohort_ltv_select, cohort_retention_select, days_to_second_purchase_select,
     enhanced_cohort_retention_select,
 )
-from core.pg_sms import refuse_while_unported, sms_store_is_postgres
 from core.sql_dialect import (
-    DUCKDB, POSTGRES, SMS_REJECTED_STATUSES, SMS_UNREACHABLE_AFTER_CAMPAIGNS,
-    TODAY_IN_KYIV, numbered, sms_segments_select,
+    POSTGRES, SMS_REJECTED_STATUSES, SMS_UNREACHABLE_AFTER_CAMPAIGNS,
+    TODAY_IN_KYIV, numbered,
 )
 
 # The numbers the gateway rejected in two campaigns, as the audience query
@@ -682,10 +681,12 @@ def _local_times(row: Sequence[Any]) -> tuple:
 
 
 class _SmsTx:
-    """Statements inside one transaction, rendered for one engine.
+    """Statements inside one transaction, rendered for Postgres.
 
     The `{table}` holes and `?` markers are the same ones `_sms_run` fills, so
     a statement reads identically whether it runs alone or in a transaction.
+    It had a DuckDB twin, `_DuckTx`, until step 14's S14-08: `/sms` has been
+    Postgres's alone since 2026-09-06, and a constant since S14-00.
     """
 
     def __init__(self, dialect):
@@ -702,24 +703,6 @@ class _SmsTx:
             stocks=self._dialect.offer_stocks,
             buyers=self._dialect.buyers,
         )
-
-
-class _DuckTx(_SmsTx):
-    def __init__(self, conn, dialect):
-        super().__init__(dialect)
-        self._conn = conn
-
-    async def all(self, sql, params=None):
-        return self._conn.execute(self._render(sql), list(params or [])).fetchall()
-
-    async def one(self, sql, params=None):
-        return self._conn.execute(self._render(sql), list(params or [])).fetchone()
-
-    async def none(self, sql, params=None):
-        self._conn.execute(self._render(sql), list(params or []))
-
-    async def many(self, sql, rows):
-        self._conn.executemany(self._render(sql), [list(r) for r in rows])
 
 
 class _PgTx(_SmsTx):
@@ -805,8 +788,10 @@ _INSIGHTS_CLV_SQL = """
         SELECT s.buyer_id,
                COUNT(DISTINCT s.id) AS order_count,
                SUM(s.grand_total)   AS total_spent,
-               CAST(MAX(s.ordered_at) AS DATE)
-                 - CAST(MIN(s.ordered_at) AS DATE) AS lifespan_days
+               -- Silver's Kyiv dates (L2-10). `CAST(ordered_at AS DATE)` took
+               -- the session's zone, UTC in production's Postgres: an order at
+               -- 00:30 Kyiv was the day before, and a lifespan a day off.
+               MAX(s.order_date) - MIN(s.order_date) AS lifespan_days
         FROM {silver_orders} s
         WHERE s.buyer_id IS NOT NULL
           AND NOT s.is_return
@@ -943,16 +928,15 @@ class CustomersMixin:
     ) -> Dict[str, Any]:
         """Customer insights: new vs returning, AOV trend, CLV, repeat rate.
 
-        Rides `KS_READ_DASHBOARD` — this is the dashboard's customer block, it
-        reads the same two layers the rest of that tab reads, and a rollback
-        that left it on the other engine would put one card of a page on a
-        different store from the cards beside it.
+        Rides the dashboard's router — this is the dashboard's customer block,
+        it reads the same two layers the rest of that tab reads, from
+        Postgres, and a failure is refused naming `dashboard` like the cards
+        beside it (`KS_READ_DASHBOARD` is not read since step 14's S14-06).
 
         `_dashboard_run` lives on `RevenueMixin` and is reached through `self`
         from here, which is one mixin boundary crossed on purpose. The
-        alternative is a second router with the same flag and the same
-        fallback rule, and two places that have to stay in step about what
-        happens when Postgres is down. `render_tables` was extracted from a
+        alternative is a second router with the same refusal, and two places
+        that have to stay in step about what happens when Postgres is down. `render_tables` was extracted from a
         mixin for this reason when it gained a *third* consumer; this is the
         second, and the note is here so the next one moves it.
         """
@@ -1687,127 +1671,81 @@ class CustomersMixin:
 
     # ─── Saved audiences ─────────────────────────────────────────────────
 
-    # ── one statement, whichever store owns /sms ────────────────────────────
+    # ── one statement, on the store that owns /sms ──────────────────────────
     #
     # The audience query has a shared body because it carries rules. These
     # statements carry almost none, so what they need is not a second dialect
-    # but one place that knows which engine is answering and how it spells a
-    # placeholder and a table name. The SQL below is written once, with
-    # `{table}` holes and `?` markers, exactly as the audience body is.
+    # but one place that knows how Postgres spells a placeholder and a table
+    # name. The SQL below is written once, with `{table}` holes and `?`
+    # markers, exactly as the audience body is.
     #
-    # `sms_store_is_postgres()` is read before any connection is taken, §34's
-    # invariant: the Postgres path must not queue behind DuckDB's single
-    # writer on its way to another engine.
+    # Postgres alone since step 14's S14-08: `KS_SMS_STORE=postgres` has been
+    # production since 2026-09-06 with no way back, a constant since S14-00,
+    # and the DuckDB branches of `_sms_tx`, `_sms_run` and the audience are
+    # gone. Nothing here takes the store's own connection — §34's invariant,
+    # which now holds by construction.
 
     async def _analytics_rows(self, render, params, types):
-        """Rows for one customer-analytics query, from whichever engine answers.
+        """Rows for one customer-analytics query, from ClickHouse.
 
-        ClickHouse when `KS_READ_COHORTS` says so and the store is configured,
-        DuckDB otherwise — and DuckDB again if ClickHouse faults, with an ERROR
-        in the log. That fallback is right here and wrong for `/sms`: nothing
-        diverges between these two, because ClickHouse holds a copy of Silver
-        and both engines read the same derived facts. ClickHouse is an optional
-        store in this architecture, so nothing may depend on it being up.
+        One path since step 14's S14-07: the ClickHouse read, and on any
+        failure a refusal — `read_fallback.refuse`, a 503 naming `cohorts`,
+        which is what `fall_back` and `no_engine` gave under
+        `KS_READ_FALLBACK=off`, production's mode since 2026-10-09. These
+        queries have no Postgres body, so ClickHouse is their one engine.
+        `KS_READ_COHORTS` is not read, and nothing here reaches for DuckDB;
+        without `KS_CH_URL` `ch_cohorts.fetch` raises and that is the refusal.
 
-        The engine is chosen before any connection is taken — a read bound for
-        another engine must not queue behind DuckDB's single writer (§34).
-
-        `render` takes an `AnalyticsDialect` and returns the SQL; one function
-        for both, so neither engine gets a body of its own.
-
-        Under `KS_READ_FALLBACK=off` a live ClickHouse is the only thing that
-        may answer (DN-20b): a failed read is refused by `fall_back`, and so
-        is a switch that does not name a configured ClickHouse at all. These
-        queries have no Postgres body, so DuckDB is the only other engine, and
-        after step 13 its Silver is frozen — the one thing `off` is there to
-        keep off a page. Under `duckdb`, the default, `no_engine` does nothing.
+        `render` takes an `AnalyticsDialect` and returns the SQL — one
+        function per body, so the engine never gets a body of its own.
         """
         from core import ch_cohorts
 
-        if ch_cohorts.enabled() and ch_cohorts.available():
-            try:
-                return await ch_cohorts.fetch(
-                    render(CLICKHOUSE_ANALYTICS), params, types,
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("cohorts", exc)
-        else:
-            read_fallback.no_engine(
-                "cohorts", f"{ch_cohorts.ENV} does not name a configured "
-                "ClickHouse, and cohorts have no Postgres body")
-
-        async with self.connection() as conn:
-            return conn.execute(render(DUCKDB_ANALYTICS), list(params)).fetchall()
+        try:
+            return await ch_cohorts.fetch(render(CLICKHOUSE_ANALYTICS), params, types)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("cohorts", exc)
 
     @asynccontextmanager
     async def _sms_tx(self):
-        """Several SMS statements, one transaction, on either engine.
+        """Several SMS statements, one Postgres transaction.
 
         The freeze writes a campaign and its roster, and a failure between the
         two would leave a campaign whose control group does not exist — which
-        looks like a campaign and cannot be measured. DuckDB's `connection()`
-        only takes the store lock, so until now that pair was autocommitted one
-        statement at a time; both engines get a real transaction here.
+        looks like a campaign and cannot be measured.
         """
-        from core.sql_dialect import DUCKDB, POSTGRES
+        from core.pg import get_pool, require_revision
 
-        if sms_store_is_postgres():
-            from core.pg import get_pool, require_revision
-
-            pool = await get_pool()
-            await require_revision()
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    yield _PgTx(conn, POSTGRES)
-            return
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                yield _DuckTx(conn, DUCKDB)
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-            conn.execute("COMMIT")
+        pool = await get_pool()
+        await require_revision()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                yield _PgTx(conn, POSTGRES)
 
     async def _sms_run(self, sql: str, params: Optional[List[Any]] = None,
                        *, mode: str = "all"):
-        """Run one SMS statement against the store that owns the tab."""
-        from core.sql_dialect import DUCKDB, POSTGRES
+        """Run one SMS statement against Postgres, the store that owns the tab."""
+        from core import pg_sms_read
 
         params = list(params or [])
-        dialect = POSTGRES if sms_store_is_postgres() else DUCKDB
-        rendered = sql.format(
-            campaigns=dialect.sms_campaigns,
-            members=dialect.sms_campaign_members,
-            presets=dialect.sms_audience_presets,
-            optouts=dialect.marketing_optouts,
-            dlr_events=dialect.sms_dlr_events,
-            lines=dialect.order_lines,
-            stocks=dialect.offer_stocks,
-            buyers=dialect.buyers,
-        )
-
-        if sms_store_is_postgres():
-            from core import pg_sms_read
-
-            rendered = numbered(rendered)
-            if mode == "all":
-                rows = await pg_sms_read.fetch(rendered, params)
-                return [_local_times(r) for r in rows]
-            if mode == "one":
-                row = await pg_sms_read.fetch_one(rendered, params)
-                return _local_times(row) if row is not None else None
-            await pg_sms_read.execute(rendered, params)
-            return None
-
-        async with self.connection() as conn:
-            cursor = conn.execute(rendered, params)
-            if mode == "all":
-                return cursor.fetchall()
-            if mode == "one":
-                return cursor.fetchone()
-            return None
+        rendered = numbered(sql.format(
+            campaigns=POSTGRES.sms_campaigns,
+            members=POSTGRES.sms_campaign_members,
+            presets=POSTGRES.sms_audience_presets,
+            optouts=POSTGRES.marketing_optouts,
+            dlr_events=POSTGRES.sms_dlr_events,
+            lines=POSTGRES.order_lines,
+            stocks=POSTGRES.offer_stocks,
+            buyers=POSTGRES.buyers,
+        ))
+        if mode == "all":
+            rows = await pg_sms_read.fetch(rendered, params)
+            return [_local_times(r) for r in rows]
+        if mode == "one":
+            row = await pg_sms_read.fetch_one(rendered, params)
+            return _local_times(row) if row is not None else None
+        await pg_sms_read.execute(rendered, params)
+        return None
 
     async def list_sms_audience_presets(self) -> List[Dict[str, Any]]:
         """Saved audiences, built-in ones first.
@@ -2731,7 +2669,14 @@ class CustomersMixin:
                        CASE WHEN os.purchased_price > 0
                             THEN os.purchased_price * l.quantity END AS line_cogs
                 FROM {{lines}} l
-                LEFT JOIN {{stocks}} os ON os.sku = l.sku
+                -- One cost row per SKU, as in the audience and in margin: a
+                -- SKU on two offers repeated its lines and both their costs.
+                LEFT JOIN (
+                    SELECT sku, MAX(purchased_price) AS purchased_price
+                    FROM {{stocks}}
+                    WHERE sku IS NOT NULL
+                    GROUP BY sku
+                ) os ON os.sku = l.sku
                 WHERE NOT l.is_return
                   AND l.is_active_source
                   -- From the moment the message went out, not from midnight
@@ -3140,28 +3085,17 @@ class CustomersMixin:
         # Kept under its own name: `tiers` is reused below for the per-arm sums.
         picked_levels = list(tiers or [])
 
-        # Which store answers. Decided out here on purpose: the Postgres path
-        # must not take DuckDB's connection at all — §34's invariant, because a
-        # read that queues behind the warehouse rebuild has moved the
-        # bottleneck rather than left it behind.
-        use_postgres = sms_store_is_postgres()
-        dialect = POSTGRES if use_postgres else DUCKDB
-
+        # Postgres answers, and never by way of the store's own connection —
+        # §34's invariant (the DuckDB branch went in step 14's S14-08).
         fragments, params, window = sms_segments_fragments(
-            groups, order_lines=dialect.order_lines, ltv_basis=ltv_basis,
+            groups, order_lines=POSTGRES.order_lines, ltv_basis=ltv_basis,
             sales_type=sales_type, tiers=tiers, grouping=grouping,
             vip_ltv=vip_ltv, core_ltv=core_ltv, core_min_orders=core_min_orders,
             reactivation_max_recency=reactivation_max_recency,
         )
 
-        if use_postgres:
-            from core.pg_sms_read import fetch_segments, render
-            rows = await fetch_segments(render(**fragments), params)
-        else:
-            # One body, two engines — `core/sql_dialect.py`.
-            query = sms_segments_select(DUCKDB, **fragments)
-            async with self.connection() as conn:
-                rows = conn.execute(query, params).fetchall()
+        from core.pg_sms_read import fetch_segments, render
+        rows = await fetch_segments(render(**fragments), params)
 
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []

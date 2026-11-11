@@ -12,23 +12,19 @@ built (chain 5's design, M1–M11), and each with the mutation it kills:
 - a backdate behind the manager's latest change is refused before the latch;
 - the stats count each order on its Kyiv date whatever the session's zone;
 - the replica stands down on the flag and on an owner row alone;
-- the copy-back carries both tables back whole, owes DuckDB a full rebuild,
-  releases, and the replica then ships what came back;
-- the handover says what each table's state is before and after a flip;
 - the standing watch's one read reports each seeded shape;
 - the dashboard's `{managers}` join and the route follow the chain.
 
-Everything goes through the repository methods every caller reaches. The
-preconditions the chain is held by include facts no environment variable
-sets — step 13, chain 3 (the goal bridge was one until chain 7b-4) — so the
-fixture holds them met; the tests in `tests/unit/test_managers_chain.py`
-prove they hold the chain back.
+Everything goes through the repository methods every caller reaches. Since
+step 14's S14-00 the chain writes Postgres whatever its flag says, with no
+precondition; the copy-back's round trip, the handover before and after a
+flip, the replica's control and the DuckDB halves went with the DuckDB path.
 """
 from __future__ import annotations
 
 import asyncio
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -36,6 +32,11 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_managers_write
+
+# What DuckDB's `get_all_managers` answered per manager, until S14-11.
+DUCKDB_MANAGER_KEYS = {"id", "name", "email", "status", "is_retail",
+                       "first_order_date", "last_order_date", "order_count",
+                       "synced_at"}
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -65,16 +66,13 @@ async def _clean(pool):
 
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
-    """A real DuckDB, a live Postgres, the landing mirror on (so the replica
-    ships while the chain is off), no chain flag set, and chain 5's
-    preconditions held met."""
+    """A real DuckDB, a live Postgres, the landing mirror on, and no chain
+    flag set (none routes anything since step 14's S14-11)."""
     from core.duckdb_store import DuckDBStore
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_MIRROR_LANDING", "on")
-    monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
-    store = DuckDBStore(db_path=tmp_path / "managers.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=2, max_size=6)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -82,7 +80,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _pg_managers(pool):
@@ -103,11 +100,6 @@ async def _pg_intervals(pool, manager_id=None):
     return [tuple(r) for r in rows]
 
 
-async def _duck_intervals(store):
-    async with store.connection() as conn:
-        return conn.execute(
-            "SELECT manager_id, valid_from, valid_to, is_retail, set_by, note "
-            "FROM manager_classifications ORDER BY manager_id, valid_from").fetchall()
 
 
 def _open(intervals, manager_id):
@@ -188,7 +180,6 @@ class TestTheSyncNeverRevertsAHuman:
         assert {r["key"] for r in owners} == {"owner:bronze.managers",
                                               "owner:app.manager_classifications"}
         # Nothing reached DuckDB.
-        assert await _duck_intervals(store) == []
 
     @pytest.mark.asyncio
     async def test_a_manager_the_replica_carried_without_a_baseline_gets_one(self, stores):
@@ -306,7 +297,8 @@ class TestTheStats:
     @pytest.mark.asyncio
     async def test_each_order_counts_on_its_kyiv_date_in_a_utc_session(self, stores):
         """M3. Mutation: `ordered_at::date` — a day early for every order
-        between 00:00 and 03:00 Kyiv. And DuckDB, under Kyiv, agrees."""
+        between 00:00 and 03:00 Kyiv. (That DuckDB, under Kyiv, agreed was
+        the other half until step 14's S14-00, which routes nothing to it.)"""
         store, pool, env = stores
         stamps = (datetime(2026, 2, 28, 22, 30, tzinfo=timezone.utc),
                   datetime(2026, 7, 31, 21, 15, tzinfo=timezone.utc))
@@ -323,170 +315,6 @@ class TestTheStats:
         assert (row["first_order_date"], row["last_order_date"], row["order_count"]) == (
             date(2026, 3, 1), date(2026, 8, 1), 2)
 
-        env.setenv(ENV, "duckdb")
-        chain_latch.release(CHAIN)
-        async with store.connection() as conn:
-            conn.execute("SET TimeZone = 'Europe/Kyiv'")
-            conn.execute("INSERT INTO managers (id, name) VALUES (7, 'M')")
-            for oid, at in zip(ORDER_IDS, stamps):
-                conn.execute("INSERT INTO orders (id, source_id, status_id, grand_total, "
-                             "ordered_at, manager_id) VALUES (?, 1, 1, 10, ?, 7)", [oid, at])
-        with patch("core.pg_replication.replicate_managers", new=AsyncMock()):
-            await store.update_manager_stats()
-        async with store.connection() as conn:
-            duck = conn.execute("SELECT first_order_date, last_order_date, order_count "
-                                "FROM managers WHERE id = 7").fetchone()
-        assert duck == (date(2026, 3, 1), date(2026, 8, 1), 2)
-
-
-class TestTheReplicaStandsDown:
-    async def _duckdb_holds_one(self, store):
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO managers (id, name, is_retail) VALUES (9, 'D', TRUE)")
-
-    @pytest.mark.asyncio
-    async def test_on_the_flag(self, stores):
-        """M8. Mutation: drop DN-22b's question from replicate_managers."""
-        from core.pg_replication import replicate_managers
-
-        store, pool, env = stores
-        await self._duckdb_holds_one(store)
-        env.setenv(ENV, "postgres")
-        out = await replicate_managers(store)
-        assert out["ok"] is False and "stood down" in out["skipped"]
-        assert await _pg_managers(pool) == {}
-
-    @pytest.mark.asyncio
-    async def test_on_an_owner_row_alone(self, stores):
-        """The marker lost with the flag off: the owner row still holds it."""
-        from core.pg_replication import replicate_managers
-
-        store, pool, env = stores
-        await self._duckdb_holds_one(store)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
-                "VALUES ('owner:bronze.managers', '2026-10-07T00:00:00+00:00', now())")
-        out = await replicate_managers(store)
-        assert out["ok"] is False and "stood down" in out["skipped"]
-        assert await _pg_managers(pool) == {}
-
-    @pytest.mark.asyncio
-    async def test_and_ships_without_either(self, stores):
-        """The control: the same store, no flag, no owner row."""
-        from core.pg_replication import replicate_managers
-
-        store, pool, _env = stores
-        await self._duckdb_holds_one(store)
-        assert (await replicate_managers(store))["ok"] is True
-        assert (await _pg_managers(pool))[9]["is_retail"] is True
-
-
-async def _level(store):
-    """DuckDB with managers and their baselines, and Postgres an exact copy of
-    it — what a healthy pre-flip production looks like."""
-    from core.pg_replication import replicate_managers
-
-    await store.upsert_managers([{"id": 4, "name": "Retail"}, {"id": 34, "name": "Other"}])
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO manager_classifications (manager_id, is_retail, valid_from, note) "
-            "SELECT id, is_retail, DATE '1970-01-01', 'baseline frozen from managers.is_retail' "
-            "FROM managers")
-    assert (await replicate_managers(store))["ok"] is True
-
-
-class TestTheCopyBack:
-    @pytest.mark.asyncio
-    async def test_a_round_trip_carries_the_classification_and_owes_a_full_rebuild(self, stores):
-        """Mutation: drop the replicated source — `chain_specs` raises — or
-        the full-rebuild mark."""
-        from core.chain_transfer import copy_back
-        from core.pg_replication import replicate_managers
-
-        store, pool, env = stores
-        await _level(store)
-        env.setenv(ENV, "postgres")
-        await store.set_manager_retail_status(34, True, date(2026, 6, 1), 7, "a")
-        await store.set_manager_retail_status(34, False, date(2026, 6, 1), 7, "same day")
-        await store.set_manager_retail_status(4, False, date(2026, 7, 1), 7, "no longer")
-        await store.set_last_sync_time("managers", datetime(2026, 10, 7, 9, tzinfo=timezone.utc))
-        pg_before = await _pg_intervals(pool)
-
-        plan = await copy_back(store, pg_managers_write, dry_run=False)
-
-        assert plan["committed"] and plan["released"] and plan["full_rebuild_owed"], plan
-        assert [tuple(r) for r in await _duck_intervals(store)] == pg_before
-        async with store.connection() as conn:
-            assert conn.execute("SELECT is_retail FROM managers WHERE id = 4").fetchone() == (False,)
-            keys = dict(conn.execute(
-                "SELECT key, value FROM sync_metadata WHERE key IN "
-                "('last_sync_managers', 'warehouse_dirty')").fetchall())
-        assert keys["warehouse_dirty"] == "full"
-        assert keys["last_sync_managers"].startswith("2026-10-07T09:00")
-        assert not chain_latch.latched(CHAIN)
-        async with pool.acquire() as conn:
-            assert await conn.fetchval("SELECT count(*) FROM meta.chain_watermarks "
-                                       "WHERE key LIKE 'owner:%'") == 0
-
-        # And the copy it hands back to is the copy it took over from.
-        env.setenv(ENV, "duckdb")
-        assert (await replicate_managers(store))["ok"] is True
-        assert await _pg_intervals(pool) == pg_before
-
-
-class TestTheHandover:
-    @pytest.mark.asyncio
-    async def test_before_a_flip_a_baseline_only_duckdb_holds_names_its_shipper(self, stores):
-        """A manager synced since web's last start: the copy-back's own
-        connect seeds DuckDB a baseline Postgres lacks."""
-        from core.chain_transfer import handover_check
-
-        store, pool, _env = stores
-        await _level(store)
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO managers (id, name) VALUES (60, 'N')")
-            conn.execute("INSERT INTO manager_classifications (manager_id, is_retail, "
-                         "valid_from) VALUES (60, FALSE, DATE '1970-01-01')")
-        issues = await handover_check(store, pg_managers_write)
-        critical = [i for i in issues if i.severity.value == "CRITICAL"]
-        assert {i.table_name for i in critical} == {"bronze.managers",
-                                                    "app.manager_classifications"}
-        assert all("replicate_managers" in i.description
-                   and "manager_stats/trigger" in i.description for i in critical)
-
-    @pytest.mark.asyncio
-    async def test_before_a_flip_an_interval_only_postgres_holds_is_critical(self, stores):
-        """Mutation: leave it INFO — there is no next full replace after a flip."""
-        from core.chain_transfer import handover_check
-
-        store, pool, _env = stores
-        await _level(store)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO app.manager_classifications (manager_id, is_retail, "
-                "valid_from, set_at) VALUES (34, TRUE, '2026-01-01', now())")
-        (issue,) = await handover_check(store, pg_managers_write)
-        assert (issue.check_name, issue.severity.value) == ("handover_rows_ahead", "CRITICAL")
-        assert issue.table_name == "app.manager_classifications"
-
-    @pytest.mark.asyncio
-    async def test_after_the_latch_a_later_duckdb_decision_is_refused(self, stores):
-        from core.chain_transfer import handover_check
-
-        store, pool, env = stores
-        await _level(store)
-        env.setenv(ENV, "postgres")
-        await store.set_manager_retail_status(34, True, date(2026, 6, 1), 7, "pg")
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO manager_classifications (manager_id, is_retail, valid_from, "
-                "set_at) VALUES (34, FALSE, DATE '2026-06-01', ?)",
-                [datetime.now(timezone.utc) + timedelta(hours=1)])
-        issues = await handover_check(store, pg_managers_write)
-        assert ("handover_rows_newer_in_duckdb", "CRITICAL") in {
-            (i.check_name, i.severity.value) for i in issues}
-
 
 class TestTheStandingWatchReadsTheShape:
     @pytest.mark.asyncio
@@ -495,8 +323,11 @@ class TestTheStandingWatchReadsTheShape:
         from core import pg_chain_invariants as inv
 
         store, pool, _env = stores
-        chain_latch.latch(CHAIN)
+        stamp = chain_latch.latch(CHAIN)
         async with pool.acquire() as conn:
+            # The handover the "from the latch on" watch measures from is the
+            # owner rows since step 14's S14-11, not the local marker.
+            await chain_latch.claim(conn, pg_managers_write.CHAIN_TABLES, stamp)
             await conn.execute(
                 "INSERT INTO bronze.managers (id, name, is_retail) VALUES "
                 "(1,'clean',TRUE),(2,'overlap',FALSE),(3,'gap',FALSE),"
@@ -529,9 +360,11 @@ class TestTheStandingWatchReadsTheShape:
 class TestTheReadsFollow:
     @pytest.mark.asyncio
     async def test_the_dashboard_names_the_manager_postgres_holds(self, stores):
-        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: under the
-        chain the join reads Postgres. Mutation: drop `reads_the_chain` in
-        `_dashboard_run`."""
+        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: the join
+        reads Postgres, whatever that switch says. It took a branch on
+        `reads_the_chain` until step 14's S14-06 gave `_dashboard_run` one
+        path, Postgres. Mutation: give `_dashboard_run` back a DuckDB tail
+        routed by the switch."""
         from core.repositories.revenue import _RETURN_ORDERS_SQL
 
         store, pool, env = stores
@@ -557,7 +390,6 @@ class TestTheReadsFollow:
 
         import httpx
 
-        from core import pg_derivation
         from core.permissions import ADMIN_USER_IDS
         from web.main import app
         from web.routes.api._deps import limiter
@@ -565,7 +397,6 @@ class TestTheReadsFollow:
 
         store, pool, env = stores
         env.setenv(ENV, "postgres")
-        monkeypatch.setattr(pg_derivation, "_mode", pg_derivation.OWN)
         await store.upsert_managers([{"id": 34, "name": "M"}])
         async with pool.acquire() as conn:
             requested = await conn.fetchval(
@@ -592,13 +423,15 @@ class TestTheReadsFollow:
                 listed = (await client.get("/api/managers")).json()["managers"]
         finally:
             limiter.reset()
-        assert "stood down" in res.json()["replica"]["skipped"]
+        # No `replica` since step 14's S14-13: the route called the
+        # classification copy, `{"skipped": "stood down: …"}` under the chain,
+        # until it went with `core.pg_replication`.
+        assert "replica" not in res.json()
         assert _open(await _pg_intervals(pool), 34)[0][1:4] == (date(2026, 10, 7), None, True)
         async with pool.acquire() as conn:
             assert await conn.fetchval(
                 "SELECT requested FROM meta.derivation_signal "
                 "WHERE layer = 'warehouse'") == requested + 1
-        assert await _duck_intervals(store) == []
         assert [(m["id"], m["is_retail"]) for m in listed] == [(34, True)]
 
 
@@ -612,8 +445,8 @@ class TestTheReviewAgainstARealPostgres:
         classified non-retail: its past stays what the seed said. Mutation:
         `WHERE FALSE AND m.id = $1` in the classification's seed — the March
         order resolves `internal` (the review's reproduction)."""
-        from core.duckdb_store import silver_sales_type_case
         from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_sales_type_case
 
         store, pool, env = stores
         async with pool.acquire() as conn:
@@ -654,11 +487,13 @@ class TestTheReviewAgainstARealPostgres:
             (BASELINE, clock), (date(2026, 6, 1), clock)]
 
     @pytest.mark.asyncio
-    async def test_the_route_answers_422_for_a_refusal_postgres_never_saw(
+    async def test_a_note_carrying_nul_is_refused_before_postgres_is_asked(
             self, stores, monkeypatch):
         """A note carrying NUL is refused before Postgres is asked; the review
         reproduced a 503 "Postgres did not answer" for it. Nothing stored.
-        Mutation: drop the route's `ClassificationRefused` mapping."""
+        Through the app the edge refuses it first (`RejectNulMiddleware`,
+        400); the writer's own refusal and the route's 422 for it are
+        tests/unit/test_managers_chain.py's."""
         import time as _time
 
         import httpx
@@ -689,8 +524,8 @@ class TestTheReviewAgainstARealPostgres:
                                         "&effective_from=2026-10-07&note=a%00b")
         finally:
             limiter.reset()
-        assert res.status_code == 422, res.text
-        assert "note carries NUL" in res.json()["detail"]
+        assert res.status_code == 400, res.text
+        assert res.json()["detail"] == "query: Must not contain a NUL character"
         assert await _pg_intervals(pool) == before
 
     @pytest.mark.asyncio
@@ -701,46 +536,11 @@ class TestTheReviewAgainstARealPostgres:
         from core import pg_managers_read
 
         store, pool, env = stores
-        with patch("core.pg_replication.replicate_managers", new=AsyncMock()):
-            await store.upsert_managers([{"id": 34, "name": "M"}])
-        duck = await store.get_all_managers()
-        env.setenv(ENV, "postgres")
         await store.upsert_managers([{"id": 34, "name": "M"}])
         pg = await pg_managers_read.fetch_all_managers()
-        assert [set(r) for r in pg] == [set(r) for r in duck]
+        # DuckDB's answer, as a literal (rule 9): the keys its
+        # `get_all_managers` returned, read off its DuckDB branch before step
+        # 14's S14-11 deleted it.
+        assert [set(r) for r in pg] == [DUCKDB_MANAGER_KEYS]
         assert pg[0]["synced_at"] is not None
 
-    @pytest.mark.asyncio
-    async def test_the_stats_never_go_backwards_while_a_chain_owns_the_orders(
-            self, stores, monkeypatch):
-        """The ways back run chain 5's before chain 3's. With chain 5 back on
-        DuckDB and the orders still a chain's, DuckDB's orders are frozen;
-        recounted from them, Postgres went from 2026-10-06 and 500 orders to
-        2026-09-01 and 1 (the review's reproduction). Mutation: drop the guard
-        in `DuckDBStore.update_manager_stats`."""
-        import types
-
-        from core import write_chains
-        from core.pg_replication import replicate_managers
-
-        store, pool, _env = stores
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO managers (id, name) VALUES (34, 'M')")
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
-                "created_at, updated_at, manager_id) VALUES (?, 1, 1, 100, "
-                "TIMESTAMPTZ '2026-09-01 10:00:00+00', TIMESTAMPTZ '2026-09-01 10:00:00+00', "
-                "TIMESTAMPTZ '2026-09-01 10:00:00+00', 34)", [ORDER_IDS[0]])
-            conn.execute("UPDATE managers SET last_order_date = DATE '2026-10-06', "
-                         "order_count = 500 WHERE id = 34")
-        assert (await replicate_managers(store))["ok"] is True
-        orders_chain = types.ModuleType("core.pg_chain_orders_write")
-        orders_chain.WRITE_ENV = "KS_WRITE_CHAIN_ORDERS"
-        orders_chain.CHAIN_TABLES = ("bronze.orders", "bronze.order_products")
-        orders_chain.env_writes_postgres = lambda: True
-        monkeypatch.setattr(write_chains, "WRITE_CHAINS",
-                            write_chains.WRITE_CHAINS + (orders_chain,))
-
-        assert await store.update_manager_stats() == 0
-        row = (await _pg_managers(pool))[34]
-        assert (row["last_order_date"], row["order_count"]) == (date(2026, 10, 6), 500)

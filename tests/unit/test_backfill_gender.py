@@ -2,12 +2,12 @@
 
 The script's first version advertised `docker exec keycrm-web python
 /app/scripts/backfill_gender.py`, and that could never have worked: the web
-container holds the DuckDB file exclusively and a second process cannot open it
-even read-only. Nobody found out for eleven days because nobody ran it. These
-tests pin the two halves that replaced it:
+container held the DuckDB file exclusively. Since step 14's S14-11 the script
+is Postgres alone — chain 4's derivation for the write path, a read-only
+transaction for the preview — and these tests pin both:
 
-* the write path, when the file is held elsewhere, refuses with exit 2 and
-  writes nothing, instead of dying with an IOException mid-stack;
+* the write path runs `derive_gender_pg` and never imports `duckdb`, whatever
+  `KS_WRITE_BUYERS` says;
 * the preview reads Postgres inside a READ-ONLY transaction — in production the
   only DSN at hand is the web container's writer DSN — and summarises counts
   only, never a name.
@@ -20,14 +20,12 @@ would stop running without anyone being told.
 from __future__ import annotations
 
 import ast
-import asyncio
 import importlib.util
 import inspect
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-import duckdb
 import pytest
 
 from core import gender_backfill
@@ -43,11 +41,6 @@ _spec.loader.exec_module(script)
 
 DSN = os.getenv("KS_PG_DSN", "").strip()
 needs_pg = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
-
-# The message DuckDB 1.5.5 gives a second process, verbatim from production.
-LOCKED = ('IO Error: Could not set lock on file "/app/data/analytics.duckdb": '
-          'Conflicting lock is held in /usr/local/bin/python3.14 (PID 1). '
-          'See also https://duckdb.org/docs/stable/connect/concurrency')
 
 # Names whose verdicts are not in doubt, so the tests pin the bookkeeping and
 # not the classifier.
@@ -134,30 +127,6 @@ class TestOneBodyTwoEngines:
         assert duck != pg and undone == duck
         assert "override_by_human = FALSE" in duck
 
-    @pytest.mark.asyncio
-    async def test_the_duckdb_rendering_runs(self):
-        conn = duckdb.connect(":memory:")
-        conn.execute("CREATE TABLE buyers (id INTEGER, full_name VARCHAR)")
-        conn.execute("""CREATE TABLE buyer_gender (buyer_id INTEGER, gender VARCHAR,
-                        rules_version INTEGER, override_by_human BOOLEAN)""")
-        conn.execute("INSERT INTO buyers VALUES (1, ?), (2, ?)", [WOMAN, MAN])
-        conn.execute("INSERT INTO buyer_gender VALUES (1, 'f', ?, FALSE)",
-                     [RULES_VERSION])
-
-        class Store:
-            def connection(self):
-                class _C:
-                    async def __aenter__(self_):
-                        return conn
-
-                    async def __aexit__(self_, *a):
-                        return False
-                return _C()
-
-        rows = sorted(await gender_backfill.read_stored_duckdb(Store()))
-        assert rows == [(1, WOMAN, "f", RULES_VERSION, False),
-                        (2, MAN, None, None, None)]
-
 
 class TestThePreviewIsReadOnly:
     def test_the_postgres_read_opens_a_read_only_transaction(self):
@@ -172,122 +141,57 @@ class TestThePreviewIsReadOnly:
             assert isinstance(kw.get("readonly"), ast.Constant) and kw["readonly"].value is True
 
 
-class TestTheWritePathWhenTheFileIsHeld:
-    def test_the_lock_is_recognised_and_other_io_errors_are_not(self):
-        assert script.held_by_another_process(duckdb.IOException(LOCKED))
-        assert not script.held_by_another_process(
-            duckdb.IOException("IO Error: No space left on device"))
-        assert not script.held_by_another_process(RuntimeError(LOCKED))
-
-    @pytest.mark.asyncio
-    async def test_it_exits_2_and_derives_nothing(self, monkeypatch, capsys):
-        from core import duckdb_store
-
-        monkeypatch.setattr(duckdb_store, "get_store",
-                            AsyncMock(side_effect=duckdb.IOException(LOCKED)))
-        derive = AsyncMock()
-        monkeypatch.setattr(script, "derive_gender", derive)
-
-        assert await script.main(rebuild_all=True, dry_run=False, use_duckdb=False) == 2
-        derive.assert_not_called()
-        err = capsys.readouterr().err
-        assert "Nothing was written" in err
-        assert "replicate_operational/trigger" in err
-        assert "--dry-run" in err
-
-    @pytest.mark.asyncio
-    async def test_the_duckdb_preview_refuses_the_same_way(self, monkeypatch):
-        from core import duckdb_store
-
-        monkeypatch.setattr(duckdb_store, "get_store",
-                            AsyncMock(side_effect=duckdb.IOException(LOCKED)))
-        assert await script.main(rebuild_all=False, dry_run=True, use_duckdb=True) == 2
-
-    @pytest.mark.asyncio
-    async def test_any_other_io_error_is_not_dressed_up_as_a_lock(self, monkeypatch):
-        from core import duckdb_store
-
-        monkeypatch.setattr(duckdb_store, "get_store", AsyncMock(
-            side_effect=duckdb.IOException("IO Error: No space left on device")))
-        with pytest.raises(duckdb.IOException):
-            await script.main(rebuild_all=False, dry_run=False, use_duckdb=False)
-
-    @pytest.mark.asyncio
-    async def test_a_preview_without_a_dsn_says_so(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        assert await script.main(rebuild_all=False, dry_run=True, use_duckdb=False) == 3
-
-
-class TestTheWritePathUnderChain4:
-    """With `KS_WRITE_BUYERS` moving the buyers, the verdicts are Postgres's
-    and DuckDB's copy has stopped — but a script may take the chain's first
-    write only if web already has: the latch is a marker web reads once and
-    caches, so a script that latched first would leave web writing DuckDB
-    until it restarted."""
-
-    READERS = ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD")
+class TestTheWritePathIsPostgres:
+    """Since step 14's S14-11 the write path is chain 4's derivation,
+    whatever `KS_WRITE_BUYERS` says, latched or not. Until then it followed
+    the chain's `mode()` — DuckDB's `derive_gender`, or exit 4 for a chain
+    flagged and not latched, or a flag nobody could read."""
 
     @pytest.fixture
-    def chain4(self, monkeypatch):
+    def pg(self, monkeypatch):
         from core import duckdb_store, pg_buyers_write
 
-        monkeypatch.setenv(pg_buyers_write.WRITE_ENV, "postgres")
-        for reader in self.READERS:
-            monkeypatch.setenv(reader, "postgres")
         monkeypatch.setattr(duckdb_store, "get_store", AsyncMock(
-            side_effect=AssertionError("DuckDB opened under chain 4")))
-        derive = AsyncMock(side_effect=AssertionError("DuckDB derived under chain 4"))
-        monkeypatch.setattr(script, "derive_gender", derive)
-        pg = AsyncMock(return_value={
+            side_effect=AssertionError("DuckDB opened by the script")))
+        derive = AsyncMock(return_value={
             "pending": 3, "written": 3, "female": 2, "male": 1, "null": 0,
             "rules_version": RULES_VERSION, "error": None, "ms": 5})
-        monkeypatch.setattr(pg_buyers_write, "derive_gender_pg", pg)
-        return monkeypatch, pg
+        monkeypatch.setattr(pg_buyers_write, "derive_gender_pg", derive)
+        return monkeypatch, derive
 
     @pytest.mark.asyncio
-    async def test_latched_it_derives_in_postgres_and_never_opens_duckdb(self, chain4):
+    @pytest.mark.parametrize("flag", [None, "duckdb", "postgres", "postgre"])
+    @pytest.mark.parametrize("latched", [True, False])
+    async def test_it_derives_in_postgres_whatever_the_flag(self, pg, flag, latched):
+        """Mutation: route by the flag or the latch again."""
         from core import chain_latch, pg_buyers_write
 
-        _env, pg = chain4
-        chain_latch.latch(pg_buyers_write.CHAIN, pg_buyers_write.WRITE_ENV)
-        assert await script.main(rebuild_all=True, dry_run=False, use_duckdb=False) == 0
-        pg.assert_awaited_once_with(rebuild_all=True)
+        env, derive = pg
+        if flag is None:
+            env.delenv(pg_buyers_write.WRITE_ENV, raising=False)
+        else:
+            env.setenv(pg_buyers_write.WRITE_ENV, flag)
+        if latched:
+            chain_latch.latch(pg_buyers_write.CHAIN, pg_buyers_write.WRITE_ENV)
+        assert await script.main(rebuild_all=True, dry_run=False) == script.EXIT_OK
+        derive.assert_awaited_once_with(rebuild_all=True)
 
     @pytest.mark.asyncio
-    async def test_flagged_and_not_latched_it_writes_nothing(self, chain4, capsys):
-        from core import chain_latch, pg_buyers_write
+    async def test_a_failed_derivation_is_exit_1(self, pg):
+        _env, derive = pg
+        derive.return_value = {**derive.return_value, "error": "OSError: down"}
+        assert await script.main(rebuild_all=False, dry_run=False) == script.EXIT_FAILED
 
-        _env, pg = chain4
-        assert await script.main(rebuild_all=False, dry_run=False, use_duckdb=False) == 4
-        pg.assert_not_awaited()
-        assert not chain_latch.latched(pg_buyers_write.CHAIN)
-        err = capsys.readouterr().err
-        assert "Nothing was written" in err and "replicate_operational/trigger" in err
-
-    @pytest.mark.asyncio
-    async def test_a_flag_nobody_can_read_writes_nothing(self, chain4):
-        from core import pg_buyers_write
-
-        env, pg = chain4
-        env.setenv(pg_buyers_write.WRITE_ENV, "postgre")
-        assert await script.main(rebuild_all=False, dry_run=False, use_duckdb=False) == 4
-        pg.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_it_reads_the_latch_from_disk_first(self, chain4):
-        """A marker web wrote is on disk, not in this process's cache: without
-        `configure_modes()` the script would see the flag alone."""
-        import json
-
-        from core import chain_latch, pg_buyers_write
-
-        _env, pg = chain4
-        chain_latch.MARKER_DIR.mkdir(parents=True, exist_ok=True)
-        (chain_latch.MARKER_DIR / pg_buyers_write.CHAIN).write_text(json.dumps(
-            {"chain": pg_buyers_write.CHAIN, "latched_at": "2026-09-30T10:00:00+00:00"}))
-        chain_latch._latched = {}                 # a cache that has not seen it
-        assert await script.main(rebuild_all=False, dry_run=False, use_duckdb=False) == 0
-        pg.assert_awaited_once()
+    def test_the_script_never_imports_duckdb(self):
+        """Structure: no `import duckdb` and no `--duckdb` left in it."""
+        tree = ast.parse((ROOT / "scripts" / "backfill_gender.py").read_text())
+        names = {alias.name for node in ast.walk(tree)
+                 if isinstance(node, (ast.Import, ast.ImportFrom))
+                 for alias in node.names}
+        modules = {node.module for node in ast.walk(tree)
+                   if isinstance(node, ast.ImportFrom)}
+        assert "duckdb" not in names and "duckdb" not in modules
+        assert '"--duckdb"' not in (ROOT / "scripts" / "backfill_gender.py").read_text()
 
 
 @needs_pg

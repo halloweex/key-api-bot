@@ -12,18 +12,21 @@ THE ONE WRITER EVERY CALLER GOES THROUGH
 Three methods write the table: `add_expense`, `update_expense`,
 `delete_expense`. `update_expense` has NO HTTP route — its only caller is
 `core/chat_tools.py` — so a port that covered `web/routes/api/expenses.py`
-would have left an editor still writing DuckDB. The routing therefore lives in
-the repository methods themselves, which every caller reaches.
+would have left an editor still writing DuckDB. The routing therefore lived in
+the repository methods themselves, which every caller reaches; since step
+14's S14-11 they call this module and ask nothing, the flag and DuckDB's
+branch gone.
 
-THE FLAG GATES BOTH ENDS
+THE FLAG GATED BOTH ENDS — UNTIL STEP 14
 
-Under `KS_WRITE_EXPENSES=postgres` the three writes come here AND the hourly
-`replicate_operational` stands down for `app.manual_expenses`. Inverting the
+Under `KS_WRITE_EXPENSES=postgres` the three writes came here AND the hourly
+`replicate_operational` stood down for `app.manual_expenses`. Inverting the
 write without standing the shipper down would roll a typed amount back within
 the hour, out of a frozen DuckDB, looking healthy in between — `replicate_sms`'
 recorded failure. The daily comparison stands down with it, or every new row
-would read as a discrepancy the check itself created. Both ask
-`core.write_chains.stood_down_tables()`, so they cannot disagree.
+would read as a discrepancy the check itself created. Both asked
+`core.write_chains.stood_down_tables()`, so they could not disagree; since
+S14-11 both stand down on every chain's tables (`write_chains.chain_tables()`).
 
 A DELETION HAS TO STAY A DELETION
 
@@ -37,13 +40,14 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write here latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
 connection has come out of the pool and before the transaction opens. From the
 first typed expense onward the flag cannot move these writes back to DuckDB —
-only `scripts/chain_copy_back.py` can — because a flag flip after a row has
-landed here starts a second writer rather than undoing anything.
+only `scripts/chain_copy_back.py` could (deleted in step 14's S14-04; the way
+back since is an image from before step 14, `core.rollback_lever`) — because a
+flag flip after a row has landed here starts a second writer rather than
+undoing anything.
 """
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date
 from typing import Any, List, Optional, Tuple
 
@@ -74,35 +78,12 @@ _UPDATE_RETURNING = ("id, expense_date, category, expense_type, amount, currency
 _UPDATABLE = ("expense_date", "category", "expense_type", "amount", "currency", "note")
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_EXPENSES` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule: a typo in the variable
-    deciding which store holds money nobody else can reconstruct must stop the
-    process, not quietly pick the other store. Since DN-01 it stops this chain
-    and nothing else.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)): once an expense has been written
-    to Postgres, setting the variable back to `duckdb` must not start a second
-    writer beside the first. It also outranks a value nobody can read, so a
-    latched chain keeps routing to the store that holds its rows while the typo
-    is published, paged and stamped — see `core/chain_latch.py`.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres()
+# `env_writes_postgres` and `writes_postgres` stood here until step 14's
+# S14-11: S14-00 made the answer a constant — the three writers write
+# Postgres whatever `KS_WRITE_EXPENSES` says — and S14-11 deleted both with
+# the flag. The first write still takes the latch (`_latch`, decision 3): an
+# image from before step 14, the rollback target, routes by the marker, and
+# this chain had not written in production when S14-11 shipped.
 
 
 def _latch() -> str:
@@ -113,7 +94,8 @@ def _latch() -> str:
     believe DuckDB is still the writer.
 
     **Called after the connection is in hand, never before it.** The latch is
-    permanent — only `scripts/chain_copy_back.py` releases it — so taking it for
+    permanent — `scripts/chain_copy_back.py` was all that released it, until
+    step 14's S14-04 deleted it — so taking it for
     a write that never reaches Postgres spends the rollback this chain still
     has. Postgres being unreachable, a wait for a connection that ends without
     one (below) and `require_revision` raising because `web` came up ahead of

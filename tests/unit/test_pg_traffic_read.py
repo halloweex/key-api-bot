@@ -1,7 +1,9 @@
-"""Which engine answers `/traffic`, and the four defects the port exposed.
+"""The `/traffic` statements, and the four defects the port exposed.
 
-The numbers are `tests/integration/test_traffic_two_engines.py`'s job. What is
-proved here is the wiring, plus the mistakes worth a permanent guard — three of
+The numbers are `tests/integration/test_traffic_two_engines.py`'s job, against
+a real Postgres; that the router asks Postgres and nothing else since step
+14's S14-05 is `tests/unit/test_read_routers_postgres_only.py`'s. What is
+proved here is the statements, plus the mistakes worth a permanent guard — three of
 them found by reading the queries while porting them, and each one a real
 defect on DuckDB too, not merely an incompatibility:
 
@@ -19,70 +21,14 @@ The fourth is the one that would have shipped silently: the blended ROAS sums
 from __future__ import annotations
 
 import ast
-import asyncio
-from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core import pg_traffic_read
-from core.duckdb_store import DuckDBStore
-from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+from core.sql_dialect import POSTGRES, render_tables
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "traffic.py"
-W = (date.today() - timedelta(days=30), date.today())
-TIMEOUT_S = 20
-
-CALLS = (
-    ("get_traffic_analytics", {}),
-    ("get_traffic_organic", {}),
-    ("get_traffic_trend", {}),
-    ("get_traffic_transactions", {}),
-    ("get_traffic_utm_campaigns", {}),
-    ("get_traffic_roas", {}),
-)
-
-
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_READ_TRAFFIC", raising=False)
-        assert pg_traffic_read.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
-        assert pg_traffic_read.enabled() is True
-
-    def test_a_typo_raises(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_TRAFFIC", "postgress")
-        with pytest.raises(ValueError, match="KS_READ_TRAFFIC"):
-            pg_traffic_read.enabled()
-
-
-class TestEveryMethodActuallyRuns:
-    """The guard the f-string brace earned.
-
-    A hole written with single braces parses, reads correctly to a human, and
-    fails only on the call — so all six are called for real, against an empty
-    DuckDB. The timeout is the second assertion: the store lock is not
-    reentrant and a nested acquisition hangs rather than raising.
-    """
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,kwargs", CALLS, ids=[n for n, _ in CALLS])
-    async def test_it_returns_rather_than_raising_or_hanging(
-        self, tmp_path, monkeypatch, name, kwargs,
-    ):
-        monkeypatch.delenv("KS_READ_TRAFFIC", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"t-{name}.duckdb")
-        await store.connect()
-        try:
-            await asyncio.wait_for(
-                getattr(store, name)(*W, **kwargs), timeout=TIMEOUT_S,
-            )
-        finally:
-            await store.close()
 
 
 class TestTheRoutedBodies:
@@ -125,14 +71,15 @@ class TestTheRoutedBodies:
                 if "SELECT" in text.upper():
                     yield node.lineno, text
 
-    def test_the_scan_finds_all_twelve(self):
-        """Six methods, twelve statements: analytics and the organic breakdown
+    def test_the_scan_finds_all_thirteen(self):
+        """Seven methods, thirteen statements: the pixel-only breakdown runs one,
+        analytics and the organic breakdown
         each run their new buyers beside their orders (the breakdown runs its
         orders statement for two periods, but it is one text), transactions
         and campaigns each run a count beside their page of rows, and ROAS
         runs three — total revenue, paid revenue per platform, and the ad
         spend."""
-        assert len(list(self._statements())) == 12
+        assert len(list(self._statements())) == 13
 
     def test_every_hole_survived_the_f_string(self):
         """`{silver_orders}` inside an f-string is an expression Python
@@ -145,13 +92,12 @@ class TestTheRoutedBodies:
                 f"level, or a brace was written singly and Python ate it"
             )
 
-    def test_both_renderings_leave_no_hole(self):
+    def test_the_rendering_leaves_no_hole(self):
         for lineno, text in self._statements():
-            for dialect in (DUCKDB, POSTGRES):
-                rendered = render_tables(text, dialect)
-                assert "{" not in rendered and "}" not in rendered, (
-                    f"line {lineno} unrendered for {dialect.name}"
-                )
+            rendered = render_tables(text, POSTGRES)
+            assert "{" not in rendered and "}" not in rendered, (
+                f"line {lineno} unrendered for {POSTGRES.name}"
+            )
 
     def test_no_method_opens_the_store_itself(self):
         src = REPOSITORY.read_text(encoding="utf-8")
@@ -234,54 +180,3 @@ class TestNoOrderIsLeftToThePlanner:
                 offenders.append((lineno, clause))
         assert not offenders, f"ORDER BY can tie: {offenders}"
 
-
-class TestItDoesNotTakeTheDuckDbLock:
-    @pytest.mark.asyncio
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
-        self, tmp_path, monkeypatch,
-    ):
-        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "tr.duckdb")
-        await store.connect()
-        try:
-            def boom(*_a, **_k):
-                raise AssertionError("the traffic read reached for DuckDB")
-
-            with patch.object(type(store), "connection", boom), \
-                 patch("core.pg_traffic_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_traffic_analytics(*W)
-            sql = fetch.await_args.args[0]
-            assert "silver.orders" in sql and "silver.order_utm" in sql
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_the_duckdb_path_still_uses_the_store(self, tmp_path, monkeypatch):
-        """The mirror, so the test above cannot pass by the routing being
-        broken in both directions."""
-        monkeypatch.delenv("KS_READ_TRAFFIC", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "tr2.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_traffic_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_traffic_analytics(*W)
-            fetch.assert_not_awaited()
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "tr3.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_traffic_read.fetch",
-                       new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-                out = await store.get_traffic_analytics(*W)
-            assert out["totals"]["orders"] == 0
-        finally:
-            await store.close()

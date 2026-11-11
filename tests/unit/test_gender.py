@@ -231,12 +231,16 @@ def test_every_table_is_non_empty():
 
 
 class TestTheDerivationRidesTheReplicationTick:
-    """Derived first, shipped second, in one tick.
+    """Derived first, in the hourly tick that kept the id
+    `replicate_operational`.
 
-    A copy that ran before the derivation would carry yesterday's verdict for a
-    buyer DuckDB decided an hour ago, and the daily reconciliation would then
-    report a difference the ordering created rather than a real drift. This is
-    `pg_gold`'s arrangement with `pg_silver` and the test that pins it.
+    Until step 14's S14-13 the tick then copied the operational tables out of
+    DuckDB (`core.pg_operational.replicate_operational`), and a copy that ran
+    before the derivation would have carried yesterday's verdict for a buyer
+    decided an hour ago — `pg_gold`'s arrangement with `pg_silver`. The copy
+    went with S14-13; what the tick runs after the derivation is the copy of
+    `data/bot.db`, and `derive_gender_pg` is the one writer of new verdicts,
+    so a tick without it stops them.
     """
 
     def test_the_runner_derives_before_it_replicates(self):
@@ -257,21 +261,63 @@ class TestTheDerivationRidesTheReplicationTick:
             if isinstance(n, ast.Call):
                 name = getattr(n.func, "id", getattr(n.func, "attr", None))
                 lines.setdefault(name, []).append(n.lineno)
-        assert "derive_gender" in lines, "the tick no longer derives gender"
-        # Chain 4's derivation rides the same place, in Postgres.
-        assert "derive_gender_pg" in lines, "the tick no longer follows chain 4"
-        assert "replicate_operational" in lines
-        assert max(lines["derive_gender"] + lines["derive_gender_pg"]) < min(
-            lines["replicate_operational"])
+        # Chain 4's derivation, in Postgres — the only one since step 14's
+        # S14-11 (DuckDB's `derive_gender` went with the flag).
+        assert "derive_gender_pg" in lines, "the tick no longer derives gender"
+        assert "derive_gender" not in lines, "the tick derives in DuckDB again"
+        assert "replicate_operational" not in lines, (
+            "the tick copies out of DuckDB again")
+        assert "replicate_bot_state" in lines
+        assert max(lines["derive_gender_pg"]) < min(lines["replicate_bot_state"])
+
+    @pytest.mark.asyncio
+    async def test_the_tick_derives_and_copies_the_bot_without_the_store(self):
+        """What the job returns, run: the derivation's answer and the bot's
+        copy, the store never asked. (Held by the off sweep's job tests until
+        step 14's S14-18 deleted them with the switch.) Mutation: drop the
+        derivation, or ask the store."""
+        from unittest.mock import AsyncMock, patch
+
+        from core.scheduler import BackgroundScheduler
+
+        derive = AsyncMock(return_value={"decided": 2})
+        bot = AsyncMock(return_value={"skipped": "KS_BOT_STORE=postgres"})
+        with patch("core.pg_buyers_write.derive_gender_pg", new=derive), \
+             patch("core.pg_bot_state.replicate_bot_state", new=bot), \
+             patch("core.duckdb_store.get_store",
+                   new=AsyncMock(side_effect=AssertionError("the store was asked"))), \
+             patch("core.store.get_store",
+                   new=AsyncMock(side_effect=AssertionError("the store was asked"))):
+            result = await BackgroundScheduler()._run_replicate_operational()
+        assert result == {"gender": {"decided": 2},
+                          "bot_state": {"skipped": "KS_BOT_STORE=postgres"}}
+        derive.assert_awaited_once()
+        bot.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_derivation_does_not_cost_the_bot_its_copy(self):
+        """Mutation: take the derivation's own `try` away."""
+        from unittest.mock import AsyncMock, patch
+
+        from core.scheduler import BackgroundScheduler
+
+        bot = AsyncMock(return_value={"rows": 3})
+        with patch("core.pg_buyers_write.derive_gender_pg",
+                   new=AsyncMock(side_effect=RuntimeError("pg down"))), \
+             patch("core.pg_bot_state.replicate_bot_state", new=bot):
+            result = await BackgroundScheduler()._run_replicate_operational()
+        assert result == {"gender": {"error": "RuntimeError: pg down"},
+                          "bot_state": {"rows": 3}}
+        bot.assert_awaited_once()
 
     def test_the_cli_and_the_tick_share_one_implementation(self):
-        """Two callers, one home — charter rule 1."""
+        """Two callers, one home — charter rule 1: both run chain 4's
+        derivation."""
         import inspect
 
         import scripts.backfill_gender as cli
-        from core import gender_backfill
 
-        assert cli.derive_gender is gender_backfill.derive_gender
+        assert "derive_gender_pg" in inspect.getsource(cli.run)
         # The CLI must not carry its own copy of the SQL.
         assert "INSERT INTO buyer_gender" not in inspect.getsource(cli)
 
@@ -282,16 +328,16 @@ class TestTheDerivationRidesTheReplicationTick:
         for sql in (_PENDING_NEW, _PENDING_ALL):
             assert "override_by_human = FALSE" in sql
 
-    def test_the_derivation_never_raises_into_the_tick(self):
-        """It shares a runner with the copy of tables nothing can rebuild."""
-        import asyncio
+    @pytest.mark.asyncio
+    async def test_the_derivation_never_raises_into_the_tick(self, monkeypatch):
+        """It shares a runner with the copy of tables nothing can rebuild:
+        chain 4's derivation returns its error, never raises it."""
+        from unittest.mock import AsyncMock
 
-        from core.gender_backfill import derive_gender
+        from core import pg, pg_buyers_write
 
-        class Exploding:
-            def connection(self):
-                raise RuntimeError("store is gone")
-
-        result = asyncio.run(derive_gender(Exploding()))
+        monkeypatch.setattr(pg, "get_pool", AsyncMock(side_effect=RuntimeError("store is gone")))
+        monkeypatch.setattr(pg, "require_revision", AsyncMock())
+        result = await pg_buyers_write.derive_gender_pg()
         assert result["error"] and "RuntimeError" in result["error"]
         assert result["written"] == 0

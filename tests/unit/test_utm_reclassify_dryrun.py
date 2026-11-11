@@ -279,16 +279,27 @@ class TestTheDiff:
         assert (t.before, t.after) == (("paid_confirmed", "google"), ("organic", "google"))
 
     @pytest.mark.asyncio
-    async def test_the_now_columns_are_what_the_tab_shows_for_the_same_rows(self, tmp_path):
-        """The tab's own `get_traffic_analytics` over a DuckDB store, and the
-        diff over the same orders with nothing reclassified: every platform
-        and traffic type, with its orders and hryvnia, must agree. That holds
-        the Google split, the source fallback and the NULL row at once, on
-        both sides — either one naming a platform differently fails here.
-        Imported here and not at the top: the audited runs import this module,
-        and may not load DuckDB."""
-        from core.duckdb_store import DuckDBStore
+    async def test_the_now_columns_are_what_the_tab_shows_for_the_same_rows(
+        self, tmp_path, monkeypatch,
+    ):
+        """The tab's own `get_traffic_analytics` and the diff over the same
+        orders with nothing reclassified: every platform and traffic type,
+        with its orders and hryvnia, must agree. That holds the Google split,
+        the source fallback and the NULL row at once, on both sides — either
+        one naming a platform differently fails here.
 
+        The tab reads Postgres alone since step 14's S14-05, so the Silver
+        rows go into Postgres (they went into DuckDB before). Imported here
+        and not at the top: the audited runs import this module, and may not
+        load DuckDB."""
+        import os
+
+        from tests.integration.pg_tab_seed import (
+            store_that_never_reaches_duckdb, tab_in_postgres,
+        )
+
+        if not os.getenv("KS_PG_DSN"):
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
         rows = [  # order_id, source_id, stored verdict or None, total
             (1, 4, verdict_row("paid_confirmed", "google"), "100.00"),
             (2, 4, verdict_row("paid_likely", "google"), "200.00"),
@@ -300,28 +311,27 @@ class TestTheDiff:
             (8, 2, NULL_ROW, "12800.00"),   # a row of NULLs: Telegram's fallback
         ]
         day = date(2026, 9, 1)
-        store = DuckDBStore(db_path=tmp_path / "tab.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                for order_id, source_id, stored, total in rows:
-                    conn.execute(
-                        "INSERT INTO silver_orders (id, source_id, status_id, grand_total, "
-                        "ordered_at, buyer_id, manager_id, order_date, is_return, "
-                        "sales_type, is_active_source, source_name, is_new_customer, "
-                        "buyer_first_order_date, promocode) VALUES (?, ?, 12, ?, NULL, "
-                        "NULL, NULL, ?, FALSE, 'retail', TRUE, 'x', FALSE, NULL, NULL)",
-                        [order_id, source_id, float(total), day])
-                    if stored is not None:
-                        conn.execute(
-                            "INSERT INTO silver_order_utm (order_id, traffic_type, "
-                            "platform, parsed_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                            [order_id, stored[script.VERDICT_TYPE],
-                             stored[script.VERDICT_PLATFORM]])
+
+        async def populate(conn, _pool):
+            for order_id, source_id, stored, total in rows:
+                await conn.execute(
+                    "INSERT INTO silver.orders (id, source_id, status_id, grand_total, "
+                    "ordered_at, buyer_id, manager_id, order_date, is_return, "
+                    "sales_type, is_active_source, source_name, is_new_customer, "
+                    "buyer_first_order_date, promocode) VALUES ($1, $2, 12, $3, NULL, "
+                    "NULL, NULL, $4, FALSE, 'retail', TRUE, 'x', FALSE, NULL, NULL)",
+                    order_id, source_id, Decimal(total), day)
+                if stored is not None:
+                    await conn.execute(
+                        "INSERT INTO silver.order_utm (order_id, traffic_type, "
+                        "platform, parsed_at) VALUES ($1, $2, $3, now())",
+                        order_id, stored[script.VERDICT_TYPE],
+                        stored[script.VERDICT_PLATFORM])
+
+        async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, populate):
+            store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "/traffic")
             tab = await store.get_traffic_analytics(
                 start_date=WINDOW[0], end_date=WINDOW[1], sales_type="retail")
-        finally:
-            await store.close()
 
         orders = [order(order_id, comment=str(order_id) if stored else None,
                         stored=stored, source_id=source_id, day=day, total=total)

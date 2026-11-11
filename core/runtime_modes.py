@@ -5,7 +5,8 @@ to come before the first code path that consults it. `KS_PG_DERIVE` used to be
 read in `BackgroundScheduler.start`, and web's startup runs the boot sync
 (`init_and_sync`) before it starts the scheduler. The boot incremental sync
 therefore landed orders in Postgres while `owns()` still answered False, and
-`mark_if_owned` skipped in silence. The first derivation rebuilt over those
+`mark_if_owned` skipped in silence (both went in step 14's S14-15: Postgres
+derives on its own signal unconditionally). The first derivation rebuilt over those
 rows anyway, so no number was ever wrong — but any detector pairing writes with
 marks would have read the boot as marks lost, and every cached mode added after
 this one would have inherited the same hole.
@@ -31,78 +32,35 @@ from __future__ import annotations
 from typing import Dict
 
 
-def configure_modes(*, web: bool = False) -> Dict[str, str]:
+def configure_modes() -> Dict[str, str]:
     """Read every cached mode from the environment, and say what was read.
 
     Idempotent: a second call reads the same environment into the same caches,
     so web's startup and the scheduler can both call it without either having
     to know whether the other already has. The latch is re-read rather than
-    assumed unchanged, because a copy-back between two calls releases it.
+    assumed unchanged.
 
-    `web` is web's own two calls, its startup and its scheduler: the one
-    process `KS_DUCKDB=off`'s coherence verdict is reached in, because it is
-    the one an incoherent `off` may hold on `on` — the only syncer (stage 5's
-    PR-2, `core/duckdb_off.py`). Every other entry point under `off` stays
-    `off` and refuses every open.
+    **No mode is left to read** (step 14). S14-00 made every one a constant
+    — the value production published on 2026-10-21
+    (`.planning/DUCKDB_EXIT_STEP14_PLAN.md` H0) — and the PRs after it
+    deleted each with its last reader: `KS_PG_DERIVE`, `KS_UTM_PARSE` and
+    `KS_WRITE_WAREHOUSE` (S14-15), `KS_READ_FALLBACK` (S14-16) and
+    `KS_DUCKDB` (S14-18, with `core/duckdb_switch.py`: nothing in any
+    process opens the DuckDB file, so there is nothing for it to switch).
+    The mapping is therefore empty; it stays the return value so that a mode
+    added later is added here and nowhere else. A value left in `.env` for
+    an image from before step 14 is read by nothing here, whatever it is.
+    `web=True`, which made web run `KS_DUCKDB=off` whatever the variable
+    said, went with the switch.
     """
-    from core import (chain_latch, duckdb_switch, pg_derivation, pg_utm_parse,
-                      read_fallback, warehouse_cutover)
+    from core import chain_latch
 
     # Not in the returned mapping: that maps an environment variable to the
-    # value read from it, and the latch is read from disk and answers over the
-    # variable rather than out of it. It is empty in production today —
-    # `KS_WRITE_EXPENSES=postgres` has been on since 2026-09-17 08:33 UTC and
-    # `app.manual_expenses` still holds zero rows, so no chain has written
-    # Postgres and none is latched. The first typed expense takes it.
+    # value read from it, and the latch is read from disk. Since S14-00 it
+    # routes nothing — every chain writes Postgres — but it is still loaded,
+    # because a first write still takes a marker and an owner row (decision
+    # 3: what an image from before step 14 routes by, while one is the
+    # rollback target), and
+    # `/api/health` publishes `latched` from it.
     chain_latch.load()
-    # `KS_READ_FALLBACK` (DN-20a), and with it the read switches that name an
-    # engine this process has no address for. Never raises: web is the only
-    # syncer, and a crash loop over how a read degrades would stop order
-    # intake — see `core/read_fallback.py`.
-    #
-    # `KS_UTM_PARSE` (DN-19) after `KS_PG_DERIVE`, never before: `postgres`
-    # needs `own`, and reads the derivation's cached answer to know. A dict
-    # display evaluates in order, so the order of these lines is the order
-    # of the reads. Never raises either — see `core/pg_utm_parse.py`.
-    #
-    # `KS_WRITE_WAREHOUSE` (DN-28, DN-29): `postgres` stops DuckDB deriving
-    # when every precondition of the switch holds, so it must be cached before
-    # the boot sync, whose empty-DuckDB path runs a full warehouse rebuild.
-    # Last, because the switch's preconditions name the modes above it. Never
-    # raises, for `KS_READ_FALLBACK`'s reason — an unmet precondition runs as
-    # `duckdb` and is published; see `core/warehouse_cutover.py`.
-    #
-    # `KS_DUCKDB` (stage 5's week of silence) first: whether this process may
-    # open the DuckDB file at all, and the boot sync's first act is to open
-    # it. Never raises; `off` refuses every open, loudly — see
-    # `core/duckdb_switch.py`.
-    modes = {
-        duckdb_switch.ENV: duckdb_switch.configure_mode(),
-        pg_derivation.ENV: pg_derivation.configure_mode(),
-        read_fallback.ENV: read_fallback.configure_mode(report=False),
-        pg_utm_parse.ENV: pg_utm_parse.configure_mode(),
-        warehouse_cutover.ENV: warehouse_cutover.configure_mode(),
-    }
-    # Chain 3's start verdict (the chain-3 review): a precondition unmet when
-    # the process starts holds `KS_WRITE_ORDERS=postgres` on DuckDB until it
-    # ends, so the flip happens at a start and never mid-day on its own. After
-    # the warehouse switch, whose cached verdict is one of its facts. Not in
-    # the mapping, for the latch's reason. Never raises.
-    from core import pg_orders_write
-
-    pg_orders_write.settle_hold()
-    # `KS_DUCKDB=off`'s coherence verdict (stage 5's PR-2), in web only: last,
-    # because it reads step 13's verdict and chain 3's hold above. One unmet
-    # key and web runs `on` (OD-S5-1 (a)), so the mapping says what runs.
-    # Reads nothing unless `off` was read; never raises — see
-    # `core/duckdb_off.py`.
-    if web:
-        from core import duckdb_off
-
-        modes[duckdb_switch.ENV] = duckdb_off.settle()
-    # The read switches with no address, logged after the verdict and not at
-    # their configure: the line says whether their reads are refused, and a
-    # held-back web serves them from DuckDB though `off` was read. Never
-    # raises — see `read_fallback.report_misconfigured`.
-    read_fallback.report_misconfigured()
-    return modes
+    return {}

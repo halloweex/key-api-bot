@@ -5,15 +5,18 @@ the boot sync before it starts the scheduler — so the boot's orders landed in
 Postgres while `owns()` still answered False, and every mark was skipped in
 silence. What is pinned here is the order of calls at each entry point, read
 out of the code, because no running test could see a boot.
+
+Since step 14's S14-00 the modes `configure_modes()` reaches are constants —
+production's values — so what they answer is held by
+`tests/unit/test_step14_prod_parity.py`; this keeps the order of the calls,
+which still decides when the switch and the latch are read.
 """
 from __future__ import annotations
 
 import ast
 import pathlib
 
-import pytest
 
-from core import pg_derivation
 from core.runtime_modes import configure_modes
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -36,42 +39,33 @@ def _calls(node: ast.AST, name: str) -> list:
             if isinstance(n, ast.Call) and _called_name(n) == name]
 
 
-@pytest.fixture
-def restore_mode():
-    before = (pg_derivation._mode, pg_derivation._mode_error)
-    yield
-    pg_derivation._mode, pg_derivation._mode_error = before
-
-
 class TestConfigureModes:
-    def test_it_sets_the_derivation_mode_and_a_second_call_changes_nothing(
-        self, monkeypatch, restore_mode,
+    def test_it_answers_productions_modes_and_a_second_call_changes_nothing(
+        self, monkeypatch,
     ):
-        monkeypatch.setenv(pg_derivation.ENV, "own")
+        """S14-00: whatever the environment says, web's two calls answer
+        production's modes, and the same twice. S14-15 and S14-16 removed
+        four (KS_PG_DERIVE, KS_UTM_PARSE, KS_WRITE_WAREHOUSE,
+        KS_READ_FALLBACK), and S14-18 the last, KS_DUCKDB, with its module:
+        no mode is configured, whatever the variables say."""
+        for name in ("KS_DUCKDB", "KS_PG_DERIVE", "KS_READ_FALLBACK", "KS_UTM_PARSE",
+                     "KS_WRITE_WAREHOUSE"):
+            monkeypatch.setenv(name, "junk-s14")
         first = configure_modes()
         second = configure_modes()
-        assert first == second
-        assert first[pg_derivation.ENV] == "own"
-        assert pg_derivation.owns() and pg_derivation.mode_error() is None
+        assert first == second == {}
 
-    def test_unset_is_piggyback(self, monkeypatch, restore_mode):
-        monkeypatch.setenv(pg_derivation.ENV, "own")
-        configure_modes()
-        monkeypatch.delenv(pg_derivation.ENV)
-        assert configure_modes()[pg_derivation.ENV] == "piggyback"
-        assert not pg_derivation.owns()
-
-    def test_it_reaches_every_cached_mode_in_core(self):
+    def test_no_module_in_core_defines_a_cached_mode_left(self):
         """Walks `core/` for modules defining `configure_mode` rather than
-        trusting a list: a second cached mode that the entry points never
-        configure is this bug again, one mode later."""
+        trusting a list: a cached mode the entry points never configure is
+        the boot-sync bug again. `core.duckdb_switch` was the last until
+        S14-18; a new one must be configured from `configure_modes`."""
         defining = set()
         for path in (REPO / "core").rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             if any(isinstance(n, ast.FunctionDef) and n.name == "configure_mode"
                    for n in tree.body):
                 defining.add(".".join(path.relative_to(REPO).with_suffix("").parts))
-        assert "core.pg_derivation" in defining, "the walk is not looking"
 
         tree = _parse("core/runtime_modes.py")
         imported = {alias.asname or alias.name: f"{n.module}.{alias.name}"
@@ -82,6 +76,7 @@ class TestConfigureModes:
                    if isinstance(call.func, ast.Attribute)
                    and isinstance(call.func.value, ast.Name)}
         assert defining <= reached, sorted(defining - reached)
+        assert "core.duckdb_switch" not in defining
 
 
 class TestWebConfiguresBeforeTheBootSync:
@@ -128,16 +123,14 @@ class TestTheSchedulerStillConfigures:
 # would route by its flag alone. `core.gender_backfill` is deliberately not a
 # writer module — its preview reads and writes nothing.
 WRITER_MODULES = frozenset({
-    "core.sync_service", "core.pg_landing", "core.pg_backfill",
-    "core.pg_buyers", "core.pg_replication", "core.pg_buyers_write",
+    "core.sync_service", "core.pg_landing", "core.pg_buyers_write",
     # Chain 3: which store an order goes to is chosen from the latch marker
     # too, so a script reaching its writers must have loaded it.
     "core.pg_orders_write",
 })
 WRITER_CALLS = frozenset({
     "upsert_orders", "upsert_managers", "upsert_buyers", "write_orders",
-    "mirror_orders", "mirror_buyers", "backfill_orders", "backfill_buyers",
-    "replicate_managers", "ship_orders_by_id", "derive_gender", "derive_gender_pg",
+    "derive_gender", "derive_gender_pg",
     "upsert_orders_with_expenses", "record_backfill_misses",
     "restore_manager_comments",
 })
@@ -182,16 +175,18 @@ class TestScriptsConfigureBeforeTheyWrite:
         return out
 
     def test_the_walk_finds_the_scripts_that_write(self):
-        """Two today, and the second is why the walk was written rather than a
-        list typed out. `force_resync.py` reaches `upsert_orders` through the
-        sync service. `backfill_utm.py` was named here as the near miss — it
+        """The walk was written rather than a list typed out, and
+        `backfill_utm.py` is why. (`force_resync.py`, which reached
+        `upsert_orders` through the sync service, was the first; S14-03
+        deleted it.) `backfill_utm.py` was named here as the near miss — it
         rewrote `manager_comment` in DuckDB with a plain `UPDATE` and reached
         Postgres only through `ship_after_reparse`, whose table no derivation
-        reads. DN-17 gave it `ship_orders_by_id`, so it writes `bronze.orders`
-        now, and this walk found it on the first run rather than a reviewer
-        finding it later."""
+        reads. DN-17 gave it `ship_orders_by_id`, so it wrote `bronze.orders`,
+        and this walk found it on the first run rather than a reviewer
+        finding it later. Since step 14's S14-09 it writes `bronze.orders`
+        through `pg_orders_write.restore_manager_comments`, which the walk
+        finds the same way."""
         found = self._scripts()
-        assert "force_resync.py" in found, sorted(found)
         assert "backfill_utm.py" in found, sorted(found)
         # Chain 4: the gender derivation's CLI routes by the chain's latch.
         assert "backfill_gender.py" in found, sorted(found)

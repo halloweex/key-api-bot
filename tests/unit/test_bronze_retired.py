@@ -76,11 +76,8 @@ def _python_files():
         for path in root.rglob("*.py"):
             if "__pycache__" in path.parts:
                 continue
-            # The one file that must still name the table: its exclusion list
-            # is what stops the weekly compact recreating it, and
-            # `TestTheCompactionStillKnowsAboutIt` asserts the name is there.
-            if path.name == "compact_duckdb.py":
-                continue
+            # `scripts/compact_duckdb.py`, whose exclusion list had to name the
+            # table, was skipped here until step 14's S14-18 deleted it.
             yield path
 
 
@@ -159,17 +156,18 @@ class TestTheCompactionStillKnowsAboutIt:
 
     The table is still in the production database — a DDL removal does not drop
     a table, and this project deliberately does not drop them by hand. The
-    exclusion is what makes the next weekly compact build a database without
-    it. Remove the exclusion before that compact has run and the compact
-    aborts; remove it after, and nothing happens. The comment in
-    `compact_duckdb.py` says which, and this pins it.
+    weekly compaction's exclusion (`DERIVED_TABLES` in
+    `scripts/compact_duckdb.py`) is what made it build a database without it.
+    Step 14's S14-18 deleted the compaction; it lives on in the pinned image
+    (`rollback-step14`), where a restore runs, and its list is held here as
+    the literal it was (`PINNED_DERIVED_TABLES`, frozen in
+    `tests/unit/test_duckdb_table_fates.py`).
     """
 
     def test_it_is_excluded_from_the_export(self):
-        src = (REPO / "scripts" / "compact_duckdb.py").read_text(encoding="utf-8")
-        block = src[src.index("DERIVED_TABLES = frozenset({"):]
-        block = block[:block.index("})")]
-        assert '"bronze_order_events",' in block, (
+        from tests.unit.test_duckdb_table_fates import PINNED_DERIVED_TABLES
+
+        assert "bronze_order_events" in PINNED_DERIVED_TABLES, (
             "without this the weekly compact exports the table and then fails "
             "to import it into a schema that no longer defines it — aborting "
             "the compact and the off-site export behind it"
@@ -186,10 +184,13 @@ class TestTheCompactionStillKnowsAboutIt:
                 fate.switch) == (RETIRED, NONE, SKIPPED, (), None)
 
     def test_its_sequence_is_not_restored(self):
-        """`seq_table_map` names a table for each sequence it repairs. Leaving
-        the entry makes the restore query a table that is not there."""
-        src = (REPO / "scripts" / "compact_duckdb.py").read_text(encoding="utf-8")
-        assert '"seq_bronze_order_events_id"' not in src
+        """The compaction's `seq_table_map` named a table for each sequence it
+        repaired, and an entry left for this one would have made the restore
+        query a table that is not there. The compaction is deleted (S14-18);
+        nothing in the tree may name the sequence either."""
+        for path in _python_files():
+            assert "seq_bronze_order_events_id" not in path.read_text(
+                encoding="utf-8"), path
 
 
 class TestTheLessonOutlivesTheTable:

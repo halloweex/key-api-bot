@@ -1,7 +1,7 @@
 """What the UTM completeness counts mean, without a server (DN-16).
 
 `tests/integration/test_order_utm_completeness.py` proves the SQL on a real
-Postgres, including that it owes exactly what the DuckDB parser parses. This
+Postgres, including that it owes exactly what the parser parses. This
 pins the other half: how one aggregate row becomes findings — which count
 pages, which is only counted — and that each finding a page can carry names a
 lever instead of the generic anchor.
@@ -23,10 +23,15 @@ from core.data_quality import (
     remediation_for,
 )
 from core.mirror_reconciliation import (
-    ORDER_UTM_TABLE,
-    SILVER_GRACE_MINUTES,
+    ORDER_UTM_PG_TABLE,
     order_utm_completeness_findings,
 )
+
+# The grace at the default floor (`pg_warehouse_dq.silver_grace_minutes()`,
+# 600 s + the twins' ten minutes) — the number the Silver comparison fixed as
+# `mirror_reconciliation.SILVER_GRACE_MINUTES` until step 14's S14-12 deleted
+# it with that comparison.
+SILVER_GRACE_MINUTES = 20
 
 NAMES = ("pg_order_utm_missing", "pg_order_utm_stale", "pg_order_utm_in_flight")
 SINCE = datetime(2030, 6, 5, 4, 9, tzinfo=timezone.utc)
@@ -70,7 +75,7 @@ class TestEachCountMeansOneThing:
         assert issue.check_name == "pg_order_utm_missing"
         assert issue.severity is Severity.CRITICAL
         assert (issue.count, issue.sample_ids) == (3, (7, 8, 9))
-        assert issue.table_name == ORDER_UTM_TABLE.pg_table
+        assert issue.table_name == ORDER_UTM_PG_TABLE
         # The oldest arrival is what tells a stalled ship from one late tick.
         assert SINCE.isoformat() in issue.description
         assert f"{SILVER_GRACE_MINUTES} minutes" in issue.description
@@ -122,6 +127,10 @@ class TestTheGraceFollowsTheFloor:
         from core import mirror_reconciliation as mr
 
         monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        # A Postgres to compare against (`configured()`), never reached: the
+        # pool is a mock. Without it the check stands down and the test read
+        # the DSN of whatever environment it ran in.
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://unused@127.0.0.1:1/none")
         seen = {}
 
         async def _fake_row(conn, *, now, grace_minutes, max_samples):
@@ -187,10 +196,11 @@ class TestTheReaderIsToldWhatToDo:
             assert find_endpoint(app, path, "POST") is not None, path
 
     def test_every_route_the_reasons_name_exists(self):
-        """The line has room for the levers alone, so why each one is or is
-        not offered rides in both paging descriptions — including the backfill
-        the line no longer offers. A route named there must exist as surely
-        as one named in the line: it is read at the same moment."""
+        """The line has room for the levers alone, so why each one is offered
+        rides in both paging descriptions. A route named there must exist as
+        surely as one named in the line: it is read at the same moment. (The
+        backfill, offered and refused in the DuckDB parser's reasons, went
+        with them in step 14's S14-15.)"""
         from tests.routes_helper import find_endpoint
         from web.main import app
 
@@ -201,181 +211,44 @@ class TestTheReaderIsToldWhatToDo:
         for issue in paged:
             named = set(re.findall(r"POST (/api/[\w/-]+)", issue.description))
             assert named == {
-                "/api/traffic/backfill-utm",
                 "/api/traffic/refresh",
                 "/api/warehouse/refresh",
             }, issue.check_name
             for path in named:
                 assert find_endpoint(app, path, "POST") is not None, path
 
-    def test_one_lever_ships_when_nothing_marked_the_warehouse_dirty(self):
-        """The 05:15 status refresh, the weekly full sync and the sync of
-        today parse in DuckDB without marking the warehouse dirty, and a
-        restart forgets the tick's deferral — so a lever that waits for the
-        next dirty tick can wait all morning. The route the line names must
-        parse and reach Postgres by itself, which is what `reparse_router`
-        does under either KS_UTM_PARSE: it ships DuckDB's parse, or parses in
-        Postgres (DN-19)."""
+    def test_the_refresh_the_line_names_parses_by_itself(self):
+        """A lever that waited for the next derivation could wait the floor out;
+        the route the line names must parse by itself, which is what
+        `reparse_router` does (DN-19)."""
         from tests.routes_helper import find_endpoint
         from web.main import app
+        from web.routes.api import traffic
 
         endpoint = find_endpoint(app, "/api/traffic/refresh", "POST").route.endpoint
-        called = _names_called(endpoint)
-        assert {"refresh_utm_silver_layer", "reparse_router"} <= called
-
-    def test_the_warehouse_refresh_is_not_offered_because_it_does_not_ship_this(self):
-        """Under KS_UTM_PARSE=duckdb, the default these tests read: the lever
-        every Silver alert names rebuilds DuckDB, and under own derives
-        Postgres — and never calls the UTM ship. Offering it here would be a
-        lever that moves nothing on /traffic. Under postgres the derivation
-        ends with the parse, and the line does offer it — see
-        `TestUnderThePostgresParse`."""
-        from tests.routes_helper import find_endpoint
-        from web.main import app
-
-        endpoint = find_endpoint(app, "/api/warehouse/refresh", "POST").route.endpoint
-        assert not {"ship_order_utm", "ship_after_reparse",
-                    "reparse_router"} & _names_called(endpoint)
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        assert "/api/warehouse/refresh" not in line
-
-    def test_the_cause_no_ship_can_reach_is_named_first(self):
-        """A comment Postgres keeps and DuckDB lost: the parser reads DuckDB,
-        so re-parsing and re-shipping cannot clear it, and a reader who tried
-        them first would conclude the check is broken."""
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        comment = line.index("manager_comment")
-        assert comment < line.index("meta.mirror_state")
-        assert comment < line.index("/api/traffic/refresh")
-
-    def test_each_page_tells_the_reader_the_comment_may_be_missing_in_duckdb(self):
-        """The description is what the diagnostic agent and the digest read.
-        It names the finding that shows the divergence, which must be a
-        condition that exists, and says the parser reads DuckDB."""
-        from core.alerting import REGISTRY
-
-        paged = _findings(
-            missing=1, missing_ids=[1], missing_since=SINCE,
-            stale=1, stale_ids=[2], stale_since=SINCE,
-        )
-        assert [i.check_name for i in paged] == [
-            "pg_order_utm_missing", "pg_order_utm_stale"]
-        for issue in paged:
-            assert "mirror_row_values" in issue.description, issue.check_name
-            assert "reads DuckDB" in issue.description, issue.check_name
-        assert "mirror_row_values" in REGISTRY
+        assert "_parse_in_postgres" in _names_called(endpoint)
+        assert "reparse_router" in _names_called(traffic._parse_in_postgres)
 
     def test_each_name_reads_as_words_in_the_digest(self):
         for name in NAMES:
             assert name in HUMAN_CHECK_NAMES, name
 
 
-class TestTheBackfillIsNotTheCommentsLever:
-    """Why the line offers the copy in `bronze.orders` for a comment DuckDB
-    lost, and not `POST /api/traffic/backfill-utm`, held to the route's own
-    run rather than to a sentence about it.
-
-    After a purge, DuckDB's INSERT stored the NULL KeyCRM's payload carried.
-    The backfill re-fetches that same field from KeyCRM, skips an empty one,
-    and still ends green — so a reader who followed it would see success and
-    the same page next morning. The descriptions say so; if the route ever
-    learns to restore from `bronze.orders`, or to say it restored nothing,
-    this fails and they have to move with it.
-    """
-
-    def test_the_line_does_not_offer_it(self):
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        assert "backfill-utm" not in line
-        assert "bronze.orders" in line
-        assert line.index("bronze.orders") < line.index("meta.mirror_state")
-
-    @pytest.mark.asyncio
-    async def test_a_comment_keycrm_serves_as_null_is_skipped_and_the_run_is_green(
-            self, tmp_path):
-        import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from core.duckdb_store import DuckDBStore
-        from web.routes.api import traffic
-
-        store = DuckDBStore(db_path=tmp_path / "purged.duckdb")
-        await store.connect()
-        async with store.connection() as conn:
-            # The order as a purge leaves it: re-inserted with the payload's
-            # NULL, while Postgres kept the comment.
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id, manager_comment) VALUES"
-                " (7, 4, 1, 10.0, TIMESTAMPTZ '2030-06-01 10:00:00+00', 1, NULL)"
-            )
-
-        class _KeyCRM:
-            """Serves the order with the same NULL it served the sync."""
-
-            async def paginate(self, *_a, **_k):
-                yield [{"id": 7, "manager_comment": None}]
-
-        scheduler = MagicMock()
-        scheduler._heavy_job_lock = asyncio.Lock()
-        ship = AsyncMock(return_value={"orders_shipped": 0})
-        before = dict(traffic._backfill_status)
-        try:
-            with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
-                 patch("core.keycrm.get_async_client",
-                       AsyncMock(return_value=_KeyCRM())), \
-                 patch("core.scheduler.get_scheduler", return_value=scheduler), \
-                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-                 patch.object(store, "refresh_utm_silver_layer",
-                              new=AsyncMock(return_value=[])), \
-                 patch.object(traffic, "reparse_router", new=AsyncMock()), \
-                 patch("asyncio.sleep", new=AsyncMock()):
-                # Bounded: the run takes a lock per chunk.
-                await asyncio.wait_for(traffic._run_backfill_inner(30), timeout=20)
-            result = dict(traffic._backfill_status["result"])
-            async with store.connection() as conn:
-                (stored,) = conn.execute(
-                    "SELECT manager_comment FROM orders WHERE id = 7").fetchone()
-        finally:
-            traffic._backfill_status.clear()
-            traffic._backfill_status.update(before)
-            await store.close()
-
-        assert stored is None, "the backfill restored a comment KeyCRM does not serve"
-        assert result["db_updated"] == 0
-        assert result["orders_remaining_null"] == 1
-        assert ship.await_count == 0
-        assert result["status"] == "success"
-
-
 class TestUnderThePostgresParse:
     """DN-19 moved the parse into Postgres behind `KS_UTM_PARSE=postgres`, and
-    the review found the levers still written for DuckDB's. The first one,
-    copying the comment into DuckDB, does nothing for a parser that reads
-    bronze.orders. And the reasons said `POST /api/warehouse/refresh` never
-    ships this table, while under own its derivation now ends with the
-    parse. Not a false page while the flag is off; a misleading "→" the day
-    it is flipped. Under the default the words are unchanged (the tests
-    above), which is why the mode picks them rather than a neutral rewrite.
+    the review found the levers still written for DuckDB's: copying the
+    comment into DuckDB does nothing for a parser that reads bronze.orders,
+    and `POST /api/warehouse/refresh`'s derivation now ends with the parse.
+    The mode picked the words until step 14's S14-15 removed it: these are
+    the words, the ones production published under `postgres`.
     """
 
     PG_ROUTES = {"/api/traffic/refresh", "/api/warehouse/refresh"}
 
     @pytest.fixture
-    def postgres_mode(self, monkeypatch):
-        """KS_PG_DERIVE=own and KS_UTM_PARSE=postgres, configured the way
-        `configure_modes` does it — the derivation first — with every cache
-        put back afterwards."""
-        from core import pg_derivation, pg_utm_parse
-
-        before = (pg_derivation._mode, pg_derivation._mode_error,
-                  pg_utm_parse._mode, pg_utm_parse._mode_error)
-        monkeypatch.setenv(pg_derivation.ENV, "own")
-        monkeypatch.setenv(pg_utm_parse.ENV, "postgres")
-        pg_derivation.configure_mode()
-        assert pg_utm_parse.configure_mode() == "postgres"
-        yield
-        (pg_derivation._mode, pg_derivation._mode_error,
-         pg_utm_parse._mode, pg_utm_parse._mode_error) = before
+    def postgres_mode(self):
+        """The modes the words were written for, configured until step 14's
+        S14-15 removed them; a fixture that sets nothing since."""
 
     @staticmethod
     def _routes_exist(named):
@@ -386,7 +259,6 @@ class TestUnderThePostgresParse:
             assert find_endpoint(app, path, "POST") is not None, path
 
     def test_the_line_reads_the_watermark_then_offers_both_refreshes(self, postgres_mode):
-        """Read through the cached mode, as every alert reads it."""
         for name in NAMES:
             (line,) = remediation_for([name])
             assert "DuckDB" not in line and "manager_comment" not in line, name
@@ -424,7 +296,7 @@ class TestUnderThePostgresParse:
         paged = order_utm_completeness_findings(
             _row(missing=1, missing_ids=[1], missing_since=SINCE,
                  stale=1, stale_ids=[2], stale_since=SINCE),
-            grace_minutes=SILVER_GRACE_MINUTES, parsed_in_postgres=True)
+            grace_minutes=SILVER_GRACE_MINUTES)
         assert [i.check_name for i in paged] == [
             "pg_order_utm_missing", "pg_order_utm_stale"]
         for issue in paged:
@@ -443,21 +315,24 @@ class TestUnderThePostgresParse:
     def test_in_flight_waits_for_the_derivation_not_the_tick(self):
         (issue,) = order_utm_completeness_findings(
             _row(in_flight=2, in_flight_ids=[5, 6]),
-            grace_minutes=SILVER_GRACE_MINUTES, parsed_in_postgres=True)
+            grace_minutes=SILVER_GRACE_MINUTES)
         assert issue.severity is Severity.INFO
         assert "DuckDB's tick" not in issue.description
         assert "next derivation" in issue.description
 
     @pytest.mark.asyncio
-    async def test_the_job_passes_the_mode(self, postgres_mode, monkeypatch):
-        """The findings are pure and take the mode as an argument; the job is
-        what reads it. Without this the words above would be reachable only
-        from a test."""
+    async def test_the_job_files_these_words(self, postgres_mode, monkeypatch):
+        """The findings are pure; the job is what reaches them. Without this
+        the words above would be reachable only from a test."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from core import mirror_reconciliation as mr
 
         monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        # A Postgres to compare against (`configured()`), never reached: the
+        # pool is a mock. Without it the check stands down and the test read
+        # the DSN of whatever environment it ran in.
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://unused@127.0.0.1:1/none")
 
         async def _fake_row(conn, *, now, grace_minutes, max_samples):
             return _row(missing=1, missing_ids=[7], missing_since=SINCE)

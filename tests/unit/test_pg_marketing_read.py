@@ -1,8 +1,10 @@
-"""Which engine answers `/marketing`, and the two shapes that had to be bridged.
+"""The `/marketing` statements, and the two shapes that had to be bridged.
 
-The numbers are `tests/integration/test_marketing_two_engines.py`'s job. What
-is proved here is the wiring and the two places where this port is not a table
-rename:
+The numbers are `tests/integration/test_marketing_two_engines.py`'s job,
+against a real Postgres; that the router asks Postgres and nothing else since
+step 14's S14-05 is `tests/unit/test_read_routers_postgres_only.py`'s. What
+is proved here is the statements and the two places where this port is not a
+table rename:
 
   * **the channel figures**, where the two Golds genuinely differ in shape —
     DuckDB names a channel by writing a column, Postgres carries `source_id`
@@ -17,64 +19,28 @@ rename:
 from __future__ import annotations
 
 import ast
-import asyncio
-import re
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core import pg_marketing_read
 from core.duckdb_store import DuckDBStore
-from core.sql_dialect import DUCKDB, POSTGRES, marketing_period_measures
+from core.sql_dialect import POSTGRES, marketing_period_measures
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
 WINDOW = (date.today() - timedelta(days=30), date.today())
-TIMEOUT_S = 20
-
-
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_READ_MARKETING", raising=False)
-        assert pg_marketing_read.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-        assert pg_marketing_read.enabled() is True
-
-    def test_a_typo_raises(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_MARKETING", "postgress")
-        with pytest.raises(ValueError, match="KS_READ_MARKETING"):
-            pg_marketing_read.enabled()
-
-    def test_it_is_a_separate_switch_from_reports(self, monkeypatch):
-        """Two tabs that read different things must be able to roll back
-        separately: `/reports` reads only Silver, this one Gold and the goals
-        as well."""
-        from core import pg_reports_read
-
-        monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-        monkeypatch.delenv("KS_READ_REPORTS", raising=False)
-        assert pg_marketing_read.enabled() is True
-        assert pg_reports_read.enabled() is False
 
 
 class TestTheTwoGoldShapes:
     """The one hole in this port that is not a table name."""
 
     def test_both_render_eleven_items_in_one_order(self):
-        for dialect in (DUCKDB, POSTGRES):
-            items = [i for i in marketing_period_measures(dialect).split(",\n")]
-            assert len(items) == 11, (dialect.name, len(items))
-
-    def test_duckdb_reads_the_channel_columns(self):
-        sql = marketing_period_measures(DUCKDB)
-        for column in ("instagram_revenue", "telegram_revenue", "shopify_revenue",
-                       "instagram_orders", "telegram_orders", "shopify_orders"):
-            assert column in sql
-        assert "source_id" not in sql, "DuckDB's Gold has no such dimension"
+        """One shape since step 14's S14-07, whose DuckDB branch — a column
+        per channel — went with the last DuckDB body carrying the hole."""
+        items = [i for i in marketing_period_measures(POSTGRES).split(",\n")]
+        assert len(items) == 11, len(items)
 
     def test_postgres_reads_the_source_dimension(self):
         sql = marketing_period_measures(POSTGRES)
@@ -156,53 +122,22 @@ class TestNothingGoesRoundTheRouter:
             assert "self.connection()" not in body, f"{name} still opens DuckDB"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", ("get_marketing_report_by_dates",
-                                      "get_promocode_analytics"))
-    async def test_it_returns_rather_than_hanging(self, tmp_path, monkeypatch, name):
-        """The store lock is not reentrant and a nested acquisition hangs
-        rather than raising, so a timeout is the only assertion that catches
-        it."""
-        monkeypatch.delenv("KS_READ_MARKETING", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"m-{name}.duckdb")
-        await store.connect()
-        try:
-            await asyncio.wait_for(getattr(store, name)(*WINDOW), timeout=TIMEOUT_S)
-        finally:
-            await store.close()
+    async def test_every_statement_goes_to_postgres(self, tmp_path, monkeypatch):
+        """The period figures, the brands and the target line — the goal read
+        included, whose branch on chain 7a went with the DuckDB tail — reach
+        Postgres, whatever `KS_READ_MARKETING` says, on a store whose
+        connection is a trap."""
+        monkeypatch.setenv("KS_READ_MARKETING", "duckdb")   # not read any more
+        store = DuckDBStore()
 
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "m.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_marketing_read.fetch",
-                       new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-                out = await store.get_marketing_report_by_dates(*WINDOW)
-            assert out["general_sales"]["current"]["revenue"] == 0
-        finally:
-            await store.close()
+        def boom(*_a, **_k):
+            raise AssertionError("the marketing read reached for DuckDB")
 
-    @pytest.mark.asyncio
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
-        self, tmp_path, monkeypatch,
-    ):
-        monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "m2.duckdb")
-        await store.connect()
-        try:
-            def boom(*_a, **_k):
-                raise AssertionError("the marketing read reached for DuckDB")
-
-            with patch.object(type(store), "connection", boom), \
-                 patch("core.pg_marketing_read.fetch",
-                       new=AsyncMock(return_value=[(0,) * 11])) as fetch:
-                await store.get_marketing_report_by_dates(*WINDOW)
-            sent = " ".join(c.args[0] for c in fetch.await_args_list)
-            assert "gold.daily_revenue" in sent
-            assert "silver.order_lines" in sent
-            assert "app.revenue_goals" in sent
-        finally:
-            await store.close()
+        with patch.object(type(store), "connection", boom), \
+             patch("core.pg_marketing_read.fetch",
+                   new=AsyncMock(return_value=[(0,) * 11])) as fetch:
+            await store.get_marketing_report_by_dates(*WINDOW)
+        sent = " ".join(c.args[0] for c in fetch.await_args_list)
+        assert "gold.daily_revenue" in sent
+        assert "silver.order_lines" in sent
+        assert "app.revenue_goals" in sent

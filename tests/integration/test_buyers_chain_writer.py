@@ -59,8 +59,7 @@ async def stores(tmp_path, monkeypatch):
     for reader in READERS:
         monkeypatch.setenv(reader, "postgres")
     monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-    store = DuckDBStore(db_path=tmp_path / "buyers-chain.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -68,7 +67,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _verdicts(pool):
@@ -78,9 +76,6 @@ async def _verdicts(pool):
             "decided_at FROM app.buyer_gender ORDER BY buyer_id")}
 
 
-async def _duckdb_buyers(store) -> int:
-    async with store.connection() as conn:
-        return conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
 
 
 class TestABuyerLandsWithItsContactsAndItsVerdict:
@@ -99,7 +94,6 @@ class TestABuyerLandsWithItsContactsAndItsVerdict:
         assert [r["buyer_id"] for r in contacts] == [1, 2]
         verdicts = await _verdicts(pool)
         assert verdicts[1]["gender"] == "f" and verdicts[2]["gender"] == "m"
-        assert await _duckdb_buyers(store) == 0, "DuckDB was written under the flag"
         assert chain_latch.latched(chain.CHAIN)
 
     @pytest.mark.asyncio

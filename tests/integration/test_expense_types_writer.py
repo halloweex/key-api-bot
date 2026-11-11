@@ -12,7 +12,6 @@ synthetic; the shapes are the parse's.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -71,8 +70,7 @@ async def stores(tmp_path, monkeypatch):
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
-    store = DuckDBStore(db_path=tmp_path / "expense_types.duckdb")
-    await store.connect()
+    store = DuckDBStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -80,7 +78,6 @@ async def stores(tmp_path, monkeypatch):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
-    await store.close()
 
 
 async def _pg_rows(pool):
@@ -89,10 +86,6 @@ async def _pg_rows(pool):
             f"SELECT id, name, alias, is_active FROM {TABLE} ORDER BY id")]
 
 
-async def _duck_rows(store):
-    async with store.connection() as conn:
-        return [tuple(r) for r in conn.execute(
-            "SELECT id, name, alias, is_active FROM expense_types ORDER BY id").fetchall()]
 
 
 async def _owners(pool):
@@ -108,7 +101,6 @@ class TestTheWriter:
         assert await store.upsert_expense_types(_payload()) == 27
 
         assert len(await _pg_rows(pool)) == 27
-        assert await _duck_rows(store) == [], "DuckDB was written under the flag"
         assert chain_latch.latched(chain.CHAIN)
         assert await _owners(pool) == {TABLE: chain_latch.latched_at(chain.CHAIN)}
 
@@ -135,68 +127,59 @@ class TestTheWriter:
                 f"SELECT mirrored_at FROM {TABLE} WHERE id = 1") > first
 
 
+# What DuckDB's own writer stored for `_payload()` — `(id, name, alias,
+# is_active)` — recorded on the commit before step 14's S14-09 (d544144c),
+# which deleted that writer. In that run Postgres stored the same rows
+# (rule 9: the literal is DuckDB's answer, proved equal to Postgres's).
+DUCKDB_ANSWERED = [
+    [1, 'Витрата 1', 'cost_1', True],
+    [2, 'Alias For 2', 'alias_for_2', True],
+    [3, 'Bare Kind 3', None, True],
+    [4, 'Витрата 4', 'cost_4', True],
+    [5, 'Alias For 5', 'alias_for_5', False],
+    [6, 'Bare Kind 6', None, True],
+    [7, 'Витрата 7', 'cost_7', True],
+    [8, 'Alias For 8', 'alias_for_8', True],
+    [9, 'Bare Kind 9', None, True],
+    [10, 'Витрата 10', 'cost_10', False],
+    [11, 'Alias For 11', 'alias_for_11', True],
+    [12, 'Bare Kind 12', None, True],
+    [13, 'Витрата 13', 'cost_13', True],
+    [14, 'Alias For 14', 'alias_for_14', True],
+    [15, 'Bare Kind 15', None, False],
+    [16, 'Витрата 16', 'cost_16', True],
+    [17, 'Alias For 17', 'alias_for_17', True],
+    [18, 'Bare Kind 18', None, True],
+    [19, 'Витрата 19', 'cost_19', True],
+    [20, 'Alias For 20', 'alias_for_20', False],
+    [21, 'Bare Kind 21', None, True],
+    [22, 'Витрата 22', 'cost_22', True],
+    [23, 'Alias For 23', 'alias_for_23', True],
+    [24, 'Bare Kind 24', None, True],
+    [25, 'Витрата 25', 'cost_25', False],
+    [26, 'Alias For 26', 'alias_for_26', True],
+    [27, 'Bare Kind 27', None, True]
+]
+
+
 class TestTheNamesAreTheDuckDBPaths:
     @pytest.mark.asyncio
     async def test_on_the_27_row_fixture_every_path_names_every_type_alike(self, stores):
-        """Three writes of one payload — DuckDB's own, the hourly copy of it
-        into Postgres, and this chain's direct write — must agree on every
-        name, alias and flag. The parse runs once, before the routing; this is
-        what a second copy of it would break."""
-        from core.pg_operational import replicate_operational
-
+        """This chain's write must name every type, alias and flag as DuckDB's
+        own write of the same payload did. The parse runs once, before the
+        writer; this is what a second copy of it would break. Until S14-09
+        the two writes ran side by side here; DuckDB's is a literal since."""
         store, pool, env = stores
-        await store.upsert_expense_types(_payload())               # flag off: DuckDB
-        duck = await _duck_rows(store)
-        shipped = await replicate_operational(store)
-        assert "error" not in shipped, shipped
-        via_shipper = await _pg_rows(pool)
-
-        async with pool.acquire() as conn:
-            await conn.execute(f"DELETE FROM {TABLE}")
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await store.upsert_expense_types(_payload())               # flag on: Postgres
+        await store.upsert_expense_types(_payload())               # Postgres
         direct = await _pg_rows(pool)
 
-        assert len(duck) == 27
-        assert direct == via_shipper == duck
+        assert len(DUCKDB_ANSWERED) == 27
+        assert [list(r) for r in direct] == DUCKDB_ANSWERED
         names = {r[0]: r[1] for r in direct}
         assert names[1] == "Витрата 1"
         assert names[2] == "Alias For 2"                  # a key with an alias
         assert names[3] == "Bare Kind 3"                  # a key without one
         assert not any(n.startswith("dictionaries.") for n in names.values())
-
-
-class TestTheReadFlagComesFirst:
-    @pytest.mark.asyncio
-    async def test_without_it_the_full_sync_writes_duckdb_and_the_hourly_copy_ships_it(
-        self, stores,
-    ):
-        """The review's reproduction on real stores: the flag on, the read flag
-        off, and a full sync bringing a type KeyCRM added after the flip. It
-        lands where the page reads, the chain does not latch, and the hourly
-        copy carries it to Postgres as it always has."""
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        env.delenv("KS_READ_EXPENSES")
-        env.setenv(chain.WRITE_ENV, "postgres")
-
-        stats = await _full_sync(store, _payload(
-            extra=[{"id": 28, "name": "Новий тип"}]))
-
-        assert stats["expense_types"] == 28 and "expense_types_error" not in stats
-        assert len(await _duck_rows(store)) == 28
-        assert await _pg_rows(pool) == []
-        assert not chain_latch.latched(chain.CHAIN)
-        assert await _owners(pool) == {}
-        assert 28 in [r["id"] for r in await store.get_expense_types()]
-        async with store.connection() as conn:
-            assert conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = ?", [KEY]).fetchone()
-
-        shipped = await replicate_operational(store)
-        assert "error" not in shipped, shipped
-        assert shipped["replaced"][TABLE] == 28
 
 
 # ─── the full sync, and the hourly copy that must leave it alone ─────────────
@@ -225,20 +208,15 @@ async def _full_sync(store, payload):
     async def _get_client():
         return client
 
-    with patch.object(sync_module, "get_async_client", new=_get_client), \
-         patch.object(sync_module, "mirror_categories", new=AsyncMock()), \
-         patch.object(sync_module, "mirror_products", new=AsyncMock()), \
-         patch.object(store, "refresh_warehouse_layers", new=AsyncMock()):
+    with patch.object(sync_module, "get_async_client", new=_get_client):
         return await service.full_sync(days_back=30)
 
 
-class TestTheFullSyncAndTheHourlyReplace:
+class TestTheFullSync:
     @pytest.mark.asyncio
-    async def test_under_the_flag_a_full_sync_writes_postgres_and_the_replace_leaves_it(
-        self, stores,
-    ):
-        from core.pg_operational import replicate_operational
-
+    async def test_under_the_flag_a_full_sync_writes_postgres(self, stores):
+        """Until step 14's S14-13 the hourly replace was run after it, and
+        left the table alone; the replace went with `core.pg_operational`."""
         store, pool, env = stores
         env.setenv(chain.WRITE_ENV, "postgres")
 
@@ -246,123 +224,25 @@ class TestTheFullSyncAndTheHourlyReplace:
 
         assert stats["expense_types"] == 27 and "expense_types_error" not in stats
         assert len(await _pg_rows(pool)) == 27
-        assert await _duck_rows(store) == []
         # The watermark went with the chain, and DuckDB's copy did not move.
         async with pool.acquire() as conn:
             assert await conn.fetchval(
                 "SELECT value FROM meta.chain_watermarks WHERE key = $1", KEY)
-        async with store.connection() as conn:
-            assert conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = ?", [KEY]).fetchone() is None
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert TABLE in result.get("stood_down", []), result
-        assert TABLE not in result["replaced"], result
-        assert len(await _pg_rows(pool)) == 27, "the hourly replace rolled it back"
-
-    @pytest.mark.asyncio
-    async def test_control_once_released_the_same_replace_wipes_it(self, stores):
-        """Proves the replace above is real, so the survival is the stand-down
-        working and not a run that quietly did nothing. Clearing the variable
-        is not enough since DN-06: both copies of the latch have to go."""
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await _full_sync(store, _payload())
-        env.delenv(chain.WRITE_ENV)
-        chain_latch.release(chain.CHAIN)
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert result["replaced"][TABLE] == 0
-        assert await _pg_rows(pool) == [], "the replace out of an empty DuckDB did not run"
-
-
-# ─── the way back ────────────────────────────────────────────────────────────
-
-
-class TestCopyBack:
-    @pytest.mark.asyncio
-    async def test_the_round_trip_lands_postgres_names_in_duckdb_and_releases(self, stores):
-        from core.chain_transfer import copy_back
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        # The ordinary state: DuckDB writes, the hourly copy ships.
-        await store.upsert_expense_types(_payload())
-        assert "error" not in await replicate_operational(store)
-
-        # The flip: a later full sync renames one type and adds one, in
-        # Postgres only.
-        env.setenv(chain.WRITE_ENV, "postgres")
-        stamp = datetime(2026, 9, 27, 2, 5, tzinfo=timezone.utc)
-        await store.upsert_expense_types(_payload(
-            renamed={4: "Реклама"},
-            extra=[{"id": 28, "name": "dictionaries.expense_types.gift_wrap"}]))
-        await store.set_last_sync_time("expense_types", stamp)
-        assert chain_latch.latched(chain.CHAIN)
-        postgres = await _pg_rows(pool)
-        assert len(postgres) == 28
-
-        result = await copy_back(store, chain, dry_run=False)
-
-        assert result["findings"] == [], result["findings"]
-        assert result["released"] is True
-        assert result["rows"] == {TABLE: 28}
-        assert await _duck_rows(store) == postgres
-        async with store.connection() as conn:
-            assert conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = ?", [KEY]
-            ).fetchone()[0] == stamp.isoformat()
-        assert not chain_latch.latched(chain.CHAIN)
-        assert await _owners(pool) == {}
-        async with pool.acquire() as conn:
-            assert await conn.fetchval(
-                "SELECT count(*) FROM meta.chain_watermarks WHERE key = $1", KEY) == 0
-
-        # The flag decides again, the hourly copy resumes, and it writes
-        # exactly what came back.
-        env.setenv(chain.WRITE_ENV, "duckdb")
-        shipped = await replicate_operational(store)
-        assert "error" not in shipped, shipped
-        assert shipped["replaced"][TABLE] == 28
-        assert await _pg_rows(pool) == postgres
-
-    @pytest.mark.asyncio
-    async def test_a_type_only_duckdb_holds_is_refused_before_anything_is_written(
-        self, stores,
-    ):
-        """A full replace would delete it, and a comparison run afterwards
-        could not see what the copy destroyed — so the handover asks first."""
-        from core.chain_transfer import CopyBackRefused, copy_back
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        await store.upsert_expense_types(_payload())
-        assert "error" not in await replicate_operational(store)
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await store.upsert_expense_types(_payload(renamed={4: "Реклама"}))
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO expense_types (id, name) VALUES (99, 'only here')")
-        before = await _duck_rows(store)
-
-        with pytest.raises(CopyBackRefused):
-            await copy_back(store, chain, dry_run=False)
-
-        assert await _duck_rows(store) == before
-        assert chain_latch.latched(chain.CHAIN)
 
 
 # ─── the standing watch, on the real table ───────────────────────────────────
 
 
 class TestTheStandingWatch:
+    @pytest.fixture(autouse=True)
+    def _this_chain_alone(self, monkeypatch):
+        """Since S14-00 every chain is watched; this chain's reader, alone."""
+        from core import pg_chain_invariants as inv
+
+        every = inv.watched_chains
+        monkeypatch.setattr(inv, "watched_chains", lambda: {
+            name: at for name, at in every().items() if name == chain.CHAIN})
+
     async def _findings(self, pool):
         from core import pg_chain_invariants as inv
 

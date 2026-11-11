@@ -9,8 +9,6 @@ defect was structural — which call sites hold the lock.
 """
 import inspect
 
-import pytest
-
 from core import scheduler as scheduler_module
 from web.routes.api import admin
 
@@ -34,13 +32,20 @@ def test_the_manual_status_refresh_holds_the_lock():
 
 def test_the_manual_warehouse_refresh_holds_the_lock():
     """Interleaved with the two-minute job it produced false validation
-    failures and raced its fired/resolved notices."""
-    assert "_heavy_job_lock" in _source(admin, "refresh_warehouse")
+    failures and raced its fired/resolved notices. Since step 14's S14-15
+    the route runs the Postgres derivation alone, which takes the lock
+    itself (`_run_pg_derivation`), so the route must not hold it around the
+    call — `asyncio.Lock` is not reentrant."""
+    src = _source(admin, "refresh_warehouse")
+    assert "_derive_postgres_now" in src and "_heavy_job_lock" not in src
+    assert "_run_pg_derivation" in _source(admin, "_derive_postgres_now")
+    derive = inspect.getsource(scheduler_module.BackgroundScheduler._run_pg_derivation)
+    assert "async with self._heavy_job_lock:" in derive
 
 
-def test_the_backfill_route_passes_the_lock():
-    src = inspect.getsource(admin)
-    assert "lock=get_scheduler()._heavy_job_lock" in src
+# `test_the_backfill_route_passes_the_lock` held `POST
+# /api/mirror/backfill/orders` to handing the backfill the lock, until step
+# 14's S14-13 deleted the route with `core.pg_backfill`.
 
 
 def test_every_repair_caller_passes_the_lock():
@@ -53,10 +58,11 @@ def test_every_repair_caller_passes_the_lock():
         assert "lock=self._heavy_job_lock" in src[idx: idx + 200], line
 
 
-def test_every_writer_of_duckdb_orders_outside_core_answers_for_the_lock():
-    """Walks `web/` and `scripts/` for a function that executes an UPDATE
-    against `orders`, and requires it to say how it is serialised against the
-    sync.
+def test_every_writer_of_orders_outside_core_answers_for_the_lock():
+    """Walks `web/` and `scripts/` for a function that writes the orders — an
+    UPDATE against `orders` in its SQL, or a call of chain 3's
+    `restore_manager_comments` — and requires it to say how it is serialised
+    against the sync.
 
     Named subjects were tried and are the reason this exists: the two
     `manager_comment` backfills (DN-17) updated DuckDB directly and neither
@@ -65,10 +71,19 @@ def test_every_writer_of_duckdb_orders_outside_core_answers_for_the_lock():
     subjects only ever guards the ones you were already thinking about —
     the same lesson as `docker rm -v` in the gate scripts.
 
+    **Since step 14's S14-09 neither backfill writes DuckDB**: both restore
+    the comments through `pg_orders_write.restore_manager_comments`, chain
+    3's, and their DuckDB `UPDATE orders` went with `_orders_in_postgres`.
+    The rule carries over unchanged to that call — it is the same write,
+    racing the same sync, in the store the sync now writes.
+
     Two acceptable answers, because the callers are genuinely different:
     `_heavy_job_lock` for anything running inside the web process, and
-    `core.pg_backfill.WEB_MUST_BE_STOPPED` for a CLI, where that lock would be
-    a fresh object guarding nothing.
+    `core.pg_orders_write.WEB_MUST_BE_STOPPED` (in `core.pg_backfill` until
+    step 14's S14-13) for a CLI, where that lock would be
+    a fresh object guarding nothing. The answer may be given by the function
+    or by a function of the same module that calls it (the CLI warns in
+    `backfill_utm`, its entry point, and writes in the helper it calls).
 
     **The two are looked for differently, and the difference is the point.**
     The lock is `async with get_scheduler()._heavy_job_lock`, an attribute the
@@ -78,7 +93,7 @@ def test_every_writer_of_duckdb_orders_outside_core_answers_for_the_lock():
     function makes**, which is what `logger.warning(...)` is. Two drafts were
     weaker: the first read `ast.get_source_segment`, so a comment three
     paragraphs below the deleted line still said the words; the second
-    collected `ast.alias` nodes, so the bare `from core.pg_backfill import
+    collected `ast.alias` nodes, so the bare `from core.pg_orders_write import
     WEB_MUST_BE_STOPPED` that a deleted warning leaves behind was accepted as
     proof the operator had been told. Both were found by mutation, the second
     by the review's.
@@ -89,7 +104,8 @@ def test_every_writer_of_duckdb_orders_outside_core_answers_for_the_lock():
 
     repo = pathlib.Path(__file__).resolve().parents[2]
     LOCK, WARNING = "_heavy_job_lock", "WEB_MUST_BE_STOPPED"
-    updates = re.compile(r"update\s+orders\s+set", re.IGNORECASE)
+    WRITER = "restore_manager_comments"
+    updates = re.compile(r"update\s+(?:bronze\.)?orders\s+set", re.IGNORECASE)
 
     def _evaluated(node):
         """Every identifier the function evaluates. Imports are not evaluation
@@ -116,6 +132,10 @@ def test_every_writer_of_duckdb_orders_outside_core_answers_for_the_lock():
                         out.add(sub.attr)
         return out
 
+    def _calls(node):
+        return {(n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", ""))
+                for n in ast.walk(node) if isinstance(n, ast.Call)}
+
     found = []
     for root in ("web", "scripts"):
         for path in sorted((repo / root).rglob("*.py")):
@@ -137,100 +157,40 @@ def test_every_writer_of_duckdb_orders_outside_core_answers_for_the_lock():
                 n for n in ast.walk(tree)
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             ]
-            for node in ast.walk(tree):
-                if (not isinstance(node, ast.Constant)
-                        or not isinstance(node.value, str)
-                        or id(node) in docstrings
-                        or not updates.search(" ".join(node.value.split()))):
-                    continue
-                # Every function containing the statement, innermost to
+            writes = [
+                node for node in ast.walk(tree)
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and id(node) not in docstrings
+                    and updates.search(" ".join(node.value.split())))
+                or (isinstance(node, ast.Call)
+                    and WRITER in {getattr(node.func, "attr", None),
+                                   getattr(node.func, "id", None)})
+            ]
+            for node in writes:
+                # Every function containing the write, innermost to
                 # outermost — a nested helper may be wrapped by the caller
-                # that takes the lock.
+                # that takes the lock — and, to a fixed point, every function
+                # of the module that calls one of them.
                 enclosing = [
                     f for f in functions
                     if f.lineno <= node.lineno <= (f.end_lineno or f.lineno)
                 ]
-                assert enclosing, f"{path.name}: UPDATE orders outside any function"
-                evaluated = set().union(*(_evaluated(f) for f in enclosing))
-                told = set().union(*(_passed_to_a_call(f) for f in enclosing))
+                assert enclosing, f"{path.name}: an orders write outside any function"
+                answering = list(enclosing)
+                while True:
+                    names = {f.name for f in answering}
+                    more = [f for f in functions
+                            if f not in answering and _calls(f) & names]
+                    if not more:
+                        break
+                    answering += more
+                evaluated = set().union(*(_evaluated(f) for f in answering))
+                told = set().union(*(_passed_to_a_call(f) for f in answering))
                 found.append(f"{path.name}:{node.lineno}")
                 assert LOCK in evaluated or WARNING in told, (
-                    f"{path.name}:{node.lineno} updates DuckDB orders without "
-                    f"taking the heavy-job lock, and without passing "
-                    f"{WARNING} to anything that would put it in front of an "
-                    f"operator"
+                    f"{path.name}:{node.lineno} writes orders without taking "
+                    f"the heavy-job lock, and without passing {WARNING} to "
+                    f"anything that would put it in front of an operator"
                 )
 
-    assert len(found) >= 2, f"no UPDATE orders statements walked: {found}"
-
-
-@pytest.mark.asyncio
-async def test_the_comment_backfill_route_ships_what_it_changed_under_the_lock(tmp_path):
-    """Behavioural twin of the walk above, for the route DN-17 rewired.
-
-    Three claims, none of which the structural test can make: the KeyCRM
-    fetch is outside the lock, the DuckDB write and the ship are inside one
-    hold of it, and the ship carries only the orders whose comment actually
-    moved. That last one is not a nicety — `bronze.orders` upserts
-    `manager_comment` as `COALESCE(EXCLUDED, stored)`, so an order that
-    already had a comment has nothing to carry, and shipping it anyway would
-    be a version written for a row that did not change.
-    """
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from core.duckdb_store import DuckDBStore
-    from web.routes.api import traffic
-
-    lock = asyncio.Lock()
-    seen = {}
-
-    class Client:
-        async def paginate(self, *_a, **_k):
-            seen["fetch_locked"] = lock.locked()
-            # Both orders come back from KeyCRM with a comment; only one of
-            # them is missing it here.
-            yield [{"id": 1, "manager_comment": "utm_source=fb"},
-                   {"id": 2, "manager_comment": "utm_source=tg"}]
-
-    async def ship(_store, ids, *, version_kind, **_kw):
-        seen["ship_locked"] = lock.locked()
-        seen["shipped"] = list(ids)
-        seen["kind"] = version_kind
-        return {"orders_shipped": len(ids)}
-
-    store = DuckDBStore(db_path=tmp_path / "analytics.duckdb")
-    await store.connect()
-    try:
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id, manager_comment) VALUES"
-                " (1, 1, 1, 10.0, TIMESTAMPTZ '2026-08-01 10:00:00+00', 1, 'kept'),"
-                " (2, 1, 1, 10.0, TIMESTAMPTZ '2026-08-01 10:00:00+00', 2, NULL)"
-            )
-        scheduler = MagicMock()
-        scheduler._heavy_job_lock = lock
-        before = dict(traffic._backfill_status)
-        with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
-             patch("core.keycrm.get_async_client", AsyncMock(return_value=Client())), \
-             patch("core.scheduler.get_scheduler", return_value=scheduler), \
-             patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-             patch.object(traffic, "reparse_router", new=AsyncMock()), \
-             patch("asyncio.sleep", new=AsyncMock()):
-            # Bounded for the reason the reconciliation test below is: a lock
-            # taken and never released is a deadlock, and a test that hangs on
-            # one fails nobody in time.
-            await asyncio.wait_for(traffic._run_backfill_inner(1), timeout=20)
-        traffic._backfill_status.clear()
-        traffic._backfill_status.update(before)
-
-        async with store.connection() as conn:
-            stored = dict(conn.execute(
-                "SELECT id, manager_comment FROM orders ORDER BY id").fetchall())
-    finally:
-        await store.close()
-
-    assert seen == {"fetch_locked": False, "ship_locked": True,
-                    "shipped": [2], "kind": "backfill"}
-    assert stored == {1: "kept", 2: "utm_source=tg"}
+    assert len(found) >= 2, f"no orders write walked: {found}"

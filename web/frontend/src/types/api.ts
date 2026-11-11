@@ -75,6 +75,8 @@ export interface RevenueTrendResponse {
   revenue: number[]
   orders: number[]
   measure?: RevenueMeasure
+  /** Present only for month buckets: labels are `MM.YYYY`, no comparison. */
+  granularity?: 'monthly'
   comparison?: {
     labels: string[]
     revenue: number[]
@@ -262,17 +264,15 @@ export interface ExpenseType {
   alias: string
 }
 
+// `duckdb` (DuckDB's row counts) left the answer in step 14's S14-17, and
+// `duckdb_switch` (KS_DUCKDB and the opens it refused, never declared here) in
+// S14-18. The page reads `version` alone (SidebarRail); `status` is `healthy`
+// since S14-17.
 export interface HealthResponse {
   status: string
+  degraded_by: string[]
   version: string
   uptime_seconds: number
-  duckdb: {
-    status: string
-    orders?: number
-    products?: number
-    categories?: number
-    db_size_mb?: number
-  }
 }
 
 // ─── Goal Types ─────────────────────────────────────────────────────────────
@@ -1106,6 +1106,57 @@ export interface TrafficOrganicResponse {
   channels: OrganicChannel[]
 }
 
+/** Orders, revenue and the people behind them; people do not add up across rows. */
+export interface PixelOnlyBucket extends TrafficMetric {
+  buyers: number
+}
+
+/**
+ * Where a pixel-only buyer's very first order came from. `group` is that
+ * order's traffic type folded the way the tab folds it: `organic` (channel is
+ * an `OrganicChannelKey`), `paid` (channel is the tab's platform), or
+ * `manager`, `pixel_only`, `unknown` (channel `opencart`, `exhibition` or
+ * `unknown`).
+ */
+export interface PixelOnlyFirstChannel extends PixelOnlyBucket {
+  group: 'organic' | 'paid' | 'manager' | 'pixel_only' | 'unknown'
+  channel: string
+  /** Of `buyers`, those whose pixel order is on their first day. */
+  new_buyers: number
+}
+
+export interface TrafficPixelOnlyResponse {
+  period: { start: string; end: string }
+  totals: PixelOnlyBucket
+  new: PixelOnlyBucket
+  returning: PixelOnlyBucket
+  first_channels: PixelOnlyFirstChannel[]
+}
+
+/** The site's purchase funnel from GA4 (`/api/traffic/funnel`): people per step. */
+export type FunnelStep = 'entered' | 'viewed_product' | 'added_to_cart' | 'began_checkout' | 'purchased'
+export type FunnelCounts = Record<FunnelStep, number>
+export type FunnelWindow = 'current' | 'previous' | 'year_ago'
+export type FunnelTrafficType = 'cold' | 'warm' | 'other'
+
+export interface FunnelRow extends Record<FunnelWindow, FunnelCounts> {
+  key: string
+  type?: FunnelTrafficType
+}
+
+export interface TrafficFunnelResponse {
+  periods: Record<FunnelWindow, { start: string; end: string }>
+  /** The first day GA4 still holds funnel data for (it keeps 14 months). */
+  earliest: string
+  steps: FunnelStep[]
+  total: Record<FunnelWindow, FunnelCounts>
+  by_type: FunnelRow[]
+  by_channel: FunnelRow[]
+  by_device: FunnelRow[]
+  stale: boolean
+  fetched_at: string
+}
+
 export interface TrafficTrendDay {
   date: string
   paid_orders: number
@@ -1404,14 +1455,16 @@ export interface MarketingSourceRow {
 export interface MarketingReportResponse {
   start_date: string
   end_date: string
-  prev_start_date: string
-  prev_end_date: string
-  yoy_start_date: string
-  yoy_end_date: string
+  // All four dates and both periods are null when the period has nothing
+  // before it (`all_time`, `core/filters.has_comparison`).
+  prev_start_date: string | null
+  prev_end_date: string | null
+  yoy_start_date: string | null
+  yoy_end_date: string | null
   general_sales: {
     current: MarketingMonthStats
-    previous: MarketingMonthStats
-    year_ago: MarketingMonthStats
+    previous: MarketingMonthStats | null
+    year_ago: MarketingMonthStats | null
     monthly_goal: number | null
   }
   brands: MarketingBrandRow[]

@@ -111,8 +111,7 @@ class TestApiRequiresAuth:
         "/api/products/intel/summary",
         "/api/reports/marketing-summary",
         "/api/health/detailed",
-        "/api/duckdb/stats",
-        # The health router's only public path is /api/health itself; the four
+        # The health router's only public path is /api/health itself; the three
         # operational reads beside it must each still refuse an anonymous
         # caller. What they disclose to an *approved* one is a separate
         # question, answered in tests/integration/test_health_router_disclosure.py.
@@ -126,7 +125,12 @@ class TestApiRequiresAuth:
         "/api/revenue/forecast/tune",
         "/api/expenses",
         "/api/stocks/snapshot/refresh",
+        # The sync levers by both their names (step 14's S14-17): the alias
+        # under /api/duckdb/ is the same function and must refuse the same.
+        "/api/sync/sync-buyers",
         "/api/duckdb/sync-buyers",
+        "/api/sync/resync",
+        "/api/duckdb/resync",
     ]
 
     @pytest.mark.parametrize("path", PROTECTED_GETS)
@@ -197,6 +201,18 @@ class TestAuthorizationStructure:
         assert route is not None
         assert require_admin in _deps(path), \
             f"{path} dropped require_admin — admin→user downgrade regression"
+
+    @pytest.mark.parametrize("method,path", [
+        ("POST", "/api/revenue/forecast/train"),
+        ("POST", "/api/revenue/forecast/tune"),
+        ("GET", "/api/revenue/forecast/evaluate"),
+    ])
+    def test_the_forecast_levers_require_admin(self, method, path):
+        """Each holds the single ML thread for minutes. `evaluate` was gated
+        on the dashboard tab until 2026-11-04, so any viewer could start a
+        walk-forward cross-validation five times an hour."""
+        assert require_admin in _deps(path, method), \
+            f"{method} {path} is not admin-only"
 
     def test_admin_endpoint_403_for_non_admin(self, client, monkeypatch):
         """A logged-in viewer (not a hardcoded admin) is forbidden from /api/jobs."""

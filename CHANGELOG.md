@@ -2,6 +2,393 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.333
+
+- fix(sync): a status refresh KeyCRM did not answer is a failed run (A10 follow-up)
+- fix(ga4): at most six GA4 requests in flight, and no lock outlives its users (A20 follow-up)
+- fix(repairs): a half-written order Postgres refuses is ledgered as refused (A15 follow-up)
+- fix(orders): a window the parse could read none of fails the order step (AR-02)
+- fix(inventory): refuse only what Postgres refuses; a float quantity is written (AR-01)
+- test(keycrm): the still-truncated case cannot be split by luck (A16)
+- chore(types): import Sequence in the scheduler; the baseline shrinks by 7
+- docs(scheduler): the weekly compaction is history; the disk page stops warning off it (A24)
+- fix(customers): a repeat customer's lifespan is counted in Kyiv days (A22 part, L2-10)
+- fix(health): the detailed and DQ health routes publish a failure's class, not its text (A21, L3-06)
+- fix(ga4): a cached funnel answer never waits behind another period's fetch (A20, L3-05)
+- fix(dq): reconciliation pages get their recheck button; the DQ body shows the layers written (A19: L4-07, L4-06)
+- fix(soak): D1, D3 and the UTM gap stop excusing two retired windows (A18, L4-10)
+- fix(clickhouse): a stalled archive copy is a finding; Gold's failure is Gold's; the codec round-trips (A17: L2-02, L2-12)
+- fix(keycrm): a listing stopped at its page cap says so; the order window splits (A16, L1-08)
+- fix(repairs): outages are not "served empty", refusals are ledgered, stale fetches are not written (A15: L1-07, L1-10, L1-12)
+- fix(web): oversized ids, impossible dates and amounts are 400/422, not 500 (A14: L3-01, L3-02, L3-03, L3-10)
+- fix(derivation): wait for the layer lock a bounded time, under the heavy lock (A13, L2-11)
+- fix(search): a Meilisearch that does not answer is a counted 503, not "nothing found" (A12, L3-04)
+- fix(canary): a probe that read nothing announces nothing resolved (A11, L4-02)
+- fix(sync): KeyCRM's failures are KeyCRM's, and the products step contains them (A10, L1-02)
+- fix(orders): a healthy order step clears the failure it recorded (A9, L4-03)
+- fix(reconciliation): four defects of the 05:30 job (A8: L4-01, L4-05, L4-09, L2-03)
+- fix(sms): the roster CSV never hands a spreadsheet a formula a customer typed (A7, L3-07)
+- fix(cohorts): a retail cohort's M0 revenue counts its retail orders only (A6, L2-04)
+- fix(inventory): one bad stock row costs that row; a failed fetch is a failure (A4)
+- fix(reconciliation): re-fetch orders Postgres holds wrong, not only those it lacks (A3, L1-04)
+- fix(clickhouse): restore the None-safe key on missing and extra (A2)
+- fix(clickhouse): compare two engines' Gold when a day differs in both grains (A2, L2-01)
+- fix(orders): one unparseable KeyCRM order is refused by id, not the page (A1, L1-01)
+
+
+## 3.0.332
+
+- docs: the archive's verdict says what the ids-diff ship already says
+- WIP: B3 — reflow read_owed's docstring
+- WIP: B4 — the disk watchdog's compaction comments, as history
+- WIP: B3 — docstrings that described DuckDB or a reader that does not exist
+- WIP: B2 — CLAUDE.md: four sales types, source 5 in revenue, the exhibition branch first
+- WIP: B1 — CLAUDE.md: the two kinds of backfill miss, and the archive's ids-diff
+
+
+## 3.0.331
+
+- The forecast badge is what the trend's bars add up to
+- The trend's forecast is the stored one, for every period
+
+
+## 3.0.330
+
+- One cost row per SKU in the SMS audience and its results
+
+
+## 3.0.329
+
+- A period for the whole history, with nothing set beside it
+
+
+## 3.0.328
+
+- WIP: S14-20 — CLAUDE.md: the test baseline taken again, the date
+- WIP: S14-20 — CLAUDE.md: stages 4-5 compressed into the history of the DuckDB exit, the Postgres schema, the refusal as it is; the week's runbook tests hold its history
+- WIP: S14-20 — comments in the files that name DuckDB only in text say it was, not is (appendix B)
+- WIP: S14-20 — the review minors of S14-11..S14-18: the managers fake, the doors' shared limits, the lever and soak texts, the host scripts' and docs' stale pointers
+- WIP: S14-20 — the slow-writer derivation proved on a synthetic mixin, the write-flag walk reads bare and indirect reads, the compose grace and the twins' comments say what is left
+- WIP: S14-20 — deploy/daily_soak.sh, Postgres only: no gate on a flag, a latch, KS_DUCKDB or a flip time; the agent routes warehouse_pg:* and its runbooks know DuckDB is an archive
+- WIP: S14-20 — docstrings say what the latch's two directions are since S14-12; the expenses refusal names the dump; the hourly job's display name
+
+
+## 3.0.327
+
+
+
+## 3.0.326
+
+- Share bars start on one line, and a small share is a bar, not a dot
+- WIP: S14-18 review — the boot and the hourly job keep their proofs
+- WIP: S14-18 review — rule 5's guard reads Python and shell, deploy/ included
+- WIP: S14-19 — CLAUDE.md: the images carry no DuckDB, and what holds it
+- WIP: S14-19 — the images carry no duckdb: an AST walk of every code tree, every module imported with the driver absent, the dev line pinned
+- WIP: S14-19 — duckdb out of requirements.txt and requirements.lock, its own line in requirements-dev.txt
+
+
+## 3.0.325
+
+- WIP: S14-18 — the basedpyright baseline shrinks by 53 with the store's DuckDB half
+- WIP: S14-18 — the suite without the store's DuckDB half: Postgres for the projections' proofs, DuckDB-only pins gone
+- WIP: S14-18 — the host tests without the deleted scripts, the heartbeat pinned, the stub tested, CLAUDE.md
+- WIP: S14-18 — the store without DuckDB, the switch gone, the compaction and snapshot deleted
+
+
+## 3.0.324
+
+- Traffic in three sections, and a funnel that reads as one
+
+
+## 3.0.323
+
+- WIP: S14-17 — the baseline shrinks by one with the canary's FATAL reader
+- WIP: S14-17 — CLAUDE.md and the data-engineering agent: health without DuckDB's blocks, the levers under /api/sync/
+- WIP: S14-17 — the sync levers under /api/sync/, the /api/duckdb/ names kept as aliases
+- WIP: S14-17 — /api/health without DuckDB's block, ledger and FATAL; the canary without the FATAL's page
+
+
+## 3.0.322
+
+- WIP: S14-16 — step 13's rule-3 test expects KS_DUCKDB alone from configure_modes
+- WIP: S14-16 — the catalogue chain's fixtures stop setting the deleted mode
+- WIP: S14-16 — junk, or nothing, in KS_READ_FALLBACK changes no start and no block
+- WIP: S14-16 — CLAUDE.md: the read-fallback section says only the refusal is left
+- WIP: S14-16 — the kept handlers say what refuses them now
+- WIP: S14-16 — the tests that asked the mode, the counts or the retired keys follow them out
+- WIP: S14-16 — the three integration modules over a live Postgres, without the mode
+- WIP: S14-16 — the five read-fallback test modules hold the refusal alone
+- WIP: S14-16 — a read whose engine fails is refused, and nothing else is left of the fallback
+
+
+## 3.0.321
+
+- WIP: S14-15 — the slow endpoints write no DuckDB, the warehouse lever's lock is the derivation's, and two tests made hermetic
+- WIP: S14-15 — the rollback lever's tests over the two emptied lists go
+- WIP: S14-15 — the baseline shrinks by 23 with the deleted step-13 code
+- WIP: S14-15 — CLAUDE.md: step 13's, the UTM parse's and the jobs' paragraphs say the switch is code
+- WIP: S14-15 — the tests follow step 13's switch, the UTM ship and the DuckDB rebuild out
+- WIP: S14-15 — the conftest's warehouse-writer reset goes with its module
+- WIP: S14-15 — step 13 as code with no mode: warehouse_cutover, the UTM ship and KS_PG_DERIVE go
+- WIP: S14-15 — DuckDB's UTM parse over the golden fixtures, captured before its side goes (rule 9)
+
+
+## 3.0.320
+
+- WIP: S14-14 — the walks' non-vacuity examples and the digest's sample names follow the scan out
+- WIP: S14-14 — the twins' judges narrow their groups; the baseline shrinks by 14
+- WIP: S14-14 — two attribution verdicts carried to the twin; the logger test kept
+- WIP: S14-14 — CLAUDE.md: the integrity scan's paragraphs say it reads Postgres only
+- WIP: S14-14 — the tests follow the integrity scan to Postgres
+- WIP: S14-14 — the integrity scan reads Postgres only; the DuckDB checks, their stand-downs and the pairing go
+
+
+## 3.0.319
+
+- WIP: S14-13 — the entry walk and the gender tick test follow the copies out
+- WIP: S14-13 — the re-gated checks ask for a Postgres, held by a test that names its own DSN
+- WIP: S14-13 — the baseline shrinks with the deleted shippers
+- WIP: S14-13 — step 13's expenses lever names the dump, not the deleted backfill; the walks' lists drop the deleted modules
+- WIP: S14-13 — soak's E1, I1, B1, H1, M1 and O1 go with the copies; CLAUDE.md's paragraphs on the mirror, the copies and the walks
+- WIP: S14-13 — unit tests follow the copies out; frozen literals where the copy was the only statement of a pairing
+- WIP: S14-13 — tests of the deleted copies, mirrors and backfills go; the writers' proofs stay
+- WIP: S14-13 — the mirrors, backfills and hourly copies out of DuckDB go; the hourly job is the gender and the bot
+
+
+## 3.0.318
+
+- WIP: S14-12 review — an unreadable marker directory is blindness, and the markers are read from disk
+
+
+## 3.0.317
+
+- WIP: S14-12 — the baseline shrinks with the deleted comparisons
+- WIP: S14-12 — the chain invariants' blindness no longer names the daily comparison
+- WIP: S14-12 — D8 reads ClickHouse and the Postgres-alone checks; CLAUDE.md's paragraphs on the comparisons and the latch
+- WIP: S14-12 — canary, digest, lever and invariant tests without the reconciliation layer; the latch is not a reader group
+- WIP: S14-12 — tests follow the comparisons out: the job's isolation, the repair from the Postgres arm, the latch on the chain invariants
+- WIP: S14-12 — tests of the deleted comparisons go; the store's extractor is run against Postgres
+- WIP: S14-12 — the DuckDB comparisons and the reconciliation layer go; the latch check moves to the chain invariants
+
+
+## 3.0.316
+
+- fix(dq): freshness_orders judges when the order step last wrote
+
+
+## 3.0.315
+
+- WIP: S14-11 — the copy's not-read-out-of-DuckDB proof stays, without its flag
+- WIP: S14-11 — the last DuckDB-writer pins go; a lost needs_postgres comes back
+- WIP: S14-11 — baseline shrinks with the deleted branches; CLAUDE.md says no flag is read
+- WIP: S14-11 — the last DuckDB-routing helpers go; two-engine buyers test against DuckDB's captured answer
+- WIP: S14-11 — remaining unit tests follow the flagless registry
+- WIP: S14-11 — invariants dated by owner rows in tests; registry walk roots on chain_tables
+- WIP: S14-11 — two-engine goal and forecast tests compare against DuckDB's captured answer
+- WIP: S14-11 — more tests follow the flagless chains
+- WIP: S14-11 — tests follow: flags read by nothing, the sweep latches nothing
+- WIP: S14-11 — consumers ask no chain; health and canary lose the flag checks
+- WIP: S14-11 — inventory writers are Postgres alone
+- WIP: S14-11 — chains collapse; registry reduced (consumers in progress)
+
+
+## 3.0.314
+
+- The margin fingerprint check reads the per-SKU cost #346 introduced
+- WIP: S14-10 review — health's comment says where data_quality comes from now
+- WIP: S14-10 review — the beat's H6 note claims only what H6 read
+- WIP: S14-10 review — the ledger's three tries take ~12 s in all, not apart
+- WIP: S14-10 — three walks count the doors the journal no longer opens
+- WIP: S14-10 — CLAUDE.md says the shadow went
+- WIP: S14-10 — the integration journals are read from Postgres
+- WIP: S14-10 — the jobs' tests stop routing the journal back to DuckDB
+- WIP: S14-10 — the journal's statements are proved on Postgres
+- WIP: S14-10 — the four doors' tests follow them to Postgres
+- WIP: S14-10 — chains 9, 10, 11a, 11b write Postgres alone; the shadow goes
+- WIP: S14-10 — the digest's run labels are pinned before the zone collapses
+
+
+## 3.0.313
+
+- The funnel asks GA4 only for the days it holds
+- Margin: the three defects, on a fixture that has them
+- GA4's funnel horizon rolls by the day, not the month
+- Margin: one cost row per SKU, the real root category, no 503 on a zero-sum window
+- Traffic tab shows the site's purchase funnel from GA4
+- WIP: S14-09 review — the deleted mirror and backfill walk in the past tense
+- WIP: S14-09 review — two sentences of the last commit read straight
+- WIP: S14-09 review — what the PR deleted is spoken of in the past tense
+- WIP: S14-09 review — chains 3, 6, 6a's writers are proved with no flag
+- WIP: S14-09 — the canary still reads chain 3's health entry, end to end
+- WIP: S14-09 — the typecheck baseline shrinks 987 → 975
+- WIP: S14-09 — the walks follow, and CLAUDE.md says what went
+- WIP: S14-09 — tests follow chains 3, 6, 6a to Postgres
+- WIP: S14-09 — chains 3, 6, 6a write Postgres with no routing left
+- WIP: step14-int — CLAUDE.md says the preview refuses without KS_PG_DSN alone
+- WIP: step14-int — the preview's host pin goes once S14-07 removes the branch it named
+
+
+## 3.0.312
+
+- chore: bump version to 3.0.311 [skip ci]
+- chore: bump version to 3.0.310 [skip ci]
+- Forecast evaluation is an admin lever, like train and tune
+- The manual-expenses list reads its window like every other route
+- The CSV summary lists only the products its filters chose
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-03: the DuckDB tools nothing schedules are deleted
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
+## 3.0.311
+
+- chore: bump version to 3.0.310 [skip ci]
+- Forecast evaluation is an admin lever, like train and tune
+- The manual-expenses list reads its window like every other route
+- The CSV summary lists only the products its filters chose
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-03: the DuckDB tools nothing schedules are deleted
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
+## 3.0.310
+
+- The manual-expenses list reads its window like every other route
+- S14-02: the fingerprint and tool tests pass on fastapi 0.141 and in the gate
+- Step 14 S14-02: archive tools on a pinned image, API fingerprints, the soak without closed clocks
+
+
+## 3.0.309
+
+- WIP: S14-08 review 2: the docstring says which tests the mutation passed
+- WIP: S14-08 review 2: the access routers are held to the hole they render
+- WIP: S14-08 review: the access docs say what the code does now
+- WIP: S14-08 review: CLAUDE.md claims only what the walks catch
+- WIP: S14-08 review: the /sms and access guards read attributes and helpers
+- WIP: S14-08 review: the routers are held to their syntax, not to a grep
+- WIP: S14-08 the entry-points walk: seventeen /sms and access routes no longer reach the file
+- WIP: S14-08 two docstrings stop naming a switch nothing reads
+- WIP: S14-08 CLAUDE.md lines rewrapped
+- WIP: S14-08 the type baseline shrinks by the five DuckDB branches
+- WIP: S14-08 CLAUDE.md paragraphs
+- WIP: S14-08 the conftest store helpers go
+- WIP: S14-08 audience groups two-engine test to golden literals
+- WIP: S14-08 SMS segments two-engine test to golden literals
+- WIP: S14-08 dashboard users two-engine test to golden literals
+- WIP: S14-08 the write-chain walk exempts the store helpers as Postgres's
+- WIP: S14-08 store-switch literal in the fates manifest test; the unported guard's tests
+- WIP: S14-08 dashboard users store tests
+- WIP: S14-08 access tests on Postgres
+- WIP: S14-08 send guards, webhook and DLR replay on Postgres
+- WIP: S14-08 delivery tests on Postgres
+- WIP: S14-08 freeze, results, groups tests on Postgres
+- WIP: S14-08 audience tests on Postgres
+- WIP: S14-08 /sms and access routers on Postgres alone
+
+
+## 3.0.308
+
+- WIP: S14-07 merge review — CLAUDE.md says what the writer allowance covers
+- WIP: S14-07 merge review — the writer allowance is judged per function, not per module
+- WIP: S14-07 merge review — CLAUDE.md's guard sentence reads as four short ones
+- WIP: S14-07 merge — CLAUDE.md's new sentence names its subject
+- WIP: S14-07 merge — the sweep's docstring names the third set
+- WIP: S14-07 merge — CLAUDE.md says what holds S14-07's readers to their routers
+- WIP: S14-07 merge — a clean helper's ClickHouse calls are allowed; the sweep names a mutation it sees
+- WIP: S14-07 merge — the round-the-router walk holds S14-07's files; its pins read the tree
+- WIP: S14-07 merge — the base's guards read ClickHouse and hold S14-07's routes
+- WIP: S14-07 review 2: misconfigured is no longer said to be what is refused
+- WIP: S14-07 review 2: chain 3's paragraph keeps its last_sync_meilisearch sentence
+- WIP: S14-07 review: texts the removed routing left behind say what is true
+- WIP: S14-07 review: chain 7a's failed read is pinned as a counted 503 and a page
+- S14-07 CLAUDE.md says what a lost DSN line is for the readers with no fallback
+- WIP: S14-07 the no-DSN HTTP case starts from an unasked expenses latch
+- WIP: S14-07 the typecheck baseline shrinks with the DuckDB tails (1090 -> 1084)
+- WIP: S14-07 CLAUDE.md says the third set reads one engine
+- WIP: S14-07 the dialects lose what has no user left
+- WIP: S14-07 the goal tests' DuckDB history seed goes with its last user
+- WIP: S14-07 the walks over switches, goal reads and ways in
+- WIP: S14-07 the date-params sweep reads /expenses from Postgres
+- WIP: S14-07 the consumers walk derives the two left
+- WIP: S14-07 the fallback walks know no switch is left
+- WIP: S14-07 the consumers of a refusal meet the routers that refuse
+- WIP: S14-07 the readers' tests follow one engine
+- WIP: S14-07 the routers' unit tests hold one engine
+- WIP: S14-07 the report tests seed Postgres' Gold and Silver
+- WIP: S14-07 two-engine tests become literals; the goal tests seed Postgres
+- WIP: S14-07 the third set of read routers reads one engine
+- WIP: S14-07 golden literals recorded on the base
+
+
+## 3.0.307
+
+- WIP: S14-06 merge review — rule 5's engine names are a required argument
+- WIP: S14-06 merge review — CLAUDE.md says what rule 5 reads now
+- WIP: S14-06 merge review — the allowance drops only what rule 5 judges
+- WIP: S14-06 merge review — rule 5 reads every spelling of an engine call
+- WIP: S14-06 merge — CLAUDE.md says what holds the dashboard to its routers
+- WIP: S14-06 merge — S14-05's round-the-router guards hold the dashboard too
+- WIP: S14-06 the managers-chain walk takes the module's own name however it is bound
+- WIP: S14-06 no present-tense line names the Gold readers' gate or fallback
+- WIP: S14-06 the managers-chain walk resolves names and walks every production tree
+- WIP: S14-06 the date-params sweep and the switch walk know the dashboard reads Postgres
+- WIP: S14-06 the typecheck baseline shrinks with the DuckDB tails (1100 -> 1090)
+- WIP: S14-06 keep _comparable for the assistant's two-engine test
+- WIP: S14-06 CLAUDE.md says the dashboard reads Postgres alone
+- WIP: S14-06 two-engine dashboard tests become literals; the routers' contract
+- WIP: S14-06 the dashboard's unit tests read Postgres alone
+- WIP: S14-06 the fallback walks know the dashboard's routers refuse
+- WIP: S14-06 the dashboard's routers read Postgres alone
+- WIP: S14-06 dashboard golden literals recorded on the base
+
+
+## 3.0.306
+
+- WIP: S14-05 merge review — the pixel-only filters and route are held by tests
+- WIP: S14-05 merge review — the traffic reader's docstring counts seven methods
+- WIP: S14-05 merge — name the walk's synthetic cases
+- WIP: S14-05 merge — the tab guards hold a reader that goes round the router
+- Step 14 S14-05: six read routers read Postgres alone
+
+
+## 3.0.305
+
+- The runbook check reads the checkout, so it runs where the checkout is
+- Step 14 S14-04: the way back into DuckDB is deleted
+
+
+## 3.0.304
+
+- Keep a bounded log of /api requests on the host
+
+
+## 3.0.303
+
+- A NUL in retail-status's note is the edge's 400 now; its two tests say so
+- Bad input is a 400 naming the field, not a 503 and a page
+
+
+## 3.0.302
+
+- Step 14 S14-01: the shared warehouse SQL and constants live in neutral modules
+
+
+## 3.0.301
+
+- Traffic tab says who the pixel-only buyers are
+- A hung cancel is judged by what the answer did not wait for, not a stopwatch
+- The two preflights are judged by the order they were asked in, not a stopwatch
+
+
+## 3.0.300
+
+- S14-00: every test starts with no SyncService singleton
+- Step 14 S14-00: every mode and verdict is the value production publishes
+- test: the journal readers' Kyiv rendering follows the day's offset
+- test: read job cadences at fixed instants, not the wall clock
+- SMS audience tests read today when they run, not at import
+
+
 ## 3.0.299
 
 - /tg-bot: where newcomers drop off, and after which press people leave

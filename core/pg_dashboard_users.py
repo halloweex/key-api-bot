@@ -9,8 +9,8 @@ side, that contention took a path from 124 req/s to 38.
 
 WHY THE WRITER MOVES WITH THE READER
 
-`replicate_bot_state` and `replicate_sms` copy a table and let the reader
-switch later. That shape is wrong here. `_resolve_session` re-reads status and
+`replicate_bot_state` and `replicate_sms` (until step 14's S14-13) copy a
+table and let the reader switch later. That shape is wrong here. `_resolve_session` re-reads status and
 role on **every** request, and that read *is* revocation: the session cookie is
 a stateless signed token that cannot be withdrawn, so taking access away means
 the next request finds the account no longer approved. Reading an hourly
@@ -18,10 +18,10 @@ replica would hand a revoked account up to an hour more, which trades a lock
 for a security hole.
 
 There is exactly one writer — the web container, through the admin page — so
-moving it costs less than making a lagging copy safe. The replication below
-exists to carry the 24 existing rows across before the switch, and stands down
-after it, for `replicate_sms`' reason: a full replace out of a frozen DuckDB
-would undo every approval made since.
+moving it costs less than making a lagging copy safe. A replication carried the
+24 existing rows across before the switch and stood down after it, for
+`replicate_sms`' reason: a full replace out of a frozen DuckDB would undo every
+approval made since. Both copies went in step 14's S14-13.
 
 WHAT IS DELIBERATELY NOT DONE HERE
 
@@ -34,9 +34,7 @@ between engines and changes neither.
 from __future__ import annotations
 
 import logging
-import os
-import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -50,27 +48,12 @@ USER_COLUMNS: Tuple[str, ...] = (
     "last_activity", "denial_count", "created_at", "allowed_features",
 )
 
-_ENV = "KS_USER_STORE"
-_VALID = ("duckdb", "postgres")
-
-
-def user_store_is_postgres() -> bool:
-    """Which store owns the dashboard's user list.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule, and it matters more here
-    than anywhere it has been applied before: a typo in the variable that
-    decides where *authorisation* is read from must stop the container, not
-    quietly point it at a copy that is about to go stale and start answering
-    "approved" for someone who is not.
-    """
-    value = os.getenv(_ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{_ENV}={value!r} — unknown store. Expected one of {_VALID}; a "
-            f"typo in the variable that decides who may open the dashboard "
-            f"must stop the container rather than pick a store for you."
-        )
-    return value == "postgres"
+# `user_store_is_postgres()` stood here until step 14's S14-18: which store
+# owned the dashboard's user list, Postgres, a constant since S14-00 —
+# production since 2026-09-07. Its last reader, the table-fate manifest's
+# `duckdb_written`, went in S14-18. `KS_USER_STORE` is read by nothing; keep
+# `postgres` in `.env` for the images before step 14, which read an absent
+# value as `duckdb` — a 401 for everybody.
 
 
 # ─── the pool, thinly ────────────────────────────────────────────────────────
@@ -108,61 +91,3 @@ async def execute(sql: str, params: Sequence[Any] = ()) -> None:
     await require_revision()
     async with pool.acquire() as conn:
         await conn.execute(sql, *params)
-
-
-# ─── carrying the list across, once ──────────────────────────────────────────
-
-
-async def replicate_dashboard_users(store) -> Dict[str, Any]:
-    """Copy DuckDB's `users` into Postgres. Never raises.
-
-    Full replace, one transaction. The table is 24 rows, an approval can be
-    *deleted* by nothing but is a decision either way, and a replace makes "in
-    DuckDB and not in Postgres" mean exactly one thing: lost.
-
-    Refuses to run once Postgres is the writer — `replicate_sms`' guard, and
-    the same reasoning with a sharper edge: an hourly full replace out of a
-    frozen DuckDB would roll back every approval and every role change made
-    since the switch, once an hour, looking healthy in between.
-    """
-    from core.mirror_reconciliation import configured
-
-    if not configured():
-        return {"skipped": "KS_PG_DSN is not set"}
-    if user_store_is_postgres():
-        return {"skipped": f"{_ENV}=postgres — DuckDB is no longer the writer"}
-
-    started = time.monotonic()
-    try:
-        from core.pg import get_pool, require_revision
-        from core.pg_landing import _WATERMARK_OK
-
-        pool = await get_pool()
-        await require_revision()
-
-        # The DuckDB read and the Postgres round trip are separate blocks: the
-        # store lock is not reentrant and every other reader waits behind it.
-        async with store.connection() as conn:
-            rows = conn.execute(
-                f"SELECT {', '.join(USER_COLUMNS)} FROM users ORDER BY user_id"
-            ).fetchall()
-        rows = [tuple(r) for r in rows]
-
-        placeholders = ", ".join(f"${i}" for i in range(1, len(USER_COLUMNS) + 1))
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(f"DELETE FROM {TABLE}")
-                if rows:
-                    await conn.executemany(
-                        f"INSERT INTO {TABLE} ({', '.join(USER_COLUMNS)}) "
-                        f"VALUES ({placeholders})",
-                        rows,
-                    )
-                await conn.execute(_WATERMARK_OK, TABLE, len(rows))
-
-        elapsed = time.monotonic() - started
-        logger.info("Dashboard users replicated: %d rows in %.3fs", len(rows), elapsed)
-        return {"rows": len(rows), "elapsed_s": round(elapsed, 3)}
-    except Exception as exc:  # noqa: BLE001 — a copy must not take the tick down
-        logger.error("Dashboard user replication failed: %s", exc, exc_info=True)
-        return {"error": f"{type(exc).__name__}: {exc}"}

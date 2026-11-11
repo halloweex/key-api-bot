@@ -57,13 +57,17 @@ lose it inside an hour.
 
 "EXACTLY ONE" IS A LATCH, NOT A VARIABLE
 
-`KS_WRITE_INVENTORY` decides which store writes until the first movement lands
-here; after that the latch does (`core/chain_latch.py`, OD-19 (a)). Setting the
+Since step 14's S14-11 no variable decides anything: this build writes
+Postgres, and `KS_WRITE_INVENTORY` is a name only (revision 0035's comments
+and an image from before step 14 read it). Until then it decided which store
+wrote until the first movement landed here; after that the latch did (`core/chain_latch.py`, OD-19 (a)). Setting the
 flag back would otherwise let DuckDB's `seq_stock_movements_id` reissue ids the
 Postgres sequence has already handed out — one movement with two names, which
 is the rule revision 0030 restated. Every writer below latches once a
 connection is out of the pool and before its first write, and
-`scripts/chain_copy_back.py` is the only way back.
+`scripts/chain_copy_back.py` was the only way back (deleted in step 14's
+S14-04; the way back since is an image from before step 14,
+`core.rollback_lever`).
 
 FAILURE POLICY: THIS ONE RAISES
 
@@ -77,11 +81,9 @@ these functions propagate, and the caller decides.
 from __future__ import annotations
 
 import logging
-import os
-import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from typing import (
-    Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+    Any, Dict, FrozenSet, List, Optional, Sequence, Tuple,
 )
 
 from core import chain_latch
@@ -89,7 +91,6 @@ from core.landing_rows import (
     OFFER_COLUMNS,
     STOCK_MOVEMENT_COLUMNS,
     OfferRow,
-    StockMovement,
     plan_stock_movements,
 )
 from core.sql_dialect import POSTGRES, sku_status_rebuild_select
@@ -143,35 +144,6 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_offers", "last_sync_stocks")
 # guard before either has committed. Held for the transaction and released by
 # COMMIT or ROLLBACK, so a writer that dies cannot leave it behind.
 CHAIN_LOCK_KEY = 0x6B73_0000_0000_0001
-
-
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_INVENTORY` alone says.
-
-    An unrecognised value raises, `KS_BOT_STORE`'s rule: a typo in the one
-    variable that decides which store owns the only record of a stock change
-    must stop the process, not quietly pick the other one. Since DN-01 it stops
-    this chain and nothing else.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read: once a movement has been recorded here, the id allocator has moved
-    and no environment variable may move it back. See `core/chain_latch.py`.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres()
 
 
 def _latch() -> str:
@@ -246,8 +218,175 @@ async def _ensure_movement_id_floor(conn) -> None:
     )
 
 
+# ─── What Postgres would refuse ──────────────────────────────────────────────
+#
+# Asked of every row before the latch, chain 3's and chain 4's rule: one row
+# Postgres refuses — a quantity KeyCRM served as null, a price over
+# NUMERIC(12,2) — used to raise inside the one transaction that writes the
+# whole catalogue of stock, so every offer kept its old quantity and no
+# movement was recorded, every hour, until somebody read the log (L1-06).
+# Revision 0013's and 0029's column types.
+#
+# Only what Postgres refuses, never more: a row refused here is a row main
+# wrote, so the refusals below are asyncpg 0.31's own encoders written out,
+# and `tests/integration/test_inventory_refusal_matches_postgres.py` holds
+# each verdict to what the server answers for the same value. What they miss
+# reaches Postgres and is written row by row (`_is_data_error`); what they
+# refuse that Postgres would take is a stock row lost every hour (AR-01: a
+# quantity of 3.0, which asyncpg writes as 3, was refused as "not an integer").
+
+_INT32 = (-2 ** 31, 2 ** 31 - 1)
+_MONEY = (12, 2)
+
+
+def _as_int4(value: Any) -> int:
+    """The integer asyncpg sends for `value` into an INTEGER column, or the
+    error it raises (TypeError, ValueError, OverflowError). Its encoder
+    (`pgproto/codecs/int.pyx`, `int4_encode`): anything but an int whose type
+    has `__int__` goes through `int()` — so 3.0 is 3, 1.5 is 1, True is 1 and
+    NaN or an infinity raise — and the result through `PyLong_AsLong`, which
+    takes an `__index__` and refuses everything else, text included."""
+    import operator
+
+    if type(value) is not int and hasattr(type(value), "__int__"):
+        value = int(value)
+    return operator.index(value)
+
+
+def _int_refusal(column: str, value: Any) -> Optional[str]:
+    if value is None:
+        return f"{column} is NULL"
+    try:
+        sent = _as_int4(value)
+    except (TypeError, ValueError, OverflowError):
+        return f"{column} is a {type(value).__name__} asyncpg cannot send as an integer"
+    if not _INT32[0] <= sent <= _INT32[1]:
+        return f"{column} is outside its integer range"
+    return None
+
+
+def _text_refusal(column: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return f"{column} is a {type(value).__name__}, not text"
+    if "\x00" in value:
+        return f"{column} carries a NUL byte"
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return f"{column} is not valid UTF-8"
+    return None
+
+
+def _money_refusal(column: str, value: Any) -> Optional[str]:
+    """Why Postgres would refuse `value` in a nullable NUMERIC(12,2).
+
+    asyncpg sends `Decimal(value)` for anything that is not a Decimal (its
+    `numeric_encode_binary`): a numeric string is its number, True is 1, a
+    float is its exact binary value. The server then rounds half away from
+    zero to two places and refuses what does not fit, an infinity included —
+    and stores NaN, which `pg_numeric.refusal` refuses on purpose for the
+    chains that compared with DuckDB's DECIMAL. Not this one: main wrote a NaN
+    cost, so the refusal does not lose the row for it."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    if value is None:
+        return None
+    try:
+        sent = value if isinstance(value, Decimal) else Decimal(value)
+    except (TypeError, ValueError, ArithmeticError):
+        return f"{column} is a {type(value).__name__} asyncpg cannot send as a number"
+    if sent.is_nan():
+        return None
+    precision, scale = _MONEY
+    digits = precision - scale
+    # The magnitude first: `quantize` raises on a number too long for the
+    # decimal context (1e30), and an infinity has no magnitude to compare.
+    if sent.is_infinite() or sent.adjusted() >= digits or abs(sent.quantize(
+            Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP)) >= 10 ** digits:
+        return f"{column} does not fit NUMERIC({precision},{scale})"
+    return None
+
+
+def stock_refusal(stock: Any) -> Optional[str]:
+    """Why Postgres would refuse this stock row, or None. A missing quantity
+    or reserve is 0, as it always was; one KeyCRM served as null is not."""
+    if not isinstance(stock, dict):
+        return f"the row is a {type(stock).__name__}, not an object"
+    return (_int_refusal("id", stock.get("id"))
+            or _int_refusal("quantity", stock.get("quantity", 0))
+            or _int_refusal("reserve", stock.get("reserve", 0))
+            or _text_refusal("sku", stock.get("sku"))
+            or _money_refusal("price", stock.get("price"))
+            or _money_refusal("purchased_price", stock.get("purchased_price")))
+
+
+def offer_refusal(row: OfferRow) -> Optional[str]:
+    """Why Postgres would refuse this offer, or None (`bronze.offers.product_id`
+    is NOT NULL)."""
+    return (_int_refusal("id", row.id) or _int_refusal("product_id", row.product_id)
+            or _text_refusal("sku", row.sku))
+
+
+def _is_data_error(exc: BaseException) -> bool:
+    """A value one row carries (SQLSTATE class 22), not a writer that is
+    broken — chain 3's rule."""
+    import asyncpg
+
+    return isinstance(exc, asyncpg.DataError)
+
+
+def _kept(rows: Sequence[Any], refusal, what: str, ident) -> List[Any]:
+    kept, refused = [], []
+    for row in rows:
+        why = refusal(row)
+        if why:
+            refused.append((ident(row), why))
+        else:
+            kept.append(row)
+    if refused:
+        logger.error("inventory: %d %s row(s) not written to Postgres: %s",
+                     len(refused), what,
+                     "; ".join(f"{i!r}: {w}" for i, w in refused[:20]))
+    return kept
+
+
+def _stock_id(stock: Any) -> Any:
+    return stock.get("id") if isinstance(stock, dict) else None
+
+
+def _deduplicated(stocks: Sequence[Any]) -> List[Any]:
+    """One row per offer, the last one given. Two pages fetched in parallel
+    can both carry an offer when the list shifts between the requests, and
+    each copy then planned its own movement off the same stored quantity —
+    one sale of three recorded twice (L1-05)."""
+    by_id: Dict[Any, Any] = {}
+    unkeyed: List[Any] = []
+    for stock in stocks:
+        key = _stock_id(stock)
+        try:
+            by_id.pop(key, None)
+            by_id[key] = stock
+        except TypeError:          # an id that cannot be a key is refused later
+            unkeyed.append(stock)
+    return list(by_id.values()) + unkeyed
+
+
+async def _write_offer_rows(conn, sql: str, rows: Sequence[OfferRow]) -> None:
+    await conn.executemany(sql, [(*r, None) for r in rows])
+    await conn.execute(
+        "UPDATE bronze.offers SET synced_at = now() "
+        "WHERE id = ANY($1::int[])",
+        [r.id for r in rows],
+    )
+
+
 async def upsert_offers(rows: List[OfferRow]) -> int:
     """The offer→product map, from the same parsed rows DuckDB would take."""
+    if not rows:
+        return 0
+    rows = _kept(rows, offer_refusal, "offer", lambda r: r.id)
     if not rows:
         return 0
     from core.pg import get_pool, require_revision
@@ -261,20 +400,38 @@ async def upsert_offers(rows: List[OfferRow]) -> int:
     # one chain, and the column name is the only place that shows.
     sql = _upsert(
         "bronze.offers", OFFER_COLUMNS + ("synced_at",), ("id",))
+    written = 0
     async with pool.acquire() as conn:
         # Inside the acquire, not before it: a wait for a connection that ends
         # in a refused reconnect is a write that never reached Postgres
         # (`_latch`).
         stamp = _latch()
-        async with conn.transaction():
-            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
-            await conn.executemany(sql, [(*r, None) for r in rows])
-            await conn.execute(
-                "UPDATE bronze.offers SET synced_at = now() "
-                "WHERE id = ANY($1::int[])",
-                [r.id for r in rows],
-            )
-    return len(rows)
+        # The whole batch in one transaction; if Postgres refuses a value
+        # nothing above foresaw, the same statements row by row, so one offer
+        # cannot cost the rest.
+        groups: List[List[OfferRow]] = [list(rows)]
+        one_by_one = False
+        while groups:
+            batch = groups.pop(0)
+            try:
+                async with conn.transaction():
+                    await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+                    await _write_offer_rows(conn, sql, batch)
+            except Exception as exc:
+                if not _is_data_error(exc):
+                    raise
+                if not one_by_one:
+                    one_by_one = True
+                    groups = [[r] for r in rows]
+                    logger.warning("inventory: a batch of %d offer(s) was refused "
+                                   "(%s); writing it row by row", len(rows),
+                                   type(exc).__name__)
+                    continue
+                logger.error("inventory: offer %r refused by Postgres: %s",
+                             batch[0].id, type(exc).__name__)
+                continue
+            written += len(batch)
+    return written
 
 
 async def upsert_stocks(stocks: List[Dict[str, Any]]) -> Tuple[int, int]:
@@ -289,71 +446,105 @@ async def upsert_stocks(stocks: List[Dict[str, Any]]) -> Tuple[int, int]:
     """
     if not stocks:
         return 0, 0
+    stocks = _kept(_deduplicated(stocks), stock_refusal, "stock", _stock_id)
+    if not stocks:
+        return 0, 0
     from core.pg import get_pool, require_revision
 
     pool = await get_pool()
     await require_revision()
+    written = moved = 0
     async with pool.acquire() as conn:
         stamp = _latch()
-        async with conn.transaction():
-            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
-            current: Dict[int, Tuple[int, int]] = {
-                r["id"]: (r["quantity"], r["reserve"])
-                for r in await conn.fetch(
-                    "SELECT id, quantity, reserve FROM bronze.offer_stocks")
-            }
-            product_map: Dict[int, Optional[int]] = {
-                r["id"]: r["product_id"]
-                for r in await conn.fetch(
-                    "SELECT id, product_id FROM bronze.offers")
-            }
+        # The whole batch in one transaction; on a value Postgres refuses that
+        # `stock_refusal` could not foresee, row by row, each with its own read
+        # of the previous state, so one offer cannot cost the rest.
+        groups: List[List[Dict[str, Any]]] = [list(stocks)]
+        one_by_one = False
+        while groups:
+            batch = groups.pop(0)
+            try:
+                async with conn.transaction():
+                    await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+                    n = await _write_stock_rows(conn, batch)
+            except Exception as exc:
+                if not _is_data_error(exc):
+                    raise
+                if not one_by_one:
+                    one_by_one = True
+                    groups = [[s] for s in stocks]
+                    logger.warning("inventory: a batch of %d stock row(s) was "
+                                   "refused (%s); writing it row by row",
+                                   len(stocks), type(exc).__name__)
+                    continue
+                logger.error("inventory: stock %r refused by Postgres: %s",
+                             _stock_id(batch[0]), type(exc).__name__)
+                continue
+            written += len(batch)
+            moved += n
+    return written, moved
 
-            movements = plan_stock_movements(
-                stocks, current=current, product_map=product_map)
 
-            # One instant for the whole batch, read from the database rather
-            # than from this process: the movements of one sync happened
-            # together, and a per-row `now()` would spread them across the
-            # statement's execution for no gain.
-            now = await conn.fetchval("SELECT now()")
+async def _write_stock_rows(conn, stocks: List[Dict[str, Any]]) -> int:
+    """The read of the previous state, the plan, the upsert and the movements,
+    on the caller's transaction. Returns the movements recorded."""
+    current: Dict[int, Tuple[int, int]] = {
+        r["id"]: (r["quantity"], r["reserve"])
+        for r in await conn.fetch(
+            "SELECT id, quantity, reserve FROM bronze.offer_stocks")
+    }
+    product_map: Dict[int, Optional[int]] = {
+        r["id"]: r["product_id"]
+        for r in await conn.fetch(
+            "SELECT id, product_id FROM bronze.offers")
+    }
 
-            # `mirrored_at`, not `synced_at` — see `upsert_offers`. Stamped in
-            # the statement rather than by a DDL default, because this table
-            # has none: it was built to RECEIVE the stamp from the replication.
-            await conn.executemany(
-                _upsert(
-                    "bronze.offer_stocks",
-                    ("id", "sku", "price", "purchased_price", "quantity",
-                     "reserve", "mirrored_at"),
-                    ("id",),
-                ),
-                [
-                    (s.get("id"), s.get("sku"), s.get("price"),
-                     s.get("purchased_price"), s.get("quantity", 0),
-                     s.get("reserve", 0), now)
-                    for s in stocks
-                ],
-            )
+    movements = plan_stock_movements(
+        stocks, current=current, product_map=product_map)
 
-            if movements:
-                await _ensure_movement_id_floor(conn)
-                # `id` is omitted — revision 0030's sequence allocates it, and
-                # this is the only writer while the flag says so.
-                #
-                # `recorded_at` and `source` ARE supplied. DuckDB defaults them
-                # (`CURRENT_TIMESTAMP` and `'sync'`); the Postgres table has no
-                # defaults at all, because it was built to receive both from
-                # the replication. A writer that omitted them would record every
-                # movement with a NULL timestamp — and `recorded_at` is what
-                # `sku_inventory_status.last_stock_out_at` reads.
-                await conn.executemany(
-                    _insert(
-                        "app.stock_movements",
-                        STOCK_MOVEMENT_COLUMNS + ("recorded_at", "source"),
-                    ),
-                    [(*m, now, MOVEMENT_SOURCE) for m in movements],
-                )
-    return len(stocks), len(movements)
+    # One instant for the whole batch, read from the database rather
+    # than from this process: the movements of one sync happened
+    # together, and a per-row `now()` would spread them across the
+    # statement's execution for no gain.
+    now = await conn.fetchval("SELECT now()")
+
+    # `mirrored_at`, not `synced_at` — see `upsert_offers`. Stamped in
+    # the statement rather than by a DDL default, because this table
+    # has none: it was built to RECEIVE the stamp from the replication.
+    await conn.executemany(
+        _upsert(
+            "bronze.offer_stocks",
+            ("id", "sku", "price", "purchased_price", "quantity",
+             "reserve", "mirrored_at"),
+            ("id",),
+        ),
+        [
+            (s.get("id"), s.get("sku"), s.get("price"),
+             s.get("purchased_price"), s.get("quantity", 0),
+             s.get("reserve", 0), now)
+            for s in stocks
+        ],
+    )
+
+    if movements:
+        await _ensure_movement_id_floor(conn)
+        # `id` is omitted — revision 0030's sequence allocates it, and
+        # this is the only writer while the flag says so.
+        #
+        # `recorded_at` and `source` ARE supplied. DuckDB defaults them
+        # (`CURRENT_TIMESTAMP` and `'sync'`); the Postgres table has no
+        # defaults at all, because it was built to receive both from
+        # the replication. A writer that omitted them would record every
+        # movement with a NULL timestamp — and `recorded_at` is what
+        # `sku_inventory_status.last_stock_out_at` reads.
+        await conn.executemany(
+            _insert(
+                "app.stock_movements",
+                STOCK_MOVEMENT_COLUMNS + ("recorded_at", "source"),
+            ),
+            [(*m, now, MOVEMENT_SOURCE) for m in movements],
+        )
+    return len(movements)
 
 
 async def rebuild_sku_inventory_status() -> int:
@@ -516,254 +707,14 @@ async def read_snapshot_calendar(
     return first_day, frozenset(r["date"] for r in rows)
 
 
-# ─── Before the flip (DN-24) ─────────────────────────────────────────────────
+# ─── Before the flip (DN-24) — until step 14's S14-11 ───────────────────────
 #
-# Three things have to be true on the day `KS_WRITE_INVENTORY` is switched on,
-# and each used to be a query somebody had to remember to run by hand. They are
-# asked here, together, and published on /api/health as
-# `write_chains.pg_inventory_write.preflight`, so the answer is one look away
-# from the person about to recreate web.
-
-# The six tables' last hourly copy must be younger than this. The flip is a
-# recreate of web, and the margin to the hour is the time it is given to land
-# in before the next stock sync writes DuckDB behind the copy — a row that
-# `scripts/chain_copy_back.py --handover` would then refuse the flip on.
-PREFLIGHT_REPLICATED_WITHIN = timedelta(minutes=50)
-
-# The findings are read out of Postgres' copy of the quality journal, which is
-# itself shipped hourly, and a copy that stopped would keep showing yesterday's
-# clean run for as long as anybody looked. DN-03's limit for that copy, and the
-# same row it reads.
-PREFLIGHT_JOURNAL_COPY_WITHIN = timedelta(minutes=75)
-JOURNAL_COPY = "app.data_quality_runs"
-
-# The comparison whose findings count: `reconcile_operational`, inside the
-# daily `mirror_landing` run. A verdict older than the canary's own limit for
-# that layer is not a verdict about today — `tests/unit/test_inventory_preflip.py`
-# pins the two together.
-OPERATIONAL_LAYER = "mirror_landing"
-PREFLIGHT_VERDICT_WITHIN = timedelta(hours=30)
-
-# Which failures of that run leave chain 1 uncompared. The run holds every
-# comparison of the layer, each in its own try, and when any raises
-# `_run_dq_mirror_landing` sets `error_message` — after every other check has
-# compared and filed — to
-#
-#     "<n> check(s) raised — <check>: <Class>: <text> | <check>: ..."
-#
-# with `setup` as the check for an exception between checks, which skips every
-# check after it. So a failed run is not an uncompared chain: only its own
-# comparison raising, or `setup`, is. `tests/unit/test_inventory_preflip.py`
-# drives the real job, so a renamed check or a reworded message fails there.
-OPERATIONAL_CHECK = "reconcile_operational"
-_RAISED_HEAD = re.compile(r"(\d+) check\(s\) raised — ")
-# The trailing space is looked at, not taken: an exception's text ending in
-# "x: Y:" would otherwise eat the space of the " | " that starts the next entry.
-_RAISED_ENTRY = re.compile(r"(?:^| \| )([a-z_]+): [A-Za-z_]\w*:(?= |$)")
-
-# How many open findings the published answer names. The rest are counted.
-_PREFLIGHT_NAMED = 5
-
-
-def _minutes(delta: timedelta) -> int:
-    return int(delta.total_seconds() // 60)
-
-
-def _raised_checks(error_message: str) -> Optional[List[str]]:
-    """The checks a failed `mirror_landing` run names as raised, in order, or
-    None when its message is not in the job's format.
-
-    It can only err towards blocking. An exception's own text holding
-    " | name: Class:" adds a name that did not raise; a real entry cannot go
-    missing, because the job itself starts each one after "— " or " | ". A
-    message naming fewer entries than its count is not trusted at all.
-    """
-    head = _RAISED_HEAD.match(error_message)
-    if head is None:
-        return None
-    names = [m.group(1) for m in _RAISED_ENTRY.finditer(error_message[head.end():])]
-    if len(names) < int(head.group(1)):
-        return None
-    return list(dict.fromkeys(names))
-
-
-def _uncompared_reason(run_id: int, raised: Optional[List[str]]) -> Optional[str]:
-    """Why a failed run leaves chain 1 uncompared, or None when it does not."""
-    run = f"the latest {OPERATIONAL_LAYER} run ({run_id})"
-    if raised is None:
-        return (f"{run} failed, and its error does not say which check raised, "
-                "so chain 1's tables may not have been compared")
-    if OPERATIONAL_CHECK in raised:
-        return (f"{run} failed in {OPERATIONAL_CHECK}, so chain 1's tables "
-                "were not compared")
-    if "setup" in raised:
-        return (f"{run} failed between its checks, so chain 1's tables may not "
-                "have been compared")
-    return None
-
-
-async def preflight(
-    pool=None, *, now: Optional[datetime] = None,
-) -> Dict[str, Any]:
-    """Whether chain 1 may be switched to Postgres now, and why not. Never raises.
-
-    `ok` is True only when all three hold:
-
-    * the writing role may create a temporary table — without it every status
-      rebuild raises (`rebuild_sku_inventory_status`), and it is granted by
-      initdb only on a cluster new enough to have the line;
-    * each of the six tables was copied by `replicate_operational` within
-      `PREFLIGHT_REPLICATED_WITHIN`, with no failure since;
-    * the latest `mirror_landing` run — from a journal copy that is itself
-      fresh — is recent, compared chain 1 (it may have failed elsewhere: a
-      check that raised in another store is a `note`, not a reason), and
-      filed nothing against the six tables or the chain.
-
-    `ok` is None once the chain already writes Postgres: this is the question
-    before the flip, and afterwards the copy it asks about stands down by
-    design. A value of `KS_WRITE_INVENTORY` nobody understands is not "writes
-    Postgres" — the chain is stood down, and the checks below say what that
-    costs.
-
-    `reasons` are sentences of this module's own; a Postgres error is named by
-    its class only, because /api/health is public and a driver's message is
-    not.
-    """
-    try:
-        moved = writes_postgres()
-    except RuntimeError:
-        moved = False
-    if moved:
-        return {"ok": None, "reasons": [
-            "chain 1 already writes Postgres; the preflight is the question "
-            "asked before the flip"]}
-
-    now = now or datetime.now(timezone.utc)
-    reasons: List[str] = []
-    notes: List[str] = []
-    out: Dict[str, Any] = {
-        "ok": False, "temporary": None, "replicated": {},
-        "journal_copy_age_s": None, "operational_run": None, "reasons": reasons,
-        "notes": notes,
-    }
-    try:
-        if pool is None:
-            from core.pg import get_pool, require_revision
-
-            pool = await get_pool()
-            await require_revision()
-        async with pool.acquire() as conn:
-            role, database, temporary = await conn.fetchrow(
-                "SELECT current_user, current_database(), "
-                "has_database_privilege(current_database(), 'TEMPORARY')")
-            marks = {r["table_name"]: r for r in await conn.fetch(
-                "SELECT table_name, last_ok_at, failures_since_ok "
-                "FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
-                [*CHAIN_TABLES, JOURNAL_COPY])}
-            run = await conn.fetchrow(
-                "SELECT run_id, started_at, error_message "
-                "FROM app.data_quality_runs WHERE layer = $1 "
-                "ORDER BY run_id DESC LIMIT 1",
-                OPERATIONAL_LAYER)
-            findings = [] if run is None else await conn.fetch(
-                "SELECT check_name, table_name FROM app.data_quality_issues "
-                "WHERE run_id = $1 AND table_name = ANY($2::text[]) "
-                "ORDER BY check_name, table_name",
-                run["run_id"], [*CHAIN_TABLES, CHAIN])
-    except Exception as exc:  # noqa: BLE001 — named by class, never raised
-        reasons.append(f"Postgres could not be read ({type(exc).__name__})")
-        return out
-
-    # ── the temporary table the status rebuild needs ──
-    out["temporary"] = bool(temporary)
-    if not temporary:
-        reasons.append(
-            f"{role} cannot create a temporary table in {database}, so every "
-            f"status rebuild would raise; as a superuser: "
-            f"GRANT TEMPORARY ON DATABASE {database} TO {role}")
-
-    # ── the six tables' last copy ──
-    limit = _minutes(PREFLIGHT_REPLICATED_WITHIN)
-    for table in CHAIN_TABLES:
-        mark = marks.get(table)
-        ok_at = mark["last_ok_at"] if mark else None
-        failures = int(mark["failures_since_ok"]) if mark else 0
-        age = now - ok_at if ok_at else None
-        out["replicated"][table] = {
-            "age_s": int(age.total_seconds()) if age is not None else None,
-            "failures_since_ok": failures,
-        }
-        if ok_at is None:
-            reasons.append(f"{table} has never been copied into Postgres")
-        elif failures:
-            reasons.append(f"the copy of {table} is failing ({failures} in a row)")
-        elif age >= PREFLIGHT_REPLICATED_WITHIN:
-            reasons.append(
-                f"{table} was last copied {_minutes(age)} min ago (limit {limit})")
-
-    # ── the journal copy the findings are read from ──
-    # Unless chain 9 writes the journal in Postgres (OD-02 (c)): the findings
-    # are then read from the writer itself, the hourly copy has stood down,
-    # and its frozen `last_ok_at` would refuse the flip for ever. The verdict's
-    # age and its findings below are still asked.
-    from core import pg_dq_journal_write
-
-    journal = marks.get(JOURNAL_COPY)
-    journal_ok_at = journal["last_ok_at"] if journal else None
-    if journal_ok_at is not None:
-        out["journal_copy_age_s"] = int((now - journal_ok_at).total_seconds())
-    if pg_dq_journal_write.reads_postgres():
-        out["journal_copy_age_s"] = None
-    elif journal_ok_at is None:
-        reasons.append(
-            "the quality journal has never been copied into Postgres, so open "
-            "findings cannot be read")
-    elif journal["failures_since_ok"]:
-        reasons.append(
-            f"the copy of the quality journal is failing "
-            f"({int(journal['failures_since_ok'])} in a row)")
-    elif now - journal_ok_at >= PREFLIGHT_JOURNAL_COPY_WITHIN:
-        reasons.append(
-            f"the copy of the quality journal is {_minutes(now - journal_ok_at)} "
-            f"min old (limit {_minutes(PREFLIGHT_JOURNAL_COPY_WITHIN)})")
-
-    # ── the latest operational comparison ──
-    if run is None:
-        reasons.append(f"no {OPERATIONAL_LAYER} run in the quality journal")
-    else:
-        age = now - run["started_at"]
-        failed = run["error_message"] is not None
-        # Check names only: the text after them is a driver's message.
-        raised = _raised_checks(run["error_message"]) if failed else []
-        out["operational_run"] = {
-            "run_id": int(run["run_id"]),
-            "age_s": int(age.total_seconds()),
-            "failed": failed,
-            "raised": raised,
-            "findings": len(findings),
-        }
-        if age >= PREFLIGHT_VERDICT_WITHIN:
-            reasons.append(
-                f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) is "
-                f"{int(age.total_seconds() // 3600)} h old (limit "
-                f"{int(PREFLIGHT_VERDICT_WITHIN.total_seconds() // 3600)})")
-        if failed:
-            reason = _uncompared_reason(run["run_id"], raised)
-            if reason is not None:
-                reasons.append(reason)
-            else:
-                notes.append(
-                    f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) failed "
-                    f"in {', '.join(raised)}; chain 1's own comparison "
-                    f"({OPERATIONAL_CHECK}) completed, so that does not count here")
-        if findings:
-            named = ", ".join(f"{f['check_name']} on {f['table_name']}"
-                              for f in findings[:_PREFLIGHT_NAMED])
-            more = len(findings) - _PREFLIGHT_NAMED
-            reasons.append(
-                f"{len(findings)} open finding(s) on chain 1 in "
-                f"{OPERATIONAL_LAYER} run {run['run_id']}: {named}"
-                + (f" and {more} more" if more > 0 else ""))
-
-    out["ok"] = not reasons
-    return out
+# `preflight()` asked, on every `/api/health`, the three questions somebody
+# had to answer before `KS_WRITE_INVENTORY` was switched on — the TEMPORARY
+# grant the status rebuild needs, the six tables' last hourly copy, the latest
+# `mirror_landing` verdict on them — and answered `ok: null` once the chain
+# wrote Postgres. Production latched the chain on 2026-09-30, and since
+# S14-00 it writes Postgres whatever the flag says, so the answer had been
+# `null` on every probe; S14-11 deleted it with the flag. The advisory lock
+# above (DN-24's other half) stays: the 01:00 snapshot and the stock step
+# still race without it.

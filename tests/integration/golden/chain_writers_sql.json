@@ -1,0 +1,521 @@
+{
+ "WATERMARK_OK_SQL": "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+ "_RECORD_WRITE_SQL": "UPDATE meta.chain_watermarks SET updated_at = now(), value = jsonb_build_object('stamps', (SELECT COALESCE(jsonb_agg(s ORDER BY s), '[]'::jsonb) FROM (SELECT DISTINCT (extract(epoch FROM mirrored_at) * 1000000)::bigint AS s FROM {table} WHERE mirrored_at = now() OR (extract(epoch FROM mirrored_at) * 1000000)::bigint = ANY($2::bigint[])) kept), 'previous', (extract(epoch FROM $3::timestamptz) * 1000000)::bigint)::text WHERE key = $1",
+ "captured_on": "d544144c (S14-09's base); equal to 57fd7c22 under KS_PG_DERIVE=own",
+ "scenarios": {
+  "categories": [
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '30s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    2
+   ],
+   [
+    "execute",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    2
+   ],
+   [
+    "fetchval",
+    "SELECT value FROM meta.chain_watermarks WHERE key = $1 FOR UPDATE",
+    1
+   ],
+   [
+    "fetchval",
+    "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1",
+    1
+   ],
+   [
+    "executemany",
+    "INSERT INTO bronze.categories (id, name, parent_id, mirrored_at) VALUES ($1, $2, $3, now()) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, parent_id = EXCLUDED.parent_id, mirrored_at = EXCLUDED.mirrored_at",
+    1
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "execute",
+    "UPDATE meta.chain_watermarks SET updated_at = now(), value = jsonb_build_object('stamps', (SELECT COALESCE(jsonb_agg(s ORDER BY s), '[]'::jsonb) FROM (SELECT DISTINCT (extract(epoch FROM mirrored_at) * 1000000)::bigint AS s FROM bronze.categories WHERE mirrored_at = now() OR (extract(epoch FROM mirrored_at) * 1000000)::bigint = ANY($2::bigint[])) kept), 'previous', (extract(epoch FROM $3::timestamptz) * 1000000)::bigint)::text WHERE key = $1",
+    3
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "comments": [
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '60s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    4
+   ],
+   [
+    "fetch",
+    "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode FROM bronze.orders WHERE id = ANY($1::int[]) AND manager_comment IS NULL ORDER BY id FOR UPDATE",
+    1
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "comments_held": [
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '60s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    4
+   ],
+   [
+    "fetch",
+    "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode FROM bronze.orders WHERE id = ANY($1::int[]) AND manager_comment IS NULL ORDER BY id FOR UPDATE",
+    1
+   ],
+   [
+    "executemany",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    1
+   ],
+   [
+    "fetch",
+    "\nWITH latest AS (\n    SELECT DISTINCT ON (order_id) order_id, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode\n    FROM app.order_versions\n    WHERE order_id = ANY($1::int[])\n    ORDER BY order_id, captured_at DESC, id DESC\n)\nINSERT INTO app.order_versions (order_id, kind, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode, updated_at)\nSELECT o.id,\n       CASE WHEN l.order_id IS NULL THEN 'create' ELSE $2::text END,\n       o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode, o.updated_at\nFROM bronze.orders o\nLEFT JOIN latest l ON l.order_id = o.id\nWHERE o.id = ANY($1::int[])\n  AND (l.order_id IS NULL\n       OR ROW(o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode) IS DISTINCT FROM ROW(l.source_id, l.status_id, l.status_group_id, l.grand_total, l.ordered_at, l.buyer_id, l.manager_id, l.manager_comment, l.promocode))\nRETURNING order_id\n",
+    2
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "begin"
+   ],
+   [
+    "begin"
+   ],
+   [
+    "fetchval",
+    "SELECT current_setting('lock_timeout')",
+    0
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "execute",
+    "\n    UPDATE meta.derivation_signal\n       SET requested = requested + 1, requested_at = now()\n     WHERE layer = $1\n",
+    1
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "expense_types": [
+   [
+    "begin"
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    1
+   ],
+   [
+    "executemany",
+    "INSERT INTO bronze.expense_types (id, name, alias, is_active, mirrored_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, alias = EXCLUDED.alias, is_active = EXCLUDED.is_active, mirrored_at = EXCLUDED.mirrored_at",
+    1
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "misses": [
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '60s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    4
+   ],
+   [
+    "executemany",
+    "INSERT INTO app.order_backfill_misses (order_id, checked_at, reason) VALUES ($1, $2, $3) ON CONFLICT (order_id) DO UPDATE SET checked_at = EXCLUDED.checked_at, reason = EXCLUDED.reason",
+    2
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "orders_header_only": [
+   [
+    "fetch",
+    "SELECT id, updated_at FROM bronze.orders WHERE id = ANY($1::int[]) ORDER BY id",
+    1
+   ]
+  ],
+  "orders_header_only_held": [
+   [
+    "fetch",
+    "SELECT id, updated_at FROM bronze.orders WHERE id = ANY($1::int[]) ORDER BY id",
+    1
+   ],
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '60s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    4
+   ],
+   [
+    "fetch",
+    "SELECT id, updated_at FROM bronze.orders WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE",
+    1
+   ],
+   [
+    "executemany",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    1
+   ],
+   [
+    "fetch",
+    "\nWITH latest AS (\n    SELECT DISTINCT ON (order_id) order_id, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode\n    FROM app.order_versions\n    WHERE order_id = ANY($1::int[])\n    ORDER BY order_id, captured_at DESC, id DESC\n)\nINSERT INTO app.order_versions (order_id, kind, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode, updated_at)\nSELECT o.id,\n       CASE WHEN l.order_id IS NULL THEN 'create' ELSE $2::text END,\n       o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode, o.updated_at\nFROM bronze.orders o\nLEFT JOIN latest l ON l.order_id = o.id\nWHERE o.id = ANY($1::int[])\n  AND (l.order_id IS NULL\n       OR ROW(o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode) IS DISTINCT FROM ROW(l.source_id, l.status_id, l.status_group_id, l.grand_total, l.ordered_at, l.buyer_id, l.manager_id, l.manager_comment, l.promocode))\nRETURNING order_id\n",
+    2
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "begin"
+   ],
+   [
+    "begin"
+   ],
+   [
+    "fetchval",
+    "SELECT current_setting('lock_timeout')",
+    0
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "execute",
+    "\n    UPDATE meta.derivation_signal\n       SET requested = requested + 1, requested_at = now()\n     WHERE layer = $1\n",
+    1
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "orders_rewrite_held": [
+   [
+    "fetch",
+    "SELECT id, updated_at FROM bronze.orders WHERE id = ANY($1::int[]) ORDER BY id",
+    1
+   ],
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '60s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    4
+   ],
+   [
+    "fetch",
+    "SELECT id, updated_at FROM bronze.orders WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE",
+    1
+   ],
+   [
+    "executemany",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    1
+   ],
+   [
+    "fetch",
+    "\nWITH latest AS (\n    SELECT DISTINCT ON (order_id) order_id, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode\n    FROM app.order_versions\n    WHERE order_id = ANY($1::int[])\n    ORDER BY order_id, captured_at DESC, id DESC\n)\nINSERT INTO app.order_versions (order_id, kind, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode, updated_at)\nSELECT o.id,\n       CASE WHEN l.order_id IS NULL THEN 'create' ELSE $2::text END,\n       o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode, o.updated_at\nFROM bronze.orders o\nLEFT JOIN latest l ON l.order_id = o.id\nWHERE o.id = ANY($1::int[])\n  AND (l.order_id IS NULL\n       OR ROW(o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode) IS DISTINCT FROM ROW(l.source_id, l.status_id, l.status_group_id, l.grand_total, l.ordered_at, l.buyer_id, l.manager_id, l.manager_comment, l.promocode))\nRETURNING order_id\n",
+    2
+   ],
+   [
+    "execute",
+    "DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])",
+    1
+   ],
+   [
+    "executemany",
+    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold)\nVALUES ($1, $2, $3, $4, $5, $6)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    mirrored_at = now()\n",
+    2
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "begin"
+   ],
+   [
+    "begin"
+   ],
+   [
+    "fetchval",
+    "SELECT current_setting('lock_timeout')",
+    0
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "execute",
+    "\n    UPDATE meta.derivation_signal\n       SET requested = requested + 1, requested_at = now()\n     WHERE layer = $1\n",
+    1
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "orders_write": [
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '60s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    4
+   ],
+   [
+    "fetch",
+    "SELECT id, updated_at FROM bronze.orders WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE",
+    1
+   ],
+   [
+    "executemany",
+    "\nINSERT INTO bronze.expenses (id, order_id, expense_type_id, amount, description, status, payment_date, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\nON CONFLICT (id) DO UPDATE SET order_id = EXCLUDED.order_id, expense_type_id = EXCLUDED.expense_type_id, amount = EXCLUDED.amount, description = EXCLUDED.description, status = EXCLUDED.status, payment_date = EXCLUDED.payment_date, created_at = EXCLUDED.created_at, mirrored_at = now()\n",
+    1
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "executemany",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    2
+   ],
+   [
+    "fetch",
+    "\nWITH latest AS (\n    SELECT DISTINCT ON (order_id) order_id, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode\n    FROM app.order_versions\n    WHERE order_id = ANY($1::int[])\n    ORDER BY order_id, captured_at DESC, id DESC\n)\nINSERT INTO app.order_versions (order_id, kind, source_id, status_id, status_group_id, grand_total, ordered_at, buyer_id, manager_id, manager_comment, promocode, updated_at)\nSELECT o.id,\n       CASE WHEN l.order_id IS NULL THEN 'create' ELSE $2::text END,\n       o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode, o.updated_at\nFROM bronze.orders o\nLEFT JOIN latest l ON l.order_id = o.id\nWHERE o.id = ANY($1::int[])\n  AND (l.order_id IS NULL\n       OR ROW(o.source_id, o.status_id, o.status_group_id, o.grand_total, o.ordered_at, o.buyer_id, o.manager_id, o.manager_comment, o.promocode) IS DISTINCT FROM ROW(l.source_id, l.status_id, l.status_group_id, l.grand_total, l.ordered_at, l.buyer_id, l.manager_id, l.manager_comment, l.promocode))\nRETURNING order_id\n",
+    2
+   ],
+   [
+    "execute",
+    "DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])",
+    1
+   ],
+   [
+    "executemany",
+    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold)\nVALUES ($1, $2, $3, $4, $5, $6)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    mirrored_at = now()\n",
+    4
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "begin"
+   ],
+   [
+    "begin"
+   ],
+   [
+    "fetchval",
+    "SELECT current_setting('lock_timeout')",
+    0
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "execute",
+    "\n    UPDATE meta.derivation_signal\n       SET requested = requested + 1, requested_at = now()\n     WHERE layer = $1\n",
+    1
+   ],
+   [
+    "execute",
+    "SELECT set_config('lock_timeout', $1, true)",
+    1
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ],
+   [
+    "end",
+    true
+   ]
+  ],
+  "products": [
+   [
+    "begin"
+   ],
+   [
+    "execute",
+    "SET LOCAL statement_timeout = '30s'",
+    0
+   ],
+   [
+    "executemany",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    2
+   ],
+   [
+    "execute",
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING",
+    2
+   ],
+   [
+    "fetchval",
+    "SELECT value FROM meta.chain_watermarks WHERE key = $1 FOR UPDATE",
+    1
+   ],
+   [
+    "fetchval",
+    "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1",
+    1
+   ],
+   [
+    "executemany",
+    "INSERT INTO bronze.products (id, name, category_id, brand, sku, price, mirrored_at) VALUES ($1, $2, $3, $4, $5, $6, now()) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, category_id = EXCLUDED.category_id, brand = EXCLUDED.brand, sku = EXCLUDED.sku, price = EXCLUDED.price, mirrored_at = EXCLUDED.mirrored_at",
+    2
+   ],
+   [
+    "execute",
+    "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
+    2
+   ],
+   [
+    "execute",
+    "UPDATE meta.chain_watermarks SET updated_at = now(), value = jsonb_build_object('stamps', (SELECT COALESCE(jsonb_agg(s ORDER BY s), '[]'::jsonb) FROM (SELECT DISTINCT (extract(epoch FROM mirrored_at) * 1000000)::bigint AS s FROM bronze.products WHERE mirrored_at = now() OR (extract(epoch FROM mirrored_at) * 1000000)::bigint = ANY($2::bigint[])) kept), 'previous', (extract(epoch FROM $3::timestamptz) * 1000000)::bigint)::text WHERE key = $1",
+    3
+   ],
+   [
+    "end",
+    true
+   ]
+  ]
+ }
+}

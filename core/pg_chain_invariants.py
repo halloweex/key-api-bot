@@ -2,14 +2,14 @@
 
 WHAT STOPS WATCHING THE MOMENT A CHAIN SWITCHES
 
-Stage 4 moves writes chain by chain, and when a chain switches, two jobs stand
-down for its tables and neither says so: the hourly `replicate_operational`
-must not ship them, and the daily `reconcile_operational` must not compare them
-(`core/write_chains.py` has the reasons). The comparison's stand-down is a
-`continue` with no finding — so from the switch onward the only checks these
-tables had are gone, and nothing replaces them. For `app.manual_expenses` today
-that is one table; for chain 1's six it is the only record there will ever be
-of a stock change.
+Stage 4 moved writes chain by chain, and when a chain switched, two jobs stood
+down for its tables and neither said so: the hourly `replicate_operational`
+must not ship them, and the daily `reconcile_operational` must not compare them.
+The comparison's stand-down was a `continue` with no finding — so from the
+switch onward the only checks these tables had were gone, and nothing replaced
+them. Step 14 deleted both jobs' DuckDB halves (S14-12, S14-13), and this watch
+is what is left: for `app.manual_expenses` that is one table; for chain 1's six
+it is the only record there will ever be of a stock change.
 
 The comparison could not be kept: it compares against a DuckDB that has stopped
 receiving these rows, so every new row would be a discrepancy it created
@@ -76,7 +76,8 @@ Goals (chain 7a, DN-25):
   write a NULL is a writer that stopped, and before it one the replication
   carried across; the finding says which (`_null_issues`). Each one costs
   something specific: `updated_at` is the clock the copy-back's handover
-  orders two versions of a goal by, so a NULL leaves it nothing to order with;
+  orders two versions of a goal by — an image from before step 14's, since
+  S14-04 deleted this build's — so a NULL leaves it nothing to order with;
   and `get_smart_goals` keeps a stored goal only `if is_custom`, so a NULL
   there silently replaces the number a human typed with the suggestion. No
   allocator and no watermark: the table is keyed on `period_type` and has no
@@ -98,9 +99,10 @@ The expense-type dictionary (chain 6a):
 * **Not its watermark.** `last_sync_expense_types` moves once a week, so the
   90-minute limit above would page every run; the chain declares
   `CHAIN_WATERMARK_MAX_AGE_MIN = None` and `_freshness_check` judges it at
-  192 h from `meta.chain_watermarks`, alone — and from DuckDB's frozen stamp
-  until the first full sync under the flag writes one there
-  (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
+  192 h from `meta.chain_watermarks`, alone — and judged it from DuckDB's
+  frozen stamp until the first full sync under the flag wrote one there
+  (`CHAIN_WATERMARK_INHERITS_DUCKDB`, which the chain declared until step
+  14's S14-09).
 
 The buyers (chain 4):
 
@@ -113,8 +115,9 @@ The buyers (chain 4):
   shipped yet is not a defect — so it is judged from the latch on. Production
   held none of either on 2026-09-30.
 * **`full_name`.** Postgres allows NULL there and DuckDB does not, so a NULL
-  is a buyer `scripts/chain_copy_back.py` refuses to carry back
-  (`handover_rows_unwritable`). The shared parse writes `'Unknown'` for a
+  is a buyer the copy-back refuses to carry back (`handover_rows_unwritable`)
+  — the copy-back of an image from before step 14, since S14-04 deleted this
+  build's. The shared parse writes `'Unknown'` for a
   blank name; a NULL is a write that went round `landing_rows.buyer_row`.
 * **Every buyer's phone and email are in its contact list.** The parse takes
   the buyer's `phone`/`email` columns and its contact rows from the same
@@ -140,8 +143,9 @@ The orders (chain 3):
   about every run, because its 30-day `NOT EXISTS` cannot compare it.
 * **Not its watermark.** `last_sync_orders` holds KeyCRM's newest
   `updated_at`, not a sync time, and stands still overnight by design
-  (`pg_orders_write.CHAIN_WATERMARK_MAX_AGE_MIN`); `freshness_orders` and the
-  order step's own health judge the sync.
+  (`pg_orders_write.CHAIN_WATERMARK_MAX_AGE_MIN`); `freshness_orders`, by the
+  row's stamp (`data_quality.JUDGED_BY_LAST_WRITE`), and the order step's
+  own health judge the sync.
 
 The manager classification (chain 5):
 
@@ -163,8 +167,9 @@ The manager classification (chain 5):
   a human can decide which answer the past should have.
 * **`is_retail` agrees with the latest open interval.** The screen shows one
   and Silver uses the other. WARN.
-* **`set_at`** — the copy-back's handover clock, which the Postgres column has
-  no default for (`chain_required_column_null`).
+* **`set_at`** — the copy-back's handover clock (an image from before step
+  14's, since S14-04 deleted this build's), which the Postgres column has no
+  default for (`chain_required_column_null`).
 * **Not its watermark.** The sync is daily; `_freshness_check` judges
   `last_sync_managers` at 192 h from `meta.chain_watermarks`.
 
@@ -189,24 +194,26 @@ The goal and forecast tables (chain 7b-3):
 * **All WARN.** Every value in the four tables can be computed again —
   `POST /api/goals/recalculate` and a training — so nothing here is worth a
   page at 01:00. An unstamped row is reported inside the staleness it blinds,
-  not as `chain_required_column_null`: these stamps order nothing in the
-  copy-back, which forgives them.
+  not as `chain_required_column_null`: these stamps ordered nothing in the
+  copy-back, which forgave them (and an image from before step 14's still
+  does; S14-04 deleted this build's).
 
-WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
+WHO IS WATCHED: EVERY CHAIN, AND THE HANDOVER IS THE OWNER ROWS'
 
-A chain is watched when `core.write_chains.chain_modes()` says its writes go to
-Postgres — latched (`core/chain_latch.py`) or flagged, in that order of
-authority. Asking the environment here would re-derive a state that already has
-one home, and it would get a latched chain with a flag flipped back exactly
-backwards.
+Every registered chain is watched (`watched_chains`). Until step 14's S14-11 a
+chain was watched when `core.write_chains.chain_modes()` said its writes went
+to Postgres — latched or flagged — and the handover was dated by the local
+marker; since S14-00 every chain writes Postgres, and S14-11 deleted the
+answer with the flags. **The handover is dated by the chain's `owner:` rows**
+in `meta.chain_watermarks` (`chain_latch.claimed_chains`, the earliest), read
+in the same transaction as the facts: they are written inside the first
+writing transaction, and a lost `./data` marker must not make every "since
+the handover" invariant forget the handover.
 
-**With no chain there, nothing is read at all**: `read_facts` returns before
-it asks for a pool, so a system that has moved nothing pays a dictionary lookup
-per integrity run and cannot fail on a store it is not using.
-
-A chain that is **flagged but not yet latched** gets the invariants that are
-true of the Postgres copy whatever wrote it — the allocator, the NULL columns,
-the watermarks. The rest are all "since the handover", and a chain that has
+A chain with **no owner row yet** — production's chains 8 and 7a on
+2026-10-29, which have never written — gets the invariants that are true of
+the Postgres copy whatever wrote it: the allocator, the NULL columns, the
+watermarks. The rest are all "since the handover", and a chain that has
 written nothing has not had one.
 
 **Production today is that second state, not the first** (2026-09-18):
@@ -225,8 +232,9 @@ STRUCTURE: AN ASYNC READ AND A PURE VERDICT, BESIDE THE POSTGRES TWINS
 
 The facts are read by the integrity job and judged by a pure function, and
 both happen in `_run_dq_integrity` next to `core/pg_warehouse_dq.py` — not
-inside `check_internal_integrity`. That function runs under the DuckDB
-connection, and these are facts about tables DuckDB no longer writes. Judged
+inside `check_internal_integrity`. That function ran under the DuckDB
+connection until step 14's S14-14, and these are facts about tables DuckDB no
+longer writes. Judged
 there, a DuckDB file that would not open, or any raise in the scan, would lose
 every chain finding of the run, and the CRITICAL page — gated on the DuckDB
 half having finished — would wait for DuckDB to recover or for the canary's
@@ -521,11 +529,11 @@ class Forecast:
 
 @dataclass(frozen=True)
 class Journal:
-    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold. The
-    daily comparison still compares the journal — DuckDB is its shadow — so
-    this is only what a comparison of two copies cannot see: the property a
-    run and its findings land in one transaction, checked where it now
-    lives."""
+    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold — the
+    property a run and its findings land in one transaction, checked where it
+    lives. While DuckDB was the journal's shadow the daily comparison of the
+    two copies watched the rest; since step 14's S14-10 there is one copy,
+    and this is its watch."""
     orphan_issues: int = 0
     orphan_diffs: int = 0
     orphan_sample: Tuple[int, ...] = ()
@@ -548,6 +556,23 @@ class Ledger:
     week_start: Optional[date] = None
     due: bool = False
     has_week: bool = True
+
+
+@dataclass(frozen=True)
+class LostMarker:
+    """A chain with owner rows in `meta.chain_watermarks` and no local marker
+    under `data/write-chain-owners/`: `claimed` of its `tables` tables carry an
+    owner row, the earliest stamped `since`."""
+    chain: str
+    claimed: int
+    tables: int
+    since: str
+
+
+@dataclass(frozen=True)
+class Latch:
+    """The latch's two copies, set against each other (decision 12)."""
+    lost: Tuple[LostMarker, ...] = ()
 
 
 Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Orders,
@@ -585,6 +610,9 @@ class Facts:
     traffic_ledger: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
+    # The owner rows against the markers on disk (`chain_latch_disagrees`).
+    # Not a `Group`: no chain's reader fills it, the whole registry's does.
+    latch: Union[Latch, Unwatched, None] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
     # here knows what is true of their tables.
     unread: Tuple[str, ...] = ()
@@ -627,6 +655,8 @@ SAMPLES_STALE = "chain_samples_stale"
 RETENTION_UNBOUNDED = "chain_retention_unbounded"
 REPORT_WEEK_MISSING = "chain_report_week_missing"
 UNWATCHED = "chain_invariants_unwatched"
+# The latch's two copies (decision 12): owner rows with no local marker.
+LATCH_DISAGREES = "chain_latch_disagrees"
 GOAL_TABLES_INCOMPLETE = "chain_goal_tables_incomplete"
 GOAL_TABLES_STALE = "chain_goal_tables_stale"
 FORECAST_STALE = "chain_forecast_stale"
@@ -648,14 +678,17 @@ CONDITIONS += (
 )
 CONDITIONS += (CATALOGUE_EMPTY, CATALOGUE_WRITTEN_AROUND, CATALOGUE_ROWS_LOST,
                CATALOGUE_RETIRED, CATALOGUE_SHORT_WRITE)
+# The latch, moved here from the daily `reconcile_operational` in step 14's
+# S14-12 (decision 12), held and resolved with the rest.
+CONDITIONS += (LATCH_DISAGREES,)
 
 # The family name every condition above carries, and the key the integrity
 # job resolves them by when its DuckDB half failed (`resolve_group(...,
 # only_prefix=PREFIX)`, the twins' `pg_` arrangement). A prefix is only as
 # exact as the names under it, so `tests/unit/test_chain_invariants.py` fails
 # if a condition here does not carry it, or if anything else the integrity
-# layer files does — `chain_latch_disagrees` and `chain_shipper_overwrote`
-# carry it too, but on `mirror_landing`, whose alert group this never touches.
+# layer files does. `chain_latch_disagrees` was filed on `mirror_landing`
+# until step 14's S14-12 moved it here.
 PREFIX = "chain_"
 
 
@@ -667,24 +700,18 @@ def all_conditions() -> FrozenSet[str]:
 
 
 def watched_chains() -> Dict[str, Optional[str]]:
-    """`{chain: latched_at or None}` for every chain whose writes go here.
+    """`{chain: None}` for every registered chain: every chain writes
+    Postgres, so every chain is watched, whatever any `KS_WRITE_*` says.
 
-    `chain_modes()["mode"]` is the one answer the writers, the sync keys, the
-    shipper and the daily comparison all read — latched first, then the flag,
-    and None for a flag nobody could parse. Deriving it again from the
-    environment is how a latched chain with a flipped-back variable would end
-    up unwatched by exactly the check that exists for it.
-
-    Never raises: `chain_modes` carries a flag error out in the mapping rather
-    than throwing, and a chain whose flag is not understood stands down with
-    the Postgres writers — so it is watched here too. `write_chain_flag_invalid`
-    is what says the value is wrong; this still watches its tables.
+    The value is a handover stamp known without Postgres, and it is None:
+    `read_facts` dates each chain's handover by its owner rows instead
+    (module docstring). Until step 14's S14-11 this read
+    `write_chains.chain_modes()` and carried the local marker's stamp. Never
+    raises.
     """
-    from core.write_chains import chain_modes
+    from core.write_chains import WRITE_CHAINS, chain_name
 
-    return {name: (str(state["latched_at"]) if state["latched_at"] else None)
-            for name, state in chain_modes().items()
-            if state["mode"] != "duckdb"}
+    return {chain_name(chain): None for chain in WRITE_CHAINS}
 
 
 def _reader_groups() -> Dict[str, str]:
@@ -1338,12 +1365,10 @@ async def _read_watermarks(conn, watched: Mapping[str, Optional[str]],
 async def read_facts(*, pool=None) -> Facts:
     """Every fact the invariants are judged on. Never raises.
 
-    **It asks Postgres nothing while no chain writes there.** That early return
-    is before the DSN check and before the pool, deliberately: a check that
-    opened a connection to discover it had nothing to look at would put a
-    Postgres failure on the path of a system that is not using Postgres for
-    these tables. It is not production's state — chain 8 is flagged there, so
-    this reads its two facts on every run (module docstring).
+    **It asks Postgres nothing while no chain is watched.** That early return
+    is before the DSN check and before the pool. Since step 14's S14-11 every
+    registered chain is watched, so only a caller narrowing `watched_chains`
+    to nothing takes it.
 
     "Never raises" includes the pool's own timeout. `pool.acquire(timeout=)`
     raises `TimeoutError`, and letting it out handed the scan `None`, which it
@@ -1386,6 +1411,31 @@ async def read_facts(*, pool=None) -> Facts:
                 now = await conn.fetchval("SELECT now()")
                 today = await conn.fetchval(
                     "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
+                # The handover, per chain: its owner rows' earliest stamp
+                # (module docstring), unless the caller's `watched_chains`
+                # brought one. A read that fails blinds the run whole, in the
+                # `except` below — every "since the handover" verdict rests
+                # on it.
+                from core import chain_latch
+
+                owners = {r["key"][len(chain_latch.OWNER_PREFIX):]: r["value"]
+                          for r in await conn.fetch(
+                              "SELECT key, value FROM meta.chain_watermarks "
+                              "WHERE key LIKE $1",
+                              f"{chain_latch.OWNER_PREFIX}%")}
+                handed = chain_latch.claimed_chains(owners)
+                # The markers, read after the owner rows: a first write takes
+                # its marker before it claims the rows, so an owner row this
+                # snapshot sees has its marker on disk by now — unless it was
+                # lost. Read afresh, never the process's cache.
+                try:
+                    latch = _latch_facts(owners, chain_latch.markers_on_disk())
+                except OSError as e:
+                    latch = Unwatched(
+                        f"{chain_latch.MARKER_DIR} unreadable: "
+                        f"{type(e).__name__}: {e}")
+                watched = {name: (at or handed.get(name))
+                           for name, at in watched.items()}
                 since = _stamp(watched.get(pg_inventory_write.CHAIN))
                 reader_of = {
                     "expenses": lambda c: _read_expenses(
@@ -1457,7 +1507,29 @@ async def read_facts(*, pool=None) -> Facts:
                  traffic_ledger=groups.get("traffic_ledger"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread, managers=groups.get("managers"),
-                 forecast=groups.get("forecast"))
+                 forecast=groups.get("forecast"), latch=latch)
+
+
+def _latch_facts(owners: Mapping[str, str], markers: Mapping[str, str]) -> Latch:
+    """Every registered chain holding an owner row and no marker. Pure.
+
+    Only that direction (decision 12). A marker with no owner row is a first
+    Postgres write that failed after the marker was taken: the chain is
+    latched, the safe direction, and nothing in a step-14 build reads either
+    copy to route. Owner rows with no marker are what an image from before
+    step 14 — the rollback target — would route by the flag and its
+    preconditions again."""
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    lost = []
+    for chain in WRITE_CHAINS:
+        name = chain_name(chain)
+        stamps = [owners[t] for t in chain.CHAIN_TABLES if t in owners]
+        if stamps and name not in markers:
+            lost.append(LostMarker(chain=name, claimed=len(stamps),
+                                   tables=len(chain.CHAIN_TABLES),
+                                   since=min(stamps)))
+    return Latch(lost=tuple(lost))
 
 
 def _stamp(value: Optional[str]) -> Optional[datetime]:
@@ -1498,6 +1570,8 @@ def _issue(**kw):
 WHOLE_PART = "(write chains)"
 # The watermarks' blindness, beside any group's in the same run.
 WATERMARKS_PART = "meta.chain_watermarks"
+# The markers' blindness: the directory could not be read.
+MARKERS_PART = "data/write-chain-owners"
 
 
 def unwatched_issue(reason: str, watched: Tuple[str, ...],
@@ -1524,10 +1598,34 @@ def unwatched_issue(reason: str, watched: Tuple[str, ...],
         description=(
             f"The invariants of {', '.join(watched) or 'the write chains'} "
             f"could not be checked this run: {reason}. Nothing else watches "
-            "these tables — the hourly replication and the daily comparison "
-            "both stand down for them — so "
+            "these tables — the hourly replication stands down for them — so "
             + ", ".join(CONDITIONS)
             + " are held as they were, not cleared."))
+
+
+def _latch_issues(latch: Latch) -> List:
+    """`chain_latch_disagrees`, CRITICAL, one per chain whose owner rows stand
+    with no marker. Never repaired here: the marker's content is the latch's
+    ISO time from the owner row, and putting it back is a human's call."""
+    from core.data_quality import Severity
+    from core.rollback_lever import ROLLBACK_RUNBOOK
+
+    return [_issue(
+        check_name=LATCH_DISAGREES, table_name=lost.chain,
+        severity=Severity.CRITICAL, count=lost.claimed,
+        description=(
+            f"{lost.chain} owns {lost.claimed} of its {lost.tables} table(s) "
+            f"in Postgres since {lost.since}, and its marker under "
+            "data/write-chain-owners/ is gone. A step-14 image routes by "
+            "neither copy, so nothing is written wrong now; an image from "
+            "before step 14 — the rollback target — routes by the marker, and "
+            "there this chain would follow its KS_WRITE_* and its "
+            "preconditions again, and send its writes to DuckDB on any unmet "
+            "one. Do not roll back to an image from before step 14 until the "
+            f"marker is restored (its content: latched_at = {lost.since}); "
+            f"{ROLLBACK_RUNBOOK}."
+        ),
+    ) for lost in latch.lost]
 
 
 def _allocator_issues(allocator: Allocator, chain: str) -> List:
@@ -1594,10 +1692,10 @@ def _null_issues(nulls: Nulls, chain: str,
                   "time-windowed read of this table, this check's own "
                   "included.")
     if nulls.table == "bronze.buyers":
-        cause += (" DuckDB declares full_name NOT NULL, so "
-                  "scripts/chain_copy_back.py refuses to carry such a buyer "
-                  "back (handover_rows_unwritable) and the chain cannot be "
-                  "rolled back until the row is corrected.")
+        cause += (" DuckDB declares full_name NOT NULL, so the copy-back of "
+                  "an image from before step 14 refuses to carry such a buyer "
+                  "back (handover_rows_unwritable): correct the row before "
+                  "any rollback to rollback-step14.")
         if latched_at is not None:
             cause += (" The shared parse writes 'Unknown' for a blank name, "
                       "so a NULL is a write that went round "
@@ -1742,10 +1840,11 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
                 "deletes a buyer, so these were written round it — or a buyer "
                 "was deleted by hand. The SMS audience joins contacts to "
                 "buyers, so an orphaned phone number is in no audience. "
-                "scripts/chain_copy_back.py does not refuse them: it reads "
-                "contacts through their buyers and leaves an orphaned one "
-                "behind, and carries an orphaned verdict into DuckDB — so "
-                "--handover will not name them. Correct them before a rollback.")))
+                "The copy-back of an image from before step 14 does not "
+                "refuse them: it reads contacts through their buyers and "
+                "leaves an orphaned one behind, and carries an orphaned "
+                "verdict into DuckDB — so its handover will not name them. "
+                "Correct them before any rollback to rollback-step14.")))
     if b.contact_missing:
         shown = ", ".join(str(i) for i in b.contact_missing_sample)
         issues.append(_issue(
@@ -1759,7 +1858,7 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
                 "the shared parse, so this is a contact list deleted and not "
                 "written again — and the SMS audience reads phone numbers from "
                 "the contact list, not the column. The next write of that "
-                "buyer rewrites both; POST /api/duckdb/sync-all-buyers rewrites "
+                "buyer rewrites both; POST /api/sync/sync-all-buyers rewrites "
                 "every buyer KeyCRM has.")))
     return issues
 
@@ -2313,6 +2412,12 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
             issues.append(unwatched_issue(group.reason, (chain_mod.CHAIN,)))
         elif isinstance(group, Ledger):
             issues += _ledger_issues(group, chain_mod.CHAIN)
+
+    if isinstance(facts.latch, Unwatched):
+        issues.append(unwatched_issue(facts.latch.reason, facts.watched,
+                                      MARKERS_PART))
+    elif isinstance(facts.latch, Latch):
+        issues += _latch_issues(facts.latch)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

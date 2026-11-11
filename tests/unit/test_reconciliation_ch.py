@@ -125,10 +125,12 @@ class TestTheArmGates:
                    new=AsyncMock(return_value={99})), \
              patch("core.reconciliation_io.clickhouse_orders_in_window",
                    new=AsyncMock(return_value=ch)) as chx:
+            # The job's watermark, two hours back: the copy shipped after it.
             result = await self._sched()._reconcile_clickhouse(
                 kc, window_start=date(2026, 8, 1),
                 window_end=date(2026, 8, 29),
-                as_of=datetime.now(timezone.utc), inflight_ids={7},
+                as_of=datetime.now(timezone.utc) - timedelta(hours=2),
+                inflight_ids={7},
             )
         assert chx.await_args.kwargs["exclude_ids"] == {7, 99}
         assert result["error"] is None

@@ -1,16 +1,22 @@
-"""Chain 9 against a real Postgres: the journal written there, shadowed in DuckDB.
+"""Chain 9 against a real Postgres: the journal written and read there alone.
 
 What `tests/unit/test_dq_journal.py` cannot prove without a database:
 
-- both stores hold the same run, column for column, after one `journal_run`;
+- one `journal_run` writes every column of a run and its findings as DuckDB's
+  shadow held them — the literal is DuckDB's rows on the base `e3112a7d`, the
+  last tree with a shadow (step 14's rule 9);
 - two runs journaled at once get two consecutive ids (the advisory lock);
-- the Postgres readers return what DuckDB's return for the same journal,
-  rendered in the same zone;
-- the daily comparison, facing Postgres→DuckDB, is silent on an honest shadow
-  and names a shadow that failed;
+- the Postgres readers return what DuckDB's readers returned for the same
+  journal, rendered in the same zone — again DuckDB's answer, as a literal;
+- the digest's beat lives in Postgres and is read from there, and while the
+  key is absent it is inherited from `app.sync_metadata`, the copy of
+  DuckDB's table, whatever `KS_DUCKDB` says (S14-10);
 - the standing watch reads an orphaned finding with its real SQL;
-- the way back carries a Postgres-only run into DuckDB, floors DuckDB's
-  allocator above it, carries the digest's beat back and releases.
+- two findings under one key in one run land as one row.
+
+The way back — a Postgres-only run carried into DuckDB, its allocator floored,
+the digest's beat carried back — went with the copy-back in step 14's S14-04;
+the shadow, its daily comparison and the `duckdb` branch with S14-10.
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from core import chain_latch, dq_journal, pg_dq_journal_write as chain, shadow_writes
+from core import chain_latch, dq_journal, pg_dq_journal_write as chain
 from core.data_quality import (
     Discrepancy, DiscrepancyClass, IntegrityIssue, Severity, run_values,
 )
@@ -32,38 +38,37 @@ DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 TABLES = chain.CHAIN_TABLES
-NOW = datetime.now(timezone.utc).replace(microsecond=0)
+# Fixed, so the literals below are DuckDB's answers on this very fixture.
+NOW = datetime(2026, 10, 1, 7, 30, tzinfo=timezone.utc)
 DAY = NOW.date()
 
 
 async def _clean(pool):
+    """The journal, the chain's owner rows and the beat in both places it
+    is read from — the throwaway database's, put back as the suite found it."""
     async with pool.acquire() as conn:
         for t in reversed(TABLES):
             await conn.execute(f"DELETE FROM {t}")
         await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%' "
                            "OR key = $1", chain.DIGEST_MARKER_KEY)
+        await conn.execute("DELETE FROM app.sync_metadata WHERE key = $1",
+                           chain.DIGEST_MARKER_KEY)
 
 
 @pytest_asyncio.fixture
-async def stores(tmp_path, monkeypatch):
-    from core.duckdb_store import DuckDBStore
+async def pool(monkeypatch):
     from core import write_chains
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    shadow_writes.reset()
-    store = DuckDBStore(db_path=tmp_path / "journal.duckdb")
-    await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
          patch("core.pg.require_revision", new=AsyncMock()):
-        yield store, pool, monkeypatch
+        yield pool
     await _clean(pool)
     await pool.close()
-    await store.close()
-    shadow_writes.reset()
 
 
 def _kwargs(layer="integrity", started=None, issues=None, diffs=None):
@@ -102,144 +107,175 @@ def _utc(row):
                  for v in row)
 
 
-async def _both(store, pool, table):
+def _at(text):
+    return datetime.fromisoformat(text)
+
+
+# DuckDB's rows after the same two `journal_run` calls on the base, shadow on
+# (rule 9), every instant in UTC.
+DUCKDB_JOURNAL_ROWS = {
+    "app.data_quality_runs": [
+        (1, _at("2026-10-01T07:25:00+00:00"), _at("2026-10-01T07:25:04+00:00"),
+         _at("2026-10-01T07:25:00+00:00"), date(2026, 10, 1), date(2026, 10, 1),
+         "integrity", "CRITICAL", 1, 1, 1, 1, 0, 4000, None),
+        (2, _at("2026-10-01T07:25:00+00:00"), _at("2026-10-01T07:25:04+00:00"),
+         _at("2026-10-01T07:25:00+00:00"), date(2026, 10, 1), date(2026, 10, 1),
+         "mirror_landing", "WARN", 1, 0, 0, 1, 0, 4000, None),
+    ],
+    "app.data_quality_issues": [
+        (1, "pk_uniqueness_orders", "orders", "WARN", 2, "[5, 6]", "двa дублі"),
+        (2, "pk_uniqueness_orders", "orders", "WARN", 2, "[5, 6]", "двa дублі"),
+    ],
+    "app.data_quality_diffs": [
+        (1, "2026-09", 4, "MISSING_IN_DK", "orders", 1.25, 3.5, "CRITICAL", "[77]"),
+    ],
+}
+
+
+async def _pg_rows(pool, table):
     cols, order = _COLUMNS[table]
     async with pool.acquire() as conn:
-        pg = [_utc(tuple(r)) for r in await conn.fetch(
+        return [_utc(tuple(r)) for r in await conn.fetch(
             f"SELECT {cols} FROM {table} ORDER BY {order}")]
-    dk_table = table.split(".", 1)[1]
-    async with store.connection() as conn:
-        dk = [_utc(r) for r in conn.execute(
-            f"SELECT {cols} FROM {dk_table} ORDER BY {order}").fetchall()]
-    return pg, dk
 
 
-class TestOneRunTwoStores:
+class TestOneRun:
     @pytest.mark.asyncio
-    async def test_every_column_is_equal_in_both_stores(self, stores):
-        """Mutation: compute `duration_ms` (or any column) once per store, or
-        hand DuckDB its own `CURRENT_TIMESTAMP` — the comparison would then
-        report every run as differing, every morning."""
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        first = await dq_journal.journal_run(store, **_kwargs())
-        second = await dq_journal.journal_run(store, **_kwargs(layer="mirror_landing",
-                                                               diffs=[]))
-        assert second == first + 1
+    async def test_every_column_is_what_duckdbs_shadow_held(self, pool):
+        """Mutation: compute `duration_ms` (or any column) per call, or let a
+        column drift in `journal_rows` — the literal is DuckDB's answer."""
+        first = await dq_journal.journal_run(**_kwargs())
+        second = await dq_journal.journal_run(**_kwargs(layer="mirror_landing", diffs=[]))
+        assert (first, second) == (1, 2)
         for table in TABLES:
-            pg, dk = await _both(store, pool, table)
-            assert pg and pg == dk, table
-        assert shadow_writes.failures_of(chain.CHAIN)["count"] == 0
+            assert await _pg_rows(pool, table) == DUCKDB_JOURNAL_ROWS[table], table
         # The first write latched the chain and claimed all three tables.
         assert chain_latch.latched(chain.CHAIN)
         assert set(await chain_latch.read_owners(pool)) == set(TABLES)
 
     @pytest.mark.asyncio
-    async def test_two_runs_at_once_get_two_ids(self, stores):
+    async def test_two_runs_at_once_get_two_ids(self, pool):
         """Mutation: drop `pg_advisory_xact_lock` — both read one MAX and the
         second INSERT dies on the primary key."""
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
         values = run_values(**_kwargs())
         a, b = await asyncio.gather(
             chain.persist_run(values, [], []), chain.persist_run(values, [], []))
         assert sorted([a.run_id, b.run_id]) == [1, 2]
 
 
-class TestTheReadersAgree:
+def _issue_literal():
+    return {"check_name": "pk_uniqueness_orders", "count": 2, "description": "двa дублі",
+            "sample_ids": [5, 6], "severity": "WARN", "table_name": "orders"}
+
+
+def _diff_literal():
+    return {"diff_class": "MISSING_IN_DK", "dk_value": 1.25, "field": "orders",
+            "kc_value": 3.5, "month": "2026-09", "order_ids": [77],
+            "severity": "CRITICAL", "source_id": 4}
+
+
+def _run_literal(run_id, layer):
+    return {"api_calls_used": 0, "as_of": "2026-10-01T10:25:00+03:00",
+            "critical_count": 1, "discrepancies_count": 1, "duration_ms": 4000,
+            "ended_at": "2026-10-01T10:25:04+03:00", "error_message": None,
+            "integrity_issues_count": 1, "layer": layer, "run_id": run_id,
+            "started_at": "2026-10-01T10:25:00+03:00", "status": "CRITICAL",
+            "warn_count": 1, "window_end": "2026-10-01", "window_start": "2026-10-01"}
+
+
+# DuckDB's readers on the same journal (integrity, integrity, reconciliation),
+# its session set to Europe/Kyiv, on the base (rule 9). The body lost its
+# `reconciliation` block (DuckDB's arm, deleted in S14-12) and gained
+# `reconciliation_ch` when it began to be built from WATCHED_LAYERS (L4-06,
+# A19); every block it keeps is the literal recorded on the base.
+# `tests/integration/test_dq_health_body_layers.py` holds the two arms' diffs.
+DUCKDB_HEALTH = {
+    "integrity": {"issues": [_issue_literal()], "last_run": _run_literal(2, "integrity")},
+    "mirror_landing": {"issues": [], "last_run": None},
+    "reconciliation_pg": {"diffs": [], "last_run": None},
+    "reconciliation_ch": {"diffs": [], "last_run": None},
+}
+DUCKDB_SECTIONS = [
+    {"layer": "integrity", "run": _run_literal(2, "integrity"),
+     "issues": [_issue_literal()], "diffs": [_diff_literal()],
+     "previous_issues": [_issue_literal()], "previous_diffs": [_diff_literal()],
+     "age_hours": 0.08333333333333333},
+    {"layer": "reconciliation", "run": _run_literal(3, "reconciliation"),
+     "issues": [_issue_literal()], "diffs": [_diff_literal()],
+     "previous_issues": [], "previous_diffs": [],
+     "age_hours": 0.08333333333333333},
+]
+DUCKDB_LAST_SUCCESS_AT = {"integrity": "2026-10-01T10:25:00+03:00",
+                          "reconciliation": "2026-10-01T10:25:00+03:00"}
+
+
+class TestTheReadersAnswerAsDuckDBs:
     @pytest.mark.asyncio
-    async def test_postgres_readers_return_what_duckdbs_return(self, stores, monkeypatch):
-        """Same journal, both readers, both rendered in the zone DuckDB uses.
-        Mutation: drop `_local`'s conversion, or let one shaper drift."""
+    async def test_postgres_readers_return_what_duckdbs_returned(self, pool, monkeypatch):
+        """Same journal, Postgres's readers, rendered in Kyiv; the literals are
+        DuckDB's readers' answers on the base. Mutation: drop `_local`'s
+        conversion, or let one shaper drift."""
         from zoneinfo import ZoneInfo
 
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
         for layer in ("integrity", "integrity", "reconciliation"):
-            await dq_journal.journal_run(store, **_kwargs(layer=layer))
+            await dq_journal.journal_run(**_kwargs(layer=layer))
         monkeypatch.setattr(chain, "_ZONE", ZoneInfo("Europe/Kyiv"))
-        async with store.connection() as conn:
-            conn.execute("SET TimeZone = 'Europe/Kyiv'")
-            dk_health = await dq_journal._health_runs(dq_journal._DuckReader(conn))
-            dk_sections = await dq_journal._sections(
-                dq_journal._DuckReader(conn), ("integrity", "reconciliation"),
-                NOW, NOW)
-            from core.data_quality import fetch_last_success_ages
-
-            dk_ages = fetch_last_success_ages(conn, ("integrity", "reconciliation"))
         async with chain.reading() as conn:
-            pg_health = await dq_journal._health_runs(dq_journal._PgReader(conn))
-            pg_sections = await dq_journal._sections(
-                dq_journal._PgReader(conn), ("integrity", "reconciliation"),
-                NOW, NOW)
-            pg_ages = await chain.last_success_ages(conn, ("integrity", "reconciliation"))
-        assert pg_health == dk_health
-        # Kyiv's offset at the run's own instant: +03:00 in summer, +02:00 in
-        # winter. The literal "+03:00" failed every run from the clocks' change.
-        started = datetime.fromisoformat(pg_health["integrity"]["last_run"]["started_at"])
-        assert started.utcoffset() == started.astimezone(ZoneInfo("Europe/Kyiv")).utcoffset()
-        assert [(s.run, s.issues, s.diffs, s.previous_issues, s.previous_diffs)
-                for s in pg_sections] == \
-            [(s.run, s.issues, s.diffs, s.previous_issues, s.previous_diffs)
-             for s in dk_sections]
-        for layer in ("integrity", "reconciliation"):
-            assert pg_ages[layer]["last_success_at"] == dk_ages[layer]["last_success_at"]
-            assert abs(pg_ages[layer]["age_seconds"] - dk_ages[layer]["age_seconds"]) <= 5
+            health = await dq_journal._health_runs(dq_journal._PgReader(conn))
+            sections = await dq_journal._sections(
+                dq_journal._PgReader(conn), ("integrity", "reconciliation"), NOW, NOW)
+            ages = await chain.last_success_ages(conn, ("integrity", "reconciliation"))
+        assert health == DUCKDB_HEALTH
+        assert [dict(layer=s.layer, run=s.run, issues=s.issues, diffs=s.diffs,
+                     previous_issues=s.previous_issues,
+                     previous_diffs=s.previous_diffs, age_hours=s.age_hours)
+                for s in sections] == DUCKDB_SECTIONS
+        assert {k: v["last_success_at"] for k, v in ages.items()} == DUCKDB_LAST_SUCCESS_AT
+        assert all(v["age_seconds"] > 0 for v in ages.values())
+        # The door's own answer for /api/health/data-quality is the same body.
+        assert await dq_journal.health_runs() == DUCKDB_HEALTH
 
+
+class TestTheBeat:
     @pytest.mark.asyncio
-    async def test_the_beat_lives_in_postgres_and_is_read_from_there(self, stores):
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await dq_journal.mark_digest_sent(store, "2026-10-01T06:00:00+00:00")
+    async def test_the_beat_lives_in_postgres_and_is_read_from_there(self, pool):
+        await dq_journal.mark_digest_sent("2026-10-01T06:00:00+00:00")
         async with chain.reading() as conn:
             assert await chain.digest_marker(conn) == "2026-10-01T06:00:00+00:00"
-        last, _ = await dq_journal.digest_inputs(store, ("integrity",), NOW)
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime(2026, 10, 1, 6, tzinfo=timezone.utc)
 
-
-class TestTheShadowIsCompared:
     @pytest.mark.asyncio
-    async def test_an_honest_shadow_is_silent_and_a_failed_one_is_named(self, stores):
-        """The third state end to end: the hourly copy stands down for the
-        journal, and the daily comparison keeps comparing it facing
-        Postgres→DuckDB. Mutation: drop `- shadowed` in
-        `reconcile_operational` (the journal is never compared), or keep the
-        shipper running (it would delete the Postgres-only run)."""
-        from core.mirror_reconciliation import reconcile_operational
-        from core.pg_operational import replicate_operational
+    async def test_absent_it_is_inherited_from_the_copy(self, pool, monkeypatch):
+        """`meta.chain_watermarks` without the key, `app.sync_metadata` with
+        it: the copy answers, and nothing opens DuckDB. (Until step 14's
+        S14-18 it ran under both values of `KS_DUCKDB`; the switch is
+        deleted.) Mutation: inherit only under off, as before S14-10."""
+        from core import duckdb_store
 
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        old = NOW - timedelta(hours=5)
-        await dq_journal.journal_run(store, **_kwargs(started=old))
-        issues = [i for i in await reconcile_operational(store)
-                  if i.table_name in TABLES]
-        assert issues == [], issues
+        def _no_duckdb(self):
+            raise AssertionError("the digest opened DuckDB")
 
-        # A shadow that failed: the run is in Postgres only.
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM data_quality_diffs")
-            conn.execute("DELETE FROM data_quality_issues")
-            conn.execute("DELETE FROM data_quality_runs")
-        found = {(i.check_name, i.table_name) for i in await reconcile_operational(store)
-                 if i.table_name in TABLES}
-        assert found == {("shadow_missing_in_duckdb", t) for t in TABLES}
-
-        # And the hourly copy does not "repair" it out of DuckDB.
-        shipped = await replicate_operational(store)
-        assert set(TABLES) <= set(shipped.get("stood_down", [])), shipped
-        pg, _ = await _both(store, pool, "app.data_quality_runs")
-        assert len(pg) == 1
+        monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", _no_duckdb)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app.sync_metadata (key, value, updated_at) "
+                "VALUES ($1, $2, now())",
+                chain.DIGEST_MARKER_KEY, "2026-09-29T06:00:00+00:00")
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
+        assert last == datetime(2026, 9, 29, 6, tzinfo=timezone.utc)
+        # Once the beat moves, Postgres's own key wins over the copy.
+        await dq_journal.mark_digest_sent("2026-10-01T06:00:00+00:00")
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
+        assert last == datetime(2026, 10, 1, 6, tzinfo=timezone.utc)
 
 
 class TestTheStandingWatch:
     @pytest.mark.asyncio
-    async def test_an_orphaned_finding_is_read(self, stores):
+    async def test_an_orphaned_finding_is_read(self, pool):
         from core import pg_chain_invariants as inv
 
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await dq_journal.journal_run(store, **_kwargs())
+        await dq_journal.journal_run(**_kwargs())
         facts = await inv.read_facts(pool=pool)
         assert facts.journal == inv.Journal()
         async with pool.acquire() as conn:
@@ -249,52 +285,6 @@ class TestTheStandingWatch:
         (issue,) = [i for i in inv.check_chain_invariants(facts)
                     if i.check_name == inv.JOURNAL_ORPHANS]
         assert issue.count == 2
-
-
-class TestTheWayBack:
-    @pytest.mark.asyncio
-    async def test_a_postgres_only_run_comes_back_and_the_allocator_clears_it(
-            self, stores):
-        """The copy-back for a shadow chain is a near no-op copy plus the
-        floor: DuckDB already holds every row but those whose shadow failed.
-        Mutation: leave `data_quality_run_seq` where the shadow left it — the
-        next DuckDB run would reissue an id Postgres already used."""
-        from core.chain_transfer import copy_back
-
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        old = NOW - timedelta(hours=5)
-        await dq_journal.journal_run(store, **_kwargs(started=old))
-        await dq_journal.mark_digest_sent(store, "2026-10-01T06:00:00+00:00")
-        # The second run's shadow fails: Postgres alone holds run 2.
-        real = shadow_writes.into_duckdb
-
-        async def failing(store_, chain_name, write):
-            return await real(store_, chain_name, lambda conn: (_ for _ in ()).throw(
-                RuntimeError("shadow refused")))
-
-        with patch.object(shadow_writes, "into_duckdb", failing):
-            second = await dq_journal.journal_run(store, **_kwargs(started=old))
-        assert second == 2
-
-        result = await copy_back(store, chain, dry_run=False)
-        assert result["findings"] == [], result["findings"]
-        assert result["released"] is True
-        assert not chain_latch.latched(chain.CHAIN)
-        assert await chain_latch.read_owners(pool) == {}
-        for table in TABLES:
-            pg, dk = await _both(store, pool, table)
-            assert pg == dk, table
-        async with store.connection() as conn:
-            marker = conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
-                                  [chain.DIGEST_MARKER_KEY]).fetchone()[0]
-            nxt = conn.execute("SELECT nextval('data_quality_run_seq')").fetchone()[0]
-        assert marker == "2026-10-01T06:00:00+00:00"
-        assert nxt > 2
-        async with pool.acquire() as conn:
-            assert await conn.fetchval(
-                "SELECT value FROM meta.chain_watermarks WHERE key = $1",
-                chain.DIGEST_MARKER_KEY) is None
 
 
 def _blind_twice():
@@ -307,34 +297,33 @@ def _blind_twice():
             for part in ("the journal", "the watchdogs")]
 
 
+class TestOneTransaction:
+    @pytest.mark.asyncio
+    async def test_a_refused_finding_leaves_no_run_behind(self, pool):
+        """A run and its findings land together or not at all: Postgres
+        refuses a NUL in a text column, and the run row inserted before it in
+        the same transaction is rolled back with it. (DuckDB's `persist_run`
+        was held to the same bracket until step 14's S14-10.) Mutation: write
+        the run in its own transaction — the digest would then read a run
+        with counts and no findings, and call every standing one new."""
+        bad = IntegrityIssue(check_name="pk_uniqueness_orders", table_name="orders",
+                             severity=Severity.WARN, count=1, description="a\x00b")
+        with pytest.raises(asyncpg.PostgresError):
+            await dq_journal.journal_run(**_kwargs(issues=[bad]))
+        for table in TABLES:
+            assert await _pg_rows(pool, table) == [], table
+
+
 class TestOneFindingPerKey:
     """`app.data_quality_issues` is keyed on `(run_id, check_name,
-    table_name)`, DuckDB's table on nothing."""
+    table_name)`."""
 
     @pytest.mark.asyncio
-    async def test_under_postgres_the_run_lands_in_both_stores(self, stores):
+    async def test_the_run_lands_with_one_row_per_key(self, pool):
         """The review's reproduction. Mutation: drop the fold from
-        `journal_run` — Postgres refuses the run on its primary key, it lands
-        in neither store, and the failed attempt has latched the chain."""
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        run_id = await dq_journal.journal_run(store, **_kwargs(issues=_blind_twice()))
-        pg, dk = await _both(store, pool, "app.data_quality_issues")
-        assert pg == dk
-        assert [(r[0], r[1], r[2], r[4]) for r in pg] == [
+        `journal_run` — Postgres refuses the run on its primary key, and the
+        failed attempt has latched the chain."""
+        run_id = await dq_journal.journal_run(**_kwargs(issues=_blind_twice()))
+        rows = await _pg_rows(pool, "app.data_quality_issues")
+        assert [(r[0], r[1], r[2], r[4]) for r in rows] == [
             (run_id, "chain_invariants_unwatched", "(write chains)", 2)]
-
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_hourly_copy_still_ships(self, stores):
-        """Left on duckdb, the default. Mutation: drop the fold — DuckDB takes
-        both rows, and `replicate_operational`'s full replace of
-        `app.data_quality_issues` then fails on the primary key every hour,
-        for good, since the journal is never pruned."""
-        from core.pg_operational import replicate_operational
-
-        store, pool, _env = stores
-        await dq_journal.journal_run(store, **_kwargs(issues=_blind_twice()))
-        result = await replicate_operational(store)
-        assert "error" not in result, result
-        pg, dk = await _both(store, pool, "app.data_quality_issues")
-        assert pg == dk and len(pg) == 1

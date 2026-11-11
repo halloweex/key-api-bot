@@ -13,11 +13,14 @@ import json
 import re
 from datetime import date
 
+import os
+
 import pytest
-from contextlib import asynccontextmanager
+import pytest_asyncio
 
 from core import telegram_alerts
 from core.telegram_alerts import sign_html_for, signature_line
+from tests.integration.pg_tab_seed import needs_postgres
 from core.weekly_report import (
     ChannelTotals,
     DayTotals,
@@ -58,23 +61,6 @@ def _report(**overrides) -> WeeklyReport:
     )
     fields.update(overrides)
     return WeeklyReport(**fields)
-
-
-class _Held:
-    """A `store` handing back a connection the test already holds.
-
-    `fetch_daily` and `fetch_channels` take a store and open their own
-    connection since `KS_READ_WEEKLY` routes them; the store lock is not
-    reentrant, so passing the real store from inside an open block would hang.
-    Same shim as `tests/unit/test_weekly_report.py`.
-    """
-
-    def __init__(self, conn):
-        self._conn = conn
-
-    @asynccontextmanager
-    async def connection(self):
-        yield self._conn
 
 
 class TestFormatReportRich:
@@ -372,56 +358,66 @@ class TestRichTransport:
 
 # ─── The two new reads ──────────────────────────────────────────────────────
 
-async def _store(tmp_path):
-    from core.duckdb_store import DuckDBStore
-
-    s = DuckDBStore(db_path=tmp_path / "rich.duckdb")
-    await s.connect()
-    return s
+# Postgres' Gold, which the report reads alone since step 14's S14-07: a
+# roll-up row per day (`source_id IS NULL`) and, for a channel, the fine row
+# under it — a channel is `source_id` there, not a column.
+CHANNEL_SOURCES = {"instagram": 1, "telegram": 2, "shopify": 4}
 
 
-def _gold(conn, day: date, revenue: float, orders: int, **channels):
-    cols = ["date", "sales_type", "revenue", "orders_count", *channels]
-    conn.execute(
-        f"INSERT OR REPLACE INTO gold_daily_revenue ({', '.join(cols)}) "
-        f"VALUES ({', '.join('?' for _ in cols)})",
-        [day, "retail", revenue, orders, *channels.values()],
+@pytest_asyncio.fixture
+async def pg(tmp_path, monkeypatch):
+    """A Postgres warehouse, emptied, and the trap store a read is handed."""
+    from tests.integration.pg_tab_seed import (
+        store_that_never_reaches_duckdb, tab_in_postgres,
     )
 
+    async def _nothing(conn, pool):
+        pass
 
+    async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _nothing) as pool:
+        yield pool, store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the report")
+
+
+async def _gold(conn, day: date, revenue: float, orders: int, **channels):
+    rows = [(None, revenue, orders)] + [
+        (CHANNEL_SOURCES[name], channels[f"{name}_revenue"], channels[f"{name}_orders"])
+        for name in CHANNEL_SOURCES if f"{name}_revenue" in channels]
+    await conn.executemany(
+        "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+        " orders_count, unique_customers, new_customers, returning_customers,"
+        " returns_count, returns_revenue, avg_order_value)"
+        " VALUES ($1, 'retail', $2, $3, $4, 0, 0, 0, 0, 0, 0)",
+        [(day, source, rev, n) for source, rev, n in rows])
+
+
+@needs_postgres
 class TestFetchDaily:
     @pytest.mark.asyncio
-    async def test_seven_rows_with_zeros_for_missing_days(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _gold(conn, date(2026, 8, 31), 1_000, 3)
-                _gold(conn, date(2026, 9, 6), 500, 1)
-                days = await fetch_daily(
-                    _Held(conn), date(2026, 8, 31), date(2026, 9, 6), "retail")
-        finally:
-            await store.close()
+    async def test_seven_rows_with_zeros_for_missing_days(self, pg):
+        pool, reads = pg
+        async with pool.acquire() as conn:
+            await _gold(conn, date(2026, 8, 31), 1_000, 3)
+            await _gold(conn, date(2026, 9, 6), 500, 1)
+        days = await fetch_daily(reads, date(2026, 8, 31), date(2026, 9, 6), "retail")
         assert [d.day.weekday() for d in days] == list(range(7))
         assert [(d.revenue, d.orders) for d in days][1:6] == [(0.0, 0)] * 5
         assert (days[0].revenue, days[6].orders) == (1_000.0, 1)
 
 
+@needs_postgres
 class TestFetchChannels:
     @pytest.mark.asyncio
-    async def test_sums_columns_and_drops_a_silent_channel(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _gold(conn, date(2026, 8, 31), 300, 3,
-                      instagram_revenue=100, instagram_orders=1,
-                      shopify_revenue=200, shopify_orders=2)
-                _gold(conn, date(2026, 8, 24), 50, 1,
-                      shopify_revenue=50, shopify_orders=1)
-                channels = await fetch_channels(
-                    _Held(conn), date(2026, 8, 31), date(2026, 9, 6),
-                    date(2026, 8, 24), date(2026, 8, 30), "retail")
-        finally:
-            await store.close()
+    async def test_sums_columns_and_drops_a_silent_channel(self, pg):
+        pool, reads = pg
+        async with pool.acquire() as conn:
+            await _gold(conn, date(2026, 8, 31), 300, 3,
+                        instagram_revenue=100, instagram_orders=1,
+                        shopify_revenue=200, shopify_orders=2)
+            await _gold(conn, date(2026, 8, 24), 50, 1,
+                        shopify_revenue=50, shopify_orders=1)
+        channels = await fetch_channels(
+            reads, date(2026, 8, 31), date(2026, 9, 6),
+            date(2026, 8, 24), date(2026, 8, 30), "retail")
         assert [(c.name, c.revenue, c.orders, c.previous_revenue) for c in channels] == [
             ("Shopify", 200.0, 2, 50.0), ("Instagram", 100.0, 1, 0.0),
         ]

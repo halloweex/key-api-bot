@@ -154,3 +154,36 @@ class TestTheBaseImagesArePinnedToo:
         'finishes the job' without meaning to."""
         compose = (REPO / "docker-compose.yml").read_text()
         assert "postgres:17.2-alpine@sha256" not in compose
+
+
+class TestTheDriverIsATestToolSinceS1419:
+    """Step 14's S14-19 took `duckdb` out of both images: nothing web or the
+    bot runs imports it (tests/unit/test_images_carry_no_duckdb.py). The
+    archives are read by the pinned `rollback-step14` image, and the tests of
+    the host tools that run there still need the driver, so it moved to the
+    dev side — on a line of its own, because it used to arrive there only
+    through `-r requirements.txt`."""
+
+    def test_the_images_install_no_driver(self):
+        """Mutation: put `duckdb==1.5.5` back into requirements.txt or the
+        lock."""
+        assert "duckdb" not in RUNTIME
+        assert "duckdb" not in _named(Path("requirements.txt"))
+
+    def test_the_dev_side_names_it_itself(self):
+        """`_named` skips the `-r requirements.txt` line, so this is the dev
+        file's own line. Mutation: delete it — a regenerated dev lock would
+        then lose the driver without a word."""
+        assert "duckdb" in _named(Path("requirements-dev.txt"))
+        lines = [line.split("#")[0].strip()
+                 for line in (REPO / "requirements-dev.txt").read_text().splitlines()]
+        assert "duckdb==1.5.5" in lines
+
+    def test_it_is_the_version_the_pinned_image_must_carry(self):
+        """The tests of the host tools run the driver the archives were
+        written by: the version deploy/archive_image.sh requires of the
+        pinned image."""
+        text = (REPO / "deploy" / "archive_image.sh").read_text()
+        pinned = re.search(r'^ARCHIVE_DUCKDB_VERSION="([^"]+)"$', text, re.M)
+        assert pinned, "deploy/archive_image.sh names no ARCHIVE_DUCKDB_VERSION"
+        assert DEV.get("duckdb") == pinned.group(1) == "1.5.5"

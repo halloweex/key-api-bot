@@ -13,7 +13,6 @@ from core.data_quality import (
     DEFAULT_REMEDIATION,
     IntegrityIssue,
     REMEDIATION,
-    REMEDIATION_UTM_PARSED_IN_POSTGRES,
     Severity,
     format_alert_message,
     machine_attempts_note,
@@ -41,11 +40,11 @@ class TestRemediationLookup:
         """Half the check names are built at runtime; an exact-name table
         would silently miss every one of them."""
         for name in (
-            "fk_orphan_order_products_order_id",
-            "pk_uniqueness_orders",
-            "not_null_orders_grand_total",
-            "value_domain_orders_source_id",
+            "pg_fk_orphan_order_products_order_id",
+            "pg_not_null_orders_ordered_at",
+            "pg_value_domain_orders_source_id",
             "freshness_orders",
+            "freshness_expense_types",
         ):
             assert remediation_for([name]) != [DEFAULT_REMEDIATION], name
 
@@ -58,12 +57,12 @@ class TestRemediationLookup:
     def test_one_useful_thing_said_once(self):
         """Eight orphan checks in one alert are still one lever."""
         assert len(remediation_for([
-            "fk_orphan_a_b", "fk_orphan_c_d", "fk_orphan_e_f",
+            "pg_fk_orphan_a_b", "pg_fk_orphan_c_d", "pg_fk_orphan_e_f",
         ])) == 1
 
     def test_order_is_stable_and_follows_the_issues(self):
-        assert remediation_for(["silver_missing_rows", "gold_cell_values"]) == list(
-            reversed(remediation_for(["gold_cell_values", "silver_missing_rows"]))
+        assert remediation_for(["pg_silver_missing_rows", "gold_rollup_mismatch"]) == list(
+            reversed(remediation_for(["gold_rollup_mismatch", "pg_silver_missing_rows"]))
         )
 
     def test_the_archive_is_never_told_to_repair_itself(self):
@@ -85,63 +84,47 @@ class TestRemediationLookup:
     def test_every_entry_is_one_line_of_levers(self):
         """A reason written into an entry pushes the lever off a phone's
         screen; reasons belong in the finding's description."""
-        for prefix, line in (REMEDIATION + REMEDIATION_UTM_PARSED_IN_POSTGRES
-                             + (("<default>", DEFAULT_REMEDIATION),)):
+        for prefix, line in (REMEDIATION + (("<default>", DEFAULT_REMEDIATION),)):
             assert "\n" not in line, prefix
             assert len(line) <= self.ARROW_LINE_MAX, (prefix, len(line))
 
-    def test_a_mode_swap_replaces_an_entry_that_exists(self):
-        """`remediation_for` swaps the KS_UTM_PARSE=postgres lines in by
-        prefix. A prefix the main table does not carry would swap nothing,
-        and the findings would keep the DuckDB lever in silence."""
-        main = [prefix for prefix, _line in REMEDIATION]
-        for prefix, line in REMEDIATION_UTM_PARSED_IN_POSTGRES:
-            assert main.count(prefix) == 1, prefix
-            assert remediation_for([prefix + "x"], utm_parsed_in_postgres=True) == [line]
-            assert remediation_for([prefix + "x"], utm_parsed_in_postgres=False) != [line]
+    def test_the_utm_line_is_the_postgres_parsers(self):
+        """One line since step 14's S14-15, which removed the `KS_UTM_PARSE`
+        swap (`REMEDIATION_UTM_PARSED_IN_POSTGRES`): the line production
+        published under `postgres`, byte for byte."""
+        assert remediation_for(["pg_order_utm_missing"]) == [
+            "Read meta.mirror_state for silver.order_utm: the parse writes its "
+            "error there. Then POST /api/traffic/refresh or /api/warehouse/refresh"]
 
 
 class TestMachineAttemptsNote:
+    """One ledger since step 14's S14-13: the ClickHouse archive's. The
+    buyers' (`core.pg_buyers.last_heal`, the hourly ids-diff) went with the
+    diff."""
+
     def test_quiet_when_nothing_has_healed(self, monkeypatch):
         """The common case. An empty line in a CRITICAL is worse than none."""
         import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
 
-        monkeypatch.setattr(pg_buyers, "last_heal", {})
         monkeypatch.setattr(ch_history, "last_heal", {})
         assert machine_attempts_note() is None
 
     def test_counts_a_recent_heal(self, monkeypatch):
         import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
 
         now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-        monkeypatch.setattr(pg_buyers, "last_heal",
-                            {"at": now - timedelta(minutes=41), "shipped": 3})
-        monkeypatch.setattr(ch_history, "last_heal", {})
-        note = machine_attempts_note(now=now)
-        assert "buyers" in note and "3" in note and "41m" in note
-
-    def test_both_ledgers_are_reported(self, monkeypatch):
-        import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
-
-        now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-        monkeypatch.setattr(pg_buyers, "last_heal",
-                            {"at": now - timedelta(minutes=5), "shipped": 1})
         monkeypatch.setattr(ch_history, "last_heal",
-                            {"at": now - timedelta(hours=2), "shipped": 9})
+                            {"at": now - timedelta(minutes=41), "shipped": 3})
         note = machine_attempts_note(now=now)
-        assert "buyers" in note and "archive" in note
+        assert "archive" in note and "3" in note and "41m" in note
+        assert "buyers" not in note
 
     def test_a_heal_older_than_a_day_is_not_this_incident(self, monkeypatch):
         import core.ch_history as ch_history
-        import core.pg_buyers as pg_buyers
 
         now = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
-        monkeypatch.setattr(pg_buyers, "last_heal",
+        monkeypatch.setattr(ch_history, "last_heal",
                             {"at": now - timedelta(days=3), "shipped": 3})
-        monkeypatch.setattr(ch_history, "last_heal", {})
         assert machine_attempts_note(now=now) is None
 
 
@@ -155,10 +138,10 @@ class TestTheAlertBody:
 
     def test_the_lever_is_last_because_it_is_what_gets_acted_on(self):
         msg = format_alert_message(
-            "integrity", Severity.CRITICAL, [_issue("pk_uniqueness_orders")], [],
+            "integrity", Severity.CRITICAL, [_issue("pg_fk_orphan_order_products_order_id")], [],
         )
         body, _, tail = msg.partition("→ ")
-        assert "pk_uniqueness_orders" in body
+        assert "pg_fk_orphan_order_products_order_id" in body
         assert tail.strip()
 
     def test_info_asks_nobody_to_do_anything(self):

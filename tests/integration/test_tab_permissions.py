@@ -185,6 +185,10 @@ class TestNoOverrideChangesNothing:
         self, client, monkeypatch, key,
     ):
         headers = _login(monkeypatch, allowed_features=None)
+        # The gate is the subject, not the data: /marketing's target line is
+        # chain 7a's table, read from Postgres, and a Postgres that cannot
+        # answer behind this client is a 503 — not the 403 asserted against.
+        # (Until step 14's S14-11 the chain was routed back to DuckDB here.)
         assert client.get(TAB_ENDPOINTS[key], headers=headers).status_code != 403
 
     @pytest.mark.parametrize("key", ["margin", "sms", "expenses"])

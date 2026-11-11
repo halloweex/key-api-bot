@@ -6,8 +6,8 @@ endpoint defaults to `retail`. KeyCRM knows a manager's name, email and status,
 and nothing about whether they sell retail, wholesale, internally or to
 bloggers — only a human does, through `POST /api/managers/{id}/retail-status`.
 Until this chain DuckDB was where that decision lived and
-`core.pg_replication.replicate_managers` full-replaced both tables into
-Postgres out of it. Under `KS_WRITE_MANAGERS=postgres` (default `duckdb`) the
+`core.pg_replication.replicate_managers` (deleted in step 14's S14-13)
+full-replaced both tables into Postgres out of it. Under `KS_WRITE_MANAGERS=postgres` (default `duckdb`) the
 three writers write Postgres and DuckDB's copies freeze.
 
 THE THREE WRITERS, AND THE ONE ORDER THEY TAKE THEIR LOCKS IN
@@ -48,7 +48,7 @@ is: changing what it accepts changes production, and that is its own decision.
 THE DERIVATION SIGNAL
 
 Silver reads `is_retail` and the intervals, so `upsert_managers` and
-`set_manager_retail_status` raise it (`pg_derivation.mark_if_owned`) in their
+`set_manager_retail_status` raise it (`pg_derivation.mark`) in their
 own transactions. `update_manager_stats` does not: Silver reads none of the
 three stats columns. Today's `write_managers` raises it after every replicate,
 the one after the stats included — one Postgres Silver rebuild a day that
@@ -57,11 +57,19 @@ moves no number, and it goes with this chain.
 ONE CLOCK FOR BOTH STORES
 
 `set_at` is the copy-back's handover clock (`chain_transfer._shared_clock`
-derives it from the daily spec), so it is the web container's clock passed in
-by the caller — `datetime.now(timezone.utc)` — never Postgres' `now()`; DuckDB's
-`CURRENT_TIMESTAMP` default reads the same host clock. Chain 7a's rule.
+derived it from the daily spec; an image from before step 14 still orders by
+it, since S14-04 deleted this build's), so it is the web container's clock
+passed in by the caller — `datetime.now(timezone.utc)` — never Postgres'
+`now()`; DuckDB's `CURRENT_TIMESTAMP` default reads the same host clock.
+Chain 7a's rule.
 
-HELD ON DUCKDB UNTIL WHAT READS THE TABLES FOLLOWS
+HELD ON DUCKDB UNTIL WHAT READS THE TABLES FOLLOWS — UNTIL STEP 14
+
+Since step 14's S14-00 the chain wrote Postgres whatever its flag said and
+asked no precondition, and since S14-11 there is nothing to ask: the flag,
+`writes_postgres`, `mode`, `reads_postgres`, `unmet_precondition`, the
+pre-flip `preflight` and `duckdb_orders_frozen` are gone. What follows is
+the history.
 
 `unmet_precondition()` names four things; until all hold an unlatched chain
 runs as duckdb whatever its flag says (DN-26's hook, generic in the registry).
@@ -73,9 +81,10 @@ bridge, and the goal history is Silver's, which step 13 makes Postgres':
   every image built before the chain (`chain_latch.lockout_unmet`).
 - `step13` — while DuckDB derives Silver it derives `sales_type` from a
   classification this chain would freeze.
-- `chain3` — `update_manager_stats` reads the orders, and the copy-backs must
-  run in reverse order of the flips. Asked of `core.pg_orders_write` by name,
-  so a build without chain 3 reads as unmet rather than failing to import.
+- `chain3` — `update_manager_stats` reads the orders, and the copy-backs had
+  to run in reverse order of the flips (deleted in step 14's S14-04). Asked
+  of `core.pg_orders_write` by name, so a build without chain 3 reads as
+  unmet rather than failing to import.
 - `read_fallback_off` — a failed read must be a 503, never DuckDB's frozen
   classification.
 
@@ -88,18 +97,16 @@ Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` and before its transaction, and claims both owner rows inside
 that transaction. What can be refused is refused before the latch — a row
 Postgres would reject, a manager that does not exist, a backdate — so a write
-that could not have landed does not spend the rollback. From the first write
-only `scripts/chain_copy_back.py managers` moves the writes back, and it owes
-DuckDB a full warehouse rebuild when it does (`CHAIN_COPY_BACK_OWES_FULL_REBUILD`).
+that could not have landed does not spend the rollback. The copy-back that
+moved the writes back to DuckDB was deleted with the way back in step 14's
+S14-04: a step-14 image has no way back but an image from before step 14
+(`.claude/CLAUDE.md`, "Before any rollback to an image from before step 14").
 """
 from __future__ import annotations
 
 import logging
-import os
-import sys
-import time
 from datetime import date, datetime
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core import chain_latch
 
@@ -112,13 +119,15 @@ WRITE_ENV = "KS_WRITE_MANAGERS"
 # release is still read by the next.
 CHAIN = "pg_managers_write"
 
-# `pg_replication.MANAGER_UNIT`, whole: a classification is read against its
-# managers, never alone, so the two change hands as one (DN-22b).
-CHAIN_TABLES: Tuple[str, ...] = ("bronze.managers", "app.manager_classifications")
+# The two tables, named once. They lived in `core.pg_replication`, beside the
+# classification copy, until step 14's S14-13 deleted it; `pg_warehouse_dq`
+# reads them from here.
+MANAGERS_TABLE = "bronze.managers"
+CLASSIFICATIONS_TABLE = "app.manager_classifications"
 
-# The revision that refuses every image built before this chain; the flag
-# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
-LOCKOUT_REVISION = "0035_batch_e_chains"
+# Both, whole: a classification is read against its managers, never alone,
+# so the two change hands as one (DN-22b).
+CHAIN_TABLES: Tuple[str, ...] = ("bronze.managers", "app.manager_classifications")
 
 # The one `sync_metadata` key that moves with it — what `sync_managers` stamps.
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_managers",)
@@ -134,11 +143,6 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_managers",)
 # true.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 
-# `core.chain_transfer.copy_back` marks DuckDB's warehouse dirty in full in the
-# copy's own transaction: `sales_type` is materialised at rebuild time, and an
-# incremental rebuild never re-derives an order whose classification moved.
-CHAIN_COPY_BACK_OWES_FULL_REBUILD = True
-
 # 'ks' in the high half and the chain's number in the low one, chain 1's
 # convention (`pg_inventory_write.CHAIN_LOCK_KEY` is ...0001).
 CHAIN_LOCK_KEY = 0x6B73_0000_0000_0005
@@ -151,15 +155,11 @@ ACQUIRE_TIMEOUT_S = 10
 
 # The holes every shared statement reading these tables carries —
 # `core.sql_dialect.render_tables` fills `{managers}`; `{classifications}` is
-# the dialect's name for the intervals. `reads_the_chain` recognises a read by
-# them, and `tests/unit/test_managers_chain.py` walks `core/` and `web/` for
-# every such statement.
+# the dialect's name for the intervals. `tests/unit/test_managers_chain.py`
+# walks `core/` and `web/` for every such statement — each must reach a router
+# that reads Postgres alone (step 14, S14-06). `reads_the_chain`, which
+# recognised a read by them, went with the chain's routing in S14-11.
 TABLE_HOLES: Tuple[str, ...] = ("{managers}", "{classifications}")
-
-# How often the unmet-precondition warning may repeat for one reason: the
-# incremental tick asks this chain's key every minute.
-UNMET_WARN_EVERY_S = 3600.0
-_unmet_warned: Dict[str, float] = {}
 
 _INT32 = (-2 ** 31, 2 ** 31 - 1)
 
@@ -196,169 +196,15 @@ class BackdateBehindLatest(ValueError):
         self.latest = latest
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_MANAGERS` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands it down, the sync
-    step contains it, the route answers 409 and the stats job fails visibly.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-# ─── Preconditions ───────────────────────────────────────────────────────────
-
-# Chain 3's module, asked by name: a build without it is unmet, not an import
-# error that would make the whole question unreadable.
-_CHAIN3 = "core.pg_orders_write"
-
-
-def _step13_unmet() -> Optional[str]:
-    from core import warehouse_cutover
-
-    if warehouse_cutover.writes_postgres():
-        return None
-    return ("step13: DuckDB still derives the warehouse (KS_WRITE_WAREHOUSE is "
-            "not in force), and it would derive sales_type from a "
-            "classification this chain freezes")
-
-
-def _chain3_unmet() -> Optional[str]:
-    import importlib
-
-    try:
-        chain3 = importlib.import_module(_CHAIN3)
-    except ModuleNotFoundError as exc:
-        if exc.name != _CHAIN3:
-            raise
-        return ("chain3: the orders chain is not in this build, and "
-                "update_manager_stats reads the orders it would freeze")
-    mode = chain3.mode()
-    if mode == "postgres":
-        return None
-    return (f"chain3: the orders are not written to Postgres "
-            f"({getattr(chain3, 'WRITE_ENV', 'KS_WRITE_ORDERS')} runs as {mode}), "
-            "and update_manager_stats reads them: flip chain 3 first, so the "
-            "copy-backs run in reverse")
-
-
-def _read_fallback_unmet() -> Optional[str]:
-    from core import read_fallback
-
-    if read_fallback.refusing():
-        return None
-    return ("read_fallback_off: KS_READ_FALLBACK is not off, so a failed read "
-            "of the classification would be answered from DuckDB's frozen copy")
-
-
-# `(key, check)`: the key is the precondition's name, the word every reason
-# starts with — spelled here, not derived from the function's name, which
-# would read `_read_fallback_unmet` as "read_fallback".
-_CHECKS = (
-    (chain_latch.LOCKOUT_KEY, lambda: chain_latch.lockout_unmet(LOCKOUT_REVISION)),
-    ("step13", _step13_unmet),
-    ("chain3", _chain3_unmet),
-    ("read_fallback_off", _read_fallback_unmet),
-)
-
-
-def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_MANAGERS=postgres` must not move the writes yet, or None.
-
-    Never raises and never asks Postgres: `/api/health` reads it through the
-    registry and must still answer with Postgres down. A fact that cannot be
-    read is unmet, because nobody can then say it holds. Every fact is stable
-    for the life of a process — a constant, a verdict cached at start — so the
-    answer cannot come good mid-process and flip the chain with nobody
-    watching; a fact that could would need chain 3's `held_until_restart`.
-    `unmet_reasons()` joined with "; ".
-    """
-    reasons = unmet_reasons()
-    return "; ".join(reasons) if reasons else None
-
-
-def unmet_reasons() -> List[str]:
-    """Every unmet precondition, one entry each, in `_CHECKS` order; empty
-    when none. What the preflight publishes — never the joined form split
-    back apart, which only works while no reason carries a "; " of its own
-    (chain 3's did, batch-E review). Never raises."""
-    reasons: List[str] = []
-    for key, check in _CHECKS:
-        try:
-            why = check()
-        except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-            # Keyed by the precondition's name, as the answer it stands for.
-            why = f"{key}: could not be read ({type(exc).__name__})"
-        if why:
-            reasons.append(why)
-    return reasons
-
-
-def _warn_unmet(reason: str) -> None:
-    now = time.monotonic()
-    last = _unmet_warned.get(reason)
-    if last is not None and now - last < UNMET_WARN_EVERY_S:
-        return
-    _unmet_warned[reason] = now
-    logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, reason)
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. Unlatched, the flag moves the writes only once `unmet_precondition()`
-    holds. Raises on a flag nobody can read while unlatched; `mode()` is the
-    question that never raises.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        _warn_unmet(unmet)
-        return False
-    return True
-
-
-def _self():
-    return sys.modules[__name__]
-
-
-def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", "duckdb", or None when
-    `KS_WRITE_MANAGERS` is not understood and no latch overrides it. The
-    registry's answer for this chain alone (`write_chains._chain_state`).
-    Never raises."""
-    from core import write_chains
-
-    return write_chains._chain_state(_self())["mode"]
-
-
-def reads_postgres() -> bool:
-    """Whether a read of these tables must ask Postgres — wherever the writes
-    go. Never raises.
-
-    Chain 7a's arrangement with one difference: the flag alone is not where
-    the writes go here, because a flag held by an unmet precondition writes
-    DuckDB, and a read must follow the rows rather than the variable. A flag
-    nobody can read on a chain that never wrote here hands the choice back
-    (neither copy moves: the writers refuse and the replica stands down).
-    """
-    return chain_latch.latched(CHAIN) or mode() == "postgres"
-
-
-def reads_the_chain(sql: str) -> bool:
-    """Whether this statement reads the chain's tables while the chain owns
-    them — decided from the body, `pg_goals_write.reads_the_chain`'s rule."""
-    return any(hole in sql for hole in TABLE_HOLES) and reads_postgres()
+# ─── Routing — none since step 14's S14-11 ──────────────────────────────────
+#
+# Until step 14's S14-00 the flag moved the writes only with the lock-out
+# revision, step 13 and chain 3 in force and `KS_READ_FALLBACK=off`
+# (`unmet_precondition`), and every caller asked `writes_postgres()`,
+# `mode()` or `reads_postgres()` where they went. S14-00 made the answers
+# constants — production met all four — and S14-11 deleted them with
+# `env_writes_postgres` and the flag: the four repository methods, the
+# managers step and the retail-status route write here and ask nothing.
 
 
 def _latch() -> str:
@@ -411,7 +257,10 @@ def _int_refusal(column: str, value, *, nullable: bool) -> Optional[str]:
 def _refusal(row) -> Optional[str]:
     """Why Postgres would refuse this manager, or None. Asked before the latch:
     a first batch the server refused whole would leave the marker with no
-    owner row behind it — CRITICAL `chain_latch_disagrees` the next morning."""
+    owner row behind it. Nothing files that direction since step 14's S14-12
+    (the integrity layer's chain invariants judge only owner rows with no
+    marker); an image from before step 14 pages it as CRITICAL
+    `chain_latch_disagrees`."""
     return (_int_refusal("id", row.id, nullable=False)
             or _text_refusal("name", row.name, nullable=False)
             or _text_refusal("email", row.email, nullable=True)
@@ -432,7 +281,7 @@ async def upsert_managers(rows: Sequence[Any], *, set_at: datetime) -> int:
     `ManagersRefused` without latching. An empty batch writes nothing and
     latches nothing.
     """
-    from core.pg_derivation import mark_if_owned
+    from core.pg_derivation import mark
 
     if set_at is None:
         raise ValueError("set_at must be supplied — it is the copy-back's clock")
@@ -497,7 +346,7 @@ async def upsert_managers(rows: Sequence[Any], *, set_at: datetime) -> int:
                 set_at,
             )
             # Silver reads `is_retail` and the intervals: it owes a rebuild.
-            await mark_if_owned(conn)
+            await mark(conn)
     return len(ordered)
 
 
@@ -520,31 +369,6 @@ async def update_manager_stats() -> int:
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             status = await conn.execute(sql)
     return int(status.rsplit(" ", 1)[-1])
-
-
-def duckdb_orders_frozen() -> FrozenSet[str]:
-    """The order tables a write chain has taken, whose DuckDB copies therefore
-    stopped at its latch — asked by `DuckDBStore.update_manager_stats` before
-    it counts DuckDB's orders while this chain is on DuckDB. Never raises.
-
-    The rollback order runs this chain's copy-back before chain 3's, so the
-    managers come back to DuckDB while the orders are still chain 3's; counted
-    from DuckDB's frozen orders, `last_order_date` and `order_count` would go
-    backwards and the replica would ship them over Postgres's (the chain-5
-    review). The stats are left as they stand instead — after a copy-back, the
-    chain's own last ones — until the orders come back.
-
-    The local answer (`pg_landing.order_tables_stood_down`), as the per-tick
-    order mirror takes it: it asks only a chain that declares an order table —
-    chain 3, whose flag and marker it reads, and which with its flag off and
-    no marker answers that nothing is taken, so the stats count DuckDB's
-    orders as they always did.
-    An owner row whose marker was lost is the daily comparison's to page
-    (`order_owner_row_without_marker`, CRITICAL); the stats are display-only.
-    """
-    from core.pg_landing import order_tables_stood_down
-
-    return order_tables_stood_down()
 
 
 def _classification_refusal(manager_id, is_retail, effective_from, set_by,
@@ -597,7 +421,7 @@ async def set_manager_retail_status(
     (`ManagerNotFound`) — both before the latch — and a value Postgres would
     refuse (`ClassificationRefused`), before Postgres is asked anything.
     """
-    from core.pg_derivation import mark_if_owned
+    from core.pg_derivation import mark
 
     why = _classification_refusal(manager_id, is_retail, effective_from, set_by, note)
     if why:
@@ -618,8 +442,9 @@ async def set_manager_retail_status(
             # Again under the lock: a classification that landed between the
             # read above and the lock would otherwise be stacked behind. On
             # the chain's very first write that costs a marker with no owner
-            # row — `chain_latch_disagrees` the next morning — and it is
-            # accepted: two admins classifying one manager in the same second.
+            # row — filed by nothing since step 14's S14-12, and paged as
+            # `chain_latch_disagrees` by an image from before step 14 — and it
+            # is accepted: two admins classifying one manager in the same second.
             latest = await conn.fetchval(
                 "SELECT MAX(valid_from) FROM app.manager_classifications "
                 "WHERE manager_id = $1", manager_id)
@@ -644,7 +469,8 @@ async def set_manager_retail_status(
             # Replaced, not stacked: the key is (manager_id, valid_from). The
             # only DELETE this chain has, and it is always followed by the
             # INSERT of the same key below — so the key set only grows, which
-            # the copy-back and the restore drill rely on.
+            # the restore drill relies on (and the copy-back did, until step
+            # 14's S14-04 deleted it).
             await conn.execute(
                 "DELETE FROM app.manager_classifications "
                 "WHERE manager_id = $1 AND valid_from = $2",
@@ -666,14 +492,15 @@ async def set_manager_retail_status(
                 manager_id, is_retail)
             # `sales_type` is decided from these rows: Silver owes a rebuild,
             # raised in the decision's own transaction.
-            await mark_if_owned(conn)
+            await mark(conn)
     logger.info("Manager %s retail status set to %s from %s (Postgres)",
                 manager_id, is_retail, effective_from)
 
 
-# ─── The shape of the two tables, and the pre-flip question ─────────────────
+# ─── The shape of the two tables ─────────────────────────────────────────────
 
-# One read of everything the standing watch and the preflight judge, from
+# One read of everything the standing watch judges (and the pre-flip
+# `preflight` judged, until step 14's S14-11), from
 # M11's measurement (2.7 ms over seeded managers):
 # - `unclassified`: managers with no interval at all;
 # - `open_wrong`: managers with intervals and not exactly one open;
@@ -681,7 +508,8 @@ async def set_manager_retail_status(
 #   where the next begins (an overlap, an open one with a later row, a gap) or
 #   that covers no day at all;
 # - `disagree`: `bronze.managers.is_retail` against the latest open interval;
-# - `set_at_null`: the copy-back's clock missing;
+# - `set_at_null`: the copy-back's clock missing (an image from before step
+#   14's; S14-04 deleted this build's);
 # - `orphans`: intervals of a manager `bronze.managers` does not hold.
 SHAPE_SQL = """
 WITH iv AS (
@@ -722,80 +550,9 @@ SELECT
              '{}'::int[]) AS orphans
 """
 
-# How old the replica's last copy of either table may be before the flip.
-# `replicate_managers` runs at web's start, on the daily manager sync and
-# after the 03:00 stats job, so a healthy copy is under a day old.
-PREFLIGHT_REPLICATED_WITHIN_S = 26 * 3600
 
-# Per statement, for a reader that cannot SET LOCAL: asyncpg's own timeout.
-PREFLIGHT_STATEMENT_TIMEOUT_S = 5
-
-
-async def preflight() -> Dict[str, Any]:
-    """Chain 5's answer to "may `KS_WRITE_MANAGERS` be switched on now?", for
-    `/api/health` (`write_chains.pg_managers_write.preflight`). Never raises;
-    bounded and cached by the route.
-
-    `ok` is null once the chain writes Postgres — the question is over. Before
-    that `reasons` names every unmet precondition (asked whatever the flag
-    says, and alone while any is: Postgres is asked only once they all hold),
-    a replica of either table failing or over a day old, and every
-    shape the standing watch would file after the flip — or that
-    `chain_copy_back.py managers --handover` refuses on: a manager with no
-    interval, not exactly one open, a broken history, a current answer that
-    disagrees with the open interval, a missing `set_at`. A Postgres error is
-    named by its class only: the endpoint is public. Not a substitute for
-    `--handover`, which is still the gate.
-    """
-    if mode() == "postgres":
-        return {"ok": None, "reasons": []}
-    reasons: List[str] = []
-    unmet = unmet_reasons()
-    if unmet:
-        # Postgres is not asked while a local precondition is unmet: until
-        # they all hold the flag cannot move the writes whatever the replica
-        # or the shape say, and while chain 3 writes DuckDB — its default —
-        # that holds for good, so `/api/health` asks Postgres nothing on this
-        # chain's behalf by default. One reason per precondition, as
-        # `unmet_reasons()` lists them (`TestTheRealChain3`). The shape is
-        # then asked the minute after the last one clears, before anybody
-        # sets the flag.
-        return {"ok": False, "reasons": unmet}
-    try:
-        pool = await _pool()
-        async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
-            marks = await conn.fetch(
-                "SELECT table_name, failures_since_ok, "
-                "       extract(epoch FROM now() - last_ok_at) AS age_s "
-                "FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
-                list(CHAIN_TABLES), timeout=PREFLIGHT_STATEMENT_TIMEOUT_S)
-            shape = await conn.fetchrow(SHAPE_SQL, timeout=PREFLIGHT_STATEMENT_TIMEOUT_S)
-    except Exception as exc:  # noqa: BLE001 — an answer of its own
-        reasons.append(f"postgres: {type(exc).__name__}")
-        return {"ok": False, "reasons": reasons}
-    state = {r["table_name"]: r for r in marks}
-    for table in CHAIN_TABLES:
-        row = state.get(table)
-        if row is None or row["age_s"] is None:
-            reasons.append(f"replica: {table} has never been copied by "
-                           "replicate_managers")
-        elif row["failures_since_ok"]:
-            reasons.append(f"replica: {table} is failing "
-                           f"({row['failures_since_ok']} in a row)")
-        elif float(row["age_s"]) > PREFLIGHT_REPLICATED_WITHIN_S:
-            reasons.append(f"replica: {table} was last copied "
-                           f"{float(row['age_s']) / 3600:.0f} h ago (limit 26 h); "
-                           "POST /api/jobs/manager_stats/trigger copies it now")
-    for column, what in (
-            ("unclassified", "manager(s) with no interval"),
-            ("open_wrong", "manager(s) without exactly one open interval"),
-            ("broken", "manager(s) whose intervals overlap or leave a gap"),
-            ("disagree", "manager(s) whose is_retail disagrees with the open interval")):
-        ids = list(shape[column] or [])
-        if ids:
-            reasons.append(f"shape: {len(ids)} {what}: {ids[:10]}")
-    if shape["set_at_null"]:
-        reasons.append(f"shape: {shape['set_at_null']} interval(s) with no set_at")
-    if not shape["managers"]:
-        reasons.append("shape: bronze.managers is empty")
-    return {"ok": not reasons, "reasons": reasons}
+# `preflight()` stood here until step 14's S14-11: chain 5's answer to "may
+# `KS_WRITE_MANAGERS` be switched on now?" for `/api/health`, `ok: null` once
+# the chain wrote Postgres — every probe since S14-00. `SHAPE_SQL` above is
+# what it read, and the standing watch reads it still
+# (`pg_chain_invariants._read_managers`).

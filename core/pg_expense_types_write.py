@@ -34,7 +34,8 @@ hour out of a dictionary it no longer receives: `replicate_sms`' recorded
 failure of 2026-09-06, exactly. `last_sync_expense_types` moves with the chain
 to `meta.chain_watermarks` (revision 0032), so the freshness check judges the
 store that is actually written — and, until the first full sync under the flag
-has written it there, DuckDB's last stamp (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
+had written it there, DuckDB's last stamp (`CHAIN_WATERMARK_INHERITS_DUCKDB`,
+until step 14's S14-09).
 
 FAILURE POLICY: THIS ONE RAISES
 
@@ -49,8 +50,9 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
 connection has come out of the pool and before the transaction opens. From the
-first dictionary written here, only `scripts/chain_copy_back.py` can move the
-writes back to DuckDB.
+first dictionary written here, only `scripts/chain_copy_back.py` could move the
+writes back to DuckDB (deleted in step 14's S14-04; the way back since is an
+image from before step 14, `core.rollback_lever`).
 
 "Once a connection has come out of the pool", and not merely once the pool is
 in hand. The acquire does not time out — `core.pg.get_pool` sets no acquire
@@ -58,32 +60,30 @@ timeout, so the Sunday full sync this runs inside holding all five connections
 is a wait — but the wait can end without a connection: a Postgres restart
 during it leaves a reconnect that is refused, and a cancellation ends it too
 (`pg_expenses_write._latch`). A latch taken before it would move the chain with
-nothing written, leaving copy-back as the only way back and
-`chain_latch_disagrees` (CRITICAL) the next morning. Chains
+nothing written, leaving the copy-back as the only way back (since step
+14's S14-04 deleted it, a rollback to an image from before step 14), and a
+marker with no owner row, which nothing files since step 14's S14-12 and an
+image from before step 14 pages as `chain_latch_disagrees`. Chains
 1, 8 and 7a were written before that was counted and latched between the two
 until 2026-09-25; every chain now latches inside the acquire, and
 `tests/unit/test_chain_latch.py` holds each registered chain to it.
 
-A PRECONDITION THE FLAG ENFORCES
+A PRECONDITION THE FLAG ENFORCED — UNTIL STEP 14
 
 Everything that reads the dictionary reads it through `_expenses_run`, which
-asks Postgres only under `KS_READ_EXPENSES=postgres`. With that flag off the
-page reads DuckDB's copy, so a chain writing Postgres would leave every type
-KeyCRM adds afterwards in Postgres alone, shown as "Other" — and nothing would
-say so: the daily comparison stands down for the table, and the standing watch
-reads Postgres, which is right. So `unmet_precondition()` names the read flag,
-and until it is on an unlatched chain runs as duckdb whatever
-`KS_WRITE_EXPENSE_TYPES` says — `core.write_chains` reads the same answer, so
-the hourly copy keeps shipping — while `/api/health`'s write_chains block
-publishes why and the canary warns. DN-27's rule for the buyers chain. A
-latched chain cannot go back that way (OD-19 (a)): it keeps writing Postgres,
-and the same warning then says its readers are on the frozen copy. Chain 8
-carries the same assumption unenforced; it is live, and left to its own change.
+asked Postgres only under `KS_READ_EXPENSES=postgres`, so until step 14's
+S14-00 `unmet_precondition()` held an unlatched chain on DuckDB until that
+read flag was on (DN-27's rule for the buyers chain). S14-00 made the answer a
+constant and S14-07 made the reader Postgres alone; S14-09 deleted the
+answer, with the routing it fed: the repository's writer and `full_sync` ask
+nothing. Kept: `WRITE_ENV` as a name (revision 0034's comments name it, and an image
+from before step 14 reads it) and the latch and its owner row (decision 3:
+that image routes by them). `env_writes_postgres` and `writes_postgres()`,
+which the registry read until then, went in S14-11 with the flag.
 """
 from __future__ import annotations
 
 import logging
-import os
 from typing import List, Optional, Tuple
 
 from core import chain_latch
@@ -99,7 +99,8 @@ WRITE_ENV = "KS_WRITE_EXPENSE_TYPES"
 CHAIN = "pg_expense_types_write"
 
 # The table this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper, the daily comparison and the copy-back.
+# the hourly shipper and the daily comparison (and the copy-back, until step
+# 14's S14-04 deleted it).
 CHAIN_TABLES: Tuple[str, ...] = ("bronze.expense_types",)
 
 # The one `sync_metadata` key that moves with it — what `full_sync` stamps
@@ -116,69 +117,22 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_expense_types",)
 # names would make one page read as two problems.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 
-# Until the first full sync under the flag writes the key to
-# `meta.chain_watermarks`, `_freshness_check` judges DuckDB's frozen stamp
-# instead of calling the dictionary never synced. Flipped on a Wednesday, the
-# key would otherwise be absent until Sunday 02:00 Kyiv, and every integrity
-# run in between — 01, 07, 13, 19 — would file `freshness_expense_types` into
-# the 09:00 digest about a dictionary the hourly copy shipped until the flip.
-# DuckDB's stamp is the honest age of what Postgres holds then, judged at the
-# same 192 h: a first sync that fails still pages when a DuckDB one would
-# have. Chain 1 does not declare this — its keys move every hour, so absence
-# past one tick is itself the finding.
-CHAIN_WATERMARK_INHERITS_DUCKDB = True
+# `CHAIN_WATERMARK_INHERITS_DUCKDB` stood here until step 14's S14-09: until
+# the first full sync under the flag wrote the key to `meta.chain_watermarks`,
+# `_freshness_check` judged DuckDB's frozen stamp instead of calling the
+# dictionary never synced — a mid-week flip would otherwise have filed
+# `freshness_expense_types` on every integrity run until Sunday. The flip is
+# long past and production holds the key (H6, 2026-10-29); nothing in the sync
+# reads it back, so an absent key would only be "never synced", which is then
+# true (`tests/unit/test_absent_chain_keys.py`).
 
 
-def env_writes_postgres() -> bool:
-    """What `KS_WRITE_EXPENSE_TYPES` alone says.
-
-    An unrecognised value raises — `KS_BOT_STORE`'s rule. Since DN-01 that
-    stops this chain and nothing else: the registry stands it down, and
-    `full_sync` contains the raise.
-    """
-    value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
-    if value not in {"duckdb", "postgres"}:
-        raise RuntimeError(
-            f"{WRITE_ENV}={value!r} is not understood; expected "
-            f"'duckdb' or 'postgres'"
-        )
-    return value == "postgres"
-
-
-def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_EXPENSE_TYPES=postgres` must not move the writes yet, or
-    None. Never raises: a read flag nobody can parse is unmet, because nobody
-    can then say the readers follow the writes. `core.write_chains` asks this
-    too, so the registry and `writes_postgres()` give one answer."""
-    from core import pg_expenses_read
-
-    try:
-        if pg_expenses_read.enabled():
-            return None
-        why = f"{pg_expenses_read.ENV} is not postgres"
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        why = f"{pg_expenses_read.ENV} is not understood ({exc})"
-    return (f"{why}, so every reader of the dictionary reads DuckDB's copy and a "
-            f"type written to Postgres alone would show on /expenses as Other; "
-            f"set {pg_expenses_read.ENV}=postgres first")
-
-
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. See `core/chain_latch.py`. Unlatched, the flag moves the writes only
-    once `unmet_precondition()` holds — until then the chain runs as duckdb.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, unmet)
-        return False
-    return True
+# `env_writes_postgres` and `writes_postgres` stood here until step 14's
+# S14-11. S14-09 left them for the registry alone — `error` and `mismatch` in
+# `/api/health`, and the store's sync-key getter and setter — and S14-11
+# deleted them with the flag and those readers: the chain writes Postgres, a
+# constant. `WRITE_ENV` stays a name (revision 0035's comments and an image
+# from before step 14 read it).
 
 
 def _latch() -> str:

@@ -16,6 +16,7 @@ const PERIODS: { value: Period; labelKey: string }[] = [
   { value: 'last_week', labelKey: 'filter.lastWeek' },
   { value: 'month', labelKey: 'filter.thisMonth' },
   { value: 'last_month', labelKey: 'filter.lastMonth' },
+  { value: 'all_time', labelKey: 'filter.allTime' },
 ]
 
 export function PeriodFilter() {

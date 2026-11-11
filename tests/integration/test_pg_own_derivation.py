@@ -56,11 +56,9 @@ async def own(monkeypatch):
     from core.scheduler import BackgroundScheduler
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setenv("KS_PG_DERIVE", "own")
     monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
-    before = (pg_derivation._mode, pg_derivation._mode_error, BackgroundScheduler._pg_derive_ran,
+    before = (BackgroundScheduler._pg_derive_ran,
               BackgroundScheduler._pg_derive_started, pg_derivation._signal_failures)
-    pg_derivation.configure_mode()
     BackgroundScheduler._pg_derive_ran = False
     BackgroundScheduler._pg_derive_started = None
     pg_derivation._signal_failures = 0
@@ -74,7 +72,7 @@ async def own(monkeypatch):
         yield pool, BackgroundScheduler(), raise_alert
     await _reset(pool)
     await pool.close()
-    (pg_derivation._mode, pg_derivation._mode_error, BackgroundScheduler._pg_derive_ran,
+    (BackgroundScheduler._pg_derive_ran,
      BackgroundScheduler._pg_derive_started, pg_derivation._signal_failures) = before
 
 
@@ -101,17 +99,6 @@ class TestTheWritersRaiseTheSignal:
         pool, _s, _a = own
         await write_orders([_order(IDS[0])], [], replace_products=False)
         assert await _signal(pool) == (2, 0)
-
-    @pytest.mark.asyncio
-    async def test_under_piggyback_it_does_not(self, own, monkeypatch):
-        from core import pg_derivation
-        from core.pg_landing import write_orders
-
-        pool, _s, _a = own
-        monkeypatch.setenv("KS_PG_DERIVE", "piggyback")
-        pg_derivation.configure_mode()
-        await write_orders([_order(IDS[0])], [], replace_products=False)
-        assert await _signal(pool) == (1, 0)
 
 
 class TestTheJob:
@@ -505,18 +492,15 @@ class TestADroppedMarkHeals:
 
 
 async def _unmarked(monkeypatch, *orders):
-    """Land orders the way a process whose mode was never configured would:
-    through the real writer, raising no mark."""
+    """Land orders the way a writer that raised no mark would: through the
+    real writer, with no signal. Every writer marks (`owns()` was a constant
+    from step 14's S14-00 and went in S14-15), so the missing mark is made by
+    hand for this one write — what the journal's twin exists to catch."""
     from core import pg_derivation
     from core.pg_landing import write_orders
 
-    monkeypatch.setenv("KS_PG_DERIVE", "piggyback")
-    pg_derivation.configure_mode()
-    try:
+    with patch.object(pg_derivation, "mark", AsyncMock(return_value=True)):
         await write_orders(list(orders), [], replace_products=False)
-    finally:
-        monkeypatch.setenv("KS_PG_DERIVE", "own")
-        pg_derivation.configure_mode()
 
 
 async def _missed(pool):
@@ -646,7 +630,7 @@ class TestTheSignalMissed:
         assert issue.sample_ids == (runs[-1]["id"],)
 
 
-# ─── DN-19: under KS_UTM_PARSE=postgres the UTM parse is the last step ────────
+# ─── DN-19: the UTM parse is the derivation's last step ──────────────────────
 
 UTM_COMMENT = "UTM: utm_source: fbads; utm_medium: cpc; utm_campaign: spring"
 
@@ -657,17 +641,14 @@ def _commented(oid, *, comment=UTM_COMMENT, days_ago=2):
 
 @pytest_asyncio.fixture
 async def utm_postgres(own, monkeypatch):
-    """`own`, plus KS_UTM_PARSE=postgres. The table and its watermark row are
-    shared with every other suite on this server, so what was there before is
-    put back: rows this run added are removed, and the watermark row restored
-    as it stood."""
-    from core import pg_utm_parse
-    from core.pg_order_utm import UTM_TABLE
+    """`own`, with the UTM parse as its last step (unconditionally since step
+    14's S14-15, which removed KS_UTM_PARSE). The table and its watermark row
+    are shared with every other suite on this server, so what was there
+    before is put back: rows this run added are removed, and the watermark
+    row restored as it stood."""
+    from core.pg_utm_parse import UTM_TABLE
 
     pool, _s, _a = own
-    before_mode = (pg_utm_parse._mode, pg_utm_parse._mode_error)
-    monkeypatch.setenv(pg_utm_parse.ENV, "postgres")
-    assert pg_utm_parse.configure_mode() == "postgres"
     async with pool.acquire() as conn:
         kept = {r["order_id"] for r in await conn.fetch(f"SELECT order_id FROM {UTM_TABLE}")}
         watermark = await conn.fetchrow(
@@ -689,7 +670,6 @@ async def utm_postgres(own, monkeypatch):
                     f"INSERT INTO meta.mirror_state ({', '.join(columns)}) VALUES "
                     f"({', '.join(f'${i}' for i in range(1, len(columns) + 1))})",
                     *watermark.values())
-        pg_utm_parse._mode, pg_utm_parse._mode_error = before_mode
 
 
 async def _utm_row(pool, oid):
@@ -707,9 +687,11 @@ async def _utm_watermark(pool):
 
 
 def _no_ship():
-    """A ship that fails the test if anything reaches it."""
-    return patch("core.pg_order_utm.ship_order_utm",
-                 new=AsyncMock(side_effect=AssertionError("shipped under postgres")))
+    """Nothing to patch since step 14's S14-15 deleted the ship from DuckDB
+    (`core/pg_order_utm.py`): a context that holds the tests' shape."""
+    import contextlib
+
+    return contextlib.nullcontext()
 
 
 class TestTheUtmParseIsTheLastStep:
@@ -769,26 +751,8 @@ class TestTheUtmParseIsTheLastStep:
         await write_orders([_commented(IDS[2])], [], replace_products=False)
 
         with _no_ship():
-            result = await reparse_router(store=None)
+            result = await reparse_router()
 
         assert result["parsed"] >= 1, result
         assert (await _utm_row(pool, IDS[2]))["utm_campaign"] == "spring"
 
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_derivation_parses_nothing(self, own):
-        """The default, byte for byte: the derivation's result carries no parse
-        and no verdict appears; the table stays the tick's copy."""
-        from core import pg_utm_parse
-        from core.pg_landing import write_orders
-
-        pool, scheduler, _a = own
-        assert not pg_utm_parse.parses_in_postgres()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM silver.order_utm WHERE order_id = ANY($1::int[])", list(IDS))
-        await write_orders([_commented(IDS[0])], [], replace_products=False)
-
-        result = await scheduler._run_pg_derivation()
-
-        assert result["status"] == "success" and "order_utm" not in result
-        assert await _utm_row(pool, IDS[0]) is None

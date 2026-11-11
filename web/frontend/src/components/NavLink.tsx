@@ -1,5 +1,5 @@
 import { memo, useCallback, type ReactNode, type MouseEvent } from 'react'
-import { navigate, useRouter } from '../hooks/useRouter'
+import { isUnder, navigate, useRouter } from '../hooks/useRouter'
 import { useNavStore } from '../store/navStore'
 import type { IconComponent } from './icons'
 
@@ -13,7 +13,8 @@ interface NavLinkProps {
 
 export const NavLink = memo(function NavLink({ href, icon: Icon, disabled, children }: NavLinkProps) {
   const path = useRouter()
-  const isActive = path === href
+  // /traffic/sales is still the traffic tab.
+  const isActive = isUnder(path, href)
   const setOpen = useNavStore((s) => s.setOpen)
 
   const handleClick = useCallback((e: MouseEvent) => {

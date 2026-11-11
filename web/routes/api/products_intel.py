@@ -8,7 +8,7 @@ from typing import Optional
 from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
-    validate_period, validate_sales_type, validate_limit,
+    validate_period, validate_sales_type, validate_limit, validate_db_int,
     ValidationError,
 )
 
@@ -58,6 +58,8 @@ async def get_product_pairs(
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
         limit = validate_limit(limit, max_value=50)
+        # Compared with COALESCE(product_id, line_id), which is bigint.
+        validate_db_int(product_id, "product_id", bits=64)
         start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))

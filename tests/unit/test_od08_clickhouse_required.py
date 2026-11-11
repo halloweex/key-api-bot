@@ -13,7 +13,7 @@ Every guard here has a named mutation in the test that catches it. The
 production payload at the bottom proves one point in time, the evening of
 2026-09-30, and nothing more: whether the canary would have paged over the
 last fourteen days is a question about history, which
-`deploy/stage4_soak/22_reconciliation_ch_history.sql` answers on the host
+`deploy/daily_soak/22_reconciliation_ch_history.sql` answers on the host
 (DN-21's bar), and which the OD-08 review found unasked.
 """
 from __future__ import annotations
@@ -25,24 +25,25 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from core import ch_silver, warehouse_cutover
+from core import ch_silver
 from core.data_quality import IntegrityIssue, Severity
+
 
 UNWATCHED = "gold_values_unwatched"
 
 
+# `duckdb_derives` and `postgres_alone` set step 13's mode one way or the
+# other (`core/warehouse_cutover.py`) to show that nothing here read it. The
+# module went in step 14's S14-15; the two names stay as fixtures that do
+# nothing, so each test still says which state it was written for.
 @pytest.fixture
-def duckdb_derives(monkeypatch):
-    """Production today: DuckDB derives, and its Gold is compared."""
-    monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-    monkeypatch.setattr(warehouse_cutover, "_held", False)
+def duckdb_derives():
+    """A state no step-14 build is in; nothing here ever read it."""
 
 
 @pytest.fixture
-def postgres_alone(monkeypatch):
-    """After step 13: Postgres alone derives."""
-    monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
-    monkeypatch.setattr(warehouse_cutover, "_held", False)
+def postgres_alone():
+    """After step 13: Postgres alone derives — the only state there is."""
 
 
 def _names(issues):
@@ -134,52 +135,30 @@ class TestTheComparisonNamesItsOwnBlindness:
         assert _names(issues) == ["ch_engines_gold_mismatch"]
 
 
-class TestItsSeverityFollowsWhoElseLooks:
-    """Mutation: make `gold_unwatched_severity` return WARN unconditionally
-    and the two CRITICAL tests fail; CRITICAL unconditionally, the WARN one."""
+class TestItIsAlwaysCritical:
+    """`gold_values_unwatched` was WARN while DuckDB's Gold was still compared
+    against Postgres' and CRITICAL once it was not
+    (`gold_unwatched_severity`, on `warehouse_checks_stand_down`). Step 13
+    stood that comparison down for good and step 14's S14-12 deleted it with
+    the predicate: ClickHouse's derivation is the only independent check of
+    Gold, so a run without it is CRITICAL whatever else holds. Mutation: let
+    the severity read any mode again."""
 
-    def test_warn_while_duckdb_gold_is_still_compared(self, duckdb_derives):
-        assert ch_silver.gold_values_unwatched("x").severity is Severity.WARN
-
-    def test_critical_once_postgres_alone_derives(self, postgres_alone):
+    def test_critical_and_says_why(self, postgres_alone):
         issue = ch_silver.gold_values_unwatched("x")
         assert issue.severity is Severity.CRITICAL
         assert "no second engine checked" in issue.description
 
-    def test_critical_while_the_way_back_holds_duckdbs_comparison_down(
-        self, monkeypatch,
-    ):
-        """DuckDB derives again but `reconcile_gold` still stands down (the
-        hold): ClickHouse is again the only independent check that runs."""
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-        monkeypatch.setattr(warehouse_cutover, "_held", True)
-        assert warehouse_cutover.duckdb_derives()
-        assert ch_silver.gold_values_unwatched("x").severity is Severity.CRITICAL
-
-    def test_unreadable_predicate_is_critical_and_still_files(self, monkeypatch):
-        """Mutation: let the predicate's raise escape and this raises."""
-        def boom():
-            raise RuntimeError("cannot tell")
-
-        monkeypatch.setattr(warehouse_cutover, "warehouse_checks_stand_down", boom)
-        assert ch_silver.gold_values_unwatched("x").severity is Severity.CRITICAL
-
-    def test_same_predicate_the_job_stands_reconcile_gold_down_on(self):
-        """The severity must follow what the job actually did, so it reads the
-        job's own predicate — never a second opinion of it."""
+    def test_no_predicate_is_read(self):
         import ast
         import inspect
         import textwrap
-        from core.scheduler import BackgroundScheduler
 
-        def calls(fn):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-            return {n.func.attr for n in ast.walk(tree)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-
-        predicate = "warehouse_checks_stand_down"
-        assert predicate in calls(ch_silver.gold_unwatched_severity)
-        assert predicate in calls(BackgroundScheduler._run_dq_mirror_landing)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(ch_silver.gold_values_unwatched)))
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert "warehouse_cutover" not in names
+        assert not hasattr(ch_silver, "gold_unwatched_severity")
 
 
 # ─── The job files what the comparison cannot ───────────────────────────────
@@ -193,19 +172,6 @@ class TestTheJobFilesWhatTheComparisonCannotReturn:
     """A raise leaves `reconcile_clickhouse` nothing to return. Mutation:
     drop the `if not gold_compared` block in `_run_dq_mirror_landing` and the
     first three fail."""
-
-    @pytest.mark.asyncio
-    async def test_a_raise_is_filed_and_the_run_still_fails(self, duckdb_derives):
-        from tests.unit.test_mirror_landing_isolation import _run
-
-        persisted, paged, resolved = await _run(
-            {"reconcile_clickhouse": RuntimeError("lock wait")})
-        issue = _unwatched(persisted["issues"])
-        assert issue is not None and issue.severity is Severity.WARN
-        assert "reconcile_clickhouse: RuntimeError" in issue.description
-        assert "reconcile_clickhouse: RuntimeError" in persisted["error_message"]
-        # WARN while DuckDB still compares: the digest's, not a page.
-        assert paged == [] and resolved == []
 
     @pytest.mark.asyncio
     async def test_after_step_13_a_raise_pages_although_the_run_failed(
@@ -374,8 +340,9 @@ class TestABlindArchiveRunResolvesNothingEither:
         from core import ch_history
 
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
+        # `ch_history_stalled` beside the buckets since L2-02 (A17).
         assert ch_history.history_unverified_conditions([], compared=False) == [
-            "ch_history_buckets"]
+            "ch_history_buckets", "ch_history_stalled"]
         assert ch_history.history_unverified_conditions([], compared=True) == []
 
     @pytest.mark.asyncio
@@ -392,7 +359,7 @@ class TestABlindArchiveRunResolvesNothingEither:
         issues = await ch_history.reconcile_ch_history()
         assert _names(issues) == [ch_history.HISTORY_UNREACHABLE]
         assert ch_history.history_unverified_conditions(issues, compared=True) == [
-            "ch_history_buckets"]
+            "ch_history_buckets", "ch_history_stalled"]
 
     def test_the_held_conditions_are_every_critical_the_archive_files(self):
         """Derived from what `reconcile_ch_history` emits, so a CRITICAL
@@ -401,7 +368,9 @@ class TestABlindArchiveRunResolvesNothingEither:
         import inspect
         from core import ch_history
 
-        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history))
+        # And `_stall`, which it calls for `ch_history_stalled` (L2-02).
+        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history)
+                         + "\n" + inspect.getsource(ch_history._stall))
         critical = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -410,7 +379,7 @@ class TestABlindArchiveRunResolvesNothingEither:
                 if (isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute)
                         and sev.attr == "CRITICAL"):
                     critical.add(name.value)
-        assert critical == {"ch_history_buckets"}
+        assert critical == {"ch_history_buckets", "ch_history_stalled"}
         assert set(ch_history.HISTORY_WATCH_CONDITIONS) == critical
 
 
@@ -439,9 +408,10 @@ async def _arm(copy_age, *, ch_down=True):
                new=AsyncMock(return_value=set())), \
          patch("core.reconciliation_io.clickhouse_orders_in_window", new=query):
         scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+        # The job's watermark, two hours back (`_run_dq_reconciliation`).
         result = await scheduler._reconcile_clickhouse(
             {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
-            as_of=now, inflight_ids=set())
+            as_of=now - timedelta(hours=2), inflight_ids=set())
     return result, query.await_count
 
 
@@ -460,60 +430,53 @@ class TestADeadClickHouseKeepsPaging:
         assert "25.5 h ago" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_the_second_morning_of_an_outage_still_pages(self, tmp_path):
+    async def test_the_second_morning_of_an_outage_still_pages(self, monkeypatch):
         """The reviewer's two mornings, persisted through the real
-        `_persist_ch_reconciliation` into a real store and judged by the real
-        canary. Day 1: ClickHouse died at 04:00, the copy is 1.5 h old, the
-        comparison raises. Day 2: still down, the copy is 25.5 h old."""
+        `_persist_ch_reconciliation` and the journal's real door, and judged
+        by the real canary. Day 1: ClickHouse died at 04:00, the copy is 1.5 h
+        old, the comparison raises. Day 2: still down, the copy is 25.5 h old.
+        The journal is chain 9's functions over a list (`tests/journal_fake.py`;
+        a DuckDB store until step 14's S14-10)."""
         from bot import canary
-        from core.data_quality import fetch_last_success_ages, persist_run
-        from core.duckdb_store import DuckDBStore
+        from core import dq_journal
         from core.scheduler import BackgroundScheduler
+        from tests.journal_fake import install_journal
 
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:   # the last good morning
-                persist_run(conn, started_at=now - timedelta(hours=54),
-                            ended_at=now - timedelta(hours=54), as_of=now,
-                            window_start=date(2026, 7, 1),
-                            window_end=date(2026, 9, 30),
-                            layer="reconciliation_ch", issues=[],
-                            discrepancies=[])
+        install_journal(monkeypatch)
+        now = datetime.now(timezone.utc)
+        await dq_journal.journal_run(                     # the last good morning
+            started_at=now - timedelta(hours=54), ended_at=now - timedelta(hours=54),
+            as_of=now, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
+            layer="reconciliation_ch", issues=[], discrepancies=[])
 
-            scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
-            resolve = AsyncMock()
-            with patch("core.duckdb_store.get_store",
-                       new=AsyncMock(return_value=store)), \
-                 patch("core.alerting.resolve_group", new=resolve):
-                for copy_age, started in (
-                    (timedelta(hours=1, minutes=30), now - timedelta(hours=30)),
-                    (timedelta(hours=25, minutes=30), now - timedelta(minutes=5)),
-                ):
-                    result, _ = await _arm(copy_age)
-                    assert result["error"], result
-                    await scheduler._persist_ch_reconciliation(
-                        result, started_at=started, as_of=started,
-                        window_start=date(2026, 7, 1),
-                        window_end=date(2026, 9, 30))
+        scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+        resolve = AsyncMock()
+        with patch("core.alerting.resolve_group", new=resolve):
+            for copy_age, started in (
+                (timedelta(hours=1, minutes=30), now - timedelta(hours=30)),
+                (timedelta(hours=25, minutes=30), now - timedelta(minutes=5)),
+            ):
+                result, _ = await _arm(copy_age)
+                assert result["error"], result
+                await scheduler._persist_ch_reconciliation(
+                    result, started_at=started, as_of=started,
+                    window_start=date(2026, 7, 1),
+                    window_end=date(2026, 9, 30))
 
-            async with store.connection() as conn:
-                ages = fetch_last_success_ages(conn)
-            failures, _ = canary.check_dq_freshness(
-                {"data_quality": ages},
-                {"reconciliation_ch": canary.DQ_MAX_AGE_S["reconciliation_ch"]})
-            assert [k for k, _ in failures] == ["dq_stale:reconciliation_ch"]
-            assert ages["reconciliation_ch"]["age_seconds"] >= 54 * 3600 - 60
-            # Neither blind morning announced anything resolved.
-            resolve.assert_not_awaited()
-        finally:
-            await store.close()
+        ages = await dq_journal.last_success_ages_pg()
+        failures, _ = canary.check_dq_freshness(
+            {"data_quality": ages},
+            {"reconciliation_ch": canary.DQ_MAX_AGE_S["reconciliation_ch"]})
+        assert [k for k, _ in failures] == ["dq_stale:reconciliation_ch"]
+        assert ages["reconciliation_ch"]["age_seconds"] >= 54 * 3600 - 60
+        # Neither blind morning announced anything resolved.
+        resolve.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_fresh_copy_that_compares_is_still_a_success(self):
-        """The gate did not become a blanket failure: a copy under 3 h is
-        compared, and a clean comparison carries no error."""
+        """The gate did not become a blanket failure: a copy shipped after
+        the job's watermark (plus Silver's floor) is compared, and a clean
+        comparison carries no error."""
         from core.scheduler import BackgroundScheduler
 
         now = datetime.now(timezone.utc)
@@ -530,7 +493,7 @@ class TestADeadClickHouseKeepsPaging:
             scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
             result = await scheduler._reconcile_clickhouse(
                 {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
-                as_of=now, inflight_ids=set())
+                as_of=now - timedelta(hours=2), inflight_ids=set())
         assert result == {"issues": [], "discrepancies": [], "error": None}
 
 
@@ -753,7 +716,8 @@ class TestTheReconciliationCatchUpReadsItsArms:
     async def _queued(monkeypatch, ages):
         from tests.unit.test_scheduler_catchup import _scheduler_with
 
-        scheduler = _scheduler_with(monkeypatch, ages)
+        # Which arms this host writes is read off `stores`' environment.
+        scheduler = _scheduler_with(monkeypatch, ages, writes_layers=None)
         await scheduler._schedule_catchup_runs()
         return set(scheduler._scheduler.added)
 
@@ -819,20 +783,6 @@ class TestTheReconciliationCatchUpReadsItsArms:
         queued = await self._queued(monkeypatch, _ages(
             reconciliation=3 * 3600, integrity=3600))
         assert queued == set()
-
-    @pytest.mark.asyncio
-    async def test_an_unreadable_configuration_leaves_the_job_layer_to_decide(
-        self, monkeypatch, stores,
-    ):
-        from core import ch_common
-
-        def boom():
-            raise RuntimeError("env unreadable")
-
-        monkeypatch.setattr(ch_common, "configured", boom)
-        queued = await self._queued(monkeypatch, _ages(
-            reconciliation=30 * 3600, integrity=3600, reconciliation_ch=None))
-        assert queued == {"dq_reconciliation_catchup"}
 
 
 # ─── Production, one evening ────────────────────────────────────────────────
@@ -948,24 +898,6 @@ class TestNothingNewPagesInProduction:
         result = await _judge(payload)
         assert (result.severity, result.failure_keys) == ("ok", [])
 
-    @pytest.mark.asyncio
-    async def test_a_blind_comparison_today_is_the_digests_not_a_page(
-        self, duckdb_derives,
-    ):
-        """Production runs DuckDB's derivation (`warehouse_writer_mode.mode`
-        above), so the mirror-landing job files a ClickHouse outage as a WARN
-        for the 09:00 digest and pages nobody over it. An outage that costs
-        the 05:30 comparison against KeyCRM pages, but through the canary's
-        `reconciliation_ch` watch, 30 h after the last run that compared
-        (`TestADeadClickHouseKeepsPaging`)."""
-        from tests.unit.test_mirror_landing_isolation import _run
-
-        assert PRODUCTION_HEALTH_2026_09_30["warehouse_writer_mode"]["mode"] == "duckdb"
-        persisted, paged, _ = await _run(
-            {"reconcile_clickhouse": [ch_silver.gold_values_unwatched("down")]})
-        assert _unwatched(persisted["issues"]).severity is Severity.WARN
-        assert paged == []
-
 
 class TestTheHistoryIsAskedForEveryPagedArm:
     """The OD-08 review's second finding: DN-21 put `reconciliation_pg` under
@@ -982,7 +914,7 @@ class TestTheHistoryIsAskedForEveryPagedArm:
         from bot.canary import DQ_MAX_AGE_S
         from core.scheduler import CATCHUP_SIBLING_LAYERS
 
-        soak = Path(__file__).resolve().parents[2] / "deploy/stage4_soak"
+        soak = Path(__file__).resolve().parents[2] / "deploy/daily_soak"
         judged = {}
         for path in sorted(soak.glob("*.sql")):
             code = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))

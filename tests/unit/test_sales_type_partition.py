@@ -9,178 +9,22 @@ outside the partition would balance them perfectly while appearing nowhere.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
-
 import pytest
 
-from core.duckdb_constants import KNOWN_SALES_TYPES, RETAIL_MANAGER_IDS
-from core.duckdb_store import DuckDBStore
+from core.duckdb_constants import KNOWN_SALES_TYPES
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
-    s = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await s.connect()
-    return s
-
-
-def _api_manager(mid: int, name: str = "Someone", status: str = "active"):
-    return {"id": mid, "name": name, "email": f"{mid}@example.com", "status": status}
-
-
-# ─── P2-1: a classification that survives the next sync ─────────────────────
-
-class TestManagerClassificationIsDurable:
-    @pytest.mark.asyncio
-    async def test_a_manual_classification_survives_a_manager_sync(self, tmp_path):
-        """This is the whole point: KeyCRM cannot tell us who is wholesale."""
-        store = await _make_store(tmp_path)
-        try:
-            unlisted = 34
-            assert unlisted not in RETAIL_MANAGER_IDS
-
-            await store.upsert_managers([_api_manager(unlisted)])
-            await store.set_manager_retail_status(unlisted, True)
-
-            # …the next sync arrives with the same manager.
-            await store.upsert_managers([_api_manager(unlisted, name="Renamed")])
-
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[unlisted]["is_retail"] is True, (
-                "the sync overwrote a human's classification"
-            )
-            assert managers[unlisted]["name"] == "Renamed", "fields KeyCRM owns still update"
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_new_managers_are_seeded_from_the_constant(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            known_retail = RETAIL_MANAGER_IDS[0]
-            await store.upsert_managers([
-                _api_manager(known_retail), _api_manager(9999),
-            ])
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[known_retail]["is_retail"] is True
-            assert managers[9999]["is_retail"] is False
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_demoting_a_manager_also_sticks(self, tmp_path):
-        """The constant lists managers who have left; a correction runs both ways."""
-        store = await _make_store(tmp_path)
-        try:
-            listed = RETAIL_MANAGER_IDS[0]
-            await store.upsert_managers([_api_manager(listed)])
-            await store.set_manager_retail_status(listed, False)
-            await store.upsert_managers([_api_manager(listed)])
-
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[listed]["is_retail"] is False
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_sync_does_not_reset_computed_stats(self, tmp_path):
-        """order_count and the date range are computed here, not in KeyCRM."""
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers([_api_manager(7)])
-            async with store.connection() as conn:
-                conn.execute(
-                    "UPDATE managers SET order_count = 412, "
-                    "first_order_date = DATE '2025-01-05' WHERE id = 7"
-                )
-
-            await store.upsert_managers([_api_manager(7, name="Still Here")])
-
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[7]["order_count"] == 412
-            assert managers[7]["first_order_date"] == date(2025, 1, 5)
-        finally:
-            await store.close()
+# P2-1, a classification that survives the next sync, is chain 5's writer's
+# rule since step 14's S14-00 made the chain a constant:
+# tests/integration/test_managers_chain_writer.py (M4).
 
 
 # ─── P2-2: the partition has to be exhaustive ───────────────────────────────
 
-def _insert_order(conn, oid: int, manager_id, total: float, when: datetime):
-    conn.execute(
-        "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
-        "buyer_id, manager_id) VALUES (?, 1, 1, ?, ?, 1, ?)",
-        [oid, total, when, manager_id],
-    )
-
-
-class TestPartitionAssertion:
-    @pytest.mark.asyncio
-    async def test_a_healthy_warehouse_reports_an_exhaustive_partition(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            when = datetime.now(timezone.utc) - timedelta(days=1)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, None, 1000.0, when)       # retail (NULL manager)
-                _insert_order(conn, 2, 15, 2000.0, when)         # b2b
-                _insert_order(conn, 3, 34, 3000.0, when)         # internal
-
-            alerts: list[tuple[str, str | None]] = []
-
-            async def fake_alert(msg, key=None):
-                alerts.append((msg, key))
-
-            store._send_warehouse_alert = fake_alert
-            res = await store.refresh_warehouse_layers(trigger="manual")
-
-            assert res["status"] != "error"
-            assert not any(k == "warehouse:sales_type_partition" for _, k in alerts)
-
-            async with store.connection() as conn:
-                by_type = dict(conn.execute(
-                    "SELECT sales_type, SUM(revenue) FROM gold_daily_revenue "
-                    "GROUP BY sales_type"
-                ).fetchall())
-            assert set(by_type) <= set(KNOWN_SALES_TYPES)
-            assert sum(by_type.values()) == pytest.approx(6000.0)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_revenue_outside_the_partition_alerts(self, tmp_path, monkeypatch):
-        """A sales_type the code does not list balances every existing checksum.
-
-        Simulated by narrowing the known set rather than by widening the CASE:
-        the effect on the assertion is identical, and Gold is rebuilt from
-        Silver inside the very call under test, so an injected value would not
-        survive to be seen.
-        """
-        store = await _make_store(tmp_path)
-        try:
-            when = datetime.now(timezone.utc) - timedelta(days=1)
-            async with store.connection() as conn:
-                _insert_order(conn, 1, None, 1000.0, when)   # retail
-                _insert_order(conn, 2, 34, 500.0, when)      # 'internal'
-
-            alerts: list[tuple[str, str | None]] = []
-
-            async def fake_alert(msg, key=None):
-                alerts.append((msg, key))
-
-            store._send_warehouse_alert = fake_alert
-            monkeypatch.setattr(
-                "core.duckdb_store.KNOWN_SALES_TYPES", ("retail", "b2b"),
-            )
-            res = await store.refresh_warehouse_layers(trigger="manual")
-
-            # The existing checksums are blind to it: the totals still balance,
-            # so validation passes and nothing is marked dirty.
-            assert res["validation_passed"] is True
-
-            partition = [(m, k) for m, k in alerts if k == "warehouse:sales_type_partition"]
-            assert partition, "revenue outside the partition must be reported"
-            assert "internal=₴500.00" in partition[0][0]
-        finally:
-            await store.close()
+# `TestPartitionAssertion` stood here until step 14's S14-15: the DuckDB
+# warehouse rebuild's `warehouse:sales_type_partition` report (Gold's known
+# sales types against Silver's total), deleted with the rebuild. DuckDB has
+# derived nothing since step 13.
 
 
 class TestSalesTypeSurfacesAgree:
@@ -358,7 +202,7 @@ class TestSalesTypeCaseSpeaksOnlyKnownTypes:
 
     @staticmethod
     def _results_by_dialect() -> dict[str, tuple[list[str], bool]]:
-        from core.duckdb_store import silver_sales_type_case
+        from core.warehouse_sql import silver_sales_type_case
         from core.sql_dialect import DUCKDB, POSTGRES
 
         return {d.name: _case_results(silver_sales_type_case(d)) for d in (DUCKDB, POSTGRES)}
@@ -385,38 +229,6 @@ class TestSalesTypeCaseSpeaksOnlyKnownTypes:
         """All four are reachable today; a known type no branch yields is dead."""
         for dialect, (results, _) in self._results_by_dialect().items():
             assert set(results) == set(KNOWN_SALES_TYPES), dialect
-
-
-class TestClassificationReachesTheWarehouse:
-    """A classification nobody rebuilds for changes nothing a reader can see.
-
-    `sales_type` is materialised into silver_orders by one CASE at rebuild
-    time. The route has always marked the warehouse dirty after calling this;
-    the method never did, so any other caller left Silver stale and no test
-    would have noticed.
-    """
-
-    @pytest.mark.asyncio
-    async def test_setting_retail_status_marks_the_warehouse_dirty(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers([_api_manager(4, "Someone")])
-            # Clear whatever the sync left behind.
-            await store.consume_warehouse_dirty()
-
-            await store.set_manager_retail_status(4, False)
-
-            is_dirty, changed_ids = await store.consume_warehouse_dirty()
-            assert is_dirty is True, (
-                "reclassifying a manager left the warehouse clean, so Silver "
-                "keeps the old sales_type until something else triggers a rebuild"
-            )
-            assert changed_ids is None, (
-                "the scope must be full: the classification applies to every "
-                "order the manager ever took, not to a list of changed ids"
-            )
-        finally:
-            await store.close()
 
 
 class TestOrderStatusRefreshIsOffTheCompactionInstant:
@@ -477,7 +289,7 @@ class TestSilverHasOneDefinition:
         ):
             assert fragment not in source, (
                 f"admin.py restates {what} instead of importing it from "
-                "core/duckdb_store.py. That duplicate drifted once already."
+                "core/warehouse_sql.py. That duplicate drifted once already."
             )
 
     def test_every_revenue_source_is_a_synced_source(self):
@@ -490,9 +302,10 @@ class TestSilverHasOneDefinition:
     def test_the_exhibition_branch_comes_before_the_manager_branches(self):
         """Source wins over manager, or a retail-listed manager reclaims it."""
         from core.duckdb_constants import EXHIBITION_SOURCE_ID
-        from core.duckdb_store import silver_sales_type_case
+        from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_sales_type_case
 
-        case = silver_sales_type_case()
+        case = silver_sales_type_case(POSTGRES)
         assert case.index(f"o.source_id = {EXHIBITION_SOURCE_ID}") < case.index("o.manager_id"), (
             "the exhibition was staffed by a manager on the retail list, so a "
             "manager-based branch placed first would pull it into retail"

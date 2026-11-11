@@ -1,17 +1,21 @@
 """Stage 5, PR-5: under `KS_DUCKDB=off`, what was inherited from DuckDB's
 `sync_metadata` is read from its Postgres copy, and the file is not opened.
 
-Four places read DuckDB for a key Postgres does not hold yet (the design's
+Four places read DuckDB for a key Postgres did not hold yet (the design's
 2.5): the sync window a chain inherits (`get_last_sync_time`), the freshness
 check's stand-in and its bootstrap gate, the digest's beat, and the report
 ledger's adoption of a week delivered before the flip. Under `off` the first
 three read `app.sync_metadata` — the hourly copy of the same table
 (`core.pg_frozen_metadata`) — and the fourth reads nothing.
 
-Each class holds one consumer: under `off` the copy answers and DuckDB is
-never asked (`duckdb_switch.opened() == {}`, and the store's directory never
-made); under `on` the answer is DuckDB's, as before. The round trip against a
-real `app.sync_metadata` is at the end, skipped without `KS_PG_DSN`.
+Each class holds one consumer: the copy answers and DuckDB is never asked
+(the store's `connection()` a trap; until step 14's S14-18 the switch's
+refusal count and a data directory never made, under `off`, while under `on`
+the first two answered DuckDB's). Step 14's S14-10
+deleted the journal's and the ledgers' DuckDB halves, so the digest's beat
+reads the copy under `on` too, and the ledger adopts nothing in either mode.
+The round trip against a real `app.sync_metadata` is at the end, skipped
+without `KS_PG_DSN`.
 
 Every guard names, in its docstring, the mutation it catches.
 """
@@ -26,9 +30,9 @@ import pytest
 import pytest_asyncio
 
 from core import (
-    chain_latch, data_quality as dq, dq_journal, duckdb_switch,
+    chain_latch, data_quality as dq, dq_journal,
     pg_chain_watermarks, pg_frozen_metadata, pg_traffic_ledger_write,
-    pg_weekly_ledger_write, report_ledger, shadow_writes,
+    pg_weekly_ledger_write, report_ledger,
 )
 from core.duckdb_store import DuckDBStore
 
@@ -44,9 +48,7 @@ def flags(monkeypatch):
 
     for chain in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(chain.WRITE_ENV, raising=False)
-    shadow_writes.reset()
     yield monkeypatch
-    shadow_writes.reset()
 
 
 class Copy:
@@ -79,10 +81,28 @@ class Copy:
         monkeypatch.setattr(pg_frozen_metadata, "values_on", values_on)
 
 
-def _untouched(data_dir):
-    """Nothing reached for the file: no refusal counted, no directory made."""
-    assert duckdb_switch.opened() == {}
-    assert not data_dir.exists()
+@pytest.fixture
+def duckdb_off(monkeypatch):
+    """The store's DuckDB connection a trap that records and raises. Until
+    step 14's S14-18 this was KS_DUCKDB=off read the way web read it (the
+    conftest's `duckdb_off`), and the proof was the switch's refusal count
+    and a data directory never made; the switch is deleted, and the store's
+    `connection()` is all a reader could still reach."""
+    from core import duckdb_store
+
+    reached = []
+
+    def connection(self):
+        reached.append(True)
+        raise AssertionError("reached DuckDB")
+
+    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
+    return reached
+
+
+def _untouched(reached):
+    """Nothing reached for the file."""
+    assert reached == []
 
 
 # ─── 1. The sync window a chain inherits ─────────────────────────────────────
@@ -92,16 +112,15 @@ class TestTheInheritedWatermark:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("chain,key", [
         ("pg_orders_write", "orders"),
-        ("pg_catalogue_write", "products"),
-        ("pg_catalogue_write", "categories"),
-        ("pg_expense_types_write", "expense_types"),
+        ("pg_orders_write", "meilisearch_pg"),
     ])
     async def test_under_off_the_copy_stands_in(self, flags, duckdb_off, chain, key):
-        """Chains 3, 6 and 6a inherit while Postgres holds no key: under off
-        the stand-in is DuckDB's stamp as Postgres copied it, read without the
-        file. Mutation: drop the `is_off()` branch — the read goes to DuckDB,
-        is refused, and the order step of every tick fails (the sweep's rows
-        for `get_last_sync_time`)."""
+        """Chain 3 inherits while Postgres holds no key: under off the
+        stand-in is DuckDB's stamp as Postgres copied it, read without the
+        file. Chains 6 and 6a did too, until step 14's S14-09 took the
+        stand-in off them (below). Mutation: drop the `is_off()` branch — the
+        read goes to DuckDB, is refused, and the order step of every tick
+        fails (the sweep's rows for `get_last_sync_time`)."""
         frozen = NOW - timedelta(hours=3)
         chain_latch.latch(chain)
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
@@ -133,14 +152,22 @@ class TestTheInheritedWatermark:
         _untouched(duckdb_off)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("chain,key", [
+        ("pg_inventory_write", "offers"),
+        # Since step 14's S14-09 (`tests/unit/test_absent_chain_keys.py`).
+        ("pg_catalogue_write", "products"),
+        ("pg_catalogue_write", "categories"),
+        ("pg_expense_types_write", "expense_types"),
+    ])
     async def test_a_chain_that_does_not_inherit_never_asks_the_copy(
-            self, flags, duckdb_off):
-        """Chain 1's absent key is "never synced" in either mode. Mutation:
-        consult the copy for every moved key."""
-        chain_latch.latch("pg_inventory_write")
+            self, flags, duckdb_off, chain, key):
+        """Chain 1's absent key is "never synced" in either mode, and chains
+        6 and 6a's since S14-09. Mutation: consult the copy for every moved
+        key."""
+        chain_latch.latch(chain)
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
-        copy = Copy(flags, {"last_sync_offers": NOW.isoformat()})
-        assert await DuckDBStore().get_last_sync_time("offers") is None
+        copy = Copy(flags, {f"last_sync_{key}": NOW.isoformat()})
+        assert await DuckDBStore().get_last_sync_time(key) is None
         assert copy.asked == []
         _untouched(duckdb_off)
 
@@ -156,23 +183,6 @@ class TestTheInheritedWatermark:
         with pytest.raises(ConnectionRefusedError):
             await DuckDBStore().get_last_sync_time("orders")
         _untouched(duckdb_off)
-
-    @pytest.mark.asyncio
-    async def test_under_on_it_is_duckdb_s_and_the_copy_is_not_asked(
-            self, flags, tmp_path):
-        """The control: under on the inherit reads DuckDB, as before."""
-        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
-        await store.connect()
-        try:
-            frozen = NOW - timedelta(hours=5)
-            await store.set_last_sync_time("orders", frozen)     # chain off: DuckDB's
-            chain_latch.latch("pg_orders_write")
-            flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
-            copy = Copy(flags, {"last_sync_orders": NOW.isoformat()})
-            assert await store.get_last_sync_time("orders") == frozen
-            assert copy.asked == []
-        finally:
-            await store.close()
 
 
 # ─── 2. The freshness check ──────────────────────────────────────────────────
@@ -193,11 +203,6 @@ def _latch_every_chain():
         chain_latch.latch(chain_name(chain))
 
 
-class _NoConn:
-    def execute(self, *_a, **_k):
-        raise AssertionError("the freshness check read DuckDB under off")
-
-
 def _names(issues):
     return sorted(i.check_name for i in issues)
 
@@ -205,25 +210,42 @@ def _names(issues):
 class TestTheFreshnessCheck:
     def test_under_off_the_copy_is_the_rows_and_conn_is_never_read(
             self, flags, duckdb_off):
-        """Every chain latched, Postgres holding all but the four inherited
-        keys: the copy stands in for those, at the same thresholds. Mutation:
-        read `conn` under off."""
+        """Every chain latched, Postgres holding all but the inherited key
+        (chain 3's; chains 6 and 6a inherited too until step 14's S14-09):
+        the copy stands in for it, at the same threshold. (Until step 14's
+        S14-14 the check was also handed a DuckDB connection it must not
+        read under off; it takes none since.)"""
         _latch_every_chain()
-        inherited = ("orders", "products", "categories", "expense_types")
+        inherited = ("orders",)
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS
                               if e not in inherited})
         frozen = _rows(**{**ALL_FRESH, "orders": timedelta(hours=7)})
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+        issues = dq._freshness_check(NOW, chain_watermarks=watermarks,
                                      frozen_rows=frozen)
         assert _names(issues) == ["freshness_orders"]
         assert "as Postgres copied it" in issues[0].description
+        _untouched(duckdb_off)
+
+    def test_under_off_chains_6_and_6a_are_never_synced_without_their_key(
+            self, flags, duckdb_off):
+        """Their stand-in went in S14-09: an absent key is "never synced",
+        however fresh the copy, at the entity's own severity. Mutation: the
+        declaration put back on either chain — the copy then answers and the
+        run is quiet."""
+        _latch_every_chain()
+        gone = ("products", "categories", "expense_types")
+        watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS if e not in gone})
+        issues = dq._freshness_check(NOW, chain_watermarks=watermarks,
+                                     frozen_rows=_rows(**ALL_FRESH))
+        assert _names(issues) == [f"freshness_{e}" for e in sorted(gone)]
+        assert all("never synced" in i.description for i in issues)
         _untouched(duckdb_off)
 
     def test_under_off_postgres_s_own_value_wins_over_the_copy(self, flags, duckdb_off):
         _latch_every_chain()
         watermarks = _rows(**ALL_FRESH)
         frozen = _rows(**{e: timedelta(days=30) for e in dq.FRESHNESS_THRESHOLDS})
-        assert dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+        assert dq._freshness_check(NOW, chain_watermarks=watermarks,
                                    frozen_rows=frozen) == []
 
     def test_under_off_the_bootstrap_gate_reads_postgres(self, flags, duckdb_off):
@@ -232,36 +254,39 @@ class TestTheFreshnessCheck:
         Mutation: gate on the copy alone — a copy holding no `last_sync_*`
         would silence every watermark Postgres holds."""
         _latch_every_chain()
-        assert dq._freshness_check(_NoConn(), NOW, chain_watermarks={},
+        assert dq._freshness_check(NOW, chain_watermarks={},
                                    frozen_rows={}) == []
         stale = _rows(offers=timedelta(hours=60))
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=stale,
+        issues = dq._freshness_check(NOW, chain_watermarks=stale,
                                      frozen_rows={})
         assert "freshness_offers" in _names(issues)
 
     def test_under_off_an_unreadable_copy_is_unwatched_not_never_synced(
             self, flags, duckdb_off):
         """A copy that failed to read is neither a bootstrap nor "never
-        synced": the inherited entities Postgres holds no key for are named
-        unwatched, and the rest are judged. Mutation: read None as `{}` —
-        the inherited entities read "never synced", and with no watermark in
-        hand the gate would call a failed read a fresh install."""
+        synced": the inherited entity Postgres holds no key for is named
+        unwatched, and the rest are judged — the categories included, whose
+        absent key is "never synced" since S14-09 took their stand-in off, so
+        the copy was never theirs to need. Mutation: read None as `{}` — the
+        inherited entity reads "never synced", and with no watermark in hand
+        the gate would call a failed read a fresh install."""
         _latch_every_chain()
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS
                               if e not in ("orders", "categories")})
         watermarks["last_sync_offers"] = (NOW - timedelta(hours=60)).isoformat()
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+        issues = dq._freshness_check(NOW, chain_watermarks=watermarks,
                                      frozen_rows=None)
-        assert _names(issues) == ["freshness_offers", "sync_watermarks_unwatched"]
+        assert _names(issues) == ["freshness_categories", "freshness_offers",
+                                  "sync_watermarks_unwatched"]
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
-        assert unwatched.count == 2
-        assert "categories, orders" in unwatched.description
+        assert unwatched.count == 1
+        assert "of orders " in unwatched.description
         assert "app.sync_metadata" in unwatched.description
         assert "freshness_orders" in dq.unverified_conditions([], issues)
 
     def test_under_off_nothing_read_at_all_is_unwatched_whole(self, flags, duckdb_off):
         _latch_every_chain()
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+        issues = dq._freshness_check(NOW, chain_watermarks=None,
                                      frozen_rows=None)
         assert _names(issues) == ["sync_watermarks_unwatched"]
         assert issues[0].count == len(dq.FRESHNESS_THRESHOLDS)
@@ -273,51 +298,12 @@ class TestTheFreshnessCheck:
         that did not look. Mutation: hold only `stood_down_sync_keys()` (the
         rule `on` derives the hold by) — no key is moved, so nothing is held,
         and `_resolve_dq_layer` clears a delivered `freshness_buyers` page."""
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+        issues = dq._freshness_check(NOW, chain_watermarks=None,
                                      frozen_rows=None)
         (unwatched,) = issues
         everything = sorted(f"freshness_{e}" for e in dq.FRESHNESS_THRESHOLDS)
         assert sorted(unwatched.unverified) == everything
         assert dq.unverified_conditions([], issues) == everything
-
-    def test_under_off_some_chains_moved_the_rest_are_held_too(
-            self, flags, duckdb_off):
-        """Chain 1 latched with its watermarks in Postgres, the copy
-        unreadable: offers and stocks are judged from Postgres; the entities
-        the copy would have judged are held, and the run resolves nothing it
-        did not see."""
-        chain_latch.latch("pg_inventory_write")
-        watermarks = _rows(offers=FRESH, stocks=FRESH)
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
-                                     frozen_rows=None)
-        (unwatched,) = issues
-        copy_judged = {f"freshness_{e}" for e in dq.FRESHNESS_THRESHOLDS
-                       if e not in ("offers", "stocks")}
-        assert set(unwatched.unverified) == copy_judged
-        assert set(dq.unverified_conditions([], issues)) >= copy_judged
-
-    @pytest.mark.parametrize("flag", [None, "garbage"])
-    def test_under_on_the_hold_is_the_moved_keys_as_before(self, flags, flag):
-        """The control: under on the finding names a subset of the moved keys,
-        so the hold is exactly the one derived from `stood_down_sync_keys()`
-        before this — chain 1 latched with no watermarks handed in, or its
-        flag not understood. Mutation: name every threshold entity in the
-        finding whatever the mode."""
-        from core.write_chains import stood_down_sync_keys
-
-        if flag:
-            flags.setenv("KS_WRITE_INVENTORY", flag)
-        else:
-            chain_latch.latch("pg_inventory_write")
-        issues = dq._judge_freshness(_rows(**ALL_FRESH), NOW,
-                                     chain_watermarks=None if not flag else {})
-        assert _names(issues) == ["sync_watermarks_unwatched"]
-        before = sorted(f"freshness_{k[len('last_sync_'):]}"
-                        for k in stood_down_sync_keys()
-                        if k[len("last_sync_"):] in dq.FRESHNESS_THRESHOLDS)
-        assert before == ["freshness_offers", "freshness_stocks"]
-        assert set(issues[0].unverified) <= set(before)
-        assert dq.unverified_conditions([], issues) == before
 
     def test_the_held_page_is_not_announced_resolved(self, flags, duckdb_off):
         """Through `_resolve_dq_layer`, the way the integrity job hands it:
@@ -327,7 +313,7 @@ class TestTheFreshnessCheck:
 
         from core.scheduler import BackgroundScheduler
 
-        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+        issues = dq._freshness_check(NOW, chain_watermarks=None,
                                      frozen_rows=None)
         resolve = AsyncMock(return_value=0)
         with patch("core.alerting.resolve_group", resolve):
@@ -335,32 +321,6 @@ class TestTheFreshnessCheck:
                 "integrity", issues, None,
                 unverified=dq.unverified_conditions([], issues)))
         assert "freshness_buyers" in resolve.await_args.kwargs["still_firing"]
-
-    @pytest.mark.asyncio
-    async def test_under_on_the_rows_are_duckdb_s_and_the_copy_is_ignored(
-            self, flags, tmp_path):
-        """The control: under on `frozen_rows` is not consulted. Mutation:
-        prefer `frozen_rows` whenever given."""
-        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                for key, value in _rows(**{**ALL_FRESH, "offers": timedelta(hours=60)}).items():
-                    conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value, "
-                                 "updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                                 [key, value])
-                issues = dq._freshness_check(conn, NOW, frozen_rows=_rows(**ALL_FRESH))
-                assert _names(issues) == ["freshness_offers"]
-                assert dq._freshness_check(conn, NOW) == issues
-        finally:
-            await store.close()
-
-    def test_the_judge_is_the_check_s_verdict_over_rows(self, flags):
-        """The split is a move, not a rewrite: under on, the judge over the
-        rows DuckDB returned is the check."""
-        rows = _rows(**{**ALL_FRESH, "stocks": timedelta(hours=50)})
-        assert _names(dq._judge_freshness(rows, NOW)) == ["freshness_stocks"]
-        assert dq._judge_freshness({}, NOW) == []
 
     def test_the_scan_hands_the_copy_through(self, flags, duckdb_off):
         """`check_internal_integrity` passes `frozen_sync_rows` to the
@@ -410,13 +370,15 @@ def pg_beat(monkeypatch):
     return state
 
 
-class _Refused:
-    """A store whose file may not be reached."""
+@pytest.fixture
+def no_duckdb(monkeypatch):
+    """A store whose file may not be reached, wherever the code looks for it."""
+    from core import duckdb_store
 
-    @asynccontextmanager
-    async def connection(self):
-        raise AssertionError("the digest reached DuckDB")
-        yield  # pragma: no cover
+    def connection(self):
+        raise AssertionError("reached DuckDB")
+
+    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
 
 
 class TestTheDigestBeat:
@@ -426,7 +388,7 @@ class TestTheDigestBeat:
         every standing finding as new, or the read would reach the file."""
         beat = "2026-10-09T06:00:00+00:00"
         copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: beat})
-        last, _ = await dq_journal.digest_inputs(_Refused(), ("integrity",), NOW)
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime.fromisoformat(beat)
         assert copy.asked == [dq_journal.DIGEST_MARKER_KEY]
         _untouched(duckdb_off)
@@ -435,34 +397,27 @@ class TestTheDigestBeat:
     async def test_under_off_postgres_s_beat_wins(self, flags, duckdb_off, pg_beat):
         pg_beat["marker"] = "2026-10-10T06:00:00+00:00"
         copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-01-01T06:00:00+00:00"})
-        last, _ = await dq_journal.digest_inputs(_Refused(), ("integrity",), NOW)
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last == datetime.fromisoformat(pg_beat["marker"])
         assert copy.asked == []
 
     @pytest.mark.asyncio
     async def test_under_off_no_beat_anywhere_is_none(self, flags, duckdb_off, pg_beat):
         Copy(flags)
-        last, _ = await dq_journal.digest_inputs(_Refused(), ("integrity",), NOW)
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last is None
         _untouched(duckdb_off)
 
     @pytest.mark.asyncio
-    async def test_under_on_the_beat_is_inherited_from_duckdb(self, flags, tmp_path,
-                                                              pg_beat):
-        """The control."""
-        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value, "
-                             "updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                             [dq_journal.DIGEST_MARKER_KEY, "2026-09-29T06:00:00+00:00"])
-            copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-01-01T06:00:00+00:00"})
-            last, _ = await dq_journal.digest_inputs(store, ("integrity",), NOW)
-            assert last == datetime(2026, 9, 29, 6, tzinfo=UTC)
-            assert copy.asked == []
-        finally:
-            await store.close()
+    async def test_under_on_the_beat_is_the_copys_too(self, flags, no_duckdb, pg_beat,
+                                                      monkeypatch):
+        """Until S14-10 a process on `KS_DUCKDB=on` inherited the beat from
+        DuckDB's own `sync_metadata`; the journal's DuckDB half went, and the
+        copy answers in either mode. Mutation: inherit only under off."""
+        copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-09-29T06:00:00+00:00"})
+        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
+        assert last == datetime(2026, 9, 29, 6, tzinfo=UTC)
+        assert copy.asked == [dq_journal.DIGEST_MARKER_KEY]
 
 
 # ─── 4. The report ledgers' adoption ─────────────────────────────────────────
@@ -479,31 +434,22 @@ class TestTheLedgerAdoptsNothingUnderOff:
         before every report (the sweep's `already_sent` rows)."""
         flags.setenv(chain.WRITE_ENV, "postgres")
         flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
-        assert await report_ledger.already_sent(_Refused(), ledger, WEEK, "retail") is False
+        assert await report_ledger.already_sent(ledger, WEEK, "retail") is False
         flags.setattr(chain, "find_sent", AsyncMock(return_value={"week_start": WEEK}))
-        assert await report_ledger.already_sent(_Refused(), ledger, WEEK, "retail") is True
+        assert await report_ledger.already_sent(ledger, WEEK, "retail") is True
         _untouched(duckdb_off)
 
     @pytest.mark.asyncio
-    async def test_under_on_a_row_only_duckdb_holds_is_still_adopted(self, flags, tmp_path):
-        """The control (`test_report_ledger.py` holds the rest of it)."""
-        from core.weekly_report import mark_sent as dk_mark
-
+    async def test_under_on_nothing_is_adopted_either(self, flags, no_duckdb, monkeypatch):
+        """Until S14-10 a process on `KS_DUCKDB=on` adopted a week only DuckDB
+        held; the adoption went with the ledgers' DuckDB half, and Postgres
+        alone answers in either mode. Mutation: put the adoption back."""
         chain = pg_weekly_ledger_write
-        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
-        await store.connect()
-        try:
-            flags.setenv(chain.WRITE_ENV, "postgres")
-            flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
-            adopted = AsyncMock()
-            flags.setattr(chain, "mark_sent", adopted)
-            async with store.connection() as conn:
-                dk_mark(conn, WEEK, "retail", 12.5, 4)
-            assert await report_ledger.already_sent(store, report_ledger.WEEKLY,
-                                                    WEEK, "retail") is True
-            assert adopted.await_count == 1
-        finally:
-            await store.close()
+        flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
+        adopted = AsyncMock()
+        flags.setattr(chain, "mark_sent", adopted)
+        assert await report_ledger.already_sent(report_ledger.WEEKLY, WEEK, "retail") is False
+        assert adopted.await_count == 0
 
 
 # ─── The module ──────────────────────────────────────────────────────────────
@@ -511,9 +457,9 @@ class TestTheLedgerAdoptsNothingUnderOff:
 
 class TestTheModule:
     def test_one_spelling_of_the_table(self):
-        from core.pg_operational import SYNC_METADATA_TABLE
-
-        assert pg_frozen_metadata.TABLE == SYNC_METADATA_TABLE
+        """`core.pg_operational.SYNC_METADATA_TABLE` was its other spelling
+        until step 14's S14-13 deleted the copy; this is the one left."""
+        assert pg_frozen_metadata.TABLE == "app.sync_metadata"
 
     def test_it_reads_and_never_writes(self):
         """Nothing here may write the copy: its one writer stands down under

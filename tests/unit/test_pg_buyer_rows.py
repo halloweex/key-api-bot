@@ -50,7 +50,7 @@ async def test_buyers_and_their_contacts_are_written_in_id_order(monkeypatch):
     `contacts = list(contacts_by_buyer)` — the two sorts removed."""
     from core import pg_buyer_rows
 
-    monkeypatch.setattr("core.pg_derivation.mark_if_owned", AsyncMock())
+    monkeypatch.setattr("core.pg_derivation.mark", AsyncMock())
     ids = [9, 3, 5, 1]
     rows = [(i, f"Покупець {i}") for i in ids]
     contacts = [(i, [] if i == 3 else [(i, "phone", f"+38050{i}", True)])
@@ -81,7 +81,7 @@ async def test_an_empty_contact_list_still_deletes(monkeypatch):
     and no INSERT. Mutation killed: the DELETE under `if buyer_contacts:`."""
     from core import pg_buyer_rows
 
-    monkeypatch.setattr("core.pg_derivation.mark_if_owned", AsyncMock())
+    monkeypatch.setattr("core.pg_derivation.mark", AsyncMock())
     conn = _Conn()
 
     written = await pg_buyer_rows._write_buyer_rows(conn, [(7, "Покупець 7")], [(7, [])])

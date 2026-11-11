@@ -15,9 +15,12 @@ These tests hold four promises:
   nothing else (no returns, no retired sources, the campaign's sales type);
 * one group renders exactly the predicate it rendered before groups existed.
 
-The store runs here on DuckDB. The same expectations against PostgreSQL, and
-the comparison with the query as it stood before groups, are in
-`tests/integration/test_sms_audience_groups_two_engines.py`.
+The store runs here on PostgreSQL, the one store `/sms` has read since step
+14's S14-08 (it ran on DuckDB until then; `tests/integration/pg_sms_seed.py`).
+The comparison with the query as it stood before groups, and the answers
+DuckDB gave on the same fixture, are in
+`tests/integration/test_sms_audience_groups_two_engines.py`. The store tests
+are skipped without `KS_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -26,17 +29,24 @@ from datetime import date
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
 from core.repositories.customers import (
     MAX_AUDIENCE_GROUPS, SmsAudienceFilters, SmsAudienceGroup,
     audience_group_fragments,
 )
 from core.sql_dialect import DUCKDB, TODAY_IN_KYIV, sms_segments_select
 from tests import sms_audience_fixture as fx
+from tests.integration import pg_sms_seed
 
-GROUP_A = SmsAudienceGroup(
-    365, SmsAudienceFilters(period_orders_min=2, period_from=fx.PERIOD_FROM),
-)
+
+def group_a(window: int = 365) -> SmsAudienceGroup:
+    """Two or more orders since `fx.period_from()`. A function where B is a
+    constant because it carries a date, and a date built at import is the
+    collection's day, not the query's (the fixture's docstring says why)."""
+    return SmsAudienceGroup(
+        window, SmsAudienceFilters(period_orders_min=2, period_from=fx.period_from()),
+    )
+
+
 GROUP_B = SmsAudienceGroup(92, SmsAudienceFilters())
 
 
@@ -190,7 +200,7 @@ class TestOneGroupRendersWhatItRenderedBefore:
 class TestTheFragments:
     def test_only_a_narrower_group_carries_its_own_window(self):
         frag = audience_group_fragments(
-            [GROUP_A, GROUP_B], "revenue_ltv", "retail", "silver_order_lines",
+            [group_a(), GROUP_B], "revenue_ltv", "retail", "silver_order_lines",
         )
         assert frag["window"] == 365
         a, b = frag["group_predicates"]
@@ -247,7 +257,7 @@ class TestTheFragments:
 
     def test_the_query_names_every_group_and_counts_each(self):
         frag = audience_group_fragments(
-            [GROUP_A, GROUP_B], "revenue_ltv", "retail", DUCKDB.order_lines,
+            [group_a(), GROUP_B], "revenue_ltv", "retail", DUCKDB.order_lines,
         )
         sql = sms_segments_select(
             DUCKDB, ltv_column="revenue_ltv", sales_type_filter="",
@@ -265,15 +275,13 @@ class TestTheFragments:
 # ─── On a real store ────────────────────────────────────────────────────────
 
 @pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "groups.duckdb")
-    await s.connect()
-    async with s.connection() as conn:
-        fx.seed_duckdb_conn(conn)
-    try:
-        yield s
-    finally:
-        await s.close()
+async def store(tmp_path, monkeypatch):
+    if not pg_sms_seed.DSN:
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        async with pg_sms_seed.pg_conn() as conn:
+            await fx.seed_postgres(conn)
+        yield pg_sms_seed.store(tmp_path, "groups.duckdb")
 
 
 def _ids(result) -> set:
@@ -291,18 +299,18 @@ async def _audience(store, groups, **kwargs):
 class TestTheUnion:
     @pytest.mark.asyncio
     async def test_each_group_alone(self, store):
-        assert _ids(await _audience(store, [GROUP_A])) == fx.A_ALONE
+        assert _ids(await _audience(store, [group_a()])) == fx.A_ALONE
         assert _ids(await _audience(store, [GROUP_B])) == fx.B_ALONE
 
     @pytest.mark.asyncio
     async def test_the_owners_campaign(self, store):
-        result = await _audience(store, [GROUP_A, GROUP_B])
+        result = await _audience(store, [group_a(), GROUP_B])
         assert _ids(result) == fx.UNION
         assert result["totals"]["customers"] == len(fx.UNION)
 
     @pytest.mark.asyncio
     async def test_each_group_reports_its_share(self, store):
-        result = await _audience(store, [GROUP_A, GROUP_B])
+        result = await _audience(store, [group_a(), GROUP_B])
         a, b = result["groups"]
         assert a == {"group": 1, "matched": len(fx.A_MATCHED),
                      "recipients": fx.A_RECIPIENTS,
@@ -315,7 +323,7 @@ class TestTheUnion:
     async def test_the_funnel_counts_the_union(self, store):
         """`filtered` is "in any group"; the stages after it are the common
         rules on the union, as before."""
-        result = await _audience(store, [GROUP_A, GROUP_B])
+        result = await _audience(store, [group_a(), GROUP_B])
         stages = {s["stage"]: s["remaining"] for s in result["funnel"]}
         assert stages["customers"] == len(fx.BUYERS)
         assert stages["filtered"] == len(fx.A_MATCHED | fx.B_MATCHED)
@@ -325,8 +333,8 @@ class TestTheUnion:
 
     @pytest.mark.asyncio
     async def test_the_order_of_groups_changes_nobody(self, store):
-        ab = await _audience(store, [GROUP_A, GROUP_B])
-        ba = await _audience(store, [GROUP_B, GROUP_A])
+        ab = await _audience(store, [group_a(), GROUP_B])
+        ba = await _audience(store, [GROUP_B, group_a()])
         assert ab["customers"] == ba["customers"]
         assert ab["groups"][0]["recipients"] == ba["groups"][1]["recipients"]
 
@@ -342,7 +350,7 @@ class TestTheUnion:
         """8 is in A, 9 in B, one number between them: the union messages it
         once, to the more valuable of the two, which is how a single group
         has always settled it."""
-        result = await _audience(store, [GROUP_A, GROUP_B])
+        result = await _audience(store, [group_a(), GROUP_B])
         assert 9 in _ids(result) and 8 not in _ids(result)
         phones = [c["phone"] for c in result["customers"]]
         assert len(phones) == len(set(phones))
@@ -363,20 +371,20 @@ class TestEachGroupKeepsItsMeaning:
     async def test_a_narrow_group_does_not_cut_a_wide_one(self, store):
         """B's 92 days used to be the window of the whole audience; 14's last
         order was 185 days ago, and it is in A."""
-        result = await _audience(store, [GROUP_A, GROUP_B])
+        result = await _audience(store, [group_a(), GROUP_B])
         assert 14 in _ids(result)
 
     @pytest.mark.asyncio
     async def test_a_wide_group_does_not_widen_a_narrow_one(self, store):
         """13 is inside A's 365 days and one day outside B's 92, and not in A:
         the union must not let it in through A's window."""
-        result = await _audience(store, [GROUP_A, GROUP_B])
+        result = await _audience(store, [group_a(), GROUP_B])
         assert 13 not in _ids(result)
         assert 4 not in _ids(result)
 
     @pytest.mark.asyncio
     async def test_a_groups_own_window_still_binds_it(self, store):
-        narrow_a = SmsAudienceGroup(180, GROUP_A.filters)
+        narrow_a = group_a(180)
         result = await _audience(store, [narrow_a, GROUP_B])
         assert _ids(result) == fx.UNION - {14}
 
@@ -391,18 +399,18 @@ class TestOrdersInAPeriod:
             grouping="single", include_customers=True,
         )
         assert 4 in _ids(lifetime)
-        assert 4 not in _ids(await _audience(store, [GROUP_A]))
+        assert 4 not in _ids(await _audience(store, [group_a()]))
 
     @pytest.mark.asyncio
     async def test_it_counts_what_the_audience_counts(self, store):
         """A return (5), a retired source (6) and a b2b order (7) are not
         purchases for the period any more than for the rest of the query."""
-        ids = _ids(await _audience(store, [GROUP_A]))
+        ids = _ids(await _audience(store, [group_a()]))
         assert not ids & {5, 6, 7}
 
     @pytest.mark.asyncio
     async def test_the_sales_type_decides_what_counts(self, store):
-        ids = _ids(await _audience(store, [GROUP_A], sales_type="all"))
+        ids = _ids(await _audience(store, [group_a()], sales_type="all"))
         assert 7 in ids
 
     @pytest.mark.asyncio
@@ -430,7 +438,7 @@ class TestThePeriodsShapesAndBounds:
         mine = fx.matched(window, **terms)
         assert fx.recipients(mine) == answer, f"{label}: the oracle disagrees with the hand"
         result = await _audience(
-            store, [SmsAudienceGroup(window, SmsAudienceFilters(**fields))])
+            store, [SmsAudienceGroup(window, SmsAudienceFilters(**fields()))])
         assert _ids(result) == answer
         assert result["groups"][0]["matched"] == len(mine)
 
@@ -453,22 +461,22 @@ class TestThePeriodsShapesAndBounds:
     @pytest.mark.asyncio
     async def test_the_new_bounds_are_frozen(self, store):
         result = await _audience(store, [SmsAudienceGroup(3650, SmsAudienceFilters(
-            period_orders_max=0, period_from=fx.PERIOD_FROM, period_to=fx.ago(10)))])
+            period_orders_max=0, period_from=fx.period_from(), period_to=fx.ago(10)))])
         assert result["criteria"]["maxRecencyDays"] == 3650
         assert result["criteria"]["filters"] == {
-            "period_orders_max": 0, "period_from": fx.PERIOD_FROM.isoformat(),
+            "period_orders_max": 0, "period_from": fx.period_from().isoformat(),
             "period_to": fx.ago(10).isoformat()}
 
 
 class TestWhatIsFrozen:
     @pytest.mark.asyncio
     async def test_the_criteria_record_every_group(self, store):
-        result = await _audience(store, [GROUP_A, GROUP_B])
+        result = await _audience(store, [group_a(), GROUP_B])
         criteria = result["criteria"]
         assert criteria["maxRecencyDays"] == 365
         assert criteria["groups"] == [
             {"maxRecencyDays": 365, "filters": {
-                "period_orders_min": 2, "period_from": fx.PERIOD_FROM.isoformat()}},
+                "period_orders_min": 2, "period_from": fx.period_from().isoformat()}},
             {"maxRecencyDays": 92, "filters": {}},
         ]
         assert criteria["filters"] == criteria["groups"][0]["filters"]
@@ -503,7 +511,7 @@ class TestTheControlIsDrawnOverTheUnion:
         """The holdout is a hash of (buyer, campaign) — reaching somebody
         through another group must not re-draw them."""
         alone = await _audience(store, [GROUP_B], holdout_pct=50, campaign="x1")
-        union = await _audience(store, [GROUP_A, GROUP_B], holdout_pct=50,
+        union = await _audience(store, [group_a(), GROUP_B], holdout_pct=50,
                                 campaign="x1")
         arm = {c["buyerId"]: c["assignment"] for c in union["customers"]}
         for c in alone["customers"]:

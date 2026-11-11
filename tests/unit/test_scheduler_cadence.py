@@ -19,10 +19,40 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-# The stage 5 sweep's target state, for the one class below that asks what is
-# registered in it.
-from tests.unit.test_duckdb_off_sweep import target_state  # noqa: F401 — fixture
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
+
+# The instants every cadence below is read at, never the wall clock.
+# `_trigger_cadence_s` takes the longest gap among a trigger's next twelve
+# firings, so read today a six-hourly Kyiv cron says seven hours for the three
+# days before the night the clocks go back, and a daily one 25 h for the
+# twelve: the suite went red every October (25200.0, measured 2026-10-22).
+# Kyiv leaves summer time at 04:00 on 2026-10-25 and enters it at 03:00 on
+# 2026-03-29.
+QUIET = (2026, 7, 15, 12)    # no clock change in the next twelve days
+AUTUMN = (2026, 10, 23, 12)  # 01:00 → 07:00 on 25 Oct is seven hours
+SPRING = (2026, 3, 26, 12)   # 01:00 → 07:00 on 29 Mar is five; six still wins
+
+
+def _kyiv(at):
+    from core.scheduler import SCHEDULER_TIMEZONE
+
+    return datetime(*at, tzinfo=SCHEDULER_TIMEZONE)
+
+
+@pytest.fixture
+def cadence_read_at(monkeypatch):
+    """Fix the instant `_add_job` reads a trigger's cadence at. It asks with
+    no `now`, so without this the cadence the wrapper captures is today's."""
+    from core.scheduler import BackgroundScheduler
+
+    real = BackgroundScheduler._trigger_cadence_s
+
+    def at(when):
+        monkeypatch.setattr(
+            BackgroundScheduler, "_trigger_cadence_s",
+            staticmethod(lambda trigger, now=None: real(trigger, now or when)))
+
+    return at
 
 
 def _registered():
@@ -58,9 +88,14 @@ class TestEveryJobCarriesItsCadence:
     def test_the_slow_emitters_get_the_rhythm_their_triggers_give(self):
         """The four whose alerts arrived every pass as news. Named here only
         as the record of why this exists; the two tests above are what keeps
-        the next one covered."""
+        the next one covered.
+
+        Read at a quiet instant. These triggers carry the process's zone —
+        UTC in CI, Europe/Kyiv in production — so on the wall clock this
+        failed only under a zone with a clock change: a laptop in Kyiv in
+        October."""
         s = _registered()
-        cadence = {j.id: s._trigger_cadence_s(j.trigger)
+        cadence = {j.id: s._trigger_cadence_s(j.trigger, _kyiv(QUIET))
                    for j in s._scheduler.get_jobs()}
         assert cadence["disk_watchdog"] == 6 * 3600
         assert cadence["dq_integrity_check"] == 6 * 3600
@@ -86,26 +121,20 @@ class TestTheWrapper:
                    func=probe, trigger=trigger)
         return s, s._scheduler.get_job("probe"), seen
 
-    @staticmethod
-    def _six_hourly():
-        """The integrity check's trigger, and the cadence it has this week:
-        six hours, or seven within three days of the clocks going back — the
-        longest gap is what `_trigger_cadence_s` answers, by design, and a
-        literal 6 h failed every run in the days before 2026-10-25."""
-        from core.scheduler import (
-            INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE, BackgroundScheduler,
-        )
+    @pytest.mark.parametrize("at, hours", [(QUIET, 6), (AUTUMN, 7)],
+                             ids=["quiet", "clocks_go_back"])
+    def test_the_job_runs_under_its_triggers_cadence(
+            self, cadence_read_at, at, hours):
+        """Both directions: six hours on a quiet week, seven across the night
+        the clocks go back — what the trigger gives at registration, not a
+        constant."""
+        from core.scheduler import INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE
 
-        trigger = CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE)
-        expected = BackgroundScheduler._trigger_cadence_s(trigger)
-        assert expected in (6 * 3600, 7 * 3600)
-        return trigger, expected
-
-    def test_the_job_runs_under_its_triggers_cadence(self):
-        trigger, expected = self._six_hourly()
-        _, job, seen = self._probe(trigger)
+        cadence_read_at(_kyiv(at))
+        _, job, seen = self._probe(
+            CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE))
         asyncio.run(job.func())
-        assert seen == [expected]
+        assert seen == [hours * 3600]
 
     def test_the_cadence_does_not_leak_past_the_job(self):
         from core.alerting import ALERT_CADENCE_S
@@ -118,20 +147,25 @@ class TestTheWrapper:
 
         assert asyncio.run(run_then_look()) is None
 
-    def test_a_catch_up_carries_the_scheduled_jobs_cadence(self):
+    @pytest.mark.parametrize("at, hours", [(QUIET, 6), (AUTUMN, 7)],
+                             ids=["quiet", "clocks_go_back"])
+    def test_a_catch_up_carries_the_scheduled_jobs_cadence(
+            self, cadence_read_at, at, hours):
         """The catch-up re-adds `job.func` under a one-shot DateTrigger, which
         has no rhythm of its own. The cadence was captured at registration, so
-        a caught-up integrity run still raises at six hours."""
-        from core.scheduler import SCHEDULER_TIMEZONE
+        a caught-up integrity run still raises at the scheduled run's six
+        hours — seven when registered across the night the clocks go back."""
+        from core.scheduler import INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE
 
-        trigger, expected = self._six_hourly()
-        s, job, seen = self._probe(trigger)
+        cadence_read_at(_kyiv(at))
+        s, job, seen = self._probe(
+            CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE))
         s._scheduler.add_job(
             job.func, trigger=DateTrigger(
                 run_date=datetime.now(SCHEDULER_TIMEZONE) + timedelta(hours=1)),
             id="probe_catchup")
         asyncio.run(s._scheduler.get_job("probe_catchup").func())
-        assert seen == [expected]
+        assert seen == [hours * 3600]
 
     def test_a_one_shot_trigger_has_no_cadence(self):
         from core.scheduler import BackgroundScheduler, SCHEDULER_TIMEZONE
@@ -159,6 +193,19 @@ class TestTheCadenceIsElapsedTime:
                               timezone=SCHEDULER_TIMEZONE)
         before = datetime(2026, 10, 23, 12, 0, tzinfo=SCHEDULER_TIMEZONE)
         assert BackgroundScheduler._trigger_cadence_s(trigger, before) == 7 * 3600
+
+    def test_the_night_the_clocks_go_forward_is_still_six_hours(self):
+        """The longest gap, not the one across the change: on 2026-03-29 the
+        01:00 and 07:00 slots are five hours apart, and the six beside them
+        is what the Gate is told. Why only October ever turned this red."""
+        from core.scheduler import (
+            BackgroundScheduler, INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE,
+        )
+
+        trigger = CronTrigger(hour=INVARIANT_CHECK_HOURS,
+                              timezone=SCHEDULER_TIMEZONE)
+        assert BackgroundScheduler._trigger_cadence_s(
+            trigger, _kyiv(SPRING)) == 6 * 3600
 
 
 class TestARequestedRunIsMarked:
@@ -190,27 +237,24 @@ class TestARequestedRunIsMarked:
         assert "_requested_runs.add(job_id)" in src
 
 
-class TestWhatIsNotRegisteredUnderDuckdbOff:
-    """Stage 5, PR-7: under `KS_DUCKDB=off` the two jobs whose subject is the
-    DuckDB file are not registered — a CHECKPOINT of a file nothing writes,
-    and a daily copy of one frozen at the start of the week — and neither is
-    DuckDB's warehouse tick, which step 13 already leaves out."""
+class TestTheDuckDBJobsAreNotRegistered:
+    """The two jobs whose subject was the DuckDB file — an hourly CHECKPOINT,
+    a nightly copy — were registered under `KS_DUCKDB=on` only (stage 5,
+    PR-7), so not in web since the week of silence began; step 14's S14-18
+    deleted them with the switch. DuckDB's warehouse tick went in S14-15.
+    The names are not reused (rule 15)."""
 
-    DUCKDB_JOBS = {"duckdb_checkpoint", "db_backup"}
+    DUCKDB_JOBS = {"duckdb_checkpoint", "db_backup", "warehouse_refresh"}
 
-    def test_under_on_both_are_registered(self):
-        """The control. Mutation: drop either from `_register_jobs`."""
+    def test_none_of_the_three_is_registered(self):
+        """Mutation: register `duckdb_checkpoint` or `db_backup` again."""
         ids = {j.id for j in _registered()._scheduler.get_jobs()}
-        assert self.DUCKDB_JOBS <= ids
-
-    def test_under_off_in_the_target_state_none_of_the_three_is(self, target_state):
-        """Mutation: register either under off — the sweep's `job:db_backup`
-        row comes back, and a CHECKPOINT runs against an unconnected store
-        every hour for nothing."""
-        ids = {j.id for j in _registered()._scheduler.get_jobs()}
-        assert not ids & (self.DUCKDB_JOBS | {"warehouse_refresh"}), ids
+        assert not ids & self.DUCKDB_JOBS, ids
         assert {"dq_integrity_check", "replicate_operational",
                 "dq_mirror_landing"} <= ids
-        from core import duckdb_switch
 
-        assert duckdb_switch.opened() == {}
+    def test_their_runners_are_gone(self):
+        from core.scheduler import BackgroundScheduler
+
+        assert not hasattr(BackgroundScheduler, "_run_duckdb_checkpoint")
+        assert not hasattr(BackgroundScheduler, "_run_backup")

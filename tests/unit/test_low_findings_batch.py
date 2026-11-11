@@ -1,128 +1,30 @@
 """The last batch of the race audit's LOW findings, each with the guard it got."""
-import asyncio
 import inspect
-from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
-
-WHEN = "2026-08-20T12:00:00+00:00"
 
 
-def _payload(order_id, products=2):
-    return {
-        "id": order_id, "source_id": 1, "status_id": 12, "status_group_id": 4,
-        "grand_total": "100.00", "ordered_at": WHEN, "created_at": WHEN,
-        "updated_at": WHEN, "buyer": {"id": 500 + order_id},
-        "manager": {"id": 4}, "manager_comment": None, "promocode": None,
-        "products": [
-            {"name": f"Товар {i}", "quantity": 1, "price_sold": "50.00",
-             "offer": {"product_id": 700 + i}}
-            for i in range(products)
-        ],
-    }
+# `TestAHeaderOnlyRefreshNeverCreatesAnOrder` stood here, pinning the
+# header-only refresh's deferral on DuckDB's order writer (with chain 3 routed
+# back to DuckDB for it). Step 14's S14-09 deleted that writer; the same rule
+# on chain 3's is `tests/integration/test_orders_chain_writer.py`
+# (`test_a_header_only_refresh_never_creates_an_order`), and the decision
+# itself `tests/unit/test_pg_orders_write.py` (`TestTheDecisionIsDuckDBs`).
 
 
-class TestAHeaderOnlyRefreshNeverCreatesAnOrder:
-    @pytest.mark.asyncio
-    async def test_an_unknown_id_is_left_for_a_full_writer(self, tmp_path):
-        store = DuckDBStore(db_path=tmp_path / "o.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-                first = await store.upsert_orders([_payload(1)], force_update=True, skip_products=True)
-                assert first.deferred_to_full_sync == 1
-                assert first.count == 0 and first.changed_ids == []
-                async with store.connection() as conn:
-                    assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
-                # The full writer creates it, with its line items.
-                second = await store.upsert_orders([_payload(1)])
-                assert second.changed_ids == [1]
-                async with store.connection() as conn:
-                    assert conn.execute("SELECT COUNT(*) FROM order_products").fetchone()[0] == 2
-                # And the header-only refresh still refreshes it afterwards.
-                third = await store.upsert_orders([_payload(1)], force_update=True, skip_products=True)
-                assert third.changed_ids == [1] and third.deferred_to_full_sync == 0
-        finally:
-            await store.close()
+# `TestPersistRunIsOneTransaction` stood here: DuckDB's `persist_run` opened
+# one transaction around the run and its findings and rolled it back on a
+# failed insert. Step 14's S14-10 deleted that writer; the same property of
+# chain 9's, a refused finding leaving no run behind, is
+# `tests/integration/test_dq_journal_pg.py` (`TestOneTransaction`).
 
 
-class TestPersistRunIsOneTransaction:
-    def test_begin_commit_bracket_the_inserts(self):
-        from core.data_quality import persist_run
-
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (7,)
-        now = datetime.now(timezone.utc)
-        run_id = persist_run(
-            conn, started_at=now, ended_at=now, as_of=now,
-            window_start=now.date(), window_end=now.date(), layer="integrity",
-            issues=[], discrepancies=[],
-        )
-        assert run_id == 7
-        sql = [str(c.args[0]).strip() for c in conn.execute.call_args_list]
-        assert sql[0] == "BEGIN TRANSACTION" and sql[-1] == "COMMIT"
-
-    def test_a_failed_insert_rolls_back(self):
-        from core.data_quality import persist_run
-
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (7,)
-        conn.executemany.side_effect = RuntimeError("disk full")
-        now = datetime.now(timezone.utc)
-        from core.data_quality import IntegrityIssue, Severity
-
-        with pytest.raises(RuntimeError):
-            persist_run(
-                conn, started_at=now, ended_at=now, as_of=now,
-                window_start=now.date(), window_end=now.date(), layer="integrity",
-                issues=[IntegrityIssue("x", "t", Severity.WARN, 1)], discrepancies=[],
-            )
-        sql = [str(c.args[0]).strip() for c in conn.execute.call_args_list]
-        assert "ROLLBACK" in sql and "COMMIT" not in sql
-
-
-class TestATimedOutQueryLeavesTheConnectionBeforeTheLockDoes:
-    @pytest.mark.asyncio
-    async def test_the_lock_is_free_and_usable_after_a_timeout(self, tmp_path):
-        from core.exceptions import QueryTimeoutError
-
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            with pytest.raises(QueryTimeoutError):
-                await asyncio.wait_for(
-                    store._fetch_all("SELECT count(*) FROM range(20000000000) r1, range(2) r2", timeout=0.05),
-                    timeout=15,
-                )
-            assert not store._lock.locked()
-            assert (await store._fetch_one("SELECT 1"))[0] == 1
-        finally:
-            await store.close()
-
-
-class TestBackupSweepsItsOwnOrphans:
-    @pytest.mark.asyncio
-    async def test_a_stale_temp_file_is_removed(self, tmp_path):
-        store = DuckDBStore(db_path=tmp_path / "analytics.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                conn.execute("INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, buyer_id) "
-                             "VALUES (1, 1, 1, 10.0, TIMESTAMPTZ '2026-08-01 10:00:00+00', 1)")
-            dest = tmp_path / "backups"
-            dest.mkdir()
-            stale = dest / ".analytics-20260101-000000.duckdb.tmp"
-            stale.write_bytes(b"x" * 10)
-            result = await store.backup_database(dest_dir=dest, keep=2)
-            assert result["status"] == "success", result
-            assert not stale.exists()
-            assert not list(dest.glob(".*.tmp"))
-        finally:
-            await store.close()
+# `TestATimedOutQueryLeavesTheConnectionBeforeTheLockDoes` and
+# `TestBackupSweepsItsOwnOrphans` stood here: the DuckDB store's `_fetch_*`
+# releasing its lock after a `QueryTimeoutError`, and its nightly backup
+# removing a stale temp copy. Both went with the store's DuckDB half in step
+# 14's S14-18.
 
 
 class TestTheUtmBackfillFlagIsAlwaysReleased:
@@ -131,9 +33,11 @@ class TestTheUtmBackfillFlagIsAlwaysReleased:
         from web.routes.api import traffic
 
         async def _boom():
-            raise RuntimeError("store unavailable")
+            raise RuntimeError("KeyCRM unavailable")
 
-        monkeypatch.setattr(traffic, "get_store", _boom)
+        # The client, the first thing the body awaits since step 14's S14-15
+        # (the store it opened first went with the way back's note).
+        monkeypatch.setattr("core.keycrm.get_async_client", _boom)
         traffic._backfill_status.update(running=True, result={"status": "started"})
         with pytest.raises(RuntimeError):
             await traffic._run_backfill(1)
@@ -148,15 +52,13 @@ class TestTheRest:
         assert "with self._lock:" in inspect.getsource(SyncKeyCRMClient._run)
 
     def test_utm_parse_stamps_the_updated_at_it_parsed(self):
-        from core.repositories.traffic import TrafficMixin
+        """The parse's own, in Postgres since step 13 and alone since step 14's
+        S14-15 deleted DuckDB's (`TrafficMixin._parse_utm_into_silver`)."""
+        from core import pg_utm_parse
 
-        src = inspect.getsource(TrafficMixin.parse_utm_data) if hasattr(TrafficMixin, "parse_utm_data") else inspect.getsource(TrafficMixin)
-        assert "SELECT o.id, o.manager_comment, o.updated_at" in src
-        assert "COALESCE(?, CURRENT_TIMESTAMP)" in src
+        assert "SELECT o.id, o.manager_comment, o.updated_at" in pg_utm_parse.INCREMENTAL_SELECT_SQL
+        assert "COALESCE($14::timestamptz, now())" in pg_utm_parse.insert_sql()
 
-    def test_the_classification_endpoint_reports_its_replica(self):
-        from web.routes.api import admin
-
-        src = inspect.getsource(admin)
-        assert 'replica = await replicate_managers(store)' in src
-        assert '"replica": replica' in src
+    # `test_the_classification_endpoint_reports_its_replica` held the
+    # retail-status route to answering the classification copy's result, until
+    # step 14's S14-13 deleted the copy (`core.pg_replication`) and the key.

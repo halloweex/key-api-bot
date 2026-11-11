@@ -21,17 +21,24 @@ to stay true around it:
   frozen copy;
 - the hourly replace stands down for the four tables (a control proves it
   would otherwise wipe them), and stays down with the flag put back;
-- the copy-back carries the four tables into DuckDB, compares them at zero and
-  releases the latch, and `--handover` before a flip names what the flip
-  would strand;
 - the standing watch reads what it judges.
 
-The inputs are a three-year history seeded in DuckDB and its Silver copied
-into `silver.orders`, so the calculators read Postgres Silver as they do in
-production (`KS_READ_GOALS=postgres`; `KS_GOALS_HISTORY=silver`, which since
-chain 7b-4 reads as unset does).
+The inputs are a three-year history seeded in Postgres' Bronze, from which
+Postgres derives Silver, so the calculators read Postgres Silver as they do
+in production — the only place they read since step 14's S14-07.
 
 Skipped without `KS_PG_DSN`. Run with `TZ=UTC` like every two-engine test.
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says, so
+the tests that needed the flag to route a write to DuckDB went with that
+path: the replace's control, a typo refusing both writers, the reads of an
+unflagged or held chain, the copy-back's round trip and the pre-flip
+handover. Since S14-11 there is no DuckDB branch to write through: the two
+tests that compared it with Postgres compare Postgres with the DuckDB
+answer captured before it went (`goal_tables_duckdb_answer.py`, rule 9).
+
+The copy-back's own tests — the four stamps it carried exactly, its dry run,
+its refusal of an unlatched chain — went with the copy-back in S14-04.
 """
 from __future__ import annotations
 
@@ -45,7 +52,7 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_forecast_write, read_fallback
-from core.chain_transfer import CopyBackRefused, copy_back, handover_check
+from tests.integration.goal_tables_duckdb_answer import DUCKDB_ANSWER
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -86,36 +93,35 @@ async def _clean(pool):
 
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
-    """A real DuckDB holding the history, its Silver in Postgres, and every
-    precondition of the chain met — the flag itself left unset."""
-    from core.duckdb_store import DuckDBStore
-    from tests.integration.test_goals_history_two_engines import _copy_silver
-    from tests.unit.test_goals_off_duckdb_silver import _seed_history
+    """A real, empty DuckDB beside a Postgres holding the history — Bronze
+    seeded, Silver and Gold derived from it, the production path — so the
+    calculators read Postgres Silver as they do in production.
 
-    monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
-    monkeypatch.setenv("KS_READ_GOALS", "postgres")
-    monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
+    Since step 14's S14-07 every goal read is Postgres' whatever any flag
+    says; the history used to be seeded in DuckDB and its Silver copied
+    across. DuckDB is here for what must not reach it."""
+    from core.duckdb_store import DuckDBStore
+    from tests.integration.pg_tab_seed import tab_in_postgres
+    from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
+
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
-    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
-    monkeypatch.setattr(read_fallback, "_mode_error", None)
-    store = DuckDBStore(db_path=tmp_path / "forecast.duckdb")
-    await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
-    await _clean(pool)
-    await _seed_history(store)
-    assert await _copy_silver(pool, store) > 1500
-    with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
-            patch("core.pg.require_revision", new=AsyncMock()):
-        yield store, pool, monkeypatch
-    await _clean(pool)
-    await pool.close()
-    await store.close()
+    store = DuckDBStore()
+
+    async def populate(conn, pool):
+        await _clean(pool)
+        await _seed_history_pg(conn, pool)
+
+    async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") > 1500
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            yield store, pool, monkeypatch
+        await _clean(pool)
 
 
 def _flag(env):
+    """Production's flag; read by nothing since step 14's S14-11."""
     env.setenv(pg_forecast_write.WRITE_ENV, "postgres")
-    assert pg_forecast_write.writes_postgres(), pg_forecast_write.unmet_precondition()
 
 
 async def _pg(pool, table, stamps=False):
@@ -126,22 +132,12 @@ async def _pg(pool, table, stamps=False):
     return [tuple(r) for r in rows]
 
 
-async def _duck(store, table, stamps=False):
-    cols = COLUMNS[table] + ((STAMP[table],) if stamps else ())
-    name = table.split(".", 1)[1]
-    async with store.connection() as conn:
-        rows = conn.execute(
-            f"SELECT {', '.join(cols)} FROM {name} ORDER BY {cols[0]}, {cols[1]}"
-        ).fetchall()
-    return [tuple(r) for r in rows]
 
 
 async def _all_pg(pool, stamps=False):
     return {t: await _pg(pool, t, stamps) for t in TABLES}
 
 
-async def _all_duck(store, stamps=False):
-    return {t: await _duck(store, t, stamps) for t in TABLES}
 
 
 FORECAST = [{"date": (date(2026, 10, 7) + timedelta(days=n)).isoformat(),
@@ -158,7 +154,6 @@ class TestUnderTheFlag:
             self, stores):
         store, pool, env = stores
         _flag(env)
-        before = await _all_duck(store)
 
         tables = await store.recalculate_goal_tables(include_weekly=True)
 
@@ -170,7 +165,6 @@ class TestUnderTheFlag:
         # One stamp for the whole set: the writer's clock, one transaction.
         stamps = {r[-1] for t in (SEASONAL, GROWTH, WEEKLY) for r in pg[t]}
         assert len(stamps) == 1 and None not in stamps
-        assert await _all_duck(store) == before, "the write reached DuckDB"
         assert chain_latch.latched(CHAIN)
 
     @pytest.mark.asyncio
@@ -197,18 +191,16 @@ class TestUnderTheFlag:
         assert rows[0][2:6] == (Decimal("1000.00"), Decimal("120.50"),
                                 Decimal("31.20"), Decimal("27.66"))
         assert len({r[-1] for r in rows}) == 1 and rows[0][-1] is not None
-        assert await _duck(store, PREDICTIONS) == []
 
     @pytest.mark.asyncio
-    async def test_both_branches_store_the_same_rows(self, stores):
-        """The same history through the DuckDB branch and then the Postgres
-        one: every value equal, the stamps aside. A SET list that differs
-        from DuckDB's — `yoy_growth` in the index upsert, say — or a growth
-        row built from other columns, shows here."""
+    async def test_postgres_stores_what_the_duckdb_branch_stored(self, stores):
+        """The same history through the Postgres branch: every value equal to
+        what the DuckDB branch stored on this fixture, the stamps aside — the
+        literal captured before S14-11 deleted that branch (rule 9). A SET
+        list that differs from DuckDB's — `yoy_growth` in the index upsert,
+        say — or a growth row built from other columns, shows here."""
         store, pool, env = stores
-        await store.recalculate_goal_tables(include_weekly=True)     # DuckDB
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        duck = await _all_duck(store)
+        duck = DUCKDB_ANSWER
         _flag(env)
         await store.recalculate_goal_tables(include_weekly=True)     # Postgres
         await store.store_predictions(FORECAST, "retail", METRICS)
@@ -231,8 +223,7 @@ class TestUnderTheFlag:
         the copy's value beside a fresh stamp, which the standing watch,
         judging presence and stamps, would not notice."""
         store, pool, env = stores
-        await store.recalculate_goal_tables(include_weekly=True)     # DuckDB
-        duck = await _all_duck(store)
+        duck = DUCKDB_ANSWER                     # the DuckDB branch's (rule 9)
         assert len(duck[SEASONAL]) == 12 and len(duck[WEEKLY]) == 60
         assert duck[GROWTH][0][4] > 0, "a measured rate, so the row is rewritten"
         old = NOW - timedelta(days=30)
@@ -285,21 +276,6 @@ class TestUnderTheFlag:
             row = await conn.fetchval(
                 f"SELECT xmin::text FROM {SEASONAL} WHERE month = 1")
         assert owners == {row}
-
-    @pytest.mark.asyncio
-    async def test_an_unknown_value_refuses_both_writers_in_both_stores(self, stores):
-        store, pool, env = stores
-        env.setenv(pg_forecast_write.WRITE_ENV, "postgrse")
-        before = await _all_duck(store)
-
-        with pytest.raises(RuntimeError, match=pg_forecast_write.WRITE_ENV):
-            await store.recalculate_goal_tables(include_weekly=True)
-        with pytest.raises(RuntimeError, match=pg_forecast_write.WRITE_ENV):
-            await store.store_predictions(FORECAST, "retail", METRICS)
-
-        assert await _all_pg(pool) == {t: [] for t in TABLES}
-        assert await _all_duck(store) == before
-        assert not chain_latch.latched(CHAIN)
 
 
 # ─── The goal tables' transaction ───────────────────────────────────────────
@@ -547,6 +523,68 @@ class TestTheForecast:
         assert await _pg(pool, PREDICTIONS) == []
 
 
+class TestTheForecastShownSaysWhichTrainingMadeIt:
+    """The trend and /revenue/forecast publish the stored rows with the day
+    and the metrics of the training that stored them, read beside the rows
+    (owner's decision, 2026-11-04). Two trainings, the second over a later
+    range, as Monday's and Thursday's are."""
+
+    MONDAY = datetime(2026, 10, 5, 0, 30, tzinfo=timezone.utc)      # 03:30 Kyiv
+    THURSDAY = datetime(2026, 10, 8, 0, 30, tzinfo=timezone.utc)
+
+    async def _two_trainings(self):
+        await pg_forecast_write.store_predictions(
+            [{"date": date(2026, 10, 5) + timedelta(days=n), "predicted_revenue": 500.0}
+             for n in range(10)], "retail", {"mae": 1.0, "mape": 2.0, "wape": 3.0},
+            self.MONDAY)
+        await pg_forecast_write.store_predictions(
+            [{"date": date(2026, 10, 8) + timedelta(days=n), "predicted_revenue": 700.0 + n}
+             for n in range(10)], "retail", METRICS, self.THURSDAY)
+
+    @pytest.mark.asyncio
+    async def test_from_today_on_the_rows_are_the_last_trainings(self, stores):
+        store, _pool, _env = stores
+        await self._two_trainings()
+        rows, trained_at = await store.get_stored_forecast(
+            date(2026, 10, 9), date(2026, 10, 15))
+        assert trained_at == self.THURSDAY
+        assert [r["predicted_revenue"] for r in rows] == [701.0 + n for n in range(7)]
+        assert rows == await store.get_predictions(date(2026, 10, 9), date(2026, 10, 15))
+
+    @pytest.mark.asyncio
+    async def test_the_trend_shows_that_training_with_no_model_loaded(
+            self, stores, monkeypatch):
+        import core.prediction_service as ps
+
+        store, _pool, _env = stores
+        await self._two_trainings()
+
+        async def the_store():
+            return store
+
+        def never(*args, **kwargs):
+            raise AssertionError("the model ran on a request")
+
+        monkeypatch.setattr("core.duckdb_store.get_store", the_store)
+        monkeypatch.setattr(ps, "_today_kyiv", lambda: date(2026, 10, 9))
+        monkeypatch.setattr(ps, "_predict_future", never)
+        svc = ps.PredictionService()
+        assert not svc.is_ready
+
+        week = await svc.get_range_forecast(date(2026, 10, 5), date(2026, 10, 11))
+        assert [p["date"] for p in week["daily_predictions"]] == [
+            "2026-10-09", "2026-10-10", "2026-10-11"]
+        assert week["predicted_total"] == 701.0 + 702.0 + 703.0
+        assert week["last_trained"] == "2026-10-08"
+        assert week["model_metrics"] == METRICS
+        assert await svc.get_range_forecast(
+            date(2026, 10, 9), date(2026, 10, 11), "b2b") is None
+
+        month = await svc.get_forecast("retail")
+        assert month["last_trained"] == "2026-10-08"
+        assert month["model_metrics"] == METRICS
+
+
 # ─── The reads follow the chain ─────────────────────────────────────────────
 
 
@@ -555,12 +593,13 @@ class TestTheReadsFollowTheChain:
     says which was read."""
 
     async def _two_versions(self, store, pool):
-        from core.pg_operational import replicate_operational
-
-        await store.recalculate_goal_tables(include_weekly=True)        # DuckDB
+        # Postgres holds the rows, and then moves on. (Until step 14's S14-11
+        # DuckDB was written the same rows first, through its branch, as the
+        # hourly copy left them before the flip; the branch went, and a read
+        # of DuckDB now answers nothing at all.)
+        await store.recalculate_goal_tables(include_weekly=True)        # Postgres
         await store.store_predictions(FORECAST, "retail", METRICS)
-        shipped = await replicate_operational(store)
-        assert shipped["replaced"][SEASONAL] == 12, shipped
+        assert len(await _pg(pool, SEASONAL)) == 12
         async with pool.acquire() as conn:
             await conn.execute(f"UPDATE {SEASONAL} SET seasonality_index = 1.2345 "
                                "WHERE month = 10")
@@ -576,33 +615,6 @@ class TestTheReadsFollowTheChain:
 
         smart = await store.generate_smart_goals(2026, 10, "retail")
         assert smart["monthly"]["seasonalityIndex"] == pytest.approx(1.2345)
-        preds = await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
-        assert {p["predicted_revenue"] for p in preds} == {7.0}
-
-    @pytest.mark.asyncio
-    async def test_flagged_but_held_every_read_is_where_it_was(self, stores):
-        store, pool, env = stores
-        await self._two_versions(store, pool)
-        env.setenv(pg_forecast_write.WRITE_ENV, "postgres")
-        env.setenv("KS_READ_GOALS", "duckdb")          # unmet: the chain is held
-        assert not pg_forecast_write.writes_postgres()
-
-        smart = await store.generate_smart_goals(2026, 10, "retail")
-        assert smart["monthly"]["seasonalityIndex"] != pytest.approx(1.2345)
-        preds = await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
-        assert 7.0 not in {p["predicted_revenue"] for p in preds}
-
-    @pytest.mark.asyncio
-    async def test_off_the_goal_tables_stay_on_duckdb_whatever_the_read_flag(
-            self, stores):
-        """Production today: `KS_READ_GOALS=postgres`, chain off. The goal
-        tables are read where they are written — the replica could be an hour
-        behind a POST — and the forecast by the flag, as since #183."""
-        store, pool, _env = stores
-        await self._two_versions(store, pool)
-
-        smart = await store.generate_smart_goals(2026, 10, "retail")
-        assert smart["monthly"]["seasonalityIndex"] != pytest.approx(1.2345)
         preds = await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
         assert {p["predicted_revenue"] for p in preds} == {7.0}
 
@@ -634,214 +646,31 @@ class TestTheReadsFollowTheChain:
                     await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
         assert raised.value.surface == "goals"
         assert isinstance(raised.value.__cause__, ConnectionError)
-        assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
         assert read_fallback.refusals()["goals"]["count"] == 1
 
 
-# ─── The hourly replace ─────────────────────────────────────────────────────
+# ─── The flag put back ──────────────────────────────────────────────────────
 
 
-class TestTheHourlyReplaceCannotRollItBack:
-    @pytest.mark.asyncio
-    async def test_under_the_flag_the_four_tables_survive(self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        _flag(env)
-        await store.recalculate_goal_tables(include_weekly=True)
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        written = await _all_pg(pool, stamps=True)
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert set(TABLES) <= set(result.get("stood_down", [])), result
-        assert not set(TABLES) & set(result["replaced"]), result
-        assert await _all_pg(pool, stamps=True) == written
-
-    @pytest.mark.asyncio
-    async def test_control_released_and_unflagged_the_same_replace_wipes_them(
-            self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        _flag(env)
-        await store.recalculate_goal_tables(include_weekly=True)
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        env.delenv(pg_forecast_write.WRITE_ENV)
-        chain_latch.release(CHAIN)
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert {t: result["replaced"][t] for t in TABLES} == {t: 0 for t in TABLES}
-        assert await _all_pg(pool) == {t: [] for t in TABLES}
-
+class TestTheFlagPutBack:
     @pytest.mark.asyncio
     async def test_the_flag_put_back_moves_nothing(self, stores):
-        """OD-19 (a): latched, `KS_WRITE_FORECAST=duckdb` is a disagreement,
-        not a rollback."""
-        from core.pg_operational import replicate_operational
+        """OD-19 (a): `KS_WRITE_FORECAST=duckdb` is not a rollback. Since step
+        14's S14-11 it is not even a disagreement — nothing reads the flag,
+        so `/api/health` says nothing of it. Until S14-13 the hourly replace
+        was asked here too, and stood down for the four tables; it went with
+        `core.pg_operational`."""
         from web.routes.api.health import _write_chains
 
         store, pool, env = stores
         _flag(env)
         await store.store_predictions(FORECAST, "retail", METRICS)
         env.setenv(pg_forecast_write.WRITE_ENV, "duckdb")
-        before = await _all_duck(store)
 
         await store.recalculate_goal_tables(include_weekly=True)
 
         assert len(await _pg(pool, SEASONAL)) == 12, "the flag moved the write back"
-        assert await _all_duck(store) == before, "a second writer started in DuckDB"
-        result = await replicate_operational(store)
-        assert set(TABLES) <= set(result["stood_down"])
-        assert list(result["chain_flag_mismatch"]) == [CHAIN]
-        block = _write_chains()[CHAIN]
-        assert block["mode"] == "postgres" and block["latched"] is True
-        assert block["mismatch"] is True
-
-
-# ─── The copy-back and the handover ─────────────────────────────────────────
-
-
-class TestTheCopyBack:
-    @pytest.mark.asyncio
-    async def test_the_four_tables_arrive_compare_at_zero_and_the_copy_resumes(
-            self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        _flag(env)
-        await store.recalculate_goal_tables(include_weekly=True)
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        written = await _all_pg(pool, stamps=True)
-
-        result = await copy_back(store, pg_forecast_write, dry_run=False)
-
-        assert result["findings"] == [], result["findings"]
-        assert result["released"] is True
-        assert result["rows"] == {SEASONAL: 12, GROWTH: 1, WEEKLY: 60, PREDICTIONS: 5}
-        assert result["sequences"] == {} and result["sync_keys"] == {}
-        assert await _all_duck(store, stamps=True) == written
-        assert not chain_latch.latched(CHAIN)
-        assert await chain_latch.read_owners(pool) == {}
-
-        env.setenv(pg_forecast_write.WRITE_ENV, "duckdb")
-        shipped = await replicate_operational(store)
-        assert "error" not in shipped, shipped
-        assert {t: shipped["replaced"][t] for t in TABLES} == result["rows"]
-        assert await _all_pg(pool, stamps=True) == written
-
-        # And the next recalculation is DuckDB's again — the cheaper way back
-        # for the content, now that the writer is.
-        await store.recalculate_goal_tables(include_weekly=False)
-        assert not chain_latch.latched(CHAIN)
-        assert await _pg(pool, SEASONAL, stamps=True) == written[SEASONAL]
-
-    @pytest.mark.asyncio
-    async def test_the_stamps_no_run_restamps_arrive_exactly(self, stores):
-        """The copy-back's comparison forgives the four stamps (the daily
-        spec's `ignore_columns`, `test_chain_transfer.py` says why), so what
-        it carries is pinned here. Two of them outlive the next run: the
-        Monday job never restamps `weekly_patterns` — only the POST stores
-        them — and a training replaces only the range it predicts, so a past
-        day keeps its `created_at` for good. Built that way under the flag —
-        the POST, then the Monday job; two trainings over overlapping ranges
-        — and carried back: every stamp arrives as Postgres held it, row by
-        row."""
-        store, pool, env = stores
-        _flag(env)
-        await store.recalculate_goal_tables(include_weekly=True)    # the POST
-        posted = await _all_pg(pool, stamps=True)
-        await store.recalculate_goal_tables(include_weekly=False)   # Monday
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        later = [{"date": (date(2026, 10, 9) + timedelta(days=n)).isoformat(),
-                  "predicted_revenue": 2000.0 + n} for n in range(5)]
-        await store.store_predictions(later, "retail", METRICS)
-        written = await _all_pg(pool, stamps=True)
-
-        # The two facts the forgiving has to live with.
-        assert written[WEEKLY] == posted[WEEKLY], "the Monday job stored weeks"
-        assert {r[-1] for r in written[SEASONAL]}.isdisjoint(
-            {r[-1] for r in posted[SEASONAL]}), "the Monday job did not restamp"
-        stamp = {r[0]: r[-1] for r in written[PREDICTIONS]}
-        kept = {stamp[date(2026, 10, 7)], stamp[date(2026, 10, 8)]}
-        fresh = {stamp[date(2026, 10, 9) + timedelta(days=n)] for n in range(5)}
-        assert len(kept) == 1 and len(fresh) == 1 and kept != fresh
-        assert len(written[PREDICTIONS]) == 7
-
-        result = await copy_back(store, pg_forecast_write, dry_run=False)
-
-        assert result["findings"] == [] and result["released"] is True
-        assert await _all_duck(store, stamps=True) == written
-
-    @pytest.mark.asyncio
-    async def test_a_dry_run_writes_nothing_and_releases_nothing(self, stores):
-        store, _pool, env = stores
-        _flag(env)
-        await store.store_predictions(FORECAST, "retail", METRICS)
-
-        result = await copy_back(store, pg_forecast_write)
-
-        assert result["executed"] is False
-        assert result["rows"][PREDICTIONS] == 5
-        assert await _duck(store, PREDICTIONS) == []
-        assert chain_latch.latched(CHAIN)
-
-    @pytest.mark.asyncio
-    async def test_an_unlatched_chain_is_refused(self, stores):
-        store, _pool, env = stores
-        _flag(env)
-        with pytest.raises(CopyBackRefused, match="not latched"):
-            await copy_back(store, pg_forecast_write, dry_run=False)
-
-
-class TestTheHandoverBeforeAFlip:
-    @pytest.mark.asyncio
-    async def test_an_unshipped_recalculation_fails_it(self, stores):
-        store, _pool, _env = stores
-        await store.recalculate_goal_tables(include_weekly=True)     # DuckDB
-
-        issues = await handover_check(store, pg_forecast_write)
-
-        assert {(i.check_name, i.severity.value, i.table_name) for i in issues} == {
-            ("handover_rows_missing", "CRITICAL", SEASONAL),
-            ("handover_rows_missing", "CRITICAL", GROWTH),
-            ("handover_rows_missing", "CRITICAL", WEEKLY)}
-
-    @pytest.mark.asyncio
-    async def test_a_value_changed_after_the_shipment_fails_it(self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, _pool, _env = stores
-        await store.recalculate_goal_tables(include_weekly=True)
-        await replicate_operational(store)
-        assert await handover_check(store, pg_forecast_write) == []
-        async with store.connection() as conn:
-            conn.execute("UPDATE seasonal_indices SET seasonality_index = 1.1111 "
-                         "WHERE month = 1")
-
-        issues = await handover_check(store, pg_forecast_write)
-
-        assert [(i.check_name, i.severity.value, i.table_name) for i in issues] == [
-            ("handover_rows_differ", "CRITICAL", SEASONAL)]
-        await replicate_operational(store)
-        assert await handover_check(store, pg_forecast_write) == []
-
-    @pytest.mark.asyncio
-    async def test_a_new_stamp_alone_is_not_a_difference(self, stores):
-        """The stamps are forgiven: the same history recomputed an hour later
-        differs only in `updated_at`, and that must not hold a flip back."""
-        from core.pg_operational import replicate_operational
-
-        store, _pool, _env = stores
-        await store.recalculate_goal_tables(include_weekly=True)
-        await replicate_operational(store)
-        await store.recalculate_goal_tables(include_weekly=True)
-        assert await handover_check(store, pg_forecast_write) == []
+        assert _write_chains()[CHAIN] == {}
 
 
 # ─── The standing watch reads what it judges ────────────────────────────────
@@ -903,6 +732,9 @@ class TestTheStandingWatchReadsItsFacts:
         await store.store_predictions(
             [{"date": date.today() + timedelta(days=n), "predicted_revenue": 1.0}
              for n in range(60)], "retail", METRICS)
+        # Since S14-00 every chain is watched; this chain's reader, alone.
+        every = inv.watched_chains()
+        env.setattr(inv, "watched_chains", lambda: {CHAIN: every[CHAIN]})
 
         facts = await inv.read_facts()
 

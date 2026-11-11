@@ -11,12 +11,13 @@ moved on it was STATUS_DRIFT, CRITICAL, every morning.
 Until OD-10 (2026-09-30) the legacy 06:00 `reconciliation_check` repaired it:
 its fetch was padded by 30 days for exactly this. The job was retired and its
 repair was kept. The refresh now re-fetches those orders by id.
-The store's selection runs as real SQL on a real DuckDB file here, in Kyiv
-dates, because the boundary is a date and the store reads dates in Kyiv.
+The store's selection runs as real SQL on a real Postgres here, in Kyiv
+dates, because the boundary is a date and the store reads dates in Kyiv. It
+ran on a DuckDB file until step 14's S14-09 deleted DuckDB's selection: the
+store's method is `pg_orders_read.backdated_order_ids` (`tests/pg_orders_seed.py`).
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -24,6 +25,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from core.duckdb_store import DuckDBStore
+from tests.pg_orders_seed import insert_orders, needs_pg, pg_orders  # noqa: F401 — the fixture
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -33,82 +35,59 @@ def _kyiv_noon(days_ago: int) -> datetime:
         hour=12, minute=0, second=0, microsecond=0)
 
 
-async def _store(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-    await store.connect()
-    return store
+async def _insert(pool, oid, *, created: datetime, ordered: datetime):
+    await insert_orders(pool, oid, total=5000.0, ordered_at=ordered, created_at=created)
 
 
-def _insert(conn, oid, *, created: datetime, ordered: datetime, status_id=12):
-    conn.execute("""
-        INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at)
-        VALUES (?, 1, ?, 5000.0, ?, ?)
-    """, [oid, status_id, ordered, created])
-
-
+@needs_pg
 class TestFindBackdatedOrderIds:
     @pytest.mark.asyncio
     async def test_it_selects_orders_dated_into_the_window_and_created_before_it(
-        self, tmp_path,
+        self, pg_orders,
     ):
-        store = await _store(tmp_path)
+        store, pool = pg_orders
         since = _kyiv_noon(30).date()
-        try:
-            async with store.connection() as conn:
-                # The review's case: created 35 days ago, ordered 5 days ago.
-                _insert(conn, 777, created=_kyiv_noon(35), ordered=_kyiv_noon(5))
-                # Dated weeks ahead of a creation long before the window.
-                _insert(conn, 778, created=_kyiv_noon(100), ordered=_kyiv_noon(-2))
-                # Created on the window's first day, ordered after it.
-                _insert(conn, 779, created=_kyiv_noon(30), ordered=_kyiv_noon(29))
-                # Created and ordered inside the window: the fetch returns it.
-                _insert(conn, 1, created=_kyiv_noon(5), ordered=_kyiv_noon(5))
-                # Created and ordered on the first day: the fetch returns it.
-                _insert(conn, 2, created=_kyiv_noon(30), ordered=_kyiv_noon(30))
-                # Ordered before the window: nothing reads it as recent.
-                _insert(conn, 3, created=_kyiv_noon(40), ordered=_kyiv_noon(35))
-                # Ordered before it was created: created inside, so fetched.
-                _insert(conn, 4, created=_kyiv_noon(3), ordered=_kyiv_noon(10))
+        # The review's case: created 35 days ago, ordered 5 days ago.
+        await _insert(pool, 777, created=_kyiv_noon(35), ordered=_kyiv_noon(5))
+        # Dated weeks ahead of a creation long before the window.
+        await _insert(pool, 778, created=_kyiv_noon(100), ordered=_kyiv_noon(-2))
+        # Created on the window's first day, ordered after it.
+        await _insert(pool, 779, created=_kyiv_noon(30), ordered=_kyiv_noon(29))
+        # Created and ordered inside the window: the fetch returns it.
+        await _insert(pool, 1, created=_kyiv_noon(5), ordered=_kyiv_noon(5))
+        # Created and ordered on the first day: the fetch returns it.
+        await _insert(pool, 2, created=_kyiv_noon(30), ordered=_kyiv_noon(30))
+        # Ordered before the window: nothing reads it as recent.
+        await _insert(pool, 3, created=_kyiv_noon(40), ordered=_kyiv_noon(35))
+        # Ordered before it was created: created inside, so fetched.
+        await _insert(pool, 4, created=_kyiv_noon(3), ordered=_kyiv_noon(10))
 
-            assert await store.find_backdated_order_ids(since) == [777, 778, 779]
-        finally:
-            await store.close()
+        assert await store.find_backdated_order_ids(since) == [777, 778, 779]
 
     @pytest.mark.asyncio
-    async def test_the_boundary_is_the_kyiv_date(self, tmp_path):
+    async def test_the_boundary_is_the_kyiv_date(self, pg_orders):
         """23:30 Kyiv is the next day in UTC+4 and the same day in UTC. The
         store reads it as Kyiv reads it."""
-        store = await _store(tmp_path)
+        store, pool = pg_orders
         since = _kyiv_noon(30).date()
         late = datetime.combine(since - timedelta(days=1), datetime.min.time(),
                                 tzinfo=KYIV).replace(hour=23, minute=30)
-        try:
-            async with store.connection() as conn:
-                _insert(conn, 10, created=late, ordered=late + timedelta(hours=1))
-                _insert(conn, 11, created=late, ordered=late)
-            assert await store.find_backdated_order_ids(since) == [10]
-        finally:
-            await store.close()
+        await _insert(pool, 10, created=late, ordered=late + timedelta(hours=1))
+        await _insert(pool, 11, created=late, ordered=late)
+        assert await store.find_backdated_order_ids(since) == [10]
 
     @pytest.mark.asyncio
-    async def test_nothing_backdated_is_nothing_to_do(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            assert await store.find_backdated_order_ids(_kyiv_noon(30).date()) == []
-        finally:
-            await store.close()
+    async def test_nothing_backdated_is_nothing_to_do(self, pg_orders):
+        store, _pool = pg_orders
+        assert await store.find_backdated_order_ids(_kyiv_noon(30).date()) == []
 
     @pytest.mark.asyncio
-    async def test_the_batch_is_bounded(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                for oid in range(1, 8):
-                    _insert(conn, oid, created=_kyiv_noon(40), ordered=_kyiv_noon(3))
-            assert await store.find_backdated_order_ids(
-                _kyiv_noon(30).date(), limit=3) == [1, 2, 3]
-        finally:
-            await store.close()
+    async def test_the_batch_is_bounded(self, pg_orders):
+        store, pool = pg_orders
+        for oid in range(1, 8):
+            await _insert(pool, oid, created=_kyiv_noon(40), ordered=_kyiv_noon(3))
+        assert await store.find_backdated_order_ids(
+            _kyiv_noon(30).date(), limit=3) == [1, 2, 3]
 
 
 class _KeyCRM:
@@ -139,7 +118,7 @@ def _keycrm_order(oid, *, created: datetime, ordered: datetime, status_id: int):
 
 async def _refresh(store, client, upsert):
     """`refresh_order_statuses` against `store`, with KeyCRM and the order
-    writer replaced — the writer is `upsert_orders`' business, tested there."""
+    writer replaced — the writer is chain 3's business, tested there."""
     from unittest.mock import AsyncMock
 
     from core import sync_service as sync_module
@@ -156,9 +135,12 @@ async def _refresh(store, client, upsert):
 
 
 class TestTheRefreshReachesThem:
-    def test_a_status_moved_on_a_backdated_order_is_written(self, tmp_path):
-        """The review's reproduction, end to end: DuckDB holds order 777 at
+    @needs_pg
+    @pytest.mark.asyncio
+    async def test_a_status_moved_on_a_backdated_order_is_written(self, pg_orders):
+        """The review's reproduction, end to end: Postgres holds order 777 at
         status 12, KeyCRM says 19, and only the by-id pass can see it."""
+        store, pool = pg_orders
         created, ordered = _kyiv_noon(35), _kyiv_noon(5)
         recent = _keycrm_order(1, created=_kyiv_noon(3), ordered=_kyiv_noon(3),
                                status_id=12)
@@ -170,17 +152,9 @@ class TestTheRefreshReachesThem:
             writes.append(([o["id"] for o in orders], force_update, skip_products))
             return len(orders), 0
 
-        async def run():
-            store = await _store(tmp_path)
-            try:
-                async with store.connection() as conn:
-                    _insert(conn, 777, created=created, ordered=ordered, status_id=12)
-                    _insert(conn, 1, created=_kyiv_noon(3), ordered=_kyiv_noon(3))
-                return await _refresh(store, client, upsert)
-            finally:
-                await store.close()
-
-        stats = asyncio.run(run())
+        await _insert(pool, 777, created=created, ordered=ordered)
+        await _insert(pool, 1, created=_kyiv_noon(3), ordered=_kyiv_noon(3))
+        stats = await _refresh(store, client, upsert)
         # The window pass: headers only, and 777 is not in it.
         assert writes[0] == ([1], True, True), writes
         assert client.by_id == [777]
@@ -189,24 +163,21 @@ class TestTheRefreshReachesThem:
         assert len(writes) == 2
         assert stats["backdated"] == {"found": 1, "repaired": 1, "failed": 0}
 
-    def test_with_none_backdated_nothing_is_fetched_by_id(self, tmp_path):
+    @needs_pg
+    @pytest.mark.asyncio
+    async def test_with_none_backdated_nothing_is_fetched_by_id(self, pg_orders):
+        store, _pool = pg_orders
         client = _KeyCRM([_keycrm_order(1, created=_kyiv_noon(3),
                                         ordered=_kyiv_noon(3), status_id=12)])
 
         async def upsert(orders, force_update=False, skip_products=False):
             return len(orders), 0
 
-        async def run():
-            store = await _store(tmp_path)
-            try:
-                return await _refresh(store, client, upsert)
-            finally:
-                await store.close()
-
-        stats = asyncio.run(run())
+        stats = await _refresh(store, client, upsert)
         assert client.by_id == [] and stats["backdated"] == {"found": 0}
 
-    def test_a_failure_there_costs_the_refresh_nothing(self, tmp_path, caplog):
+    @pytest.mark.asyncio
+    async def test_a_failure_there_costs_the_refresh_nothing(self, tmp_path, caplog):
         """The window pass has committed by then; the by-id pass says why it
         did not run and the job still returns its stats."""
         client = _KeyCRM([_keycrm_order(1, created=_kyiv_noon(3),
@@ -219,15 +190,7 @@ class TestTheRefreshReachesThem:
             async def find_backdated_order_ids(self, since, limit=200):
                 raise OSError("disk")
 
-        async def run():
-            store = Broken(db_path=tmp_path / "t.duckdb")
-            await store.connect()
-            try:
-                return await _refresh(store, client, upsert)
-            finally:
-                await store.close()
-
-        stats = asyncio.run(run())
+        stats = await _refresh(Broken(), client, upsert)
         assert stats["orders"] == 1
         assert stats["backdated"] == {"error": "OSError"}
         assert "backdated orders were not re-fetched" in caplog.text

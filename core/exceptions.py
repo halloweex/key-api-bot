@@ -6,6 +6,7 @@ Exception Hierarchy:
     ├── KeyCRMConnectionError  - Network/timeout issues (recoverable)
     ├── KeyCRMAPIError         - API returned error response
     └── KeyCRMDataError        - Invalid response structure
+        └── KeyCRMTruncated    - A listing stopped at its page cap, full
 
     ValidationError            - Input validation failed
 """
@@ -70,6 +71,25 @@ class KeyCRMDataError(KeyCRMError):
         self.got = got
 
 
+class KeyCRMTruncated(KeyCRMDataError):
+    """A listing stopped at its page cap with its last page full: there may be
+    more, and KeyCRM was not asked for it (L1-08).
+
+    `paginate` and `fetch_all` used to stop there without saying so. For the
+    order window that meant the watermark moved to the newest order fetched
+    and the oldest were never fetched again. Raised so a caller can split its
+    window, or fail the step and hold its watermark.
+    """
+
+    def __init__(self, endpoint: str, pages: int, page_size: int):
+        super().__init__(
+            f"{endpoint}: {pages} full pages of {page_size}, the cap; the "
+            f"listing may go on past it")
+        self.endpoint = endpoint
+        self.pages = pages
+        self.page_size = page_size
+
+
 class ValidationError(Exception):
     """
     Input validation failed.
@@ -89,24 +109,8 @@ class ValidationError(Exception):
         return f"{self.field}: {self.message}"
 
 
-class QueryTimeoutError(Exception):
-    """
-    Database query exceeded timeout.
-
-    Indicates a long-running query that should be investigated:
-    - Missing index
-    - Too much data being scanned
-    - Complex join/aggregation
-    """
-
-    def __init__(self, query: str, timeout: float, details: str = None):
-        self.query = query[:200] + "..." if len(query) > 200 else query
-        self.timeout = timeout
-        self.details = details
-        message = f"Query timed out after {timeout}s"
-        if details:
-            message = f"{message}: {details}"
-        super().__init__(message)
-
-    def __str__(self) -> str:
-        return f"QueryTimeoutError: Query timed out after {self.timeout}s - {self.query}"
+# `QueryTimeoutError` stood here until step 14's S14-18: the DuckDB store's
+# `_fetch_one`/`_fetch_all` raised it when a query outlived its timeout on
+# the executor thread, and `web/main.py` answered it 504. Both went with the
+# DuckDB half of the store; a Postgres read that fails is refused with a 503
+# naming its tab (`core.read_fallback.refuse`).

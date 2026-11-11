@@ -19,6 +19,8 @@ export const getPeriodLabels = (t: (key: string) => string): Record<string, Peri
   last_month: { current: t('filter.lastMonth'), previous: t('chart.previousMonth') },
   last_7_days: { current: t('filter.7days'), previous: t('chart.previous7Days') },
   last_28_days: { current: t('filter.28days'), previous: t('chart.previous28Days') },
+  // Nothing is drawn beside it (`hasComparison`); the label is never shown.
+  all_time: { current: t('filter.allTime'), previous: t('chart.previous') },
   custom: { current: t('chart.selected'), previous: t('chart.previous') },
 })
 

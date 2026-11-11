@@ -32,8 +32,8 @@
 #
 # WHY .env RIDES HERE. Its one off-site copy used to be the env.gpg inside the
 # DuckDB Parquet archive (deploy/offsite_parquet.sh), which the nightly
-# deploy/daily_offsite.sh ships — and the week of silence retires that branch
-# (stage 5). A cluster restored with no .env is one nothing can start
+# deploy/daily_offsite.sh shipped — until the week of silence retired that
+# branch (stage 5) and step 14's S14-18 deleted both scripts. A cluster restored with no .env is one nothing can start
 # against, and the host's .env and a laptop's have diverged, so the owner's
 # OD-S5-6 moved the copy here before the DuckDB branch goes: same passphrase
 # file, same verification — downloaded, hashed, decrypted and compared with

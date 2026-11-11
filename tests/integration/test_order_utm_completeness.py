@@ -7,18 +7,19 @@ so it is proved on a server, not a fake: a healthy table says nothing, an order
 past the grace with no verdict or an old one is CRITICAL and named, and one
 inside the grace is counted as INFO and never paged.
 
-The last class runs the real DuckDB parser and the real shipper against the
-same orders, because "the population is the parser's own predicate" is a claim
-about two pieces of code, and only running both can hold them to it. It also
-settles the one thing a reading cannot: that `parsed_at`, carried through
-DuckDB and asyncpg, compares equal to the `updated_at` Postgres holds for the
-same order, rather than an offset away.
+The last class runs the real parser against the same orders, because "the
+population is the parser's own predicate" is a claim about two pieces of
+code, and only running both can hold them to it. It also settles the one
+thing a reading cannot: that `parsed_at` compares equal to the `updated_at`
+Postgres holds for the same order, rather than an offset away. It ran
+DuckDB's parser and the shipper until step 14's S14-15 deleted both; the
+parser is Postgres' own (`core.pg_utm_parse`) since step 13.
 
 HOW A SCENARIO IS ISOLATED
 The check reads the whole of `bronze.orders`, so every scenario empties both
 tables and seeds its own rows inside one transaction that is rolled back.
 Nothing another test committed is touched, and nothing here survives. The
-shipper runs on the same connection through a one-connection pool, so its own
+parser runs on the same connection through a one-connection pool, so its own
 transaction becomes a savepoint inside that one.
 
 Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` and CI supply one.
@@ -34,9 +35,8 @@ import pytest
 import pytest_asyncio
 
 from core import mirror_reconciliation as mr
-from core import pg_order_utm
+from core import pg_utm_parse
 from core.data_quality import Severity
-from core.duckdb_store import DuckDBStore
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -45,8 +45,11 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TABLE = mr.ORDER_UTM_TABLE.pg_table
-GRACE = mr.SILVER_GRACE_MINUTES
+TABLE = mr.ORDER_UTM_PG_TABLE
+# The grace at the default floor (`pg_warehouse_dq.silver_grace_minutes()`) —
+# the number the Silver comparison fixed as `SILVER_GRACE_MINUTES` until step
+# 14's S14-12 deleted it with that comparison.
+GRACE = 20
 # A fixed clock, so no verdict depends on when the suite happened to run.
 NOW = datetime(2030, 6, 5, 4, 30, tzinfo=timezone.utc)
 CUTOFF = NOW - timedelta(minutes=GRACE)
@@ -369,41 +372,27 @@ class TestThroughTheJob:
         assert found["pg_order_utm_missing"].sample_ids == (307,)
         assert "more than 30 minutes" in found["pg_order_utm_missing"].description
 
-    @pytest.mark.asyncio
-    async def test_it_stands_down_with_the_mirror(self, conn, monkeypatch):
-        """`reconcile_order_utm`'s rule: with the landing mirror off,
-        `bronze.orders` stops moving and the question has no current answer."""
-        monkeypatch.setenv("KS_MIRROR_LANDING", "0")
-        await order(conn, 302)
-        pool = AsyncMock()
-        with patch("core.pg.get_pool", new=pool):
-            assert await mr.reconcile_order_utm_completeness(now=NOW) == []
-        pool.assert_not_called()
-
 
 # ── the parser and the check agree ────────────────────────────────────────────
 
-@pytest_asyncio.fixture
-async def duck(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "utm_completeness.duckdb")
-    await store.connect()
-    try:
-        yield store
-    finally:
-        await store.close()
-
-
-async def both_stores(store, conn, oid, comment, updated_at):
-    """The same order header in both stores, as the sync writes it: one aware
-    datetime, handed to each driver."""
-    async with store.connection() as dk:
-        dk.execute(
-            "INSERT OR REPLACE INTO orders (id, source_id, status_id, grand_total, "
-            "updated_at, manager_comment) VALUES (?, 4, 1, 100, ?, ?)",
-            [oid, updated_at, comment],
-        )
+async def landed(conn, oid, comment, updated_at):
+    """An order header as chain 3 writes it, replaced whole."""
     await conn.execute("DELETE FROM bronze.orders WHERE id = $1", oid)
     await order(conn, oid, comment=comment, updated_at=updated_at)
+
+
+async def parse(conn):
+    """The derivation's last step, on the scenario's connection: the ids it
+    wrote a verdict for this time (`parsed_at` = the order's `updated_at`)."""
+    pool = _OneConnectionPool(conn)
+    with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+         patch("core.pg.require_revision", new=AsyncMock()):
+        before = {r["order_id"]: r["parsed_at"] for r in await conn.fetch(
+            f"SELECT order_id, parsed_at FROM {TABLE}")}
+        await pg_utm_parse.parse_incremental(pool)
+    after = {r["order_id"]: r["parsed_at"] for r in await conn.fetch(
+        f"SELECT order_id, parsed_at FROM {TABLE}")}
+    return {oid for oid, at in after.items() if before.get(oid) != at}
 
 
 def owed(issues):
@@ -412,34 +401,24 @@ def owed(issues):
 
 class TestTheParserAndTheCheckAgree:
     @pytest.mark.asyncio
-    async def test_the_check_owes_exactly_what_the_parser_parses(self, duck, conn):
+    async def test_the_check_owes_exactly_what_the_parser_parses(self, conn):
         edited = UPDATED + timedelta(hours=2)
-        await both_stores(duck, conn, 401, COMMENT, UPDATED)
+        await landed(conn, 401, COMMENT, UPDATED)
         # A comment with no UTM in it still gets a row — of NULLs — so it is
         # owed one; the classification falls back to the source there.
-        await both_stores(duck, conn, 402, "Передзвонити після 18:00", UPDATED)
-        await both_stores(duck, conn, 403, "", UPDATED)
-        await both_stores(duck, conn, 404, None, UPDATED)
-        pool = _OneConnectionPool(conn)
+        await landed(conn, 402, "Передзвонити після 18:00", UPDATED)
+        await landed(conn, 403, "", UPDATED)
+        await landed(conn, 404, None, UPDATED)
 
         before = await findings(conn, max_samples=100)
-        parsed = await duck.refresh_utm_silver_layer()
-        assert owed(before) == parsed == {401, 402}
-
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            shipped = await pg_order_utm.ship_order_utm(duck, pool=pool)
-        assert shipped["rows"] == 2, shipped
-        # Carried through DuckDB's TIMESTAMPTZ and asyncpg into Postgres,
+        assert owed(before) == await parse(conn) == {401, 402}
         # `parsed_at` is the same instant as the `updated_at` Postgres holds:
         # an offset anywhere on that path would read as a stale verdict here.
         assert await findings(conn) == []
 
-        # An edit: KeyCRM moves `updated_at`, the sync writes both stores.
-        await both_stores(duck, conn, 401, COMMENT + "; utm_content: v2", edited)
+        # An edit: KeyCRM moves `updated_at`, chain 3 writes it.
+        await landed(conn, 401, COMMENT + "; utm_content: v2", edited)
         after_edit = await findings(conn, max_samples=100)
         assert [i.check_name for i in after_edit] == ["pg_order_utm_stale"]
-        assert owed(after_edit) == await duck.refresh_utm_silver_layer() == {401}
-
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            await pg_order_utm.ship_order_utm(duck, pool=pool)
+        assert owed(after_edit) == await parse(conn) == {401}
         assert await findings(conn) == []

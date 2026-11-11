@@ -1,17 +1,24 @@
-"""Chains 11a/11b against a real Postgres: the ledgers written there, shadowed in DuckDB.
+"""Chains 11a/11b against a real Postgres: the ledgers written and read there alone.
 
-- one record puts the same row in both stores, `sent_at` included, and the
-  upsert rewrites a week as DuckDB's `INSERT OR REPLACE` does;
-- the gate reads Postgres, drains a spool into it, and adopts a row only
-  DuckDB holds;
-- the daily comparison is silent on an honest shadow and names a failed one;
-- the standing watch reads a missing week and a NULL `sent_at`;
-- the way back carries a Postgres-only week into DuckDB and releases.
+- one record puts the row DuckDB's shadow held in Postgres, and the upsert
+  rewrites a week as DuckDB's `INSERT OR REPLACE` did — the literal is
+  DuckDB's row on the base `e3112a7d`, the last tree with a shadow (step
+  14's rule 9);
+- the gate reads Postgres and drains a spool into it with its `sent_at`;
+- end to end through the sales report's job, against this Postgres: a
+  delivery whose record Postgres refuses three times is spooled, a tick with
+  Postgres still refusing counts the spooled week as sent, the next drains it
+  and the one after reads Postgres's row — one message in all (OD-16 (a));
+- the standing watch reads a missing week and a NULL `sent_at`.
+
+The way back — a Postgres-only week carried into DuckDB, a spool landed before
+the copy — went with the copy-back in step 14's S14-04; the shadow, its daily
+comparison and the adoption of a week only DuckDB held with S14-10.
 """
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -21,7 +28,6 @@ import pytest_asyncio
 
 from core import (
     chain_latch, pg_traffic_ledger_write, pg_weekly_ledger_write, report_ledger,
-    shadow_writes,
 )
 
 DSN = os.getenv("KS_PG_DSN")
@@ -33,6 +39,7 @@ CHAINS = [(report_ledger.WEEKLY, pg_weekly_ledger_write),
 
 
 async def _clean(pool):
+    """Both ledgers and the chains' owner rows — the throwaway database's."""
     async with pool.acquire() as conn:
         for _, chain in CHAINS:
             await conn.execute(f"DELETE FROM {chain.TABLE}")
@@ -40,113 +47,137 @@ async def _clean(pool):
 
 
 @pytest_asyncio.fixture
-async def stores(tmp_path, monkeypatch):
+async def pool(monkeypatch):
     from core import write_chains
-    from core.duckdb_store import DuckDBStore
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setattr(report_ledger, "RETRY_DELAYS", (0, 0, 0))
-    shadow_writes.reset()
-    store = DuckDBStore(db_path=tmp_path / "ledger.duckdb")
-    await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
          patch("core.pg.require_revision", new=AsyncMock()):
-        yield store, pool, monkeypatch
+        yield pool
     await _clean(pool)
     await pool.close()
-    await store.close()
-    shadow_writes.reset()
 
 
 def _utc(row):
     return tuple(v.astimezone(timezone.utc) if isinstance(v, datetime) else v for v in row)
 
 
-async def _both(store, pool, chain):
+async def _rows(pool, chain):
     cols = "week_start, sales_type, revenue, orders, sent_at"
     async with pool.acquire() as conn:
-        pg = sorted(_utc(tuple(r)) for r in await conn.fetch(f"SELECT {cols} FROM {chain.TABLE}"))
-    async with store.connection() as conn:
-        dk = sorted(_utc(r) for r in conn.execute(
-            f"SELECT {cols} FROM {chain.TABLE.split('.', 1)[1]}").fetchall())
-    return pg, dk
+        return sorted(_utc(tuple(r)) for r in await conn.fetch(
+            f"SELECT {cols} FROM {chain.TABLE}"))
 
 
-class TestOneRecordTwoStores:
+# DuckDB's row after the same two records on the base, shadow on (rule 9):
+# week, sales type, revenue, orders — `sent_at` is the instant of the call.
+DUCKDB_LEDGER_ROW = (date(2026, 9, 21), "retail", Decimal("99.00"), 2)
+
+
+class TestOneRecord:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("ledger,chain", CHAINS)
-    async def test_the_same_row_and_the_upsert(self, stores, ledger, chain):
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        assert await report_ledger.mark_sent(store, ledger, WEEK, "retail", 1234.565, 7) == "recorded"
-        assert await report_ledger.mark_sent(store, ledger, WEEK, "retail", 99.0, 2) == "recorded"
-        pg, dk = await _both(store, pool, chain)
-        assert pg == dk and len(pg) == 1
-        assert pg[0][2:4] == (Decimal("99.00"), 2)
-        assert await report_ledger.already_sent(store, ledger, WEEK, "retail")
-        assert not await report_ledger.already_sent(store, ledger, WEEK, "b2b")
+    async def test_the_row_and_the_upsert_are_duckdbs(self, pool, ledger, chain):
+        before = datetime.now(timezone.utc)
+        assert await report_ledger.mark_sent(ledger, WEEK, "retail", 1234.565, 7) == "recorded"
+        assert await report_ledger.mark_sent(ledger, WEEK, "retail", 99.0, 2) == "recorded"
+        (row,) = await _rows(pool, chain)
+        assert row[:4] == DUCKDB_LEDGER_ROW
+        assert before <= row[4] <= datetime.now(timezone.utc)
+        assert await report_ledger.already_sent(ledger, WEEK, "retail")
+        assert not await report_ledger.already_sent(ledger, WEEK, "b2b")
         assert chain_latch.latched(chain.CHAIN)
 
 
 class TestTheGate:
     @pytest.mark.asyncio
-    async def test_a_spool_drains_into_postgres_with_its_sent_at(self, stores):
-        store, pool, env = stores
+    async def test_a_spool_drains_into_postgres_with_its_sent_at(self, pool):
         chain = pg_weekly_ledger_write
-        env.setenv(chain.WRITE_ENV, "postgres")
         went_out = datetime(2026, 9, 28, 6, 30, tzinfo=timezone.utc)
         report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1, went_out)
-        assert await report_ledger.already_sent(store, report_ledger.WEEKLY, WEEK, "retail")
-        pg, dk = await _both(store, pool, chain)
-        assert pg == dk == [(WEEK, "retail", Decimal("5.00"), 1, went_out)]
+        assert await report_ledger.already_sent(report_ledger.WEEKLY, WEEK, "retail")
+        assert await _rows(pool, chain) == [(WEEK, "retail", Decimal("5.00"), 1, went_out)]
         assert not report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
 
     @pytest.mark.asyncio
-    async def test_a_duckdb_only_week_is_adopted(self, stores):
-        store, pool, env = stores
-        chain = pg_traffic_ledger_write
-        env.setenv(chain.WRITE_ENV, "postgres")
-        from core.traffic_report import mark_sent as dk_mark
-
-        async with store.connection() as conn:
-            dk_mark(conn, WEEK, "retail", 12.5, 4)
-        assert await report_ledger.already_sent(store, report_ledger.TRAFFIC, WEEK, "retail")
-        pg, dk = await _both(store, pool, chain)
-        assert pg == dk
+    async def test_a_week_postgres_does_not_hold_is_not_sent(self, pool):
+        assert not await report_ledger.already_sent(report_ledger.TRAFFIC, WEEK, "retail")
 
 
-class TestTheShadowIsCompared:
+@pytest_asyncio.fixture
+async def warehouse(pool, monkeypatch):
+    """Postgres' Gold and Silver, emptied, for the sales report's reads, on
+    the same database the ledger is written to."""
+    from tests.integration.pg_tab_seed import tab_in_postgres
+
+    async def _nothing(conn, pool):
+        pass
+
+    async with tab_in_postgres(DSN, monkeypatch, _nothing) as gold:
+        # `tab_in_postgres` points `core.pg.get_pool` at its own pool; the
+        # ledger's writer asks the same patched name, so both land here.
+        yield gold
+
+
+class TestTheJobSendsOnce:
     @pytest.mark.asyncio
-    async def test_honest_then_failed(self, stores):
-        from core.mirror_reconciliation import reconcile_operational
+    async def test_across_a_refusal_a_spool_and_a_drain_the_week_goes_out_once(
+            self, pool, warehouse, tmp_path, monkeypatch):
+        """The weekly report's own job and wiring against this Postgres: the
+        delivery, then the record refused three times — spooled — then a tick
+        with Postgres still refusing the drain, a tick that drains, and a
+        tick that finds Postgres's row. Mutation: drop the spool branch from
+        the gate (two messages), or let the drain stamp now() (the row's
+        `sent_at` would be the drain's)."""
+        from tests.unit.test_weekly_report import TestSchedulerJob, _store
 
-        store, pool, env = stores
         chain = pg_weekly_ledger_write
-        env.setenv(chain.WRITE_ENV, "postgres")
-        went_out = datetime.now(timezone.utc) - timedelta(hours=5)
-        report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1, went_out)
-        await report_ledger.drain(store, report_ledger.WEEKLY)
-        assert [i for i in await reconcile_operational(store)
-                if i.table_name == chain.TABLE] == []
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM weekly_report_sends")
-        found = {i.check_name for i in await reconcile_operational(store)
-                 if i.table_name == chain.TABLE}
-        assert found == {"shadow_missing_in_duckdb"}
+        real = chain.mark_sent
+        refusals = {"left": 3}
+
+        async def mark_sent(*args, **kwargs):
+            if refusals["left"]:
+                refusals["left"] -= 1
+                raise ConnectionRefusedError("Postgres restarting")
+            await real(*args, **kwargs)
+
+        monkeypatch.setattr(chain, "mark_sent", mark_sent)
+        store = await _store(tmp_path)
+        job = TestSchedulerJob()
+        week_start = await job._seed(warehouse, complete=True)
+        sent = []
+        scheduler = job._wire(monkeypatch, store, sent, tmp_path)
+
+        first = await scheduler._run_weekly_report()
+        assert first["sent"] is True and first["ledger"] == "pending"
+        (spooled,) = report_ledger._spooled(chain.CHAIN)
+        assert await _rows(pool, chain) == []
+
+        quiet = {"sent": False, "reason": "already_sent", "week": week_start.isoformat()}
+        refusals["left"] = 1
+        assert await scheduler._run_weekly_report() == quiet        # still spooled
+        assert report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
+
+        assert await scheduler._run_weekly_report() == quiet        # drained
+        assert not report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
+        (row,) = await _rows(pool, chain)
+        assert row[0] == week_start and row[4] == spooled["sent_at"]
+
+        assert await scheduler._run_weekly_report() == quiet        # Postgres's row
+        assert len(sent) == 1
 
 
 class TestTheStandingWatch:
     @pytest.mark.asyncio
-    async def test_a_missing_week_and_a_null_sent_at_are_read(self, stores):
+    async def test_a_missing_week_and_a_null_sent_at_are_read(self, pool):
         from core import pg_chain_invariants as inv
 
-        store, pool, env = stores
         chain = pg_weekly_ledger_write
-        env.setenv(chain.WRITE_ENV, "postgres")
         async with pool.acquire() as conn:
             await conn.execute(
                 f"INSERT INTO {chain.TABLE} VALUES ('2020-01-06', 'retail', 1, 1, NULL)")
@@ -158,114 +189,3 @@ class TestTheStandingWatch:
                 f"INSERT INTO {chain.TABLE} VALUES ($1, 'retail', 1, 1, now())", WEEK)
             led = await inv._read_ledger(conn, chain, date(2026, 9, 30))
         assert led.has_week
-
-
-class TestTheWayBack:
-    @pytest.mark.asyncio
-    async def test_a_postgres_only_week_comes_back(self, stores):
-        from core.chain_transfer import copy_back
-
-        store, pool, env = stores
-        chain = pg_traffic_ledger_write
-        env.setenv(chain.WRITE_ENV, "postgres")
-        went_out = datetime.now(timezone.utc) - timedelta(hours=5)
-        await chain.mark_sent(WEEK, "retail", Decimal("7.00"), 2, went_out)  # no shadow
-        result = await copy_back(store, chain, dry_run=False)
-        assert result["findings"] == [] and result["released"] is True, result
-        pg, dk = await _both(store, pool, chain)
-        assert pg == dk and len(dk) == 1
-        assert not chain_latch.latched(chain.CHAIN)
-
-
-class TestTheWayBackLandsTheSpool:
-    """The review's first reproduction: a week delivered under a latched chain
-    and spooled, then a copy-back. The handover said "every row DuckDB holds
-    is in Postgres", the copy released, and the week was in neither store."""
-
-    async def _latched_with_a_spooled_week(self, store, env, chain, ledger):
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await report_ledger.mark_sent(store, ledger, WEEK - timedelta(days=7),
-                                      "retail", 10.0, 1)          # latches
-        real = chain.mark_sent
-        env.setattr(chain, "mark_sent", AsyncMock(side_effect=ConnectionError("pg down")))
-        assert await report_ledger.mark_sent(store, ledger, WEEK, "retail", 20.0, 2) == "pending"
-        env.setattr(chain, "mark_sent", real)
-        return report_ledger._spooled(chain.CHAIN)[0]["sent_at"]
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("ledger,chain", CHAINS)
-    async def test_execute_lands_it_before_the_copy(self, stores, ledger, chain):
-        """Mutation: drop `_land_spool` from `copy_back` — the release still
-        comes, and the week is in neither store."""
-        from core.chain_transfer import copy_back
-
-        store, pool, env = stores
-        spooled_at = await self._latched_with_a_spooled_week(store, env, chain, ledger)
-        result = await copy_back(store, chain, dry_run=False)
-        assert result["findings"] == [] and result["released"] is True, result
-        assert result["landed_from_spool"] == 1
-        assert chain.pending()["count"] == 0
-        pg, dk = await _both(store, pool, chain)
-        assert pg == dk
-        assert (WEEK, "retail", Decimal("20.00"), 2, spooled_at) in dk
-        env.setenv(chain.WRITE_ENV, "duckdb")
-        assert await report_ledger.already_sent(store, ledger, WEEK, "retail")
-
-    @pytest.mark.asyncio
-    async def test_the_dry_run_and_the_handover_report_it_and_land_nothing(self, stores):
-        """Mutation: land in the dry run (it would write Postgres on the one
-        call that promises to read), or drop the spool from either report."""
-        from core.chain_transfer import copy_back, handover_check
-
-        store, pool, env = stores
-        chain, ledger = pg_weekly_ledger_write, report_ledger.WEEKLY
-        await self._latched_with_a_spooled_week(store, env, chain, ledger)
-        plan = await copy_back(store, chain, dry_run=True)
-        assert "handover_ledger_spooled" in {f["check"] for f in plan["handover"]}
-        assert "landed_from_spool" not in plan
-        assert {i.check_name for i in await handover_check(store, chain)} >= {
-            "handover_ledger_spooled"}
-        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
-        async with pool.acquire() as conn:
-            assert await conn.fetchval(
-                f"SELECT count(*) FROM {chain.TABLE} WHERE week_start = $1", WEEK) == 0
-
-    @pytest.mark.asyncio
-    async def test_a_week_postgres_will_not_take_refuses_the_copy(self, stores):
-        """Mutation: ignore what is still spooled after the landing — the copy
-        releases the chain with the week in a file."""
-        from core.chain_transfer import CopyBackRefused, copy_back
-
-        store, pool, env = stores
-        chain, ledger = pg_traffic_ledger_write, report_ledger.TRAFFIC
-        await self._latched_with_a_spooled_week(store, env, chain, ledger)
-        env.setattr(chain, "mark_sent", AsyncMock(side_effect=ConnectionError("pg down")))
-        before = await _both(store, pool, chain)
-        with pytest.raises(CopyBackRefused):
-            await copy_back(store, chain, dry_run=False)
-        assert await _both(store, pool, chain) == before
-        assert chain_latch.latched(chain.CHAIN)
-        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
-
-    @pytest.mark.asyncio
-    async def test_a_file_that_will_not_parse_refuses_before_anything_is_written(
-            self, stores):
-        """CRITICAL in the handover, so `--execute` refuses at exit 2 with
-        nothing landed. Mutation: leave the spool out of `copy_back`'s own
-        handover — it would land the readable weeks first and refuse after."""
-        from core.chain_transfer import CopyBackRefused, copy_back, handover_check
-
-        store, pool, env = stores
-        chain, ledger = pg_weekly_ledger_write, report_ledger.WEEKLY
-        await self._latched_with_a_spooled_week(store, env, chain, ledger)
-        bad = report_ledger._spool_path(chain.CHAIN, WEEK + timedelta(days=7), "retail")
-        bad.write_text("{", encoding="utf-8")
-        found = {i.check_name: i.severity.value for i in await handover_check(store, chain)}
-        assert found["handover_ledger_spool_unreadable"] == "CRITICAL"
-        with pytest.raises(CopyBackRefused) as refused:
-            await copy_back(store, chain, dry_run=False)
-        assert "handover_ledger_spool_unreadable" in {i.check_name for i in refused.value.issues}
-        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")      # nothing landed
-        async with pool.acquire() as conn:
-            assert await conn.fetchval(
-                f"SELECT count(*) FROM {chain.TABLE} WHERE week_start = $1", WEEK) == 0

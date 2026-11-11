@@ -92,7 +92,7 @@ class TestSilverWireFormat:
 
 class TestNoThirdDialect:
     def test_every_measure_renders_verbatim(self):
-        from core.duckdb_store import GOLD_MEASURES
+        from core.warehouse_sql import GOLD_MEASURES
 
         fine, rollup = derive_gold_sql()
         for name, expr in GOLD_MEASURES.items():
@@ -196,6 +196,16 @@ class _FakePool:
             async def __aenter__(self):
                 conn = AsyncMock()
                 conn.fetch = AsyncMock(return_value=pool._rows)
+
+                # The archive's liveness reads (L2-02): nothing waiting above
+                # the copy's ceiling, and a ship that succeeded just now.
+                async def fetchrow(sql, *args):
+                    if "order_versions" in sql:
+                        return {"n": 0, "oldest": None}
+                    return {"last_ok_at": datetime.now(timezone.utc),
+                            "failures_since_ok": 0}
+
+                conn.fetchrow = fetchrow
                 return conn
 
             async def __aexit__(self, *a):

@@ -158,92 +158,12 @@ class TestTheMarker:
         assert not chain_latch.latched("pg_expenses_write")
 
 
-class TestTheOneAnswerEveryConsumerReads:
-    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
-    def test_latched_outranks_the_flag(self, flags, chain):
-        assert chain.writes_postgres() is False
-        chain_latch.latch(chain.CHAIN)
-        assert chain.writes_postgres() is True, "the flag moved the writes back"
-        flags.setenv(chain.WRITE_ENV, "duckdb")
-        assert chain.writes_postgres() is True
-        assert chain.env_writes_postgres() is False, "the variable is still readable"
-
-    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
-    def test_latched_outranks_a_value_nobody_can_read(self, flags, chain):
-        """A typo must not route a latched chain back to DuckDB either — it is
-        the same second writer, arrived at by accident instead of by decision."""
-        chain_latch.latch(chain.CHAIN)
-        flags.setenv(chain.WRITE_ENV, "postgrse")
-
-        assert chain.writes_postgres() is True
-        with pytest.raises(RuntimeError):
-            chain.env_writes_postgres()
-
-    def test_the_tables_and_the_sync_keys_stand_down_on_the_latch_alone(self, flags):
-        chain_latch.latch("pg_inventory_write")
-
-        assert write_chains.stood_down_tables() >= frozenset(pg_inventory_write.CHAIN_TABLES)
-        assert write_chains.stood_down_sync_keys() == frozenset(
-            {"last_sync_offers", "last_sync_stocks"})
-
-    def test_health_publishes_both_halves_of_the_disagreement(self, flags):
-        from web.routes.api.health import _write_chains
-
-        chain_latch.latch("pg_expenses_write")
-        flags.setenv("KS_WRITE_EXPENSES", "postgrse")
-
-        block = _write_chains()["pg_expenses_write"]
-        assert block["mode"] == "postgres" and block["latched"] is True
-        assert block["mismatch"] is True and block["latched_at"]
-        assert "postgrse" in block["error"], "the typo is hidden behind the latch"
-
-    def test_the_published_schema_describes_the_fields_it_publishes(self, flags):
-        """`/api/health` is public and `web/schemas.py` is where an operator
-        reads what the block means, so the field that says "a rollback somebody
-        believes happened has not" cannot be the one with no description."""
-        from web.schemas import HealthResponse
-
-        described = HealthResponse.model_fields["write_chains"].description
-        published = set().union(*(set(state) for state in
-                                  write_chains.chain_modes().values()))
-        assert published >= {"latched", "latched_at", "mismatch"}
-        import re
-
-        # A whole word, not a substring: `shadow` was "described" by
-        # `shadow_failures` alone, and a mutation renaming it survived.
-        for field in sorted(published - {"env", "mode", "error"}):
-            assert re.search(rf"\b{re.escape(field)}\b", described), \
-                f"{field} is published and undescribed"
-        assert "chain_copy_back" in described, "the way back is not named"
-
-    def test_the_health_block_answers_without_postgres(self, flags):
-        """The other disagreement — marker against owner row — is deliberately
-        NOT in `mismatch`: reading the Postgres copy here would make the one
-        block that can say "your writes are going to a store you cannot reach"
-        fail with that store. The daily comparison owns that comparison."""
-        source = textwrap.dedent(inspect.getsource(write_chains.chain_modes))
-        tree = ast.parse(source)
-        called = {getattr(n.func, "attr", getattr(n.func, "id", ""))
-                  for n in ast.walk(tree) if isinstance(n, ast.Call)}
-        assert not called & {"read_owners", "get_pool", "acquire", "fetch", "run"}
-        assert not [n for n in ast.walk(tree) if isinstance(n, ast.Await)]
-        # The import as well as the call: reaching for `core.pg` here is the
-        # tell, and a guard that watched only calls let its own mutation past.
-        pulled = {f"{n.module}.{a.name}" for n in ast.walk(tree)
-                  if isinstance(n, ast.ImportFrom) and n.module for a in n.names}
-        assert not [m for m in pulled if m.startswith("core.pg.")], sorted(pulled)
-
-    def test_no_mismatch_while_the_flag_agrees(self, flags):
-        chain_latch.latch("pg_expenses_write")
-        flags.setenv("KS_WRITE_EXPENSES", "postgres")
-
-        assert write_chains.mismatched_chains() == {}
-
-    def test_the_mismatch_names_the_chain_and_when_it_was_taken(self, flags):
-        stamp = chain_latch.latch("pg_expenses_write")
-        flags.setenv("KS_WRITE_EXPENSES", "duckdb")
-
-        assert write_chains.mismatched_chains() == {"pg_expenses_write": stamp}
+# `TestTheOneAnswerEveryConsumerReads` stood here until step 14's S14-11: the
+# latch outranking the flag in every chain's `writes_postgres()`, the
+# registry's `chain_modes()` publishing both halves of a disagreement, and
+# `mismatched_chains()`. The flags went, and every answer with them; the
+# latch is still taken on a chain's first write (decision 3), which the rest
+# of this file pins.
 
 
 class TestPostgresDownAtBoot:
@@ -258,10 +178,8 @@ class TestPostgresDownAtBoot:
     async def store(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
-        s = DuckDBStore(db_path=tmp_path / "latched.duckdb")
-        await s.connect()
+        s = DuckDBStore()
         yield s
-        await s.close()
 
     @pytest.mark.asyncio
     async def test_an_expense_raises_instead_of_landing_in_duckdb(self, flags, store):
@@ -284,8 +202,6 @@ class TestPostgresDownAtBoot:
             with pytest.raises(OSError):
                 await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 100)
 
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM manual_expenses").fetchone()[0] == 0
 
 
 class TestAWriteThatNeverReachesPostgres:
@@ -304,10 +220,8 @@ class TestAWriteThatNeverReachesPostgres:
     async def store(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
-        s = DuckDBStore(db_path=tmp_path / "unreached.duckdb")
-        await s.connect()
+        s = DuckDBStore()
         yield s
-        await s.close()
 
     @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
     @pytest.mark.asyncio
@@ -332,12 +246,9 @@ class TestAWriteThatNeverReachesPostgres:
         assert not chain_latch.latched("pg_expenses_write"), (
             "a write that never reached Postgres latched the chain")
         assert not chain_latch.marker_path("pg_expenses_write").exists()
-
-        # And so the flag is still the whole answer: the rollback survives.
-        flags.setenv("KS_WRITE_EXPENSES", "duckdb")
-        assert pg_expenses_write.writes_postgres() is False
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM manual_expenses").fetchone()[0] == 0
+        # Until step 14's S14-00 the flag was then still the whole answer; it
+        # routes nothing now, but an image from before step 14 does, and finds
+        # no marker.
 
     @pytest.mark.asyncio
     async def test_the_dictionary_chain_when_the_pool_has_no_connection_to_give(
@@ -376,8 +287,6 @@ class TestAWriteThatNeverReachesPostgres:
         assert not chain_latch.latched("pg_expense_types_write"), (
             "a write that never got a connection latched the chain")
         assert not chain_latch.marker_path("pg_expense_types_write").exists()
-        flags.setenv("KS_WRITE_EXPENSE_TYPES", "duckdb")
-        assert pg_expense_types_write.writes_postgres() is False
 
     @pytest.mark.asyncio
     async def test_the_inventory_chain_too(self, flags, store):
@@ -392,8 +301,6 @@ class TestAWriteThatNeverReachesPostgres:
                 await store.upsert_offers([{"id": 1, "product_id": 101, "sku": "S-1"}])
 
         assert not chain_latch.latched("pg_inventory_write")
-        flags.setenv("KS_WRITE_INVENTORY", "duckdb")
-        assert pg_inventory_write.writes_postgres() is False
 
     @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
     @pytest.mark.asyncio
@@ -417,12 +324,8 @@ class TestAWriteThatNeverReachesPostgres:
 
         assert not chain_latch.latched("pg_buyers_write")
         assert not chain_latch.marker_path("pg_buyers_write").exists()
-        flags.setenv("KS_WRITE_BUYERS", "duckdb")
-        assert pg_buyers_write.writes_postgres() is False
         # And DuckDB was not written in its place: under the flag the batch
         # belonged to Postgres.
-        async with store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0] == 0
 
     @pytest.mark.asyncio
     async def test_the_gender_derivation_returns_without_latching(self, flags):
@@ -447,9 +350,9 @@ _CONNECTION = {"get_pool", "_pool", "acquire"}
 # and these are the exceptions to it. `TestTheWalk` holds each one to writing
 # nothing, so a write added to one fails there instead of hiding here.
 _READERS = {
-    "pg_inventory_write": {"read_snapshot_calendar", "preflight"},
-    "pg_orders_write": {"preflight"},
-    "pg_managers_write": {"preflight"},
+    "pg_inventory_write": {"read_snapshot_calendar"},
+    # Chains 3's, 1's and 5's `preflight` were readers too, until step 14's
+    # S14-09 (chain 3) and S14-11 (chains 1 and 5) deleted them.
     # Chain 9 (OD-02 (c)): the connection the journal's readers are handed —
     # the digest, the layer ages, the data-quality endpoint, the catch-up.
     "pg_dq_journal_write": {"reading"},
@@ -720,9 +623,10 @@ class TestEveryWriterLatchesFirst:
     def test_and_none_of_them_latches_before_the_connection(self, module):
         """The window between the two calls is the whole point.
 
-        The latch is permanent — only `scripts/chain_copy_back.py` releases it
-        — so taking it for a write that never reaches Postgres spends a
-        rollback that is still available. Postgres restarting, the pool being
+        The latch is permanent — `scripts/chain_copy_back.py` was the only
+        thing that released it, until step 14's S14-04 deleted it — so taking
+        it for a write that never reaches Postgres spent a rollback that was
+        still available. Postgres restarting, the pool being
         exhausted and `require_revision` raising because `web` came up ahead of
         `migrate` are all ordinary events; reproduced against a live database,
         each of them latched the chain with zero rows written.
@@ -785,25 +689,6 @@ class TestEveryWriterLatchesFirst:
 
 
 class TestTheCanaryJudgesThePublishedBlock:
-    def test_it_warns_on_a_mismatch_and_names_when(self):
-        from bot import canary
-
-        payload = {"write_chains": {"pg_expenses_write": {
-            "env": "KS_WRITE_EXPENSES", "mode": "postgres", "error": None,
-            "latched": True, "latched_at": "2026-09-17T08:33:00+00:00",
-            "mismatch": True}}}
-        (key, message), = canary.check_write_chain_latch(payload)
-        assert key == "write_chain_flag_mismatch"
-        assert "pg_expenses_write" in message and "2026-09-17T08:33:00+00:00" in message
-
-    def test_a_latched_chain_whose_flag_agrees_is_quiet(self):
-        from bot import canary
-
-        payload = {"write_chains": {"pg_expenses_write": {
-            "mode": "postgres", "latched": True, "mismatch": False}}}
-        assert canary.check_write_chain_latch(payload) == []
-        assert canary.check_write_chain_latch({}) == []          # an older web
-
     def test_it_never_reads_the_markers_itself(self):
         """Both containers mount the same `./data`, so `bot/canary.py` *can*
         open the marker directory — and must not. The question is where web's
@@ -826,42 +711,20 @@ class TestTheCanaryJudgesThePublishedBlock:
                     if m.startswith(("core.chain_latch", "core.pg"))], sorted(imported)
         assert "write-chain-owners" not in source
 
+
+class TestTheWatermarkGoesToPostgresAskingNothing:
     @pytest.mark.asyncio
-    async def test_run_canary_warns_rather_than_pages(self):
-        """Nothing is failing: the writes go where the rows are. What is wrong
-        is that somebody edited a variable expecting a rollback."""
-        import httpx
-        from datetime import timedelta
-
-        from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-
-        payload = _healthy_payload()
-        payload["write_chains"] = {"pg_expenses_write": {
-            "env": "KS_WRITE_EXPENSES", "mode": "postgres", "error": None,
-            "latched": True, "latched_at": "2026-09-17T08:33:00+00:00",
-            "mismatch": True}}
-
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(lambda request: httpx.Response(200, json=payload)) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                result = await canary.run_canary(DASHBOARD, client=client)
-
-        assert result.severity == "warn"
-        assert "write_chain_flag_mismatch" in result.failure_keys
-        assert "chain_copy_back" in canary.format_alert(result, DASHBOARD)
-
-
-class TestTheLatchIsWhatTheStoreRoutesOn:
-    @pytest.mark.asyncio
-    async def test_a_latched_chains_watermark_leaves_duckdb(self, flags, tmp_path):
-        """`get_last_sync_time` asks the chain that owns the key, and that
-        answer is now the latch. The store's DuckDB path must not be taken."""
+    @pytest.mark.parametrize("latched", [True, False])
+    async def test_a_chains_watermark_never_reaches_duckdb(self, flags, latched):
+        """`get_last_sync_time` reads `meta.chain_watermarks`, asking no chain
+        (step 14's S14-11; until then it asked the key's chain, whose answer
+        was the latch). The store's DuckDB path must not be taken, latched or
+        not, whatever the flag says."""
         from core.duckdb_store import DuckDBStore
 
-        store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
-        chain_latch.latch("pg_inventory_write")
+        store = DuckDBStore()
+        if latched:
+            chain_latch.latch("pg_inventory_write")
         flags.setenv("KS_WRITE_INVENTORY", "duckdb")
 
         with patch("core.pg_chain_watermarks.get_value",
@@ -871,9 +734,10 @@ class TestTheLatchIsWhatTheStoreRoutesOn:
 
 
 def test_the_module_never_reaches_postgres_to_answer_where_writes_go():
-    """`writes_postgres()` is asked on every write and on the boot path, and a
-    latch that needed a query could not answer while Postgres was down — which
-    is precisely the boot this exists for."""
+    """`latch()` is asked on every first write (and until step 14's S14-11
+    every chain's `writes_postgres()` asked it on every write and on the boot
+    path), and a latch that needed a query could not answer while Postgres
+    was down."""
     source = textwrap.dedent(inspect.getsource(chain_latch.latched))
     source += textwrap.dedent(inspect.getsource(chain_latch.load))
     source += textwrap.dedent(inspect.getsource(chain_latch._cache))

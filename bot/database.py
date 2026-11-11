@@ -326,9 +326,11 @@ def get_celebrated_milestones(
 def dashboard_access_available() -> bool:
     """Can this process reach the dashboard's user list at all?
 
-    False under `KS_USER_STORE=duckdb`, because DuckDB takes a single writer
-    and the web container holds it. Callers ask *before* offering the admin a
-    checklist, so that a tap that could not be honoured is never drawn.
+    True on Postgres; False when the bot's own store is SQLite (`KS_BOT_STORE`
+    other than `postgres`), which has no way to the list — that lives in
+    Postgres alone since step 14's S14-08. Callers ask *before* offering the
+    admin a checklist, so that a tap that could not be honoured is never
+    drawn.
     """
     return get_bot_store().dashboard.available()
 

@@ -27,6 +27,7 @@ window's own edges, under every comparison. So is 29 February, which the
 marketing report and its CSV answered 500 until its year ago became the
 trend's. `parse_period` itself is tests/unit/test_filters_parse_period.py.
 """
+import os
 from datetime import date, timedelta
 
 import pytest
@@ -35,10 +36,139 @@ from core.filters import MAX_RANGE_DAYS
 from tests.routes_helper import iter_endpoints
 from tests.unit.test_read_fallback_http import _request_for
 from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    _seed_gold,
     admin_client,
 )
 from web.main import app
+
+# The routers step 14's S14-05 to S14-07 left on Postgres alone, by the
+# module each reads through, and the routes they answer. Those routes are
+# answered by a real Postgres here; without one they refuse, and say so as a
+# skip. (A fixture kept chain 7a's goal table on DuckDB here until S14-07,
+# whose `_goals_run` reads Postgres whatever the chain says; no dated route
+# reads it.)
+POSTGRES_ONLY = ("pg_traffic_read", "pg_margin_read", "pg_products_intel_read",
+                 "pg_reports_read", "pg_marketing_read", "pg_lookups_read",
+                 "pg_dashboard_read", "pg_silver_read",
+                 # `/expenses`, S14-07.
+                 "pg_expenses_read")
+POSTGRES_ONLY_ROUTES = ("/api/traffic/", "/api/margin/", "/api/products/intel/",
+                        "/api/reports/", "/api/promocodes/analytics",
+                        # The dashboard's, S14-06.
+                        "/api/summary", "/api/revenue/trend", "/api/sales/by-source",
+                        "/api/products/top", "/api/returns",
+                        "/api/products/performance", "/api/brands/analytics",
+                        "/api/categories/breakdown", "/api/customers/insights",
+                        # `/expenses`, S14-07.
+                        "/api/expenses/")
+DSN = os.getenv("KS_PG_DSN")
+
+
+class _OneConnectionPool:
+    """What `core.pg_gold_read`'s two readers ask `get_pool` for, one
+    connection per `acquire()` on the caller's loop."""
+
+    def acquire(self):
+        return _OneConnection()
+
+
+class _OneConnection:
+    async def __aenter__(self):
+        import asyncpg
+
+        self.conn = await asyncpg.connect(DSN)
+        return self.conn
+
+    async def __aexit__(self, *exc):
+        await self.conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _postgres_only_routers_on_their_own_connections(monkeypatch):
+    """The routers with no DuckDB tail read a live Postgres, one connection
+    per statement on the request's own loop: the client runs every request
+    on a loop of its own, and a pool would outlive the loop it was made on.
+    What is read is whatever the database holds — the question is the
+    status, not the numbers. The dashboard's Gold readers take the pool
+    from `core.pg.get_pool` themselves, so they are handed one that opens a
+    connection per `acquire()`."""
+    if not DSN:
+        return
+    from unittest.mock import AsyncMock, patch
+
+    from core import pg_gold_read
+
+    async def fetch(sql, params=()):
+        import asyncpg
+
+        from core.sql_dialect import numbered
+
+        conn = await asyncpg.connect(DSN)
+        try:
+            rows = await conn.fetch(numbered(sql), *params)
+        finally:
+            await conn.close()
+        return [tuple(r) for r in rows]
+
+    for module in POSTGRES_ONLY:
+        monkeypatch.setattr(f"core.{module}.fetch", fetch)
+    # The expenses' history gate reads `meta.mirror_state` through the pool;
+    # the question here is the dates, so the history is across.
+    from core import pg_expenses_read
+
+    monkeypatch.setattr(pg_expenses_read, "backfilled", AsyncMock(return_value=True))
+
+    def on_one_connection(reader):
+        async def read(*args, **kwargs):
+            with patch("core.pg.get_pool",
+                       new=AsyncMock(return_value=_OneConnectionPool())):
+                return await reader(*args, **kwargs)
+        return read
+
+    for name in ("fetch_summary", "fetch_series"):
+        monkeypatch.setattr(pg_gold_read, name,
+                            on_one_connection(getattr(pg_gold_read, name)))
+
+
+def _needs_postgres(path: str) -> None:
+    if not DSN and path.startswith(POSTGRES_ONLY_ROUTES):
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+
+
+# The routes that answer from Google Analytics, not a store. They are
+# configured with the funnel tests' key and answered by their fake Google, so
+# nothing leaves the suite. Today no date sent here falls inside the 14 months
+# GA4 holds, and the service asks nothing for a window with none of those
+# days. The fake is there for the day one does.
+GA4_ROUTES = ("/api/traffic/funnel",)
+
+
+@pytest.fixture
+def ga4_faked(monkeypatch, tmp_path):
+    import json
+
+    import httpx
+
+    from core import ga4
+    from tests.unit.test_ga4_funnel import INFO, _Google
+    from web.services import ga4_funnel_service
+
+    key = tmp_path / "ga4-reader.json"
+    key.write_text(json.dumps(INFO))
+    monkeypatch.setenv("KS_GA4_KEY_FILE", str(key))
+    monkeypatch.setenv("KS_GA4_PROPERTY_ID", "123")
+    ga4_funnel_service._reset_cache()
+    ga4._reset_token()
+    real = ga4_funnel_service.get_funnel
+
+    async def get_funnel(start, end, **kwargs):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_Google())) as client:
+            return await real(start, end, client=client, **kwargs)
+
+    monkeypatch.setattr(ga4_funnel_service, "get_funnel", get_funnel)
+    yield
+    ga4_funnel_service._reset_cache()
+    ga4._reset_token()
+
 
 DATED = sorted(
     (e for e in iter_endpoints(app)
@@ -157,7 +287,11 @@ INSIDE = [
 
 @pytest.mark.parametrize("start, end", INSIDE)
 @pytest.mark.parametrize("endpoint", DATED, ids=lambda e: e.path)
-def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end):
+def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end, request):
+    if endpoint.path in GA4_ROUTES:
+        request.getfixturevalue("ga4_faked")
+    else:
+        _needs_postgres(endpoint.path)
     r = _get(admin_client, endpoint, start_date=start, end_date=end)
     assert r.status_code == 200, r.text
 
@@ -165,6 +299,7 @@ def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end
 @pytest.mark.parametrize("compare_type", COMPARISONS)
 @pytest.mark.parametrize("start, end", INSIDE)
 def test_the_trend_answers_them_under_every_comparison(admin_client, compare_type, start, end):
+    _needs_postgres("/api/revenue/trend")
     r = admin_client.get("/api/revenue/trend", params={
         "start_date": start, "end_date": end, "compare_type": compare_type})
     assert r.status_code == 200, r.text
@@ -176,6 +311,7 @@ FEBRUARY_2024 = {"start_date": "2024-02-01", "end_date": "2024-02-29"}
 def test_the_marketing_report_takes_29_february_a_year_back_to_the_28th(admin_client):
     """The same dates a year back, as the trend's year ago has always taken
     them; the previous period is the 29 days before, as it was."""
+    _needs_postgres("/api/reports/marketing-summary")
     r = admin_client.get("/api/reports/marketing-summary", params=FEBRUARY_2024)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -184,14 +320,43 @@ def test_the_marketing_report_takes_29_february_a_year_back_to_the_28th(admin_cl
 
 
 def test_the_marketing_csv_labels_29_february_a_year_back_as_the_28th(admin_client):
+    _needs_postgres("/api/reports/marketing-summary/export/csv")
     r = admin_client.get("/api/reports/marketing-summary/export/csv", params=FEBRUARY_2024)
     assert r.status_code == 200, r.text
     assert "2023-02-01 — 2023-02-28" in r.content.decode("utf-8-sig")
 
 
+@pytest.fixture
+def gold_cell():
+    """One retail roll-up cell in Postgres's Gold, where the trend reads it
+    since step 14's S14-06, taken out again afterwards."""
+    import asyncio
+
+    import asyncpg
+
+    _needs_postgres("/api/revenue/trend")
+    day = date(2026, 1, 7)
+
+    async def run(*statements):
+        conn = await asyncpg.connect(DSN)
+        try:
+            for sql, args in statements:
+                await conn.execute(sql, *args)
+        finally:
+            await conn.close()
+
+    clear = ("DELETE FROM gold.daily_revenue WHERE date = $1", (day,))
+    asyncio.run(run(clear, (
+        "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+        " orders_count, unique_customers, new_customers, returning_customers,"
+        " returns_count, returns_revenue, avg_order_value)"
+        " VALUES ($1, 'retail', NULL, 1234.5, 3, 3, 1, 2, 0, 0, 411.5)", (day,))))
+    yield
+    asyncio.run(run(clear))
+
+
 class TestValidInputAnswersAsBefore:
-    def test_a_forgiven_form_answers_as_its_iso_spelling(self, admin_client):
-        _seed_gold(date(2026, 1, 7), 1234.5, 3)
+    def test_a_forgiven_form_answers_as_its_iso_spelling(self, admin_client, gold_cell):
         forgiven = admin_client.get("/api/revenue/trend", params={
             "start_date": "2026-1-5", "end_date": "2026-01- 9"})
         iso = admin_client.get("/api/revenue/trend", params={
@@ -202,6 +367,7 @@ class TestValidInputAnswersAsBefore:
         assert forgiven.json()["revenue"][2] == 1234.5
 
     def test_a_range_of_exactly_the_cap_is_answered(self, admin_client):
+        _needs_postgres("/api/revenue/trend")
         start = date(2016, 1, 1)
         end = start + timedelta(days=MAX_RANGE_DAYS - 1)
         r = admin_client.get("/api/revenue/trend", params={

@@ -1,447 +1,123 @@
-"""Every read that falls back to DuckDB, counted in one place (DN-20a).
+"""A read whose engine failed is refused, counted in one place.
 
-Fourteen routers answer from DuckDB when Postgres (or, for cohorts,
-ClickHouse) fails, and each used to say so in its own words: "falling back to
-DuckDB" in most of them, "cannot read the backfill watermark" in
-`pg_expenses_read.backfilled()`, which served DuckDB without ever using the
-phrase. A fallback was therefore visible only to somebody grepping the web
-log for every spelling at once, inside a window that log rotation shortens
-without saying so. After step 13 each of those paths serves frozen DuckDB
-numbers — and after the first Sunday compaction, empty ones — behind a page
-that looks as if it works.
+Every router reads one engine — Postgres, or ClickHouse for the cohorts —
+and has no other to answer from. When that engine fails, the router calls
+`refuse(surface, exc)` from the handler around its read and raises what it
+is handed: `ReadUnavailable`, which `web/main.py` turns, from any route, into
+one 503 naming the surface. A 503 is an outage somebody can see; the frontend
+already reads it as "temporarily unavailable" and retries it
+(`ApiErrorState`). The cause stays in web's log, beside the refusal.
 
-So every such site calls `fall_back(surface, exc)`: one uniform ERROR line,
-one in-process counter per surface, and `/api/health` publishes the counters
-under `read_fallbacks`. `tests/unit/test_read_fallback_sites.py` walks `core/`
-and `web/` for the shapes a fallback takes rather than trusting a list.
-
-UNDER `off`, A FALLBACK IS REFUSED (DN-20b)
-
-`KS_READ_FALLBACK` is `duckdb`, the default, or `off`. Under `duckdb`,
-`fall_back` counts and logs, and the caller then reads DuckDB exactly as it
-did before this module existed. Under `off` it raises `ReadUnavailable`
-instead, so the DuckDB read below the call is never reached, and
-`web/main.py` maps that exception, from any route, to one 503 naming the
-surface. After step 13 a fallback serves frozen Silver and Gold, and after
-the first Sunday compaction empty ones, behind a page that looks as if it
-works; a 503 is an outage somebody can see. The frontend already reads a
-503 as "temporarily unavailable" and retries it (`ApiErrorState`).
-
-A refusal is not a fallback, so it is counted apart (`refusals()`), logged
-without the phrase a fallback is grepped by (the canary's `read_fallback_used`
-lever), and published only beside the mode that produces it
-(`read_fallback_mode.refused` on `/api/health`, under `off` alone).
-`read_fallbacks` keeps meaning "answered from DuckDB", and under `off` it
-stays empty — the canary pages it `read_fallback_used` and pages a recent
-refusal apart, as `read_refused`, so the week OD-07 waits for stays clean
-under a refusal (bot/canary.py).
-
-One place raises, so every consumer of a router refuses at once — and a
-gate whose switch names an engine with no address refuses through
-`no_address`, below, for the same reason. The HTTP routes answer 503 here.
-Cohorts go one step further, because they have no Postgres body: under
-`off` they are answered by a live ClickHouse or not at all (`no_engine`),
-whatever `KS_READ_COHORTS` says.
+Each refusal is counted per surface (`refusals()`), and `/api/health`
+publishes the counts as `read_fallback_mode.refused` — the block keeps its
+name because the canary judges it there, paging a recent refusal as
+`read_refused` (bot/canary.py). The line it is logged with says "read
+refused", which is what that page's lever greps for.
 
 WHAT NO HTTP REQUEST WAITS FOR ANSWERS ITSELF (DN-20c)
 
-Everything else that can receive a refusal gives it an answer of its own,
-and never a DuckDB number: the two weekly reports defer with no ledger row;
-the Monday goals job asks its one routed read before it writes anything, so
-it defers whole; training is skipped and the previous model stands; the
-search index and the buyers step skip their step for the tick with the
-watermark held, and the tick goes on; the boot contains each of those; and
-the assistant's tools return a named `data_unavailable` result. A job says
-so in its result through `answered`, below, so `/api/jobs` shows a refusal
-rather than a quiet run — all but the incremental sync, whose stats are
-summed and carry no strings: its buyers step records the refusal and passes
-it on, the tick names it at the call with `answered` and skips the step, and
-it shows in the log, in `buyer_sync`'s error class and in `refusals()`. The consumers are derived, not remembered —
-`tests/unit/test_read_fallback_consumers.py` walks up from every refusal to
-the entry points nothing in the repository calls (`NON_HTTP_CONSUMERS`), then
-back down through the `try` each call sits in, and pins where every
-consumer's refusal stops (`ANSWERS`): a refusal that could leave one as an
-exception, or a new handler on the way, fails it. A handler that answers
-rather than raises may live only in a function no HTTP route reaches but
-the assistant's two (`POST /api/chat`, `GET /api/chat/stream`), which answer
-inside the conversation; anywhere else it would take that route's 503 away.
+Everything else that can receive a refusal gives it an answer of its own:
+the two weekly reports defer with no ledger row; the Monday goals job asks
+every read it makes before it writes anything, so it defers whole; training
+is skipped and the previous model stands; the search index and the buyers
+step skip their step for the tick with the watermark held, and the tick
+goes on; the boot contains each of those; and the assistant's tools return a
+named `data_unavailable` result. A job says so in its result through
+`answered`, below, so `/api/jobs` shows a refusal rather than a quiet run —
+all but the incremental sync, whose stats are summed and carry no strings:
+its buyers step records the refusal and passes it on, the tick names it at
+the call with `answered` and skips the step, and it shows in the log, in
+`buyer_sync`'s error class and in `refusals()`. The consumers are derived,
+not remembered — `tests/unit/test_read_fallback_consumers.py` walks up from
+every refusal to the entry points nothing in the repository calls, then back
+down through the `try` each call sits in, and pins where every consumer's
+refusal stops.
 
-AN UNKNOWN VALUE DOES NOT STOP WEB
+WHAT THIS MODULE WAS, UNTIL STEP 14'S S14-16
 
-`KS_BOT_STORE`'s rule — raise on a typo — is wrong for this variable. Web is
-the only process that syncs orders, so a raise at startup is a crash loop
-that stops order intake over a setting about how a read degrades. It runs as
-`duckdb`, today's behaviour, logs at ERROR, publishes the error in
-`/api/health` under `read_fallback_mode`, and the canary files
-`read_fallback_mode_invalid`. `core/pg_derivation.py` answers `KS_PG_DERIVE`
-the same way, for the same reason; OD-09 recommends it for every flag of
-this family.
-
-Read once, in `core.runtime_modes.configure_modes()`, which web's startup
-calls before the boot sync: a mode cached at scheduler start misses
-everything the boot does (DN-05b).
-
-THE OTHER SILENT FALLBACK: A FLAG WITH NOTHING TO ASK
-
-A router's gate is `enabled() and available()`, and `available()` is only
-"is a DSN set". `KS_READ_GOLD=postgres` with no `KS_PG_DSN` therefore serves
-DuckDB on every request without a single exception to count. That is a
-configuration, not a failure, so it is found once, at the same moment the
-mode is read, and published beside it (`misconfigured`) — every
-`KS_READ_*=postgres` without `KS_PG_DSN`, and every `KS_READ_*=clickhouse`
-without `KS_CH_URL`. Under `duckdb` nothing raises there.
-
-Under `off` it is refused, per request, like a failure (`no_address`): a lost
-DSN line is the most ordinary way for a whole dashboard to go back to DuckDB,
-and after step 13 it would serve frozen numbers behind pages that all look as
-if they work — exactly what `off` exists to prevent. Every gate asks it
-before it lets DuckDB answer, with the switch it just consulted, and the walk
-in `tests/unit/test_read_fallback_sites.py` requires that of every
-`enabled() and available()` gate it finds. The rule is the one
-`misconfigured` publishes, read from the same table (`_NEEDS`), so a switch
-that is published as misconfigured is exactly a switch that is refused.
-Chosen over having the canary page `misconfigured` under `off`: a page would
-still have served DuckDB until somebody read it.
-
-The cohorts are the one route `off` refuses that no misconfiguration names:
-they have no Postgres body, so under `off` a live ClickHouse answers them or
-nobody does (`no_engine`), and `KS_READ_COHORTS=duckdb` — or unset — is a
-routing choice under `duckdb` and a 503 on every cohort read under `off`.
-`no_engine_routes()` publishes it beside `misconfigured` (`no_engine`), from
-`ENGINE_ONLY`, so the two lists together are every read a configuration sends
-to DuckDB uncounted today and `off` would refuse tomorrow. The canary pages
-them under `duckdb` as `read_routed_to_duckdb` (OD-07): nothing counts such a
-read, so without that the week `off` waits for would read clean while every
-one of them was served from DuckDB.
-
-UNDER `KS_DUCKDB=off` NOTHING HERE MAY ANSWER FROM DUCKDB (STAGE 5, PR-8)
-
-With the file switched off (`core/duckdb_switch.py`) a read that would go to
-DuckDB is refused whatever `KS_READ_FALLBACK` says — `refusing()` holds —
-and so is a read switch left at `duckdb` (or unset), the way `no_engine`
-refuses the cohorts: `no_address` refuses it before the gate lets DuckDB
-answer, naming the switch. Without that each would reach the tripwire, be
-answered 503 all the same and be paged as `duckdb_opened_while_off`, with
-the switch nobody moved named nowhere. It is defence in depth: the stage 5
-verdict holds `off` back while `KS_READ_FALLBACK` or a read switch is short
-of its target, so a process actually running under `off` meets neither.
-`misconfigured` and `no_engine_routes` do not grow for it — under `off`
-every such read is refused, counted and published under
-`read_fallback_mode.refused`, and the canary pages it as `read_refused`.
-In web, whether `off` holds is decided by that verdict, which comes after this
-module is configured, so the start's line for a switch with no address is
-written after the verdict (`report_misconfigured`): a web held back on `on`
-serves those reads from DuckDB and must not log them as refused.
-Under `KS_DUCKDB=on` every answer here is what it was.
+It counted every read that fell back to DuckDB (DN-20a) — fourteen routers
+answered from DuckDB when their engine failed, each in its own words — and
+published the counts as `read_fallbacks`. `KS_READ_FALLBACK=off` (DN-20b)
+made `fall_back` refuse instead, as production has since 2026-10-09;
+`no_address` refused a read switch naming an engine with no address, and
+`no_engine` the cohorts with no ClickHouse; `misconfigured` and `no_engine`
+published those configurations at start, and the canary paged them as
+`read_fallback_used`, `read_routed_to_duckdb` and
+`read_fallback_mode_invalid`. Since S14-07 no router has a DuckDB tail and
+no read switch routes a read, so none of that had a caller: S14-16 deleted
+it with the health fields and the canary's three checks, and
+`KS_READ_FALLBACK` is not read. The condition names are not reused (rule 15
+of the plan). What is left is the refusal, its count and its answers.
 """
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, List, NoReturn, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
-ENV = "KS_READ_FALLBACK"
-DUCKDB = "duckdb"
-OFF = "off"
-_VALID = (DUCKDB, OFF)
-
-# The switches whose value names another engine, and what that engine needs.
-# Found by prefix in the environment, never listed: a read flag added later is
-# covered the day it is set, which is the point of looking at startup at all.
-READ_FLAG_PREFIX = "KS_READ_"
-_NEEDS = {
-    "postgres": "KS_PG_DSN",
-    "clickhouse": "KS_CH_URL",
-}
-
-_mode: Optional[str] = None
-_mode_error: Optional[str] = None
-_misconfigured: List[str] = []
-# Causes `configure_mode(report=False)` found new and nobody has logged yet:
-# `configure_modes()` logs them after stage 5's verdict, which decides what
-# the line says (`report_misconfigured`).
-_unreported: List[str] = []
-
 _lock = threading.Lock()
-_counts: Dict[str, Dict[str, object]] = {}
-# Refusals under `off`, apart from the fallbacks: a refusal served nothing
-# from DuckDB, and `read_fallbacks` is read as exactly that.
+# `{surface: {count, last_at}}`, the reads refused since this process started.
 _refused: Dict[str, Dict[str, object]] = {}
 
 
 class ReadUnavailable(Exception):
-    """A read that would have been answered by DuckDB, refused instead.
+    """A read whose one engine failed, refused.
 
-    Raised by `fall_back`, `no_address` and `no_engine` under
-    `KS_READ_FALLBACK=off`, and — under either mode — by the read of a table a
-    write chain owns, through `chain_refusal`; by nothing else. `web/main.py`
-    maps it to a 503 carrying `surface`, so a
-    handler between a route and a router must let it through — the walk in
-    `tests/unit/test_read_fallback_sites.py` requires every handler around a
-    router to say so, and `GoalsMixin._get_ml_forecast_total` is the one
-    that had to.
+    Raised from the handler around a router's read with what `refuse`
+    returns, and by nothing else. `web/main.py` maps it to a 503 carrying
+    `surface`, so a handler between a route and a router must let it
+    through — the walk in `tests/unit/test_read_fallback_sites.py` requires
+    every handler around a router to say so, and
+    `GoalsMixin._get_ml_forecast_total` is the one that had to.
     """
 
     def __init__(self, surface: str):
-        super().__init__(f"{surface}: the read cannot be answered without DuckDB")
+        super().__init__(f"{surface}: the read cannot be answered")
         self.surface = surface
 
 
-def _unaddressed(name: str) -> Optional[str]:
-    """`"NAME=engine without ADDRESS"` when the read switch `name` names an
-    engine this process has no address for, else None. The one rule, shared
-    by what is published (`misconfigured`) and what is refused
-    (`no_address`)."""
-    value = os.getenv(name, "").strip().lower()
-    needed = _NEEDS.get(value)
-    if needed and not os.getenv(needed, "").strip():
-        return f"{name}={value} without {needed}"
-    return None
-
-
-def _misconfigured_reads() -> List[str]:
-    """Every read switch naming an engine this process has no address for."""
-    found = []
-    for name in sorted(os.environ):
-        if not name.startswith(READ_FLAG_PREFIX) or name == ENV:
-            continue
-        line = _unaddressed(name)
-        if line:
-            found.append(line)
-    return found
-
-
-def configure_mode(*, report: bool = True) -> str:
-    """Read `KS_READ_FALLBACK` once, and look for read switches that cannot
-    reach their engine. Never raises. Called by `configure_modes()`, with
-    `report=False`: the line a misconfigured switch is logged with is then
-    left to `report_misconfigured`, which that function calls last."""
-    global _mode, _mode_error, _misconfigured, _unreported
-    previous = _mode
-    value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
-    if value in _VALID:
-        error = None
-        _mode = value
-    else:
-        _mode = DUCKDB
-        error = (f"{ENV}={value!r} is not one of {_VALID}; "
-                 f"running as {DUCKDB!r}")
-    # Logged when it changes, not on every call: web's startup and the
-    # scheduler both configure, and one ERROR per cause is what a reader of
-    # the log can use.
-    if error and error != _mode_error:
-        logger.error(error)
-    _mode_error = error
-    if _mode == OFF and previous != OFF:
-        logger.warning(
-            "%s=off: a read whose engine fails is refused rather than "
-            "answered from DuckDB — an HTTP route answers 503 naming the "
-            "surface. Refusals are published under read_fallback_mode.refused",
-            ENV)
-
-    misconfigured = _misconfigured_reads()
-    # New since the last configure, as before — or found new by one whose
-    # report has not come yet.
-    _unreported = [line for line in misconfigured
-                   if line not in _misconfigured or line in _unreported]
-    _misconfigured = misconfigured
-    if report:
-        report_misconfigured()
-    return _mode
-
-
-def report_misconfigured() -> None:
-    """Log each read switch `configure_mode` found new without an address,
-    once per cause, saying what this process does with the reads behind it:
-    refused, or served from DuckDB. Never raises.
-
-    Which of the two is `refusing()`, and in web that answer is not final
-    when this mode is configured. `KS_DUCKDB=off` makes it hold, and stage
-    5's verdict (`core.duckdb_off.settle()`) comes last in
-    `configure_modes()`, after step 13's verdict and chain 3's hold, which
-    it reads. A verdict that holds web back runs it `on`, and those reads
-    are then served from DuckDB. Logged at the configure, the line said
-    "refused (KS_DUCKDB=off)", and nothing corrected it: the scheduler's
-    configure finds the cause already logged. So `configure_modes()`
-    configures this mode with `report=False` and reports after the verdict
-    (integration of PR-8 with PR-2). The mode itself is still cached at
-    its place in that order; only the line waits."""
-    global _unreported
-    for line in _unreported:
-        logger.error(
-            "%s — every read behind it is %s. Set the address or unset "
-            "the flag.", line,
-            f"refused ({_refusal_cause()})" if refusing()
-            else "served from DuckDB")
-    _unreported = []
-
-
-def mode() -> str:
-    """The configured mode; `duckdb` until `configure_mode` has run."""
-    return _mode or DUCKDB
-
-
-def mode_error() -> Optional[str]:
-    return _mode_error
-
-
-def misconfigured() -> List[str]:
-    return list(_misconfigured)
-
-
-# Surfaces only one engine besides DuckDB can answer, and the switch that must
-# name it: under `off` that engine answers them or nobody does (`no_engine`).
-# Today the cohorts alone (`CustomersMixin._analytics_rows`); a test holds this
-# row to `core.ch_cohorts`' own gate, so the two cannot drift.
-ENGINE_ONLY: Dict[str, "tuple[str, str]"] = {
-    "cohorts": ("KS_READ_COHORTS", "clickhouse"),
-}
-
-
-def no_engine_routes() -> List[str]:
-    """`"surface: SWITCH=value, …"` for every `ENGINE_ONLY` surface whose
-    switch does not name its engine — served from DuckDB with nothing to
-    count under `duckdb`, refused on every read under `off`.
-
-    A switch that names the engine without its address is left out: that is
-    `misconfigured`, and one cause gets one line. Read per call, like the
-    gate it describes; a dict lookup and no I/O."""
-    found = []
-    for surface, (name, engine) in sorted(ENGINE_ONLY.items()):
-        value = os.getenv(name, "").strip().lower() or DUCKDB
-        if value != engine:
-            found.append(f"{surface}: {name}={value}, and only {engine} may "
-                         f"answer it under {ENV}={OFF}")
-    return found
-
-
-def refusing() -> bool:
-    """Whether a read that would be answered by DuckDB is refused instead:
-    under `KS_READ_FALLBACK=off`, and under `KS_DUCKDB=off` whatever that
-    says — the file a fallback would read is switched off (stage 5, PR-8).
-    `mode()` stays what was configured; this is the answer to act on."""
-    if mode() == OFF:
-        return True
-    from core import duckdb_switch
-
-    return duckdb_switch.is_off()
-
-
-def _refusal_cause() -> str:
-    """The variable that makes `refusing()` hold, as a log line names it:
-    `KS_READ_FALLBACK=off` first, which refuses in either mode and is the
-    only cause under `KS_DUCKDB=on` — so a line there reads as it always
-    has — and otherwise `KS_DUCKDB=off` (stage 5, PR-8). Only asked once
-    `refusing()` holds."""
-    if mode() == OFF:
-        return f"{ENV}={OFF}"
-    from core import duckdb_switch
-
-    return f"{duckdb_switch.ENV}={duckdb_switch.OFF}"
-
-
-def _names_duckdb(name: str) -> bool:
-    """Whether the read switch `name` sends its reads to DuckDB — set to
-    `duckdb`, or unset, which every switch reads as `duckdb`."""
-    return (os.getenv(name, "").strip().lower() or DUCKDB) == DUCKDB
-
-
-def _tally(table: Dict[str, Dict[str, object]], surface: str) -> int:
+def _tally(surface: str) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _lock:
-        entry = table.setdefault(surface, {"count": 0, "last_at": None})
+        entry = _refused.setdefault(surface, {"count": 0, "last_at": None})
         entry["count"] = int(entry["count"]) + 1
         entry["last_at"] = now
         return int(entry["count"])
 
 
-def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
-    """Count one refusal on `surface`, say why, and raise `ReadUnavailable`.
+def refuse(surface: str, exc: BaseException) -> ReadUnavailable:
+    """A read on `surface` failed in its one engine: count it, say so, and
+    hand back the `ReadUnavailable` the caller raises.
 
-    The line deliberately does not say "falling back to DuckDB": nothing
-    fell back, and that phrase is what a fallback is grepped by.
+    The routers call this from the handler around their read, as `raise
+    read_fallback.refuse(surface, exc)`. Counted with the refusals
+    (`read_fallback_mode.refused` on `/api/health`), logged at ERROR with the
+    cause beside it, and caused by `exc` — what `raise ReadUnavailable(surface)
+    from exc` makes: setting the cause suppresses the context, as `from` does
+    — so `web/main.py` answers the 503 naming the surface. Returned rather
+    than raised: the handler says `raise` itself, which is what the walks in
+    `tests/unit/test_read_fallback_sites.py` read as a decision.
+
+    `surface` is the tab or consumer a reader would name (`dashboard`,
+    `goals`, `cohorts`…), a literal, because it is a key in `/api/health`.
+
+    The line says "read refused", the phrase `read_refused`'s lever greps,
+    and never "falling back to DuckDB": nothing fell back. Until step 14's
+    S14-16 it named `KS_READ_FALLBACK=off` as what refused; nothing reads
+    that variable since, and a reader of the log is not sent to it.
     """
-    count = _tally(_refused, surface)
+    count = _tally(surface)
     logger.error(
-        "read refused: %s — %s, and %s forbids answering from DuckDB "
-        "(%d refused since start)%s", surface, why, _refusal_cause(), count,
-        f": {exc}" if exc is not None else "",
+        "read refused: %s — its engine failed, and no other store may answer "
+        "it (%d refused since start): %s", surface, count, exc,
         exc_info=exc if isinstance(exc, BaseException) else None,
     )
-    raise ReadUnavailable(surface) from exc
-
-
-def fall_back(surface: str, exc: Optional[BaseException] = None) -> None:
-    """A read on `surface` is about to be answered by DuckDB: count it, say so
-    — or, under `KS_READ_FALLBACK=off`, refuse it.
-
-    Called from the handler that caught the other engine's failure, before
-    the DuckDB read, which is what makes this the one place that refuses:
-    under `off` it raises `ReadUnavailable` and the DuckDB read below the
-    call is never reached. `surface` is the tab or consumer a reader would
-    name (`dashboard`, `goals`, `cohorts`…), never the flag: several flags
-    serve one tab, and the question the count answers is which page was not
-    reading the store it claims to.
-    """
-    if refusing():
-        _refuse(surface, "its engine failed", exc)
-    count = _tally(_counts, surface)
-    logger.error(
-        "read fallback: %s read failed, falling back to DuckDB (%d since "
-        "start): %s", surface, count, exc,
-        exc_info=exc if isinstance(exc, BaseException) else None,
-    )
-
-
-def no_engine(surface: str, why: str) -> None:
-    """`surface` is about to be answered by DuckDB because no other engine
-    is live for it — not because one failed.
-
-    Under `duckdb` that is routing, not a failure: nothing is counted and
-    nothing is said, per request. Under `off` it is refused like a fallback.
-    The cohorts call it: they have no Postgres body, so under `off` a live
-    ClickHouse is the only thing that may answer them (DN-20b). And, under
-    `KS_DUCKDB=off` alone, the expenses' history gate: a Postgres that
-    holds no history of `bronze.expenses` leaves no engine for the
-    statements that read it (stage 5, PR-8).
-    """
-    if refusing():
-        _refuse(surface, why, None)
-
-
-def no_address(surface: str, switch: Any) -> None:
-    """Under `off`, refuse `surface` when `switch` names an engine this
-    process has no address for — `KS_READ_TRAFFIC=postgres` without
-    `KS_PG_DSN` — because the gate beside the call is about to let DuckDB
-    answer instead (DN-20b).
-
-    `switch` is the read-switch module the gate consults, and its `ENV` is
-    what is read, per request, as the gate reads it. Under `duckdb` it does
-    nothing at all, not even read the environment: that state is a
-    configuration, published once at start under `misconfigured`, and the
-    page keeps answering from DuckDB exactly as it always has. A switch that
-    names DuckDB, or names nothing, is a routing decision under either mode
-    and is never refused here — while the file is there to read.
-
-    Under `KS_DUCKDB=off` it is not (stage 5, PR-8): such a switch leaves
-    DuckDB as the only engine, and it is refused like `no_engine`'s, naming
-    the switch. A switch whose value this module does not know is left to
-    the gate's own `enabled()`, which raises on it.
-    """
-    if not refusing():
-        return
-    line = _unaddressed(switch.ENV)
-    if line:
-        _refuse(surface, line, None)
-    from core import duckdb_switch
-
-    if duckdb_switch.is_off() and _names_duckdb(switch.ENV):
-        _refuse(surface, f"{switch.ENV}={DUCKDB} while "
-                         f"{duckdb_switch.ENV}={duckdb_switch.OFF}", None)
+    refusal = ReadUnavailable(surface)
+    refusal.__cause__ = exc
+    return refusal
 
 
 READ_UNAVAILABLE = "read_unavailable"
@@ -455,28 +131,21 @@ def answered(consumer: str, exc: ReadUnavailable, answer: str) -> Dict[str, str]
 
     `consumer` names the caller as a reader of the job list would —
     `weekly_report`, `revenue_prediction` — and `answer` says in words what
-    it did instead of reading DuckDB: deferred, kept the previous model,
-    skipped the step. The refusal itself was logged at ERROR and counted
-    where it was raised (`read_fallback_mode.refused`), so this line says
-    only what became of it, at WARNING, and never the phrase a fallback is
-    grepped by. The returned `{"reason", "surface"}` goes into the consumer's own
-    result, so `/api/jobs` history shows a refusal rather than a quiet run.
+    it did instead: deferred, kept the previous model, skipped the step. The
+    refusal itself was logged at ERROR and counted where it was raised
+    (`read_fallback_mode.refused`), so this line says only what became of
+    it, at WARNING. The returned `{"reason", "surface"}` goes into the
+    consumer's own result, so `/api/jobs` history shows a refusal rather than
+    a quiet run.
     """
     logger.warning("refused read answered by %s (%s): %s",
                    consumer, exc.surface, answer)
     return {"reason": READ_UNAVAILABLE, "surface": exc.surface}
 
 
-def counts() -> Dict[str, Dict[str, object]]:
-    """`{surface: {count, last_at}}` — reads answered from DuckDB since this
-    process started. A copy."""
-    with _lock:
-        return {surface: dict(entry) for surface, entry in _counts.items()}
-
-
 def refusals() -> Dict[str, Dict[str, object]]:
-    """`{surface: {count, last_at}}` — reads refused under `off` since this
-    process started. A copy."""
+    """`{surface: {count, last_at}}` — reads refused since this process
+    started. A copy."""
     with _lock:
         return {surface: dict(entry) for surface, entry in _refused.items()}
 
@@ -484,36 +153,4 @@ def refusals() -> Dict[str, Dict[str, object]]:
 def reset_counts() -> None:
     """Forget every count. Tests only; a process never forgets its own."""
     with _lock:
-        _counts.clear()
         _refused.clear()
-
-
-def chain_refusal(surface: str, exc: BaseException) -> ReadUnavailable:
-    """A read of a table a write chain owns failed in Postgres: count it as a
-    refusal and hand back the `ReadUnavailable` the caller raises — under
-    EITHER mode.
-
-    While a chain writes Postgres, every read of its tables goes there with
-    no fallback: DuckDB's copy is frozen, not older. Before the flip the same
-    failure went through `fall_back`, and chain 7b-3's precondition is `off`,
-    so it was a counted refusal and a 503 naming the surface. Let through raw
-    after the flip, it reached handlers built to let `ReadUnavailable` through
-    and contain everything else: `/api/revenue/forecast` answered 200
-    "Forecast not available yet" and the smart goal dropped its ML signal,
-    with nothing counted for the canary to page. Under `duckdb` — a latched
-    chain whose precondition has since lapsed — it is refused all the same:
-    DuckDB has nothing to answer with but the pre-flip copy.
-
-    Returned, not raised, so the handler that calls it says `raise` itself,
-    which is what DN-20a's walk reads as a decision. Counted with the
-    refusals, so `/api/health` publishes it beside the mode in either mode,
-    and logged with "read refused", the phrase `read_refused`'s lever greps.
-    """
-    count = _tally(_refused, surface)
-    logger.error(
-        "read refused: %s — its engine failed, and a write chain owns the "
-        "table, so DuckDB's copy is frozen and may not answer (%d refused "
-        "since start): %s", surface, count, exc,
-        exc_info=exc if isinstance(exc, BaseException) else None,
-    )
-    return ReadUnavailable(surface)

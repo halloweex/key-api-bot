@@ -12,19 +12,9 @@ import ast
 import inspect
 import textwrap
 
-import pytest
-import pytest_asyncio
 
-from core.data_quality import Severity, check_internal_integrity
-from core.duckdb_store import DuckDBStore
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
-    await s.connect()
-    yield s
-    await s.close()
+from core import data_quality
+from core.data_quality import check_internal_integrity
 
 
 def _raised(issues):
@@ -32,39 +22,26 @@ def _raised(issues):
 
 
 class TestARaisingCheckIsNamed:
-    @pytest.mark.asyncio
-    async def test_a_clean_database_raises_nothing(self, store):
-        async with store.connection() as conn:
-            assert _raised(check_internal_integrity(conn)) == []
+    def test_clean_facts_raise_nothing(self):
+        """Since step 14's S14-14 the scan reads no store: it judges the
+        facts it is handed. (Until then: a clean, empty DuckDB.)"""
+        assert _raised(check_internal_integrity(
+            inventory_calendar=(None, frozenset()), chain_watermarks={},
+            chain_stamps={}, frozen_sync_rows={})) == []
 
-    @pytest.mark.asyncio
-    async def test_a_lost_table_is_reported_by_the_check_that_needed_it(self, store):
-        async with store.connection() as conn:
-            conn.execute("DROP TABLE silver_order_utm")
-            issues = check_internal_integrity(conn)
-        found = _raised(issues)
-        assert len(found) == 1
-        assert found[0].severity == Severity.WARN
-        assert found[0].count == 1
-        assert "attribution_coverage" in found[0].description
+    def test_a_check_that_raises_is_named_and_its_conditions_held(self, monkeypatch):
+        def boom(*_a, **_k):
+            raise KeyError("inventory_sku_history")
 
-    @pytest.mark.asyncio
-    async def test_every_raising_check_is_counted_and_the_rest_still_run(self, store):
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,"
-                " created_at, updated_at) VALUES (1, 99, 12, 100,"
-                " '2026-09-01 10:00:00+03', '2026-09-01 10:00:00+03',"
-                " '2026-09-01 10:00:00+03')")
-            conn.execute("DROP TABLE silver_order_utm")
-            conn.execute("DROP TABLE gold_daily_revenue")
-            issues = check_internal_integrity(conn)
-        found = _raised(issues)
-        assert len(found) == 1 and found[0].count == 2
-        assert "attribution_coverage" in found[0].description
-        assert "gold_cell_values" in found[0].description
-        # The checks that did not raise are still in the run.
-        assert "value_domain_orders_source_id" in {i.check_name for i in issues}
+        monkeypatch.setattr(data_quality, "_inventory_snapshot_continuity_check", boom)
+        raised: list = []
+        issues = check_internal_integrity(
+            inventory_calendar=(None, frozenset()), chain_watermarks={},
+            chain_stamps={}, frozen_sync_rows={}, raised_out=raised)
+        (finding,) = _raised(issues)
+        assert "inventory_snapshot_continuity (KeyError)" in finding.description
+        assert raised == ["inventory_snapshot_continuity"]
+        assert data_quality.unverified_conditions(raised, issues) == ["inventory_snapshot_gaps"]
 
 
 class TestTheGuardHasOneHome:

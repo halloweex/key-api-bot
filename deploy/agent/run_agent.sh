@@ -34,7 +34,10 @@ api_key() { grep -m1 '^ANTHROPIC_API_KEY=' "$ENV_FILE" | cut -d= -f2- | tr -d '"
 
 family_for() {
     case "$1" in
-        warehouse:*)                          echo warehouse ;;
+        # The Postgres derivation's own keys. `warehouse:*` were the DuckDB
+        # warehouse tick's, gone with it (step 14's S14-15); no `duckdb_*`
+        # key is registered since S14-17/S14-18, so none is routed.
+        warehouse_pg:*)                       echo warehouse ;;
         # gold_values_unwatched is the ClickHouse Gold comparison saying it
         # did not run (OD-08 (a)): the mirror runbook knows ClickHouse.
         mirror_*|dq_*|ch_*|gold_values_unwatched|order_versions_*|freshness_*) echo mirror ;;

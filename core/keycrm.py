@@ -17,7 +17,9 @@ from typing import Dict, List, Any, Optional, AsyncGenerator
 
 import httpx
 
-from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError
+from core.exceptions import (
+    KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError, KeyCRMTruncated,
+)
 from core.models import Order, Product, Buyer
 from core.observability import get_logger, get_correlation_id, Timer
 from core.resilience import (
@@ -262,7 +264,20 @@ class KeyCRMClient:
                 )
 
             if response.content:
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as e:
+                    # A 200 carrying a proxy's or a maintenance page's HTML is
+                    # KeyCRM not answering, not this process failing: as a bare
+                    # JSONDecodeError the order step filed it as chain 3's
+                    # (L1-02). Not retried and not a breaker failure, as before.
+                    raise KeyCRMDataError(
+                        f"API returned {response.status_code} with a body that "
+                        f"is not JSON",
+                        details=(response.headers.get("content-type") or "")[:100],
+                        expected="JSON",
+                        got=type(e).__name__,
+                    ) from e
             return {"status": "success"}
 
         except httpx.TimeoutException as e:
@@ -417,6 +432,10 @@ class KeyCRMClient:
 
         Yields:
             List of items per page
+
+        Raises:
+            KeyCRMTruncated: the last page allowed came back full — there may
+                be more, and it was not asked for (L1-08).
         """
         params = dict(params or {})
         params["limit"] = page_size
@@ -434,6 +453,8 @@ class KeyCRMClient:
 
             if len(batch) < page_size:
                 break
+        else:
+            raise KeyCRMTruncated(endpoint, max_pages, page_size)
 
     async def fetch_all(
         self,
@@ -476,6 +497,7 @@ class KeyCRMClient:
 
         # Fetch remaining pages in parallel batches
         page = 2
+        done = False
         while page <= max_pages:
             tasks = []
             for p in range(page, min(page + parallel_batches, max_pages + 1)):
@@ -487,10 +509,19 @@ class KeyCRMClient:
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            # A page that failed before the last one is a list with a hole in
+            # it, and the callers cannot tell a hole from a shorter list: the
+            # stocks step wrote 850 of 900 stocks and called it a sync (L1-09).
+            # So the fetch fails whole. A failure after the last page (the
+            # first short or empty one) cost nothing and is ignored.
             done = False
+            failed: Optional[BaseException] = None
             for result in results:
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
                     logger.warning(f"Page fetch failed: {result}")
+                    failed = failed or result
                     continue
 
                 batch = result.get("data", [])
@@ -504,11 +535,20 @@ class KeyCRMClient:
                     done = True
                     break
 
+            if failed is not None:
+                raise KeyCRMConnectionError(
+                    f"{endpoint}: a page of the listing failed, so the listing "
+                    f"is incomplete", details=f"{type(failed).__name__}: {failed}",
+                ) from failed
+
             if done:
                 break
 
             page += parallel_batches
 
+        if not done:
+            # Every page up to the cap came back full: the listing may go on.
+            raise KeyCRMTruncated(endpoint, max_pages, page_size)
         return all_items
 
     async def fetch_all_offers(

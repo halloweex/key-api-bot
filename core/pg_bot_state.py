@@ -1,10 +1,10 @@
 """Copying the bot's SQLite into Postgres.
 
-Step 03. `core/pg_operational.py` copies what only DuckDB holds; this copies
-what only `data/bot.db` holds, and the case for it is simpler than any of them:
-**that file is in no backup.** `data/backups/` takes `analytics-*.duckdb`,
-`deploy/daily_offsite.sh` globs the same pattern, and the Ark froze the
-warehouse. One file, one disk, no copy — 24 approvals, 25 celebrated milestones
+Step 03. `core/pg_operational.py` copied what only DuckDB held (until step
+14's S14-13); this copies what only `data/bot.db` holds, and the case for it
+is simpler than any of them: **that file is in no backup.** `data/backups/`
+took `analytics-*.duckdb`, `deploy/daily_offsite.sh` globbed the same pattern
+(both gone since step 14), and the Ark froze the warehouse. One file, one disk, no copy — 24 approvals, 25 celebrated milestones
 and everyone's language choice.
 
 So this is worth having before any question of switching the writer. Landing the

@@ -1,13 +1,12 @@
-"""One reconciliation that raises must not silence the other sixteen.
+"""One check that raises must not silence the other seven.
 
-`dq_mirror_landing` runs seventeen checks in one job — landing, orders, Silver,
-UTM and its completeness, expenses, Gold, the five irreplaceable tables, the
-bot's state, the order archive, buyers and their completeness, SMS, dashboard
-users, the vitrina,
-ClickHouse and its archive. It used to wrap all of them in ONE try, so an
-exception anywhere skipped every check after it, and the alert gate's
-`and not error_message` then withheld the page for any CRITICAL already found
-above the failure.
+`dq_mirror_landing` runs eight checks in one job — the UTM verdicts'
+completeness, Gold's two grains, the bot's state, the order archive, the
+buyers' completeness, the vitrina, ClickHouse and its archive. (Seventeen until
+step 14's S14-12 deleted the comparisons against DuckDB.) It used to wrap all
+of them in ONE try, so an exception anywhere skipped every check after it, and
+the alert gate's `and not error_message` then withheld the page for any
+CRITICAL already found above the failure.
 
 What these pin, and what they deliberately do not change:
 
@@ -22,24 +21,19 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.data_quality import IntegrityIssue, Severity
 
-# Every check, in the order the job runs it. `reconcile_mirror` is the landing
-# comparison; the rest are named as they are imported.
+
+# Every check, in the order the job runs it, named as it is imported.
 CHECKS_BY_MODULE = {
     "core.mirror_reconciliation": [
-        "reconcile_mirror", "reconcile_orders", "reconcile_silver",
-        "reconcile_order_utm", "reconcile_order_utm_completeness",
-        "reconcile_expenses", "reconcile_gold", "pg_gold_internal_check",
-        "reconcile_operational", "reconcile_bot_state",
-        "reconcile_order_versions", "reconcile_buyers",
-        "reconcile_buyer_completeness", "reconcile_sms",
-        "reconcile_dashboard_users",
+        "reconcile_order_utm_completeness", "pg_gold_internal_check",
+        "reconcile_bot_state", "reconcile_order_versions",
+        "reconcile_buyer_completeness",
     ],
     "core.pg_vitrina": ["reconcile_customer_profile"],
     "core.ch_silver": ["reconcile_clickhouse"],
@@ -69,11 +63,22 @@ def check_order() -> list:
 
 
 class TestEveryCheckIsIsolated:
-    def test_all_eighteen_run_through_check_and_each_exactly_once(self):
-        """Seventeen every run, and `pg_gold_internal_check` only while
-        Postgres alone derives the warehouse (DN-28) — see the class below."""
-        assert sorted(check_order()) == sorted(ALL_CHECKS)
-        assert len(check_order()) == len(set(check_order())) == 18
+    def test_all_eight_run_through_check_and_each_exactly_once(self):
+        assert check_order() == ALL_CHECKS
+        assert len(check_order()) == len(set(check_order())) == 8
+
+    def test_nothing_reads_duckdb(self):
+        """The comparisons against DuckDB went in step 14's S14-12; the job
+        asks the store for nothing."""
+        from core.scheduler import BackgroundScheduler
+
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)))
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        names |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        modules = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+        assert not {"get_store", "store"} & names
+        assert not {m for m in modules if m and "duckdb" in m}
 
 
 def _critical(name):
@@ -99,22 +104,16 @@ async def _run(outcomes, mocks=None, held=None, hook=None, returned=None):
 
     persisted, paged, resolved = {}, [], []
 
-    @asynccontextmanager
-    async def _conn():
-        yield MagicMock()
-
-    store = MagicMock()
-    store.connection = _conn
-
-    def _persist(conn, **kw):
+    # What the job hands the journal's door. Until step 14's S14-10 this
+    # module routed chain 9 back to DuckDB and caught DuckDB's `persist_run`
+    # behind the door instead.
+    async def _journal_run(**kw):
         persisted.update(kw)
         return 1
 
     patches = [
         patch("core.mirror_reconciliation.configured", return_value=True),
-        patch("core.mirror_reconciliation.read_duckdb_side", return_value={}),
-        patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)),
-        patch("core.data_quality.persist_run", side_effect=_persist),
+        patch("core.dq_journal.journal_run", new=_journal_run),
         patch("core.data_quality.machine_attempts_note", return_value=None),
         patch("core.data_quality.evidence_for_agent", return_value={}),
     ]
@@ -161,40 +160,40 @@ async def _run(outcomes, mocks=None, held=None, hook=None, returned=None):
 class TestOneRaisingCheckSilencesNothing:
     @pytest.mark.asyncio
     async def test_the_checks_after_it_still_run_and_their_findings_are_kept(self):
-        """The shape that used to lose them: Silver raises early, and the lost
-        stock movement is found three checks later by the operational one."""
+        """The shape that used to lose them: an early check raises, and a
+        stalled archive is found three checks later."""
         persisted, _, _ = await _run({
-            "reconcile_silver": RuntimeError("silver.orders is gone"),
-            "reconcile_operational": [_critical("mirror_lost_rows")],
+            "reconcile_order_utm_completeness": RuntimeError("silver.order_utm is gone"),
+            "reconcile_order_versions": [_critical("order_versions_stalled")],
         })
-        assert [i.check_name for i in persisted["issues"]] == ["mirror_lost_rows"]
+        assert [i.check_name for i in persisted["issues"]] == ["order_versions_stalled"]
 
     @pytest.mark.asyncio
     async def test_the_run_is_still_failed_and_names_every_check_that_raised(self):
         persisted, _, _ = await _run({
-            "reconcile_silver": RuntimeError("silver.orders is gone"),
-            "reconcile_gold": ValueError("gold.daily_revenue is gone"),
+            "reconcile_bot_state": RuntimeError("data/bot.db is gone"),
+            "pg_gold_internal_check": ValueError("gold.daily_revenue is gone"),
         })
         message = persisted["error_message"]
         assert message and message.startswith("2 check(s) raised")
-        assert "reconcile_silver: RuntimeError" in message
-        assert "reconcile_gold: ValueError" in message
+        assert "reconcile_bot_state: RuntimeError" in message
+        assert "pg_gold_internal_check: ValueError" in message
 
     @pytest.mark.asyncio
     async def test_a_critical_from_a_completed_check_still_pages(self):
         """Withholding it because an unrelated check raised is exactly how one
         flaky round-trip used to silence a lost row."""
         _, paged, _ = await _run({
-            "reconcile_silver": RuntimeError("transient"),
-            "reconcile_operational": [_critical("mirror_lost_rows")],
+            "reconcile_order_utm_completeness": RuntimeError("transient"),
+            "reconcile_order_versions": [_critical("order_versions_stalled")],
         })
-        assert paged == [["mirror_lost_rows"]]
+        assert paged == [["order_versions_stalled"]]
 
     @pytest.mark.asyncio
     async def test_a_run_with_any_unverified_check_announces_no_recovery(self):
         """Unchanged, and it must stay unchanged: a check that did not run proves
         nothing, so the run cannot clear a page it never re-examined."""
-        _, _, resolved = await _run({"reconcile_operational": RuntimeError("down")})
+        _, _, resolved = await _run({"reconcile_buyer_completeness": RuntimeError("down")})
         assert resolved == []
 
     @pytest.mark.asyncio
@@ -203,6 +202,16 @@ class TestOneRaisingCheckSilencesNothing:
         assert persisted["error_message"] is None
         assert persisted["issues"] == [] and paged == []
         assert resolved == [[]]
+
+    @pytest.mark.asyncio
+    async def test_clickhouse_raising_files_gold_unwatched(self):
+        """OD-08: a raise leaves the comparison nothing to return, so the job
+        files `gold_values_unwatched` itself — CRITICAL, it pages."""
+        persisted, paged, _ = await _run(
+            {"reconcile_clickhouse": RuntimeError("ClickHouse refused")})
+        assert [i.check_name for i in persisted["issues"]] == ["gold_values_unwatched"]
+        assert persisted["issues"][0].severity is Severity.CRITICAL
+        assert paged == [["gold_values_unwatched"]]
 
 
 class TestTheUtmCompletenessCheckRunsAsProductionRunsIt:
@@ -230,29 +239,14 @@ class TestTheUtmCompletenessCheckRunsAsProductionRunsIt:
         mocks["reconcile_order_utm_completeness"].assert_awaited_once_with()
 
 
-class TestTheGoldRollUpStandsAloneUnderPostgres:
-    """DN-28: `gold_rollup_mismatch` is asked of Postgres by itself while
-    Postgres alone derives, and `reconcile_gold` leaves it out on the same
-    predicate. In this build the predicate is never true, so production runs
-    exactly the seventeen it ran before."""
+class TestTheGoldRollUpIsAskedEveryRun:
+    """DN-28: `gold_rollup_mismatch` is asked of Postgres by itself. It stood
+    beside `reconcile_gold` while that ran, and on every run since step 13
+    stood the comparison down; step 14's S14-12 deleted the comparison, so
+    it is asked unconditionally."""
 
     @pytest.mark.asyncio
-    async def test_while_duckdb_derives_it_is_not_asked(self, monkeypatch):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-        mocks = {}
-        await _run({}, mocks=mocks)
-        mocks["pg_gold_internal_check"].assert_not_awaited()
-        mocks["reconcile_gold"].assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_under_postgres_it_is_asked_once_and_its_finding_pages(
-        self, monkeypatch,
-    ):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+    async def test_it_is_asked_once_and_its_finding_pages(self):
         mocks = {}
         mismatch = IntegrityIssue(
             check_name="gold_rollup_mismatch", table_name="gold.daily_revenue",
@@ -265,62 +259,30 @@ class TestTheGoldRollUpStandsAloneUnderPostgres:
         assert paged == [["gold_rollup_mismatch"]]
 
     @pytest.mark.asyncio
-    async def test_it_raising_fails_the_run_like_any_other_check(self, monkeypatch):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+    async def test_it_raising_fails_the_run_like_any_other_check(self):
         persisted, _, resolved = await _run(
             {"pg_gold_internal_check": RuntimeError("gold.daily_revenue is gone")})
         assert "pg_gold_internal_check: RuntimeError" in persisted["error_message"]
         assert resolved == []
 
-    def test_it_sits_right_after_reconcile_gold(self):
-        order = check_order()
-        assert order.index("pg_gold_internal_check") == order.index("reconcile_gold") + 1
-
 
 class TestTheRunSaysWhichChecksItAsked:
-    """A stand-down cannot be read off absent findings: `compare_gold` excuses
-    every cell whose orders synced inside its grace, so a `reconcile_gold`
-    that ran when it should have stood down files nothing on a morning after
-    a busy sync. The step-13 rehearsal ran into exactly that (its P5 could not
-    fail), so the job names what it asked, raise or verdict, on the one line
-    a reader outside the process has."""
+    """Absent findings cannot say whether a check ran. The step-13 rehearsal
+    ran into exactly that (its P5 could not fail), so the job names what it
+    asked, raise or verdict, on the one line a reader outside the process
+    has."""
 
     @pytest.mark.asyncio
-    async def test_while_duckdb_derives_it_names_the_three_comparisons(self, monkeypatch):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
+    async def test_it_names_every_check_in_order(self):
         returned = []
         await _run({}, returned=returned)
-        asked = returned[0]["checks_run"]
-        assert asked == [c for c in check_order() if c != "pg_gold_internal_check"]
-        assert set(warehouse_cutover.RETIRED_COMPARISONS) <= set(asked)
+        assert returned[0]["checks_run"] == check_order() == ALL_CHECKS
 
     @pytest.mark.asyncio
-    async def test_under_postgres_it_names_the_internal_check_and_none_retired(
-        self, monkeypatch,
-    ):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+    async def test_a_check_that_raised_was_still_asked(self):
         returned = []
-        await _run({}, returned=returned)
-        asked = returned[0]["checks_run"]
-        assert "pg_gold_internal_check" in asked
-        assert not set(warehouse_cutover.RETIRED_COMPARISONS) & set(asked)
-        assert asked == [c for c in check_order()
-                         if c not in warehouse_cutover.RETIRED_COMPARISONS]
-
-    @pytest.mark.asyncio
-    async def test_a_check_that_raised_was_still_asked(self, monkeypatch):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-        returned = []
-        await _run({"reconcile_gold": ValueError("boom")}, returned=returned)
-        assert "reconcile_gold" in returned[0]["checks_run"]
+        await _run({"pg_gold_internal_check": ValueError("boom")}, returned=returned)
+        assert "pg_gold_internal_check" in returned[0]["checks_run"]
 
     def test_it_is_on_the_completion_line(self):
         """`extra=result` is how the formatter puts it on the line; a key a

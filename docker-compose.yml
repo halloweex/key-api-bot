@@ -403,8 +403,20 @@ services:
       # since this decides what a message looks like and not where data
       # lives.
       # - KS_WEEKLY_REPORT_RICH=0
+      # The site's GA4 property, read for the purchase funnel on /traffic
+      # (core/ga4.py). The property id is not a secret; the key is. It is a
+      # Viewer-only service account's JSON, kept on the host outside the
+      # repository and mounted read-only below. Without the file the funnel
+      # block says GA4 is not connected and nothing is asked of Google.
+      - KS_GA4_PROPERTY_ID=${KS_GA4_PROPERTY_ID:-461490434}
+      - KS_GA4_KEY_FILE=/run/secrets/ks/ga4-reader.json
     volumes:
       - ./data:/app/data
+      # The GA4 key's folder (see KS_GA4_KEY_FILE). A folder rather than the
+      # file, so a key added after the container started is seen without a
+      # recreate. The file is mode 640 with the container user's group, since
+      # web runs as the unprivileged appuser.
+      - ${KS_GA4_KEY_DIR:-/root/secrets/key-api-bot}:/run/secrets/ks:ro
     expose:
       - "8080"
     depends_on:
@@ -422,19 +434,19 @@ services:
     cpus: 1.0
     # How long a stop waits before SIGKILL; Docker's default is 10 s. web's
     # shutdown waits on uvicorn draining requests (30 s timeout, and a handler
-    # runs on past its 504), then close_store() on whatever DuckDB work a
-    # cancelled job left in flight (a whole warehouse refresh, ~30 s on one
-    # CPU), then close()'s checkpoint (~7 s with a 900 MB WAL): ~67 s for an
-    # ordinary request. NOT for the eight SLOW_ENDPOINTS in web/middleware.py
-    # (300 s; resync, refresh-statuses, reclassify, and under today's
-    # KS_WRITE_FORECAST goals/recalculate and forecast/train write DuckDB —
-    # the list is derived in tests/unit/test_web_stop_grace.py): one in
-    # flight outlasts this and is killed. Covering them (~340 s, plus the
-    # pull, the migration and the 180 s health gate) would leave a deploy no
-    # margin in its 10-minute ssh timeout. A kill leaves a WAL, which the one
-    # opener (duckdb_switch.open_file) checkpoints whole at the next start;
-    # this only makes kills rarer. Deploys (`up -d`) and `docker compose stop`
-    # both honour it; weekly_compact.sh passes its own --timeout.
+    # runs on past its 504). Until step 14 it also waited on close_store()
+    # for DuckDB work a cancelled job left in flight (~30 s) and close()'s
+    # checkpoint (~7 s with a 900 MB WAL), ~67 s for an ordinary request; the
+    # store holds no file since S14-18 and the 120 s are kept as they were.
+    # NOT for the ten SLOW_ENDPOINTS in web/middleware.py (300 s; resync and
+    # refresh-statuses by both their paths, reclassify, goals/recalculate and
+    # forecast/train among them): one in flight outlasts this and is killed.
+    # None of them writes DuckDB since S14-15 (derived in
+    # tests/unit/test_web_stop_grace.py), so a kill costs the request in
+    # flight and leaves no WAL. Covering them (~340 s, plus the pull, the
+    # migration and the 180 s health gate) would leave a deploy no margin in
+    # its 10-minute ssh timeout. Deploys (`up -d`) and `docker compose stop`
+    # both honour it.
     stop_grace_period: 120s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
@@ -456,6 +468,9 @@ services:
       - ./nginx/security-headers.conf:/etc/nginx/security-headers.conf:ro
       - ./nginx/error.html:/etc/nginx/html/error.html:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      # The /api request log (nginx.conf, `ks_api`), on the host so it outlives
+      # this container. Its bound is the `api-log` service below.
+      - /var/log/ks-api:/var/log/ks-api
     depends_on:
       web:
         condition: service_healthy
@@ -467,6 +482,33 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # The bound of the /api request log, declared beside the mount that creates
+  # the log, so the one cannot ship without the other. Every five minutes
+  # nginx/api-log/rotate.sh cuts the file at midnight UTC or past 32 MiB and
+  # keeps the newest 62 cuts: two months on an ordinary day. The script is
+  # read afresh on every pass, from a directory mount, so an edit to it lands
+  # at the next pass after a deploy. nginx's own image because it is on the
+  # host already and its busybox has everything the script uses. `init` and
+  # SIGTERM so a stop ends the loop at once: the image stops with SIGQUIT,
+  # which the shell outlives, and every stop then waited out Docker's ten
+  # seconds (measured: 10.7 s, against 0.18 s with these two).
+  api-log:
+    image: nginx:alpine
+    container_name: keycrm-api-log
+    restart: unless-stopped
+    logging: *default-logging
+    init: true
+    stop_signal: SIGTERM
+    command:
+      - sh
+      - -c
+      - while :; do sh /opt/api-log/rotate.sh || echo 'api-log - pass failed' >&2; sleep 300; done
+    volumes:
+      - /var/log/ks-api:/var/log/ks-api
+      - ./nginx/api-log:/opt/api-log:ro
+    mem_limit: 32m
+    cpus: 0.1
 
 volumes:
   meili_data:

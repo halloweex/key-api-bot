@@ -2,27 +2,41 @@
 
 Each test plants a known response pattern and checks what comes back, so the
 arithmetic is verified against outcomes we chose rather than against itself.
+
+On Postgres, `/sms`'s one store since step 14's S14-08 (they ran on DuckDB
+until then; `tests/integration/pg_sms_seed.py`). Skipped without `KS_PG_DSN`.
 """
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import insert, needs_postgres, order_row, pg_conn
+
+pytestmark = needs_postgres
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(monkeypatch):
+    async with pg_sms_seed.on_postgres(monkeypatch):
+        yield
 
 SENT = datetime(2026, 8, 1, 10, 0)
 SENT_DATE = date(2026, 8, 1)
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
-    await store.connect()
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO products (id, name, sku, price) VALUES (1, 'Cream', 'SKU-1', 1000)"
+    store = pg_sms_seed.store(tmp_path, "test.duckdb")
+    async with pg_conn() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.products (id, name, sku, price)"
+            " VALUES (1, 'Cream', 'SKU-1', 1000)"
         )
-        conn.execute(
-            "INSERT INTO offer_stocks (id, sku, price, purchased_price, quantity)"
+        await conn.execute(
+            "INSERT INTO bronze.offer_stocks (id, sku, price, purchased_price, quantity)"
             " VALUES (1, 'SKU-1', 1000, 400, 100)"
         )
     return store
@@ -53,23 +67,13 @@ async def _buy(store, buyer_id: int, *, days_after: int, total: str = "1000.00",
                promocode=None, oid=None):
     order_date = SENT_DATE + timedelta(days=days_after)
     oid = oid if oid is not None else 10000 + buyer_id * 10 + days_after
-    async with store.connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO silver_orders (
-                id, source_id, status_id, grand_total, ordered_at, buyer_id,
-                manager_id, order_date, is_return, sales_type, is_active_source,
-                source_name, is_new_customer, promocode
-            ) VALUES (?, 4, 1, ?, ?, ?, NULL, ?, FALSE, 'retail', TRUE,
-                      'Shopify', FALSE, ?)
-            """,
-            [oid, total, order_date, buyer_id, order_date, promocode],
-        )
-        conn.execute(
-            "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
-            " price_sold) VALUES (?, ?, 1, 'Cream', 1, ?)",
-            [oid, oid, total],
-        )
+    async with pg_conn() as conn:
+        await insert(conn, "silver.orders", [order_row(
+            oid=oid, buyer_id=buyer_id, day=order_date, total=total,
+            promocode=promocode)])
+        await insert(conn, "bronze.order_products", [dict(
+            id=oid, order_id=oid, product_id=1, name="Cream", quantity=1,
+            price_sold=total)])
 
 
 @pytest.mark.asyncio
@@ -92,7 +96,6 @@ async def test_lift_is_the_difference_not_the_raw_rate(tmp_path):
     assert cmp["significant"] is True
     assert cmp["pValue"] < 0.01
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -113,7 +116,6 @@ async def test_no_real_effect_is_reported_as_not_significant(tmp_path):
     assert cmp["ci95Pp"][0] < 0 < cmp["ci95Pp"][1]
     assert cmp["pValue"] > 0.5
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -132,7 +134,6 @@ async def test_small_holdout_widens_the_interval(tmp_path):
     assert cmp["significant"] is False, "but 10 controls cannot establish it"
     assert cmp["ci95Pp"][0] < 0, "the interval reaches below zero"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -152,7 +153,6 @@ async def test_purchases_outside_the_window_are_ignored(tmp_path):
     assert wider["overall"]["target"]["converted"] == 3, "wider window catches day 31"
     assert wider["windowDays"] == 60
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -174,7 +174,6 @@ async def test_incremental_money_is_per_contact_difference(tmp_path):
     assert cmp["incrementalMarginPerContact"] == 180.0
     assert cmp["incrementalMarginTotal"] == 1800.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -193,7 +192,6 @@ async def test_promocode_orders_counted_separately(tmp_path):
     assert result["overall"]["target"]["promoOrders"] == 2
     assert result["overall"]["target"]["converted"] == 4, "all four still bought"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -223,7 +221,6 @@ async def test_results_broken_down_by_tier(tmp_path):
     assert tiers["REACTIVATION"]["target"]["converted"] == 1
     assert result["overall"]["target"]["converted"] == 2
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -239,7 +236,6 @@ async def test_only_roster_members_are_counted(tmp_path):
     assert overall["target"]["contacts"] == 5
     assert overall["target"]["converted"] == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -248,29 +244,18 @@ async def test_returns_and_dead_sources_excluded(tmp_path):
     await _seed_campaign(store, targets=10, holdouts=10)
 
     await _buy(store, 1, days_after=2)
-    async with store.connection() as conn:
+    async with pg_conn() as conn:
         for oid, buyer, is_return, active in ((900, 2, True, True), (901, 3, False, False)):
-            conn.execute(
-                """
-                INSERT INTO silver_orders (
-                    id, source_id, status_id, grand_total, ordered_at, buyer_id,
-                    manager_id, order_date, is_return, sales_type, is_active_source,
-                    source_name, is_new_customer
-                ) VALUES (?, 4, 1, '1000.00', ?, ?, NULL, ?, ?, 'retail', ?,
-                          'Shopify', FALSE)
-                """,
-                [oid, SENT_DATE + timedelta(days=2), buyer,
-                 SENT_DATE + timedelta(days=2), is_return, active],
-            )
-            conn.execute(
-                "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
-                " price_sold) VALUES (?, ?, 1, 'Cream', 1, '1000.00')", [oid, oid],
-            )
+            await insert(conn, "silver.orders", [order_row(
+                oid=oid, buyer_id=buyer, day=SENT_DATE + timedelta(days=2),
+                total="1000.00", is_return=is_return, is_active_source=active)])
+            await insert(conn, "bronze.order_products", [dict(
+                id=oid, order_id=oid, product_id=1, name="Cream", quantity=1,
+                price_sold="1000.00")])
 
     overall = (await store.get_sms_campaign_results("aug"))["overall"]
     assert overall["target"]["converted"] == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -278,10 +263,10 @@ async def test_delivery_counts_are_reported(tmp_path):
     store = await _make_store(tmp_path)
     await _seed_campaign(store, targets=4, holdouts=2)
 
-    async with store.connection() as conn:
-        conn.execute("UPDATE sms_campaign_members SET message_id='m1',"
+    async with pg_conn() as conn:
+        await conn.execute("UPDATE app.sms_campaign_members SET message_id='m1',"
                      " delivered=TRUE WHERE campaign='aug' AND buyer_id=1")
-        conn.execute("UPDATE sms_campaign_members SET delivered=FALSE"
+        await conn.execute("UPDATE app.sms_campaign_members SET delivered=FALSE"
                      " WHERE campaign='aug' AND buyer_id IN (2,3)")
 
     target = (await store.get_sms_campaign_results("aug"))["overall"]["target"]
@@ -292,7 +277,6 @@ async def test_delivery_counts_are_reported(tmp_path):
     # buyer 4 has no report yet — neither delivered nor failed
     assert target["delivered"] + target["undelivered"] < target["contacts"]
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -304,11 +288,11 @@ async def test_delivered_only_never_filters_the_control(tmp_path):
     store = await _make_store(tmp_path)
     await _seed_campaign(store, targets=10, holdouts=10)
 
-    async with store.connection() as conn:
+    async with pg_conn() as conn:
         # Only half the target arm was delivered to; the control has no reports
-        conn.execute("UPDATE sms_campaign_members SET delivered=TRUE"
+        await conn.execute("UPDATE app.sms_campaign_members SET delivered=TRUE"
                      " WHERE campaign='aug' AND buyer_id <= 5")
-        conn.execute("UPDATE sms_campaign_members SET delivered=FALSE"
+        await conn.execute("UPDATE app.sms_campaign_members SET delivered=FALSE"
                      " WHERE campaign='aug' AND buyer_id BETWEEN 6 AND 10")
 
     for i in (1, 2, 3):
@@ -331,7 +315,6 @@ async def test_delivered_only_never_filters_the_control(tmp_path):
     assert itt["comparison"]["conversionTarget"] == 30.0
     assert restricted["overall"]["comparison"]["conversionTarget"] == 60.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -348,7 +331,6 @@ async def test_unsent_campaign_refuses_to_report(tmp_path):
     with pytest.raises(ValueError, match="no send date"):
         await store.get_sms_campaign_results("draft")
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -356,7 +338,6 @@ async def test_unknown_campaign(tmp_path):
     store = await _make_store(tmp_path)
     with pytest.raises(ValueError, match="not frozen"):
         await store.get_sms_campaign_results("nope")
-    await store.close()
 
 
 # ─── the window starts at the send, not at midnight ──────────────────────
@@ -364,23 +345,13 @@ async def test_unknown_campaign(tmp_path):
 async def _buy_at(store, buyer_id: int, when: datetime, oid: int,
                   total: str = "1000.00"):
     """A purchase at a precise moment, for testing the window's edges."""
-    async with store.connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO silver_orders (
-                id, source_id, status_id, grand_total, ordered_at, buyer_id,
-                manager_id, order_date, is_return, sales_type, is_active_source,
-                source_name, is_new_customer, promocode
-            ) VALUES (?, 4, 1, ?, ?, ?, NULL, ?, FALSE, 'retail', TRUE,
-                      'Shopify', FALSE, NULL)
-            """,
-            [oid, total, when, buyer_id, when.date()],
-        )
-        conn.execute(
-            "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
-            " price_sold) VALUES (?, ?, 1, 'Cream', 1, ?)",
-            [oid, oid, total],
-        )
+    async with pg_conn() as conn:
+        await insert(conn, "silver.orders", [order_row(
+            oid=oid, buyer_id=buyer_id, day=when.date(), total=total,
+            ordered_at=when)])
+        await insert(conn, "bronze.order_products", [dict(
+            id=oid, order_id=oid, product_id=1, name="Cream", quantity=1,
+            price_sold=total)])
 
 
 @pytest.mark.asyncio
@@ -396,7 +367,6 @@ async def test_a_purchase_before_the_send_is_not_the_campaign(tmp_path):
     overall = (await store.get_sms_campaign_results("aug"))["overall"]
     assert overall["target"]["converted"] == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -409,7 +379,6 @@ async def test_a_purchase_after_the_send_counts_the_same_day(tmp_path):
     overall = (await store.get_sms_campaign_results("aug"))["overall"]
     assert overall["target"]["converted"] == 1
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -423,7 +392,6 @@ async def test_the_window_closes_exactly_n_days_after_the_send(tmp_path):
     overall = (await store.get_sms_campaign_results("aug", window_days=7))["overall"]
     assert overall["target"]["converted"] == 1, "only the one inside the window"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -432,9 +400,9 @@ async def test_members_never_handed_to_the_gateway_leave_the_arm(tmp_path):
     contacts understates the rate on every reading."""
     store = await _make_store(tmp_path)
     await _seed_campaign(store, targets=10, holdouts=10)
-    async with store.connection() as conn:
-        conn.execute(
-            "UPDATE sms_campaign_members SET delivery_status = 'NotSent',"
+    async with pg_conn() as conn:
+        await conn.execute(
+            "UPDATE app.sms_campaign_members SET delivery_status = 'NotSent',"
             " delivered = FALSE WHERE campaign = 'aug' AND buyer_id IN (1, 2)"
         )
 
@@ -445,7 +413,6 @@ async def test_members_never_handed_to_the_gateway_leave_the_arm(tmp_path):
     assert overall["holdout"]["contacts"] == 10, "the control is untouched"
     assert overall["holdout"]["notSent"] == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -453,9 +420,9 @@ async def test_a_purchase_by_someone_never_messaged_is_not_a_response(tmp_path):
     """They bought without ever seeing the message, so it is not the campaign's."""
     store = await _make_store(tmp_path)
     await _seed_campaign(store, targets=10, holdouts=10)
-    async with store.connection() as conn:
-        conn.execute(
-            "UPDATE sms_campaign_members SET delivery_status = 'NotSent',"
+    async with pg_conn() as conn:
+        await conn.execute(
+            "UPDATE app.sms_campaign_members SET delivery_status = 'NotSent',"
             " delivered = FALSE WHERE campaign = 'aug' AND buyer_id = 1"
         )
     await _buy(store, 1, days_after=2)
@@ -466,7 +433,6 @@ async def test_a_purchase_by_someone_never_messaged_is_not_a_response(tmp_path):
     assert overall["target"]["converted"] == 1, "buyer 2 only"
     assert overall["target"]["contacts"] == 9
 
-    await store.close()
 
 
 async def _second_record(store, *, buyer_id: int, phone: str, name: str):
@@ -476,11 +442,9 @@ async def _second_record(store, *, buyer_id: int, phone: str, name: str):
     checks out on the storefront, and the name is spelled differently enough
     that a fresh buyer row is written.
     """
-    async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO buyers (id, full_name, phone) VALUES (?, ?, ?)",
-            [buyer_id, name, phone],
-        )
+    async with pg_conn() as conn:
+        await insert(conn, "bronze.buyers", [dict(
+            id=buyer_id, full_name=name, phone=phone)])
 
 
 @pytest.mark.asyncio
@@ -507,7 +471,6 @@ async def test_an_empty_control_does_not_certify_an_effect(tmp_path):
     assert cmp["ci95Pp"][0] < 0, "the interval must reach below zero"
     assert cmp["pValue"] > 0.05
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -531,7 +494,6 @@ async def test_a_verdict_needs_purchases_in_both_arms(tmp_path):
     assert cmp["verdictReady"] is False
     assert cmp["significant"] is False
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -551,7 +513,6 @@ async def test_a_verdict_is_offered_once_both_arms_have_bought(tmp_path):
     assert cmp["significant"] is True
     assert cmp["ci95Pp"][0] > 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -570,7 +531,6 @@ async def test_the_interval_holds_the_lift_it_is_drawn_around(tmp_path):
     lo, hi = cmp["ci95Pp"]
     assert lo <= cmp["liftPp"] <= hi
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -596,7 +556,6 @@ async def test_a_response_under_a_second_customer_record_still_counts(tmp_path):
     assert overall["target"]["revenue"] == 2000.0
     assert overall["target"]["contacts"] == 10, "and still one contact"
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -616,7 +575,6 @@ async def test_one_person_on_two_records_is_still_one_response(tmp_path):
     assert overall["target"]["orders"] == 2, "who placed two orders"
     assert overall["target"]["revenue"] == 2000.0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -634,7 +592,6 @@ async def test_a_stranger_on_a_different_number_is_not_a_member(tmp_path):
     assert overall["target"]["converted"] == 0
     assert overall["holdout"]["converted"] == 0
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -647,11 +604,11 @@ async def test_delivery_filter_keeps_recipients_with_no_report(tmp_path):
     """
     store = await _make_store(tmp_path)
     await _seed_campaign(store, targets=10, holdouts=10)
-    async with store.connection() as conn:
-        conn.execute("UPDATE sms_campaign_members SET delivered = TRUE,"
+    async with pg_conn() as conn:
+        await conn.execute("UPDATE app.sms_campaign_members SET delivered = TRUE,"
                      " delivery_status = 'Delivered'"
                      " WHERE campaign = 'aug' AND buyer_id <= 3")
-        conn.execute("UPDATE sms_campaign_members SET delivered = FALSE,"
+        await conn.execute("UPDATE app.sms_campaign_members SET delivered = FALSE,"
                      " delivery_status = 'Rejected'"
                      " WHERE campaign = 'aug' AND buyer_id = 4")
         # 5..10 keep delivery_status 'Sent' and a NULL flag — in transit.
@@ -662,7 +619,6 @@ async def test_delivery_filter_keeps_recipients_with_no_report(tmp_path):
     assert restricted["target"]["contacts"] == 9, "only the refusal is dropped"
     assert restricted["holdout"]["contacts"] == 10
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -682,7 +638,6 @@ async def test_the_send_records_what_it_cost(tmp_path):
     # are not billed, so the roster size is the wrong number to multiply.
     assert res["costTotal"] == pytest.approx(8 * 2 * 1.28)
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -696,7 +651,6 @@ async def test_a_campaign_sent_before_costs_were_recorded_reports_none(tmp_path)
 
     assert res["costTotal"] is None
 
-    await store.close()
 
 
 @pytest.mark.asyncio
@@ -709,11 +663,11 @@ async def test_the_tariff_is_frozen_onto_the_campaign(tmp_path):
         message_text="hi", message_parts=1, price_per_part=1.28,
     )
 
-    async with store.connection() as conn:
-        stored = conn.execute(
+    async with pg_conn() as conn:
+        stored = await conn.fetchrow(
             "SELECT message_text, message_parts, recipients_sent,"
-            " price_per_part, cost_total FROM sms_campaigns WHERE campaign = 'aug'"
-        ).fetchone()
+            " price_per_part, cost_total FROM app.sms_campaigns WHERE campaign = 'aug'"
+        )
 
     assert stored[0] == "hi"
     assert stored[1] == 1
@@ -721,4 +675,3 @@ async def test_the_tariff_is_frozen_onto_the_campaign(tmp_path):
     assert float(stored[3]) == pytest.approx(1.28)
     assert float(stored[4]) == pytest.approx(2 * 1.28)
 
-    await store.close()

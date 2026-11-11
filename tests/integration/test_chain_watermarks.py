@@ -2,8 +2,10 @@
 
 Through the store's own `get_last_sync_time`/`set_last_sync_time` — the calls
 the sync makes — on a DuckDBStore whose `connection` raises where a key must not
-reach DuckDB. Then the case that decided the design: the hourly replace of
-`app.sync_metadata` runs for real, and the watermark is still there.
+reach DuckDB. Then the case that decided the design: DuckDB's frozen stamps
+stand beside the moved keys, and the watermark read is Postgres's. (Until step
+14's S14-13 the hourly replace of `app.sync_metadata` ran for real here; it
+went with `core.pg_operational`.)
 """
 from __future__ import annotations
 
@@ -38,7 +40,7 @@ async def pg_only(monkeypatch):
         monkeypatch.delenv(env, raising=False)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     await _clean(pool)
-    store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
+    store = DuckDBStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("reached DuckDB")
@@ -80,26 +82,46 @@ class TestTheStoreRoutesThroughTheRegistry:
         await store.set_last_sync_time("stocks", first + timedelta(hours=1))
         assert await store.get_last_sync_time("stocks") == first + timedelta(hours=1)
 
-    @pytest.mark.asyncio
-    async def test_under_the_flag_a_key_the_chain_does_not_own_stays_on_duckdb(
-        self, pg_only,
-    ):
-        store, pool, env = pg_only
-        env.setenv("KS_WRITE_INVENTORY", "postgres")
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.set_last_sync_time("orders", datetime.now(timezone.utc))
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.get_last_sync_time("orders")
-        assert await _stored(pool) == {}
+
+class TestTheOrderStepIsJudgedByItsOwnWrite:
+    """`last_sync_orders` holds KeyCRM's newest `updated_at`, which stands
+    still all of a quiet night while the order step writes the same value
+    every tick. The row's stamp is what moves, and what the freshness check
+    judges (`data_quality.JUDGED_BY_LAST_WRITE`)."""
 
     @pytest.mark.asyncio
-    async def test_without_the_flag_the_chain_keys_stay_on_duckdb(self, pg_only):
+    async def test_the_same_value_written_again_moves_the_stamp(self, pg_only):
+        from core.data_quality import _judge_freshness
+        from core.pg_chain_watermarks import read_values_and_stamps
+        from core.write_chains import sync_keys
+
         store, pool, _env = pg_only
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.set_last_sync_time("offers", datetime.now(timezone.utc))
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.get_last_sync_time("offers")
-        assert await _stored(pool) == {}
+        evening = datetime.now(timezone.utc) - timedelta(hours=8, minutes=36)
+        async with pool.acquire() as conn:
+            # The step last wrote 8 h ago with the evening's last order...
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ('last_sync_orders', $1, now() - interval '8 hours')",
+                evening.isoformat())
+        _, before = await read_values_and_stamps(["last_sync_orders"])
+
+        # ...and writes it again now: a tick on a night nobody ordered.
+        await store.set_last_sync_time("orders", evening)
+        values, stamps = await read_values_and_stamps(sync_keys())
+
+        assert values["last_sync_orders"] == evening.isoformat()
+        written = datetime.fromisoformat(stamps["last_sync_orders"])
+        assert written.tzinfo is not None
+        assert written > datetime.fromisoformat(before["last_sync_orders"]) + timedelta(hours=7)
+
+        now = datetime.now(timezone.utc)
+        rows = {"last_sync_orders": evening.isoformat()}
+        assert not [i for i in _judge_freshness(rows, now, chain_watermarks=values,
+                                                chain_stamps=stamps)
+                    if i.check_name == "freshness_orders"]
+        stale = [i for i in _judge_freshness(rows, now, chain_watermarks=values)
+                 if i.check_name == "freshness_orders"]
+        assert stale, "without the stamp the value is judged, and pages"
 
 
 class TestTheHourlyReplaceCannotRollItBack:
@@ -117,8 +139,7 @@ class TestTheHourlyReplaceCannotRollItBack:
         for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", DSN)
-        store = DuckDBStore(db_path=tmp_path / "frozen.duckdb")
-        await store.connect()
+        store = DuckDBStore()
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
         await _clean(pool)
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -126,7 +147,6 @@ class TestTheHourlyReplaceCannotRollItBack:
             yield store, pool, monkeypatch
         await _clean(pool)
         await pool.close()
-        await store.close()
 
     @pytest.mark.asyncio
     async def test_the_watermark_survives_and_the_freshness_check_is_quiet(
@@ -134,34 +154,33 @@ class TestTheHourlyReplaceCannotRollItBack:
     ):
         from core.data_quality import _freshness_check
         from core.pg_chain_watermarks import read_values
-        from core.pg_operational import replicate_operational
-        from core.write_chains import stood_down_sync_keys
+        from core.write_chains import sync_keys as stood_down_sync_keys
 
         store, pool, env = both_stores
         now = datetime.now(timezone.utc)
         frozen = now - timedelta(hours=60)
         fresh = now - timedelta(minutes=10)
 
-        # Before the switch: DuckDB owns both keys, and they stop here.
-        await store.set_last_sync_time("offers", frozen)
-        await store.set_last_sync_time("stocks", frozen)
+        # Before the switch: DuckDB owned both keys, and they stopped there.
+        # The store's setter writes Postgres alone since step 14's S14-11, and
+        # since S14-18 there is no DuckDB to hold the frozen stamps: they are
+        # the rows Postgres's copy of the table hands the check (`frozen_rows`).
+        frozen_rows = {f"last_sync_{key}": frozen.isoformat()
+                       for key in ("offers", "stocks")}
 
         env.setenv("KS_WRITE_INVENTORY", "postgres")
         await store.set_last_sync_time("offers", fresh)
         await store.set_last_sync_time("stocks", fresh)
 
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        async with pool.acquire() as conn:
-            copied = await conn.fetchval(
-                "SELECT value FROM app.sync_metadata WHERE key = 'last_sync_offers'")
-        assert copied == frozen.isoformat(), "the replace did not run"
+        # The hourly replace of `app.sync_metadata` ran here until step 14's
+        # S14-13 deleted it with `core.pg_operational`; DuckDB's frozen stamps
+        # still stand beside the moved keys, and are not what is read.
         assert await store.get_last_sync_time("offers") == fresh
         assert await store.get_last_sync_time("stocks") == fresh
 
         watermarks = await read_values(stood_down_sync_keys())
-        async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks=watermarks)
+        # DuckDB's frozen rows, as the check meets them since step 14's
+        # S14-14: Postgres's copy of the table (`frozen_rows`, above).
+        issues = _freshness_check(now, chain_watermarks=watermarks, frozen_rows=frozen_rows)
         assert not [i for i in issues
                     if i.check_name in ("freshness_offers", "freshness_stocks")], issues
