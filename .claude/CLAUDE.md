@@ -675,6 +675,20 @@ keep. Set it via `POST /api/managers/{id}/retail-status`, which raises the
 derivation signal in the same transaction, because `sales_type` only changes
 on a rebuild.
 
+**"First purchase" has three definitions, kept on purpose** (owner's decision
+O7, 2026-11-11). Silver's (`silver_recompute_ctes`, which Gold's
+`new_customers` counts): the earliest non-return order on any source and of any
+sales type, and `is_new_customer` only on an active-source order of that day.
+`app.customer_profile`'s: retail orders on active sources (frozen since O6).
+The SMS audience's: retail order lines on active sources, so an order without
+lines does not count. Measured on production for the 365 days to 2026-11-11:
+8 168 buyers made a first retail order, and Silver's rule counts 63 of them as
+not new, exactly the gap to Gold's 8 105 — 40 because their first order was on
+Opencart (intended: a purchase on a retired channel is still a purchase), 21
+because it was an internal shipment (9 of them with no money), one b2b and one
+at the exhibition. The SMS audience disagrees with the order-based rule for 2
+of 19 413 retail buyers, both for want of line items.
+
 ### The audience of an SMS campaign
 Until 2026-08-26 the page had exactly one cohort: three value tiers over a
 270-day window, from six thresholds hardcoded in the API. Two knobs were on
