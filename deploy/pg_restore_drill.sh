@@ -138,15 +138,17 @@ CHAIN5_OWNER_SQL="SELECT count(*) FROM meta.chain_watermarks WHERE key IN ('owne
 # it they are copies — the orders, line items and expenses of DuckDB's mirror,
 # the misses of the hourly full replace — and with the chain off the drill reads
 # what it always read. After it this dump is the only backup of every order
-# taken since the flip. Nothing deletes an order or an expense — both are
-# upserted, by the chain as by the mirror before it — and the misses are
-# upserted by the chain alone, so those three grow. An order's line items are
-# deleted and laid down again whenever it is written, and an order that lost a
-# line is one row fewer, so they may shrink.
+# taken since the flip. Nothing deletes an order — orders are upserted, by the
+# chain as by the mirror before it — and the misses are upserted by the chain
+# alone, so those two grow. An order's line items are deleted and laid down
+# again whenever it is written, and an order that lost a line is one row fewer,
+# so they may shrink. So may its expenses since the owner's decision O2 (a)
+# (2026-11-11): the chain deletes an expense KeyCRM no longer lists under its
+# order, so an expense removed between the dump and the drill is one row fewer.
 CHAIN3_DRILL_TABLES=(
     "bronze.orders:grows"
     "bronze.order_products:either"
-    "bronze.expenses:grows"
+    "bronze.expenses:either"
     "app.order_backfill_misses:grows"
 )
 CHAIN3_OWNER_SQL="SELECT count(*) FROM meta.chain_watermarks WHERE key IN ('owner:bronze.orders', 'owner:bronze.order_products', 'owner:bronze.expenses', 'owner:app.order_backfill_misses')"
