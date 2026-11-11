@@ -21,14 +21,20 @@ export function formatCurrency(value: number): string {
 /**
  * Hryvnia in as few characters as stay readable, for a tile too narrow to
  * hold the full figure (which it keeps in its tooltip): from a million up
- * `₴108 млн` / `₴68,1 млн` (`₴68.1M` in English); below it the full figure,
- * which is already the shorter of the two.
+ * `₴68,1 млн` (`₴68.1M` in English), and with no tenth once the figure has
+ * three digits before it — `₴109 млн`, not `₴108,5 млн`, which is a
+ * character more than a tile beside the sidebar holds and a precision nobody
+ * reads at that size; below a million the full figure, which is already the
+ * shorter of the two.
  */
 export function formatCurrencyShort(value: number): string {
-  if (Math.abs(value) < 1_000_000) return formatCurrency(value)
+  const size = Math.abs(value)
+  if (size < 1_000_000) return formatCurrency(value)
+  // The figure before the unit: 108.5 for 108 542 127, 1.2 for 1.2 billion.
+  const unit = 10 ** (Math.floor(Math.log10(size) / 3) * 3)
   const compact = new Intl.NumberFormat(getLocale(), {
     notation: 'compact',
-    maximumFractionDigits: 1,
+    maximumFractionDigits: size / unit >= 100 ? 0 : 1,
   }).format(value)
   return `₴${compact}`
 }
