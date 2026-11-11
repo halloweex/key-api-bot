@@ -112,7 +112,8 @@ def iter_endpoints(app: Any) -> Iterator[Endpoint]:
 def in_schema(endpoint: Endpoint) -> bool:
     """Whether the route is in the OpenAPI schema — False for a route
     registered with `include_in_schema=False`, such as an old path kept as an
-    alias of a renamed one (step 14's S14-17: `/api/duckdb/…` → `/api/sync/…`)."""
+    alias of a renamed one (step 14's S14-17 kept `/api/duckdb/…` beside
+    `/api/sync/…` that way, until the final stage removed the aliases)."""
     return bool(getattr(endpoint.route, "include_in_schema", True))
 
 
@@ -120,7 +121,7 @@ def aliases(app: Any) -> frozenset:
     """`(method, path)` of every route out of the schema whose function a
     route in the schema serves at another path: the same door under its old
     name. A sweep that opens every door opens it once, by the name in the
-    schema."""
+    schema. Empty since the final stage (`tests/unit/test_sync_doors.py`)."""
     endpoints = list(iter_endpoints(app))
     served = {(method, e.route.endpoint) for e in endpoints if in_schema(e)
               for method in e.methods}

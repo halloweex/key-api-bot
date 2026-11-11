@@ -125,12 +125,11 @@ class TestApiRequiresAuth:
         "/api/revenue/forecast/tune",
         "/api/expenses",
         "/api/stocks/snapshot/refresh",
-        # The sync levers by both their names (step 14's S14-17): the alias
-        # under /api/duckdb/ is the same function and must refuse the same.
+        # The sync levers (step 14's S14-17). Their aliases under
+        # /api/duckdb/ went at the final stage; what those paths answer now
+        # is held in tests/unit/test_sync_doors.py.
         "/api/sync/sync-buyers",
-        "/api/duckdb/sync-buyers",
         "/api/sync/resync",
-        "/api/duckdb/resync",
     ]
 
     @pytest.mark.parametrize("path", PROTECTED_GETS)

@@ -227,7 +227,7 @@ KEPT_ENTRIES = {
 
 # The routes the sweep does not run, and where a refusal stops on each before
 # the 503 handler — empty means it reaches the handler. The assistant's stop
-# at its tools, by design (`IN_BAND_ROUTES`). `POST /duckdb/sync-buyers`
+# at its tools, by design (`IN_BAND_ROUTES`). `POST /sync/sync-buyers`
 # reaches the handler: the buyers step passes a refusal on and the route lets
 # it through (chain 4's PR-3). Until then the step's `except Exception`
 # answered it, and the route said "Buyer sync failed" with a 500.
