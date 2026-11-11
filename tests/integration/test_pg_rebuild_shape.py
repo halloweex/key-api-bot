@@ -167,9 +167,9 @@ class TestTheRowsAreTheTwoPassesRows:
     @pytest.mark.asyncio
     async def test_silver_and_gold_equal_the_old_shape(self, landed):
         """Mutation: drop `AND p.is_active_source` from the recompute's
-        is_new_customer, or join the baseline on the inactive-source filter —
-        the Opencart buyer's Instagram order turns new and Silver and Gold
-        differ."""
+        is_new_customer (first orders placed on Opencart turn new: 126 rows
+        differ), or filter the baseline to active sources (the Opencart
+        buyer's Instagram order turns new) — Silver and Gold then differ."""
         from core.pg_gold import GOLD_TABLE, insert_sql as gold_insert, rebuild_gold
         from core.pg_silver import SILVER_TABLE, rebuild_silver
 
