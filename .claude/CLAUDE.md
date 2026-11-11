@@ -203,9 +203,16 @@ digits up, `₴109 млн`) and shows it only when the full figure, measured on 
 hidden copy, does not fit — the full one stays in the tooltip and the label.
 `TileGrid`'s five-tile row is three-up below `xl` (1280 px): beside the
 sidebar at 1024 px a fifth of the row held 74 px of figure. The marketing report's range gives its start a year
-when the two differ (`formatReportRange`). Its «Кол-во клиентов» sums Gold's
-daily distinct buyers, which over the whole history reads 42 620 against the
-dashboard's 19 293 people — a known difference, the owner's to decide.
+when the two differ (`formatReportRange`). Its «Кол-во клиентов», new and
+returning count **people**, by the dashboard's own statement over Silver
+(`_INSIGHTS_PERIOD_SQL`; with a brand or category, over the matching lines),
+in every window, the comparisons included (owner's decision, 2026-11-11).
+They summed Gold's daily distinct buyers until then — buyer-days, within a
+few of the orders on a month (October 2026: 1 295 against 1 299 orders and
+1 231 people) and 42 880 against 19 425 people over the whole history. A
+person new in the window who comes back in it is in both new and returning,
+as on the dashboard. `tests/integration/test_marketing_counts_people.py`
+holds the report to the dashboard's answer.
 
 `start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
 `core/filters.parse_period`, and only as a pair: one alone is ignored, and a

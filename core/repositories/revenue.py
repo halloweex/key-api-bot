@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from core.duckdb_constants import UNKNOWN_BRAND, brand_where
 from core.filters import by_month
 from core.models import OrderStatus
+from core.repositories.customers import _INSIGHTS_PERIOD_SQL
 from core.sql_dialect import TODAY_IN_KYIV
 from core import read_fallback
 
@@ -293,13 +294,17 @@ def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
 
 # The monthly report's eleven figures when a brand or category is chosen.
 #
-# Gold carries no product dimension, so this reads the order lines — and it
-# reproduces Gold's grain rather than improving on it. Gold's customer counts
-# are `COUNT(DISTINCT buyer_id)` per (date, sales_type) cell and the report
-# SUMs the cells, so "customers" has always meant buyer-days. Counting distinct
-# buyers over the whole window here would make a filtered report and an
-# unfiltered one disagree about what the same word means. Orders sum exactly
-# either way: an order has one date and one sales type.
+# Gold carries no product dimension, so this reads the order lines.
+#
+# Customers are people over the whole window: whoever bought a matching line,
+# once, however many days they came back — the unfiltered report's count
+# (`_INSIGHTS_PERIOD_SQL`, the dashboard's) narrowed to the lines. Until
+# 2026-11-11 both paths summed a distinct count per (date, sales_type) cell,
+# Gold's grain, so "customers" meant buyer-days: within a few of the orders on
+# a month (October 2026, retail: 1 295 against 1 299 orders and 1 231 people)
+# and 42 880 against 19 425 people over the whole history. The owner chose
+# people. Orders, revenue and the channels read the same either way: an order
+# has one date and one sales type.
 #
 # Revenue is the matching lines' `line_amount`, not the orders' grand totals —
 # a brand's sales, not the value of every basket it appeared in. That is what
@@ -307,39 +312,23 @@ def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
 #
 # The column order is `_MONTH_SQL`'s, which `_fetch_month` unpacks.
 _MARKETING_LINES_PERIOD_SQL = """
-    WITH cells AS (
-        SELECT
-            COALESCE(SUM(l.line_amount), 0) AS revenue,
-            COUNT(DISTINCT l.order_id) AS orders,
-            COUNT(DISTINCT l.buyer_id) AS customers,
-            COUNT(DISTINCT CASE WHEN l.is_new_customer THEN l.buyer_id END) AS new_customers,
-            COUNT(DISTINCT CASE WHEN NOT l.is_new_customer THEN l.buyer_id END) AS returning_customers,
-            COALESCE(SUM(CASE WHEN l.source_id = 1 THEN l.line_amount END), 0) AS instagram_revenue,
-            COALESCE(SUM(CASE WHEN l.source_id = 2 THEN l.line_amount END), 0) AS telegram_revenue,
-            COALESCE(SUM(CASE WHEN l.source_id = 4 THEN l.line_amount END), 0) AS shopify_revenue,
-            COUNT(DISTINCT CASE WHEN l.source_id = 1 THEN l.order_id END) AS instagram_orders,
-            COUNT(DISTINCT CASE WHEN l.source_id = 2 THEN l.order_id END) AS telegram_orders,
-            COUNT(DISTINCT CASE WHEN l.source_id = 4 THEN l.order_id END) AS shopify_orders
-        FROM {order_lines} l
-        WHERE NOT l.is_return
-          AND l.is_active_source
-          AND l.order_date BETWEEN ? AND ?
-          AND {where}
-        GROUP BY l.order_date, l.sales_type
-    )
     SELECT
-        COALESCE(SUM(revenue), 0),
-        COALESCE(SUM(orders), 0),
-        COALESCE(SUM(customers), 0),
-        COALESCE(SUM(new_customers), 0),
-        COALESCE(SUM(returning_customers), 0),
-        COALESCE(SUM(instagram_revenue), 0),
-        COALESCE(SUM(telegram_revenue), 0),
-        COALESCE(SUM(shopify_revenue), 0),
-        COALESCE(SUM(instagram_orders), 0),
-        COALESCE(SUM(telegram_orders), 0),
-        COALESCE(SUM(shopify_orders), 0)
-    FROM cells
+        COALESCE(SUM(l.line_amount), 0),
+        COUNT(DISTINCT l.order_id),
+        COUNT(DISTINCT l.buyer_id),
+        COUNT(DISTINCT CASE WHEN l.is_new_customer THEN l.buyer_id END),
+        COUNT(DISTINCT CASE WHEN NOT l.is_new_customer THEN l.buyer_id END),
+        COALESCE(SUM(CASE WHEN l.source_id = 1 THEN l.line_amount END), 0),
+        COALESCE(SUM(CASE WHEN l.source_id = 2 THEN l.line_amount END), 0),
+        COALESCE(SUM(CASE WHEN l.source_id = 4 THEN l.line_amount END), 0),
+        COUNT(DISTINCT CASE WHEN l.source_id = 1 THEN l.order_id END),
+        COUNT(DISTINCT CASE WHEN l.source_id = 2 THEN l.order_id END),
+        COUNT(DISTINCT CASE WHEN l.source_id = 4 THEN l.order_id END)
+    FROM {order_lines} l
+    WHERE NOT l.is_return
+      AND l.is_active_source
+      AND l.order_date BETWEEN ? AND ?
+      AND {where}
 """
 
 
@@ -1887,12 +1876,25 @@ class RevenueMixin:
         # Postgres with a `source_id` dimension, and the five scalars must be
         # read from the roll-up rows only — three of them are
         # `COUNT(DISTINCT buyer_id)`, and distinct counts do not add up.
+        # Those three are Gold's buyer-days and are not read: the customers
+        # come from `_PEOPLE_SQL` below.
         _MONTH_SQL = """
             SELECT
                 {period_measures}
             FROM {gold_daily_revenue}
             WHERE date BETWEEN ? AND ? AND %s
         """ % sales_where
+
+        # The window's customers as the dashboard counts them, by its own
+        # statement over Silver (`get_customer_insights`): people, each once,
+        # new and returning by `is_new_customer`. One person can be both, as
+        # on the dashboard: first ever order in the window, and another after
+        # it. `tests/integration/test_marketing_counts_people.py` holds the two
+        # screens to one answer.
+        _PEOPLE_SQL = _INSIGHTS_PERIOD_SQL.replace("{where}", " AND ".join(
+            ["s.order_date BETWEEN ? AND ?", "NOT s.is_return",
+             "s.is_active_source", "s.buyer_id IS NOT NULL"]
+            + (["s.sales_type = ?"] if sales_type != "all" else [])))
 
         # A product filter: the same eleven figures from the order lines.
         # Resolved before any read, and through the routed `_category_ids`,
@@ -1924,12 +1926,15 @@ class RevenueMixin:
                         _MONTH_SQL, [sd, ed] + sales_params,
                     )
                 row = rows[0]
+                # The line path counts people itself; Gold cannot.
+                people = row[2:5] if product_filtered else (
+                    await self._marketing_run(_PEOPLE_SQL, [sd, ed] + sales_params))[0]
 
                 revenue = float(row[0])
                 orders = int(row[1])
-                customers = int(row[2])
-                new_cust = int(row[3])
-                ret_cust = int(row[4])
+                customers = int(people[0] or 0)
+                new_cust = int(people[1] or 0)
+                ret_cust = int(people[2] or 0)
 
                 return {
                     "revenue": round(revenue, 2),
