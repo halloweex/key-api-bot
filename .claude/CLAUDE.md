@@ -1831,10 +1831,13 @@ so Gold can never aggregate a Silver the next statement is about to replace.
 `DELETE` then one `INSERT`, in one transaction, under `SET LOCAL lock_timeout
 = '5s'`, for `pg_silver`'s reasons — and Silver is the same shape: one `INSERT`
 of `silver_recompute_ctes`, where it was an INSERT and a full-table pass-2
-UPDATE. Both were `TRUNCATE` until the review's A23 (2026-11), which made
-every read of the two tables wait for the rebuild; a `DELETE` blocks no
-reader, and a conflicting lock now costs one failed, journalled run that the
-next tick retries.
+UPDATE. Both tables were cleared with `TRUNCATE` until the review's A23
+(2026-11), and every read of them waited for the rebuild; a `DELETE` blocks
+no reader, and a conflicting lock costs one failed, journalled run that the
+next tick retries. The price, a dead version of every row for autovacuum, was
+measured first: at production's pace (the 600-second floor) both tables
+settle under twice a fresh build; back to back, which only forced refreshes
+can do, they grow until vacuum catches up.
 
 **The measures are shared; the shape is not.** The eight aggregates live in
 `GOLD_MEASURES` (`core/warehouse_sql.py`) and are rendered verbatim into the

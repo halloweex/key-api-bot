@@ -44,11 +44,17 @@ until the COMMIT and never wait. Its price is a dead version of every row for
 autovacuum — about 89 rebuilds a day of ~50 000 rows — and that was measured
 before it was chosen, on 50 300 synthetic orders with the default autovacuum:
 at production's pace, which never rebuilds twice inside the 600-second floor
-while autovacuum looks every 60 seconds, the files settle at under twice a
-fresh build and stop there, and a rebuild is no slower than the first. Run
-back to back with no pause, a pace the floor forbids, vacuum cannot keep up
-and the table grows without bound — the reason the floor and this choice go
-together. (The PR that made the change carries the numbers.)
+while autovacuum looks every 60 seconds, each rebuild's vacuum ran within 80
+seconds of it, the files settled at 1.87 times a fresh build (14.4 MB, where
+the two-pass table, its UPDATE's dead rows included, held 14.0) and stayed
+there for 100 rebuilds, and
+the last rebuilds were no slower than the first. Run back to back with no
+pause, a pace the floor forbids, vacuum cannot keep up: 48.7 times a fresh
+build after 100 — the reason the floor and this choice go together. A forced
+`POST /api/warehouse/refresh` skips the floor, so a burst of them grows the
+files by most of a fresh build each (5 to 6 MB back to back), space the
+rebuilds after the next vacuum reuse. (The PR that made the change carries
+the rest of the numbers.)
 
 `lock_timeout` (`REBUILD_LOCK_TIMEOUT`, `SET LOCAL`) bounds the wait for the
 table's lock. A rebuild that cannot take it in time raises

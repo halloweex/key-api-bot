@@ -168,8 +168,9 @@ services:
   # SQL body, no longer derived anything; `app.customer_profile` stopped
   # being rebuilt by the owner's decision O6 the same month. Measured on
   # 50 300 synthetic orders: 39.2 MB of WAL per derivation of Silver and Gold
-  # before, 22.4 MB after (`core/pg_silver.py` says why it is a DELETE and
-  # not a TRUNCATE that clears the table first).
+  # before, 22.4 MB after — 39.8 and 23.2 with the autovacuum each one is
+  # owed (`core/pg_silver.py` says why it is a DELETE and not a TRUNCATE that
+  # clears the table first).
   #
   # Not urgent: with retention now anchored to a base backup
   # (deploy/pg_basebackup.sh) the archive is bounded by the PITR window, so
