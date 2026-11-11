@@ -202,8 +202,8 @@ async def rebuild_silver_from_scratch(
     admin: dict = Depends(require_admin),
 ):
     """Rebuild Silver from scratch — in Postgres, the derivation run past its
-    floor, which rebuilds `silver.orders` whole (TRUNCATE and both passes in
-    one transaction, `core.pg_silver.rebuild_silver`).
+    floor, which rebuilds `silver.orders` whole (one transaction,
+    `core.pg_silver.rebuild_silver`).
 
     Until step 14's S14-15 this DROPped, re-created and re-filled DuckDB's
     `silver_orders` first — a lever for DuckDB rows that blocked its

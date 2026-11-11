@@ -1785,7 +1785,13 @@ nanohryvnia.
 rather than receives. `core/pg_gold.py` writes it from `silver.orders`, in the
 same call that rebuilds Silver and immediately after it — one floor, one tick,
 so Gold can never aggregate a Silver the next statement is about to replace.
-`TRUNCATE` then one `INSERT`, in one transaction, for `pg_silver`'s reasons.
+`DELETE` then one `INSERT`, in one transaction, under `SET LOCAL lock_timeout
+= '5s'`, for `pg_silver`'s reasons — and Silver is the same shape: one `INSERT`
+of `silver_recompute_ctes`, where it was an INSERT and a full-table pass-2
+UPDATE. Both were `TRUNCATE` until the review's A23 (2026-11), which made
+every read of the two tables wait for the rebuild; a `DELETE` blocks no
+reader, and a conflicting lock now costs one failed, journalled run that the
+next tick retries.
 
 **The measures are shared; the shape is not.** The eight aggregates live in
 `GOLD_MEASURES` (`core/warehouse_sql.py`) and are rendered verbatim into the

@@ -161,12 +161,15 @@ services:
   #   app.customer_profile  5.2M inserts over 18,418
   #   gold.daily_revenue    1.7M inserts over 5,714
   #
-  # — i.e. ~400 whole-table rebuilds, and `silver.orders` pays twice because
-  # `rebuild_silver` follows its INSERT with a full-table pass-2 UPDATE, and an
-  # UPDATE here is a second row version. Folding pass 2 into pass 1 would
-  # roughly halve the largest contributor; it is not a free change, because
-  # that SQL body is shared with DuckDB, whose incremental path scopes pass 2
-  # by buyer and would not benefit the same way.
+  # — i.e. ~400 whole-table rebuilds, and `silver.orders` paid twice because
+  # `rebuild_silver` followed its INSERT with a full-table pass-2 UPDATE, and
+  # an UPDATE here is a second row version. The review's A23 (2026-11) folded
+  # pass 2 into the INSERT, once DuckDB, whose incremental path shared that
+  # SQL body, no longer derived anything; `app.customer_profile` stopped
+  # being rebuilt by the owner's decision O6 the same month. Measured on
+  # 50 300 synthetic orders: 39.2 MB of WAL per derivation of Silver and Gold
+  # before, 22.4 MB after (`core/pg_silver.py` says why it is a DELETE and
+  # not a TRUNCATE that clears the table first).
   #
   # Not urgent: with retention now anchored to a base backup
   # (deploy/pg_basebackup.sh) the archive is bounded by the PITR window, so
