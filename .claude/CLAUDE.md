@@ -1248,7 +1248,7 @@ whole reason the group is read from the source now.
 
 | Job | Trigger | What it does |
 |---|---|---|
-| `pg_warehouse_derive` | every 1 min | Postgres derives Silver, Gold and the customer profile when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
+| `pg_warehouse_derive` | every 1 min | Postgres derives Silver and Gold when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
@@ -2584,7 +2584,9 @@ TRUNCATE не MVCC-безопасен: снимок, взятый до комм�
 Воспроизведено с настоящим `rebuild_silver`: exit 0, «no orders» за все
 12 недель, а с `--snapshot` — файл на 0 строк, «сверенный» с таблицей.
 LOCK снимка не фиксирует и пережидает тик; пустой Silver рядом с непустой
-бронзой всё равно роняет прогон (exit 1). Платформы в отчёте — в именах
+бронзой всё равно роняет прогон (exit 1). С A23 (11.11.2026) Silver и Gold
+чистятся `DELETE`, а не `TRUNCATE`: LOCK тика больше не ждёт, снимок читает
+предыдущий Silver целиком, а проверка пустого Silver остаётся страховкой. Платформы в отчёте — в именах
 вкладки: Google делится на `google_ads`/`google_organic` одной функцией
 `core.utm_classify.tab_platform`, которую зовёт и `get_traffic_analytics`.
 
