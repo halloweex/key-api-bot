@@ -83,7 +83,12 @@ OrderFacts = Dict[int, Dict[str, object]]
 # VALUE_MISMATCH every morning and was re-fetched every morning, and the
 # re-fetch is refused the same way. A refused entry whose id Postgres already
 # holds keeps its stored row (an id KeyCRM lists is never deleted), so that
-# row is left out of Postgres' side too: `EXPENSES_LEFT_AS_STORED`.
+# row is left out of Postgres' side too: `EXPENSES_LEFT_AS_STORED`. And an
+# order the chain refuses whole (`pg_orders_write.payload_refusal`: the parse,
+# its header or a line item) carries no expense facts at all (C2R-2): its
+# listing deletes nothing, so a held order whose list had since lost an
+# expense read VALUE_MISMATCH every morning, and its re-fetch is refused the
+# same way.
 EXPENSE_FIELDS = ("n_expenses", "expense_amount")
 
 # The ids KeyCRM lists under an order that chain 3 does not write: their
@@ -479,6 +484,8 @@ def _process_batch(
     is skipped, and one merely glimpsed by a neighbouring month's ±2 day
     widening is left for whichever pass can actually resolve it.
     """
+    from core.pg_orders_write import payload_refusal
+
     for o in batch:
         oid = o.get("id")
         if oid is None or oid in orders or oid in inflight:
@@ -547,7 +554,12 @@ def _process_batch(
             "line_amount": round(line_amount, 2),
         }
         # Only when the payload carried them (O3 (a)): absent, the order's
-        # expenses are not compared rather than read as none.
-        expense_facts = keycrm_expense_facts(o.get("expenses"), oid)
-        if expense_facts is not None:
-            orders[int(oid)].update(expense_facts)
+        # expenses are not compared rather than read as none. And only for an
+        # order chain 3 writes (C2R-2): one it refuses whole is not written,
+        # and its listing deletes none of its expenses, so no re-fetch could
+        # put them right. It is left to the header comparison, as any refused
+        # order is.
+        if isinstance(o.get("expenses"), list) and payload_refusal(o) is None:
+            expense_facts = keycrm_expense_facts(o["expenses"], oid)
+            if expense_facts is not None:
+                orders[int(oid)].update(expense_facts)

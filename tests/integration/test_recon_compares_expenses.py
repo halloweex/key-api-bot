@@ -39,7 +39,7 @@ def _cost(eid: int, amount: object = "10.50") -> dict:
     return {"id": eid, "expense_type_id": 1, "amount": amount, "status": "paid"}
 
 
-def _payload(oid: int, costs, *, updated: datetime = OLD) -> dict:
+def _payload(oid: int, costs, *, updated: datetime = OLD, **over) -> dict:
     p = {
         "id": oid, "source_id": 1, "status_id": 12, "status_group_id": 4,
         "grand_total": "100.00", "ordered_at": OLD.isoformat(),
@@ -49,6 +49,7 @@ def _payload(oid: int, costs, *, updated: datetime = OLD) -> dict:
         "products": [{"name": "Товар", "quantity": 1, "price_sold": "100.00",
                       "offer": {"product_id": 701}}],
     }
+    p.update(over)
     if costs is not None:
         p["expenses"] = costs
     return p
@@ -102,8 +103,24 @@ C1_HELD = {**C1_SERVED,
                              _cost(STORED_THEN_NUL * 10 + 1, "5.00")]}
 
 
+# C2R-2: an order chain 3 refuses whole, held with expenses KeyCRM has since
+# removed. Its header compares equal — neither a comment nor a line's name is
+# compared — so only its expenses could name it.
+C2_BASE = 990_740
+REFUSED_HEADER, REFUSED_LINE = C2_BASE, C2_BASE + 1
+C2_IDS = [REFUSED_HEADER, REFUSED_LINE]
+C2_HELD = {REFUSED_HEADER: [_cost(REFUSED_HEADER * 10),
+                            _cost(REFUSED_HEADER * 10 + 1, "7.25")],
+           REFUSED_LINE: [_cost(REFUSED_LINE * 10)]}
+C2_SERVED = {REFUSED_HEADER: [_cost(REFUSED_HEADER * 10)], REFUSED_LINE: []}
+C2_SHAPE = {REFUSED_HEADER: {"manager_comment": "utm\x00"},
+            REFUSED_LINE: {"products": [{"name": "Тов\x00ар", "quantity": 1,
+                                         "price_sold": "100.00",
+                                         "offer": {"product_id": 701}}]}}
+
+
 async def _clean(pool):
-    ids = IDS + C1_IDS
+    ids = IDS + C1_IDS + C2_IDS
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM bronze.expenses WHERE order_id = ANY($1::int[])", ids)
@@ -145,17 +162,19 @@ async def _stored(pool, oid):
 class _KeyCRM:
     """KeyCRM by id, as the repair asks it: the order as served at 05:30."""
 
-    def __init__(self, served):
+    def __init__(self, served, shape):
         self.served = served
+        self.shape = shape
         self.asked: list = []
 
     async def get_order(self, order_id, include=None):
         self.asked.append(int(order_id))
         assert "expenses" in (include or "")
-        return _payload(int(order_id), self.served[int(order_id)])
+        return _payload(int(order_id), self.served[int(order_id)],
+                        **self.shape.get(int(order_id), {}))
 
 
-async def _run(pool, sched, ids=IDS, served=SERVED, in_flight=INFLIGHT):
+async def _run(pool, sched, ids=IDS, served=SERVED, in_flight=INFLIGHT, shape=None):
     from core.reconciliation_io import _process_batch, postgres_orders_in_window
 
     flying = {in_flight} if in_flight is not None else set()
@@ -168,13 +187,14 @@ async def _run(pool, sched, ids=IDS, served=SERVED, in_flight=INFLIGHT):
         inflight: set = set()
         _process_batch([_payload(oid, served[oid],
                                  updated=(datetime.now(timezone.utc) if oid in flying
-                                          else OLD))
+                                          else OLD),
+                                 **(shape or {}).get(oid, {}))
                         for oid in ids],
                        kc, watermark, window_start, window_end, inflight)
         assert inflight == flying
         return kc, 3, inflight
 
-    keycrm = _KeyCRM(served)
+    keycrm = _KeyCRM(served, shape or {})
     with patch("core.reconciliation_io.keycrm_orders_in_window", new=snapshot), \
          patch("core.sync_service.get_async_client", new=AsyncMock(return_value=keycrm)):
         result = await sched._run_dq_reconciliation()
@@ -300,3 +320,42 @@ async def test_an_entry_the_chain_does_not_write_is_neither_reported_nor_re_fetc
     for oid in (STORED_THEN_NULL, STORED_THEN_NUL):
         assert await _stored(pool, oid) == [(oid * 10, Decimal("10.50")),
                                             (oid * 10 + 1, Decimal("5.00"))]
+
+
+@pytest.mark.asyncio
+async def test_an_order_the_chain_refuses_whole_is_left_to_the_header_comparison(pool):
+    """C2R-2. KeyCRM removed an expense of an order Postgres holds, and now
+    serves the order with a NUL byte in its comment, or in a line item's
+    name: chain 3 refuses the order whole, so it neither writes it nor
+    deletes the expense. Compared, the order read VALUE_MISMATCH on both
+    fields every morning and was re-fetched every morning, and the forced
+    re-fetch is refused the same way — on the commit before the fix both
+    orders were named and re-fetched, and the rows stayed. Now its expenses
+    are not compared, as the header comparison does not compare the comment.
+    Mutation killed: compare the expenses of an order the chain refuses."""
+    from core.scheduler import BackgroundScheduler
+
+    await chain.upsert_orders_with_expenses([_payload(oid, C2_HELD[oid]) for oid in C2_IDS])
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meta.mirror_state SET backfilled_at = now() "
+            "WHERE table_name = 'bronze.orders'")
+
+    for _morning in range(2):
+        sched = BackgroundScheduler()
+        sched._persist_postgres_reconciliation = AsyncMock()
+        sched._reconcile_clickhouse = AsyncMock(return_value=None)
+        result, keycrm = await _run(pool, sched, ids=C2_IDS, served=C2_SERVED,
+                                    in_flight=None, shape=C2_SHAPE)
+
+        assert result["error"] is None
+        persisted = sched._persist_postgres_reconciliation.await_args.args[0]
+        assert persisted["error"] is None
+        named = {(oid, d.field) for d in persisted["discrepancies"]
+                 for oid in d.order_ids if oid in C2_IDS}
+        assert named == set()
+        assert keycrm.asked == []
+        assert await _stored(pool, REFUSED_HEADER) == [
+            (REFUSED_HEADER * 10, Decimal("10.50")),
+            (REFUSED_HEADER * 10 + 1, Decimal("7.25"))]
+        assert await _stored(pool, REFUSED_LINE) == [(REFUSED_LINE * 10, Decimal("10.50"))]

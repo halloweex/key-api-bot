@@ -219,6 +219,62 @@ class TestOnlyWhatChain3Stores:
         assert left_as_stored(kc) == {1: frozenset({11})}
 
 
+_LINE = {"name": "Товар", "quantity": 1, "price_sold": "100.00",
+         "offer": {"product_id": 701}}
+
+
+class TestAnOrderTheChainRefusesWhole:
+    """C2R-2: an order chain 3 refuses whole — the parse cannot read it, or
+    its header or one of its line items would be refused — is not written,
+    and its payload's listing deletes none of its stored expenses. Compared,
+    a held order whose KeyCRM list had since lost an expense read
+    VALUE_MISMATCH every morning and was re-fetched every morning, and the
+    re-fetch is refused the same way. So its expenses are not compared: it
+    is left to the header comparison, as any refused order. Mutation killed
+    by every case: compare the expenses of an order the chain refuses."""
+
+    @pytest.mark.parametrize("over", [
+        {"manager_comment": "utm\x00"},
+        {"promocode": "SALE\x00"},
+        {"status_id": "twelve"},
+        {"grand_total": "not a number"},
+        {"products": [dict(_LINE, name="Тов\x00ар")]},
+        {"products": [dict(_LINE, name=None)]},
+        {"products": [_LINE, dict(_LINE, quantity=2 ** 31)]},
+    ], ids=["NUL in manager_comment", "NUL in promocode", "status not an integer",
+            "total the parse cannot read", "NUL in a line's name",
+            "a line without a name", "a line's quantity past int32"])
+    def test_its_expenses_are_not_compared(self, over):
+        orders = _snapshot(_order(1, expenses=[_OK], **over))
+        # The header is still compared, as for any order.
+        assert 1 in orders
+        assert not set(EXPENSE_FIELDS) & set(orders[1])
+
+    def test_an_order_the_chain_writes_is_compared(self):
+        """A line item without its offer is how `include=products` may serve
+        it, and the chain writes it with no product id. Mutation: refuse on
+        the snapshot's shape of a line, and compare nothing at all."""
+        orders = _snapshot(_order(1, expenses=[_OK], products=[_LINE]),
+                           _order(2, expenses=[_OK], products=[
+                               {k: v for k, v in _LINE.items() if k != "offer"}]))
+        assert _counted(orders[1]) == (1, Decimal("10.50"))
+        assert _counted(orders[2]) == (1, Decimal("10.50"))
+
+    def test_it_is_the_writer_s_check_not_a_copy(self):
+        """The writer's own `order_refusal` and `product_refusal` decide.
+        Mutation: a copy of either rule, or the header's alone."""
+        from core import pg_orders_write
+
+        with patch.object(pg_orders_write, "order_refusal", return_value="refused"):
+            assert not set(EXPENSE_FIELDS) & set(_snapshot(_order(1, expenses=[_OK]))[1])
+        with patch.object(pg_orders_write, "product_refusal", return_value="refused"):
+            orders = _snapshot(_order(1, expenses=[_OK], products=[_LINE]))
+            assert not set(EXPENSE_FIELDS) & set(orders[1])
+        with patch.object(pg_orders_write, "order_refusal", return_value=None):
+            orders = _snapshot(_order(1, expenses=[_OK], manager_comment="utm\x00"))
+            assert _counted(orders[1]) == (1, Decimal("10.50"))
+
+
 def _facts(n, amount, **over):
     f = {"status_id": 12, "source_id": 1, "order_date": date(2026, 6, 10),
          "n_expenses": n, "expense_amount": Decimal(amount)}

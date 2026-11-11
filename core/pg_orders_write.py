@@ -139,7 +139,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from core import chain_latch
 
@@ -646,12 +646,45 @@ def _int_or_none(value: Any) -> Optional[int]:
 
 # ─── Which of an order's listed expenses this chain stores ──────────────────
 #
-# Two pure functions, because two readers must agree on them: the writer
-# below, and the 05:30 reconciliation (`reconciliation_io.keycrm_expense_facts`),
-# which counts an order's KeyCRM expenses only as this chain would store them.
+# Pure functions, because two readers must agree on them: the writer below,
+# and the 05:30 reconciliation (`reconciliation_io.keycrm_expense_facts` and
+# `_process_batch`), which counts an order's KeyCRM expenses only as this
+# chain would store them, and not at all for an order it refuses whole.
 # Counting every entry of the list instead reported an order with one refused
 # entry as VALUE_MISMATCH every morning and re-fetched it, and the re-fetch is
-# refused the same way (C-1).
+# refused the same way (C-1); comparing a refused order's expenses did the
+# same to a held order whose list had since changed (C2R-2).
+
+def order_with_lines_refusal(row: Any, lines: Iterable[Any]) -> Optional[str]:
+    """Why Postgres would refuse this order: its header's reason, else the
+    first of its line items' (`order_refusal`, `product_refusal`), or None."""
+    return order_refusal(row) or next(
+        filter(None, (product_refusal(p) for p in lines)), None)
+
+
+def payload_refusal(payload: Dict[str, Any]) -> Optional[str]:
+    """Why this chain refuses one KeyCRM order payload whole, or None.
+
+    Read as the minute sync and the by-id repair write it, line items
+    included (`landing_rows.landed_orders`): the parse cannot read it, or
+    `order_with_lines_refusal` refuses it (an id that is not an integer
+    among its reasons). Such an order is not written, and its payload's
+    listing deletes none of its stored expenses. Two refusals are not
+    foreseen here: an expense list the parse cannot read
+    (`reconciliation_io.keycrm_expense_facts` answers None for it), and a
+    value only Postgres itself refuses, which nothing foresees before the
+    writer's latch either."""
+    from core.landing_rows import landed_orders
+
+    landed = landed_orders([payload], with_products=True)
+    for _oid, why in landed.refused:
+        return why
+    for row in landed.orders:
+        why = order_with_lines_refusal(row, landed.products)
+        if why:
+            return why
+    return None
+
 
 def listed_expense_ids(carried: Any) -> set:
     """Every expense id one order's `expenses` list names, read off the
@@ -772,8 +805,7 @@ async def upsert_orders_with_expenses(
             lines.setdefault(line_order, []).append(p)
     orders = []
     for row in latest.values():
-        why = order_refusal(row) or next(
-            filter(None, (product_refusal(p) for p in lines.get(int(row.id), ()))), None)
+        why = order_with_lines_refusal(row, lines.get(int(row.id), ()))
         if why:
             logger.error("orders: order %r not written to Postgres: %s", row.id, why)
             refusals[int(row.id)] = why
