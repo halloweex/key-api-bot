@@ -320,6 +320,26 @@ async def _inventory_snapshot_taken_today_pg():
         return ()
 
 
+# What an integrity run in which the Postgres twins and the chain invariants
+# could look at nothing is journalled with (O10 (a)). Static on purpose: the
+# reasons are in the run's own `*_unwatched` findings, and this text is what
+# a reader of the run sees first.
+BLIND_INTEGRITY_RUN = (
+    "blind run: the Postgres twins and the chain invariants could look at "
+    "nothing (every one filed its *_unwatched finding; the reasons are there)"
+)
+
+
+def blind_integrity_run(pg_issues, chain_facts, chain_issues) -> Optional[str]:
+    """`BLIND_INTEGRITY_RUN` when neither the twins nor the chain invariants
+    saw anything this run, else None. Pure; reads only the run's findings."""
+    from core import pg_chain_invariants, pg_warehouse_dq
+
+    if (pg_warehouse_dq.looked_at_nothing(pg_issues)
+            and pg_chain_invariants.looked_at_nothing(chain_facts, chain_issues)):
+        return BLIND_INTEGRITY_RUN
+    return None
+
 
 class BackgroundScheduler:
     """
@@ -1832,6 +1852,19 @@ class BackgroundScheduler:
             chain_unverified = pg_chain_invariants.unverified_conditions(chain_issues)
             issues = issues + pg_issues + chain_issues
 
+            # A run in which the twins and the chain invariants could look at
+            # nothing is journalled failed (O10 (a), 2026-11-11), the way the
+            # ClickHouse arm journals a run that compared nothing: as a
+            # success it moved the layer's age, and the canary's 12 h on
+            # `integrity` could never fire however long Postgres stayed
+            # unreadable to them. Judged from the run's own findings; one twin
+            # or one chain part seeing anything keeps the run a success. Only
+            # the journal (and the job's result) carry it: the scan above did
+            # look, so its CRITICALs still page and its verified conditions
+            # still resolve, as before.
+            journal_error = error_message or blind_integrity_run(
+                pg_issues, chain_facts, chain_issues)
+
             ended_at = datetime.now(timezone.utc)
             window_day = ended_at.date()
 
@@ -1844,7 +1877,7 @@ class BackgroundScheduler:
                     window_start=window_day, window_end=window_day,
                     layer="integrity",
                     issues=issues, discrepancies=[],
-                    error_message=error_message,
+                    error_message=journal_error,
                 )
             except Exception as e:
                 logger.exception(f"DQ integrity persist failed: {e}")
@@ -1913,7 +1946,7 @@ class BackgroundScheduler:
                 "issues_count": len(issues),
                 "severity": sev.value,
                 "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
-                "error": error_message,
+                "error": journal_error,
             }
             logger.info("DQ Layer-1 integrity scan complete", extra=result)
             return result

@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
 from core.duckdb_constants import UNKNOWN_BRAND, brand_where
+from core.filters import by_month
 from core.models import OrderStatus
 from core.sql_dialect import TODAY_IN_KYIV
 from core import read_fallback
@@ -958,18 +959,11 @@ class RevenueMixin:
         orders_data = []
         current = start_date
         if monthly:
-            # Dicts keep insertion order, and the days arrive in order.
-            months: Dict[str, List[float]] = {}
-            while current <= end_date:
-                revenue_val, orders_val = daily_data.get(current, (0, 0))
-                bucket = months.setdefault(current.strftime("%m.%Y"), [0.0, 0])
-                bucket[0] += revenue_val
-                bucket[1] += orders_val
-                current += timedelta(days=1)
-            for label, (revenue_val, orders_val) in months.items():
+            for label, revenue_val, orders_val in by_month(start_date, end_date, daily_data):
                 labels.append(label)
                 data.append(round(revenue_val, 2))
-                orders_data.append(int(orders_val))
+                orders_data.append(orders_val)
+            current = end_date + timedelta(days=1)
         while current <= end_date:
             labels.append(current.strftime("%d.%m"))
             revenue_val, orders_val = daily_data.get(current, (0, 0))

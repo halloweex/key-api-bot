@@ -44,14 +44,19 @@ SESSION_ONLY = {
     "GET /api/brands": "filter dropdown",
     "GET /api/promocodes": "filter dropdown",
 
-    # Operational readouts: row counts, uptime, check ages. No per-tab data,
-    # and the canary and the digest read them. Pre-dating tabs.
-    # (`GET /api/duckdb/stats`, DuckDB's row counts, was one until step 14's
-    # S14-17 deleted it.)
-    "GET /api/health/detailed": "component status",
-    "GET /api/health/data-quality": "check results, no business figures",
-    "GET /api/metrics": "uptime and request timings",
+    # The operational readouts — `GET /api/health/detailed` (component
+    # status), `GET /api/health/data-quality` (check results) and
+    # `GET /api/metrics` (uptime and request timings) — stood here from
+    # before tabs until the owner's decision O8 (a) (2026-11-11) put each
+    # behind `require_admin`; `test_the_operational_readouts_are_admin_only`
+    # below holds that. (`GET /api/duckdb/stats`, DuckDB's row counts, was one
+    # until step 14's S14-17 deleted it.)
 }
+
+# Admin-only by the owner's decision O8 (a), 2026-11-11.
+ADMIN_ONLY_READOUTS = (
+    "GET /api/health/detailed", "GET /api/health/data-quality", "GET /api/metrics",
+)
 
 
 def _ungated() -> dict:
@@ -94,3 +99,17 @@ def test_the_allowlist_has_no_leftovers():
 @pytest.mark.parametrize("entry", sorted(SESSION_ONLY))
 def test_every_entry_carries_a_reason(entry):
     assert SESSION_ONLY[entry].strip(), entry
+
+
+def test_the_operational_readouts_are_admin_only():
+    """The decision recorded where the open list is: each of the three carries
+    `require_admin` on its own route. Mutation: drop it from any of them, and
+    the readout answers to any approved session again."""
+    from web.routes.auth import require_admin
+
+    found = {f"{method} {e.path}": e for e in iter_endpoints(app)
+             for method in e.methods - {"HEAD", "OPTIONS"}}
+    for entry in ADMIN_ONLY_READOUTS:
+        assert entry in found, entry
+        assert require_admin in found[entry].dependencies, entry
+        assert entry not in SESSION_ONLY, entry

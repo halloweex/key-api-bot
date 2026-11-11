@@ -2458,6 +2458,27 @@ def judge(facts: Optional[Facts]) -> List:
             facts.watched if facts is not None else (), WHOLE_PART)]
 
 
+def looked_at_nothing(facts: Optional[Facts], issues) -> bool:
+    """Whether the chain invariants could look at nothing this run, read off
+    the run's own findings (`judge`'s) against what was watched. Pure.
+
+    Nothing was seen when the whole read or the verdict was blind — one
+    `chain_invariants_unwatched` on `WHOLE_PART` — or when every part there
+    was to look at filed its own: each watched chain's group (`(<chain>)`),
+    the watermarks and the markers. With no chain watched there was nothing
+    to look at, which is looking at nothing too. One part read is a run that
+    saw something, and stays a success (O10 (a), 2026-11-11).
+    """
+    blind = {i.table_name for i in issues if i.check_name == UNWATCHED}
+    if WHOLE_PART in blind:
+        return True
+    watched = facts.watched if facts is not None else ()
+    if not watched:
+        return True
+    parts = {f"({chain})" for chain in watched} | {WATERMARKS_PART, MARKERS_PART}
+    return parts <= blind
+
+
 def unverified_conditions(issues) -> List[str]:
     """The conditions this run could not re-examine: every one, or none.
 

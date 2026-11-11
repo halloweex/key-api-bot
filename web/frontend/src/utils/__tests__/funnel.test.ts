@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   FOLDED_DEVICES, OVERDISPERSION, biggestLeak, buyersMoved, canCompare, conclude, conversionChange,
-  countChange, enoughToClaim, foldDevices, funnelSteps, groupFigures, judge, leak, mixShift, noiseZ,
+  countChange, enoughToClaim, foldDevices, funnelSteps, groupFigures, judge, mixShift, noiseZ,
   perBase, roughly, rowsGap,
 } from '../funnel'
 import {
@@ -107,7 +107,6 @@ describe('the conclusion', () => {
     expect(verdict.buyers.move).toBe('same')
     expect(verdict.entered.move).toBe('more')
     expect(verdict.moves.map((m) => [m.step, m.change, roughly(m.buyers ?? 0)])).toEqual([['began_checkout', 'worse', 100]])
-    expect(verdict.leak).toEqual({ step: 'added_to_cart', leftShare: 1 - 2420 / 18700, asBefore: true, was: null })
     expect(verdict.mix).toBeNull()
   })
 
@@ -121,26 +120,27 @@ describe('the conclusion', () => {
   })
 
   it('says the mix carried part of the rise only when it pushed the same way and by a fifth', () => {
-    expect(conclude(NOW, YEAR_AGO, BY_TYPE, 'year_ago').mix).toEqual({ change: 'better', type: 'warm', more: true })
+    expect(conclude(NOW, YEAR_AGO, BY_TYPE, 'year_ago').mix).toEqual({
+      change: 'better', type: 'warm', more: true, shareNow: 19300 / 34000, shareWas: 20000 / 60000,
+    })
     expect(mixShift(BY_TYPE, 'previous')).toBeNull()
   })
 
-  it('has nothing beyond noise to say about a steady month but where people leave', () => {
+  it('names the share of the site the type moved to, which can rise while its people fall', () => {
+    // The shape of October 2026 against 2025: fewer warm visitors than a year
+    // ago (19 300 against 20 000), a much larger share of the site. A sentence
+    // about the counts said the opposite of the table.
+    const mix = conclude(NOW, YEAR_AGO, BY_TYPE, 'year_ago').mix
+    const warm = BY_TYPE.find((r) => r.key === 'warm')!
+    expect(warm.current.entered).toBeLessThan(warm.year_ago.entered)
+    expect(mix?.shareNow).toBeGreaterThan(mix?.shareWas ?? 1)
+  })
+
+  it('has nothing beyond noise to say about a steady month', () => {
     const verdict = conclude(NOW, STEADY, BY_TYPE, 'previous')
     expect(verdict.headline).toEqual({ kind: 'steady' })
     expect(verdict.moves).toEqual([])
-    expect(verdict.leak?.asBefore).toBe(true)
-  })
-
-  it('does not say "as before" when the leak moved beyond noise', () => {
-    // The same step leaked most then (14 700 against 12 000), at 81.7 % not 87.1 %.
-    const then = c(30000, 18000, 3300, 1500, 1000)
-    expect(leak(NOW, then)).toMatchObject({ step: 'added_to_cart', asBefore: false })
-    expect(leak(NOW, then)?.was).toBeCloseTo(1 - 3300 / 18000, 10)
-  })
-
-  it('does not set the leak beside a window whose leak was elsewhere', () => {
-    expect(leak(NOW, c(30000, 16500, 3300, 1500, 1000))).toMatchObject({ asBefore: false, was: null })
+    expect(verdict.mix).toBeNull()
   })
 })
 

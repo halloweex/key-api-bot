@@ -1069,10 +1069,19 @@ class TestTheJobWhenTheDuckDBHalfFails:
         self, job,
     ):
         """The layer's own resolution must hold them too: `data_quality`'s
-        `unverified_conditions` no longer knows these conditions exist."""
+        `unverified_conditions` no longer knows these conditions exist.
+
+        The twins look in this run, so it is a success: one in which they
+        could not look either is journalled failed since O10 (a)
+        (`tests/unit/test_blind_integrity_runs.py`)."""
+        from core import pg_warehouse_dq
+        from tests.unit.test_pg_warehouse_dq import _facts as twins_looking
+
         scheduler, journal, sent, resolve = job
         blind = inv.Facts.blind(("pg_expenses_write",), "Postgres is unreachable")
-        result = await self._run(scheduler, blind, duckdb_raises=False)
+        with patch.object(pg_warehouse_dq, "read_facts",
+                          AsyncMock(return_value=twins_looking())):
+            result = await self._run(scheduler, blind, duckdb_raises=False)
 
         assert result["error"] is None
         (layer,) = [c for c in resolve.await_args_list if not c.kwargs.get("only_prefix")]

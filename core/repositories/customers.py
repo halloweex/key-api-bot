@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional, Dict, Any, List, Sequence, Union
 
 from core import read_fallback
+from core.filters import by_month
 
 logger = logging.getLogger(__name__)
 
@@ -783,6 +784,17 @@ _INSIGHTS_AOV_SQL = """
     ORDER BY date
 """
 
+# A month's AOV is the month's revenue over its orders, never a mean of its
+# days' AOVs — a quiet day would weigh what a sale day weighs. So the monthly
+# trend reads the two sums per day and folds them (`core.filters.by_month`).
+_INSIGHTS_DAILY_SQL = """
+    SELECT date, SUM(revenue) AS revenue, SUM(orders_count) AS orders
+    FROM {gold_daily_revenue}
+    WHERE {where} AND {gold_revenue_rollup}
+    GROUP BY date
+    ORDER BY date
+"""
+
 _INSIGHTS_CLV_SQL = """
     WITH customer_stats AS (
         SELECT s.buyer_id,
@@ -925,8 +937,12 @@ class CustomersMixin:
         brand: Optional[str] = None,
         sales_type: str = "retail",
         promocode: Optional[str] = None,
+        granularity: str = "daily",
     ) -> Dict[str, Any]:
         """Customer insights: new vs returning, AOV trend, CLV, repeat rate.
+
+        `granularity="monthly"` gives the AOV trend one point a calendar month,
+        labelled `MM.YYYY`, and says so in `granularity` — the trend's rule.
 
         Rides the dashboard's router — this is the dashboard's customer block,
         it reads the same two layers the rest of that tab reads, from
@@ -953,17 +969,25 @@ class CustomersMixin:
         total_orders = int(gold_result[0] or 0)
         total_revenue = float(gold_result[1] or 0)
 
+        monthly = granularity == "monthly"
+        aov_sql = _INSIGHTS_DAILY_SQL if monthly else _INSIGHTS_AOV_SQL
         aov_results = await self._dashboard_run(
-            _INSIGHTS_AOV_SQL.replace("{where}", gold_where_sql), gold_params)
-        aov_by_day = {row[0]: float(row[1]) for row in aov_results}
+            aov_sql.replace("{where}", gold_where_sql), gold_params)
 
         labels = []
         aov_data = []
-        current = start_date
-        while current <= end_date:
-            labels.append(current.strftime("%d.%m"))
-            aov_data.append(round(aov_by_day.get(current, 0), 2))
-            current += timedelta(days=1)
+        if monthly:
+            daily = {row[0]: (float(row[1] or 0), int(row[2] or 0)) for row in aov_results}
+            for label, revenue, orders in by_month(start_date, end_date, daily):
+                labels.append(label)
+                aov_data.append(round(revenue / orders, 2) if orders > 0 else 0)
+        else:
+            aov_by_day = {row[0]: float(row[1]) for row in aov_results}
+            current = start_date
+            while current <= end_date:
+                labels.append(current.strftime("%d.%m"))
+                aov_data.append(round(aov_by_day.get(current, 0), 2))
+                current += timedelta(days=1)
 
         overall_aov = total_revenue / total_orders if total_orders > 0 else 0
 
@@ -1028,7 +1052,9 @@ class CustomersMixin:
                     "backgroundColor": "rgba(245, 158, 11, 0.1)",
                     "fill": True,
                     "tension": 0.3
-                }]
+                }],
+                # Only for months: a daily answer keeps the body the goldens hold.
+                **({"granularity": "monthly"} if monthly else {}),
             },
             "metrics": {
                 "totalCustomers": total_customers,
