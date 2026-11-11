@@ -1778,7 +1778,12 @@ count only what chain 3 stores, through the writer's own
 `pg_orders_write.stored_expenses`: an entry it drops (no id) or refuses
 (`expense_refusal`) is not counted from KeyCRM, and a stored row whose id
 KeyCRM lists but the chain refuses is not counted from Postgres, because a
-re-fetch keeps that row as it is. An order whose expenses differ is re-fetched
+re-fetch keeps that row as it is. An order the chain refuses whole
+(`pg_orders_write.payload_refusal`: the parse, its header or a line item) is
+not compared for its expenses at all, since its listing deletes nothing. An
+amount is the number asyncpg sends, rounded as `NUMERIC(12,2)` rounds it: a
+float by its binary value, so 2.675 is stored as 2.67, and text as written,
+so "2.675" is 2.68. An order whose expenses differ is re-fetched
 last in the same batch, and its write deletes what KeyCRM no longer lists
 (O2 (a)). History below.
 
