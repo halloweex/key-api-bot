@@ -2,15 +2,19 @@
 
 Authentication is enforced by ``api_gate`` at the /api include level: only
 ``/api/health`` is listed in ``PUBLIC_API_PATHS`` so it is reachable without
-a session (Docker / nginx / uptime monitors). The detailed / stats / metrics
-endpoints are gated by api_gate like every other /api/* endpoint.
+a session (Docker / nginx / uptime monitors, the canary). The three
+operational readouts beside it — ``/api/health/detailed``,
+``/api/health/data-quality`` and ``/api/metrics`` — are admin-only since the
+owner's decision O8 (a) (2026-11-11): ``require_admin`` on each route, on
+top of the gate. Until then any approved session could read them.
 """
 import asyncio
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from core.observability import get_correlation_id, metrics
+from web.routes.auth import require_admin
 from web.config import VERSION
 from web.schemas import HealthResponse, MetricsResponse
 from ._deps import limiter, get_logger, START_TIME
@@ -517,7 +521,7 @@ def _class_only(component: str, exc: BaseException) -> str:
     return type(exc).__name__
 
 
-@router.get("/health/detailed")
+@router.get("/health/detailed", dependencies=[Depends(require_admin)])
 @limiter.limit("30/minute")
 async def detailed_health_check(request: Request):
     """Detailed health check with component-level status."""
@@ -609,7 +613,7 @@ async def detailed_health_check(request: Request):
 # 404.
 
 
-@router.get("/health/data-quality")
+@router.get("/health/data-quality", dependencies=[Depends(require_admin)])
 @limiter.limit("60/minute")
 async def get_data_quality_health(request: Request):
     """Latest Data Quality run summaries (integrity + reconciliation).
@@ -629,7 +633,8 @@ async def get_data_quality_health(request: Request):
         return {"status": "error", "error": _class_only("data-quality", e)}
 
 
-@router.get("/metrics", response_model=MetricsResponse)
+@router.get("/metrics", response_model=MetricsResponse,
+            dependencies=[Depends(require_admin)])
 @limiter.limit("60/minute")
 async def get_metrics_endpoint(request: Request):
     """Get application metrics."""

@@ -23,14 +23,16 @@ because that keeps every operational property the metric had — per-route count
 and latencies — while there is no id to redact, and it bounds the dictionary by
 the route table rather than by traffic.
 
-**Templated, not gated**, and the evidence for that is ``/openapi.json``: it is
-served to anonymous callers and names all 143 route templates with their
-parameters. Once the concrete ids are gone, what is left is route names that
-are already public, plus counts, latencies and exception class names. A
-``require_admin`` on top would hide traffic volume from four people who can
-already read the dashboard's numbers, and this codebase does not add controls
-without evidence. The last class pins the endpoint staying viewer-readable, so
-the decision has to be re-argued rather than drifted into.
+**Templated, and since 2026-11-11 gated too.** The key was templated rather
+than the response redacted, and that still holds: it bounds the dictionary by
+the route table, and an admin reading the metric should see route names, not
+ids. The endpoint was then left viewer-readable on purpose — ``/openapi.json``
+names every route template to anonymous callers, so what was left was route
+names already public plus counts, latencies and exception class names — and a
+class below pinned that, so restricting it had to be a decision. The owner took
+it (O8 (a), 2026-11-11): ``/api/metrics``, ``/api/health/detailed`` and
+``/api/health/data-quality`` are behind ``require_admin``, and that class now
+pins the new answer for all three.
 
 **``/api/health`` published DuckDB exception text to anonymous callers.** The
 handler scrubs the store's error on purpose ("don't leak DuckDB exception text
@@ -146,6 +148,11 @@ def _login(monkeypatch, role: str) -> dict:
     return _cookie_header(_make_cookie(uid, role=role))
 
 
+def _read_metrics(client, monkeypatch) -> dict:
+    """What an admin reads back from /api/metrics (admin-only since O8 (a))."""
+    return client.get(METRICS_PATH, headers=_login(monkeypatch, "admin")).json()
+
+
 def _metric_keys(payload: dict) -> set:
     """Every key a reader of /api/metrics can see."""
     return set(payload.get("requests", {})) | set(payload.get("timing", {}))
@@ -183,7 +190,7 @@ class TestMetricsDoesNotEchoIdentifiers:
         for method, path, _template in ID_BEARING_REQUESTS:
             client.request(method, path, headers=headers)
 
-        body = client.get(METRICS_PATH, headers=headers).json()
+        body = _read_metrics(client, monkeypatch)
         keys = _metric_keys(body)
 
         leaked = sorted(
@@ -191,7 +198,7 @@ class TestMetricsDoesNotEchoIdentifiers:
             if any(fragment in key for fragment in SECRET_FRAGMENTS)
         )
         assert not leaked, (
-            "an approved viewer read back the identifiers other callers used:\n  "
+            "the metric read back the identifiers other callers used:\n  "
             + "\n  ".join(leaked)
         )
 
@@ -202,7 +209,7 @@ class TestMetricsDoesNotEchoIdentifiers:
         for method, path, _template in ID_BEARING_REQUESTS:
             client.request(method, path, headers=headers)
 
-        keys = _metric_keys(client.get(METRICS_PATH, headers=headers).json())
+        keys = _metric_keys(_read_metrics(client, monkeypatch))
         for method, _path, template in ID_BEARING_REQUESTS:
             assert f"{method} {template}" in keys, \
                 f"{method} {template} vanished from the metric instead of being templated"
@@ -214,7 +221,7 @@ class TestMetricsDoesNotEchoIdentifiers:
 
         assert client.get(f"/api/admin/users/{USER_ID}", headers=headers).status_code == 403
 
-        body = client.get(METRICS_PATH, headers=headers).json()
+        body = _read_metrics(client, monkeypatch)
         assert body["requests"].get("GET /api/admin/users/{user_id}") == 1
         assert USER_ID not in json.dumps(body)
 
@@ -228,7 +235,7 @@ class TestMetricKeysAreBoundedByTheRouteTable:
         for user_id in range(9_100_000, 9_100_050):
             client.get(f"/api/admin/users/{user_id}", headers=headers)
 
-        body = client.get(METRICS_PATH, headers=headers).json()
+        body = _read_metrics(client, monkeypatch)
         user_keys = [k for k in body["requests"] if "/api/admin/users/" in k]
         assert user_keys == ["GET /api/admin/users/{user_id}"], \
             f"50 ids produced {len(user_keys)} keys — the dictionary still grows with traffic"
@@ -237,12 +244,10 @@ class TestMetricKeysAreBoundedByTheRouteTable:
     def test_static_assets_share_one_key(self, client, monkeypatch):
         """nginx proxies /static/ here, so every hashed filename ever built used
         to add a key and a list of 100 latency samples that nothing evicted."""
-        headers = _login(monkeypatch, "viewer")
-
         for name in ("index-aaa111.js", "index-bbb222.js", "style-ccc333.css"):
             client.get(f"/static/{name}")
 
-        keys = _metric_keys(client.get(METRICS_PATH, headers=headers).json())
+        keys = _metric_keys(_read_metrics(client, monkeypatch))
         static_keys = sorted(k for k in keys if "static" in k)
         assert static_keys == ["GET /static/*"], \
             f"static filenames are still metric keys: {static_keys}"
@@ -287,24 +292,35 @@ class TestUnroutableRequestsAreHandled:
         assert client.get("/static/definitely-absent.js").status_code == 404
 
 
-# ─── The decision not to gate ─────────────────────────────────────────────────
+# ─── The decision to gate ─────────────────────────────────────────────────────
 
-class TestMetricsStaysViewerReadable:
-    """`/openapi.json` already names every route to anonymous callers, so once
-    the ids are templated out there is nothing here to gate. Recorded as a test
-    so restricting it later is a decision somebody makes on purpose."""
+# The health router's operational readouts. Viewer-readable until the owner's
+# decision O8 (a) (2026-11-11) put each behind `require_admin`.
+ADMIN_ONLY_READOUTS = (METRICS_PATH, "/api/health/detailed", "/api/health/data-quality")
 
-    def test_a_viewer_may_read_metrics(self, client, monkeypatch):
-        headers = _login(monkeypatch, "viewer")
-        assert client.get(METRICS_PATH, headers=headers).status_code == 200
 
-    def test_metrics_still_requires_a_session(self, client):
-        assert client.get(METRICS_PATH).status_code == 401
+class TestTheOperationalReadoutsAreAdminOnly:
+    """Recorded as a test, as the earlier answer was (any approved session
+    may read them), so opening them again is a decision somebody makes on
+    purpose. Mutation: drop `require_admin` from any of the three."""
 
-    def test_route_templates_are_public_anyway(self, client):
-        schema = client.get("/openapi.json")
-        assert schema.status_code == 200
-        assert "/api/admin/users/{user_id}" in schema.json()["paths"]
+    @pytest.mark.parametrize("path", ADMIN_ONLY_READOUTS)
+    @pytest.mark.parametrize("role", ["viewer", "editor"])
+    def test_a_non_admin_session_is_refused(self, client, monkeypatch, path, role):
+        assert client.get(path, headers=_login(monkeypatch, role)).status_code == 403
+
+    @pytest.mark.parametrize("path", ADMIN_ONLY_READOUTS)
+    def test_an_admin_may_read_it(self, client, monkeypatch, path):
+        assert client.get(path, headers=_login(monkeypatch, "admin")).status_code == 200
+
+    @pytest.mark.parametrize("path", ADMIN_ONLY_READOUTS)
+    def test_it_still_requires_a_session(self, client, path):
+        assert client.get(path).status_code == 401
+
+    def test_the_public_health_stays_open(self, client):
+        """The canary, Docker, nginx and the uptime monitor read it with no
+        session; O8 (a) left it as it was."""
+        assert client.get("/api/health").status_code == 200
 
 
 # ─── The public endpoint ──────────────────────────────────────────────────────

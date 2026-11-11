@@ -160,7 +160,9 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager; raises the Postgres derivation signal (POST, admin) |
-| `/api/health/data-quality` | Latest run of every watched layer (`data_quality.WATCHED_LAYERS`: integrity, mirror_landing, reconciliation_pg, reconciliation_ch) with its top 20 issues, or diffs for the two reconciliation arms (за сессией) |
+| `/api/health/data-quality` | Latest run of every watched layer (`data_quality.WATCHED_LAYERS`: integrity, mirror_landing, reconciliation_pg, reconciliation_ch) with its top 20 issues, or diffs for the two reconciliation arms (за сессией) (admin) |
+| `/api/health/detailed` | Component status — Meilisearch, WebSocket rooms, the sync, the forecast model — and process metrics (admin, O8 (a), 2026-11-11) |
+| `/api/metrics` | Uptime, request counts and timings per route template (admin, O8 (a), 2026-11-11) |
 | `/api/warehouse/status` | The Postgres derivation: owed or not, when built, the last journalled run (`cutover` and `duckdb_frozen` went with step 13's switch in step 14's S14-15) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
