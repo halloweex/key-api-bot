@@ -38,12 +38,19 @@ spec and two critics). What this module takes from it:
   `pg_warehouse_unwatched`. `data_quality.unverified_conditions` holds their
   conditions firing rather than announcing a recovery nobody verified.
 - **One snapshot under PG_LAYER_LOCK, with a hold budget.** Every rebuild of
-  silver.orders and silver.order_utm happens under that lock, and a TRUNCATE
-  (silver.order_utm's full parse; Silver's own rebuild until the review's A23
-  made it a DELETE) is not MVCC-safe, so a REPEATABLE READ snapshot alone could
-  still catch an emptied table. The derivation and
-  the DuckDB tick wait for this lock while holding the heavy lock the sync needs,
-  so the hold is capped at HOLD_BUDGET_S whatever Postgres is doing.
+  silver.orders and silver.order_utm in this process happens under that lock.
+  It was taken for a TRUNCATE: Silver's rebuild cleared its table with one
+  until the review's A23, a TRUNCATE is not MVCC-safe, and a REPEATABLE READ
+  snapshot alone could read the table emptied. No clear in this process is a
+  TRUNCATE any more: Silver's rebuild and silver.order_utm's full parse each
+  DELETE inside the transaction that refills the table (`pg_silver` and
+  `pg_utm_parse` say why), so a snapshot reads each table whole, as it was
+  before a replacement or after it. What the lock still gives is a snapshot
+  taken between derivations, never inside one: a derivation commits Silver,
+  Gold and its journal row in separate transactions, and the twins read
+  Silver beside that journal. The derivation waits for this lock while
+  holding the heavy lock the sync needs, so the hold is capped at
+  HOLD_BUDGET_S whatever Postgres is doing.
 - **Line items compared, not repeated** (until S14-14). While DuckDB's own
   headline and goods checks looked, the twins did not file a second standing
   row each; they filed `pg_line_items_disagree` when the engines differed by

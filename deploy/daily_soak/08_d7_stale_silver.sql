@@ -9,11 +9,13 @@
 -- HOW IT DECIDES
 -- A bronze order mirrored before the latest error-free run started must be in
 -- that run's Silver, with the same status, total, buyer and manager. One
--- statement, deliberately, and outside REPEATABLE READ: the rebuild is a
--- TRUNCATE plus INSERT, and TRUNCATE is not MVCC-safe — a transaction snapshot
--- taken before it commits reads Silver as empty afterwards. A single
--- READ COMMITTED statement takes its locks before its snapshot, so it waits
--- for the rebuild instead.
+-- statement, deliberately, and outside REPEATABLE READ: an image from before
+-- the review's A23 rebuilds with a TRUNCATE plus INSERT, and TRUNCATE is not
+-- MVCC-safe — a transaction snapshot taken before it commits reads Silver as
+-- empty afterwards. A single READ COMMITTED statement takes its locks before
+-- its snapshot, so it waits for that rebuild instead. Since A23 the rebuild
+-- is a DELETE plus INSERT in one transaction, which the statement reads whole
+-- without waiting.
 --
 -- WHAT A FAIL MEANS
 -- - `stale_rows > 0`: Silver holds a row the latest rebuild should have

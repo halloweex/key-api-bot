@@ -47,20 +47,25 @@ and `bronze.orders` is what the Postgres parser reads (step 9; the only parser
 since step 14's S14-15, which deleted the DuckDB reclassify over DuckDB's
 `orders`).
 
-That instant comes AFTER the three tables are locked. Every Silver tick
-`TRUNCATE`s `silver.orders` and `silver.order_utm` under ACCESS EXCLUSIVE, and
-a TRUNCATE is not MVCC-safe: a snapshot taken before one commits, whose read
+That instant comes AFTER the three tables are locked. A Silver tick of an
+image from before the review's A23 (`rollback-step14` among them) `TRUNCATE`s
+`silver.orders` under ACCESS EXCLUSIVE, an image from before step 14's S14-15
+could do the same to `silver.order_utm` while copying it from DuckDB, and a
+TRUNCATE is not MVCC-safe: a snapshot taken before one commits, whose read
 then waits for it, finds the table's new, emptied file and reads it as empty —
 a run that exits 0 on no verdicts, and a snapshot "checked" against the same
 empty table. So the transaction's first statement is a `LOCK ... IN ACCESS
-SHARE MODE`, which waits out a tick without fixing the snapshot. A table read
-as empty all the same is refused (exit 1) rather than reported.
+SHARE MODE`, which waits out such a tick without fixing the snapshot. Since
+A23 the tick clears Silver with a DELETE, which a snapshot reads whole and
+which conflicts with no read, so against a later image the LOCK waits for
+no tick; it stays for the older ones. A table read as empty all the same is
+refused (exit 1) rather than reported.
 
-The transaction is kept short on purpose: the same TRUNCATE waits for this
-read, and every reader of /traffic then waits behind that. So the rows come
-out first and all the work happens after COMMIT, `lock_timeout` refuses to
-queue behind a tick for long, and the report prints how long the snapshot was
-held.
+The transaction is kept short on purpose: under such an image the same
+TRUNCATE waits for this read, and every reader of /traffic then waits behind
+that. So the rows come out first and all the work happens after COMMIT,
+`lock_timeout` refuses to queue behind a tick for long, and the report prints
+how long the snapshot was held.
 
 WHAT IT WRITES: NOTHING, EXCEPT THE ONE FILE YOU NAME
 
@@ -172,9 +177,10 @@ COMPOSE_HOST = "postgres"
 DATABASE = "ks"
 
 # Sent at connection start, so they hold for every statement this session runs.
-# `lock_timeout`: a Silver tick holds ACCESS EXCLUSIVE on both Silver tables
-# for its TRUNCATE+INSERT (a few seconds); queueing behind it longer than this
-# would park every /traffic reader behind this script too.
+# `lock_timeout`: a Silver tick of an image from before the review's A23 holds
+# ACCESS EXCLUSIVE on a Silver table for its TRUNCATE+INSERT (a few seconds);
+# queueing behind it longer than this would park every /traffic reader behind
+# this script too. A later image's DELETE conflicts with no read.
 SESSION = {
     "default_transaction_read_only": "on",
     "TimeZone": "UTC",
@@ -814,7 +820,8 @@ async def read_state(conn, snapshot_path: Optional[Path] = None) -> State:
     The LOCK comes first because a REPEATABLE READ snapshot is fixed by the
     first statement that reads, and LOCK is not one — PostgreSQL exempts it
     precisely so it can run at the start of such a transaction. The other way
-    round, the snapshot is fixed before a Silver tick's TRUNCATE commits, the
+    round, the snapshot is fixed before a Silver tick's TRUNCATE commits (an
+    image from before the review's A23; the module docstring says which), the
     read waits for that commit, and then reads the truncated table through
     the older snapshot: empty, since TRUNCATE is not MVCC-safe.
     """

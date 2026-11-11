@@ -110,12 +110,15 @@ FIRST_REBUILT_AT: Optional[datetime] = None
 # snapshot, and the ClickHouse ship-and-derive. Unserialised, they race in
 # three documented ways the review named: a silver rebuild landing between
 # the reconcile's two reads turns the flagship engines-verdict into a false
-# CRITICAL; a TRUNCATE is not MVCC-safe, so even REPEATABLE READ can compare
-# against an emptied table; and two CH shippers interleaving TRUNCATE/EXCHANGE
-# can swap an empty staging into place under a fresh OK watermark. (The
+# CRITICAL; two CH shippers interleaving TRUNCATE/EXCHANGE can swap an empty
+# staging into place under a fresh OK watermark; and Silver's TRUNCATE, which
+# is not MVCC-safe, let even REPEATABLE READ compare against an emptied
+# table. The third went with that TRUNCATE: since the review's A23 every clear
+# of a Postgres layer in this process is a DELETE, which a snapshot reads
+# whole (the module docstring, and `pg_utm_parse` for silver.order_utm). (The
 # витрина's own rebuild-and-check was one of the actors until the owner's
 # decision O6.) One lock, taken by every actor for its whole
-# read-derive-write span, removes all three. It is a coordination lock over
+# read-derive-write span, removes the other two. It is a coordination lock over
 # network-bound work — deliberately NOT the DuckDB store lock, whose rule
 # ("never held across the network") stays intact.
 PG_LAYER_LOCK = asyncio.Lock()
