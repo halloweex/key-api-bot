@@ -6,7 +6,8 @@ refresh and the two buyer syncs — from `/api/duckdb/…`, a name from the days
 they wrote DuckDB, to `/api/sync/…`. The old paths stayed until step 14's
 final stage as aliases, the same function behind both, out of the schema.
 The final stage removed them (2026-11-12), with their two entries in
-`SLOW_ENDPOINTS` and `duckdb/resync` in nginx's long-timeout regex. Each slow
+`SLOW_ENDPOINTS`. nginx keeps `duckdb/resync` in its long-timeout regex until
+Z3: the rollback image serves its resync only there. Each slow
 lever keeps its long timeout by its one name, in the app (`SLOW_ENDPOINTS`,
 300 s, else a 504 at 30 s while the handler runs on) and in nginx
 (`proxy_read_timeout 300`, else a 504 at 60 s).
@@ -108,11 +109,19 @@ def test_nginx_gives_the_slow_levers_its_long_timeout(path):
 
 
 @pytest.mark.parametrize("path", ["/api/sync/sync-buyers", "/api/sync/sync-all-buyers",
-                                  *sorted(RETIRED)])
+                                  *sorted(set(RETIRED) - {"/api/duckdb/resync"})])
 def test_nginx_names_no_other_sync_door_slow(path):
-    """The buyer syncs never were slow; the old names are gone. Mutation: put
-    `duckdb/resync` back in the regex."""
+    """The buyer syncs never were slow; the old names are gone. Mutation: add
+    `duckdb/refresh-statuses` to the regex."""
     assert not any(re.match(rx, path) for rx in _long_timeout_locations()), path
+
+
+def test_nginx_keeps_the_rollback_images_resync_slow_until_z3():
+    """rollback-step14, a rollback target until Z3, serves the resync only at
+    `/api/duckdb/resync` and runs it inside the request: without the long
+    timeout nginx would answer 504 at 60 s while the handler runs on.
+    Mutation: drop `duckdb/resync` from the regex."""
+    assert any(re.match(rx, "/api/duckdb/resync") for rx in _long_timeout_locations())
 
 
 @pytest.mark.parametrize("door", DOORS)

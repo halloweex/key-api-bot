@@ -365,7 +365,13 @@ date outside 2000-01-01..2099-12-31 answered 400 and a marketing report on
    — that image reads them all again, and for many an absent value means
    `duckdb` (`KS_USER_STORE` absent is a 401 for everybody). Above all
    `KS_DUCKDB=off`: the final stage deleted the DuckDB file (2026-11-12), and
-   that image runs without it only under `off`.
+   that image runs without it only under `off`. `off` is necessary, not
+   enough: that image falls back to `on` whenever a coherence key is unmet
+   (OD-S5-1 (a)), a start that cannot reach Postgres included, and under `on`
+   it creates an empty `data/analytics.duckdb` and starts the empty-DuckDB
+   boot sync. Right after such a rollback, confirm `/api/health`'s
+   `duckdb_switch.held_back` is empty, no `duckdb_off_held_back` page fired
+   and no new `data/analytics.duckdb` appeared; if any did, stop that image.
 3. **`meta.alembic_version`** is the revision that image requires
    (`0035_batch_e_chains` for every image built before S14-00), or roll back
    to the last image that requires the one there instead.
