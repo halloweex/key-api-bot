@@ -222,6 +222,7 @@ async def get_customer_insights(
     source_id: Optional[int] = None,
     sales_type: str = "retail",
     promocode: Optional[str] = None,
+    granularity: str = "daily",
 ) -> Dict[str, Any]:
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
     start, end = _parse_dates(start_date, end_date)
@@ -232,6 +233,7 @@ async def get_customer_insights(
         brand=brand,
         sales_type=sales_type,
         promocode=promocode,
+        granularity=granularity,
     )
 
 

@@ -294,7 +294,9 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         {/* AOV Trend Line Chart */}
         <div>
           <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
-            {t('customer.aovTrend')}
+            {data?.aovTrend?.granularity === 'monthly'
+              ? `${t('customer.aovTrend')} · ${t('chart.byMonth')}`
+              : t('customer.aovTrend')}
             <InfoPopover title={t('customer.aovCalcTitle')}>
               <p className="text-xs text-slate-300 mb-2">
                 {t('customer.aovCalcDesc')}
