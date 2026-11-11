@@ -19,12 +19,20 @@ moved: each fails here, and the answer is never an edited literal.
 Driven, not read: the writers render some statements from the shared parse's
 column lists (`core.landing_rows`) and from `pg_landing`'s templates, so a
 change upstream of the writer's own text shows here too.
+
+Re-recorded once, under the owner's decision O1 (a) (2026-11-11: a fix of a
+reproduced defect may change a pinned literal in the same PR, which lists every
+changed statement): chain 3's four `orders_*` scenarios for A5, the expenses
+that follow KeyCRM (O2 (a)) — the stored expenses read before the latch and
+under lock — and `orders_expense_dropped` added, which pins the deletion. Every
+other scenario is the literal of `d544144c`, unchanged.
 """
 from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -120,6 +128,18 @@ def _held(sql):
     return []
 
 
+def _held_with_a_dropped_expense(sql):
+    """`_held`, and one expense stored under it that the payload no longer
+    lists — what owner decision O2 (a) deletes (added with it, under O1 (a))."""
+    if sql.startswith("SELECT") and "FROM bronze.expenses" in sql:
+        return [{"id": 9, "order_id": 1, "expense_type_id": 1,
+                 "amount": Decimal("10.00"), "description": None, "status": "paid",
+                 "payment_date": None, "created_at": None}]
+    if sql.startswith("DELETE FROM bronze.expenses"):
+        return [{"id": 9, "order_id": 1, "amount": Decimal("10.00")}]
+    return _held(sql)
+
+
 def _scenarios():
     from core import pg_catalogue_write, pg_expense_types_write, pg_orders_write
     from core.landing_rows import (
@@ -141,6 +161,8 @@ def _scenarios():
             [_payload(1)], force_update=True, skip_products=True), _held),
         "orders_rewrite_held": (lambda: pg_orders_write.upsert_orders_with_expenses(
             [_payload(1)]), _held),
+        "orders_expense_dropped": (lambda: pg_orders_write.upsert_orders_with_expenses(
+            [_payload(1)]), _held_with_a_dropped_expense),
         "misses": (lambda: pg_orders_write.record_backfill_misses(
             {5: "gone", 6: "empty"}), None),
         "comments": (lambda: pg_orders_write.restore_manager_comments(

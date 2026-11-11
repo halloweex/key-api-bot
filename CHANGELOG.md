@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.339
+
+- docs(claude): what the 05:30 expense comparison leaves out, and how it reads money
+- fix(dq): an order chain 3 refuses whole is not compared for its expenses (C2R-2)
+- fix(orders): a float amount is compared as asyncpg writes it (C2R-1)
+- fix(dq): the 05:30 snapshot counts an order's expenses as chain 3 stores them (C-1)
+- fix(orders): an expense id any payload of the page lists is never deleted (A5)
+- feat(dq): the 05:30 reconciliation compares each order's expenses (O3 a)
+- fix(orders): expenses follow KeyCRM, and an unchanged one is not rewritten (A5, O2 a)
+
+
 ## 3.0.338
 
 - feat(traffic): the whole funnel on a phone's first screen

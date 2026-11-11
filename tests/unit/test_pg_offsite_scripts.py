@@ -1067,17 +1067,29 @@ class TestTheRemoteDrill:
             assert re.search(rf"^\s+{re.escape(table)}\s+restored", run.out, flags=re.M), \
                 (table, run.out)
 
-    @pytest.mark.parametrize("table,var", [c for c in CHAIN3 if c[0] != "bronze.order_products"])
-    def test_an_order_an_expense_or_a_miss_is_never_deleted(self, world, table, var):
-        """Both stores upsert orders and expenses and never delete them, and
-        under the chain the misses are upserted by it alone — so a dump
-        holding more than live is rows live has lost. Mutation: mark any of
-        the three `either`."""
+    @pytest.mark.parametrize("table,var", [c for c in CHAIN3 if c[0] not in (
+        "bronze.order_products", "bronze.expenses")])
+    def test_an_order_or_a_miss_is_never_deleted(self, world, table, var):
+        """Orders are upserted and never deleted, and under the chain the
+        misses are upserted by it alone — so a dump holding more than live is
+        rows live has lost. Mutation: mark either of the two `either`."""
         self._shipped(world)
         live = dict(LIVE, FAKE_LIVE_CHAIN3_OWNERS=4)
         restored = dict(RESTORED, **{f"FAKE_RESTORED_{var}": LIVE[f"FAKE_LIVE_{var}"] + 1})
         run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **restored)
         assert run.code != 0 and "ROWS MISSING FROM LIVE" in run.out, (table, run.out)
+
+    def test_an_expense_live_no_longer_holds_is_one_keycrm_removed(self, world):
+        """Since the owner's decision O2 (a) the chain deletes an expense
+        KeyCRM no longer lists under its order, so an expense removed between
+        the dump and the drill is one row fewer in live. Until then the table
+        was `grows`, and such a morning would have failed the drill with ROWS
+        MISSING FROM LIVE. Mutation: mark bronze.expenses `grows` again."""
+        self._shipped(world)
+        live = dict(LIVE, FAKE_LIVE_CHAIN3_OWNERS=4)
+        restored = dict(RESTORED, FAKE_RESTORED_BRONZE_EXPENSES=LIVE["FAKE_LIVE_BRONZE_EXPENSES"] + 3)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **restored)
+        assert run.code == 0 and "ROWS MISSING FROM LIVE" not in run.out, run.out
 
     def test_a_line_item_live_no_longer_holds_is_an_order_rewritten(self, world):
         """An order's line items are deleted and laid down again on every
