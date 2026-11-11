@@ -174,6 +174,21 @@ class TestOnlyWhatChain3Stores:
         assert _counted(facts) == (0, Decimal("0"))
         assert facts[EXPENSES_LEFT_AS_STORED] == frozenset({1})
 
+    def test_a_float_counts_as_asyncpg_writes_it(self):
+        """asyncpg sends a float's binary value (`Decimal(obj)`), and
+        `NUMERIC(12,2)` rounds that: 2.675 is 2.67499… and is stored as 2.67,
+        1.005 as 1.00. Text is read as written: "2.675" is 2.68. Read from
+        its text, a float summed to a cent above what Postgres holds, and the
+        order read VALUE_MISMATCH every morning (C2R-1). Mutations: read a
+        float from its text, or a text through a float."""
+        assert Decimal(2.675) < Decimal("2.675")
+        floats = keycrm_expense_facts(
+            [dict(_OK, amount=2.675), dict(_OK, id=2, amount=1.005)], 7)
+        assert _counted(floats) == (2, Decimal("3.67"))
+        text = keycrm_expense_facts(
+            [dict(_OK, amount="2.675"), dict(_OK, id=2, amount="1.005")], 7)
+        assert _counted(text) == (2, Decimal("3.69"))
+
     def test_an_absent_amount_is_written_as_zero_and_counted(self):
         """`expense_row` writes an absent amount as 0; a null one is refused.
         Mutation: read the two alike."""

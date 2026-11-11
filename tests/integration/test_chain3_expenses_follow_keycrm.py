@@ -329,12 +329,39 @@ class TestAnUnchangedExpenseIsNotRewritten:
         assert (await _expenses_stamp(pool))["last_ok_at"] > stamp["last_ok_at"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("amount", ["10.50", "10.5", 10.5, "10.500"])
-    async def test_the_same_amount_in_another_spelling_is_not_a_change(self, pool, amount):
+    @pytest.mark.parametrize("stored, served, cents", [
+        ("10.50", "10.50", "10.50"),
+        ("10.50", "10.5", "10.50"),
+        ("10.50", 10.5, "10.50"),
+        ("10.50", "10.500", "10.50"),
+        # A float is its binary value, the one asyncpg sends: 2.675 is
+        # 2.67499…, so `NUMERIC(12,2)` stores 2.67 — and 1.005, 1.00. Read
+        # from its text it was 2.68 against the stored 2.67, so the same page
+        # rewrote it on every tick (C2R-1).
+        (2.675, 2.675, "2.67"),
+        (1.005, 1.005, "1.00"),
+        ("2.67", 2.675, "2.67"),
+        ("1.00", 1.005, "1.00"),
+    ], ids=["same", "short", "float", "long", "float 2.675", "float 1.005",
+            "text then float 2.675", "text then float 1.005"])
+    async def test_the_same_amount_in_another_spelling_is_not_a_change(
+            self, pool, stored, served, cents):
         """KeyCRM serves money as text or a number; `NUMERIC(12,2)` stores
-        cents. Mutation: compare the payload's value as it arrived."""
-        await _write([_payload(BASE, [_cost(BASE * 10, amount="10.50")])])
-        before = await _costs(pool, BASE)
-        result, _ = await _write([_payload(BASE, [_cost(BASE * 10, amount=amount)])])
+        cents. Mutations: compare the payload's value as it arrived, or read
+        a float from its text."""
+        await _write([_payload(BASE, [_cost(BASE * 10, amount=stored)])])
+        before, stamp = await _costs(pool, BASE), await _expenses_stamp(pool)
+        assert before[BASE * 10][0] == cents
+        result, _ = await _write([_payload(BASE, [_cost(BASE * 10, amount=served)])])
         assert await _costs(pool, BASE) == before
+        assert await _expenses_stamp(pool) == stamp
         assert result.expenses_deleted == 0
+
+    @pytest.mark.asyncio
+    async def test_a_float_and_the_text_of_its_digits_are_two_amounts(self, pool):
+        """2.675 as a float is stored as 2.67, and "2.675" as text as 2.68:
+        served the text after the float, the expense moved by a kopeck and is
+        written. Mutation: read every amount as a float."""
+        await _write([_payload(BASE, [_cost(BASE * 10, amount=2.675)])])
+        await _write([_payload(BASE, [_cost(BASE * 10, amount="2.675")])])
+        assert (await _costs(pool, BASE))[BASE * 10][0] == "2.68"

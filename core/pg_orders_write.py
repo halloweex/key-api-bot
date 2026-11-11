@@ -505,16 +505,23 @@ _EXPENSES_DELETE_SQL = (
 
 
 def _cents(value: Any) -> Any:
-    """A money value as `NUMERIC(12,2)` stores it: rounded half away from
-    zero to two places (`pg_numeric.refusal`'s rule), and read from its text
-    (`Decimal(str(value))`, what asyncpg sends for a float). A value that is
-    not a number is returned as it is, and so compares unequal."""
+    """A money value as `NUMERIC(12,2)` stores it: the number asyncpg sends,
+    rounded half away from zero to two places (`pg_numeric.refusal`'s rule).
+    A value that is not a number is returned as it is, and so compares
+    unequal.
+
+    asyncpg's binary NUMERIC encoder sends `Decimal(obj)` for anything that
+    is not already a Decimal, so a float is its exact binary value, never its
+    text: 2.675 is 2.67499…, stored as 2.67, and 1.005 as 1.00, while the text
+    "2.675" is stored as 2.68. Read from its text, a float with a half-cent
+    tail differed from its own stored row on every tick — rewritten every
+    time, and named VALUE_MISMATCH by the 05:30 run every morning (C2R-1)."""
     from decimal import ROUND_HALF_UP, InvalidOperation
 
     if value is None or isinstance(value, bool):
         return value
     try:
-        exact = value if isinstance(value, Decimal) else Decimal(str(value))
+        exact = value if isinstance(value, Decimal) else Decimal(value)
         return exact.quantize(_CENT, rounding=ROUND_HALF_UP)
     except (InvalidOperation, ValueError, TypeError):
         return value

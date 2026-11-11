@@ -30,12 +30,12 @@ DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 BASE = 990_700
-REMOVED, EXTRA, REPRICED, NO_KEY, SAME, INFLIGHT = (BASE + i for i in range(6))
-IDS = [REMOVED, EXTRA, REPRICED, NO_KEY, SAME, INFLIGHT]
+REMOVED, EXTRA, REPRICED, NO_KEY, SAME, INFLIGHT, FLOAT = (BASE + i for i in range(7))
+IDS = [REMOVED, EXTRA, REPRICED, NO_KEY, SAME, INFLIGHT, FLOAT]
 OLD = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=40)
 
 
-def _cost(eid: int, amount: str = "10.50") -> dict:
+def _cost(eid: int, amount: object = "10.50") -> dict:
     return {"id": eid, "expense_type_id": 1, "amount": amount, "status": "paid"}
 
 
@@ -62,6 +62,7 @@ HELD = {
     NO_KEY: [_cost(NO_KEY * 10)],
     SAME: [_cost(SAME * 10), _cost(SAME * 10 + 1, "3")],
     INFLIGHT: [_cost(INFLIGHT * 10)],
+    FLOAT: [_cost(FLOAT * 10, 2.675), _cost(FLOAT * 10 + 1, 1.005)],
 }
 SERVED = {
     REMOVED: [_cost(REMOVED * 10)],
@@ -70,6 +71,9 @@ SERVED = {
     NO_KEY: None,                                   # fetched without the key
     SAME: [_cost(SAME * 10, "10.5"), _cost(SAME * 10 + 1, "3.00")],
     INFLIGHT: [],                                   # updated after the watermark
+    # Floats with a half-cent tail, stored as asyncpg sends them: 2.67 and
+    # 1.00. Read from their text they summed to 3.69 against 3.67 (C2R-1).
+    FLOAT: [_cost(FLOAT * 10, 2.675), _cost(FLOAT * 10 + 1, 1.005)],
 }
 
 # C-1: an entry chain 3 does not write. Each order lists one expense it writes
@@ -209,7 +213,8 @@ async def test_an_order_whose_expenses_differ_is_reported_and_repaired(pool):
     # Removed and added: both the count and the sum; re-priced by one
     # kopeck: the sum alone. Nothing else about these orders differs, and
     # neither the order fetched without its expenses, the one whose
-    # expenses agree in another spelling, nor the one in flight is named.
+    # expenses agree in another spelling, the one whose amounts are floats,
+    # nor the one in flight is named.
     assert found == {REMOVED: {mismatch, amount}, EXTRA: {mismatch, amount},
                      REPRICED: {amount}}
 
@@ -223,6 +228,8 @@ async def test_an_order_whose_expenses_differ_is_reported_and_repaired(pool):
     # Untouched: what KeyCRM said nothing about, and what was held back.
     assert await _stored(pool, NO_KEY) == [(NO_KEY * 10, Decimal("10.50"))]
     assert await _stored(pool, INFLIGHT) == [(INFLIGHT * 10, Decimal("10.50"))]
+    assert await _stored(pool, FLOAT) == [(FLOAT * 10, Decimal("2.67")),
+                                          (FLOAT * 10 + 1, Decimal("1.00"))]
 
 
 @pytest.mark.asyncio
