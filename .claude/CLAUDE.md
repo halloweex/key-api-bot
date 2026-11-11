@@ -1697,7 +1697,12 @@ Cap what rebounds; only delete what stays deleted.
   down, and the page was announced resolved with ClickHouse still down. The
   history that watch rests on is `deploy/daily_soak/22_reconciliation_ch_history.sql`,
   DN-21's bar for `reconciliation_pg` (20) applied to this arm, read the way
-  the canary now reads it.
+  the canary now reads it. The same for `integrity` since O10 (a)+(c)
+  (2026-11-11): a run in which every Postgres twin and the chain invariants
+  filed only their `*_unwatched` findings is journalled with `error_message`
+  and moves no age (`scheduler.blind_integrity_run`), while the scan's own
+  CRITICALs still page, and a blindness finding is news in every 09:00 digest
+  it stands in (`data_quality.blindness_names`), not only on the weekly beat.
 - **Every message is signed with `KS_INSTANCE`** (default `gethostname()`,
   `prod-vps` in compose on both services). Applied by the two HTTP transports
   and by the bot's Application path — three call sites, so nothing that merely

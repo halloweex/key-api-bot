@@ -136,8 +136,11 @@ unnoticed for a month).
 - **DuckDB's own thresholds**: `min_total` from its signature, the known ids
   and the return list from where DuckDB reads them, bound as parameters.
 
-Still deferred, with the owner's decision it needs: making blindness news in
-every digest (OD-05).
+Blindness is news in every digest it stands in, unchanged or not, and a run
+in which every group here and the chain invariants could look at nothing is
+journalled failed, so the layer's age stops and the canary pages
+(`looked_at_nothing`; the owner's decision O10 (a)+(c), 2026-11-11 — OD-05
+had deferred it).
 """
 from __future__ import annotations
 
@@ -1452,6 +1455,29 @@ def check_pg_warehouse(
 # S14-14: one INFO a run with both engines' numbers side by side, for the
 # soak's Pairing check (`deploy/stage4_soak/21_pairing.sql`, deleted with it).
 # With no DuckDB scan there is no second side to record.
+
+
+def looked_at_nothing(issues: Sequence[Any]) -> bool:
+    """Whether every group of the twins was blind this run, read off the
+    twins' own findings (`check_pg_warehouse`'s). Pure.
+
+    Each blind group is counted once among them: the whole snapshot, or two
+    or more groups unread, is one `WHOLE_UNWATCHED` whose count is the number
+    of groups it covers; one group unread, or a group whose verdict raised,
+    is its own `UNWATCHED_NAMES` finding, count 1. So the counts add up to
+    the groups that could not look, and all of them is a run in which the
+    twins saw nothing (O10 (a), 2026-11-11: such a run is journalled failed
+    when the chain invariants saw nothing either). A run with no finding at
+    all looked everywhere and found nothing — the opposite.
+    """
+    blind_names = set(UNWATCHED_NAMES.values())
+    blind = 0
+    for i in issues:
+        if i.check_name == WHOLE_UNWATCHED:
+            blind += int(i.count)
+        elif i.check_name in blind_names:
+            blind += 1
+    return blind >= len(GROUPS)
 
 
 def unverified_pg_conditions(held: Sequence[str] = ()) -> List[str]:
