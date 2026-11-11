@@ -637,6 +637,46 @@ def _int_or_none(value: Any) -> Optional[int]:
         return None
 
 
+# ─── Which of an order's listed expenses this chain stores ──────────────────
+#
+# Two pure functions, because two readers must agree on them: the writer
+# below, and the 05:30 reconciliation (`reconciliation_io.keycrm_expense_facts`),
+# which counts an order's KeyCRM expenses only as this chain would store them.
+# Counting every entry of the list instead reported an order with one refused
+# entry as VALUE_MISMATCH every morning and re-fetched it, and the re-fetch is
+# refused the same way (C-1).
+
+def listed_expense_ids(carried: Any) -> set:
+    """Every expense id one order's `expenses` list names, read off the
+    payload as it came: an entry that is not an object, or an id that is not a
+    number, names none. A stored expense whose id is here is never deleted
+    (O2 (a)), whether this chain writes the entry or refuses it."""
+    if not isinstance(carried, list):
+        return set()
+    return {i for i in (_int_or_none(e.get("id")) if isinstance(e, dict) else None
+                        for e in carried) if i is not None}
+
+
+def stored_expenses(rows: Sequence[Any]) -> Tuple[List[Any], List[Tuple[Any, str]]]:
+    """`(kept, refused)` of parsed expense rows (`landing_rows.expense_row`).
+
+    An expense with no id is dropped without a word: nothing could name it.
+    One id given twice is the last one given (`INSERT OR REPLACE`'s outcome on
+    the DuckDB path). What `expense_refusal` refuses is in `refused` with the
+    reason, and its stored row, if any, stays as it is. The rest is `kept`,
+    which is what is written."""
+    by_id = {e.id: e for e in rows if e.id is not None}
+    kept: List[Any] = []
+    refused: List[Tuple[Any, str]] = []
+    for row in by_id.values():
+        why = expense_refusal(row)
+        if why:
+            refused.append((row, why))
+        else:
+            kept.append(row)
+    return kept, refused
+
+
 async def upsert_orders_with_expenses(
     payloads: Sequence[Dict[str, Any]], *,
     force_update: bool = False,
@@ -697,10 +737,7 @@ async def upsert_orders_with_expenses(
         if not isinstance(p, dict):
             continue
         carried = p.get("expenses")
-        if isinstance(carried, list):
-            all_listed.update(
-                i for i in (_int_or_none(e.get("id")) if isinstance(e, dict) else None
-                            for e in carried) if i is not None)
+        all_listed.update(listed_expense_ids(carried))
         if _int_or_none(p.get("id")) in refusals:
             continue
         if isinstance(carried, list) and _int_or_none(p.get("id")) is not None:
@@ -719,8 +756,7 @@ async def upsert_orders_with_expenses(
                 refusals[oid] = why
                 unparsed.add(oid)
                 latest.pop(oid, None)
-    expenses = {e.id: e for e in parsed_expenses
-                if e.id is not None and _int_or_none(e.order_id) not in refusals}
+    expenses = [e for e in parsed_expenses if _int_or_none(e.order_id) not in refusals]
 
     lines: Dict[int, List[Any]] = {}
     for p in landed.products:
@@ -736,13 +772,9 @@ async def upsert_orders_with_expenses(
             refusals[int(row.id)] = why
         else:
             orders.append(row)
-    kept_expenses = []
-    for row in expenses.values():
-        why = expense_refusal(row)
-        if why:
-            logger.error("orders: expense %r not written to Postgres: %s", row.id, why)
-        else:
-            kept_expenses.append(row)
+    kept_expenses, refused_expenses = stored_expenses(expenses)
+    for row, why in refused_expenses:
+        logger.error("orders: expense %r not written to Postgres: %s", row.id, why)
 
     # The orders whose expense listing is acted on: not refused, by the parse
     # or by the checks above (O2 (a)).

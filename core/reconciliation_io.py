@@ -31,8 +31,8 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Dict, Iterable, List, Optional, Tuple
+from decimal import Decimal
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from core.data_quality import Discrepancy, Rollup, classify_order_discrepancies
@@ -74,42 +74,66 @@ OrderFacts = Dict[int, Dict[str, object]]
 # An order whose KeyCRM payload did not carry an `expenses` list carries no
 # expense facts and is not compared: a snapshot without the key must not read
 # as every expense missing.
+#
+# KeyCRM's side counts what chain 3 would store, never the list's length
+# (C-1): each entry goes through the writer's own parse and the writer's own
+# choice (`pg_orders_write.stored_expenses`), so an entry with no id, or one
+# Postgres would refuse (a null amount, a NUL byte, an amount `NUMERIC(12,2)`
+# cannot hold, an id that is not an integer), is left out. Counted, it read as
+# VALUE_MISMATCH every morning and was re-fetched every morning, and the
+# re-fetch is refused the same way. A refused entry whose id Postgres already
+# holds keeps its stored row (an id KeyCRM lists is never deleted), so that
+# row is left out of Postgres' side too: `EXPENSES_LEFT_AS_STORED`.
 EXPENSE_FIELDS = ("n_expenses", "expense_amount")
+
+# The ids KeyCRM lists under an order that chain 3 does not write: their
+# stored rows, if any, stay as they are, and are not compared.
+EXPENSES_LEFT_AS_STORED = "expense_ids_left_as_stored"
 
 # What the snapshot asks KeyCRM to embed in each order. `expenses` since O3 (a):
 # the same pages, a larger payload.
 SNAPSHOT_INCLUDE = "products,manager,buyer,expenses"
 
-_CENT = Decimal("0.01")
 
+def keycrm_expense_facts(expenses: object, order_id: Any) -> Optional[Dict[str, object]]:
+    """`{n_expenses, expense_amount, EXPENSES_LEFT_AS_STORED}` of one KeyCRM
+    order's `expenses`, counted as chain 3 would store them, or None when
+    there is nothing to compare: no list under the key, or an entry the
+    writer's parse cannot read, which refuses the whole order and so writes
+    and deletes none of its expenses.
 
-def keycrm_expense_facts(expenses: object) -> Optional[Dict[str, object]]:
-    """`{n_expenses, expense_amount}` of one KeyCRM order's `expenses`, or
-    None when there is nothing to compare: no list under the key, an entry
-    that is not an object, or an amount that is not a number.
-
-    Each amount is rounded to the cent half away from zero, as
-    `NUMERIC(12,2)` rounds what the chain writes; an absent or null amount
-    counts as zero (the chain writes an absent one as 0)."""
+    `order_id` is the payload's own `id`, as the writer hands it to the parse.
+    Each entry is parsed by `landing_rows.expense_row` and chosen by
+    `pg_orders_write.stored_expenses`: one with no id is left out, one id
+    given twice counts once, and one `expense_refusal` refuses is left out —
+    a null amount among them, which the column (NOT NULL) refuses. An absent
+    amount is written as 0 and counts as 0. Each kept amount is rounded to the
+    cent as `NUMERIC(12,2)` stores it (`pg_orders_write._cents`)."""
     if not isinstance(expenses, list):
         return None
-    total = Decimal(0)
-    for e in expenses:
-        if not isinstance(e, dict):
-            return None
-        amount = e.get("amount")
-        if amount is None:
-            continue
-        if isinstance(amount, bool):
-            return None
-        try:
-            exact = Decimal(str(amount))
-            if not exact.is_finite():
-                return None
-            total += exact.quantize(_CENT, rounding=ROUND_HALF_UP)
-        except (InvalidOperation, ValueError):
-            return None
-    return {"n_expenses": len(expenses), "expense_amount": total}
+    from core.landing_rows import _UNPARSEABLE, expense_row
+    from core.pg_orders_write import _cents, listed_expense_ids, stored_expenses
+
+    try:
+        rows = [expense_row(order_id, e) for e in expenses]
+    except _UNPARSEABLE:
+        return None
+    kept, _refused = stored_expenses(rows)
+    total = sum((_cents(r.amount) for r in kept), Decimal(0))
+    written = {int(r.id) for r in kept}
+    return {"n_expenses": len(kept), "expense_amount": total,
+            EXPENSES_LEFT_AS_STORED: frozenset(listed_expense_ids(expenses) - written)}
+
+
+def left_as_stored(kc: OrderFacts) -> Dict[int, FrozenSet[int]]:
+    """`{order id: ids}` of the expenses KeyCRM lists that chain 3 does not
+    write, for the orders that have any."""
+    out: Dict[int, FrozenSet[int]] = {}
+    for oid, facts in kc.items():
+        ids = facts.get(EXPENSES_LEFT_AS_STORED)
+        if isinstance(ids, (set, frozenset)) and ids:
+            out[oid] = frozenset(int(i) for i in ids)
+    return out
 
 
 def carries_expenses(kc: OrderFacts, among: Iterable[int]) -> List[int]:
@@ -119,23 +143,34 @@ def carries_expenses(kc: OrderFacts, among: Iterable[int]) -> List[int]:
                   if oid in kc and all(kc[oid].get(f) is not None for f in EXPENSE_FIELDS))
 
 
-async def postgres_expenses_of(pool, order_ids: Iterable[int]) -> OrderFacts:
+async def postgres_expenses_of(
+    pool, order_ids: Iterable[int], *,
+    leave_out: Optional[Mapping[int, Iterable[int]]] = None,
+) -> OrderFacts:
     """`{order id: {n_expenses, expense_amount}}` from `bronze.expenses`, for
-    every id asked — an order with no expense row reads 0 and 0.00."""
+    every id asked — an order with no expense row reads 0 and 0.00.
+
+    `leave_out` is `left_as_stored(kc)`: under each order, the ids KeyCRM
+    lists that chain 3 does not write. A re-fetch keeps those rows as they
+    are, so they are not counted here either. Summed in Python, as Decimal."""
     ids = sorted({int(i) for i in order_ids})
-    out: OrderFacts = {oid: {"n_expenses": 0, "expense_amount": Decimal("0.00")}
-                       for oid in ids}
-    if not ids:
-        return out
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT order_id, count(*) AS n, COALESCE(SUM(amount), 0) AS amount "
-            "FROM bronze.expenses WHERE order_id = ANY($1::int[]) GROUP BY order_id",
-            ids)
-    for r in rows:
-        out[int(r["order_id"])] = {"n_expenses": int(r["n"]),
-                                   "expense_amount": Decimal(r["amount"])}
-    return out
+    count = {oid: 0 for oid in ids}
+    amount = {oid: Decimal("0.00") for oid in ids}
+    if ids:
+        skip = {int(oid): {int(i) for i in eids}
+                for oid, eids in (leave_out or {}).items()}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT order_id, id, amount FROM bronze.expenses "
+                "WHERE order_id = ANY($1::int[])", ids)
+        for r in rows:
+            oid = int(r["order_id"])
+            if int(r["id"]) in skip.get(oid, ()):
+                continue
+            count[oid] += 1
+            amount[oid] += Decimal(r["amount"])
+    return {oid: {"n_expenses": count[oid], "expense_amount": amount[oid]}
+            for oid in ids}
 
 
 def classify_expense_discrepancies(
@@ -513,6 +548,6 @@ def _process_batch(
         }
         # Only when the payload carried them (O3 (a)): absent, the order's
         # expenses are not compared rather than read as none.
-        expense_facts = keycrm_expense_facts(o.get("expenses"))
+        expense_facts = keycrm_expense_facts(o.get("expenses"), oid)
         if expense_facts is not None:
             orders[int(oid)].update(expense_facts)

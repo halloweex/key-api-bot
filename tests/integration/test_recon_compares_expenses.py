@@ -72,16 +72,42 @@ SERVED = {
     INFLIGHT: [],                                   # updated after the watermark
 }
 
+# C-1: an entry chain 3 does not write. Each order lists one expense it writes
+# and one it drops (no id) or refuses (`expense_refusal`); the last two held a
+# clean second expense before KeyCRM's copy of it turned into one the chain
+# refuses, so the stored row stays as it was.
+C1_BASE = 990_720
+(NULL_AMOUNT, NO_ID, NUL_DESC, OUT_OF_RANGE,
+ STORED_THEN_NULL, STORED_THEN_NUL) = (C1_BASE + i for i in range(6))
+C1_IDS = [NULL_AMOUNT, NO_ID, NUL_DESC, OUT_OF_RANGE, STORED_THEN_NULL, STORED_THEN_NUL]
+C1_SERVED = {
+    NULL_AMOUNT: [_cost(NULL_AMOUNT * 10), dict(_cost(NULL_AMOUNT * 10 + 1), amount=None)],
+    NO_ID: [_cost(NO_ID * 10), {"expense_type_id": 1, "amount": "5.00", "status": "paid"}],
+    NUL_DESC: [_cost(NUL_DESC * 10),
+               dict(_cost(NUL_DESC * 10 + 1, "5.00"), description="a\x00b")],
+    OUT_OF_RANGE: [_cost(OUT_OF_RANGE * 10), _cost(OUT_OF_RANGE * 10 + 1, "10000000000.00")],
+    STORED_THEN_NULL: [_cost(STORED_THEN_NULL * 10),
+                       dict(_cost(STORED_THEN_NULL * 10 + 1), amount=None)],
+    STORED_THEN_NUL: [_cost(STORED_THEN_NUL * 10),
+                      dict(_cost(STORED_THEN_NUL * 10 + 1, "5.00"), description="a\x00b")],
+}
+C1_HELD = {**C1_SERVED,
+           STORED_THEN_NULL: [_cost(STORED_THEN_NULL * 10),
+                              _cost(STORED_THEN_NULL * 10 + 1, "5.00")],
+           STORED_THEN_NUL: [_cost(STORED_THEN_NUL * 10),
+                             _cost(STORED_THEN_NUL * 10 + 1, "5.00")]}
+
 
 async def _clean(pool):
+    ids = IDS + C1_IDS
     async with pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM bronze.expenses WHERE order_id = ANY($1::int[])", IDS)
+            "DELETE FROM bronze.expenses WHERE order_id = ANY($1::int[])", ids)
         await conn.execute(
-            "DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])", IDS)
-        await conn.execute("DELETE FROM bronze.orders WHERE id = ANY($1::int[])", IDS)
+            "DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])", ids)
+        await conn.execute("DELETE FROM bronze.orders WHERE id = ANY($1::int[])", ids)
         await conn.execute(
-            "DELETE FROM app.order_versions WHERE order_id = ANY($1::int[])", IDS)
+            "DELETE FROM app.order_versions WHERE order_id = ANY($1::int[])", ids)
 
 
 @pytest_asyncio.fixture
@@ -115,33 +141,36 @@ async def _stored(pool, oid):
 class _KeyCRM:
     """KeyCRM by id, as the repair asks it: the order as served at 05:30."""
 
-    def __init__(self):
+    def __init__(self, served):
+        self.served = served
         self.asked: list = []
 
     async def get_order(self, order_id, include=None):
         self.asked.append(int(order_id))
         assert "expenses" in (include or "")
-        return _payload(int(order_id), SERVED[int(order_id)])
+        return _payload(int(order_id), self.served[int(order_id)])
 
 
-async def _run(pool, sched):
+async def _run(pool, sched, ids=IDS, served=SERVED, in_flight=INFLIGHT):
     from core.reconciliation_io import _process_batch, postgres_orders_in_window
+
+    flying = {in_flight} if in_flight is not None else set()
 
     async def snapshot(window_start, window_end, *, watermark):
         held = await postgres_orders_in_window(
             pool, window_start, window_end, watermark=watermark)
-        assert set(IDS) - {INFLIGHT} <= set(held), "the fixture is not in the window"
-        kc = {oid: facts for oid, facts in held.items() if oid not in IDS}
+        assert set(ids) - flying <= set(held), "the fixture is not in the window"
+        kc = {oid: facts for oid, facts in held.items() if oid not in ids}
         inflight: set = set()
-        _process_batch([_payload(oid, SERVED[oid],
-                                 updated=(datetime.now(timezone.utc) if oid == INFLIGHT
+        _process_batch([_payload(oid, served[oid],
+                                 updated=(datetime.now(timezone.utc) if oid in flying
                                           else OLD))
-                        for oid in IDS],
+                        for oid in ids],
                        kc, watermark, window_start, window_end, inflight)
-        assert inflight == {INFLIGHT}
+        assert inflight == flying
         return kc, 3, inflight
 
-    keycrm = _KeyCRM()
+    keycrm = _KeyCRM(served)
     with patch("core.reconciliation_io.keycrm_orders_in_window", new=snapshot), \
          patch("core.sync_service.get_async_client", new=AsyncMock(return_value=keycrm)):
         result = await sched._run_dq_reconciliation()
@@ -222,3 +251,45 @@ async def test_a_second_run_after_the_repair_is_clean(pool):
     assert keycrm.asked == []
     assert result["error"] is None
 
+
+
+@pytest.mark.asyncio
+async def test_an_entry_the_chain_does_not_write_is_neither_reported_nor_re_fetched(pool):
+    """C-1. KeyCRM lists an expense chain 3 drops (no id) or refuses (a null
+    amount, a NUL byte, an amount `NUMERIC(12,2)` cannot hold). Counted, the
+    order read VALUE_MISMATCH every morning and was re-fetched every morning,
+    one KeyCRM call each, and the forced re-fetch is refused the same way —
+    on the commit before the fix every one of these orders but the last was
+    named and re-fetched. The last held a clean expense KeyCRM's copy of which
+    now carries a NUL: the chain keeps the stored row, so leaving the entry
+    out of KeyCRM's side alone would name it instead. Mutations killed: count
+    `len(list)`; leave the kept row in Postgres' side."""
+    from core.scheduler import BackgroundScheduler
+
+    await chain.upsert_orders_with_expenses([_payload(oid, C1_HELD[oid]) for oid in C1_IDS])
+    # The minute sync since: KeyCRM's copy of the second expense of the last
+    # two turned into one the chain refuses, and it wrote what it could.
+    await chain.upsert_orders_with_expenses(
+        [_payload(oid, C1_SERVED[oid]) for oid in C1_IDS], force_update=True)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meta.mirror_state SET backfilled_at = now() "
+            "WHERE table_name = 'bronze.orders'")
+
+    sched = BackgroundScheduler()
+    sched._persist_postgres_reconciliation = AsyncMock()
+    sched._reconcile_clickhouse = AsyncMock(return_value=None)
+    result, keycrm = await _run(pool, sched, ids=C1_IDS, served=C1_SERVED, in_flight=None)
+
+    assert result["error"] is None
+    persisted = sched._persist_postgres_reconciliation.await_args.args[0]
+    assert persisted["error"] is None
+    named = {(oid, d.field) for d in persisted["discrepancies"]
+             for oid in d.order_ids if oid in C1_IDS}
+    assert named == set()
+    assert keycrm.asked == []
+    for oid in (NULL_AMOUNT, NO_ID, NUL_DESC, OUT_OF_RANGE):
+        assert await _stored(pool, oid) == [(oid * 10, Decimal("10.50"))]
+    for oid in (STORED_THEN_NULL, STORED_THEN_NUL):
+        assert await _stored(pool, oid) == [(oid * 10, Decimal("10.50")),
+                                            (oid * 10 + 1, Decimal("5.00"))]

@@ -2537,6 +2537,7 @@ class BackgroundScheduler:
         from core.reconciliation_io import (
             carries_expenses,
             classify_expense_discrepancies,
+            left_as_stored,
             postgres_expenses_of,
             postgres_orders_in_window,
             rollup_from_orders,
@@ -2615,9 +2616,11 @@ class BackgroundScheduler:
             # (owner decision O3 (a)): VALUE_MISMATCH on `n_expenses` and
             # `expense_amount`, WARN, and repaired by id below. Only where
             # KeyCRM's payload carried them, and only orders both sides hold
-            # after the watermark's exclusion.
+            # after the watermark's exclusion. Only what chain 3 would store
+            # (C-1): an entry it refuses is on neither side.
             pg_expenses = await postgres_expenses_of(
-                pool, carries_expenses(kc_orders, pg_orders))
+                pool, carries_expenses(kc_orders, pg_orders),
+                leave_out=left_as_stored(kc_orders))
             discrepancies += classify_expense_discrepancies(pg_expenses, kc_orders)
             logger.info(
                 f"DQ reconciliation (Postgres): pg_cells={len(pg_rollup)} "

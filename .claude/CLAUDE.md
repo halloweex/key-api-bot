@@ -1773,9 +1773,14 @@ verdict are what the job re-fetches by id. Since the owner's decision O3 (a)
 (2026-11-11) the snapshot carries each order's expenses, and the Postgres arm
 compares their count and sum with `bronze.expenses`, to the kopeck, as
 `VALUE_MISMATCH` (WARN — a cost moves no revenue) on `n_expenses` and
-`expense_amount`; an order fetched without the key is not compared. Such an
-order is re-fetched last in the same batch, and its write deletes what KeyCRM
-no longer lists (O2 (a)). History below.
+`expense_amount`; an order fetched without the key is not compared. Both sides
+count only what chain 3 stores, through the writer's own
+`pg_orders_write.stored_expenses`: an entry it drops (no id) or refuses
+(`expense_refusal`) is not counted from KeyCRM, and a stored row whose id
+KeyCRM lists but the chain refuses is not counted from Postgres, because a
+re-fetch keeps that row as it is. An order whose expenses differ is re-fetched
+last in the same batch, and its write deletes what KeyCRM no longer lists
+(O2 (a)). History below.
 
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the

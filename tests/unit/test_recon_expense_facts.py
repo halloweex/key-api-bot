@@ -18,9 +18,11 @@ import pytest
 from core.data_quality import DiscrepancyClass, Severity
 from core.reconciliation_io import (
     EXPENSE_FIELDS,
+    EXPENSES_LEFT_AS_STORED,
     _process_batch,
     classify_expense_discrepancies,
     keycrm_expense_facts,
+    left_as_stored,
 )
 
 WATERMARK = datetime(2026, 8, 4, tzinfo=timezone.utc)
@@ -42,43 +44,55 @@ def _snapshot(*orders):
     return out
 
 
+def _counted(facts):
+    """The two compared fields of a snapshot's facts."""
+    return facts["n_expenses"], facts["expense_amount"]
+
+
 class TestWhatTheSnapshotRecords:
     def test_a_list_is_counted_and_summed_in_cents(self):
         facts = keycrm_expense_facts([{"id": 1, "amount": "10.50"},
                                       {"id": 2, "amount": 3},
                                       {"id": 3, "amount": 0.1},
-                                      {"id": 4}])
-        assert facts == {"n_expenses": 4, "expense_amount": Decimal("13.60")}
+                                      {"id": 4}], 7)
+        assert _counted(facts) == (4, Decimal("13.60"))
         assert isinstance(facts["expense_amount"], Decimal)
+        assert facts[EXPENSES_LEFT_AS_STORED] == frozenset()
 
     def test_each_amount_rounds_as_the_column_does(self):
         """`NUMERIC(12,2)` rounds half away from zero, each row on its own.
         Mutation: sum first and round once, or round half to even."""
-        assert keycrm_expense_facts([{"amount": "0.005"}, {"amount": "0.005"}]) == \
-            {"n_expenses": 2, "expense_amount": Decimal("0.02")}
-        assert keycrm_expense_facts([{"amount": "0.125"}])["expense_amount"] == \
+        assert _counted(keycrm_expense_facts(
+            [{"id": 1, "amount": "0.005"}, {"id": 2, "amount": "0.005"}], 7)) == \
+            (2, Decimal("0.02"))
+        assert keycrm_expense_facts([{"id": 1, "amount": "0.125"}], 7)["expense_amount"] == \
             Decimal("0.13")
 
     def test_an_empty_list_is_no_expense_at_all(self):
-        assert keycrm_expense_facts([]) == {"n_expenses": 0,
-                                            "expense_amount": Decimal("0")}
+        assert _counted(keycrm_expense_facts([], 7)) == (0, Decimal("0"))
 
     @pytest.mark.parametrize("carried", [None, {"id": 1}, "x", 7],
                              ids=["null", "object", "text", "number"])
     def test_anything_but_a_list_is_nothing_to_compare(self, carried):
-        assert keycrm_expense_facts(carried) is None
+        assert keycrm_expense_facts(carried, 7) is None
 
-    @pytest.mark.parametrize("amount", ["ten", True, "NaN", "Infinity"])
-    def test_an_amount_that_is_not_a_number_is_nothing_to_compare(self, amount):
-        assert keycrm_expense_facts([{"amount": amount}]) is None
+    @pytest.mark.parametrize("entry", ["x", 7, None, ["id", 1]],
+                             ids=["text", "number", "null", "list"])
+    def test_an_entry_the_parse_cannot_read_is_nothing_to_compare(self, entry):
+        """The writer refuses the whole order then (`_UNPARSEABLE`), and so
+        writes and deletes none of its expenses. Mutation: count the entry,
+        or skip it and compare the rest."""
+        assert keycrm_expense_facts([{"id": 1, "amount": "1.00"}, entry], 7) is None
 
     def test_the_order_s_facts_carry_them_only_when_the_payload_did(self):
         """Mutation: record an absent key as no expenses — every order of a
         snapshot fetched without them would read as having lost its costs."""
         orders = _snapshot(_order(1, expenses=[{"id": 9, "amount": "10.00"}]),
                            _order(2, expenses=[]), _order(3))
-        assert (orders[1]["n_expenses"], orders[1]["expense_amount"]) == (1, Decimal("10.00"))
-        assert (orders[2]["n_expenses"], orders[2]["expense_amount"]) == (0, Decimal("0"))
+        # Order 1's expense is counted, so the parse was handed the order's
+        # id: without it every expense is refused (`order_id` is NOT NULL).
+        assert _counted(orders[1]) == (1, Decimal("10.00"))
+        assert _counted(orders[2]) == (0, Decimal("0"))
         assert not set(EXPENSE_FIELDS) & set(orders[3])
 
     @pytest.mark.asyncio
@@ -107,6 +121,87 @@ class TestWhatTheSnapshotRecords:
         assert len(asked) == 2
         for params in asked:
             assert "expenses" in params["include"].split(","), params
+
+
+_OK = {"id": 1, "expense_type_id": 1, "amount": "10.50", "status": "paid"}
+
+
+class TestOnlyWhatChain3Stores:
+    """C-1: KeyCRM's side counts what chain 3 would store, never the list's
+    length. With an entry the writer drops (no id) or refuses
+    (`expense_refusal`) counted, the order read VALUE_MISMATCH every morning
+    and was re-fetched every morning, and the re-fetch is refused the same
+    way. Mutation killed by every case: count `len(list)`, or sum every
+    amount the list carries."""
+
+    @pytest.mark.parametrize("entry, left", [
+        ({"id": 2, "expense_type_id": 1, "amount": None}, {2}),
+        ({"expense_type_id": 1, "amount": "5.00"}, set()),
+        ({"id": None, "expense_type_id": 1, "amount": "5.00"}, set()),
+        ({"id": 2, "expense_type_id": 1, "amount": "5.00", "description": "a\x00b"}, {2}),
+        ({"id": 2, "expense_type_id": 1, "amount": "5.00", "status": "paid\x00"}, {2}),
+        ({"id": 2, "expense_type_id": 1, "amount": "10000000000.00"}, {2}),
+        ({"id": 2, "expense_type_id": 1, "amount": "-9999999999.995"}, {2}),
+        ({"id": 2, "expense_type_id": 1, "amount": "ten"}, {2}),
+        ({"id": 2, "expense_type_id": 1, "amount": True}, {2}),
+        ({"id": 2, "expense_type_id": 1, "amount": "NaN"}, {2}),
+        ({"id": 2, "expense_type_id": 1, "amount": "Infinity"}, {2}),
+        ({"id": "abc", "expense_type_id": 1, "amount": "5.00"}, set()),
+        ({"id": "2", "expense_type_id": 1, "amount": "5.00"}, {2}),
+        ({"id": 2 ** 31, "expense_type_id": 1, "amount": "5.00"}, {2 ** 31}),
+        ({"id": 2, "expense_type_id": "x", "amount": "5.00"}, {2}),
+    ], ids=["amount null", "id absent", "id null", "NUL in description",
+            "NUL in status", "amount out of range", "amount rounds out of range",
+            "amount is text", "amount is a boolean", "amount NaN",
+            "amount infinite", "id is text", "id is a numeric string",
+            "id past int32", "type id not an integer"])
+    def test_an_entry_the_chain_does_not_write_is_left_out(self, entry, left):
+        facts = keycrm_expense_facts([_OK, entry], 7)
+        assert _counted(facts) == (1, Decimal("10.50"))
+        # Its id, when it names one, is left out of Postgres' side too: the
+        # row a re-fetch keeps as it is. Mutation: leave nothing out there.
+        assert facts[EXPENSES_LEFT_AS_STORED] == frozenset(left)
+
+    def test_one_id_given_twice_counts_once_as_the_last(self):
+        """The writer keeps the last of one id. Mutation: count both."""
+        facts = keycrm_expense_facts([dict(_OK), dict(_OK, amount="2.00")], 7)
+        assert _counted(facts) == (1, Decimal("2.00"))
+
+    def test_the_last_of_one_id_refused_is_none_written(self):
+        """The last one given is refused, so the writer writes neither and
+        keeps the stored row. Mutation: dedupe after the refusal."""
+        facts = keycrm_expense_facts([dict(_OK), dict(_OK, amount=None)], 7)
+        assert _counted(facts) == (0, Decimal("0"))
+        assert facts[EXPENSES_LEFT_AS_STORED] == frozenset({1})
+
+    def test_an_absent_amount_is_written_as_zero_and_counted(self):
+        """`expense_row` writes an absent amount as 0; a null one is refused.
+        Mutation: read the two alike."""
+        facts = keycrm_expense_facts([_OK, {"id": 2, "expense_type_id": 1}], 7)
+        assert _counted(facts) == (2, Decimal("10.50"))
+
+    def test_the_order_s_own_id_is_what_the_parse_is_handed(self):
+        """An order id the writer cannot write an expense under refuses every
+        expense of it. Mutation: hand the parse the int()'d id."""
+        assert _counted(keycrm_expense_facts([_OK], "7")) == (0, Decimal("0"))
+
+    def test_it_is_the_writer_s_choice_not_a_copy(self):
+        """The writer's own functions decide; nothing here restates them.
+        Mutation: a copy of `expense_refusal`'s rule, or of the parse."""
+        from core import landing_rows, pg_orders_write
+
+        with patch.object(pg_orders_write, "expense_refusal", return_value="refused"):
+            assert _counted(keycrm_expense_facts([_OK], 7)) == (0, Decimal("0"))
+        real = landing_rows.expense_row
+        with patch.object(landing_rows, "expense_row",
+                          side_effect=lambda oid, e: real(oid, dict(e, amount="1.00"))):
+            assert _counted(keycrm_expense_facts([_OK], 7)) == (1, Decimal("1.00"))
+
+    def test_left_as_stored_names_only_the_orders_that_have_any(self):
+        kc = {1: {"n_expenses": 1, EXPENSES_LEFT_AS_STORED: frozenset({11})},
+              2: {"n_expenses": 0, EXPENSES_LEFT_AS_STORED: frozenset()},
+              3: {"status_id": 12}}
+        assert left_as_stored(kc) == {1: frozenset({11})}
 
 
 def _facts(n, amount, **over):
