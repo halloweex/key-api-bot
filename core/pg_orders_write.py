@@ -149,7 +149,7 @@ logger = logging.getLogger(__name__)
 # What an order upsert did — the shape `upsert_orders_with_expenses` returns
 # and `SyncService._upsert_orders_with_expenses` reads. It was DuckDB's
 # (`core.duckdb_store`) until step 14's S14-01 moved it to its one remaining
-# producer, unchanged; `core.duckdb_store` re-exports it for one release.
+# producer, unchanged; `core.duckdb_store` re-exported it until S14-18.
 @dataclass(frozen=True)
 class UpsertResult:
     """What an order upsert actually did.

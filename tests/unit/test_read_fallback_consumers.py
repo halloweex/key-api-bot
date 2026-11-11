@@ -356,7 +356,7 @@ def build_graph(tops=WALKED) -> Graph:
 
     # The store: AnalyticsStore and the mixins it is composed of (it was
     # `DuckDBStore` in `core/duckdb_store.py` until step 14's S14-18, which
-    # left that module a shim of the name).
+    # left that module a shim of the name until the final stage deleted it).
     store_def = classes[("core/store.py", "AnalyticsStore")]
     composed = {b.id for b in store_def.bases if isinstance(b, ast.Name)}
     composed.add("AnalyticsStore")

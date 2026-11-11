@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 
 from core import pg_dashboard_users as duf
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 REPO = Path(__file__).resolve().parents[2]
 MIGRATION = REPO / "migrations" / "versions" / "0016_dashboard_users.py"
@@ -387,13 +387,13 @@ class TestTheRoleMatrixLeftDuckDB:
         monkeypatch.setattr(duf, "fetch_row", fetch_row)
         monkeypatch.setattr(duf, "execute", execute)
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
 
         def explode():
             raise AssertionError(
                 "the access path opened DuckDB with KS_USER_STORE=postgres")
 
-        monkeypatch.setattr(store, "connection", explode)
+        monkeypatch.setattr(store, "connection", explode, raising=False)
 
         await store.get_role_permissions("viewer")
         await store.get_all_permissions()

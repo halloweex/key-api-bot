@@ -67,9 +67,9 @@ class TestTheManagerRow:
     def test_duckdbs_writer_reads_it_through_the_shared_function(self):
         """Mutation: spell the row inline in DuckDB again — the two stores
         would then be one edit away from naming a manager differently."""
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(DuckDBStore.upsert_managers)))
+        tree = ast.parse(textwrap.dedent(inspect.getsource(AnalyticsStore.upsert_managers)))
         called = {getattr(n.func, "id", getattr(n.func, "attr", ""))
                   for n in ast.walk(tree) if isinstance(n, ast.Call)}
         assert "manager_rows" in called
@@ -484,10 +484,10 @@ class TestTheStoreRoutes:
         from unittest.mock import AsyncMock, patch
 
         from core import chain_latch, pg_managers_write
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         chain_latch.latch(pg_managers_write.CHAIN)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         rows = [{"id": 1, "name": "M", "synced_at": T0}]
         with patch("core.pg_managers_read.fetch_all_managers",
                    new=AsyncMock(return_value=rows)) as read:
@@ -502,10 +502,10 @@ class TestTheStoreRoutes:
         from unittest.mock import AsyncMock, patch
 
         from core import chain_latch, pg_managers_write
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         chain_latch.latch(pg_managers_write.CHAIN)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         store.mark_warehouse_dirty = AsyncMock()
         with patch.object(pg_managers_write, "set_manager_retail_status",
                           new=AsyncMock()) as write:
@@ -520,10 +520,10 @@ class TestTheStoreRoutes:
         from unittest.mock import AsyncMock, patch
 
         from core import chain_latch, pg_managers_write
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         chain_latch.latch(pg_managers_write.CHAIN)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         with patch.object(pg_managers_write, "update_manager_stats",
                           new=AsyncMock(return_value=4)), \
                 patch.object(pg_managers_write, "upsert_managers",
@@ -803,14 +803,14 @@ class TestEveryReadOfTheTablesFollowsTheChain:
         from unittest.mock import AsyncMock, patch
 
         from core import read_fallback
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.repositories.revenue import _RETURN_ORDERS_SQL
 
         if switch is None:
             flags.delenv("KS_READ_DASHBOARD", raising=False)
         else:
             flags.setenv("KS_READ_DASHBOARD", switch)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         with patch("core.pg_dashboard_read.fetch",
                    new=AsyncMock(return_value=[(1,)])) as fetch:
             assert await store._dashboard_run(_RETURN_ORDERS_SQL.replace(

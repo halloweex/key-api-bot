@@ -284,7 +284,7 @@ class TestTheDerivationRidesTheReplicationTick:
         bot = AsyncMock(return_value={"skipped": "KS_BOT_STORE=postgres"})
         with patch("core.pg_buyers_write.derive_gender_pg", new=derive), \
              patch("core.pg_bot_state.replicate_bot_state", new=bot), \
-             patch("core.duckdb_store.get_store",
+             patch("core.store.get_store",
                    new=AsyncMock(side_effect=AssertionError("the store was asked"))), \
              patch("core.store.get_store",
                    new=AsyncMock(side_effect=AssertionError("the store was asked"))):

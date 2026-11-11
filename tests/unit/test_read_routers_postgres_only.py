@@ -163,9 +163,9 @@ SWITCH_VALUES = [None, "", "duckdb", "postgres", "postgress", "junk-s14-05"]
 def store(tmp_path, monkeypatch):
     """A store that is never connected, whose connection is a trap: nothing
     here may reach for DuckDB, under any value of any switch."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def trap(*_a, **_k):
         raise AssertionError("a Postgres-only router reached for DuckDB")
@@ -437,6 +437,6 @@ class TestNothingGoesRoundTheRouter:
         """`_get_category_with_children` ran the tree on a DuckDB connection
         its caller held. Its last callers were the dashboard's DuckDB tails,
         which resolve the tree through `_category_ids` now."""
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        assert not hasattr(DuckDBStore, "_get_category_with_children")
+        assert not hasattr(AnalyticsStore, "_get_category_with_children")

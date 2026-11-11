@@ -4,7 +4,7 @@ import time
 
 from web.ratelimit import limiter  # single app-wide limiter instance
 
-from core.duckdb_store import get_store
+from core.store import get_store
 from core.validators import (
     validate_period,
     validate_source_id,

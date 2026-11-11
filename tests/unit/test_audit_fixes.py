@@ -121,7 +121,7 @@ class TestModelValidationGate:
         async def fake_get_store():
             return object()
 
-        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+        monkeypatch.setattr("core.store.get_store", fake_get_store)
         monkeypatch.setattr(svc, "_query_daily_revenue",
                             AsyncMock(return_value=_valid_training_df()))
         # Garbage model: WAPE far above the reject threshold.
@@ -143,7 +143,7 @@ class TestModelValidationGate:
         async def fake_get_store():
             return object()
 
-        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+        monkeypatch.setattr("core.store.get_store", fake_get_store)
         monkeypatch.setattr(svc, "_query_daily_revenue",
                             AsyncMock(return_value=_valid_training_df()))
         sentinel_model = object()
@@ -167,7 +167,7 @@ class TestModelValidationGate:
         fake_store = AsyncMock()
         async def fake_get_store():
             return fake_store
-        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+        monkeypatch.setattr("core.store.get_store", fake_get_store)
 
         hist = _valid_training_df()
         # predictions contain a negative value → must be rejected.

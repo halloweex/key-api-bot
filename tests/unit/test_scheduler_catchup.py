@@ -81,7 +81,7 @@ def _scheduler_with(
     async def _get_store():
         return _Store()
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+    monkeypatch.setattr("core.store.get_store", _get_store)
     # Since step 14's S14-00 the journal's and the snapshot's chains (9 and 1)
     # write Postgres, a constant, so the catch-up reads both facts there: the
     # same ages, and today's snapshot — a Postgres fault reads as taken. Since
@@ -169,7 +169,7 @@ class TestCatchUp:
         async def _boom():
             raise RuntimeError("db is down")
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _boom)
+        monkeypatch.setattr("core.store.get_store", _boom)
 
         await scheduler._schedule_catchup_runs()  # must not raise
 
@@ -405,7 +405,7 @@ class TestUnderDuckdbOffPostgresIsAskedFirst:
         async def _no_store():
             raise AssertionError("the catch-up asked for the DuckDB store under off")
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _no_store)
+        monkeypatch.setattr("core.store.get_store", _no_store)
 
     @pytest.mark.asyncio
     async def test_the_snapshot_catch_up_is_queued_by_the_postgres_probe(

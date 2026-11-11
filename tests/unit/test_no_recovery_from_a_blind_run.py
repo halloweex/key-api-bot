@@ -22,12 +22,12 @@ import pytest_asyncio
 
 from core import data_quality as dq
 from core.data_quality import IntegrityIssue, Severity
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 
 @pytest_asyncio.fixture
 async def store(tmp_path):
-    s = DuckDBStore()
+    s = AnalyticsStore()
     yield s
 
 

@@ -257,7 +257,7 @@ async def check_user_access_async(user_id: int, auth_data: Dict[str, Any] = None
     Returns:
         Dict with 'authorized' bool, 'status' string, and 'role'
     """
-    from core.duckdb_store import get_store
+    from core.store import get_store
     from core.permissions import is_hardcoded_admin
 
     try:

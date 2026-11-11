@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from core.repositories.customers import DlrEventRebound
 from tests.integration import pg_sms_seed
 from tests.integration.pg_sms_seed import as_tuple, insert, needs_postgres, pg_conn
@@ -52,7 +52,7 @@ async def _postgres(monkeypatch):
 UTC = timezone.utc
 
 
-async def _store_with_roster(tmp_path: Path) -> DuckDBStore:
+async def _store_with_roster(tmp_path: Path) -> AnalyticsStore:
     """Two recipients of one campaign, each with the gateway's message id."""
     store = pg_sms_seed.store(tmp_path, "dlr.duckdb")
     async with pg_conn() as conn:

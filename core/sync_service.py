@@ -18,7 +18,7 @@ from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
 
 from core.keycrm import get_async_client
-from core.duckdb_store import get_store, DuckDBStore
+from core.store import get_store, AnalyticsStore
 from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError, KeyCRMTruncated
 from core.observability import get_logger, correlation_context
 from core.events import (
@@ -426,7 +426,7 @@ class SyncService:
     OFF_HOURS_END = 7               # 7 AM Kyiv
     OFF_HOURS_INTERVAL = 300        # 5 min during off-hours
 
-    def __init__(self, store: DuckDBStore):
+    def __init__(self, store: AnalyticsStore):
         self.store = store
         self._sync_task: Optional[asyncio.Task] = None
         # Track if ordered_between filter is supported

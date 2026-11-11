@@ -396,9 +396,9 @@ async def _job_store(tmp_path):
     """The store the job is handed: never connected, its DuckDB connection a
     trap. The report's two reads are `FakeStore`'s (`_wire`), the gate's Gold
     is Postgres's, and the ledger is `ledger`'s dict."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("the traffic report reached for DuckDB")
@@ -476,7 +476,7 @@ class TestTheScheduledJob:
         async def _get_store():
             return store
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+        monkeypatch.setattr("core.store.get_store", _get_store)
         return BackgroundScheduler()
 
     @staticmethod

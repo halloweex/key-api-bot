@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from tests.integration import pg_sms_seed
 from tests.integration.pg_sms_seed import insert, needs_postgres, order_row, pg_conn
 
@@ -25,7 +25,7 @@ async def _postgres(monkeypatch):
         yield
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
+async def _make_store(tmp_path: Path) -> AnalyticsStore:
     return pg_sms_seed.store(tmp_path, "test.duckdb")
 
 
@@ -106,7 +106,7 @@ async def _add_order(
         price_sold=line_price if line_price is not None else total)])
 
 
-async def _seed(store: DuckDBStore) -> None:
+async def _seed(store: AnalyticsStore) -> None:
     """Seed one buyer per intended outcome."""
     async with pg_conn() as conn:
         await _seed_catalogue(conn)

@@ -471,7 +471,7 @@ class TestTheRoleMatrixIsReadOnce:
         async def get_store():
             return store
 
-        monkeypatch.setattr("core.duckdb_store.get_store", get_store)
+        monkeypatch.setattr("core.store.get_store", get_store)
         first = await perm.get_permissions_for_role_async("viewer")
         second = await perm.get_permissions_for_role_async("viewer")
         assert first == second
@@ -505,7 +505,7 @@ class TestTheRoleMatrixIsReadOnce:
         async def get_store():
             return store
 
-        monkeypatch.setattr("core.duckdb_store.get_store", get_store)
+        monkeypatch.setattr("core.store.get_store", get_store)
         await perm.get_permissions_for_role_async("viewer")
         await perm.get_permissions_for_role_async("viewer")
         assert store.reads == 2
@@ -519,7 +519,7 @@ class TestTheRoleMatrixIsReadOnce:
         async def explode():
             raise AssertionError("get_store must not be called on a cache hit")
 
-        monkeypatch.setattr("core.duckdb_store.get_store", explode)
+        monkeypatch.setattr("core.store.get_store", explode)
         await perm.get_permissions_for_role_async("viewer")
 
 

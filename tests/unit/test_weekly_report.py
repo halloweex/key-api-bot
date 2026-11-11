@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from tests.integration.pg_tab_seed import (
     needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
 )
@@ -286,10 +286,10 @@ def reads(tmp_path, monkeypatch):
     return store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the weekly report")
 
 
-async def _store(tmp_path: Path) -> DuckDBStore:
+async def _store(tmp_path: Path) -> AnalyticsStore:
     """The store the job is handed: never connected, its DuckDB connection a
     trap — the report reads Postgres and the ledger is `ledger`'s dict."""
-    s = DuckDBStore()
+    s = AnalyticsStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("the weekly report reached for DuckDB")
@@ -549,7 +549,7 @@ class TestSchedulerJob:
             bot_store.preferences.set(uid, "language", lang)
 
         monkeypatch.setattr(core_config, "ADMIN_USER_IDS", self.ADMINS)
-        monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+        monkeypatch.setattr("core.store.get_store", _get_store)
         monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _send_text)
         return BackgroundScheduler()
 

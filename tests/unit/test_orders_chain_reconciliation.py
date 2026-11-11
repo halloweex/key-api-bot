@@ -46,7 +46,7 @@ async def _run(*, pg_result, journal_run=None):
          patch("core.dq_journal.journal_run", new=journal_run or _refuse), \
          patch("core.data_quality.machine_attempts_note", return_value=None), \
          patch("core.sync_service.get_sync_service", new=AsyncMock(return_value=sync)), \
-         patch("core.duckdb_store.get_store",
+         patch("core.store.get_store",
                new=AsyncMock(side_effect=AssertionError("the job asked the store"))):
         result = await sched._run_dq_reconciliation()
     return sched, sync, result

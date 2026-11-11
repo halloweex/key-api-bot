@@ -185,12 +185,12 @@ async def tab_in_postgres(dsn: str, monkeypatch, populate):
 def store_that_never_reaches_duckdb(tmp_path, monkeypatch, what: str = "the tab"):
     """The repository, on a store that is never connected and whose DuckDB
     connection is a trap: an answer it gives can only be Postgres's."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError(f"{what} reached for DuckDB")
 
-    monkeypatch.setattr(type(store), "connection", _no_duckdb)
+    monkeypatch.setattr(type(store), "connection", _no_duckdb, raising=False)
     return store

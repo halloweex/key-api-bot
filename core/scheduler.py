@@ -543,7 +543,7 @@ class BackgroundScheduler:
         """Register all background jobs."""
         # Import here to avoid circular imports
         from core.sync_service import get_sync_service
-        from core.duckdb_store import get_store
+        from core.store import get_store
 
         # Job: Incremental sync (every 60 seconds)
         self._add_job(
@@ -1083,7 +1083,7 @@ class BackgroundScheduler:
         with correlation_context() as corr_id:
             logger.info("Starting inventory snapshot job")
 
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
 
             # Refresh Layer 1
@@ -1172,7 +1172,7 @@ class BackgroundScheduler:
         with correlation_context() as corr_id:
             logger.info("Starting manager stats job")
 
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
             updated = await store.update_manager_stats()
 
@@ -1216,7 +1216,7 @@ class BackgroundScheduler:
         with correlation_context() as corr_id:
             logger.info("Starting seasonality calculation job")
 
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
 
             # Retail only. `seasonal_indices` and `growth_metrics` are keyed
@@ -2308,9 +2308,9 @@ class BackgroundScheduler:
         from core import watchdog_samples
 
         with correlation_context() as corr_id:
-            # The DuckDB file itself, which stays on disk until the final
-            # stage: its size is the sample's `db_size_mb`. It sits in the data
-            # directory, `core.paths.DATA_DIR`, where everything below is
+            # The DuckDB file itself: its size is the sample's `db_size_mb`,
+            # 0 since the final stage deleted it (2026-11-12). It sat in the
+            # data directory, `core.paths.DATA_DIR`, where everything below is
             # sampled too. Until step 14's S14-18 the path was the store's
             # `db_path`; the store holds no file since.
             sample = sample_disk_state(str(DATA_DIR / DUCKDB_FILE_NAME))
@@ -3116,7 +3116,7 @@ class BackgroundScheduler:
         30 days: the alternative is being permanently blind to an order whose
         line items someone eventually fixes upstream.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core.sync_service import SyncService, get_sync_service
 
         with correlation_context():
@@ -3261,7 +3261,7 @@ class BackgroundScheduler:
 
         from core import read_fallback
         from core.config import ADMIN_USER_IDS, DASHBOARD_URL
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core import report_ledger
         from core.weekly_report import (
             build_report,
@@ -3461,7 +3461,7 @@ class BackgroundScheduler:
 
         from core import read_fallback
         from core.config import DASHBOARD_URL
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core import report_ledger
         from core.traffic_report import (
             TRAFFIC_SALES_TYPE,
@@ -3605,7 +3605,7 @@ class BackgroundScheduler:
         sequence find them without spending a single API call, and the repair
         drains them a batch at a time until there is nothing left to ask for.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core.sync_service import get_sync_service
 
         with correlation_context():

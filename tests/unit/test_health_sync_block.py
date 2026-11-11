@@ -36,7 +36,7 @@ def test_the_sync_block_is_published(monkeypatch, ago_s, status):
     """Mutation: import `DEFAULT_TZ` from `core.config` again — `sync: null`."""
     from fastapi.testclient import TestClient
 
-    from core import duckdb_store, sync_service
+    from core import store as core_store, sync_service
     from web.main import app
     from web.ratelimit import limiter
 
@@ -47,7 +47,7 @@ def test_the_sync_block_is_published(monkeypatch, ago_s, status):
         body = TestClient(app).get("/api/health").json()
     finally:
         limiter.reset()
-        asyncio.run(duckdb_store.close_store())
+        asyncio.run(core_store.close_store())
 
     sync = body["sync"]
     assert sync is not None, "the sync block was dropped"

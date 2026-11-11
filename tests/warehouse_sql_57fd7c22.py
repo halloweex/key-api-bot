@@ -50,14 +50,20 @@ def render() -> Dict[str, object]:
     from core import ch_silver, pg_gold, pg_silver, pg_warehouse_dq
     from core.sql_dialect import POSTGRES
 
-    try:
-        from core import warehouse_sql as home
-    except ImportError:  # a tree from before S14-01, whose duckdb_store held
-        # them; by name, since this tree's duckdb_store (a shim since S14-18)
-        # holds none of them.
-        import importlib
+    import importlib
 
-        home = importlib.import_module("core.duckdb_store")
+    # Their home in whichever tree `core` is: `core.warehouse_sql` since
+    # S14-01, `core.duckdb_store` before it. Asked by name, in that order, so
+    # a tree with neither fails here — this one has no `core.duckdb_store`
+    # (a shim from S14-18 that held none of them, deleted at the final stage).
+    home = None
+    for name in ("core.warehouse_sql", "core.duckdb_store"):
+        try:
+            home = importlib.import_module(name)
+            break
+        except ImportError:
+            continue
+    assert home is not None, "neither core.warehouse_sql nor core.duckdb_store imports"
 
     fine, rollup = ch_silver.derive_gold_sql()
     renderers: Dict[str, Callable[[], object]] = {

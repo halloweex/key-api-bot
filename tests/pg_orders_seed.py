@@ -64,12 +64,12 @@ async def pg_orders(monkeypatch, tmp_path):
     """`(store, pool)`: the store web holds, and chain 3's tables, empty."""
     import asyncpg
 
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore()
+    store = AnalyticsStore()
     monkeypatch.setattr(store, "connection", MagicMock(
-        side_effect=AssertionError("chain 3's selections read DuckDB")))
+        side_effect=AssertionError("chain 3's selections read DuckDB")), raising=False)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await clean(pool)
     try:

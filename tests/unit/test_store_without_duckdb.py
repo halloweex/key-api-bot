@@ -6,10 +6,10 @@ counts — deleted the switch (`core/duckdb_switch.py`) with its health block,
 its three pages and its watch, and deleted the compaction and the nightly
 snapshot. What is held here:
 
-* `connection()`, kept one release, refuses: `StoreRemoved`, a
-  `ReadUnavailable` naming `duckdb`, counted where it is raised, answered as
-  the 503 every refused read gets, and paged by the canary as `read_refused`.
-  It depends on nothing DuckDB — the handler the switch's refusal had is gone.
+* `connection()` refused — `StoreRemoved`, a `ReadUnavailable` naming
+  `duckdb`, the counted 503 — from S14-18 until the final stage, which
+  deleted it with the shim `core/duckdb_store.py`: nothing in the code
+  reaches for a connection, and nothing imports the shim;
 * the store holds nothing DuckDB, its modules load no driver, and the deleted
   modules and scripts are gone;
 * rule 3: junk, or nothing, in the variables S14-18 stopped reading
@@ -36,83 +36,63 @@ from pathlib import Path
 
 import pytest
 
-from core import read_fallback
 from tests import deletion_walk
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 REPO = Path(__file__).resolve().parents[2]
 TREES = ("core", "web", "bot", "scripts")
 
 
-@pytest.fixture
-def counts():
-    read_fallback.reset_counts()
-    yield read_fallback
-    read_fallback.reset_counts()
+# ─── the stub, and the shim, are gone ────────────────────────────────────────
+
+def _production_trees():
+    for top in ("core", "web", "bot", "scripts", "deploy"):
+        for path in sorted((REPO / top).rglob("*.py")):
+            if "frontend" in path.parts or "node_modules" in path.parts:
+                continue
+            yield path.relative_to(REPO).as_posix(), ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path))
 
 
-# ─── the stub ────────────────────────────────────────────────────────────────
+class TestTheConnectionStubIsGone:
+    """`connection()` refused from S14-18 (`StoreRemoved`, the counted 503
+    naming `duckdb`) so that a caller nobody had found would page rather than
+    crash. The final stage deleted it: nobody had been found, and the walk
+    below says nobody can be."""
 
-class TestTheConnectionStub:
-    def test_it_is_a_refusal_naming_duckdb(self, counts):
-        """Mutation: raise anything but a `ReadUnavailable`, or name another
-        surface — the route would answer 500, or the page say another tab."""
-        from core.store import AnalyticsStore, StoreRemoved
+    def test_the_store_has_neither_the_stub_nor_its_refusal(self):
+        """Mutation: put `connection()` or `StoreRemoved` back on the store."""
+        from core import store
 
-        assert issubclass(StoreRemoved, read_fallback.ReadUnavailable)
-        with pytest.raises(StoreRemoved) as caught:
-            AnalyticsStore().connection()
-        assert caught.value.surface == "duckdb"
-        assert isinstance(caught.value.__cause__, RuntimeError)
-        assert "S14-18" in str(caught.value.__cause__)
+        assert not hasattr(store.AnalyticsStore, "connection")
+        assert not hasattr(store, "StoreRemoved")
 
-    def test_it_is_counted_where_it_is_raised(self, counts):
-        """Counted at the raise, as `refuse` counts: a caller that swallows it
-        still leaves the count. Mutation: raise without counting."""
-        from core.store import AnalyticsStore, StoreRemoved
+    def test_nothing_in_the_code_reaches_for_a_connection(self):
+        """By attribute (`store.connection()`), by string (`getattr(store,
+        "connection")`) or by the refusal's name, anywhere under the
+        production trees. Mutation: write `async with store.connection()`
+        into any module — it would be an `AttributeError`, a 500 naming
+        nothing, now that no stub refuses it."""
+        found = []
+        for rel, tree in _production_trees():
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr == "connection":
+                    found.append(f"{rel}:{node.lineno} .connection")
+                elif isinstance(node, ast.Constant) and node.value == "connection":
+                    found.append(f"{rel}:{node.lineno} 'connection'")
+                elif isinstance(node, ast.Name) and node.id == "StoreRemoved":
+                    found.append(f"{rel}:{node.lineno} StoreRemoved")
+        assert found == [], found
 
-        store = AnalyticsStore()
-        for _ in range(2):
-            try:
-                store.connection()
-            except StoreRemoved:
-                pass
-        assert counts.refusals()["duckdb"]["count"] == 2
-
-    def test_the_old_spelling_meets_it_too(self, counts):
-        """`async with store.connection() as conn:` — the shape every DuckDB
-        caller had — raises the refusal before the block runs."""
-        from core.duckdb_store import DuckDBStore, StoreRemoved
-
-        async def caller():
-            async with DuckDBStore().connection() as conn:  # noqa: F841
-                raise AssertionError("the block ran")
-
-        with pytest.raises(StoreRemoved):
-            asyncio.run(caller())
-
-    def test_a_route_that_reaches_it_answers_the_counted_503_and_pages(
-            self, admin_client, counts, monkeypatch):  # noqa: F811
-        """What a caller nobody found would cost: the 503 naming `duckdb`, its
-        count on `/api/health`, and `read_refused` from the canary — never a
-        500. The handler the switch's refusal had (`DuckDBOpenedWhileOff`) is
-        gone, so the stub must not need it. Mutation: delete the stub (an
-        `AttributeError`, a 500), or have it raise the old exception."""
-        from bot import canary
-        from core.store import AnalyticsStore
-
-        async def reaches_duckdb(self):
-            async with self.connection():
-                return []
-
-        monkeypatch.setattr(AnalyticsStore, "get_all_managers", reaches_duckdb)
-        response = admin_client.get("/api/managers")
-        assert response.status_code == 503, response.text
-        assert response.json()["surface"] == "duckdb"
-
-        health = admin_client.get("/api/health").json()
-        assert health["read_fallback_mode"]["refused"]["duckdb"]["count"] == 1
-        assert [k for k, _ in canary.check_read_refusals(health)] == ["read_refused"]
+    def test_the_walk_sees_each_shape(self):
+        """The walk above, on the shapes it must see."""
+        for source in ("async def f(store):\n    async with store.connection():\n        pass\n",
+                       "def f(store):\n    return getattr(store, 'connection')\n",
+                       "def f():\n    raise StoreRemoved()\n"):
+            tree = ast.parse(source)
+            assert any((isinstance(n, ast.Attribute) and n.attr == "connection")
+                       or (isinstance(n, ast.Constant) and n.value == "connection")
+                       or (isinstance(n, ast.Name) and n.id == "StoreRemoved")
+                       for n in ast.walk(tree)), source
 
     def test_web_main_has_no_handler_of_the_switch_s(self):
         """Mutation: put `duckdb_opened_while_off_handler` back."""
@@ -124,6 +104,40 @@ class TestTheConnectionStub:
         assert "read_unavailable_handler" in names
 
 
+class TestTheShimIsGone:
+    """`core/duckdb_store.py` re-exported the store under its old name from
+    S14-18 (owner decision O9 (b)) until the final stage repointed every
+    caller to `core.store` and deleted it."""
+
+    def test_the_module_is_gone(self):
+        import importlib.util
+
+        assert not (REPO / "core" / "duckdb_store.py").exists()
+        assert importlib.util.find_spec("core.duckdb_store") is None
+
+    def test_nothing_in_production_imports_it(self):
+        """In every spelling: `from core.duckdb_store import …`, `from core
+        import duckdb_store`, `import core.duckdb_store`, `import_module`.
+        (The suite is held by `test_imports_resolve.py`.) Mutation: import
+        the old name anywhere under the production trees."""
+        found = []
+        for rel, tree in _production_trees():
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+                elif (isinstance(node, ast.Call) and node.args
+                      and isinstance(node.args[0], ast.Constant)
+                      and isinstance(node.args[0].value, str)):
+                    names = [node.args[0].value]
+                if any(n == "core.duckdb_store" or n.startswith("core.duckdb_store.")
+                       for n in names):
+                    found.append(f"{rel}:{node.lineno}")
+        assert found == [], found
+
+
 # ─── the store holds nothing DuckDB ──────────────────────────────────────────
 
 GONE_FROM_THE_STORE = (
@@ -133,6 +147,8 @@ GONE_FROM_THE_STORE = (
     "backup_database", "_send_warehouse_alert", "fatal_status",
     "_drop_if_invalidated", "_read_index_short", "_record_index_short",
     "get_stats", "db_path", "_connection", "_lock", "_executor",
+    # The refusing stub, from S14-18 until the final stage.
+    "connection",
 )
 
 
@@ -144,23 +160,6 @@ class TestTheStore:
         store = AnalyticsStore()
         for name in GONE_FROM_THE_STORE:
             assert not hasattr(store, name), name
-
-    def test_the_shim_is_the_store_and_nothing_else(self):
-        """`core/duckdb_store.py` re-exports the store under its old name for
-        one release, and nothing more — no driver, no path, no schema.
-        Mutation: define anything in the shim again."""
-        from core import duckdb_store, store
-
-        assert duckdb_store.DuckDBStore is store.AnalyticsStore
-        assert duckdb_store.get_store is store.get_store
-        assert duckdb_store.close_store is store.close_store
-        tree = ast.parse(Path(duckdb_store.__file__).read_text(encoding="utf-8"))
-        defined = [n for n in tree.body
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
-        assert defined == []
-        for gone in ("DB_PATH", "DB_DIR", "duckdb", "SILVER_ORDERS_DDL",
-                     "StoreClosedError", "_memory_limit", "INDEX_SHORT_MARKER"):
-            assert not hasattr(duckdb_store, gone), gone
 
     def test_one_store_per_process_and_close_forgets_it(self):
         from core import store
@@ -177,10 +176,10 @@ class TestTheStore:
 
     def test_the_store_and_web_load_no_driver(self, tmp_path):
         """In an interpreter of its own, with no `.env` to read: importing
-        the store, its shim, web and the scheduler loads no `duckdb`.
-        Mutation: import `duckdb` anywhere on that path."""
+        the store, web and the scheduler loads no `duckdb`. Mutation: import
+        `duckdb` anywhere on that path."""
         code = ("import sys\n"
-                "import core.store, core.duckdb_store, core.scheduler, web.main\n"
+                "import core.store, core.scheduler, web.main\n"
                 "print(json.dumps(sorted(m for m in sys.modules if m.split('.')[0] == 'duckdb')))\n")
         done = _python(tmp_path, "import json\n" + code, {})
         assert done.returncode == 0, done.stderr[-3000:]
@@ -188,7 +187,7 @@ class TestTheStore:
 
     @pytest.mark.parametrize("module", [
         "core.duckdb_switch", "core.migrations", "core.duckdb_sequences",
-        "core.snapshot_validation", "core.pg_sms"])
+        "core.snapshot_validation", "core.pg_sms", "core.duckdb_store"])
     def test_the_deleted_modules_are_gone(self, module):
         import importlib.util
 

@@ -34,20 +34,20 @@ async def _stored(pool):
 
 @pytest_asyncio.fixture
 async def pg_only(monkeypatch):
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     await _clean(pool)
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("reached DuckDB")
 
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
          patch("core.pg.require_revision", new=AsyncMock()), \
-         patch.object(DuckDBStore, "connection", _no_duckdb):
+         patch.object(AnalyticsStore, "connection", _no_duckdb, create=True):
         yield store, pool, monkeypatch
     await _clean(pool)
     await pool.close()
@@ -134,12 +134,12 @@ class TestTheHourlyReplaceCannotRollItBack:
 
     @pytest_asyncio.fixture
     async def both_stores(self, tmp_path, monkeypatch):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", DSN)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
         await _clean(pool)
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \

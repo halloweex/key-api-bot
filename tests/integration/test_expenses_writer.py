@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 
 @pytest_asyncio.fixture
 async def writer(monkeypatch):
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
@@ -32,14 +32,14 @@ async def writer(monkeypatch):
         # no local marker — a real CRITICAL, manufactured by a fixture.
         await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("an expense write reached DuckDB under KS_WRITE_EXPENSES=postgres")
 
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
          patch("core.pg.require_revision", new=AsyncMock()), \
-         patch.object(DuckDBStore, "connection", _no_duckdb):
+         patch.object(AnalyticsStore, "connection", _no_duckdb, create=True):
         yield store, pool
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM app.manual_expenses")

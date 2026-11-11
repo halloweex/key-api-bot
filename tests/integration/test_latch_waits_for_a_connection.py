@@ -426,7 +426,7 @@ async def stores(tmp_path, monkeypatch):
     them routes anything, and none is read here. Chains 3, 6 and 6a have no
     precondition left to stand in for since S14-09.
     """
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for chain in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(chain.WRITE_ENV, raising=False)
@@ -440,7 +440,7 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
-    store = DuckDBStore()
+    store = AnalyticsStore()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(live)
     with patch("core.pg.require_revision", new=AsyncMock()):

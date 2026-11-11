@@ -53,7 +53,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -204,11 +204,11 @@ class TestItDoesNotTakeTheDuckDbLock:
         self, tmp_path, monkeypatch, name, args, kwargs,
     ):
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore()
+        store = AnalyticsStore()
         def boom(*_a, **_k):
             raise AssertionError(f"{name} reached for DuckDB")
 
-        with patch.object(type(store), "connection", boom), \
+        with patch.object(type(store), "connection", boom, create=True), \
              patch("core.pg_goals_read.fetch", new=AsyncMock(return_value=[])):
             await getattr(store, name)(*args, **kwargs)
 

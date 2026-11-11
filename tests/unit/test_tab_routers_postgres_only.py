@@ -149,9 +149,9 @@ def store(tmp_path, monkeypatch):
     here may reach for DuckDB, under any value of any switch. The expenses'
     history is across unless a test says otherwise."""
     from core import pg_expenses_read
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def trap(*_a, **_k):
         raise AssertionError("a one-engine reader reached for DuckDB")

@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from tests.integration.pg_tab_seed import (
     call_key, comparable, derive, golden, seed, tab_in_postgres,
 )
@@ -87,12 +87,12 @@ async def _populate(conn, pool):
 async def in_postgres(tmp_path, monkeypatch):
     """The tab's store, never connected: its DuckDB connection is a trap, so
     an answer below can only be Postgres's."""
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError("the margin tab reached for DuckDB")
 
-    monkeypatch.setattr(type(store), "connection", _no_duckdb)
+    monkeypatch.setattr(type(store), "connection", _no_duckdb, raising=False)
     async with tab_in_postgres(DSN, monkeypatch, _populate):
         yield store
 

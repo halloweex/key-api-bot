@@ -50,7 +50,7 @@ def _wire(monkeypatch, store, repair_mock):
         svc.repair_orders = repair_mock
         return svc
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+    monkeypatch.setattr("core.store.get_store", _get_store)
     monkeypatch.setattr("core.sync_service.get_sync_service", _get_sync_service)
 
 

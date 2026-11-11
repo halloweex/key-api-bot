@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from tests.pg_orders_seed import insert_orders, needs_pg, pg_orders  # noqa: F401 — the fixture
 
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -186,7 +186,7 @@ class TestTheRefreshReachesThem:
         async def upsert(orders, force_update=False, skip_products=False):
             return len(orders), 0
 
-        class Broken(DuckDBStore):
+        class Broken(AnalyticsStore):
             async def find_backdated_order_ids(self, since, limit=200):
                 raise OSError("disk")
 

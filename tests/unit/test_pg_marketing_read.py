@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from core.sql_dialect import POSTGRES, marketing_period_measures
 
 REPO = Path(__file__).resolve().parents[2]
@@ -128,12 +128,12 @@ class TestNothingGoesRoundTheRouter:
         Postgres, whatever `KS_READ_MARKETING` says, on a store whose
         connection is a trap."""
         monkeypatch.setenv("KS_READ_MARKETING", "duckdb")   # not read any more
-        store = DuckDBStore()
+        store = AnalyticsStore()
 
         def boom(*_a, **_k):
             raise AssertionError("the marketing read reached for DuckDB")
 
-        with patch.object(type(store), "connection", boom), \
+        with patch.object(type(store), "connection", boom, create=True), \
              patch("core.pg_marketing_read.fetch",
                    new=AsyncMock(return_value=[(0,) * 11])) as fetch:
             await store.get_marketing_report_by_dates(*WINDOW)

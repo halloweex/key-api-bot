@@ -5,8 +5,9 @@ from bot.config import DEFAULT_TIMEZONE
 from core.paths import DATA_DIR
 
 # Database configuration. The data directory is `core.paths.DATA_DIR` since
-# step 14's S14-01; `DB_DIR` is the same object, kept for one release because
-# `core.duckdb_store` and the suite still address the DuckDB file through it.
+# step 14's S14-01; `DB_DIR` is the same object, kept because the suite still
+# names the DuckDB file through it (the file itself went at the final stage,
+# and `core.duckdb_store`, which read these, with it).
 DB_DIR = DATA_DIR
 DB_PATH = DB_DIR / "analytics.duckdb"
 DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)

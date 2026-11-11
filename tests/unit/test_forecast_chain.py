@@ -507,7 +507,7 @@ class TestTheWatchIsRegistered:
 
 # ─── The repository routes ──────────────────────────────────────────────────
 
-from core.duckdb_store import DuckDBStore  # noqa: E402
+from core.store import AnalyticsStore  # noqa: E402
 from core.repositories.goals import GoalsMixin  # noqa: E402
 
 TABLES = {
@@ -531,7 +531,7 @@ TABLES = {
 
 def _with_store(path, step):
     async def run():
-        store = DuckDBStore()
+        store = AnalyticsStore()
         return await step(store)
     return asyncio.run(run())
 
@@ -598,7 +598,7 @@ class TestPredictionsStored:
         async def fake_get_store():
             return store
 
-        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+        monkeypatch.setattr("core.store.get_store", fake_get_store)
         monkeypatch.setattr(svc, "_query_daily_revenue",
                             AsyncMock(return_value=_valid_training_df()))
         monkeypatch.setattr(ps, "_train_model", lambda df: (
@@ -750,7 +750,7 @@ def latched(ready):
 def _forecast(fetch):
     from web.services import dashboard_service
 
-    with patch("core.duckdb_store.get_store",
+    with patch("core.store.get_store",
                new=AsyncMock(return_value=_NoDuckDB())), \
             patch("core.pg_goals_read.fetch", new=fetch):
         return asyncio.run(dashboard_service.get_forecast_data("retail"))

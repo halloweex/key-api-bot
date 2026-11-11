@@ -140,7 +140,7 @@ class TestMetByConstruction:
         async def _get_store():
             return history
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+        monkeypatch.setattr("core.store.get_store", _get_store)
         for sales_type in ("retail", "b2b", "all"):
             await _history_answers(history, sales_type)
             await asyncio.wait_for(

@@ -19,7 +19,7 @@ from web.middleware import (
     RejectNulMiddleware, RequestLoggingMiddleware, RequestTimeoutMiddleware,
 )
 from bot.database import init_database
-from core.duckdb_store import get_store, close_store
+from core.store import get_store, close_store
 from core.sync_service import init_and_sync
 from core.runtime_modes import configure_modes
 from core.config import validate_config, ConfigurationError
@@ -114,10 +114,10 @@ async def sms_refusal_handler(request: Request, exc: SmsRefusal):
 
 
 # `DuckDBOpenedWhileOff`'s handler (503 naming `duckdb`) stood here until step
-# 14's S14-18 deleted the switch that raised it (`core/duckdb_switch.py`). A
-# caller still reaching for the store's DuckDB connection meets
-# `core.store.StoreRemoved`, a `ReadUnavailable`, which the handler above
-# answers with the same 503 naming `duckdb`, counted.
+# 14's S14-18 deleted the switch that raised it (`core/duckdb_switch.py`). The
+# store's `connection()` refused the same way (`core.store.StoreRemoved`, a
+# `ReadUnavailable` the handler above answered) until the final stage deleted
+# it: nothing reached for it.
 
 
 @app.exception_handler(Exception)

@@ -477,7 +477,7 @@ async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]
         return _permissions_cache[role]
 
     try:
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         # Ensure defaults are seeded
@@ -528,7 +528,7 @@ async def get_all_permissions_async() -> Dict[str, Dict[str, Dict[str, bool]]]:
     global _permissions_cache
 
     try:
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         # Ensure defaults are seeded
@@ -555,7 +555,7 @@ async def set_permission_async(
     global _permissions_cache
 
     try:
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
         result = await store.set_permission(role, feature, can_view, can_edit, can_delete, updated_by)
 

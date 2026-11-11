@@ -106,9 +106,9 @@ class TestItDoesNotTakeTheDuckDbLock:
     async def test_a_postgres_read_answers_while_the_store_lock_raises(
         self, tmp_path, monkeypatch,
     ):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
 
         def _explode(*_a, **_k):
             raise AssertionError(
@@ -121,7 +121,7 @@ class TestItDoesNotTakeTheDuckDbLock:
         # count and one group's count.
         funnel_only = [(None,) * 19 + (0, 0, 0, 0, 0, 0, 0) + (0,) + (0,) + (0,)]
         try:
-            monkeypatch.setattr(type(store), "connection", _explode)
+            monkeypatch.setattr(type(store), "connection", _explode, raising=False)
             with patch("core.pg_sms_read.fetch_segments",
                        new=AsyncMock(return_value=funnel_only)) as fetch:
                 result = await store.get_sms_segments(grouping="single")
@@ -247,9 +247,9 @@ class TestTheDeliveryWriteEscapesTheStoreLock:
 
     @pytest.mark.asyncio
     async def test_it_writes_while_the_store_lock_is_fatal(self, tmp_path, monkeypatch):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
 
         def _explode(*_a, **_k):
             raise AssertionError(
@@ -287,7 +287,7 @@ class TestTheDeliveryWriteEscapesTheStoreLock:
                 return False
 
         try:
-            monkeypatch.setattr(type(store), "connection", _explode)
+            monkeypatch.setattr(type(store), "connection", _explode, raising=False)
             monkeypatch.setattr(type(store), "_sms_tx", lambda self: _Ctx())
 
             known = await store.record_sms_delivery(

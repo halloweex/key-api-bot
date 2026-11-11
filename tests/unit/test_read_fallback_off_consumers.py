@@ -51,9 +51,9 @@ def _refused(surface: str) -> dict:
 
 
 async def _duck(tmp_path, name="consumers.duckdb"):
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
     return store
 
 
@@ -75,7 +75,7 @@ def _serve(monkeypatch, store) -> None:
     async def _get_store():
         return store
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+    monkeypatch.setattr("core.store.get_store", _get_store)
 
 
 # ─── The weekly sales report ──────────────────────────────────────────────
@@ -403,10 +403,10 @@ class TestAssistant:
     ):
         """Through `ChatService.chat`, which `POST /api/chat` calls: the tool
         result the model is given is the named one."""
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from web.services import chat_service as cs
 
-        self._serve_tools(monkeypatch, DuckDBStore())
+        self._serve_tools(monkeypatch, AnalyticsStore())
 
         class _LLM:
             is_available = True
