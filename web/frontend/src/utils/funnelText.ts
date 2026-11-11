@@ -13,7 +13,7 @@ import { plural, type T } from './plural'
 import { formatDay, kyivToday } from './smsDates'
 import {
   conversion, perBase, roughly,
-  type Change, type Conclusion, type CountChange, type StepMove,
+  type Change, type Conclusion, type CountChange, type MixNote, type StepMove,
 } from './funnel'
 import type { FunnelCounts } from '../types/api'
 
@@ -137,6 +137,54 @@ export function sayConclusion(c: Conclusion, t: T): Line[] {
   }
   for (const m of c.moves) lines.push(moveLine(m, c.moves.length === 1 ? 'one' : 'many', t))
   return lines
+}
+
+/** The mix in one line, for a phone, where it stays under the number while
+ *  the rest of the conclusion moves below the funnel: a green «лучше
+ *  обычного» with nothing beside it would read as the whole story.
+ *  «Часть роста дал состав трафика: тёплых 56 % вместо 34 %.» */
+export function sayMixShort(mix: MixNote, t: T): string {
+  return t(`traffic.funnel.mixShort.${mix.change === 'better' ? 'up' : 'down'}`, {
+    type: t(`traffic.funnel.mixShortType.${mix.type}`),
+    to: groupPct(mix.shareNow),
+    from: groupPct(mix.shareWas),
+  })
+}
+
+// ─── The comparison ──────────────────────────────────────────────────────────
+
+const atNoon = (iso: string) => new Date(`${iso}T12:00:00Z`)
+
+/** A month's short name after a day — the form a date takes («21 мая»,
+ *  «21 июн.»), not the nominative a month alone takes («май»). */
+function monthAfterDay(iso: string): string {
+  return new Intl.DateTimeFormat(locale(), { day: 'numeric', month: 'short', timeZone: 'UTC' })
+    .formatToParts(atNoon(iso)).find((p) => p.type === 'month')?.value ?? ''
+}
+
+/**
+ * The window the period is compared with, short enough for a chip beside the
+ * block's title on a phone: «21–31 окт.», «31 авг. – 30 сент.», «окт. 2025».
+ * A month is named once, and a year only when it is not this one.
+ */
+export function compareChip(start: string, end: string, today: string = kyivToday()): string {
+  const year = end.slice(0, 4) === today.slice(0, 4) ? '' : ` ${end.slice(0, 4)}`
+  const day = (iso: string) => String(Number(iso.slice(8, 10)))
+  const lastDay = new Date(Date.UTC(Number(end.slice(0, 4)), Number(end.slice(5, 7)), 0)).getUTCDate()
+  const sameMonth = start.slice(0, 7) === end.slice(0, 7)
+  const english = locale().startsWith('en')
+  if (sameMonth && start.slice(8) === '01' && Number(end.slice(8)) === lastDay) {
+    const month = new Intl.DateTimeFormat(locale(), { month: 'short', timeZone: 'UTC' }).format(atNoon(start))
+    return `${month}${year}`
+  }
+  if (sameMonth) {
+    return english
+      ? `${monthAfterDay(end)} ${day(start)}–${day(end)}${year}`
+      : `${day(start)}–${day(end)} ${monthAfterDay(end)}${year}`
+  }
+  return english
+    ? `${monthAfterDay(start)} ${day(start)} – ${monthAfterDay(end)} ${day(end)}${year}`
+    : `${day(start)} ${monthAfterDay(start)} – ${day(end)} ${monthAfterDay(end)}${year}`
 }
 
 // ─── The headline number ─────────────────────────────────────────────────────
