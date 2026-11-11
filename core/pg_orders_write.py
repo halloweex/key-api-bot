@@ -81,6 +81,32 @@ FAILURE POLICY
 
 Connection errors, timeouts and cancellation raise at once.
 
+EXPENSES FOLLOW KEYCRM (owner decision O2 (a), 2026-11-11)
+
+Until then an order's expenses were upserted and never deleted, and every
+expense in the payload was rewritten on every tick. So a cost KeyCRM removed
+stayed in `bronze.expenses` for ever — in /expenses' costs and its profit —
+and every tick of the 24-hour window rewrote every expense in it, so no tick
+that carried one was ever idle. Now, for a payload carrying an `expenses` key
+that holds a list, and for an order that is not refused:
+
+- the rows of `bronze.expenses` under that order whose ids the payload no
+  longer lists are deleted — all of them for an empty list — in the
+  transaction that writes the order, after the owner claim, each logged at
+  INFO with its id and amount and counted in `UpsertResult.expenses_deleted`.
+  An id listed anywhere in the batch is never deleted (an expense KeyCRM moved
+  to another order is rewritten under it instead). A payload without the key,
+  or with something that is not a list under it, deletes nothing;
+- an expense is written only when it is new or differs from the stored row in
+  a written column, so a batch whose orders are in their state and whose
+  expenses are already stored as listed reads that before the latch and
+  returns, as an idle tick of orders always did; and `meta.mirror_state`'s
+  `bronze.expenses` row is stamped only by a tick that wrote or deleted one.
+
+The returned expense count keeps its meaning: the expenses in their state,
+written or already correct, as `count` is for orders. Silver reads no
+expenses, so the derivation mark stays `_write_order_rows`' alone.
+
 AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
@@ -89,9 +115,9 @@ transaction, so the owner row shares an `xmin` with the row it was taken for.
 From the first order written here only `scripts/chain_copy_back.py orders`
 could move the writes back to DuckDB (deleted in step 14's S14-04; the way
 back since is an image from before step 14, `core.rollback_lever`). A batch
-with nothing to write — every order already in its state and no expense —
-reads that on the same connection before the latch and returns, so an idle
-tick latches nothing.
+with nothing to write — every order already in its state, every expense
+already stored as listed and none to delete — reads that on the same
+connection before the latch and returns, so an idle tick latches nothing.
 
 PRECONDITIONS AND ROUTING — UNTIL STEP 14
 
@@ -150,6 +176,10 @@ class UpsertResult:
     # line or an expense), whatever their id. The order step fails on a batch
     # that landed nothing and holds any of these (`OrdersRefused`, AR-02).
     unparseable: int = 0
+    # Order expenses deleted because the order's payload no longer lists them
+    # (owner decision O2 (a), "EXPENSES FOLLOW KEYCRM" in the module
+    # docstring). Each is logged at INFO with its id and amount.
+    expenses_deleted: int = 0
 
     def __len__(self) -> int:
         return self.count
@@ -454,26 +484,124 @@ async def _stored_stamps(conn, ids: Sequence[int], *, lock: bool) -> Dict[int, A
     return {int(r["id"]): r["updated_at"] for r in rows}
 
 
-async def _already_in_state(conn, orders, expenses, *, force_update: bool,
-                            skip_products: bool):
+# ─── The expenses: what is new or moved, and what KeyCRM dropped (O2 (a)) ────
+
+_CENT = Decimal("0.01")
+
+# The stored rows a batch's expenses are compared with: every row under an
+# order whose payload lists its expenses (the deletion candidates), and every
+# row whose id the payload carries (a row KeyCRM moved to another order is
+# stored under the old one). `{cols}` is `landing_rows.EXPENSE_COLUMNS`, the
+# columns the writer writes, so the comparison sees every one of them.
+_EXPENSES_STORED_SQL = (
+    "SELECT {cols} FROM bronze.expenses "
+    "WHERE order_id = ANY($1::int[]) OR id = ANY($2::int[]) ORDER BY id")
+
+# The deletion, with what it deleted for the log. Run only on ids the locked
+# read inside the same transaction chose.
+_EXPENSES_DELETE_SQL = (
+    "DELETE FROM bronze.expenses WHERE id = ANY($1::int[]) "
+    "RETURNING id, order_id, amount")
+
+
+def _cents(value: Any) -> Any:
+    """A money value as `NUMERIC(12,2)` stores it: rounded half away from
+    zero to two places (`pg_numeric.refusal`'s rule), and read from its text
+    (`Decimal(str(value))`, what asyncpg sends for a float). A value that is
+    not a number is returned as it is, and so compares unequal."""
+    from decimal import ROUND_HALF_UP, InvalidOperation
+
+    if value is None or isinstance(value, bool):
+        return value
+    try:
+        exact = value if isinstance(value, Decimal) else Decimal(str(value))
+        return exact.quantize(_CENT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError):
+        return value
+
+
+def _expense_values(row: Sequence[Any]) -> tuple:
+    """An expense's written columns as `bronze.expenses` holds them, in
+    `EXPENSE_COLUMNS` order — a parsed row or a stored one. Money in cents
+    (Decimal, never float), timestamps as UTC instants."""
+    (eid, order_id, type_id, amount, description, status,
+     payment_date, created_at) = tuple(row)
+    return (_int_or_none(eid), _int_or_none(order_id), type_id, _cents(amount),
+            description, status, _as_utc(payment_date), _as_utc(created_at))
+
+
+def expense_changes(costs: Sequence[Any], listed: Any, all_listed: Any,
+                    stored: Sequence[Any]) -> Tuple[List[Any], List[Any]]:
+    """`(to_write, to_delete)` for one group of a batch. Pure.
+
+    `costs` are the parsed expenses the group writes; `listed` the ids of the
+    orders whose payload carried an `expenses` list (and are not refused);
+    `all_listed` every expense id any payload of the batch lists; `stored`
+    the rows `_EXPENSES_STORED_SQL` read, in `EXPENSE_COLUMNS` order.
+
+    An expense is written when it is new or differs in a written column. A
+    stored row is deleted when its order is in `listed` and no payload of the
+    batch lists its id."""
+    from core.landing_rows import EXPENSE_COLUMNS
+
+    rows = [tuple(r[c] for c in EXPENSE_COLUMNS) if not isinstance(r, tuple) else r
+            for r in stored]
+    held = {_int_or_none(r[0]): _expense_values(r) for r in rows}
+    to_write = [e for e in costs
+                if held.get(_int_or_none(e.id)) != _expense_values(e)]
+    orders = {int(o) for o in listed}
+    keep = {int(i) for i in all_listed}
+    to_delete = [r for r in rows
+                 if _int_or_none(r[1]) in orders and _int_or_none(r[0]) not in keep]
+    return to_write, to_delete
+
+
+async def _stored_expenses(conn, listed, costs, *, lock: bool) -> List[Any]:
+    """The rows `expense_changes` compares with — locked `FOR UPDATE`, in id
+    order, inside the writing transaction; unlocked before the latch."""
+    from core.landing_rows import EXPENSE_COLUMNS
+
+    order_ids = sorted({int(o) for o in listed})
+    expense_ids = sorted({i for i in (_int_or_none(e.id) for e in costs)
+                          if i is not None})
+    if not order_ids and not expense_ids:
+        return []
+    sql = _EXPENSES_STORED_SQL.format(cols=", ".join(EXPENSE_COLUMNS))
+    return list(await conn.fetch(sql + (" FOR UPDATE" if lock else ""),
+                                 order_ids, expense_ids))
+
+
+async def _already_in_state(conn, orders, expenses, listed=(), all_listed=(), *,
+                            force_update: bool, skip_products: bool):
     """Read before the latch, unlocked: `(skipped_ids, deferred)` when this
-    batch would write nothing — no expense, and every order already in its
-    state or deferred — else None. Whatever it says, a batch that does write
-    is decided again under the lock.
+    batch would write nothing — every order already in its state or deferred,
+    every expense already stored as listed and none to delete — else None.
+    Whatever it says, a batch that does write is decided again under the
+    lock.
 
     A forced batch is asked too: the 05:15 refresh forces a header-only
     rewrite, and a header-only refresh never creates an order, so a forced
     batch of orders Postgres does not hold writes nothing — and, as the first
     write after a flip, used to take the latch and claim the owner rows
-    anyway."""
-    if expenses:
-        return None
-    if not orders:
-        return ([], 0)
-    existing = await _stored_stamps(conn, [r.id for r in orders], lock=False)
-    to_write, skipped, deferred = decide(
-        orders, existing, force_update=force_update, skip_products=skip_products)
-    return None if to_write else (skipped, deferred)
+    anyway.
+
+    Until O2 (a) any expense at all answered "must write": an order's costs
+    move without its `updated_at`, and nothing compared them with what was
+    stored, so every tick rewrote every expense of the 24-hour window."""
+    skipped: List[int] = []
+    deferred = 0
+    if orders:
+        existing = await _stored_stamps(conn, [r.id for r in orders], lock=False)
+        to_write, skipped, deferred = decide(
+            orders, existing, force_update=force_update, skip_products=skip_products)
+        if to_write:
+            return None
+    if expenses or listed:
+        stored = await _stored_expenses(conn, listed, expenses, lock=False)
+        write, gone = expense_changes(expenses, listed, all_listed, stored)
+        if write or gone:
+            return None
+    return (skipped, deferred)
 
 
 def _is_data_error(exc: BaseException) -> bool:
@@ -486,16 +614,19 @@ def _is_data_error(exc: BaseException) -> bool:
     return isinstance(exc, asyncpg.DataError)
 
 
-def _one_by_one(orders, expenses) -> List[Tuple[List[Any], List[Any]]]:
-    """A refused batch as groups of one: each order with its own expenses,
-    then the expenses whose order is not in the batch, together."""
+def _one_by_one(orders, expenses, listed=()) -> List[Tuple[List[Any], List[Any], set]]:
+    """A refused batch as groups of one: each order with its own expenses and
+    its own expense listing, then the expenses and listings whose order is not
+    in the batch, together."""
     by_order: Dict[Any, List[Any]] = {}
     for e in expenses:
         by_order.setdefault(e.order_id, []).append(e)
-    groups = [([r], by_order.pop(r.id, [])) for r in orders]
+    listing = {int(o) for o in listed}
+    groups = [([r], by_order.pop(r.id, []), {int(r.id)} & listing) for r in orders]
     leftover = [e for costs in by_order.values() for e in costs]
-    if leftover:
-        groups.append(([], leftover))
+    rest = listing - {int(r.id) for r in orders}
+    if leftover or rest:
+        groups.append(([], leftover, rest))
     return groups
 
 
@@ -553,15 +684,29 @@ async def upsert_orders_with_expenses(
             latest[oid] = r
     # Every fetched order's expenses, as `upsert_expenses_batch` was handed
     # them, deduplicated by id keeping the last (`INSERT OR REPLACE`'s outcome).
-    # Parsed order by order, for the same reason as the headers.
+    # Parsed order by order, for the same reason as the headers. Beside them,
+    # which orders' payloads LIST their expenses — a list under the key, empty
+    # included — and the ids they list: what KeyCRM no longer lists under such
+    # an order is deleted (O2 (a)); a payload without the key says nothing.
     parsed_expenses = []
+    listing: Dict[int, set] = {}
     for p in payloads:
-        if not isinstance(p, dict) or not p.get("expenses"):
+        if not isinstance(p, dict):
             continue
         if _int_or_none(p.get("id")) in refusals:
             continue
+        carried = p.get("expenses")
+        lists = isinstance(carried, list) and _int_or_none(p.get("id")) is not None
+        if not carried:
+            if lists:
+                listing.setdefault(int(p["id"]), set())
+            continue
         try:
-            parsed_expenses.extend(expense_rows([p]))
+            rows = expense_rows([p])
+            parsed_expenses.extend(rows)
+            if lists:
+                listing.setdefault(int(p["id"]), set()).update(
+                    i for i in (_int_or_none(e.id) for e in rows) if i is not None)
         except _UNPARSEABLE as exc:
             why = f"unparseable expenses: {type(exc).__name__}: {exc}"
             logger.error("orders: order %r not written to Postgres: %s", p.get("id"), why)
@@ -597,6 +742,12 @@ async def upsert_orders_with_expenses(
         else:
             kept_expenses.append(row)
 
+    # The orders whose expense listing is acted on: not refused, by the parse
+    # or by the checks above (O2 (a)). Every id any payload lists, refused or
+    # not, is kept: an expense KeyCRM lists somewhere is never deleted.
+    all_listed = set().union(*listing.values()) if listing else set()
+    listed = {oid for oid in listing if oid not in refusals}
+
     def failed() -> int:
         return len(refusals) + unidentified
 
@@ -606,7 +757,7 @@ async def upsert_orders_with_expenses(
     def unparseable() -> int:
         return len(unparsed) + unidentified
 
-    if not orders and not kept_expenses:
+    if not orders and not kept_expenses and not listed:
         return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0,
                             failed=failed(), refused=refused(),
                             unparseable=unparseable()), 0
@@ -615,27 +766,31 @@ async def upsert_orders_with_expenses(
     skipped: List[int] = []
     deferred = 0
     expense_count = 0
+    expenses_written = 0
+    deleted: List[Any] = []
     pool = await _pool()
     async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
-        idle = await _already_in_state(conn, orders, kept_expenses,
+        idle = await _already_in_state(conn, orders, kept_expenses, listed, all_listed,
                                        force_update=force_update,
                                        skip_products=skip_products)
         if idle is not None:
             skipped, deferred = idle
+            # Every expense is already stored as listed: in its state, which
+            # is what the count says for the orders too.
             return UpsertResult(
                 count=len(skipped), changed_ids=[], skipped_unchanged=len(skipped),
                 failed=failed(), deferred_to_full_sync=deferred,
-                refused=refused(), unparseable=unparseable()), 0
+                refused=refused(), unparseable=unparseable()), len(kept_expenses)
         # Inside the acquire, not before it: an acquire that ends without a
         # connection is a write that never reached Postgres (`_latch`).
         stamp = _latch()
         # The whole batch in one transaction; if Postgres refuses a value
         # nothing above could foresee, the same statements again, order by
         # order, so one order cannot cost the rest (module docstring).
-        groups = [(orders, kept_expenses)]
+        groups = [(orders, kept_expenses, listed)]
         one_by_one = False
         while groups:
-            batch, costs = groups.pop(0)
+            batch, costs, group_listed = groups.pop(0)
             try:
                 async with conn.transaction():
                     await conn.execute(
@@ -649,10 +804,23 @@ async def upsert_orders_with_expenses(
                         conn, [r.id for r in batch], lock=True)
                     to_write, s, d = decide(batch, existing, force_update=force_update,
                                             skip_products=skip_products)
-                    if costs:
-                        await pg_landing._write_rows(
-                            conn, "bronze.expenses", EXPENSE_COLUMNS,
-                            [tuple(e) for e in costs])
+                    # And the expenses' read, under lock too: what is new or
+                    # moved is written, what KeyCRM no longer lists deleted.
+                    gone: List[Any] = []
+                    changed: List[Any] = []
+                    if costs or group_listed:
+                        stored = await _stored_expenses(
+                            conn, group_listed, costs, lock=True)
+                        changed, stale = expense_changes(
+                            costs, group_listed, all_listed, stored)
+                        if stale:
+                            gone = list(await conn.fetch(
+                                _EXPENSES_DELETE_SQL,
+                                sorted(int(r[0]) for r in stale)))
+                        if changed or stale:
+                            await pg_landing._write_rows(
+                                conn, "bronze.expenses", EXPENSE_COLUMNS,
+                                [tuple(e) for e in changed])
                     if to_write:
                         await pg_landing._write_order_rows(
                             conn, [tuple(r) for r in to_write],
@@ -663,7 +831,7 @@ async def upsert_orders_with_expenses(
                     raise
                 if not one_by_one:
                     one_by_one = True
-                    groups = _one_by_one(orders, kept_expenses)
+                    groups = _one_by_one(orders, kept_expenses, listed)
                     logger.warning(
                         "orders: a batch of %d order(s) was refused (%s); "
                         "writing it order by order", len(orders), type(exc).__name__)
@@ -679,17 +847,26 @@ async def upsert_orders_with_expenses(
             skipped += s
             deferred += d
             expense_count += len(costs)
+            expenses_written += len(changed)
+            deleted += gone
 
+    # Logged once the transaction that deleted them has committed (O2 (a)):
+    # these lines are the measurement of what the stale rows were worth.
+    for row in deleted:
+        logger.info("orders: expense %s of order %s deleted, amount %s: KeyCRM "
+                    "no longer lists it", row["id"], row["order_id"], row["amount"])
     logger.info(
-        "Upserted %d/%d orders to Postgres (written=%d, skipped_unchanged=%d%s%s)",
+        "Upserted %d/%d orders to Postgres (written=%d, skipped_unchanged=%d%s%s%s)",
         len(written) + len(skipped), len(latest), len(written), len(skipped),
         f", deferred_to_full_sync={deferred}" if deferred else "",
-        f", refused={failed()}" if failed() else "")
+        f", refused={failed()}" if failed() else "",
+        f", expenses_written={expenses_written}, expenses_deleted={len(deleted)}"
+        if expenses_written or deleted else "")
     return UpsertResult(
         count=len(written) + len(skipped), changed_ids=written,
         skipped_unchanged=len(skipped), failed=failed(),
         deferred_to_full_sync=deferred, refused=refused(),
-        unparseable=unparseable()), expense_count
+        unparseable=unparseable(), expenses_deleted=len(deleted)), expense_count
 
 
 async def record_backfill_misses(misses: Mapping[int, str]) -> int:

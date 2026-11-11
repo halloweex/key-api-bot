@@ -1857,8 +1857,11 @@ class SyncService:
         items failed to write looks complete because the header is there. Both
         need the order pulled again by id.
 
-        Only ever adds or corrects — nothing is deleted, so this is safe to run
+        Only ever adds or corrects — no order is deleted, so this is safe to run
         automatically against ids that a comparison against the source flagged.
+        The one deletion is the chain's own (owner decision O2 (a)): an expense
+        the re-fetched order no longer lists is deleted with its write, which is
+        how the 05:30 run's expense mismatches are repaired.
 
         `lock` is the scheduler's heavy-job lock, held around the write and the
         dirty mark only — never around the per-id KeyCRM fetches, which would
