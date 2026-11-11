@@ -2502,6 +2502,9 @@ class BackgroundScheduler:
         from core.data_quality import IntegrityIssue, Severity
         from core.mirror_reconciliation import configured
         from core.reconciliation_io import (
+            carries_expenses,
+            classify_expense_discrepancies,
+            postgres_expenses_of,
             postgres_orders_in_window,
             rollup_from_orders,
         )
@@ -2575,6 +2578,14 @@ class BackgroundScheduler:
             # nanohryvnia.
             discrepancies = classify_discrepancies(pg_rollup, kc_rollup)
             discrepancies += classify_order_discrepancies(pg_orders, kc_orders)
+            # Each order's expenses, count and sum, against the same snapshot
+            # (owner decision O3 (a)): VALUE_MISMATCH on `n_expenses` and
+            # `expense_amount`, WARN, and repaired by id below. Only where
+            # KeyCRM's payload carried them, and only orders both sides hold
+            # after the watermark's exclusion.
+            pg_expenses = await postgres_expenses_of(
+                pool, carries_expenses(kc_orders, pg_orders))
+            discrepancies += classify_expense_discrepancies(pg_expenses, kc_orders)
             logger.info(
                 f"DQ reconciliation (Postgres): pg_cells={len(pg_rollup)} "
                 f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
@@ -2863,7 +2874,8 @@ class BackgroundScheduler:
         `reconciliation_pg`) and ClickHouse (layer `reconciliation_ch`), each
         persisted and alerted on CRITICAL by its own arm. Then re-fetches by
         id the orders the Postgres arm found missing (MISSING_IN_DK) or held
-        wrong (STATUS_DRIFT, VALUE_MISMATCH), and writes them under force.
+        wrong (STATUS_DRIFT, VALUE_MISMATCH — an order's expenses included
+        since O3 (a), last), and writes them under force.
 
         Until step 14's S14-12 the snapshot was compared against DuckDB too,
         on layer `reconciliation`; that arm stood down from chain 3's flip
@@ -2873,6 +2885,7 @@ class BackgroundScheduler:
         from zoneinfo import ZoneInfo
         from core.data_quality import DiscrepancyClass
         from core.reconciliation_io import (
+            EXPENSE_FIELDS,
             keycrm_orders_in_window,
             rollup_from_orders,
         )
@@ -3004,19 +3017,28 @@ class BackgroundScheduler:
             #    their fate on a job that failed 57 runs out of 68 and died at
             #    120 s before ever reaching this line. They have their own job
             #    now: `halfwritten_repair`.
+            #    An order whose expenses differ (O3 (a): VALUE_MISMATCH on the
+            #    expense fields) is re-fetched too, last: since O2 (a) the
+            #    write of the re-fetched order deletes what KeyCRM no longer
+            #    lists and writes what moved, and a cost moves no revenue, so
+            #    the CRITICAL drifts keep the front of the bounded batch.
             repair = None
             if not error_message:
                 source = (pg_result or {}).get("discrepancies") or []
 
-                def ids_of(*classes) -> list:
+                def ids_of(*classes, costs: bool = False) -> list:
                     return sorted({oid for d in source if d.diff_class in classes
+                                   and (d.field in EXPENSE_FIELDS) == costs
                                    for oid in d.order_ids})
 
                 missing = ids_of(DiscrepancyClass.MISSING_IN_DK)
                 drifted = [oid for oid in ids_of(DiscrepancyClass.STATUS_DRIFT,
                                                  DiscrepancyClass.VALUE_MISMATCH)
                            if oid not in set(missing)]
-                repairable = missing + drifted
+                costed = [oid for oid in ids_of(DiscrepancyClass.VALUE_MISMATCH,
+                                                costs=True)
+                          if oid not in set(missing) | set(drifted)]
+                repairable = missing + drifted + costed
 
                 if repairable:
                     try:
@@ -3027,8 +3049,10 @@ class BackgroundScheduler:
                         if repair.get("remaining"):
                             logger.warning(
                                 "DQ repair: %d order(s) left for the next run "
-                                "(%d missing, %d drifted found)",
-                                repair["remaining"], len(missing), len(drifted))
+                                "(%d missing, %d drifted, %d with expenses "
+                                "differing found)",
+                                repair["remaining"], len(missing), len(drifted),
+                                len(costed))
                     except Exception as e:
                         logger.exception(f"DQ repair failed: {e}")
 

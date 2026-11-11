@@ -1218,7 +1218,7 @@ whole reason the group is read from the source now.
 | `pg_warehouse_derive` | every 1 min | Postgres derives Silver, Gold and the customer profile when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
-| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
+| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses included (Postgres only, O3 (a)) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
 | `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, the витрина, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
@@ -1740,7 +1740,13 @@ Cap what rebounds; only delete what stays deleted.
 DuckDB's arm (`reconciliation_io.duckdb_orders_in_window`, layer
 `reconciliation`), standing down since chain 3's flip, is deleted, and
 `MISSING_IN_DK`, `STATUS_DRIFT` and `VALUE_MISMATCH` in the Postgres arm's
-verdict are what the job re-fetches by id. History below.
+verdict are what the job re-fetches by id. Since the owner's decision O3 (a)
+(2026-11-11) the snapshot carries each order's expenses, and the Postgres arm
+compares their count and sum with `bronze.expenses`, to the kopeck, as
+`VALUE_MISMATCH` (WARN — a cost moves no revenue) on `n_expenses` and
+`expense_amount`; an order fetched without the key is not compared. Such an
+order is re-fetched last in the same batch, and its write deletes what KeyCRM
+no longer lists (O2 (a)). History below.
 
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the

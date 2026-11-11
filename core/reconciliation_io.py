@@ -31,10 +31,11 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Tuple
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from core.data_quality import Rollup
+from core.data_quality import Discrepancy, Rollup, classify_order_discrepancies
 from core.models import OrderStatus
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,102 @@ MONEY_FIELDS = frozenset({"grand_total", "line_amount"})
 # An order id → its facts. Both extractors below produce this shape, and the
 # rollup is derived from it, so the two sides cannot aggregate differently.
 OrderFacts = Dict[int, Dict[str, object]]
+
+
+# ─── The order's expenses (owner decision O3 (a), 2026-11-11) ────────────────
+#
+# Until then order expenses were compared with nothing: the snapshot did not
+# ask KeyCRM for them, and the only watch on `bronze.expenses` was the orphan
+# check (`core.pg_chain_invariants`). Since O2 (a) a re-fetch of an order puts
+# its expenses right — deleting what KeyCRM no longer lists — so a mismatch
+# found here is repaired by the same by-id batch as a status drift.
+#
+# Per order, the count and the sum, in cents. Postgres only: ClickHouse holds
+# no expenses. Compared exactly — `NUMERIC(12,2)` against KeyCRM's amounts
+# rounded to the cent the way the column rounds them, as Decimal, never float.
+# An order whose KeyCRM payload did not carry an `expenses` list carries no
+# expense facts and is not compared: a snapshot without the key must not read
+# as every expense missing.
+EXPENSE_FIELDS = ("n_expenses", "expense_amount")
+
+# What the snapshot asks KeyCRM to embed in each order. `expenses` since O3 (a):
+# the same pages, a larger payload.
+SNAPSHOT_INCLUDE = "products,manager,buyer,expenses"
+
+_CENT = Decimal("0.01")
+
+
+def keycrm_expense_facts(expenses: object) -> Optional[Dict[str, object]]:
+    """`{n_expenses, expense_amount}` of one KeyCRM order's `expenses`, or
+    None when there is nothing to compare: no list under the key, an entry
+    that is not an object, or an amount that is not a number.
+
+    Each amount is rounded to the cent half away from zero, as
+    `NUMERIC(12,2)` rounds what the chain writes; an absent or null amount
+    counts as zero (the chain writes an absent one as 0)."""
+    if not isinstance(expenses, list):
+        return None
+    total = Decimal(0)
+    for e in expenses:
+        if not isinstance(e, dict):
+            return None
+        amount = e.get("amount")
+        if amount is None:
+            continue
+        if isinstance(amount, bool):
+            return None
+        try:
+            exact = Decimal(str(amount))
+            if not exact.is_finite():
+                return None
+            total += exact.quantize(_CENT, rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError):
+            return None
+    return {"n_expenses": len(expenses), "expense_amount": total}
+
+
+def carries_expenses(kc: OrderFacts, among: Iterable[int]) -> List[int]:
+    """The ids of `among` whose KeyCRM facts carry both expense fields — the
+    only orders whose expenses are compared, and asked of Postgres."""
+    return sorted(oid for oid in set(among)
+                  if oid in kc and all(kc[oid].get(f) is not None for f in EXPENSE_FIELDS))
+
+
+async def postgres_expenses_of(pool, order_ids: Iterable[int]) -> OrderFacts:
+    """`{order id: {n_expenses, expense_amount}}` from `bronze.expenses`, for
+    every id asked — an order with no expense row reads 0 and 0.00."""
+    ids = sorted({int(i) for i in order_ids})
+    out: OrderFacts = {oid: {"n_expenses": 0, "expense_amount": Decimal("0.00")}
+                       for oid in ids}
+    if not ids:
+        return out
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT order_id, count(*) AS n, COALESCE(SUM(amount), 0) AS amount "
+            "FROM bronze.expenses WHERE order_id = ANY($1::int[]) GROUP BY order_id",
+            ids)
+    for r in rows:
+        out[int(r["order_id"])] = {"n_expenses": int(r["n"]),
+                                   "expense_amount": Decimal(r["amount"])}
+    return out
+
+
+def classify_expense_discrepancies(
+    dk: OrderFacts, kc: OrderFacts, *, max_ids: int = 50,
+) -> List[Discrepancy]:
+    """The orders whose expenses differ, as `VALUE_MISMATCH` on the fields
+    `n_expenses` and `expense_amount` — the per-order comparison's own class,
+    grouped the same way, and so WARN: like a moved total (`grand_total`),
+    and unlike a moved status, an expense moves no revenue figure.
+
+    Only orders on both sides whose KeyCRM facts carry the expense fields are
+    compared (an order on one side only is the header comparison's
+    MISSING_IN_DK or MISSING_IN_KC), and with no tolerance: `money_fields` is
+    empty, so the sums compare as the Decimals they are."""
+    comparable = {oid: kc[oid] for oid in carries_expenses(kc, dk)}
+    return classify_order_discrepancies(
+        {oid: dk[oid] for oid in comparable}, comparable,
+        fields=EXPENSE_FIELDS, money_fields=frozenset(), max_ids=max_ids)
 
 
 # The header-only slice of ORDER_FIELDS: what ClickHouse's silver can answer
@@ -298,7 +395,7 @@ async def keycrm_orders_in_window(
             # Pass 1: created_between
             page_count = 0
             params = {
-                "include": "products,manager,buyer",
+                "include": SNAPSHOT_INCLUDE,
                 "filter[created_between]": f"{f_start},{f_end}",
             }
             async for batch in client.paginate("order", params=params, page_size=50):
@@ -307,7 +404,7 @@ async def keycrm_orders_in_window(
                                window_start, window_end, inflight)
             # Pass 2: updated_between (status changes on backdated orders)
             params_upd = {
-                "include": "products,manager,buyer",
+                "include": SNAPSHOT_INCLUDE,
                 "filter[updated_between]": f"{f_start},{f_end}",
             }
             async for batch in client.paginate("order", params=params_upd, page_size=50):
@@ -414,3 +511,8 @@ def _process_batch(
             "qty": qty,
             "line_amount": round(line_amount, 2),
         }
+        # Only when the payload carried them (O3 (a)): absent, the order's
+        # expenses are not compared rather than read as none.
+        expense_facts = keycrm_expense_facts(o.get("expenses"))
+        if expense_facts is not None:
+            orders[int(oid)].update(expense_facts)
