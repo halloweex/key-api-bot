@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.338
+
+- feat(traffic): the whole funnel on a phone's first screen
+
+
 ## 3.0.337
 
 - fix(ui): traffic tiles three-up below 1280px, no tenth from 100 million

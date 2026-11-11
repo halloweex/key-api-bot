@@ -8,6 +8,7 @@
  * (`usableWebApp` null) both do nothing.
  */
 import { useEffect, useRef, useState } from 'react'
+import { closeTopLayer, useAnyLayerOpen } from '../utils/layerStack'
 import {
   loadTelegramWebApp, usableWebApp, type TelegramWebApp,
 } from '../utils/telegramMiniApp'
@@ -61,6 +62,20 @@ export function useTelegramMainButton(
     }
     webApp.MainButton.setParams({ text, is_active: enabled, is_visible: true })
   }, [webApp, visible, text, enabled])
+}
+
+/**
+ * For a page with no back of its own: Telegram's BackButton while a sheet or
+ * dialog is open on it (`utils/layerStack`), closing the one on top. Without
+ * it the Mini App's header shows "Close" over an open sheet, and the press a
+ * person means as "close this" closes the whole dashboard (found on /traffic,
+ * 2026-11-11). A page that steps back by itself (the SMS wizard) asks the
+ * stack in its own handler instead and must not use this too.
+ */
+export function useTelegramBackClosesLayers(): void {
+  const webApp = useTelegramWebApp()
+  const open = useAnyLayerOpen()
+  useTelegramBackButton(webApp, { visible: open, onClick: () => { closeTopLayer() } })
 }
 
 /** Telegram's BackButton, while `visible`, calling `onClick`. */

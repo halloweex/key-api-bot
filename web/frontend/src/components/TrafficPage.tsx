@@ -12,6 +12,7 @@ import { TrafficTrendChart } from './TrafficTrendChart'
 import { TrafficTransactionsTable } from './TrafficTransactionsTable'
 import { UtmCampaignsTable } from './UtmCampaignsTable'
 import { useRouter } from '../hooks/useRouter'
+import { useTelegramBackClosesLayers } from '../hooks/useTelegramButtons'
 import { trafficTabFor } from '../utils/trafficTabs'
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -23,6 +24,8 @@ import { trafficTabFor } from '../utils/trafficTabs'
 export const TrafficPage = memo(function TrafficPage() {
   const { t } = useTranslation()
   const tab = trafficTabFor(useRouter()) ?? 'funnel'
+  // The funnel's sheets ("?", the comparison) close on Telegram's Back.
+  useTelegramBackClosesLayers()
 
   return (
     <PageShell variant="feature">
