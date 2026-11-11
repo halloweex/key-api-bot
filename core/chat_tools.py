@@ -3,7 +3,7 @@ Chat tools for LLM function calling.
 
 Defines tools that the LLM can call to access data from DuckDB and Meilisearch.
 """
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple, cast
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -753,9 +753,12 @@ async def _get_customer_insights(period: str) -> Dict[str, Any]:
     totals = await _chat_run(
         _revenue_totals_sql("retail"), [start_date, end_date], mode="one")
 
-    total = int(customers[0] or 0) if customers else 0
-    new_customers = int(customers[1] or 0) if customers else 0
-    returning = int(customers[2] or 0) if customers else 0
+    # `mode="one"` is one row or None; the cast says so to the checker.
+    row = cast(Tuple[Any, ...], customers) if customers else (0, 0, 0)
+    money = cast(Tuple[Any, ...], totals) if totals else (0, 0, 0)
+    total = int(row[0] or 0)
+    new_customers = int(row[1] or 0)
+    returning = int(row[2] or 0)
     repeat_rate = (returning / total * 100) if total > 0 else 0
 
     return {
@@ -764,7 +767,7 @@ async def _get_customer_insights(period: str) -> Dict[str, Any]:
         "new_customers": new_customers,
         "returning_customers": returning,
         "repeat_rate": round(repeat_rate, 1),
-        "avg_order_value": float(totals[2] or 0) if totals else 0.0,
+        "avg_order_value": float(money[2] or 0),
     }
 
 
