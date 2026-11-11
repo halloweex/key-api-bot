@@ -18,6 +18,21 @@ describe('a figure too wide for its tile', () => {
     expect(formatCurrencyShort(68_106_047)).toBe('₴68.1M')
   })
 
+  it('drops the tenth once three digits stand before it', async () => {
+    // ₴108,5 млн was a character wider than the dashboard's tile at 1024px.
+    await i18n.changeLanguage('uk')
+    expect(plain(formatCurrencyShort(108_542_127))).toBe('₴109 млн')
+    expect(plain(formatCurrencyShort(100_000_000))).toBe('₴100 млн')
+    expect(plain(formatCurrencyShort(99_400_000))).toBe('₴99,4 млн')
+    await i18n.changeLanguage('en')
+    expect(formatCurrencyShort(108_542_127)).toBe('₴109M')
+  })
+
+  it('counts the digits in its own unit, so a billion keeps its tenth', async () => {
+    await i18n.changeLanguage('uk')
+    expect(plain(formatCurrencyShort(1_234_000_000))).toBe('₴1,2 млрд')
+  })
+
   it('stays whole below a million, where it is already the shorter', async () => {
     await i18n.changeLanguage('uk')
     expect(plain(formatCurrencyShort(585_704))).toBe('₴585 704')

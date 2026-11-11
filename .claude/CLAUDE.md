@@ -198,9 +198,11 @@ the traffic trend's additive days are folded on the page
 (`utils/trafficTrend.trafficByMonth`). The GA4 funnel sees 14 months of it and
 says so; the CRM's order count beside it starts at GA4's `earliest` too. Nine
 digits of hryvnia do not fit a narrow tile: `StatCard` takes a
-`shortFormatter` (`formatCurrencyShort`, `₴108 млн`) and shows it only when the
-full figure, measured on a hidden copy, does not fit — the full one stays in
-the tooltip and the label. The marketing report's range gives its start a year
+`shortFormatter` (`formatCurrencyShort`: `₴68,1 млн`, and no tenth from three
+digits up, `₴109 млн`) and shows it only when the full figure, measured on a
+hidden copy, does not fit — the full one stays in the tooltip and the label.
+`TileGrid`'s five-tile row is three-up below `xl` (1280 px): beside the
+sidebar at 1024 px a fifth of the row held 74 px of figure. The marketing report's range gives its start a year
 when the two differ (`formatReportRange`). Its «Кол-во клиентов» sums Gold's
 daily distinct buyers, which over the whole history reads 42 620 against the
 dashboard's 19 293 people — a known difference, the owner's to decide.

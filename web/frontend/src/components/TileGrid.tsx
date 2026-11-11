@@ -13,7 +13,11 @@ import { type ReactNode } from 'react'
 //   2 — one column, pairs from md up (wide tiles: insight cards, breakdowns)
 //   3 — always three-up (compact KPI triplets)
 //   4 — pairs on mobile, four-up from lg
-//   5 — pairs on mobile, five-up from lg
+//   5 — pairs on mobile, three-up from lg, five-up from xl
+//
+// Five from xl, not lg: beside the sidebar at 1024px a fifth of the row left
+// a tile 74px for its figure, and «₴365 770» needs 106 — cut off, on /traffic,
+// for every period from a month up.
 
 type Columns = 2 | 3 | 4 | 5
 
@@ -23,7 +27,7 @@ const columnsClass: Record<Columns, string> = {
   2: 'grid-cols-1 md:grid-cols-2',
   3: 'grid-cols-3',
   4: 'grid-cols-2 lg:grid-cols-4 mobile-single-col',
-  5: 'grid-cols-2 lg:grid-cols-5 mobile-single-col',
+  5: 'grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 mobile-single-col',
 }
 
 interface TileGridProps {
