@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.335
+
+- One AOV statement, at the span the type baseline already holds
+- The whole history, legible where it was cut off
+
+
 ## 3.0.334
 
 - feat(traffic): the funnel says each fact once, phone first
