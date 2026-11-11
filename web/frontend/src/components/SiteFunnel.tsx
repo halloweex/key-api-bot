@@ -1,9 +1,11 @@
 import { Fragment, memo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { CalendarX, Clock, CloudOff, Users } from 'lucide-react'
 import { ApiErrorState } from './ApiErrorState'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { DataTable, Td, Th, Tr } from './DataTable'
-import { InfoPopover } from './InfoPopover'
+import { HelpSheet } from './HelpSheet'
+import type { IconComponent } from './icons'
 import { SegmentedControl } from './SegmentedControl'
 import { SkeletonChart } from './Skeleton'
 import { Wrapper } from './Wrapper'
@@ -13,15 +15,15 @@ import { formatNumber } from '../utils/formatters'
 import {
   FOLDED_DEVICES, MIN_GROUP_PEOPLE, TRANSITIONS,
   biggestLeak, canCompare, conclude, conversion, conversionChange, enoughToClaim, foldDevices,
-  funnelSteps, groupFigures, hasPeople, leak, perBase, rowsGap, stepShare,
+  funnelSteps, groupFigures, hasPeople, rowsGap, stepShare,
   type Against, type GroupFigure, type StepFigure, type Transition,
 } from '../utils/funnel'
 import {
-  convPct, fetchedAt, gapText, groupPct, perBaseText, sayConclusion, sayLeak, stepPct, toneOf,
-  transitionText, wasText, type Line, type Tone,
+  convPct, fetchedAt, gapText, groupPct, heroWas, perBaseText, sayConclusion, stepPct, toneOf,
+  type HeroWas, type Line, type Tone,
 } from '../utils/funnelText'
 import { plural, type T } from '../utils/plural'
-import { addDays, formatDay, formatDayRange, formatSpan, inclusiveDays, kyivToday, rangeEnds } from '../utils/smsDates'
+import { addDays, formatDay, formatDayRange, formatSpan, inclusiveDays, kyivToday } from '../utils/smsDates'
 import type { FunnelRow, TrafficFunnelResponse } from '../types/api'
 
 // ─── The site's purchase funnel, from Google Analytics ───────────────────────
@@ -32,6 +34,13 @@ import type { FunnelRow, TrafficFunnelResponse } from '../types/api'
 // bars from one left edge with what each step lost written between them, then
 // who gets how far. The arithmetic is `utils/funnel`, the sentences
 // `utils/funnelText`.
+//
+// Each fact is said once (the owner, 2026-11-05: «слишком много текста… ты
+// теряешься, особенно с телефона»). The conversion and its verdict stand in
+// the number at the top and nowhere else; what changes how a number reads —
+// the last days still counting, too few people, the CRM's different count —
+// stays on screen in a line each; what is read once — how the funnel is
+// counted, who is cold or warm — is under a "?" that opens a sheet on a phone.
 
 type Breakdown = 'type' | 'channel' | 'device'
 
@@ -39,18 +48,6 @@ const TONE_TEXT: Record<Tone, string> = {
   good: 'text-emerald-700',
   bad: 'text-red-700',
   neutral: 'text-slate-600',
-}
-
-const VERDICT_BOX: Record<Tone, string> = {
-  good: 'border-emerald-200 bg-emerald-50',
-  bad: 'border-red-200 bg-red-50',
-  neutral: 'border-slate-200 bg-slate-50',
-}
-
-const VERDICT_HEAD: Record<Tone, string> = {
-  good: 'text-emerald-900',
-  bad: 'text-red-900',
-  neutral: 'text-slate-900',
 }
 
 /** GA4's device categories with a label; any other is shown as GA4 names it. */
@@ -74,28 +71,40 @@ function groupName(row: FunnelRow, by: Breakdown, t: T): string {
   return row.key
 }
 
-function groupNote(row: FunnelRow, by: Breakdown, t: T): string | null {
+/** What a group is: a type's members; a GA4 channel in our words and its type. */
+function groupNote(row: FunnelRow, by: Breakdown, t: T, gloss: (key: string) => string): string | null {
   if (by === 'type') return t(`traffic.funnelTypeDesc.${row.key}`)
-  if (by === 'channel' && row.type) return t(`traffic.funnelType.${row.type}`)
+  if (by === 'channel') {
+    const type = row.type ? t(`traffic.funnelType.${row.type}`).toLocaleLowerCase() : ''
+    return [gloss(row.key), type].filter(Boolean).join(' · ') || null
+  }
   return null
 }
 
 // ─── Frame and messages ──────────────────────────────────────────────────────
+
+function FunnelHelp() {
+  const { t } = useTranslation()
+  return (
+    <>
+      {(['steps', 'bars', 'verdict', 'buyers', 'scope'] as const).map((part) => (
+        <p key={part}>{t(`traffic.funnel.help.${part}`)}</p>
+      ))}
+    </>
+  )
+}
 
 function FunnelFrame({ aside, children }: { aside?: ReactNode; children: ReactNode }) {
   const { t } = useTranslation()
   return (
     <Card animate="chart-in">
       <CardHeader>
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="flex min-w-0 max-w-xl flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <CardTitle>{t('traffic.funnelTitle')}</CardTitle>
-              <InfoPopover title={t('traffic.funnelHowTitle')} size="wide">
-                <p className="text-xs leading-relaxed text-slate-300">{t('traffic.funnelHowText')}</p>
-              </InfoPopover>
-            </div>
-            <p className="text-[13px] leading-relaxed text-slate-600">{t('traffic.funnelDesc')}</p>
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="flex items-center gap-2">
+            <CardTitle>{t('traffic.funnelTitle')}</CardTitle>
+            <HelpSheet title={t('traffic.funnelHowTitle')} label={t('traffic.funnelHowTitle')}>
+              <FunnelHelp />
+            </HelpSheet>
           </div>
           {aside}
         </div>
@@ -114,13 +123,26 @@ function Message({ title, text }: { title?: string; text: string }) {
   )
 }
 
-function Note({ warn, children }: { warn?: boolean; children: ReactNode }) {
+interface Notice {
+  key: string
+  icon: IconComponent
+  text: string
+}
+
+/** What changes how the figures read, a line each and in one place: the data
+ *  is old, the last days are still being counted, the history starts later,
+ *  too few people to judge. */
+function Notices({ items }: { items: Notice[] }) {
   return (
-    <p className={`rounded-xl border px-3.5 py-3 text-[13px] leading-relaxed ${
-      warn ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-slate-200 bg-slate-50 text-slate-700'
-    }`}>
-      {children}
-    </p>
+    <ul className="flex flex-col gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5
+                   text-[13px] leading-snug text-amber-900">
+      {items.map(({ key, icon: Icon, text }) => (
+        <li key={key} className="flex items-start gap-2">
+          <Icon className="mt-px h-4 w-4 shrink-0 text-amber-700" aria-hidden />
+          <span>{text}</span>
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -141,24 +163,25 @@ const CompareWith = memo(function CompareWith({
     return <p className="max-w-xs text-xs leading-relaxed text-slate-600">{t('traffic.funnel.compare.none', { date: since })}</p>
   }
   const window = data.periods[against]
-  const ends = rangeEnds(window.start, window.end)
   const days = inclusiveDays(window.start, window.end)
+  const span = formatSpan(window.start, window.end)
   const dates = against === 'previous'
-    ? t('traffic.funnel.compare.datesPrevious', { ...ends, n: formatNumber(days), word: plural(t, 'word.days', days) })
-    : t('traffic.funnel.compare.datesYear', ends)
+    ? t('traffic.funnel.compare.datesPrevious', { dates: span, n: formatNumber(days), word: plural(t, 'word.days', days) })
+    : t('traffic.funnel.compare.datesYear', { dates: span })
   const options = [
     { value: 'previous' as const, label: t('traffic.funnel.compare.previous'), disabled: !prevOk },
     { value: 'year_ago' as const, label: t('traffic.funnel.compare.year_ago'), disabled: !yearOk },
   ]
+  const control = (fullWidth: boolean) => (
+    <SegmentedControl<Against>
+      options={options} value={against} onChange={onChange} size="sm" fullWidth={fullWidth}
+      ariaLabel={t('traffic.funnel.compare.label')}
+    />
+  )
   return (
-    <div className="flex w-full flex-col gap-1.5 sm:w-auto sm:items-end">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[13px] text-slate-600">{t('traffic.funnel.compare.label')}</span>
-        <SegmentedControl<Against>
-          options={options} value={against} onChange={onChange} size="sm"
-          ariaLabel={t('traffic.funnel.compare.label')}
-        />
-      </div>
+    <div className="flex w-full flex-col gap-1 sm:w-auto sm:items-end">
+      <div className="w-full sm:hidden">{control(true)}</div>
+      <div className="hidden sm:block">{control(false)}</div>
       <span className="text-xs text-slate-600">{dates}</span>
       {!yearOk && <span className="max-w-sm text-xs leading-relaxed text-slate-600 sm:text-right">{t('traffic.funnel.compare.noYear', { date: since })}</span>}
       {!prevOk && <span className="max-w-sm text-xs leading-relaxed text-slate-600 sm:text-right">{t('traffic.funnel.compare.noPrevious', { date: since })}</span>}
@@ -168,28 +191,32 @@ const CompareWith = memo(function CompareWith({
 
 // ─── The number and what it says ─────────────────────────────────────────────
 
-const Hero = memo(function Hero({ rate, per, was }: { rate: string; per: string | null; was: Line | null }) {
+const Hero = memo(function Hero({ rate, per, was }: { rate: string; per: string | null; was: HeroWas | null }) {
   const { t } = useTranslation()
+  const strong = was != null && was.tone !== 'neutral'
   return (
-    <div className="flex flex-[1_1_18rem] flex-col gap-1.5 rounded-xl bg-blue-50 px-4 py-4 sm:px-6 sm:py-5">
+    <div className="flex flex-[1_1_16rem] flex-col gap-1 rounded-xl bg-blue-50 px-4 py-3 sm:px-5 sm:py-4">
       <span className="text-[13px] font-semibold text-blue-800">{t('traffic.funnel.hero.label')}</span>
-      <span className="text-[44px] font-bold leading-none tabular-nums text-slate-900 sm:text-[52px]">{rate}</span>
-      {per && <span className="text-sm text-slate-900 sm:text-[15px]">{per}</span>}
-      {was && (
-        <span className={`text-[13px] sm:text-sm ${was.tone === 'neutral' ? 'text-slate-600' : `font-semibold ${TONE_TEXT[was.tone]}`}`}>
-          <Arrow tone={was.tone} />{was.text}
-        </span>
-      )}
+      <div className="flex items-end justify-between gap-3">
+        <span className="text-4xl font-bold leading-none tabular-nums text-slate-900 sm:text-[44px]">{rate}</span>
+        {was && (
+          <span className={`flex flex-col items-end gap-0.5 pb-0.5 text-right ${strong ? `font-semibold ${TONE_TEXT[was.tone]}` : ''}`}>
+            <span className={`text-sm tabular-nums ${strong ? '' : 'text-slate-900'}`}><Arrow tone={was.tone} />{was.was}</span>
+            {was.verdict && <span className={`text-xs ${strong ? '' : 'text-slate-600'}`}>{was.verdict}</span>}
+          </span>
+        )}
+      </div>
+      {per && <span className="text-[13px] text-slate-700">{per}</span>}
     </div>
   )
 })
 
-const Verdict = memo(function Verdict({ headline, lines }: { headline: Line; lines: Line[] }) {
+/** What only words can add: the counts, each step that moved and what it
+ *  cost, the mix. A box beside the number on a wide screen, plain lines under
+ *  it on a phone. */
+const Conclusion = memo(function Conclusion({ lines }: { lines: Line[] }) {
   return (
-    <div className={`flex flex-[2_1_28rem] flex-col gap-2 rounded-xl border px-4 py-3 sm:px-6 sm:py-5 ${VERDICT_BOX[headline.tone]}`}>
-      <p className={`text-[15px] font-bold sm:text-base ${VERDICT_HEAD[headline.tone]}`}>
-        <Arrow tone={headline.tone} />{headline.text}
-      </p>
+    <div className="flex flex-[2_1_24rem] flex-col justify-center gap-1.5 sm:rounded-xl sm:border sm:border-slate-200 sm:px-5 sm:py-4">
       {lines.map((line, i) => (
         <p key={i} className="text-[13px] leading-relaxed text-slate-700 sm:text-sm">
           {line.lead && (
@@ -206,12 +233,12 @@ const Verdict = memo(function Verdict({ headline, lines }: { headline: Line; lin
 
 /** A step's people as a bar from the common left edge; the people at the step
  *  before as its pale tail, two pixels apart. Decorative: every number it
- *  draws is written beside it. */
+ *  draws is written beside it, or for a screen reader under it. */
 function Bar({ reached, before, thin }: { reached: number; before: number | null; thin?: boolean }) {
   const r = Math.max(0, Math.min(1, reached)) * 100
   const b = before == null ? null : Math.max(0, Math.min(1, before)) * 100
   return (
-    <div className={`relative ${thin ? 'h-[18px]' : 'h-7'}`} aria-hidden="true">
+    <div className={`relative ${thin ? 'h-3' : 'h-5'}`} aria-hidden="true">
       {b != null && b > r && (
         <div
           className="absolute inset-y-0 rounded-r bg-slate-300"
@@ -223,117 +250,140 @@ function Bar({ reached, before, thin }: { reached: number; before: number | null
   )
 }
 
-/** The words between two bars: how many went on, how many left, and against
- *  the window compared with. */
-function Between({ s, isLeak, short }: { s: StepFigure; isLeak: boolean; short: boolean }) {
+/** The words between two bars: «дошли 55 % · ушли 15 774», and under them the
+ *  verdict when the step moved beyond noise. A bare «↓ 55 %» read as "fell by
+ *  55 %"; a «было» no test judged read as a change. */
+function Between({ s, isLeak }: { s: StepFigure; isLeak: boolean }) {
   const { t } = useTranslation()
   const was = s.was?.ofBefore
   const judged = (s.change === 'better' || s.change === 'worse') && was != null
   return (
-    <p className={`py-1 text-[13px] leading-relaxed ${isLeak ? 'text-slate-900' : 'text-slate-600'}`}>
-      <span aria-hidden="true">↓ </span>
-      {transitionText(s.step as Transition, t, short)}{' '}
-      <b className="text-slate-900">{stepPct(s.ofBefore)}</b>
-      {' · '}{t('traffic.funnel.bars.left', { n: formatNumber(s.left ?? 0) })}
-      {isLeak && <>{' — '}<b>{t(short ? 'traffic.funnel.bars.leakShort' : 'traffic.funnel.bars.leak')}</b></>}
+    <div className="flex flex-col py-1 text-[13px] leading-snug">
+      <p className={isLeak ? 'text-slate-900' : 'text-slate-600'}>
+        {t('traffic.funnel.bars.reached')} <b className="text-slate-900">{stepPct(s.ofBefore)}</b>
+        {' · '}{t('traffic.funnel.bars.left', { n: formatNumber(s.left ?? 0) })}
+        {isLeak && <>{' · '}<b>{t('traffic.funnel.bars.leakShort')}</b></>}
+      </p>
       {judged && (
-        <>
-          {' · '}
-          <b className={TONE_TEXT[toneOf(s.change)]}>
-            <Arrow tone={toneOf(s.change)} />{t(`traffic.funnel.bars.${s.change}`, { was: stepPct(was) })}
-          </b>
-        </>
+        <p className={`font-semibold ${TONE_TEXT[toneOf(s.change)]}`}>
+          <Arrow tone={toneOf(s.change)} />{t(`traffic.funnel.bars.${s.change}`, { was: stepPct(was) })}
+        </p>
       )}
-      {!judged && !short && was != null && <>{' · '}{t('traffic.funnel.bars.was', { was: stepPct(was) })}</>}
-    </p>
+    </div>
   )
 }
 
 const FunnelBars = memo(function FunnelBars({
-  steps, leakStep, total, totalShort, totalWas,
+  steps, leakStep, total,
 }: {
   steps: StepFigure[]
   leakStep: Transition | null
   total: string
-  totalShort: string
-  totalWas: Line | null
 }) {
   const { t } = useTranslation()
   const last = steps.length - 1
-  const sub = (s: StepFigure, i: number) => {
-    const was = s.was ? t('traffic.funnel.bars.was', { was: formatNumber(s.was.people) }) : null
-    if (i === 0) return was ?? ''
-    const share = t('traffic.funnel.bars.ofEntered', { share: i === last ? convPct(s.ofEntered) : stepPct(s.ofEntered) })
-    return was ? `${share} · ${was}` : share
-  }
-  const wasClass = totalWas && totalWas.tone !== 'neutral' ? `font-semibold ${TONE_TEXT[totalWas.tone]}` : 'text-slate-600'
+  // «было N» beside the first and the last step only: they are the counts the
+  // sentence above compares, and a middle step's count nobody judged.
+  const wasAt = (s: StepFigure, i: number) => (s.was && (i === 0 || i === last)
+    ? t('traffic.funnel.bars.was', { was: formatNumber(s.was.people) })
+    : null)
+  // The share of everyone who entered is the bar's length: written out for a
+  // reader who does not see the bar.
+  const ofEntered = (s: StepFigure, i: number) => (i === 0
+    ? null
+    : t('traffic.funnel.bars.ofEntered', { share: i === last ? convPct(s.ofEntered) : stepPct(s.ofEntered) }))
 
   return (
     <Wrapper dir="column" gap="xs">
-      <div className="hidden flex-wrap gap-4 pb-1.5 text-xs text-slate-600 sm:flex">
+      <div className="flex flex-wrap gap-4 pb-1 text-xs text-slate-600" aria-hidden="true">
         <span className="flex items-center gap-1.5">
-          <span className="h-2.5 w-3.5 rounded-sm bg-blue-600" aria-hidden="true" />{t('traffic.funnel.bars.reached')}
+          <span className="h-2.5 w-3.5 rounded-sm bg-blue-600" />{t('traffic.funnel.bars.reached')}
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="h-2.5 w-3.5 rounded-sm bg-slate-300" aria-hidden="true" />{t('traffic.funnel.bars.tail')}
+          <span className="h-2.5 w-3.5 rounded-sm bg-slate-300" />{t('traffic.funnel.bars.tail')}
         </span>
       </div>
 
       {/* Wide: name | bar | figures, one row per step and the words between. */}
-      <div className="hidden grid-cols-[11rem_minmax(0,1fr)_13rem] items-center gap-x-4 gap-y-1 sm:grid">
+      <div className="hidden grid-cols-[11rem_minmax(0,1fr)_9rem] items-center gap-x-4 gap-y-1 sm:grid">
         {steps.map((s, i) => (
           <Fragment key={s.step}>
             {i > 0 && (
               <>
                 <span />
-                <Between s={s} isLeak={s.step === leakStep} short={false} />
+                <Between s={s} isLeak={s.step === leakStep} />
                 <span />
               </>
             )}
             <span className="text-sm font-semibold text-slate-900">{t(`traffic.funnelStep.${s.step}`)}</span>
             <Bar reached={s.ofEntered ?? 0} before={i > 0 ? steps[i - 1].ofEntered : null} />
-            <span className="flex flex-col">
+            <span className="flex flex-col text-right">
               <span className="text-lg font-bold tabular-nums text-slate-900">{formatNumber(s.people)}</span>
-              <span className="text-xs text-slate-600">{sub(s, i)}</span>
+              {wasAt(s, i) && <span className="text-xs text-slate-600">{wasAt(s, i)}</span>}
+              {ofEntered(s, i) && <span className="sr-only">{ofEntered(s, i)}</span>}
             </span>
           </Fragment>
         ))}
         <span className="mt-2 border-t border-slate-200 pt-2.5 text-[15px] font-bold text-slate-900">
           {t('traffic.funnel.total.label')}
         </span>
-        <span className="mt-2 border-t border-slate-200 pt-2.5 text-[15px] text-slate-900">{total}</span>
-        <span className={`mt-2 border-t border-slate-200 pt-2.5 text-[13px] ${wasClass}`}>
-          {totalWas && <><Arrow tone={totalWas.tone} />{totalWas.text}</>}
-        </span>
+        <span className="col-span-2 mt-2 border-t border-slate-200 pt-2.5 text-[15px] text-slate-900">{total}</span>
       </div>
 
       {/* Narrow: the same steps stacked, the bar under its name. */}
       <ol className="flex flex-col sm:hidden">
         {steps.map((s, i) => (
           <li key={s.step} className="flex flex-col">
-            {i > 0 && <Between s={s} isLeak={s.step === leakStep} short />}
-            <div className="flex flex-col gap-1.5 py-2">
+            {i > 0 && <Between s={s} isLeak={s.step === leakStep} />}
+            <div className="flex flex-col gap-1">
               <div className="flex items-baseline justify-between gap-2">
-                <span className="text-sm font-semibold text-slate-900">{t(`traffic.funnelStep.${s.step}`)}</span>
-                <span className="text-lg font-bold tabular-nums text-slate-900">{formatNumber(s.people)}</span>
+                <span className="text-sm font-semibold text-slate-900">
+                  {t(`traffic.funnelStep.${s.step}`)}
+                  {wasAt(s, i) && <span className="font-normal text-slate-600"> · {wasAt(s, i)}</span>}
+                </span>
+                <span className="text-base font-bold tabular-nums text-slate-900">{formatNumber(s.people)}</span>
               </div>
               <Bar reached={s.ofEntered ?? 0} before={i > 0 ? steps[i - 1].ofEntered : null} thin />
-              <span className="text-xs text-slate-600">{sub(s, i)}</span>
+              {ofEntered(s, i) && <span className="sr-only">{ofEntered(s, i)}</span>}
             </div>
           </li>
         ))}
       </ol>
-      <div className="flex items-baseline justify-between gap-2 border-t border-slate-200 pt-2.5 sm:hidden">
+      <div className="flex items-baseline justify-between gap-2 border-t border-slate-200 pt-2 sm:hidden">
         <span className="text-[15px] font-bold text-slate-900">{t('traffic.funnel.total.label')}</span>
-        <span className="text-[15px] text-slate-900">{totalShort}</span>
+        <span className="text-[15px] text-slate-900">{total}</span>
       </div>
-      {totalWas && (
-        <p className={`text-xs sm:hidden ${wasClass}`}><Arrow tone={totalWas.tone} />{totalWas.text}</p>
-      )}
-      <p className="text-xs text-slate-600 sm:hidden">{t('traffic.funnel.bars.legendSentence')}</p>
     </Wrapper>
   )
 })
+
+/** The CRM's count of the website's orders beside the funnel's buyers, in a
+ *  line, and why the two differ one tap away. Without the count it still says
+ *  the funnel counts people, not orders. */
+function CrmLine({ buyers, orders, oneDay }: { buyers: number; orders: number | null; oneDay: boolean }) {
+  const { t } = useTranslation()
+  const line = orders != null
+    ? t(oneDay ? 'traffic.funnel.crm.lineDay' : 'traffic.funnel.crm.lineDays', {
+      n: formatNumber(orders), word: plural(t, 'word.orders', orders),
+    })
+    : t('traffic.funnel.crm.fallback')
+  return (
+    <div className="flex flex-col text-[13px] leading-relaxed text-slate-600 sm:flex-row sm:flex-wrap sm:items-baseline sm:gap-x-2">
+      <span>{line}</span>
+      <HelpSheet link title={t('traffic.funnel.crm.sheetTitle')} label={t('traffic.funnel.crm.why')}>
+        {orders != null && (
+          <p>
+            {t('traffic.funnel.crm.sheetCounts', {
+              buyers: formatNumber(buyers), buyersWord: plural(t, 'word.buyers', buyers),
+              orders: formatNumber(orders), ordersWord: plural(t, 'word.orders', orders),
+            })}
+          </p>
+        )}
+        <p>{t('traffic.funnel.crm.sheetWhy')}</p>
+      </HelpSheet>
+    </div>
+  )
+}
 
 // ─── Who gets how far ────────────────────────────────────────────────────────
 
@@ -362,18 +412,8 @@ function WasCell({ was, change }: { was: number | null; change: GroupFigure['cha
   )
 }
 
-function CardWas({ was, change }: { was: number; change: GroupFigure['change'] }) {
-  const { t } = useTranslation()
-  const tone = toneOf(change)
-  return (
-    <span className="text-right">
-      {t('traffic.funnel.bars.was', { was: convPct(was) })}
-      {tone !== 'neutral' && (
-        <b className={`ml-1 ${TONE_TEXT[tone]}`}><Arrow tone={tone} />{t(`traffic.funnel.table.${change}`)}</b>
-      )}
-    </span>
-  )
-}
+/** A phone's row: name and share, the conversion, what it was. */
+const PHONE_ROW = 'grid grid-cols-[minmax(0,1fr)_4.75rem_3.75rem] items-baseline gap-x-2'
 
 const FunnelBreakdown = memo(function FunnelBreakdown({
   data, against, judgeNow, judgeThen,
@@ -383,7 +423,7 @@ const FunnelBreakdown = memo(function FunnelBreakdown({
   judgeNow: boolean
   judgeThen: boolean
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [by, setBy] = useState<Breakdown>('type')
   const site = data.total.current
   const siteWas = against ? data.total[against] : null
@@ -394,6 +434,11 @@ const FunnelBreakdown = memo(function FunnelBreakdown({
   const siteChange = judgeThen && siteWas ? conversionChange(site, siteWas).change : null
   const siteConversion = conversion(site)
   const siteWasConversion = siteWas ? conversion(siteWas) : null
+  // A GA4 channel in our words; one GA4 adds later stays as GA4 names it.
+  const gloss = (key: string) => {
+    const k = `traffic.funnelChannelDesc.${key}`
+    return i18n.exists(k) ? t(k) : ''
+  }
   const options = (['type', 'channel', 'device'] as const).map((value) => ({
     value, label: t(`traffic.funnel.table.by.${value}`),
   }))
@@ -405,7 +450,18 @@ const FunnelBreakdown = memo(function FunnelBreakdown({
   return (
     <Wrapper dir="column" gap="md">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h4 className="text-[15px] font-bold text-slate-900">{t('traffic.funnel.table.title')}</h4>
+        <div className="flex items-center gap-2">
+          <h4 className="text-[15px] font-bold text-slate-900">{t('traffic.funnel.table.title')}</h4>
+          <HelpSheet title={t('traffic.funnel.table.helpTitle')} label={t('traffic.funnel.table.helpTitle')}>
+            {(['cold', 'warm', 'other'] as const).map((type) => (
+              <p key={type}>
+                <b>{t(`traffic.funnelType.${type}`)}</b> — {t(`traffic.funnelTypeDesc.${type}`)}
+              </p>
+            ))}
+            <p>{t('traffic.funnel.table.helpMarks')}</p>
+            {gapLine && <p>{gapLine}</p>}
+          </HelpSheet>
+        </div>
         <div className="hidden flex-wrap items-center gap-2 sm:flex">
           <span className="text-[13px] text-slate-600">{t('traffic.funnel.table.byLabel')}</span>
           <SegmentedControl<Breakdown> options={options} value={by} onChange={setBy} size="sm"
@@ -453,7 +509,7 @@ const FunnelBreakdown = memo(function FunnelBreakdown({
               {against && <Td align="right" tabular><WasCell was={siteWasConversion} change={siteChange} /></Td>}
             </Tr>
             {groups.map((g) => {
-              const note = groupNote(g.row, by, t)
+              const note = groupNote(g.row, by, t, gloss)
               return (
                 <Tr key={g.row.key} faded={g.small}>
                   <Td bold>
@@ -484,47 +540,59 @@ const FunnelBreakdown = memo(function FunnelBreakdown({
         </DataTable>
       </div>
 
-      <ul className="flex flex-col gap-2 sm:hidden">
-        <li className="flex flex-col gap-1 rounded-xl bg-blue-50 p-3">
-          <div className="flex justify-between gap-2">
-            <span className="text-sm font-bold text-slate-900">{t('traffic.funnel.table.site')}</span>
-            <span className="text-[15px] font-bold tabular-nums text-slate-900">{convPct(siteConversion)}</span>
-          </div>
-          <div className="flex justify-between gap-2 text-xs text-slate-600">
-            <span className="tabular-nums">
-              {t('traffic.funnel.table.cardSite', { entered: formatNumber(site.entered), buyers: formatNumber(site.purchased) })}
-            </span>
-            {siteWasConversion != null && <CardWas was={siteWasConversion} change={siteChange} />}
-          </div>
-        </li>
-        {groups.map((g) => {
-          const note = groupNote(g.row, by, t)
-          const lower = TRANSITIONS.filter((step) => g.steps[step].lower)
-          return (
-            <li key={g.row.key} className={`flex flex-col gap-1 rounded-xl border border-slate-200 p-3 ${g.small ? 'opacity-60' : ''}`}>
-              <div className="flex justify-between gap-2">
-                <span className="text-sm font-semibold text-slate-900">{groupName(g.row, by, t)} · {groupPct(g.shareOfSite)}</span>
-                <span className="text-[15px] font-bold tabular-nums text-slate-900">{convPct(g.conversion)}</span>
-              </div>
-              {note && <span className="text-xs text-slate-500">{note}</span>}
-              <div className="flex justify-between gap-2 text-xs text-slate-600">
-                <span className="tabular-nums">{formatNumber(g.row.current.entered)} → {formatNumber(g.row.current.purchased)}</span>
-                {g.was != null && <CardWas was={g.was} change={g.change} />}
-              </div>
-              {lower.map((step) => (
-                <span key={step} className="text-xs font-semibold text-red-700">
-                  <Arrow tone="bad" />{t(`traffic.funnel.table.lowerStep.${step}`, { value: stepPct(g.steps[step].share) })}
-                </span>
-              ))}
-            </li>
-          )
-        })}
-      </ul>
+      {/* A phone: the conversion and what it was in two columns, read down;
+          under each row what it is and, in words, where it falls short. */}
+      <div className="flex flex-col sm:hidden">
+        <div className={`${PHONE_ROW} px-2.5 pb-1 text-[11px] text-slate-500`}>
+          <span />
+          <span className="text-right">{t('traffic.funnel.table.colConversion')}</span>
+          <span className="text-right">{against ? t('traffic.funnel.table.colWas') : ''}</span>
+        </div>
+        <div className={`${PHONE_ROW} rounded-lg bg-blue-50 px-2.5 py-2`}>
+          <span className="text-sm font-bold text-slate-900">{t('traffic.funnel.table.site')}</span>
+          <span className="text-right text-sm font-bold tabular-nums text-slate-900">{convPct(siteConversion)}</span>
+          <span className="text-right text-[13px] tabular-nums text-slate-600">
+            {siteWasConversion != null ? convPct(siteWasConversion) : ''}
+          </span>
+        </div>
+        <ul className="flex flex-col divide-y divide-slate-100">
+          {groups.map((g) => {
+            const note = groupNote(g.row, by, t, gloss)
+            const people = by === 'type' ? null
+              : `${formatNumber(g.row.current.entered)} → ${formatNumber(g.row.current.purchased)}`
+            const hint = [note, people].filter(Boolean).join(' · ')
+            const lower = TRANSITIONS.filter((step) => g.steps[step].lower)
+            const tone = toneOf(g.change)
+            return (
+              <li key={g.row.key} className={`flex flex-col gap-0.5 px-2.5 py-2 ${g.small ? 'opacity-60' : ''}`}>
+                <div className={PHONE_ROW}>
+                  <span className="text-sm font-semibold text-slate-900">{groupName(g.row, by, t)} · {groupPct(g.shareOfSite)}</span>
+                  <span className="text-right text-sm font-bold tabular-nums text-slate-900">{convPct(g.conversion)}</span>
+                  <span className="text-right text-[13px] tabular-nums text-slate-600">{g.was != null ? convPct(g.was) : '—'}</span>
+                </div>
+                {hint && <span className="text-xs text-slate-500">{hint}</span>}
+                {tone !== 'neutral' && (
+                  <span className={`text-xs font-semibold ${TONE_TEXT[tone]}`}>
+                    <Arrow tone={tone} />{t(`traffic.funnel.table.${g.change}`)}
+                  </span>
+                )}
+                {lower.map((step) => (
+                  <span key={step} className="text-xs font-semibold text-red-700">
+                    <Arrow tone="bad" />
+                    {t('traffic.funnel.table.lowerLine', {
+                      step: t(`traffic.funnel.transitionShort.${step}`), value: stepPct(g.steps[step].share),
+                    })}
+                  </span>
+                ))}
+              </li>
+            )
+          })}
+        </ul>
+      </div>
 
       <div className="flex flex-col gap-1 text-xs leading-relaxed text-slate-600">
-        {/* A phone's cards say each ▼ in words; there are no cells to explain. */}
+        {/* A phone's rows say each ▼ in words; there are no cells to explain. */}
         {judgeNow && <p className="hidden sm:block">{t('traffic.funnel.table.lowerNote')}</p>}
-        {gapLine && <p>{gapLine}</p>}
         {groups.some((g) => g.small) && <p>{t('traffic.funnel.table.smallNote', { n: formatNumber(MIN_GROUP_PEOPLE) })}</p>}
         {folded.length > 0 && <p>{t('traffic.funnel.table.foldNote', { names })}</p>}
       </div>
@@ -541,7 +609,8 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
   const now = data.total.current
   // The CRM's orders over the days GA4 counted: a period reaching before
   // `earliest` (the whole history does) has funnels for its tail alone.
-  const orders = useSiteOrders(period.start < data.earliest ? data.earliest : period.start, period.end)
+  const ordersFrom = period.start < data.earliest ? data.earliest : period.start
+  const orders = useSiteOrders(ordersFrom, period.end)
   const today = kyivToday()
   const since = formatDay(data.earliest, { month: 'long' })
 
@@ -559,63 +628,59 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
   const judgeThen = judgeNow && !!was && enoughToClaim(was)
 
   const steps = funnelSteps(now, was, judgeThen)
-  const said = judgeThen && was && against
+  const lines = judgeThen && was && against
     ? sayConclusion(conclude(now, was, data.by_type, against), t)
-    : null
-  const leakOnly = !said && judgeNow ? sayLeak(leak(now, null), t) : null
+    : []
   const convChange = judgeThen && was ? conversionChange(now, was).change : null
   const convWas = was ? conversion(was) : null
   const rate = conversion(now)
-  const { base, count } = perBase(rate ?? 0)
 
-  const notes: ReactNode[] = []
+  const notices: Notice[] = []
   if (data.stale) {
-    notes.push(<Note key="stale" warn>{t('traffic.funnel.state.stale', { time: fetchedAt(data.fetched_at, today) })}</Note>)
+    notices.push({ key: 'stale', icon: CloudOff, text: t('traffic.funnel.state.stale', { time: fetchedAt(data.fetched_at, today) }) })
   }
   // GA4 is still counting yesterday and today: their figures can grow.
   const unsettledFrom = period.start > addDays(today, -1) ? period.start : addDays(today, -1)
   const unsettledTo = period.end < today ? period.end : today
   if (unsettledFrom <= unsettledTo) {
-    notes.push(
-      <Note key="unsettled">
-        {t('traffic.funnel.state.incomplete', {
-          days: formatSpan(unsettledFrom, unsettledTo), lastWeek: t('filter.lastWeek'), lastMonth: t('filter.lastMonth'),
-        })}
-      </Note>,
-    )
+    notices.push({ key: 'unsettled', icon: Clock, text: t('traffic.funnel.state.incomplete', { days: formatSpan(unsettledFrom, unsettledTo) }) })
   }
   if (period.start < data.earliest) {
-    notes.push(<Note key="partial">{t('traffic.funnel.state.partial', { date: since })}</Note>)
+    notices.push({ key: 'partial', icon: CalendarX, text: t('traffic.funnel.state.partial', { date: since }) })
   }
+  // Both counts, since either can be the one too small: a site with 2 000
+  // visitors and 40 buyers is judged no more than one with 1 100.
   if (!judgeNow) {
-    notes.push(<Note key="few">{t('traffic.funnel.state.few', { n: formatNumber(now.entered), word: plural(t, 'word.people', now.entered) })}</Note>)
+    notices.push({
+      key: 'few', icon: Users,
+      text: t('traffic.funnel.state.few', { entered: formatNumber(now.entered), bought: formatNumber(now.purchased) }),
+    })
   } else if (was && !judgeThen) {
-    notes.push(<Note key="fewThen">{t('traffic.funnel.state.fewThen', { n: formatNumber(was.entered), word: plural(t, 'word.people', was.entered) })}</Note>)
+    notices.push({
+      key: 'fewThen', icon: Users,
+      text: t('traffic.funnel.state.fewThen', { entered: formatNumber(was.entered), bought: formatNumber(was.purchased) }),
+    })
   }
-
-  const crmOrders = orders.data ? ` ${t('traffic.funnel.crm.orders', { n: formatNumber(orders.data.totalOrders) })}` : ''
 
   return (
     <FunnelFrame aside={<CompareWith data={data} against={against} prevOk={prevOk} yearOk={yearOk} onChange={setPicked} />}>
-      <Wrapper dir="column" gap="xl">
-        {notes.length > 0 && <Wrapper dir="column" gap="sm">{notes}</Wrapper>}
+      <Wrapper dir="column" gap="lg">
+        {notices.length > 0 && <Notices items={notices} />}
         <Wrapper dir="row" wrap gap="lg">
-          <Hero rate={convPct(rate)} per={perBaseText(now, t)} was={wasText(convWas, convChange, t, 'hero')} />
-          {said && <Verdict headline={said.headline} lines={said.lines} />}
-          {leakOnly && <Verdict headline={leakOnly} lines={[]} />}
+          <Hero rate={convPct(rate)} per={perBaseText(now, t)} was={heroWas(convWas, convChange, t)} />
+          {lines.length > 0 && <Conclusion lines={lines} />}
         </Wrapper>
-        <Wrapper dir="column" gap="sm">
+        <Wrapper dir="column" gap="xs">
           <FunnelBars
             steps={steps}
             leakStep={biggestLeak(now)}
-            total={t('traffic.funnel.total.value', { rate: convPct(rate), n: formatNumber(count), base: formatNumber(base) })}
-            totalShort={t('traffic.funnel.total.short', { rate: convPct(rate) })}
-            totalWas={wasText(convWas, convChange, t, 'total')}
+            total={t('traffic.funnel.total.short', { rate: convPct(rate) })}
           />
-          <p className="text-[13px] leading-relaxed text-slate-600">
-            {t('traffic.funnel.crm.note', { n: formatNumber(now.purchased), word: plural(t, 'word.buyers', now.purchased) })}
-            {crmOrders}
-          </p>
+          <CrmLine
+            buyers={now.purchased}
+            orders={orders.data?.totalOrders ?? null}
+            oneDay={inclusiveDays(ordersFrom, period.end) === 1}
+          />
         </Wrapper>
         <FunnelBreakdown data={data} against={against} judgeNow={judgeNow} judgeThen={judgeThen} />
       </Wrapper>

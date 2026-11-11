@@ -293,14 +293,18 @@ export interface StepMove {
   z: number
 }
 
-export interface Leak {
-  step: Transition
-  /** Of the people at the step before, the share who did not reach it. */
-  leftShare: number
-  /** The same step leaked most then, by a share not told from this one. */
-  asBefore: boolean
-  /** Then's share, when the same step leaked most and the share moved. */
-  was: number | null
+/**
+ * The mix as it is said: the type named and its share of the site's visitors
+ * in both windows. A share of the site, as the breakdown shows it, not of the
+ * rows' own sum `mixShift` weighs with — the two differ by a point at most,
+ * and the sentence must agree with the table beside it. The share is what
+ * moved: in October 2026 against 2025 warm visitors fell from 21 940 to
+ * 19 592 while their share rose from 34 % to 56 %, and «тёплых стало больше»
+ * said the opposite of the counts.
+ */
+export interface MixNote extends MixShift {
+  shareNow: number
+  shareWas: number
 }
 
 export interface Conclusion {
@@ -313,31 +317,15 @@ export interface Conclusion {
   strongest: StepMove | null
   /** Every other step that moved beyond noise, in the funnel's order. */
   moves: StepMove[]
-  mix: MixShift | null
-  leak: Leak | null
-}
-
-export function leak(now: FunnelCounts, was: FunnelCounts | null): Leak | null {
-  const step = biggestLeak(now)
-  if (!step) return null
-  const reached = stepShare(now, step)
-  if (reached == null) return null
-  if (!was || biggestLeak(was) !== step) return { step, leftShare: 1 - reached, asBefore: false, was: null }
-  const same = stepChange(now, was, step).change === 'same'
-  const wasReached = stepShare(was, step)
-  return {
-    step,
-    leftShare: 1 - reached,
-    asBefore: same,
-    was: !same && wasReached != null ? 1 - wasReached : null,
-  }
+  mix: MixNote | null
 }
 
 /**
  * What the period says against the window it is set beside, as facts in the
  * order they are told: first what happened to the counts or the conversion,
- * then where it happened, then where the site always loses most. Only for
- * windows both large enough to claim anything (`enoughToClaim`).
+ * then where it happened. Where the site loses most people is not a sentence:
+ * the bars mark that step (`biggestLeak`). Only for windows both large enough
+ * to claim anything (`enoughToClaim`).
  */
 export function conclude(now: FunnelCounts, was: FunnelCounts, byType: FunnelRow[], window: Against): Conclusion {
   const moved: StepMove[] = []
@@ -354,7 +342,6 @@ export function conclude(now: FunnelCounts, was: FunnelCounts, byType: FunnelRow
     entered: countChange(now.entered, was.entered),
     buyersNow: now.purchased,
     buyersWas: was.purchased,
-    leak: leak(now, was),
   }
 
   if (conv === 'better' || conv === 'worse') {
@@ -366,12 +353,15 @@ export function conclude(now: FunnelCounts, was: FunnelCounts, byType: FunnelRow
     const strongest = moved.filter((m) => m.change === conv)
       .sort((a, b) => weight(b) - weight(a) || Math.abs(b.z) - Math.abs(a.z))[0] ?? null
     const mix = mixShift(byType, window)
+    const row = mix ? byType.find((r) => r.key === mix.type) : undefined
     return {
       ...base,
       headline: { kind: 'conversion', change: conv, now: conversion(now) ?? 0, was: conversion(was) ?? 0 },
       strongest,
       moves: moved.filter((m) => m !== strongest && m.change !== conv),
-      mix: mix && mix.change === conv ? mix : null,
+      mix: mix && mix.change === conv && row && now.entered > 0 && was.entered > 0
+        ? { ...mix, shareNow: row.current.entered / now.entered, shareWas: row[window].entered / was.entered }
+        : null,
     }
   }
   return {
