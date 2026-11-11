@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.334
+
+- feat(traffic): the funnel says each fact once, phone first
+
+
 ## 3.0.333
 
 - fix(sync): a status refresh KeyCRM did not answer is a failed run (A10 follow-up)
