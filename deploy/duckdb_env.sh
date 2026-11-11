@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # KS_DUCKDB as the host's cron scripts read it: out of .env, by exact name.
 #
-# Sourced by deploy/offsite_check.sh and deploy/restore-test.sh. It was also
-# sourced by scripts/weekly_compact.sh and deploy/daily_offsite.sh, the two
-# host-cron scripts the week of silence stood down (stage 5, PR-10), until
-# step 14's S14-18 deleted them.
+# Sourced by deploy/restore-test.sh. It was also sourced by
+# scripts/weekly_compact.sh and deploy/daily_offsite.sh, the two host-cron
+# scripts the week of silence stood down (stage 5, PR-10), until step 14's
+# S14-18 deleted them, and by deploy/offsite_check.sh until the final stage
+# (2026-11-12) took its judgement of the DuckDB copy out.
 # deploy/stage4_soak.sh's P4 judged the week on the same reading, rather than
 # a parse of its own, until step 14's S14-02 retired it. It defines and
 # does not act, and it sets no shell options: errexit is the caller's. Bash

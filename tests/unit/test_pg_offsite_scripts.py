@@ -16,9 +16,11 @@ its calls, which is how the promises are checked.
 
 Since stage 5 (OD-S5-6) every shipment carries `.env` beside the dump — the
 copy that rode only in the DuckDB Parquet archive, whose nightly branch the
-week of silence retires — so the shipment is four files, and
-offsite_check.sh reports the DuckDB copy as frozen, never judged, while
-`.env` says KS_DUCKDB=off.
+week of silence retired — so the shipment is four files. offsite_check.sh
+reported the DuckDB copy as frozen while `.env` said KS_DUCKDB=off, and judged
+it otherwise, until the final stage (2026-11-12) deleted the file and every
+judgement of its copy: the check judges the Postgres marker and the watchdog
+alone, whatever `.env` says.
 
 The one thing a fake cannot prove is that real gpg round-trips, so
 `test_real_gpg_round_trips` runs when a real one is installed and skips when
@@ -212,9 +214,10 @@ def world(tmp_path):
     """A scratch repository root, a scratch Storage Box, and the fakes."""
     root = tmp_path / "repo"
     (root / "deploy").mkdir(parents=True)
+    # Not `duckdb_env.sh`: offsite_check.sh read KS_DUCKDB through it until
+    # the final stage, and a scratch root without it fails one that does again.
     for name in ("pg_offsite.sh", "pg_offsite_lib.sh", "notify.sh",
-                 "offsite_check.sh", "pg_restore_drill.sh", "gpg_safe.sh",
-                 "duckdb_env.sh"):
+                 "offsite_check.sh", "pg_restore_drill.sh", "gpg_safe.sh"):
         shutil.copy(DEPLOY / name, root / "deploy" / name)
 
     bin_dir = tmp_path / "bin"
@@ -710,8 +713,19 @@ class TestTheLogIsBounded:
 
 # ── the alarm ─────────────────────────────────────────────────────────────────
 
+# What `notify` would send, whole: the real one prints 80 characters of a
+# suppressed message, which cannot show a line is absent from a heartbeat.
+FAKE_NOTIFY = """notify() {
+    printf '%s\\n<<bucket=%s>>\\n' "$1" "${2:-hostcron}" >> "$FAKE_NOTIFY_LOG"
+}
+"""
+
+
 class TestOffsiteCheck:
     def _instruments(self, world, offsite_h=1, watchdog_h=1, pg_h=None):
+        """The three markers. `data/.offsite_last_ok` is the DuckDB copy's,
+        which nothing writes since the week of silence and nothing reads
+        since the final stage: it is set to show it changes nothing."""
         for rel, age in (("data/.offsite_last_ok", offsite_h),
                          ("data/health/watchdog_last_sample", watchdog_h),
                          ("data/.pg_offsite_last_ok", pg_h)):
@@ -723,11 +737,24 @@ class TestOffsiteCheck:
             when = time.time() - age * 3600
             os.utime(path, (when, when))
 
-    def test_all_three_fresh_is_quiet_and_says_so(self, world):
+    @pytest.fixture
+    def sent(self, world, tmp_path):
+        """Every message the check would send, with its bucket."""
+        log = tmp_path / "notify.log"
+        log.write_text("")
+        (world.root / "deploy" / "notify.sh").write_text(FAKE_NOTIFY)
+
+        def run(**env):
+            out = world.run("offsite_check.sh", FAKE_NOTIFY_LOG=log, **env)
+            return out, log.read_text()
+
+        return run
+
+    def test_both_fresh_is_quiet_and_says_so(self, world):
         self._instruments(world, pg_h=1)
         run = world.run("offsite_check.sh")
         assert run.code == 0, run.out
-        assert "instruments ok" in run.out and "postgres 1h ago" in run.out
+        assert "instruments ok: postgres and .env 1h ago, watchdog 1h ago" in run.out
 
     def test_a_stale_postgres_marker_exits_non_zero(self, world):
         self._instruments(world, pg_h=40)
@@ -749,106 +776,105 @@ class TestOffsiteCheck:
         self._instruments(world, offsite_h=100, watchdog_h=100, pg_h=None)
         run = world.run("offsite_check.sh")
         assert run.code == 1
-        assert "off-site copy is 100h old" in run.out
         assert "no Postgres copy has ever left this host" in run.out
         assert "disk watchdog last sampled" in run.out
+        assert "off-site copy is 100h old" not in run.out
 
 
-class TestOffsiteCheckInTheWeekOfSilence:
-    """Stage 5, PR-10. With KS_DUCKDB=off in .env the DuckDB copy is frozen on
-    purpose — daily_offsite.sh stands down and its cron line is retired — so
-    its marker only ages, and judging it would page "off-site copy is stale"
-    every morning from the second day of the week. Under `off` it is reported
-    as frozen with its age and never fails the run; the Postgres marker,
-    which now answers for .env too (OD-S5-6), and the watchdog are judged as
-    before, and the Monday heartbeat keeps speaking."""
+class TestTheDuckDBCopyIsNotJudged:
+    """The final stage (2026-11-12) deleted the DuckDB file, and with it
+    every judgement of its off-site copy: the frozen branch, and the stale
+    and never branches behind it. Taking the frozen branch alone would have
+    sent every morning into the stale one — its marker only ages since the
+    week of silence — and paged "Warehouse: off-site copy is stale" at 09:00.
+    The check reads no KS_DUCKDB since; the Postgres marker and the watchdog
+    are judged as before, and their pages say the Postgres copy is the only
+    off-site .env whatever `.env` says."""
 
     _instruments = TestOffsiteCheck._instruments
+    sent = TestOffsiteCheck.sent
 
-    def _off(self, world, line="KS_DUCKDB=off"):
-        env = world.root / ".env"
-        env.write_text(env.read_text() + line + "\n")
+    def _env(self, world, line):
+        if line:
+            env = world.root / ".env"
+            env.write_text(env.read_text() + line + "\n")
 
-    @pytest.mark.parametrize("offsite_h", [200, None], ids=["frozen-200h", "never"])
-    def test_a_frozen_duckdb_copy_is_reported_and_never_fails(self, world, offsite_h):
-        """Mutation: judge the DuckDB marker under `off` as under `on` — exit 1
-        and a stale page, every morning of the week."""
-        self._off(world)
+    LINES = ["KS_DUCKDB=off", "KS_DUCKDB=on", "", "KS_DUCKDB=of"]
+    LINE_IDS = ["off", "on", "unset", "typo"]
+
+    @pytest.mark.parametrize("line", LINES, ids=LINE_IDS)
+    @pytest.mark.parametrize("offsite_h", [200, None], ids=["stale-200h", "never"])
+    def test_a_stale_or_absent_duckdb_marker_pages_nothing(self, world, sent,
+                                                           line, offsite_h):
+        """Mutation: put back any of the three branches — the frozen one
+        prints "frozen", the stale and never ones exit 1 and page."""
+        self._env(world, line)
         self._instruments(world, offsite_h=offsite_h, pg_h=1)
-        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        run, pages = sent(FAKE_DOW="3")
         assert run.code == 0, run.out
-        assert "CRITICAL" not in run.out and "notify suppressed" not in run.out, run.out
-        if offsite_h is None:
-            assert "frozen (KS_DUCKDB=off), no copy ever left" in run.out
-        else:
-            assert "frozen (KS_DUCKDB=off), last copy 200h ago" in run.out
-        assert "instruments ok: off-site frozen" in run.out
-        assert "postgres and .env 1h ago" in run.out
+        assert pages == "", pages
+        assert "CRITICAL" not in run.out and "frozen" not in run.out, run.out
+        assert "Warehouse" not in run.out
+        assert "instruments ok: postgres and .env 1h ago, watchdog 1h ago" in run.out
 
-    @pytest.mark.parametrize("line", [
-        'KS_DUCKDB="off"', "KS_DUCKDB=off  # week of silence", "  KS_DUCKDB=off",
-        "export KS_DUCKDB=off", "KS_DUCKDB = off",
-    ], ids=["quoted", "inline-comment", "leading-space", "export", "spaces-around-equals"])
-    def test_every_off_the_two_scripts_stand_down_on_is_frozen_too(self, world, line):
-        """The same reading as the two scripts whose copy this judges: every
-        line compose reads as off stands them down, so their marker stops for
-        the same reason. Mutation: read the line the way the first reader
-        did, `^KS_DUCKDB=` and nothing else — four of these page the copy
-        stale every morning of the week."""
-        self._off(world, line)
-        self._instruments(world, offsite_h=200, pg_h=1)
-        run = world.run("offsite_check.sh", FAKE_DOW="3")
-        assert run.code == 0, run.out
-        assert "frozen (KS_DUCKDB=off)" in run.out
-
-    def test_the_postgres_copy_is_still_judged_and_names_the_env(self, world):
-        """The Postgres marker is the only off-site .env's age under `off`, so
-        a stale one still fails the run — and its page says what else it is
-        now the only copy of. Mutation: let the frozen branch return early."""
-        self._off(world)
+    @pytest.mark.parametrize("line", LINES, ids=LINE_IDS)
+    def test_a_stale_postgres_marker_still_pages_and_names_the_env(self, world, sent,
+                                                                  line):
+        """Under any KS_DUCKDB: one page, its bucket, the .env it is the only
+        off-site copy of, and nothing about the DuckDB copy. Mutation: let
+        the Postgres judgement return early, or gate its note on KS_DUCKDB."""
+        self._env(world, line)
         self._instruments(world, offsite_h=200, pg_h=40)
-        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        run, pages = sent(FAKE_DOW="3")
         assert run.code == 1, run.out
         assert ("newest Postgres copy off-site is 40h old (max 36h), and with it the "
                 "only off-site .env") in run.out
-        assert "notify suppressed (KS_ALERTS_DISABLED): 🚨 Postgres" in run.out
-        assert "newest off-site copy is" not in run.out
-        # And the never-shipped page says the same.
-        (world.root / "data" / ".pg_offsite_last_ok").unlink()
-        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        assert pages.count("<<bucket=") == 1, pages
+        assert "🚨 Postgres: off-site copy is stale" in pages
+        assert "It is also the only off-site copy of .env." in pages
+        assert "<<bucket=backup:pg_offsite_stale>>" in pages
+        assert "Warehouse" not in pages and "DuckDB" not in pages
+
+    def test_a_missing_postgres_marker_still_pages(self, world, sent):
+        self._env(world, "KS_DUCKDB=off")
+        self._instruments(world, offsite_h=200, pg_h=None)
+        run, pages = sent(FAKE_DOW="3")
         assert run.code == 1, run.out
         assert "no Postgres copy has ever left this host" in run.out
         assert "and with it the only off-site .env" in run.out
+        assert "<<bucket=backup:pg_offsite_never>>" in pages
+        assert pages.count("<<bucket=") == 1, pages
 
-    def test_a_stopped_watchdog_is_still_judged(self, world):
-        self._off(world)
+    def test_a_stopped_watchdog_is_still_judged(self, world, sent):
+        self._env(world, "KS_DUCKDB=off")
         self._instruments(world, offsite_h=200, watchdog_h=100, pg_h=1)
-        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        run, pages = sent(FAKE_DOW="3")
         assert run.code == 1, run.out
         assert "disk watchdog last sampled" in run.out
+        assert "🚨 The disk watchdog has stopped sampling" in pages
 
-    def test_the_monday_heartbeat_keeps_speaking_and_says_frozen(self, world):
+    @pytest.mark.parametrize("line", ["KS_DUCKDB=off", ""], ids=["off", "unset"])
+    def test_the_monday_heartbeat_speaks_without_a_duckdb_line(self, world, sent, line):
         """The heartbeat is the only dead-man's switch on the off-site path
-        itself, so the week must not silence it. The kill switch is on in
-        this fixture: what is asserted is that notify() was reached with the
-        frozen line."""
-        self._off(world)
+        itself: it speaks on Mondays, of Postgres and .env and the watchdog.
+        Mutation: put the DuckDB copy's line back."""
+        self._env(world, line)
         self._instruments(world, offsite_h=200, pg_h=1)
-        run = world.run("offsite_check.sh", FAKE_DOW="1")
+        run, pages = sent(FAKE_DOW="1")
         assert run.code == 0, run.out
-        assert "notify suppressed (KS_ALERTS_DISABLED): 🫀" in run.out, run.out
+        assert pages.startswith("🫀 Приборы в порядке (недельный)\n"), pages
+        assert "копия Postgres и .env: 1h ago (порог 36ч)" in pages
+        assert "сторож диска: 1h ago (порог 14ч)" in pages
+        assert "DuckDB" not in pages and "внешняя копия" not in pages, pages
 
-    @pytest.mark.parametrize("line", ["KS_DUCKDB=on", "KS_DUCKDB=of", ""],
-                             ids=["on", "typo", "unset"])
-    def test_under_on_the_duckdb_copy_is_judged_as_ever(self, world, line):
-        """Nothing changes under `on` — nor under a value web runs `on` over."""
-        if line:
-            self._off(world, line)
-        self._instruments(world, offsite_h=100, pg_h=1)
-        run = world.run("offsite_check.sh", FAKE_DOW="3")
-        assert run.code == 1, run.out
-        assert "off-site copy is 100h old" in run.out
-        assert "frozen" not in run.out and ".env" not in run.out
+    def test_the_script_reads_no_duckdb_setting_or_marker(self):
+        """Parsed from the script's code, comments aside. Mutation: source
+        `deploy/duckdb_env.sh` again, or read `BACKUP_MARKER`."""
+        code = [ln for ln in (DEPLOY / "offsite_check.sh").read_text().splitlines()
+                if not ln.lstrip().startswith("#")]
+        for word in ("KS_DUCKDB", "duckdb_env", "ks_duckdb", "BACKUP_MARKER",
+                     "data/.offsite_last_ok", "BACKUP_MAX_ARCHIVE_AGE_HOURS", "FROZEN"):
+            assert not [ln for ln in code if word in ln], (word, code)
 
 
 # ── the drill ─────────────────────────────────────────────────────────────────

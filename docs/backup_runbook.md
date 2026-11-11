@@ -3,13 +3,17 @@
 Two databases left this machine, by different routes. **Postgres is the one
 that cannot be rebuilt from anything**, so start with it if you are reading
 this during a recovery. It is also the only one that still leaves: the DuckDB
-warehouse below is a frozen archive since 2026-10-16, and step 14 deleted
+warehouse below was a frozen archive from 2026-10-16, and step 14 deleted
 everything that wrote or shipped it — the `db_backup` job (S14-00 stopped
 registering it), the weekly compaction, `deploy/daily_offsite.sh`,
 `deploy/offsite_parquet.sh` and `deploy/snapshot_export.py` (S14-18). The
-DuckDB sections below are kept as the record of what the existing archives
-are and how they restore; the restore drill (`deploy/restore-test.sh`) still
-runs, on the pinned image `keycrm-web:rollback-step14`.
+final stage deleted the file itself on 2026-11-12, after a restore from the
+second Ark was rehearsed on 2026-11-11, with its local backups
+(`data/backups/analytics-*.duckdb`) and `data/export_parquet/`; the Arks and
+the off-site Parquet archive keep it. The DuckDB sections below are kept as
+the record of what those archives are and how they restore; the restore
+drill (`deploy/restore-test.sh`) still runs, on the pinned image
+`keycrm-web:rollback-step14`.
 
 ## Postgres off-site (DN-09)
 
@@ -71,10 +75,10 @@ so a copy nobody can open still hashes correctly.
 **The alarm** is `deploy/offsite_check.sh`, which reads
 `data/.pg_offsite_last_ok` — written only after the uploaded bytes have been
 fetched back, hashed and decrypted — and alerts above 36 h. Every run that
-refused says which step refused, in `data/logs/pg_offsite.log`. With
-`KS_DUCKDB=off` in `.env` (the week of silence) it reports the DuckDB copy's
-marker as frozen, with its age, and never fails on it: that copy stops on
-purpose.
+refused says which step refused, in `data/logs/pg_offsite.log`. It reported
+the DuckDB copy's marker as frozen while `.env` said `KS_DUCKDB=off`, and
+judged it otherwise, until the final stage deleted the file and every
+judgement of that copy (2026-11-12).
 
 ## What is backed up (the warehouse)
 `data/analytics.duckdb` — the warehouse. It holds data that is **NOT recoverable
@@ -146,9 +150,10 @@ anything is the one on the server.
   container of `BACKUP_RESTORE_IMAGE`, the pinned image that carries DuckDB
   1.5.5 (`keycrm-web:rollback-step14` since step 14; never `:latest`, which
   loses DuckDB at S14-19). Quarterly. An untested backup is a hypothesis.
-- **Staleness: `deploy/offsite_check.sh`** in the host crontab, daily. Since
-  the week of silence it reports the DuckDB copy as frozen and judges the
-  Postgres marker. It alerted if no copy had left in 36 h — this line said "9 days" until 2026-09-18, a
+- **Staleness: `deploy/offsite_check.sh`** in the host crontab, daily. It
+  judges the Postgres marker and the disk watchdog alone since the final
+  stage; from the week of silence until then it reported the DuckDB copy as
+  frozen. It alerted if no copy had left in 36 h — this line said "9 days" until 2026-09-18, a
   threshold the script stopped using when the push moved off the weekly
   compact to `deploy/daily_offsite.sh`. It lives in host cron rather than the app
   scheduler because an in-process check cannot attest to its own liveness: a
@@ -162,6 +167,10 @@ reason the alert stays worth reading; a recurring message that overstates its
 own severity teaches the reader to scroll past it.
 
 ## Restore (the warehouse; Postgres is in its own section at the top)
+**Historical.** The local backups this used were deleted with the file at the
+final stage (2026-11-12). A DuckDB warehouse now comes back only from an Ark
+or the off-site Parquet archive, through `deploy/restore_from_export.py` on
+the pinned image — `docs/offsite_backup_setup.md`, "Restoring for real".
 ```bash
 ssh root@<vps>
 cd /opt/key-api-bot
