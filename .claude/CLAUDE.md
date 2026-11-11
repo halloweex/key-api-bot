@@ -1253,6 +1253,17 @@ repair only the legacy job made now belongs to
 created before them, whose status or total moved without `updated_at`
 changing. That job re-fetches these orders by id, before 05:30 looks at them.
 
+**What nothing sees, accepted** (the owner's decision O4 (a), 2026-11-11):
+an order older than the 90-day reconciliation window whose status changes
+without KeyCRM moving its `updated_at`. No sync, no refresh and no comparison
+reaches it. Accepted on a measurement of production that day: of the 14 070
+status transitions `app.order_versions` captured as `change` from 2026-08-27
+to 2026-11-11, every one came with `updated_at` moved, so the delta sync saw
+it; 8 were on orders older than 90 days (6 at 91–365 days, 2 older), all with
+`updated_at` moved; and `reconciliation_pg` compared 79 runs since 2026-08-25
+with zero discrepancies of any class. The case stays unwatched by design;
+the 05:15 refresh is unchanged.
+
 **A job must not fire at the instant something restarts web.** The host cron
 `0 2 * * 0 weekly_compact.sh`, 02:00 UTC — 05:00 Kyiv in summer, 04:00 in
 winter — stopped both containers every Sunday until the week of silence
