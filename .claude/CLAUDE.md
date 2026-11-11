@@ -160,7 +160,9 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager; raises the Postgres derivation signal (POST, admin) |
-| `/api/health/data-quality` | Latest run of every watched layer (`data_quality.WATCHED_LAYERS`: integrity, mirror_landing, reconciliation_pg, reconciliation_ch) with its top 20 issues, or diffs for the two reconciliation arms (за сессией) |
+| `/api/health/data-quality` | Latest run of every watched layer (`data_quality.WATCHED_LAYERS`: integrity, mirror_landing, reconciliation_pg, reconciliation_ch) with its top 20 issues, or diffs for the two reconciliation arms (за сессией) (admin) |
+| `/api/health/detailed` | Component status — Meilisearch, WebSocket rooms, the sync, the forecast model — and process metrics (admin, O8 (a), 2026-11-11) |
+| `/api/metrics` | Uptime, request counts and timings per route template (admin, O8 (a), 2026-11-11) |
 | `/api/warehouse/status` | The Postgres derivation: owed or not, when built, the last journalled run (`cutover` and `duckdb_frozen` went with step 13's switch in step 14's S14-15) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
@@ -189,8 +191,19 @@ of theirs (`include_comparison=False`, the four dates and both periods
 null), and the page hides the change column of the organic block. The page
 asks the trend `granularity=monthly` for it: one bar a month, labelled
 `MM.YYYY`, never a comparison or a forecast — by day it is a thousand bars
-whose `dd.mm` repeats every year. The GA4 funnel sees 14 months of it and
-says so; the CRM's order count beside it starts at GA4's `earliest` too.
+whose `dd.mm` repeats every year. `/api/customers/insights` takes the same
+`granularity` for its AOV trend, a month's AOV being its revenue over its
+orders (never a mean of daily AOVs; `core.filters.by_month` folds both), and
+the traffic trend's additive days are folded on the page
+(`utils/trafficTrend.trafficByMonth`). The GA4 funnel sees 14 months of it and
+says so; the CRM's order count beside it starts at GA4's `earliest` too. Nine
+digits of hryvnia do not fit a narrow tile: `StatCard` takes a
+`shortFormatter` (`formatCurrencyShort`, `₴108 млн`) and shows it only when the
+full figure, measured on a hidden copy, does not fit — the full one stays in
+the tooltip and the label. The marketing report's range gives its start a year
+when the two differ (`formatReportRange`). Its «Кол-во клиентов» sums Gold's
+daily distinct buyers, which over the whole history reads 42 620 against the
+dashboard's 19 293 people — a known difference, the owner's to decide.
 
 `start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
 `core/filters.parse_period`, and only as a pair: one alone is ignored, and a
@@ -1265,6 +1278,17 @@ repair only the legacy job made now belongs to
 created before them, whose status or total moved without `updated_at`
 changing. That job re-fetches these orders by id, before 05:30 looks at them.
 
+**What nothing sees, accepted** (the owner's decision O4 (a), 2026-11-11):
+an order older than the 90-day reconciliation window whose status changes
+without KeyCRM moving its `updated_at`. No sync, no refresh and no comparison
+reaches it. Accepted on a measurement of production that day: of the 14 070
+status transitions `app.order_versions` captured as `change` from 2026-08-27
+to 2026-11-11, every one came with `updated_at` moved, so the delta sync saw
+it; 8 were on orders older than 90 days (6 at 91–365 days, 2 older), all with
+`updated_at` moved; and `reconciliation_pg` compared 79 runs since 2026-08-25
+with zero discrepancies of any class. The case stays unwatched by design;
+the 05:15 refresh is unchanged.
+
 **A job must not fire at the instant something restarts web.** The host cron
 `0 2 * * 0 weekly_compact.sh`, 02:00 UTC — 05:00 Kyiv in summer, 04:00 in
 winter — stopped both containers every Sunday until the week of silence
@@ -1711,7 +1735,12 @@ Cap what rebounds; only delete what stays deleted.
   down, and the page was announced resolved with ClickHouse still down. The
   history that watch rests on is `deploy/daily_soak/22_reconciliation_ch_history.sql`,
   DN-21's bar for `reconciliation_pg` (20) applied to this arm, read the way
-  the canary now reads it.
+  the canary now reads it. The same for `integrity` since O10 (a)+(c)
+  (2026-11-11): a run in which every Postgres twin and the chain invariants
+  filed only their `*_unwatched` findings is journalled with `error_message`
+  and moves no age (`scheduler.blind_integrity_run`), while the scan's own
+  CRITICALs still page, and a blindness finding is news in every 09:00 digest
+  it stands in (`data_quality.blindness_names`), not only on the weekly beat.
 - **Every message is signed with `KS_INSTANCE`** (default `gethostname()`,
   `prod-vps` in compose on both services). Applied by the two HTTP transports
   and by the bot's Application path — three call sites, so nothing that merely
@@ -2339,39 +2368,33 @@ derived, переезд стоит одну пересборку. **С реше�
 
 ### Gold в ClickHouse — шаг 4 «Одной бронзы», копия на обкатку
 
-`core/ch_gold.py` копирует `gold.daily_revenue` из Postgres в ClickHouse
-(база `gold`, та же таблица) ежечасно и **ничего не вычисляет** — uniqExact и
-настоящая деривация приезжают с шагом 5. Что обкатывается: связность (web
-вошёл в сеть `ks-data`, где живёт `ks-clickhouse` без опубликованных портов),
-форма доставки (staging + атомарный `EXCHANGE TABLES`, потому что транзакций
-нет и TRUNCATE+INSERT по живой таблице дал бы читателю пустую), и суточная
-сверка на слое `mirror_landing`.
+**Режима копии больше нет** (решение владельца O11 (a), 11.11.2026). Шаг 4
+копировал `gold.daily_revenue` из Postgres в ClickHouse как есть, ежечасно, и
+сверял копию; шаг 5 его превзошёл (Gold считает сам ClickHouse, см. ниже), и
+с тех пор копию не запускало ничего. Шиппер, сверка обратным чтением и пять
+условий `ch_gold_unreachable`, `ch_gold_ship_failed`, `ch_gold_row_missing`,
+`ch_gold_row_extra`, `ch_gold_value_mismatch` удалены; имена не
+переиспользуются. В `core/ch_gold.py` осталось то, что деривация шага 5
+импортирует, а не повторяет: DDL таблицы (`_TABLE_DDL`), её колонки
+(`COLUMNS` — тот же объект, что `core.pg_gold.GOLD_COLUMNS`) и TSV-кодек.
+Что шаг 4 обкатал, живёт дальше в шаге 5:
 
+- **Связность**: web в сети `ks-data`, где живёт `ks-clickhouse` без
+  опубликованных портов. **Выкладка, меняющая членство, требует
+  `--force-recreate web`** — restart его не даёт (урок D3).
 - **Включается `KS_CH_URL`** (`http://ks-clickhouse:8123`); без него часовой
-  шиппер стоит, а суточная сверка с OD-08 (a) не молчит: слой
+  `ch_sync` стоит, а суточная сверка с OD-08 (a) не молчит: слой
   `mirror_landing` получает `gold_values_unwatched` (см. шаги 5–6). Пароль
-  `ks_app` (пользователь уже заведён платформой с правами на `bronze/silver/
+  `ks_app` (пользователь заведён платформой с правами на `bronze/silver/
   gold.*`) — `KS_CH_PASSWORD` из `.env`; кредензии едут заголовками, не в URL.
-- **Счётчик до обмена**: короткая заливка в staging не подменяет живую
-  таблицу — EXCHANGE случается только при равенстве числа строк.
-- **Сверка сначала отгружает, потом читает обратно** и сравнивает с тем же
-  снимком в памяти: PG gold пересобирается каждые ~10 минут и не несёт
-  таймстемпов строк, так что сверка «свежести» врала бы ежедневно. Свежесть —
-  дело вотермарки (`meta.mirror_state`, строка `clickhouse.gold_daily_revenue`);
-  сверка меряет верность копии. Допуск ноль **включая** `avg_order_value` —
-  цент прощается двум движкам, которые считают, а не копии.
-- Недоступный ClickHouse — WARN-находка, не исключение: одно хранилище не
-  должно валить слой остальных сравнений. Рядом с ней — `gold_values_unwatched`.
-- Проверено против настоящего ClickHouse 24.8.14.39 (версия прода): 10 950
-  синтетических ячеек — отгрузка 0.28 с, чтение 0.06 с, чистый круг — ноль
-  находок; три подложенных дефекта (цент, потерянная и выдуманная ячейка)
-  пойманы с правильными именами; повторная отгрузка лечит.
-- **Выкладка требует `--force-recreate web`** — членство в сети меняется
-  только пересозданием контейнера, restart его не даёт (урок D3).
+- **Форма доставки**: staging + атомарный `EXCHANGE TABLES` — транзакций нет,
+  и TRUNCATE+INSERT по живой таблице дал бы читателю пустую.
+- **Свежесть — дело вотермарки** (`meta.mirror_state`, строка
+  `clickhouse.gold_daily_revenue`, её пишет деривация шага 5), а не сверки.
 
 ### Шаги 5–6: ClickHouse считает Gold сам, и архив наследуется
 
-Шаг 4 (копия голда) превзойдён и оставлен фолбэком. Часовой `ch_sync` теперь:
+Шаг 4 (копия голда) превзойдён; его режим копии удалён (O11 (a)). Часовой `ch_sync` теперь:
 `core/ch_silver.py` отгружает **silver целиком** (staging + EXCHANGE, копия —
 допуск ноль на круге) и **деривит gold внутри ClickHouse** из этого silver;
 `core/ch_history.py` дописывает в `history.order_versions` разность множеств
@@ -2603,8 +2626,9 @@ LOCK снимка не фиксирует и пережидает тик; пус
 `useQueryParams` теперь тоже кладёт только там, где он есть в карте). Двум
 другим — `period`, `sales_type`, `source_id`. Под ссылками раздела — период
 словами («Период: 1–31 октября 2026») и одна фраза о том, какие фильтры
-действуют; даты считает `utils/periodDates` тем же правилом, что
-`core/filters.parse_period`.
+действуют — на воронке только когда в шапке выбран не розничный тип продаж
+или источник, иначе её нечем удивить; даты считает `utils/periodDates` тем же
+правилом, что `core/filters.parse_period`.
 
 **Ревизия 0018** привозит две таблицы, которых действительно не хватало:
 
@@ -2790,9 +2814,11 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 
 - **Сверху — конверсия и что она значит**, потом пять шагов полосами от общего
   левого края (синее — дошли, бледный хвост — были на прошлом шаге и не
-  дошли), между полосами словами: «из них положили в корзину 12,9 % · ушли
-  16 974 · было 13,5 %», в конце строка «Итог». Изменение доли пишется «было
-  X %», никогда относительными процентами.
+  дошли), между полосами словами: «дошли 12,9 % · ушли 16 280 · больше
+  всего», а под ними «▼ хуже обычного: было 48 %», только если шаг ушёл за
+  колебания. «Было N» людей — только у первого и последнего шага, в конце
+  строка «Итог». Изменение доли пишется «было X %», никогда относительными
+  процентами.
 - **«Хуже обычного» — z двух долей с поправкой на разброс GA4**:
   `OVERDISPERSION = 1.96` — дневные воронки сентября–октября 2026 разбросаны в
   1,96 раза шире биномиального (χ²/df). Без поправки тест назвал бы
@@ -2801,13 +2827,18 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
   ±0,8 п.п. сам по себе), про группу меньше 200 человек и про долю из меньше
   чем 50 человек. Красный значит только «хуже», всегда со значком ▼.
 - **Вывод — сначала факт, потом место, без «из-за»**: при конверсии в пределах
-  колебаний заголовок — счётчики («Покупателей почти столько же, а зашедших на
-  13 % больше»), затем шаг, ушедший за колебания, и его цена в покупателях
-  (доля тогда и сейчас × люди перед шагом × сколько прошедших его купило),
-  затем где уходит больше всего людей. При заметном изменении конверсии —
-  шаг, сдвинувший больше всего покупателей (не самый «уверенный»: z растёт с
-  числом людей), и состав трафика, если он дал не меньше пятой части изменения
-  в ту же сторону (симметричное разложение по холодным/тёплым/другим).
+  колебаний — счётчики («Покупателей почти столько же, а зашедших на 13 %
+  больше»), затем шаг, ушедший за колебания, и его цена в покупателях
+  («корзина → оформление — минус около 100 покупателей»: доля тогда и сейчас
+  × люди перед шагом × сколько прошедших его купило). При заметном изменении
+  конверсии — шаг, сдвинувший больше всего покупателей (не самый «уверенный»:
+  z растёт с числом людей), и состав трафика, если он дал не меньше пятой
+  части изменения в ту же сторону (симметричное разложение по
+  холодным/тёплым/другим). Состав говорится **долей сайта** («доля тёплых
+  выросла с 33 % до 57 %»): до 11.11.2026 было «тёплых стало больше», а в
+  октябре 2026 против 2025 тёплых стало меньше (21 940 → 19 592) при доле
+  34 % → 56 %. Месяц в пределах колебаний и без сдвинувшихся шагов не
+  получает ни строки: вердикт стоит рядом с числом.
 - **«Купили» — люди, а не заказы**, и блок говорит это рядом с числом заказов
   сайта в CRM за те же дни (`useSiteOrders`: `/api/summary`, `source_id=4`,
   `sales_type=all`).
@@ -2823,6 +2854,23 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
   старше 14 месяцев, мало людей, период задом наперёд, нет визитов. В
   Storybook — по истории на каждое (`Traffic/SiteFunnel`), на условных
   числах (`test/funnelFixtures`), не на продовых.
+
+**Меньше текста, 11.11.2026** (владелец: «слишком много текста на вкладке
+воронка и ты теряешься, особенно если смотреть с телефона»). Каждый факт
+говорится один раз. Вердикт конверсии — рядом с числом («было 2,33 % · в
+пределах колебаний»), без заголовка-фразы, которая его повторяла. Фразы «где
+уходит больше всего» нет: это слово «больше всего» у полосы. Что меняет
+прочтение цифр (GA4 не отвечает, дни досчитываются, история короче периода,
+мало людей) — строкой с иконкой в одном жёлтом блоке. Что читают один раз —
+как считается воронка, кто холодный и тёплый, почему CRM не совпадает, — под
+«?» или ссылкой (`HelpSheet`: снизу лист на телефоне, панель под кнопкой на
+широком экране, цель 44 px). На телефоне разбивка — строки «конверсия · было»
+с подписью группы, а ▼ в ячейке сказан словами («в корзину 9,5 % — ниже
+остального сайта»); каналы GA4 остаются английскими, под ними наше слово
+(`traffic.funnelChannelDesc.*`, `test_frontend_locales.py` требует его у
+каждого канала, который сервис делит на холодные и тёплые). На макете при
+375 px октябрь стал 206 слов вместо 368 и 1 277 px вместо 2 179, «Итог» — на
+первом экране.
 
 - **Читается вживую из GA4 Data API** (`core/ga4.py`, `runFunnelReport`
   v1alpha), без таблицы в базе. Доступ — сервисный аккаунт `ga4-reader` с

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import i18n from '../../lib/i18n'
-import { conclude, conversion, conversionChange, leak } from '../funnel'
+import { conclude, conversion, conversionChange } from '../funnel'
 import {
-  convPct, countsSentence, fetchedAt, gapText, groupPct, perBaseText, sayConclusion, sayLeak, stepPct, wasText,
+  convPct, countsSentence, fetchedAt, gapText, groupPct, heroWas, perBaseText, sayConclusion, stepPct,
 } from '../funnelText'
 import type { T } from '../plural'
 import { BY_TYPE, NOW, PREVIOUS, STEADY, YEAR_AGO } from '../../test/funnelFixtures'
@@ -34,37 +34,26 @@ describe('numbers as the page writes them', () => {
 })
 
 describe('the conclusion in words', () => {
-  it('says the counts, the one step that fell and what it cost, then where people leave', () => {
+  it('says the counts, then the one step that fell and what it cost', () => {
     const said = sayConclusion(conclude(NOW, PREVIOUS, BY_TYPE, 'previous'), t)
-    expect([said.headline.tone, plain(said.headline.text)])
-      .toEqual(['neutral', 'Покупателей почти столько же, а зашедших на 13 % больше'])
-    expect(said.lines.map((l) => [l.tone, l.lead ?? null, plain(l.text)])).toEqual([
-      ['neutral', null, '690 покупателей против 700: прибавка посетителей почти ничего не купила.'],
-      ['bad', 'Просел один шаг:', 'из корзины до оформления дошли 42 % вместо 48 % — это около 100 покупателей.'],
-      ['neutral', null, 'Больше всего людей уходит между товаром и корзиной — 87 %, как и раньше.'],
+    expect(said.map((l) => [l.tone, l.lead ?? null, plain(l.text)])).toEqual([
+      ['neutral', null, 'Покупателей почти столько же, а зашедших на 13 % больше.'],
+      ['bad', 'Просел один шаг:', 'корзина → оформление — минус около 100 покупателей.'],
     ])
   })
 
-  it('says a rise in conversion, the step that moved the most buyers, and the mix', () => {
+  it('says the step that moved the most buyers and the mix as shares, not the conversion again', () => {
     const said = sayConclusion(conclude(NOW, YEAR_AGO, BY_TYPE, 'year_ago'), t)
-    expect([said.headline.tone, plain(said.headline.text)]).toEqual(['good', 'Конверсия выросла: было 1,13 %, стало 2,03 %'])
-    expect(said.lines.map((l) => plain(l.text))).toEqual([
-      'Сильнее всего вырос шаг «товар → корзина»: было 8,4 %, стало 12,9 % — это около 240 дополнительных покупателей.',
-      'Часть роста дал состав трафика: тёплых стало больше.',
-      'Больше всего людей уходит между товаром и корзиной — 87 %.',
+    expect(said.map((l) => plain(l.text))).toEqual([
+      'Сильнее всего вырос шаг «товар → корзина» — плюс около 240 покупателей.',
+      // Warm visitors were 20 000 a year ago and are 19 300 now: the sentence
+      // says their share, which is what grew. «Тёплых стало больше» was false.
+      'Часть роста дал состав трафика: доля тёплых выросла с 33 % до 57 %.',
     ])
   })
 
-  it('says a steady month is steady', () => {
-    const said = sayConclusion(conclude(NOW, STEADY, BY_TYPE, 'previous'), t)
-    expect(said.headline.text).toBe('Всё в пределах обычных колебаний')
-    expect(said.lines.map((l) => plain(l.text))).toEqual([
-      'Больше всего людей уходит между товаром и корзиной — 87 %, как и раньше.',
-    ])
-  })
-
-  it('says only where people leave when there is nothing to compare with', () => {
-    expect(plain(sayLeak(leak(NOW, null), t)?.text)).toBe('Больше всего людей уходит между товаром и корзиной — 87 %.')
+  it('says nothing about a steady month: the verdict beside the number says it', () => {
+    expect(sayConclusion(conclude(NOW, STEADY, BY_TYPE, 'previous'), t)).toEqual([])
   })
 
   it('joins counts that moved the same way without a "but"', () => {
@@ -75,12 +64,13 @@ describe('the conclusion in words', () => {
 })
 
 describe('the rest of the block in words', () => {
-  it('says the verdict beside "было" only when it was judged', () => {
+  it('sets "было" beside the number, and the verdict only when it was judged', () => {
     const change = conversionChange(NOW, PREVIOUS).change
-    expect(plain(wasText(conversion(PREVIOUS), change, t, 'hero')?.text)).toBe('было 2,33 % — в пределах обычных колебаний')
-    expect(plain(wasText(conversion(PREVIOUS), null, t, 'hero')?.text)).toBe('было 2,33 %')
-    expect(wasText(conversion(PREVIOUS), 'worse', t, 'total')?.tone).toBe('bad')
-    expect(wasText(null, 'worse', t, 'hero')).toBeNull()
+    const was = heroWas(conversion(PREVIOUS), change, t)
+    expect([plain(was?.was), was?.verdict, was?.tone]).toEqual(['было 2,33 %', 'в пределах колебаний', 'neutral'])
+    expect(heroWas(conversion(PREVIOUS), null, t)).toMatchObject({ verdict: null, tone: 'neutral' })
+    expect(heroWas(conversion(PREVIOUS), 'worse', t)).toMatchObject({ verdict: 'хуже обычного', tone: 'bad' })
+    expect(heroWas(null, 'worse', t)).toBeNull()
   })
 
   it('says why the rows do not add up to the site', () => {

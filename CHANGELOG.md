@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.336
+
+- docs: the residual of A3 is accepted on a measurement (O4 a)
+- feat(web): /api/health/detailed, /api/health/data-quality and /api/metrics are admin-only (O8 a)
+- fix(dq): an integrity run that saw nothing is failed; blindness is daily news (O10 a+c)
+- refactor(clickhouse): delete Gold's copy mode and its five conditions (O11 a)
+
+
+## 3.0.335
+
+- One AOV statement, at the span the type baseline already holds
+- The whole history, legible where it was cut off
+
+
+## 3.0.334
+
+- feat(traffic): the funnel says each fact once, phone first
+
+
 ## 3.0.333
 
 - fix(sync): a status refresh KeyCRM did not answer is a failed run (A10 follow-up)

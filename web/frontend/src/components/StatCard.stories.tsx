@@ -65,3 +65,26 @@ export const NoIcon: Story = {
 export const Skeleton: Story = {
   render: () => <StatCardSkeleton />,
 }
+
+/** The whole history is nine digits of hryvnia. With `shortFormatter` a
+ *  card too narrow for the full figure says it in millions and keeps the
+ *  full one in its tooltip; a wide card keeps it whole. */
+export const ShortenedWhenNarrow: Story = {
+  name: 'Shortened when narrow',
+  render: () => (
+    <div className="grid grid-cols-1 gap-3">
+      {[160, 220, 320].map((width) => (
+        <div key={width} style={{ width }}>
+          <StatCard
+            label={`${width} px`}
+            value={108007791}
+            formatter={formatCurrency}
+            shortFormatter={(v) => `₴${(v / 1e6).toLocaleString('uk-UA', { maximumFractionDigits: 1 })} млн`}
+            variant="green"
+            icon={CircleDollarSign}
+          />
+        </div>
+      ))}
+    </div>
+  ),
+}
