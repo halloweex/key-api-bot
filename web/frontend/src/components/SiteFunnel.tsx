@@ -1,7 +1,8 @@
 import { Fragment, memo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { CalendarX, Clock, CloudOff, Users } from 'lucide-react'
+import { ArrowLeftRight, CalendarX, Check, ChevronDown, Clock, CloudOff, Users } from 'lucide-react'
 import { ApiErrorState } from './ApiErrorState'
+import { BottomSheet } from './BottomSheet'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { DataTable, Td, Th, Tr } from './DataTable'
 import { HelpSheet } from './HelpSheet'
@@ -11,6 +12,7 @@ import { SkeletonChart } from './Skeleton'
 import { Wrapper } from './Wrapper'
 import { ApiError } from '../api/client'
 import { useSiteOrders, useTrafficFunnel } from '../hooks/useApi'
+import { useIsPhone } from '../hooks/useMediaQuery'
 import { formatNumber } from '../utils/formatters'
 import {
   FOLDED_DEVICES, MIN_GROUP_PEOPLE, TRANSITIONS,
@@ -19,8 +21,8 @@ import {
   type Against, type GroupFigure, type StepFigure, type Transition,
 } from '../utils/funnel'
 import {
-  convPct, fetchedAt, gapText, groupPct, heroWas, perBaseText, sayConclusion, stepPct, toneOf,
-  type HeroWas, type Line, type Tone,
+  compareChip, convPct, fetchedAt, gapText, groupPct, heroWas, perBaseText, sayConclusion, sayMixShort,
+  stepPct, toneOf, type HeroWas, type Line, type Tone,
 } from '../utils/funnelText'
 import { plural, type T } from '../utils/plural'
 import { addDays, formatDay, formatDayRange, formatSpan, inclusiveDays, kyivToday } from '../utils/smsDates'
@@ -41,6 +43,14 @@ import type { FunnelRow, TrafficFunnelResponse } from '../types/api'
 // the last days still counting, too few people, the CRM's different count —
 // stays on screen in a line each; what is read once — how the funnel is
 // counted, who is cold or warm — is under a "?" that opens a sheet on a phone.
+//
+// On a phone the whole funnel, to «Итог», fits the first screen inside
+// Telegram (the owner, 2026-11-11; production put «Итог» at 954 px on an
+// 812 px phone): the comparison is a chip on the title row, the daily "still
+// counting" notice a plain line, the colours keyed in the first line under a
+// bar, «из 1 000 купили N» the «Итог» row, and what moved is said after it —
+// all but the traffic mix, which stays under the number it qualifies. A wide
+// screen is unchanged.
 
 type Breakdown = 'type' | 'channel' | 'device'
 
@@ -127,12 +137,13 @@ interface Notice {
   key: string
   icon: IconComponent
   text: string
+  /** A notice said every day of a running month, in the shorter form a phone
+   *  shows as a plain line: a box that is always there teaches the eye to
+   *  skip boxes, and a real warning keeps its own. */
+  routine?: string
 }
 
-/** What changes how the figures read, a line each and in one place: the data
- *  is old, the last days are still being counted, the history starts later,
- *  too few people to judge. */
-function Notices({ items }: { items: Notice[] }) {
+function NoticeBox({ items }: { items: Notice[] }) {
   return (
     <ul className="flex flex-col gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5
                    text-[13px] leading-snug text-amber-900">
@@ -146,7 +157,87 @@ function Notices({ items }: { items: Notice[] }) {
   )
 }
 
+/** What changes how the figures read, a line each and in one place: the data
+ *  is old, the last days are still being counted, the history starts later,
+ *  too few people to judge. */
+function Notices({ items }: { items: Notice[] }) {
+  const warnings = items.filter((n) => n.routine == null)
+  const routine = items.filter((n) => n.routine != null)
+  return (
+    <>
+      <div className="hidden sm:block"><NoticeBox items={items} /></div>
+      <div className="flex flex-col gap-2 sm:hidden">
+        {warnings.length > 0 && <NoticeBox items={warnings} />}
+        {routine.map(({ key, icon: Icon, routine: line }) => (
+          <p key={key} className="flex items-start gap-1.5 text-xs leading-snug text-amber-900">
+            <Icon className="mt-px h-3.5 w-3.5 shrink-0 text-amber-700" aria-hidden />
+            <span>{line}</span>
+          </p>
+        ))}
+      </div>
+    </>
+  )
+}
+
 // ─── What the period is set beside ───────────────────────────────────────────
+
+/** A phone's comparison: the window as a chip on the title row, the choice in
+ *  a sheet with each window's dates. The segmented control and its dates line
+ *  took two rows of the first screen. */
+function CompareChip({ against, chip, options, onChange }: {
+  against: Against
+  chip: { label: string; dates: string }
+  options: { value: Against; label: string; note: string; ok: boolean }[]
+  onChange: (value: Against) => void
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const title = t('traffic.funnel.compare.sheetTitle')
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={t('traffic.funnel.compare.chip', { dates: chip.dates })}
+        className="-my-1.5 inline-flex min-h-11 items-center"
+      >
+        <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3
+                         text-[13px] font-medium text-slate-800 shadow-sm">
+          <ArrowLeftRight className="h-3.5 w-3.5 text-slate-500" aria-hidden />
+          {chip.label}
+          <ChevronDown className="h-3.5 w-3.5 text-slate-500" aria-hidden />
+        </span>
+      </button>
+      <BottomSheet open={open} title={title} onClose={() => setOpen(false)} closeLabel={t('traffic.close')}>
+        <div role="radiogroup" aria-label={title} className="flex flex-col gap-2 pb-2">
+          {options.map(({ value, label, note, ok }) => {
+            const on = value === against
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                disabled={!ok}
+                onClick={() => { onChange(value); setOpen(false) }}
+                className={`flex min-h-11 items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left ${
+                  on ? 'border-blue-600 bg-blue-50' : 'border-slate-200'} ${ok ? '' : 'opacity-60'}`}
+              >
+                <span className="flex flex-1 flex-col">
+                  <span className="text-sm font-semibold text-slate-900">{label}</span>
+                  <span className="text-xs text-slate-600">{note}</span>
+                </span>
+                {on && <Check className="h-5 w-5 shrink-0 text-blue-700" aria-hidden />}
+              </button>
+            )
+          })}
+        </div>
+      </BottomSheet>
+    </>
+  )
+}
 
 const CompareWith = memo(function CompareWith({
   data, against, prevOk, yearOk, onChange,
@@ -158,30 +249,45 @@ const CompareWith = memo(function CompareWith({
   onChange: (value: Against) => void
 }) {
   const { t } = useTranslation()
+  const phone = useIsPhone()
   const since = formatDay(data.earliest, { month: 'long' })
   if (!against) {
     return <p className="max-w-xs text-xs leading-relaxed text-slate-600">{t('traffic.funnel.compare.none', { date: since })}</p>
   }
+  const datesOf = (value: Against) => {
+    const w = data.periods[value]
+    const span = formatSpan(w.start, w.end)
+    if (value === 'year_ago') return t('traffic.funnel.compare.datesYear', { dates: span })
+    const n = inclusiveDays(w.start, w.end)
+    return t('traffic.funnel.compare.datesPrevious', { dates: span, n: formatNumber(n), word: plural(t, 'word.days', n) })
+  }
   const window = data.periods[against]
-  const days = inclusiveDays(window.start, window.end)
-  const span = formatSpan(window.start, window.end)
-  const dates = against === 'previous'
-    ? t('traffic.funnel.compare.datesPrevious', { dates: span, n: formatNumber(days), word: plural(t, 'word.days', days) })
-    : t('traffic.funnel.compare.datesYear', { dates: span })
+  if (phone) {
+    return (
+      <CompareChip
+        against={against}
+        chip={{ label: compareChip(window.start, window.end), dates: formatSpan(window.start, window.end) }}
+        options={([['previous', prevOk], ['year_ago', yearOk]] as const).map(([value, ok]) => ({
+          value,
+          ok,
+          label: t(`traffic.funnel.compare.${value}`),
+          note: ok ? datesOf(value) : t(value === 'previous' ? 'traffic.funnel.compare.noPrevious' : 'traffic.funnel.compare.noYear', { date: since }),
+        }))}
+        onChange={onChange}
+      />
+    )
+  }
+  const dates = datesOf(against)
   const options = [
     { value: 'previous' as const, label: t('traffic.funnel.compare.previous'), disabled: !prevOk },
     { value: 'year_ago' as const, label: t('traffic.funnel.compare.year_ago'), disabled: !yearOk },
   ]
-  const control = (fullWidth: boolean) => (
-    <SegmentedControl<Against>
-      options={options} value={against} onChange={onChange} size="sm" fullWidth={fullWidth}
-      ariaLabel={t('traffic.funnel.compare.label')}
-    />
-  )
   return (
     <div className="flex w-full flex-col gap-1 sm:w-auto sm:items-end">
-      <div className="w-full sm:hidden">{control(true)}</div>
-      <div className="hidden sm:block">{control(false)}</div>
+      <SegmentedControl<Against>
+        options={options} value={against} onChange={onChange} size="sm"
+        ariaLabel={t('traffic.funnel.compare.label')}
+      />
       <span className="text-xs text-slate-600">{dates}</span>
       {!yearOk && <span className="max-w-sm text-xs leading-relaxed text-slate-600 sm:text-right">{t('traffic.funnel.compare.noYear', { date: since })}</span>}
       {!prevOk && <span className="max-w-sm text-xs leading-relaxed text-slate-600 sm:text-right">{t('traffic.funnel.compare.noPrevious', { date: since })}</span>}
@@ -206,7 +312,8 @@ const Hero = memo(function Hero({ rate, per, was }: { rate: string; per: string 
           </span>
         )}
       </div>
-      {per && <span className="text-[13px] text-slate-700">{per}</span>}
+      {/* On a phone the «Итог» row says it, and the number stands alone. */}
+      {per && <span className="hidden text-[13px] text-slate-700 sm:block">{per}</span>}
     </div>
   )
 })
@@ -238,7 +345,7 @@ function Bar({ reached, before, thin }: { reached: number; before: number | null
   const r = Math.max(0, Math.min(1, reached)) * 100
   const b = before == null ? null : Math.max(0, Math.min(1, before)) * 100
   return (
-    <div className={`relative ${thin ? 'h-3' : 'h-5'}`} aria-hidden="true">
+    <div className={`relative ${thin ? 'h-2' : 'h-5'}`} aria-hidden="true">
       {b != null && b > r && (
         <div
           className="absolute inset-y-0 rounded-r bg-slate-300"
@@ -253,15 +360,26 @@ function Bar({ reached, before, thin }: { reached: number; before: number | null
 /** The words between two bars: «дошли 55 % · ушли 15 774», and under them the
  *  verdict when the step moved beyond noise. A bare «↓ 55 %» read as "fell by
  *  55 %"; a «было» no test judged read as a change. */
-function Between({ s, isLeak }: { s: StepFigure; isLeak: boolean }) {
+function Between({ s, isLeak, tight = false, keyed = false }: {
+  s: StepFigure
+  isLeak: boolean
+  /** A phone's: less air, so the five steps and «Итог» fit one screen. */
+  tight?: boolean
+  /** The legend's swatches in this line — on a phone, where the legend
+   *  itself took a row, the first line under a bar keys the colours. */
+  keyed?: boolean
+}) {
   const { t } = useTranslation()
   const was = s.was?.ofBefore
   const judged = (s.change === 'better' || s.change === 'worse') && was != null
+  const swatch = (colour: string) => (
+    <span aria-hidden="true" className={`mr-1 inline-block h-2 w-3 rounded-sm align-middle ${colour}`} />
+  )
   return (
-    <div className="flex flex-col py-1 text-[13px] leading-snug">
+    <div className={`flex flex-col ${tight ? 'pb-0.5 pt-1' : 'py-1'} text-[13px] leading-snug`}>
       <p className={isLeak ? 'text-slate-900' : 'text-slate-600'}>
-        {t('traffic.funnel.bars.reached')} <b className="text-slate-900">{stepPct(s.ofBefore)}</b>
-        {' · '}{t('traffic.funnel.bars.left', { n: formatNumber(s.left ?? 0) })}
+        {keyed && swatch('bg-blue-600')}{t('traffic.funnel.bars.reached')} <b className="text-slate-900">{stepPct(s.ofBefore)}</b>
+        {' · '}{keyed && swatch('bg-slate-300')}{t('traffic.funnel.bars.left', { n: formatNumber(s.left ?? 0) })}
         {isLeak && <>{' · '}<b>{t('traffic.funnel.bars.leakShort')}</b></>}
       </p>
       {judged && (
@@ -274,11 +392,13 @@ function Between({ s, isLeak }: { s: StepFigure; isLeak: boolean }) {
 }
 
 const FunnelBars = memo(function FunnelBars({
-  steps, leakStep, total,
+  steps, leakStep, total, phoneTotal,
 }: {
   steps: StepFigure[]
   leakStep: Transition | null
   total: string
+  /** What a phone's «Итог» row says: «из 1 000 зашедших купили 18». */
+  phoneTotal: string
 }) {
   const { t } = useTranslation()
   const last = steps.length - 1
@@ -295,7 +415,7 @@ const FunnelBars = memo(function FunnelBars({
 
   return (
     <Wrapper dir="column" gap="xs">
-      <div className="flex flex-wrap gap-4 pb-1 text-xs text-slate-600" aria-hidden="true">
+      <div className="hidden flex-wrap gap-4 pb-1 text-xs text-slate-600 sm:flex" aria-hidden="true">
         <span className="flex items-center gap-1.5">
           <span className="h-2.5 w-3.5 rounded-sm bg-blue-600" />{t('traffic.funnel.bars.reached')}
         </span>
@@ -334,7 +454,7 @@ const FunnelBars = memo(function FunnelBars({
       <ol className="flex flex-col sm:hidden">
         {steps.map((s, i) => (
           <li key={s.step} className="flex flex-col">
-            {i > 0 && <Between s={s} isLeak={s.step === leakStep} />}
+            {i > 0 && <Between s={s} isLeak={s.step === leakStep} tight keyed={i === 1} />}
             <div className="flex flex-col gap-1">
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-sm font-semibold text-slate-900">
@@ -351,7 +471,7 @@ const FunnelBars = memo(function FunnelBars({
       </ol>
       <div className="flex items-baseline justify-between gap-2 border-t border-slate-200 pt-2 sm:hidden">
         <span className="text-[15px] font-bold text-slate-900">{t('traffic.funnel.total.label')}</span>
-        <span className="text-[15px] text-slate-900">{total}</span>
+        <span className="text-[15px] text-slate-900">{phoneTotal}</span>
       </div>
     </Wrapper>
   )
@@ -628,9 +748,15 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
   const judgeThen = judgeNow && !!was && enoughToClaim(was)
 
   const steps = funnelSteps(now, was, judgeThen)
-  const lines = judgeThen && was && against
-    ? sayConclusion(conclude(now, was, data.by_type, against), t)
-    : []
+  const verdict = judgeThen && was && against ? conclude(now, was, data.by_type, against) : null
+  const lines = verdict ? sayConclusion(verdict, t) : []
+  // On a phone what moved is said after «Итог», so the funnel fits the first
+  // screen — all but the mix, said in one line under the number: there a green
+  // «лучше обычного» alone read as the whole story (October 2026 against 2025,
+  // buyers fewer and a fifth of the rise from the mix). It is the last line
+  // `sayConclusion` writes.
+  const mixShort = verdict?.mix ? sayMixShort(verdict.mix, t) : null
+  const phoneLines = verdict?.mix ? lines.slice(0, -1) : lines
   const convChange = judgeThen && was ? conversionChange(now, was).change : null
   const convWas = was ? conversion(was) : null
   const rate = conversion(now)
@@ -643,7 +769,12 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
   const unsettledFrom = period.start > addDays(today, -1) ? period.start : addDays(today, -1)
   const unsettledTo = period.end < today ? period.end : today
   if (unsettledFrom <= unsettledTo) {
-    notices.push({ key: 'unsettled', icon: Clock, text: t('traffic.funnel.state.incomplete', { days: formatSpan(unsettledFrom, unsettledTo) }) })
+    const days = formatSpan(unsettledFrom, unsettledTo)
+    notices.push({
+      key: 'unsettled', icon: Clock,
+      text: t('traffic.funnel.state.incomplete', { days }),
+      routine: t('traffic.funnel.state.incompleteShort', { days }),
+    })
   }
   if (period.start < data.earliest) {
     notices.push({ key: 'partial', icon: CalendarX, text: t('traffic.funnel.state.partial', { date: since }) })
@@ -668,13 +799,15 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
         {notices.length > 0 && <Notices items={notices} />}
         <Wrapper dir="row" wrap gap="lg">
           <Hero rate={convPct(rate)} per={perBaseText(now, t)} was={heroWas(convWas, convChange, t)} />
-          {lines.length > 0 && <Conclusion lines={lines} />}
+          {lines.length > 0 && <div className="hidden sm:contents"><Conclusion lines={lines} /></div>}
         </Wrapper>
+        {mixShort && <p className="-mt-2 text-[13px] leading-relaxed text-slate-700 sm:hidden">{mixShort}</p>}
         <Wrapper dir="column" gap="xs">
           <FunnelBars
             steps={steps}
             leakStep={biggestLeak(now)}
             total={t('traffic.funnel.total.short', { rate: convPct(rate) })}
+            phoneTotal={perBaseText(now, t) ?? t('traffic.funnel.total.short', { rate: convPct(rate) })}
           />
           <CrmLine
             buyers={now.purchased}
@@ -682,6 +815,12 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
             oneDay={inclusiveDays(ordersFrom, period.end) === 1}
           />
         </Wrapper>
+        {phoneLines.length > 0 && (
+          <div className="sm:hidden">
+            <h4 className="mb-1 text-[13px] font-semibold text-slate-900">{t('traffic.funnel.changedTitle')}</h4>
+            <Conclusion lines={phoneLines} />
+          </div>
+        )}
         <FunnelBreakdown data={data} against={against} judgeNow={judgeNow} judgeThen={judgeThen} />
       </Wrapper>
     </FunnelFrame>
