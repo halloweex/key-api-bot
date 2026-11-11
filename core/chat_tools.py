@@ -421,9 +421,10 @@ def _revenue_totals_sql(sales_type: str) -> str:
 
     The average order value is the period's revenue over its orders, as the
     dashboard's (`CustomersMixin.get_customer_insights`). It was the mean of
-    the days' averages until the review's A22, so a day with no sale — every
-    day a return or a retired source left a Gold row of zeros — pulled it
-    down, and a ₴190 period read ₴550 or ₴0 by which days it held.
+    the days' averages until the review's A22: a day of many small orders
+    weighed as much as a day of one large one, and a day Gold holds a row of
+    zeros for (only a return, or only a retired source) pulled it down — the
+    review's repro read ₴550 for a ₴190 period.
     """
     sales_filter = ""
     if sales_type == "retail":
