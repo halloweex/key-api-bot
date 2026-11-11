@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import i18n from '../../lib/i18n'
 import { ApiError } from '../../api/client'
 import { FUNNEL, c } from '../../test/funnelFixtures'
+import { addDays, kyivToday } from '../../utils/smsDates'
 import type { TrafficFunnelResponse } from '../../types/api'
 
 // The setup answers every `t` with its key; this block is read for what it
@@ -181,6 +182,55 @@ describe('the site funnel on a phone', () => {
     expect(plain(sheet.textContent)).toContain('Синяя полоса — дошли до шага')
     await userEvent.click(within(sheet).getByRole('button', { name: 'Закрыть' }))
     expect(screen.queryByRole('dialog', { name: 'Как читать воронку' })).toBeNull()
+  })
+
+  it('compares through a chip on the title row, the choice in a sheet', async () => {
+    withData(FUNNEL)
+    render(<SiteFunnel />)
+    expect(screen.queryByRole('radio', { name: 'с прошлым годом' })).toBeNull()
+    const chip = screen.getByRole('button', { name: /^Сравнение с 31 августа – 30 сентября 2026/ })
+    expect(plain(chip.textContent)).toContain('31 авг. – 30 сент.')
+    expect(chip).toHaveAttribute('aria-haspopup', 'dialog')
+
+    await userEvent.click(chip)
+    const sheet = screen.getByRole('dialog', { name: 'С чем сравнить' })
+    expect(within(sheet).getByRole('radio', { name: /^с прошлым периодом/ })).toHaveAttribute('aria-checked', 'true')
+    await userEvent.click(within(sheet).getByRole('radio', { name: /^с прошлым годом/ }))
+
+    expect(screen.queryByRole('dialog', { name: 'С чем сравнить' })).toBeNull()
+    expect(plain(screen.getByRole('button', { name: /^Сравнение с 1–31 октября 2025/ }).textContent)).toContain('окт. 2025')
+    expect(shown()).toContain('было 1,13 %')
+  })
+
+  it('keeps the mix under the number and says what else moved after «Итог»', async () => {
+    withData(FUNNEL)
+    render(<SiteFunnel />)
+    await userEvent.click(screen.getByRole('button', { name: /^Сравнение с/ }))
+    await userEvent.click(screen.getByRole('radio', { name: /^с прошлым годом/ }))
+
+    const mix = screen.getByText('Часть роста дал состав трафика: тёплых 57 % вместо 33 %.', { normalizer: plain })
+    const changed = screen.getByRole('heading', { name: 'Что изменилось' })
+    const itog = screen.getAllByText('Итог').find((e) => plain(e.parentElement?.textContent).includes('из 1 000'))!
+    expect(plain(itog.parentElement?.textContent)).toContain('из 1 000 зашедших купили 20')
+    // Under the number, above the funnel; the rest after «Итог».
+    expect(mix.compareDocumentPosition(itog) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(itog.compareDocumentPosition(changed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(plain(changed.parentElement?.textContent)).toContain('Сильнее всего вырос шаг «товар → корзина» — плюс около 240 покупателей.')
+  })
+
+  it('says the daily "still counting" in a plain line, and a real warning keeps its box', () => {
+    const today = kyivToday()
+    withData({
+      ...FUNNEL, stale: true,
+      periods: { ...FUNNEL.periods, current: { start: addDays(today, -30), end: today } },
+    })
+    render(<SiteFunnel />)
+    const routine = screen.getAllByText(/ещё могут вырасти$/)
+    expect(routine).toHaveLength(1)
+    expect(routine[0].closest('ul')).toBeNull()
+    for (const warning of screen.getAllByText(/Google Analytics не отвечает/)) {
+      expect(warning.closest('ul')).not.toBeNull()
+    }
   })
 
   it('gives the "?" a target a thumb can hit', () => {

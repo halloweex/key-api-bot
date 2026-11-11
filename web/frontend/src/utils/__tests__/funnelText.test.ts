@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import i18n from '../../lib/i18n'
 import { conclude, conversion, conversionChange } from '../funnel'
 import {
-  convPct, countsSentence, fetchedAt, gapText, groupPct, heroWas, perBaseText, sayConclusion, stepPct,
+  compareChip, convPct, countsSentence, fetchedAt, gapText, groupPct, heroWas, perBaseText, sayConclusion,
+  sayMixShort, stepPct,
 } from '../funnelText'
 import type { T } from '../plural'
 import { BY_TYPE, NOW, PREVIOUS, STEADY, YEAR_AGO } from '../../test/funnelFixtures'
@@ -52,6 +53,12 @@ describe('the conclusion in words', () => {
     ])
   })
 
+  it('says the mix in one line for a phone, as shares of the site', () => {
+    const mix = conclude(NOW, YEAR_AGO, BY_TYPE, 'year_ago').mix
+    expect(mix).not.toBeNull()
+    expect(plain(sayMixShort(mix!, t))).toBe('Часть роста дал состав трафика: тёплых 57 % вместо 33 %.')
+  })
+
   it('says nothing about a steady month: the verdict beside the number says it', () => {
     expect(sayConclusion(conclude(NOW, STEADY, BY_TYPE, 'previous'), t)).toEqual([])
   })
@@ -87,5 +94,22 @@ describe('the rest of the block in words', () => {
     // 08:42 UTC is 10:42 in Kyiv in November.
     expect(fetchedAt('2026-11-04T08:42:00Z', '2026-11-04')).toBe('10:42')
     expect(fetchedAt('2026-11-03T08:42:00Z', '2026-11-04')).toBe('3 ноября, 10:42')
+  })
+})
+
+describe('the comparison chip', () => {
+  it('names a month once, after a day in the form a date takes, and a year only when it is not this one', () => {
+    expect(compareChip('2026-10-21', '2026-10-31', '2026-11-11')).toBe('21–31 окт.')
+    expect(compareChip('2026-08-31', '2026-09-30', '2026-11-11')).toBe('31 авг. – 30 сент.')
+    expect(compareChip('2026-05-21', '2026-05-31', '2026-11-11')).toBe('21–31 мая')
+    expect(compareChip('2025-10-01', '2025-10-31', '2026-11-11')).toBe('окт. 2025')
+    expect(compareChip('2025-10-21', '2025-10-31', '2026-11-11')).toBe('21–31 окт. 2025')
+  })
+
+  it('puts the month first in English', async () => {
+    await i18n.changeLanguage('en')
+    expect(compareChip('2026-10-21', '2026-10-31', '2026-11-11')).toBe('Oct 21–31')
+    expect(compareChip('2026-08-31', '2026-09-30', '2026-11-11')).toBe('Aug 31 – Sep 30')
+    expect(compareChip('2025-10-01', '2025-10-31', '2026-11-11')).toBe('Oct 2025')
   })
 })
