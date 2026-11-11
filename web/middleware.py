@@ -76,7 +76,8 @@ def request_metric_key(method: str, path: str, scope: Any) -> str:
     """The metric name for one request — the route, never the identifiers in it.
 
     `metrics.get_stats()` is returned verbatim by `GET /api/metrics`, which any
-    approved viewer may read. Keyed on the path as asked, that dictionary was a
+    approved viewer could read (admins only since O8 (a), 2026-11-11). Keyed on
+    the path as asked, that dictionary was a
     directory of the ids other people had used — buyer ids, the Telegram id of
     an admin whose role was changed, campaign and preset names — which turns
     "you must know a valid id" into "here is the list of valid ids". Refused

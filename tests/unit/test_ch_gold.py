@@ -1,33 +1,38 @@
-"""Step 4 of «Одна бронза»: the ClickHouse copy of Gold.
+"""What is left of step 4 of «Одна бронза»: ClickHouse Gold's shape and codec.
 
-The module under test is a copy pipeline, so the tests are about the ways a
-copy goes wrong: rows lost or invented crossing the wire, values changed by
-the wire format, a short INSERT swapped into place, and a comparison that
-quietly compares nothing. The wire format itself (TSV both directions) gets a
+The copy mode — `ship_gold`, `reconcile_ch_gold` and their five `ch_gold_*`
+conditions — was deleted by the owner's decision O11 (a) (2026-11-11); step 5's
+derivation (`core/ch_silver.py`) had superseded it and nothing ran it. What
+stays is the table's DDL and the TSV codec typed to it, which the derivation
+and the engines' comparison import, so their tests stay: the wire format gets a
 round-trip test because it is the one place where every column's type is
 decided by hand.
-
-No network anywhere: `_execute` is replaced with fakes that record SQL, which
-also lets the EXCHANGE-refusal test assert on what was *not* executed.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import re
 from datetime import date
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
-
-import pytest
+from pathlib import Path
 
 from core import ch_gold
 from core.ch_gold import (
     COLUMNS,
     _TABLE_DDL,
-    compare_rows,
     parse_tsv,
     render_tsv,
 )
-from core.data_quality import Severity
+
+ROOT = Path(__file__).resolve().parents[2]
+
+# The copy mode's conditions. Deleted with it (O11 a) and never reused: a page
+# under one of these names would read as the retired copy's.
+COPY_MODE_CONDITIONS = frozenset({
+    "ch_gold_unreachable", "ch_gold_ship_failed", "ch_gold_row_missing",
+    "ch_gold_row_extra", "ch_gold_value_mismatch",
+})
 
 
 def _row(**overrides):
@@ -88,159 +93,31 @@ class TestTheDDLAndTheColumnListAgree:
         assert tuple(declared) == COLUMNS
 
 
-class TestTheComparison:
-    def test_identical_sets_produce_no_findings(self):
-        rows = [_row(), _row(sales_type="b2b", source_id=None)]
-        assert compare_rows(rows, list(rows)) == []
+class TestTheCopyModeIsGone:
+    def test_the_module_holds_no_shipper_and_no_comparison(self):
+        """O11 (a): nothing here ships, reads back or compares any more —
+        the module is a DDL and a codec. Mutation: put back `ship_gold` (or
+        any coroutine) in `core/ch_gold.py`."""
+        coroutines = [name for name, fn in vars(ch_gold).items()
+                      if inspect.iscoroutinefunction(fn)]
+        assert coroutines == []
+        for gone in ("ship_gold", "reconcile_ch_gold", "compare_rows",
+                     "ensure_schema", "STAGING"):
+            assert not hasattr(ch_gold, gone), gone
 
-    def test_a_lost_row_is_critical(self):
-        shipped = [_row(), _row(sales_type="b2b")]
-        (issue,) = compare_rows(shipped, shipped[:1])
-        assert issue.check_name == "ch_gold_row_missing"
-        assert issue.severity is Severity.CRITICAL
-        assert issue.count == 1
-        assert issue.sample_ids == (20260827,)
+    def test_its_condition_names_are_registered_and_emitted_by_nothing(self):
+        """A deleted condition name is never reused. Mutation: register or
+        emit any of the five again (`check_name="ch_gold_ship_failed"`)."""
+        from core.alerting import REGISTRY
+        from core.data_quality import HUMAN_CHECK_NAMES, REMEDIATION
 
-    def test_an_invented_row_is_critical(self):
-        shipped = [_row()]
-        (issue,) = compare_rows(shipped, shipped + [_row(sales_type="b2b")])
-        assert issue.check_name == "ch_gold_row_extra"
-        assert issue.severity is Severity.CRITICAL
-
-    def test_one_cent_of_drift_is_a_finding(self):
-        # The tolerance elsewhere in this system exists because two engines
-        # compute. Here nothing computes, so the tolerance is exactly zero.
-        shipped = [_row()]
-        readback = [_row(avg_order_value=Decimal("35284.76"))]
-        (issue,) = compare_rows(shipped, readback)
-        assert issue.check_name == "ch_gold_value_mismatch"
-        assert "avg_order_value" in issue.description
-        assert "35284.75" in issue.description
-
-    def test_the_rollup_and_the_fine_row_are_different_cells(self):
-        # (date, type, NULL) and (date, type, 1) must never shadow each other.
-        rollup = _row(source_id=None)
-        fine = _row(source_id=1)
-        assert compare_rows([rollup, fine], [fine, rollup]) == []
-
-
-class TestTheShipper:
-    @pytest.mark.asyncio
-    async def test_a_short_staging_refuses_to_exchange(self, monkeypatch):
-        executed = []
-
-        async def fake_execute(sql, *, body=None):
-            executed.append(sql)
-            if sql.startswith("SELECT count()"):
-                return "1\n"  # staging holds 1 row; two were supplied
-            return ""
-
-        monkeypatch.setenv(ch_gold.URL_ENV, "http://ch:8123")
-        monkeypatch.setattr(ch_gold, "_execute", fake_execute)
-        monkeypatch.setattr(
-            ch_gold, "_fetch_pg_rows",
-            AsyncMock(return_value=[_row(), _row(sales_type="b2b")]),
-        )
-        failed = AsyncMock()
-        monkeypatch.setattr(ch_gold, "_watermark_failed", failed)
-        monkeypatch.setattr(ch_gold, "_watermark_ok", AsyncMock())
-
-        result = await ch_gold.ship_gold()
-
-        assert "error" in result and "refusing" in result["error"]
-        assert not any(sql.startswith("EXCHANGE") for sql in executed)
-        failed.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_a_clean_ship_exchanges_and_moves_the_watermark(self, monkeypatch):
-        executed = []
-
-        async def fake_execute(sql, *, body=None):
-            executed.append(sql)
-            if sql.startswith("SELECT count()"):
-                return "2\n"
-            return ""
-
-        monkeypatch.setenv(ch_gold.URL_ENV, "http://ch:8123")
-        monkeypatch.setattr(ch_gold, "_execute", fake_execute)
-        monkeypatch.setattr(
-            ch_gold, "_fetch_pg_rows",
-            AsyncMock(return_value=[_row(), _row(sales_type="b2b")]),
-        )
-        ok = AsyncMock()
-        monkeypatch.setattr(ch_gold, "_watermark_ok", ok)
-
-        result = await ch_gold.ship_gold()
-
-        assert result == {"rows": 2}
-        assert any(sql.startswith("EXCHANGE TABLES") for sql in executed)
-        ok.assert_awaited_once_with(2)
-
-    @pytest.mark.asyncio
-    async def test_unconfigured_stands_down_without_touching_anything(self, monkeypatch):
-        monkeypatch.delenv(ch_gold.URL_ENV, raising=False)
-        fetch = AsyncMock()
-        monkeypatch.setattr(ch_gold, "_fetch_pg_rows", fetch)
-
-        result = await ch_gold.ship_gold()
-
-        assert "skipped" in result
-        fetch.assert_not_awaited()
-
-
-class TestTheReconciliation:
-    @pytest.mark.asyncio
-    async def test_unconfigured_returns_no_findings(self, monkeypatch):
-        monkeypatch.delenv(ch_gold.URL_ENV, raising=False)
-        assert await ch_gold.reconcile_ch_gold() == []
-
-    @pytest.mark.asyncio
-    async def test_a_ship_failure_is_one_warn_not_an_exception(self, monkeypatch):
-        # It rides dq_mirror_landing, where a raise fails the whole layer —
-        # an optional store must not silence the mandatory comparisons.
-        monkeypatch.setenv(ch_gold.URL_ENV, "http://ch:8123")
-        monkeypatch.setattr(
-            ch_gold, "_fetch_pg_rows",
-            AsyncMock(side_effect=RuntimeError("connection refused")),
-        )
-        monkeypatch.setattr(ch_gold, "_watermark_failed", AsyncMock())
-
-        (issue,) = await ch_gold.reconcile_ch_gold()
-
-        assert issue.check_name == "ch_gold_ship_failed"
-        assert issue.severity is Severity.WARN
-
-    @pytest.mark.asyncio
-    async def test_compares_the_shipped_snapshot_not_a_fresh_read(self, monkeypatch):
-        # The shipped rows and the readback disagree on one cell; the finding
-        # must surface it even though nothing re-reads Postgres.
-        shipped = [_row(), _row(sales_type="b2b", source_id=None)]
-        readback = [shipped[0], _row(sales_type="b2b", source_id=None,
-                                     revenue=Decimal("999.99"))]
-
-        monkeypatch.setenv(ch_gold.URL_ENV, "http://ch:8123")
-        monkeypatch.setattr(ch_gold, "_fetch_pg_rows", AsyncMock(return_value=shipped))
-        monkeypatch.setattr(ch_gold, "_ship", AsyncMock())
-        monkeypatch.setattr(ch_gold, "_watermark_ok", AsyncMock())
-        monkeypatch.setattr(ch_gold, "_fetch_ch_rows", AsyncMock(return_value=readback))
-
-        (issue,) = await ch_gold.reconcile_ch_gold()
-
-        assert issue.check_name == "ch_gold_value_mismatch"
-        assert "revenue" in issue.description
-
-    @pytest.mark.asyncio
-    async def test_a_failed_readback_is_warn_after_a_clean_ship(self, monkeypatch):
-        monkeypatch.setenv(ch_gold.URL_ENV, "http://ch:8123")
-        monkeypatch.setattr(ch_gold, "_fetch_pg_rows", AsyncMock(return_value=[_row()]))
-        monkeypatch.setattr(ch_gold, "_ship", AsyncMock())
-        monkeypatch.setattr(ch_gold, "_watermark_ok", AsyncMock())
-        monkeypatch.setattr(
-            ch_gold, "_fetch_ch_rows",
-            AsyncMock(side_effect=RuntimeError("read timed out")),
-        )
-
-        (issue,) = await ch_gold.reconcile_ch_gold()
-
-        assert issue.check_name == "ch_gold_unreachable"
-        assert issue.severity is Severity.WARN
+        emitted = set()
+        for tree in ("core", "web", "bot", "scripts", "deploy"):
+            for path in sorted((ROOT / tree).rglob("*.py")):
+                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                    if isinstance(node, ast.Constant) and node.value in COPY_MODE_CONDITIONS:
+                        emitted.add((str(path.relative_to(ROOT)), node.value))
+        assert emitted == set()
+        assert not COPY_MODE_CONDITIONS & set(REGISTRY)
+        assert not COPY_MODE_CONDITIONS & set(HUMAN_CHECK_NAMES)
+        assert not [p for p, _ in REMEDIATION if p.startswith("ch_gold")]

@@ -1729,6 +1729,30 @@ DIGEST_MAX_AGE_HOURS = {
 DIGEST_RESTATE_AFTER = timedelta(days=7)
 
 
+def blindness_names() -> FrozenSet[str]:
+    """The findings that say a check could not look this run — each one makes
+    its run hold conditions it could not re-examine (the `*unverified*`
+    functions read them). The digest treats them as news every morning they
+    stand (O10 (c), 2026-11-11): a known problem may wait a week to be
+    restated, a check that is not looking may not — the morning it is not
+    mentioned reads as the morning nothing was wrong.
+
+    Read off the modules that file them, not listed here, except the scan's
+    own two, which it files by literal. `tests/unit/test_blind_integrity_runs.py`
+    walks every hold function in `core/` and fails on a name one of them
+    reacts to that this set lacks.
+    """
+    from core import ch_history, ch_silver, pg_chain_invariants, pg_warehouse_dq
+
+    return frozenset({
+        "inventory_continuity_unwatched", "sync_watermarks_unwatched",
+        *pg_warehouse_dq.UNWATCHED_NAMES.values(), pg_warehouse_dq.WHOLE_UNWATCHED,
+        pg_chain_invariants.UNWATCHED,
+        ch_silver.GOLD_UNWATCHED,
+        ch_history.HISTORY_UNREACHABLE,
+    })
+
+
 @dataclass
 class DigestSection:
     """One layer's contribution to the daily digest."""
@@ -1822,6 +1846,7 @@ def build_digest(
     body: List[str] = []
     news = False           # something a reader does not already know
     standing = False       # a finding worth restating on the weekly beat
+    blindness = blindness_names()
 
     for s in sorted(sections, key=lambda x: x.layer):
         if s.run is None:
@@ -1847,7 +1872,9 @@ def build_digest(
                 note = _delta_note(i["check_name"], int(i["count"]), s.previous_issues)
                 if i.get("severity") != "INFO":
                     standing = True
-                    if note != "=":
+                    # A check that could not look is news every morning it
+                    # stands, unchanged or not (O10 (c)).
+                    if note != "=" or i["check_name"] in blindness:
                         news = True
                 # Одна строка на находку, человеческим именем и с дельтой.
                 # 200-символьные описания владелец назвал визуальным шумом —
