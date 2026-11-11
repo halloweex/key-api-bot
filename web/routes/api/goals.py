@@ -1,10 +1,16 @@
 """Revenue goals, smart goals, seasonality, growth, weekly patterns endpoints."""
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from web.routes.auth import require_admin, require_permission
 from core.repositories.goals import GOAL_TABLES_SALES_TYPE
+from bot.config import DEFAULT_TIMEZONE
 from ._deps import limiter, get_store, validate_sales_type, ValidationError
+
+# How far ahead `/goals/smart` may be asked about, from this year (L3-03).
+YEARS_AHEAD = 5
 
 router = APIRouter()
 
@@ -53,7 +59,9 @@ async def get_goal_history(
 async def set_goal(
     request: Request,
     period_type: str = Query(...),
-    amount: float = Query(..., gt=0),
+    # `app.revenue_goals.goal_amount` is NUMERIC(12,2): past it, or inf/NaN,
+    # the write answered 500 (L3-03).
+    amount: float = Query(..., gt=0, le=9_999_999_999.99, allow_inf_nan=False),
     growth_factor: float = Query(1.10, ge=1.0, le=2.0),
     admin: dict = Depends(require_admin),
 ):
@@ -91,7 +99,10 @@ async def reset_goal(
 async def get_smart_goals(
     request: Request,
     sales_type: Optional[str] = Query("retail"),
-    year: Optional[int] = Query(None, ge=2020, le=2030),
+    # The ceiling is judged at request time (`YEARS_AHEAD`): a fixed 2030
+    # would refuse every goal the page asks for from 2031 on, because the
+    # frontend sends the year it shows (L3-03).
+    year: Optional[int] = Query(None, ge=2020, le=2099),
     month: Optional[int] = Query(None, ge=1, le=12),
     _gate=Depends(require_permission("dashboard")),
 ):
@@ -104,6 +115,11 @@ async def get_smart_goals(
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if year is not None:
+        latest = datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).year + YEARS_AHEAD
+        if year > latest:
+            raise HTTPException(status_code=400,
+                                detail=f"year: Must be at most {latest}")
 
     store = await get_store()
     return await store.get_smart_goals(sales_type, year=year, month=month)

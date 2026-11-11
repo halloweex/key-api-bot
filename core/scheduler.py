@@ -23,7 +23,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
@@ -92,9 +92,11 @@ SEASONALITY_SCHEDULE = {"day_of_week": "mon", "hour": 4, "minute": 0}
 # A CronTrigger computes its next fire from the moment of registration, so a
 # process that starts at 02:00:51 for a job due at 02:00:00 sets the next run a
 # full day out. The job is not late — it does not exist when it is due, and
-# misfire_grace_time has nothing to forgive. That is not a rare event: the host
-# cron `0 2 * * 0 weekly_compact.sh` stops the containers at exactly 02:00 UTC
-# every Sunday, and any deploy landing on a cron instant does the same.
+# misfire_grace_time has nothing to forgive. It was not a rare event while the
+# host cron `0 2 * * 0 weekly_compact.sh` stopped the containers at exactly
+# 02:00 UTC every Sunday (its line was retired on 2026-10-16 and its script
+# deleted in step 14's S14-18), and any deploy or restart landing on a cron
+# instant still does the same.
 #
 # The delay keeps the catch-up out of the startup rush (initial sync, model
 # training, first warehouse refresh) and staggers the two checks.
@@ -143,6 +145,72 @@ def _writes_layer(layer: str) -> bool:
     except Exception as e:  # noqa: BLE001 — the job's own layer still decides
         logger.warning(f"Catch-up: cannot tell whether {layer} is written: {e}")
     return False
+
+
+# The page conditions a reconciliation arm's CRITICAL discrepancies raise, one
+# per (layer, class). A page made only of discrepancies used to carry
+# `conditions=[]`: the Gate journalled no series and kept no delivered entry
+# for it, so the clean run after it announced nothing resolved, and the next
+# CRITICAL morning was a new incident with no history (L4-01). Registered in
+# `core.alerting.REGISTRY`; held by `_resolve_dq_layer` while they stand.
+RECON_CONDITION_PREFIX = {
+    "reconciliation_pg": "recon_pg",
+    "reconciliation_ch": "recon_ch",
+}
+
+
+def discrepancy_conditions(layer: str, discrepancies) -> List[str]:
+    """`recon_pg:status_drift` and its kin: one name per CRITICAL class the
+    run found, for the layers that compare against KeyCRM; [] elsewhere."""
+    from core.data_quality import Severity
+
+    prefix = RECON_CONDITION_PREFIX.get(layer)
+    if prefix is None:
+        return []
+    return sorted({
+        f"{prefix}:{d.diff_class.value.lower()}" for d in discrepancies
+        if d.severity == Severity.CRITICAL
+    })
+
+
+# How long a derivation waits for `PG_LAYER_LOCK` (L2-11). The derivation runs
+# under `_heavy_job_lock`, and the lock's other holders — the hourly ClickHouse
+# ship and the daily ClickHouse read-back — hold it across HTTP round trips of
+# up to `ch_common.TIMEOUT_S` each. Unbounded, a slow ClickHouse held the heavy
+# lock with it, and the minute sync, which waits for the heavy lock, stopped
+# taking orders. Past this the tick gives up, the signal stays owed, and the
+# next tick asks again.
+DERIVE_LOCK_WAIT_S = 60
+
+
+async def _acquire_within(lock: asyncio.Lock, timeout: float) -> bool:
+    """Take `lock` within `timeout` s, or report False holding nothing.
+
+    The acquire runs as a task of its own, shielded: a timeout, or a
+    cancellation of the caller, can then never leave the lock taken by a
+    waiter that gave up — if the task wins after all, it releases."""
+    task = asyncio.ensure_future(lock.acquire())
+
+    def release_if_won(t: "asyncio.Future") -> None:
+        if not t.cancelled() and t.exception() is None:
+            lock.release()
+
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+        return True
+    except asyncio.TimeoutError:
+        if task.done() and not task.cancelled() and task.exception() is None:
+            return True
+        task.cancel()
+        task.add_done_callback(release_if_won)
+        return False
+    except BaseException:
+        if task.done() and not task.cancelled() and task.exception() is None:
+            lock.release()
+        else:
+            task.cancel()
+            task.add_done_callback(release_if_won)
+        raise
 
 
 # Where the digest remembers its last delivery. In `sync_metadata` and not on
@@ -542,11 +610,13 @@ class BackgroundScheduler:
         # KeyCRM doesn't update updated_at when status changes, so we need to
         # periodically re-fetch recent orders to catch status changes (like cancellations)
         #
-        # 05:15 and not 05:00. The host cron `0 2 * * 0 weekly_compact.sh` is
-        # 02:00 UTC = 05:00 Kyiv: it stops the containers at 02:00:01, swaps the
-        # database and starts them at 02:00:39, and the scheduler comes up at
-        # 02:00:51 — past the cron instant, so CronTrigger sets the next fire a
-        # day out. The job is not late; it does not exist when it is due, which
+        # 05:15 and not 05:00. The host cron `0 2 * * 0 weekly_compact.sh` was
+        # 02:00 UTC = 05:00 Kyiv: it stopped the containers at 02:00:01, swapped
+        # the database and started them at 02:00:39, and the scheduler came up
+        # at 02:00:51 — past the cron instant, so CronTrigger set the next fire
+        # a day out (the compaction is retired since 2026-10-16 and deleted in
+        # step 14's S14-18; a deploy on the instant does the same). The job was
+        # not late; it did not exist when it was due, which
         # is why misfire_grace_time cannot help. That mechanism was diagnosed on
         # 2026-08-09 for dq_reconciliation and fixed there with a catch-up. This
         # job sat on the same instant and nobody checked: it ran 35 times in 42
@@ -634,12 +704,13 @@ class BackgroundScheduler:
         # Classifies discrepancies, persists to data_quality_runs, alerts
         # admin on CRITICAL severity.
         #
-        # 05:00 Kyiv is FORBIDDEN — it is 02:00 UTC, and the host cron
-        # `0 2 * * 0 weekly_compact.sh` stops both containers at that exact
+        # 05:00 Kyiv was FORBIDDEN — it is 02:00 UTC, and the host cron
+        # `0 2 * * 0 weekly_compact.sh` stopped both containers at that exact
         # instant every Sunday. The scheduler came back at 02:00:51, after the
         # cron instant, so CronTrigger set the next fire a day out and the run
-        # was lost. Not late — absent, which no misfire grace can forgive.
-        # The compact takes ~85 s; half an hour of clearance is plenty.
+        # was lost. Not late — absent, which no misfire grace can forgive. The
+        # compaction is retired (2026-10-16) and deleted (S14-18); the lesson
+        # stands for any restart on a cron instant, and 05:30 stays.
         self._add_job(
             job_id="dq_reconciliation",
             name="DQ: Reconciliation",
@@ -759,8 +830,8 @@ class BackgroundScheduler:
         # the six days that week has already been delivered. A weekly
         # CronTrigger would be the obvious thing and the wrong one: it computes
         # its next fire from registration, so a container that was not alive at
-        # its Monday instant — the Sunday compact stops both, and so does any
-        # deploy — pushes the next run a full week out and the week is never
+        # its Monday instant — any deploy or restart, as the Sunday compaction
+        # did until it was retired — pushes the next run a full week out and the week is never
         # reported at all. A daily tick against a ledger turns that into a
         # Tuesday delivery. 09:30 is after the DQ digest at 09:00, so a broken
         # warehouse is heard about before its numbers are read.
@@ -1388,6 +1459,10 @@ class BackgroundScheduler:
         derivation's verdict.
         """
         result = await self._derive_and_journal_pg_layers(pool, trigger)
+        if result.get("skipped"):
+            # The layer lock was busy: the parse would wait for the same lock,
+            # up to `pg_utm_parse.LOCK_WAIT_S`, still under the heavy lock.
+            return result
         result["order_utm"] = await self._parse_order_utm_in_postgres(pool)
         return result
 
@@ -1435,6 +1510,16 @@ class BackgroundScheduler:
                         PROFILE_TABLE: PROFILE_TABLE,
                         "validation": derivation.RUNS_TABLE}
 
+        if not await _acquire_within(PG_LAYER_LOCK, DERIVE_LOCK_WAIT_S):
+            # Not a failure: nothing was read, nothing journalled, and the
+            # signal stays owed for the next tick. Returned under the heavy
+            # lock's `async with`, which releases it (L2-11).
+            logger.warning(
+                "Postgres derivation skipped: PG_LAYER_LOCK was not free within "
+                "%ss (the ClickHouse ship or read-back holds it); the rebuild "
+                "stays owed", DERIVE_LOCK_WAIT_S)
+            return {"skipped": True, "reason": "layer_lock_busy", "trigger": trigger}
+
         started = datetime.now(timezone.utc)
         counts: Dict[str, Optional[int]] = {}
         stage = "signal"
@@ -1442,7 +1527,7 @@ class BackgroundScheduler:
         BackgroundScheduler._pg_derive_ran = True
         BackgroundScheduler._pg_derive_started = started
         try:
-            async with PG_LAYER_LOCK:
+            try:
                 async with pool.acquire() as conn:
                     seen, _built, _at = await derivation.read_owed(conn)
                 stage = SILVER_TABLE
@@ -1470,6 +1555,8 @@ class BackgroundScheduler:
                         validation=validation,
                     )
                     await derivation.clear_tail_failures(conn)
+            finally:
+                PG_LAYER_LOCK.release()
         except Exception as e:
             logger.error("Postgres derivation failed at %s: %s", stage, e, exc_info=True)
             if stage in failure_rows:
@@ -1539,6 +1626,7 @@ class BackgroundScheduler:
     async def _resolve_dq_layer(
         self, layer: str, issues, error_message: "Optional[str]",
         unverified: "Sequence[str]" = (),
+        discrepancies: "Sequence[Any]" = (),
     ) -> None:
         """Announce the layer's cleared page-conditions after a run.
 
@@ -1553,6 +1641,9 @@ class BackgroundScheduler:
         it raised, or said it was not watching. They are held as still firing:
         unknown, not cleared, for the same reason a failed run resolves nothing.
         Everything the run did verify still resolves.
+
+        `discrepancies` are a reconciliation arm's: each CRITICAL class still
+        found holds its `recon_*` condition (`discrepancy_conditions`).
         """
         if error_message:
             return
@@ -1563,7 +1654,7 @@ class BackgroundScheduler:
             still = [
                 i.check_name for i in issues
                 if i.severity == Severity.CRITICAL
-            ] + list(unverified)
+            ] + list(unverified) + discrepancy_conditions(layer, discrepancies)
             await resolve_group(f"dq:{layer}", still_firing=still)
         except Exception as e:
             logger.warning(f"DQ resolve for {layer} failed: {e}")
@@ -1595,7 +1686,8 @@ class BackgroundScheduler:
             # this system has produced end in "wait for the next run and see
             # whether the same ids come back", and the next run is hours away.
             # `buttons_for` drops it silently where the layer is not one the
-            # action declares, so the two reconciliation siblings carry none.
+            # action declares; both reconciliation layers are declared since
+            # L4-07, and re-run the 05:30 job.
             return await raise_alert(
                 message, conditions=list(conditions), bucket=bucket,
                 group=f"dq:{layer}", evidence=evidence,
@@ -2358,8 +2450,8 @@ class BackgroundScheduler:
                     f"{icon} <b>Disk: {alert.disk_pct_used:.0f}% used, "
                     f"{alert.disk_free_gb:.0f} GB free</b>\n"
                     f"{alert.reason}\n"
-                    "→ du -xd1 data; du -sx /var /opt; docker system df. "
-                    "Never trigger the compact — it stops the containers"
+                    # The compaction this once warned off is deleted (S14-18).
+                    "→ du -xd1 data; du -sx /var /opt; docker system df"
                 )
                 # The three-line message names one mover; this carries the
                 # whole group table, so the reader can see that everything
@@ -2452,7 +2544,20 @@ class BackgroundScheduler:
                         "Postgres dump, which carries backfilled_at with it."
                     ),
                 ))
-                return {"issues": issues, "discrepancies": [], "error": None}
+                # Gated, not a verdict: nothing was compared with KeyCRM, so
+                # the run is written as one that did not run — the ClickHouse
+                # arm's stale gate's form. Written as a success, it reset the
+                # layer's age every morning the backfill stayed missing, and
+                # the canary never paged a Postgres compared with nothing
+                # (L4-05).
+                return {
+                    "issues": issues, "discrepancies": [],
+                    "error": (
+                        "mirror_backfill_pending: bronze.orders has no "
+                        "backfilled_at, so nothing was compared with KeyCRM — "
+                        "read meta.mirror_state 'bronze.orders'"
+                    ),
+                }
 
             pg_orders = await postgres_orders_in_window(
                 pool, window_start, window_end,
@@ -2495,11 +2600,10 @@ class BackgroundScheduler:
         DuckDB one. It is also the number that closes step 05, so it deserves
         to be readable on its own.
 
-        **No repair path, deliberately.** The DuckDB layer re-fetches orders it
-        is missing, because a delta sync keyed on `updated_at` can never reach
-        an order it does not hold. Postgres has a different answer to the same
-        problem — the backfill — and re-fetching from KeyCRM here would repair
-        the wrong store.
+        **No repair here.** The job repairs after both arms have persisted
+        (`_run_dq_reconciliation`, step 3), from this arm's discrepancies
+        alone. Until step 14's S14-12 the DuckDB layer was the one that
+        re-fetched; the history is in `.claude/CLAUDE.md`.
         """
         from datetime import datetime, timezone
         from core.data_quality import (
@@ -2546,11 +2650,13 @@ class BackgroundScheduler:
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
                 conditions=[i.check_name for i in issues
-                                if i.severity == Severity.CRITICAL],
+                                if i.severity == Severity.CRITICAL]
+                + discrepancy_conditions(layer, discrepancies),
                 evidence=evidence_for_agent(layer, issues, discrepancies,
                                             run_id=run_id),
             )
-        await self._resolve_dq_layer(layer, issues, error_message)
+        await self._resolve_dq_layer(layer, issues, error_message,
+                                     discrepancies=discrepancies)
 
     async def _reconcile_clickhouse(
         self, kc_orders, *, window_start, window_end, as_of, inflight_ids,
@@ -2604,19 +2710,24 @@ class BackgroundScheduler:
 
             pool = await get_pool()
 
-            # The gate: a copy that never shipped, or shipped hours ago, must
-            # not be reconciled against the source — the verdict would measure
-            # the ship's lag and call it a lie. Three hours is the hourly
-            # cadence plus grace.
+            # The gate: a copy that never shipped, or shipped before the
+            # snapshot's orders could have reached it, must not be reconciled
+            # against the source — the verdict would measure the ship's lag
+            # and call it a lie. The copy holds every order KeyCRM last touched
+            # before the watermark only if it shipped after the watermark plus
+            # Silver's derivation floor (bronze → silver.orders); the inflight
+            # exclusion covers the rest. Three hours from now was the gate
+            # until L2-03: a copy whose last ship was 2 h 40 min ago passed it
+            # and an order updated 2 h 20 min ago was filed MISSING_IN_DK,
+            # CRITICAL.
             watermarks = await fetch_watermarks(pool)
             silver_state = watermarks.get("clickhouse.silver_orders") or {}
             last_ok = silver_state.get("last_ok_at")
             from datetime import datetime, timedelta, timezone
+            from core.pg_warehouse_dq import floor_seconds
 
-            stale = (
-                last_ok is None
-                or (datetime.now(timezone.utc) - last_ok) > timedelta(hours=3)
-            )
+            needed = as_of + timedelta(seconds=floor_seconds())
+            stale = last_ok is None or last_ok < needed
             if stale:
                 # Gated, not blamed — and not a verdict either. The run
                 # compared nothing against KeyCRM, so it is written the way
@@ -2634,8 +2745,9 @@ class BackgroundScheduler:
                     description=(
                         "ClickHouse silver has not shipped recently enough to "
                         "be reconciled against KeyCRM (last_ok_at="
-                        f"{last_ok}); comparing now would measure the ship's "
-                        "lag and call it a lie. The hourly ch_sync is the fix."
+                        f"{last_ok}, needed after {needed.isoformat()}); "
+                        "comparing now would measure the ship's lag and call "
+                        "it a lie. The hourly ch_sync is the fix."
                     ),
                 ))
                 shipped = (
@@ -2647,8 +2759,10 @@ class BackgroundScheduler:
                     "issues": issues, "discrepancies": [],
                     "error": (
                         f"ch_reconcile_pending: the ClickHouse copy {shipped} "
-                        f"(gate 3 h), so nothing was compared with KeyCRM — "
-                        f"read meta.mirror_state 'clickhouse.silver_orders'"
+                        f"(it must have shipped after {needed.isoformat()}, the "
+                        f"watermark plus Silver's derivation floor), so nothing "
+                        f"was compared with KeyCRM — read meta.mirror_state "
+                        f"'clickhouse.silver_orders'"
                     ),
                 }
 
@@ -2733,11 +2847,13 @@ class BackgroundScheduler:
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
                 conditions=[i.check_name for i in issues
-                                if i.severity == Severity.CRITICAL],
+                                if i.severity == Severity.CRITICAL]
+                + discrepancy_conditions(layer, discrepancies),
                 evidence=evidence_for_agent(layer, issues, discrepancies,
                                             run_id=run_id),
             )
-        await self._resolve_dq_layer(layer, issues, error_message)
+        await self._resolve_dq_layer(layer, issues, error_message,
+                                     discrepancies=discrepancies)
 
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
@@ -2746,7 +2862,8 @@ class BackgroundScheduler:
         watermark, and compares that one snapshot against Postgres (layer
         `reconciliation_pg`) and ClickHouse (layer `reconciliation_ch`), each
         persisted and alerted on CRITICAL by its own arm. Then re-fetches by
-        id the orders the Postgres arm found missing (MISSING_IN_DK).
+        id the orders the Postgres arm found missing (MISSING_IN_DK) or held
+        wrong (STATUS_DRIFT, VALUE_MISMATCH), and writes them under force.
 
         Until step 14's S14-12 the snapshot was compared against DuckDB too,
         on layer `reconciliation`; that arm stood down from chain 3's flip
@@ -2816,6 +2933,30 @@ class BackgroundScheduler:
 
             ended_at = datetime.now(timezone.utc)
 
+            # 1b. The fetch (or anything before an arm) raised: no arm has a
+            #     verdict to write, and a morning whose check never ran used to
+            #     leave no row on either layer — only the canary's age, a day
+            #     later, said so (L4-09). A failed run on each layer this
+            #     process writes, the way an arm that raised is written: it
+            #     moves no age, resolves nothing and pages nothing.
+            if error_message:
+                for layer, arm in (("reconciliation_pg", pg_result),
+                                   ("reconciliation_ch", ch_result)):
+                    if arm is not None or not _writes_layer(layer):
+                        continue
+                    try:
+                        await dq_journal.journal_run(
+                            started_at=started_at, ended_at=ended_at,
+                            as_of=as_of,
+                            window_start=window_start, window_end=window_end,
+                            layer=layer, issues=[], discrepancies=[],
+                            api_calls_used=api_calls,
+                            error_message=error_message,
+                        )
+                    except Exception:
+                        logger.exception("DQ reconciliation: the failed run "
+                                         "on %s was not journalled", layer)
+
             # 2. Each arm's verdict, on its own layer so it gets its own age
             #    and its own digest section, and neither may disturb the other
             #    or the repair below.
@@ -2842,9 +2983,21 @@ class BackgroundScheduler:
             #    The orders we do not hold are the ones Postgres lacks: its arm
             #    classified the snapshot with Postgres on the store's side, so
             #    MISSING_IN_DK there means missing from the store the chain
-            #    writes. Additive only — MISSING_IN_KC is deliberately not
+            #    writes. Then the orders we hold wrong — STATUS_DRIFT and
+            #    VALUE_MISMATCH: KeyCRM does not bump `updated_at` on a status
+            #    change, so an order created and ordered more than 30 days ago
+            #    is reached by neither the incremental sync, nor the 05:15
+            #    refresh (created in its window, or backdated into it), nor the
+            #    weekly full sync (unforced, it skips it as unchanged), and was
+            #    filed CRITICAL every morning with nothing to fix it (L1-04).
+            #    `repair_orders` writes by id under force, so the fetch puts
+            #    KeyCRM's state over ours. The missing come first: the run is
+            #    bounded by `repair_orders` and its remainder is reported.
+            #    Additive only — MISSING_IN_KC is deliberately not
             #    touched, because deleting on the strength of one API reading
-            #    is how you turn a fetch glitch into data loss.
+            #    is how you turn a fetch glitch into data loss. Nothing is
+            #    taken from the ClickHouse arm: it compares a copy, and a copy
+            #    that differs is ClickHouse's defect, not an order to re-fetch.
             #    Half-written orders used to be repaired here too. They are
             #    found by scanning our own tables, owe nothing to the comparison
             #    or its 90-day window, and cost one API call each — so they hung
@@ -2854,12 +3007,16 @@ class BackgroundScheduler:
             repair = None
             if not error_message:
                 source = (pg_result or {}).get("discrepancies") or []
-                repairable = sorted({
-                    oid
-                    for d in source
-                    if d.diff_class == DiscrepancyClass.MISSING_IN_DK
-                    for oid in d.order_ids
-                })
+
+                def ids_of(*classes) -> list:
+                    return sorted({oid for d in source if d.diff_class in classes
+                                   for oid in d.order_ids})
+
+                missing = ids_of(DiscrepancyClass.MISSING_IN_DK)
+                drifted = [oid for oid in ids_of(DiscrepancyClass.STATUS_DRIFT,
+                                                 DiscrepancyClass.VALUE_MISMATCH)
+                           if oid not in set(missing)]
+                repairable = missing + drifted
 
                 if repairable:
                     try:
@@ -2867,6 +3024,11 @@ class BackgroundScheduler:
                         repair = await sync_service.repair_orders(
                             repairable, lock=self._heavy_job_lock,
                         )
+                        if repair.get("remaining"):
+                            logger.warning(
+                                "DQ repair: %d order(s) left for the next run "
+                                "(%d missing, %d drifted found)",
+                                repair["remaining"], len(missing), len(drifted))
                     except Exception as e:
                         logger.exception(f"DQ repair failed: {e}")
 
@@ -2915,18 +3077,34 @@ class BackgroundScheduler:
                 candidates, lock=self._heavy_job_lock,
             )
 
-            # Which ones KeyCRM served without line items anyway.
-            still_empty = await store.halfwritten_among(candidates)
-            recorded = await store.record_backfill_misses({
-                oid: "re-fetched by id; KeyCRM served no line items"
-                for oid in still_empty
-            })
+            # Which ones KeyCRM served without line items anyway — of those
+            # it served at all. A fetch that failed (a 503, an open breaker) or
+            # a fetch Postgres held a newer write of is not KeyCRM saying "no
+            # line items", and ledgered as one it hid a real order from this
+            # job for 30 days (L1-07).
+            failures = result.get("failures", {})
+            not_served = set(failures) | set(
+                result.get("rewritten_since_fetch", ()))
+            empty_now = await store.halfwritten_among(candidates)
+            still_empty = [oid for oid in empty_now if oid not in not_served]
+            # An order KeyCRM did serve, and Postgres refused (a NUL in a line's
+            # name): asked again it is refused again, so left out of the ledger
+            # it was offered every two hours for ever, one KeyCRM call and one
+            # ERROR each time. Ledgered under the refusal, as the gap backfill
+            # does, it comes back after the misses' retry window like any other.
+            refused = {oid: str(failures[oid]) for oid in empty_now
+                       if str(failures.get(oid, "")).startswith("Postgres refused: ")}
+            misses = {oid: "re-fetched by id; KeyCRM served no line items"
+                      for oid in still_empty}
+            misses.update(refused)
+            await store.record_backfill_misses(misses)
 
             out = {
                 "candidates": len(candidates),
                 "repaired": result.get("repaired", 0),
                 "failed": result.get("failed", 0),
-                "still_empty": recorded,
+                "still_empty": len(still_empty),
+                "refused": len(refused),
             }
             logger.info(f"Half-written repair: {out}")
             return out
@@ -3380,10 +3558,15 @@ class BackgroundScheduler:
             result = await sync_service.repair_orders(gaps, lock=self._heavy_job_lock)
 
             # An id KeyCRM does not have is a hole that will never close.
-            # Recording it is what lets the job finish rather than loop.
+            # Recording it is what lets the job finish rather than loop. So is
+            # an order Postgres refuses (a NUL in its comment): asked again it
+            # is refused again, and the scan offered the same 200 ids every run
+            # with `failed` 0 (L1-10). Ledgered as refused, it comes back after
+            # the misses' retry window like any other.
             permanent = {
                 oid: reason for oid, reason in result.get("failures", {}).items()
                 if "not found" in str(reason).lower()
+                or str(reason).startswith("Postgres refused: ")
             }
             recorded = await store.record_backfill_misses(permanent)
 

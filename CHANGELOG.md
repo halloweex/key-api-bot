@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.333
+
+- fix(sync): a status refresh KeyCRM did not answer is a failed run (A10 follow-up)
+- fix(ga4): at most six GA4 requests in flight, and no lock outlives its users (A20 follow-up)
+- fix(repairs): a half-written order Postgres refuses is ledgered as refused (A15 follow-up)
+- fix(orders): a window the parse could read none of fails the order step (AR-02)
+- fix(inventory): refuse only what Postgres refuses; a float quantity is written (AR-01)
+- test(keycrm): the still-truncated case cannot be split by luck (A16)
+- chore(types): import Sequence in the scheduler; the baseline shrinks by 7
+- docs(scheduler): the weekly compaction is history; the disk page stops warning off it (A24)
+- fix(customers): a repeat customer's lifespan is counted in Kyiv days (A22 part, L2-10)
+- fix(health): the detailed and DQ health routes publish a failure's class, not its text (A21, L3-06)
+- fix(ga4): a cached funnel answer never waits behind another period's fetch (A20, L3-05)
+- fix(dq): reconciliation pages get their recheck button; the DQ body shows the layers written (A19: L4-07, L4-06)
+- fix(soak): D1, D3 and the UTM gap stop excusing two retired windows (A18, L4-10)
+- fix(clickhouse): a stalled archive copy is a finding; Gold's failure is Gold's; the codec round-trips (A17: L2-02, L2-12)
+- fix(keycrm): a listing stopped at its page cap says so; the order window splits (A16, L1-08)
+- fix(repairs): outages are not "served empty", refusals are ledgered, stale fetches are not written (A15: L1-07, L1-10, L1-12)
+- fix(web): oversized ids, impossible dates and amounts are 400/422, not 500 (A14: L3-01, L3-02, L3-03, L3-10)
+- fix(derivation): wait for the layer lock a bounded time, under the heavy lock (A13, L2-11)
+- fix(search): a Meilisearch that does not answer is a counted 503, not "nothing found" (A12, L3-04)
+- fix(canary): a probe that read nothing announces nothing resolved (A11, L4-02)
+- fix(sync): KeyCRM's failures are KeyCRM's, and the products step contains them (A10, L1-02)
+- fix(orders): a healthy order step clears the failure it recorded (A9, L4-03)
+- fix(reconciliation): four defects of the 05:30 job (A8: L4-01, L4-05, L4-09, L2-03)
+- fix(sms): the roster CSV never hands a spreadsheet a formula a customer typed (A7, L3-07)
+- fix(cohorts): a retail cohort's M0 revenue counts its retail orders only (A6, L2-04)
+- fix(inventory): one bad stock row costs that row; a failed fetch is a failure (A4)
+- fix(reconciliation): re-fetch orders Postgres holds wrong, not only those it lacks (A3, L1-04)
+- fix(clickhouse): restore the None-safe key on missing and extra (A2)
+- fix(clickhouse): compare two engines' Gold when a day differs in both grains (A2, L2-01)
+- fix(orders): one unparseable KeyCRM order is refused by id, not the page (A1, L1-01)
+
+
+## 3.0.332
+
+- docs: the archive's verdict says what the ids-diff ship already says
+- WIP: B3 — reflow read_owed's docstring
+- WIP: B4 — the disk watchdog's compaction comments, as history
+- WIP: B3 — docstrings that described DuckDB or a reader that does not exist
+- WIP: B2 — CLAUDE.md: four sales types, source 5 in revenue, the exhibition branch first
+- WIP: B1 — CLAUDE.md: the two kinds of backfill miss, and the archive's ids-diff
+
+
 ## 3.0.331
 
 - The forecast badge is what the trend's bars add up to

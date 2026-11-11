@@ -800,8 +800,10 @@ _INSIGHTS_CLV_SQL = """
         SELECT s.buyer_id,
                COUNT(DISTINCT s.id) AS order_count,
                SUM(s.grand_total)   AS total_spent,
-               CAST(MAX(s.ordered_at) AS DATE)
-                 - CAST(MIN(s.ordered_at) AS DATE) AS lifespan_days
+               -- Silver's Kyiv dates (L2-10). `CAST(ordered_at AS DATE)` took
+               -- the session's zone, UTC in production's Postgres: an order at
+               -- 00:30 Kyiv was the day before, and a lifespan a day off.
+               MAX(s.order_date) - MIN(s.order_date) AS lifespan_days
         FROM {silver_orders} s
         WHERE s.buyer_id IS NOT NULL
           AND NOT s.is_return

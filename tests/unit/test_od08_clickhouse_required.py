@@ -340,8 +340,9 @@ class TestABlindArchiveRunResolvesNothingEither:
         from core import ch_history
 
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
+        # `ch_history_stalled` beside the buckets since L2-02 (A17).
         assert ch_history.history_unverified_conditions([], compared=False) == [
-            "ch_history_buckets"]
+            "ch_history_buckets", "ch_history_stalled"]
         assert ch_history.history_unverified_conditions([], compared=True) == []
 
     @pytest.mark.asyncio
@@ -358,7 +359,7 @@ class TestABlindArchiveRunResolvesNothingEither:
         issues = await ch_history.reconcile_ch_history()
         assert _names(issues) == [ch_history.HISTORY_UNREACHABLE]
         assert ch_history.history_unverified_conditions(issues, compared=True) == [
-            "ch_history_buckets"]
+            "ch_history_buckets", "ch_history_stalled"]
 
     def test_the_held_conditions_are_every_critical_the_archive_files(self):
         """Derived from what `reconcile_ch_history` emits, so a CRITICAL
@@ -367,7 +368,9 @@ class TestABlindArchiveRunResolvesNothingEither:
         import inspect
         from core import ch_history
 
-        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history))
+        # And `_stall`, which it calls for `ch_history_stalled` (L2-02).
+        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history)
+                         + "\n" + inspect.getsource(ch_history._stall))
         critical = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -376,7 +379,7 @@ class TestABlindArchiveRunResolvesNothingEither:
                 if (isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute)
                         and sev.attr == "CRITICAL"):
                     critical.add(name.value)
-        assert critical == {"ch_history_buckets"}
+        assert critical == {"ch_history_buckets", "ch_history_stalled"}
         assert set(ch_history.HISTORY_WATCH_CONDITIONS) == critical
 
 
@@ -405,9 +408,10 @@ async def _arm(copy_age, *, ch_down=True):
                new=AsyncMock(return_value=set())), \
          patch("core.reconciliation_io.clickhouse_orders_in_window", new=query):
         scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+        # The job's watermark, two hours back (`_run_dq_reconciliation`).
         result = await scheduler._reconcile_clickhouse(
             {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
-            as_of=now, inflight_ids=set())
+            as_of=now - timedelta(hours=2), inflight_ids=set())
     return result, query.await_count
 
 
@@ -470,8 +474,9 @@ class TestADeadClickHouseKeepsPaging:
 
     @pytest.mark.asyncio
     async def test_a_fresh_copy_that_compares_is_still_a_success(self):
-        """The gate did not become a blanket failure: a copy under 3 h is
-        compared, and a clean comparison carries no error."""
+        """The gate did not become a blanket failure: a copy shipped after
+        the job's watermark (plus Silver's floor) is compared, and a clean
+        comparison carries no error."""
         from core.scheduler import BackgroundScheduler
 
         now = datetime.now(timezone.utc)
@@ -488,7 +493,7 @@ class TestADeadClickHouseKeepsPaging:
             scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
             result = await scheduler._reconcile_clickhouse(
                 {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
-                as_of=now, inflight_ids=set())
+                as_of=now - timedelta(hours=2), inflight_ids=set())
         assert result == {"issues": [], "discrepancies": [], "error": None}
 
 

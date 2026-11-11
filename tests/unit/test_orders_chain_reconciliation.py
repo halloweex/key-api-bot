@@ -68,15 +68,19 @@ class TestTheJob:
         sched._persist_postgres_reconciliation.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_only_missing_in_the_store_is_repaired(self):
+    async def test_a_ghost_is_never_repaired_and_a_drift_is(self):
         """Additive only: an order KeyCRM no longer returns is never deleted
-        on the strength of one reading, and a status drift is the sync's."""
+        on the strength of one reading. A status drift is re-fetched after
+        the missing (A3, L1-04): no sync reaches an order created and ordered
+        more than 30 days ago whose status moved without `updated_at`.
+        (`tests/integration/test_recon_repairs_status_drift.py` proves the
+        write.)"""
         pg = {"issues": [], "error": None, "discrepancies": [
             _missing(7, diff_class=DiscrepancyClass.MISSING_IN_KC),
             _missing(8, diff_class=DiscrepancyClass.STATUS_DRIFT),
             _missing(9)]}
         _sched, sync, _result = await _run(pg_result=pg)
-        assert sync.repair_orders.await_args.args[0] == [9]
+        assert sync.repair_orders.await_args.args[0] == [9, 8]
 
     @pytest.mark.asyncio
     async def test_nothing_missing_repairs_nothing(self):

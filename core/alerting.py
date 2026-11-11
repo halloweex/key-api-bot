@@ -107,6 +107,19 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "dq_missing:reconciliation_ch": _c("the layer reports freshness again"),
     "dq_never:reconciliation_ch": _c("the layer's first successful run"),
     "dq_stale:reconciliation_ch": _c("a successful run inside the age limit"),
+    # The 05:30 job's CRITICAL discrepancies, one condition per (arm, class)
+    # (`core.scheduler.discrepancy_conditions`). Until L4-01 such a page
+    # carried no condition at all, so nothing ever announced it resolved.
+    "recon_pg:missing_in_dk": _c("a reconciliation run with no CRITICAL missing order"),
+    "recon_pg:missing_in_kc": _c("a reconciliation run with no CRITICAL ghost order"),
+    "recon_pg:value_mismatch": _c("a reconciliation run with no CRITICAL value mismatch"),
+    "recon_pg:status_drift": _c("a reconciliation run with no status drift"),
+    "recon_pg:total_drift": _c("a reconciliation run with no CRITICAL total drift"),
+    "recon_ch:missing_in_dk": _c("a reconciliation run with no CRITICAL missing order"),
+    "recon_ch:missing_in_kc": _c("a reconciliation run with no CRITICAL ghost order"),
+    "recon_ch:value_mismatch": _c("a reconciliation run with no CRITICAL value mismatch"),
+    "recon_ch:status_drift": _c("a reconciliation run with no status drift"),
+    "recon_ch:total_drift": _c("a reconciliation run with no CRITICAL total drift"),
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
     # `derivation_mode_invalid` (a KS_PG_DERIVE web did not understand) went
     # in step 14's S14-15 with the variable; the name is not reused (rule 15).
@@ -403,6 +416,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_engines_gold_mismatch": _c("the engines' aggregations agree again"),
     "ch_history_unreachable": _c("ClickHouse answers again"),
     "ch_history_buckets": _c("a human repairs the archive copy"),
+    # The archive copy stopped receiving (L2-02): below its own MAX(id) the
+    # buckets agree, so only Postgres' side of the ship can say so.
+    "ch_history_stalled": _c("the archive ships within 3 h and nothing waits past it"),
     # OD-08 (a): the one independent re-aggregation of Gold did not run —
     # KS_CH_URL unset, a failed ship or read-back, a raise. WARN while DuckDB's
     # Gold is still compared, CRITICAL once it is not.

@@ -140,8 +140,13 @@ class TestTheWriterUsesIt:
 
         from core import pg_inventory_write
 
-        src = inspect.getsource(pg_inventory_write.upsert_stocks)
-        tree = ast.parse(src.lstrip())
+        # The writer and the helper it writes each batch through (since a
+        # refused row costs only itself, L1-06): the plan moved there whole.
+        src = "\n".join(
+            inspect.getsource(fn).lstrip() for fn in (
+                pg_inventory_write.upsert_stocks,
+                pg_inventory_write._write_stock_rows))
+        tree = ast.parse(src)
         calls = {
             n.func.id for n in ast.walk(tree)
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)

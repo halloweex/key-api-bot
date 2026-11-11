@@ -10,9 +10,13 @@
 --
 -- WHAT THE VERDICTS MEAN
 -- A gap is judged only above 62 min — the heartbeat plus a tick.
--- - PASS: ended by a `first_tick` run within 95 min (a web start, including
---   the Sunday compaction's), or overlapping a named heavy-lock window within
---   90 min (training, the weekly full sync, the backup, the status refresh).
+-- - PASS: ended by a `first_tick` run within 95 min (a web start), or
+--   overlapping a named heavy-lock window within 90 min (training, the
+--   weekly full sync, the status refresh). The DuckDB backup (04:30 Kyiv) and
+--   the host's Sunday compaction (02:00 UTC) excused a gap here until both
+--   were retired — `db_backup` is not registered since step 14's S14-00, and
+--   the compaction's cron line went on 2026-10-16 and its script in S14-18 —
+--   so a stall inside either window read UNKNOWN instead of FAIL (L4-10).
 -- - UNKNOWN: an unexplained gap of 95 min or less. A web start whose first run
 --   owed marks is journalled as `signal`, not `first_tick`
 --   (core/pg_derivation.py, `due`), so a restart can look exactly like a stall
@@ -26,9 +30,7 @@ WITH clock AS (
 heavy (name, isodows, starts, ends, tz) AS (
     VALUES ('weekly full sync',     '{7}'::int[],   time '02:00', time '03:00', 'Europe/Kyiv'),
            ('model training',       '{1,4}'::int[], time '03:30', time '04:30', 'Europe/Kyiv'),
-           ('DuckDB backup',        NULL::int[],    time '04:30', time '05:00', 'Europe/Kyiv'),
-           ('order status refresh', NULL::int[],    time '05:15', time '05:45', 'Europe/Kyiv'),
-           ('Sunday compaction',    '{7}'::int[],   time '02:00', time '03:30', 'UTC')
+           ('order status refresh', NULL::int[],    time '05:15', time '05:45', 'Europe/Kyiv')
 ),
 windows AS (
     SELECT h.name,

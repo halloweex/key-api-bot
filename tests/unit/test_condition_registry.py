@@ -181,6 +181,16 @@ def collect_family_keys() -> set:
                         kinds.add(value)
     assert kinds, "webhook rejection kinds moved — update the collector"
     keys |= {f"turbosms:webhook:{k}" for k in kinds}
+
+    # reconciliation: f"{prefix}:{class.value.lower()}" in
+    # `core.scheduler.discrepancy_conditions`, one per arm and class — the
+    # prefixes and the classes imported from what the code reads (L4-01).
+    from core.data_quality import DiscrepancyClass
+    from core.scheduler import RECON_CONDITION_PREFIX
+
+    keys |= {f"{prefix}:{klass.value.lower()}"
+             for prefix in RECON_CONDITION_PREFIX.values()
+             for klass in DiscrepancyClass}
     return keys
 
 

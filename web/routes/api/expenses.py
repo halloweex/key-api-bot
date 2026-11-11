@@ -1,9 +1,11 @@
 """Expense types, expense summary, profit analysis, manual expenses endpoints."""
+import math
+
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
-from core.filters import parse_period
+from core.filters import EARLIEST_DATE, LATEST_DATE, parse_period
 from web.services import dashboard_service
 from web.routes.auth import require_permission
 from ._deps import (
@@ -13,14 +15,39 @@ from ._deps import (
 )
 
 
+# `app.manual_expenses.amount` is NUMERIC(12,2). Past it, or a NaN/inf
+# (`1e400` parses as inf), asyncpg refused the INSERT and the route answered
+# 500 (L3-02).
+MAX_EXPENSE_AMOUNT = 9_999_999_999.99
+
+
 class CreateExpenseRequest(BaseModel):
     expense_date: str = Field(..., pattern=r'^\d{4}-\d{2}-\d{2}$')
-    category: str
-    expense_type: str
-    amount: float = Field(..., gt=0)
-    currency: str = "UAH"
-    note: Optional[str] = None
-    platform: Optional[str] = None
+    category: str = Field(..., max_length=200)
+    expense_type: str = Field(..., max_length=200)
+    amount: float = Field(..., gt=0, le=MAX_EXPENSE_AMOUNT, allow_inf_nan=False)
+    currency: str = Field("UAH", max_length=10)
+    note: Optional[str] = Field(None, max_length=2000)
+    platform: Optional[str] = Field(None, max_length=50)
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _non_finite_as_text(cls, value):
+        # `1e400` and `NaN` arrive from the JSON parser as a float inf/NaN.
+        # Refused as such, the 422 carries the input back and cannot itself be
+        # written as JSON — a 500 again. As text it is refused the same way
+        # (`allow_inf_nan=False`) and the answer renders.
+        if isinstance(value, float) and not math.isfinite(value):
+            return repr(value)
+        return value
+
+    @field_validator("category", "expense_type", "currency", "note", "platform")
+    @classmethod
+    def _no_nul(cls, value: Optional[str]) -> Optional[str]:
+        # Postgres refuses NUL in text; the 500 it caused is a 422 here.
+        if value is not None and "\x00" in value:
+            raise ValueError("Must not contain a NUL character")
+        return value
 
 router = APIRouter()
 
@@ -144,7 +171,18 @@ async def create_expense(
     if body.platform and body.platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"Invalid platform: {body.platform}")
 
-    expense_date = datetime.strptime(body.expense_date, "%Y-%m-%d").date()
+    # The pattern lets 2026-02-30 and 0000-01-01 through, and `strptime` then
+    # raised out of the handler as a 500 (L3-02). The dashboard's window, as
+    # every date parameter here (`core.filters`).
+    try:
+        expense_date = datetime.strptime(body.expense_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail="expense_date: Not a valid date (YYYY-MM-DD)")
+    if not EARLIEST_DATE <= expense_date <= LATEST_DATE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"expense_date: Date must be between {EARLIEST_DATE} and {LATEST_DATE}")
     result = await store.add_expense(
         expense_date=expense_date,
         category=body.category,

@@ -200,7 +200,7 @@ class TestThroughRunCanary:
         result = await _probe(payload)
         assert set(result.failure_keys) == {"mirror_failing:bronze.orders",
                                             "read_refused"}
-        assert canary._what_to_do(result).startswith("Check meta.mirror_state")
+        assert canary._what_to_do(result).startswith("Read meta.mirror_state")
 
     def test_the_lever_is_one_line_of_at_most_150(self):
         lever = dict(canary._ACTIONS)["read_refused"]

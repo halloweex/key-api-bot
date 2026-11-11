@@ -184,13 +184,16 @@ def _run_literal(run_id, layer):
 
 
 # DuckDB's readers on the same journal (integrity, integrity, reconciliation),
-# its session set to Europe/Kyiv, on the base (rule 9).
+# its session set to Europe/Kyiv, on the base (rule 9). The body lost its
+# `reconciliation` block (DuckDB's arm, deleted in S14-12) and gained
+# `reconciliation_ch` when it began to be built from WATCHED_LAYERS (L4-06,
+# A19); every block it keeps is the literal recorded on the base.
+# `tests/integration/test_dq_health_body_layers.py` holds the two arms' diffs.
 DUCKDB_HEALTH = {
     "integrity": {"issues": [_issue_literal()], "last_run": _run_literal(2, "integrity")},
     "mirror_landing": {"issues": [], "last_run": None},
-    "reconciliation": {"diffs": [_diff_literal()],
-                       "last_run": _run_literal(3, "reconciliation")},
     "reconciliation_pg": {"diffs": [], "last_run": None},
+    "reconciliation_ch": {"diffs": [], "last_run": None},
 }
 DUCKDB_SECTIONS = [
     {"layer": "integrity", "run": _run_literal(2, "integrity"),

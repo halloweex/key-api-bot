@@ -6,6 +6,7 @@ Exception Hierarchy:
     ├── KeyCRMConnectionError  - Network/timeout issues (recoverable)
     ├── KeyCRMAPIError         - API returned error response
     └── KeyCRMDataError        - Invalid response structure
+        └── KeyCRMTruncated    - A listing stopped at its page cap, full
 
     ValidationError            - Input validation failed
 """
@@ -68,6 +69,25 @@ class KeyCRMDataError(KeyCRMError):
         super().__init__(message, details)
         self.expected = expected
         self.got = got
+
+
+class KeyCRMTruncated(KeyCRMDataError):
+    """A listing stopped at its page cap with its last page full: there may be
+    more, and KeyCRM was not asked for it (L1-08).
+
+    `paginate` and `fetch_all` used to stop there without saying so. For the
+    order window that meant the watermark moved to the newest order fetched
+    and the oldest were never fetched again. Raised so a caller can split its
+    window, or fail the step and hold its watermark.
+    """
+
+    def __init__(self, endpoint: str, pages: int, page_size: int):
+        super().__init__(
+            f"{endpoint}: {pages} full pages of {page_size}, the cap; the "
+            f"listing may go on past it")
+        self.endpoint = endpoint
+        self.pages = pages
+        self.page_size = page_size
 
 
 class ValidationError(Exception):

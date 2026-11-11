@@ -509,6 +509,14 @@ async def health_check(request: Request):
     }
 
 
+def _class_only(component: str, exc: BaseException) -> str:
+    """What a health route publishes about a failure: the exception's class
+    (L3-06), as `/api/health` does. The text — a driver's or a client's,
+    naming hosts, ports and the database user — goes to the log."""
+    logger.warning("health: %s failed: %s: %s", component, type(exc).__name__, exc)
+    return type(exc).__name__
+
+
 @router.get("/health/detailed")
 @limiter.limit("30/minute")
 async def detailed_health_check(request: Request):
@@ -531,7 +539,7 @@ async def detailed_health_check(request: Request):
             else:
                 components["meilisearch"] = {"status": "unhealthy", "code": response.status_code}
     except Exception as e:
-        components["meilisearch"] = {"status": "unavailable", "error": str(e)}
+        components["meilisearch"] = {"status": "unavailable", "error": _class_only("meilisearch", e)}
 
     # 4. WebSocket connections
     try:
@@ -539,7 +547,7 @@ async def detailed_health_check(request: Request):
         ws_stats = ws_manager.get_stats()
         components["websocket"] = {"status": "active", **ws_stats}
     except Exception as e:
-        components["websocket"] = {"status": "error", "error": str(e)}
+        components["websocket"] = {"status": "error", "error": _class_only("websocket", e)}
 
     # 5. Sync service status
     try:
@@ -551,7 +559,7 @@ async def detailed_health_check(request: Request):
             **sync_stats,
         }
     except Exception as e:
-        components["sync"] = {"status": "error", "error": str(e)}
+        components["sync"] = {"status": "error", "error": _class_only("sync", e)}
 
     # 6. Prediction service
     try:
@@ -562,7 +570,7 @@ async def detailed_health_check(request: Request):
             "model_loaded": pred_service.is_ready,
         }
     except Exception as e:
-        components["prediction"] = {"status": "unavailable", "error": str(e)}
+        components["prediction"] = {"status": "unavailable", "error": _class_only("prediction", e)}
 
     # System metrics
     uptime_seconds = int(time.time() - START_TIME)
@@ -618,7 +626,7 @@ async def get_data_quality_health(request: Request):
         # From Postgres, which writes the journal (chain 9), with no fallback.
         return await dq_journal.health_runs()
     except Exception as e:
-        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        return {"status": "error", "error": _class_only("data-quality", e)}
 
 
 @router.get("/metrics", response_model=MetricsResponse)

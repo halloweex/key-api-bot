@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from core.keycrm import get_async_client
 from core.duckdb_store import get_store, DuckDBStore
-from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError
+from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError, KeyCRMTruncated
 from core.observability import get_logger, correlation_context
 from core.events import (
     events,
@@ -130,6 +130,37 @@ class InventoryStepState:
 # How long the tick waits to stamp `bronze.orders` failing in Postgres, and
 # for `last_sync_orders` out of it.
 ORDERS_FAILURE_RECORD_TIMEOUT_S = 5
+
+# The narrowest window `_fetch_order_window` splits a truncated listing into
+# before it gives up (L1-08): 5 000 orders in an hour is not a shop this size.
+ORDER_WINDOW_MIN_SPAN = timedelta(hours=1)
+
+
+def _window_bound(value: str, *, end_of_day: bool) -> datetime:
+    """A KeyCRM date filter's bound as a datetime. A date alone is widened to
+    the whole day at the end, so a split never asks for less than the window
+    it replaces (a superset is merged away by id; a subset loses orders)."""
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        day = datetime.strptime(value.strip(), "%Y-%m-%d")
+        return day.replace(hour=23, minute=59, second=59) if end_of_day else day
+
+# The step's own statement for the healthy tick after a failure (L4-03). Only
+# a write of an order zeroes `failures_since_ok` (`pg_landing._WATERMARK_OK`),
+# and a healthy tick that finds nothing changed writes nothing — so one failed
+# step left `bronze.orders` failing, and the canary paging
+# `mirror_failing:bronze.orders`, until an order next changed (overnight, hours).
+# `last_ok_at` is not moved: it keeps meaning "the last write", which
+# `mirror_stale` and the soak's S0 judge. `WATERMARK_OK_SQL` is the writers'
+# and stays theirs.
+ORDERS_FAILURE_CLEAR_SQL = """
+UPDATE meta.mirror_state
+   SET failures_since_ok = 0,
+       last_error        = NULL,
+       last_attempted_at = now()
+ WHERE table_name = $1 AND failures_since_ok > 0
+"""
 ORDERS_WATERMARK_TIMEOUT_S = 10
 
 
@@ -298,6 +329,22 @@ class BuyersRefused(ValueError):
     count toward `consecutive_failures`; the age still pages."""
 
 
+class OrdersRefused(ValueError):
+    """The order step's window landed nothing — no order written, none found
+    unchanged, no expense — and the parse refused orders in it (AR-02).
+
+    One payload the parse cannot read is refused by id and the rest of the
+    window lands (L1-01). A window in which nothing could be read is not that:
+    it is KeyCRM changing a field's shape for every order, or a parser defect
+    that shipped, and before L1-01 it failed the step on every tick. Reported
+    as a success it moved `last_sync_orders` past orders nobody wrote and kept
+    `orders_sync_failing` quiet until the 05:30 reconciliation. So the step
+    fails on it: the watermark holds, `consecutive_failures` counts it and
+    `meta.mirror_state` marks `bronze.orders` failing, as the TypeError did.
+    Chain 4's `BuyersRefused` for the same shape; unlike it, counted as a
+    failure, because the order step's canary pages on the count."""
+
+
 def _is_data_error(exc: BaseException) -> bool:
     return any(k.__name__ in _DATA_ERROR_NAMES for k in type(exc).__mro__)
 
@@ -395,6 +442,12 @@ class SyncService:
         # may try again after a failure (a `time.monotonic()` instant).
         self.inventory_step = InventoryStepState()
         self._inventory_retry_at = 0.0
+        # Whether `meta.mirror_state` may still hold an order-step failure:
+        # unknown at a start, so asked once (`_clear_orders_failure`).
+        self._orders_failure_may_stand = True
+        # The KeyCRM error the last offers or stocks fetch ended on, for the
+        # step's published class (`sync_offers` answers None and logs it).
+        self._inventory_keycrm_error: Optional[BaseException] = None
         # Chain 5's managers step, under the chain (`MANAGERS_RETRY_AFTER_S`).
         self.managers_step = ManagersStepState()
         self._managers_retry_at = 0.0
@@ -405,6 +458,8 @@ class SyncService:
         # many orders its last write refused (`UpsertResult.failed`).
         self.orders_step = OrdersStepState()
         self._last_refused = 0
+        # Of those, the ones the parse could not read (`UpsertResult.unparseable`).
+        self._last_unparseable = 0
         # Chain 6's hourly products step off DuckDB — see CATALOGUE_RETRY_AFTER_S.
         self.catalogue_step = InventoryStepState()
         self._catalogue_retry_at = 0.0
@@ -500,27 +555,25 @@ class SyncService:
 
         # Fetch by created_between
         logger.debug(f"Fetching orders created between {start_date} and {end_date}")
-        params = {
-            "include": include,
-            "filter[created_between]": f"{start_date}, {end_date}",
-        }
-        async for batch in client.paginate("order", params=params, page_size=50):
-            for order in batch:
-                orders_by_id[order["id"]] = order
+        await self._fetch_order_window(
+            client, "filter[created_between]", start_date, end_date, include,
+            orders_by_id)
 
         created_count = len(orders_by_id)
 
         # Also fetch by updated_between to catch status changes
         if include_updated:
             logger.debug(f"Fetching orders updated between {start_date} and {end_date}")
-            params = {
-                "include": include,
-                "filter[updated_between]": f"{start_date}, {end_date}",
-            }
             try:
-                async for batch in client.paginate("order", params=params, page_size=50):
-                    for order in batch:
-                        orders_by_id[order["id"]] = order  # Overwrites with latest data
+                # Overwrites with latest data
+                await self._fetch_order_window(
+                    client, "filter[updated_between]", start_date, end_date, include,
+                    orders_by_id)
+            except KeyCRMTruncated:
+                # Not "the filter is unsupported": the window holds more than a
+                # listing can carry even split to an hour, and the step must
+                # fail rather than move its watermark past what it never saw.
+                raise
             except KeyCRMError as e:
                 # filter[updated_between] may not be supported - fall back gracefully
                 logger.warning(f"filter[updated_between] failed: {e}")
@@ -530,6 +583,39 @@ class SyncService:
             logger.info(f"Fetched {created_count} created + {updated_count} updated orders")
 
         return list(orders_by_id.values())
+
+    async def _fetch_order_window(
+        self, client, key: str, start: str, end: str, include: str,
+        into: Dict[Any, Any],
+    ) -> None:
+        """One filtered order listing into `into`, by id; a listing KeyCRM
+        stops at its page cap (`KeyCRMTruncated`) is fetched again as two
+        halves of its window, recursively, down to `ORDER_WINDOW_MIN_SPAN`
+        (L1-08). The cap is 5 000 orders (100 pages of 50); past it the
+        oldest orders of the window were never fetched, and the watermark
+        moved past them. Still truncated at an hour, it raises: the caller's
+        step fails and holds its watermark. A truncated listing adds nothing;
+        its halves add theirs, overlapping at the midpoint, merged by id."""
+        params = {"include": include, key: f"{start}, {end}"}
+        got: list = []
+        try:
+            async for batch in client.paginate("order", params=params, page_size=50):
+                got.extend(batch)
+        except KeyCRMTruncated:
+            lo, hi = _window_bound(start, end_of_day=False), _window_bound(end, end_of_day=True)
+            if hi - lo <= ORDER_WINDOW_MIN_SPAN:
+                raise
+            mid = lo + (hi - lo) / 2
+            logger.warning("Order listing %s %s..%s truncated at the page cap; "
+                           "fetching it as two halves", key, start, end)
+            fmt = "%Y-%m-%d %H:%M:%S"
+            await self._fetch_order_window(
+                client, key, lo.strftime(fmt), mid.strftime(fmt), include, into)
+            await self._fetch_order_window(
+                client, key, mid.strftime(fmt), hi.strftime(fmt), include, into)
+            return
+        for order in got:
+            into[order["id"]] = order
 
     async def _upsert_orders_with_expenses(
         self, orders: list, force_update: bool = False, skip_products: bool = False,
@@ -566,6 +652,14 @@ class SyncService:
         if changed_ids_out is not None:
             changed_ids_out.extend(result.changed_ids)
         self._last_refused = result.failed
+        # `(order id, reason)` for every order the writer refused — what the
+        # repairs ledger rather than ask KeyCRM for again (L1-10). An
+        # attribute, like the count, so the many mocks of this method keep
+        # their signature.
+        self._last_refused_ids = tuple(result.refused)
+        # Of those, how many the parse could not read at all: the order step
+        # fails on a window that landed nothing and holds one (`OrdersRefused`).
+        self._last_unparseable = getattr(result, "unparseable", 0)
         return result.count, expense_count
 
     async def sync_managers(self) -> int:
@@ -813,7 +907,7 @@ class SyncService:
         """The `buyer_sync` block of /api/health."""
         return self.buyer_sync_state.published(self._buyers_retry_in())
 
-    async def sync_offers(self) -> int:
+    async def sync_offers(self) -> Optional[int]:
         """
         Sync offers (product variations) from KeyCRM API.
 
@@ -821,7 +915,10 @@ class SyncService:
         between offer_stocks and products tables.
 
         Returns:
-            Number of offers synced
+            Number of offers synced, or None when KeyCRM failed (logged, and
+            kept in `_inventory_keycrm_error`). None, not 0: the stocks after
+            it read the offer→product map, and written ahead of their offers a
+            new SKU's movement is recorded with no product (L1-14).
         """
         logger.info("Syncing offers...")
         try:
@@ -835,13 +932,16 @@ class SyncService:
             return count
         except KeyCRMConnectionError as e:
             logger.warning(f"Offers sync connection error (will retry): {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
         except KeyCRMAPIError as e:
             logger.error(f"Offers sync API error: {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
         except KeyCRMError as e:
             logger.error(f"Offers sync error: {e}")
-            return 0
+            self._inventory_keycrm_error = e
+            return None
 
     async def sync_stocks(self) -> int:
         """
@@ -873,12 +973,15 @@ class SyncService:
             return await self.store.upsert_stocks(stocks)
         except KeyCRMConnectionError as e:
             logger.warning(f"Stock sync connection error (will retry): {e}")
+            self._inventory_keycrm_error = e
             return None
         except KeyCRMAPIError as e:
             logger.error(f"Stock sync API error: {e}")
+            self._inventory_keycrm_error = e
             return None
         except KeyCRMError as e:
             logger.error(f"Stock sync error: {e}")
+            self._inventory_keycrm_error = e
             return None
 
     def _inventory_retry_in(self) -> Optional[int]:
@@ -893,6 +996,38 @@ class SyncService:
         """The `sync_step` entry of chain 3 on /api/health."""
         return self.orders_step.published()
 
+    async def _clear_orders_failure(self) -> None:
+        """After an order step that succeeded, idle included: `meta.mirror_state`
+        stops saying `bronze.orders` is failing (`ORDERS_FAILURE_CLEAR_SQL`).
+
+        Asked once per process (a failure recorded before a restart is still
+        there) and after each failure this process recorded, never on every
+        tick. Best effort and bounded the way `_record_orders_failure` is; a
+        clear that did not land is asked again on the next healthy tick."""
+        if not getattr(self, "_orders_failure_may_stand", True):
+            return
+
+        async def clear() -> None:
+            from core.pg import get_pool
+            from core.pg_landing import ORDERS_TABLE
+
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(ORDERS_FAILURE_CLEAR_SQL, ORDERS_TABLE)
+
+        task = asyncio.ensure_future(clear())
+        try:
+            await asyncio.wait_for(asyncio.shield(task), ORDERS_FAILURE_RECORD_TIMEOUT_S)
+            self._orders_failure_may_stand = False
+        except asyncio.TimeoutError:
+            logger.warning("Order step's recorded failure not cleared in "
+                           "meta.mirror_state within %ss",
+                           ORDERS_FAILURE_RECORD_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 — best effort, asked again next tick
+            logger.debug("Order step's recorded failure not cleared: %s", e)
+        finally:
+            task.cancel()
+
     async def _record_orders_failure(self, exc: BaseException) -> None:
         """`mirror_failing`'s fast signal, which the sync's mirror gave before
         chain 3 took the tables (DN-22b): `meta.mirror_state` says
@@ -902,6 +1037,7 @@ class SyncService:
         refuses cannot hold the tick. The class only: the text is a driver's."""
         from core.pg_landing import ORDERS_TABLE, _record_failure
 
+        self._orders_failure_may_stand = True
         task = asyncio.ensure_future(_record_failure(ORDERS_TABLE, type(exc).__name__))
         try:
             await asyncio.wait_for(asyncio.shield(task), ORDERS_FAILURE_RECORD_TIMEOUT_S)
@@ -929,13 +1065,25 @@ class SyncService:
                     > INVENTORY_STEP_EVERY_S)
 
         step, ran, stocked = "offers", False, False
+        # Which fetch KeyCRM failed, if one did. Not a success: the step used
+        # to publish `last_ok_at` over a fetch that never arrived (L1-14). Not
+        # a store failure either, so no hold — the fetch is what is retried on
+        # the next tick, as it always was.
+        keycrm_failed: Optional[str] = None
+        self._inventory_keycrm_error = None
         try:
             if due(await self.store.get_last_sync_time("offers")):
                 ran = True
-                stats["offers"] = await self.sync_offers()
+                offers = await self.sync_offers()
+                stats["offers"] = offers or 0
+                if offers is None:
+                    keycrm_failed = "offers"
 
             step = "stocks"
-            if due(await self.store.get_last_sync_time("stocks")):
+            # Not after a failed offers fetch: the stocks read the offer→
+            # product map, and a new SKU's movement would be recorded with no
+            # product.
+            if keycrm_failed is None and due(await self.store.get_last_sync_time("stocks")):
                 ran = stocked = True
                 count = await self._upsert_stocks_from_keycrm()
                 stats["stocks"] = count or 0
@@ -947,6 +1095,8 @@ class SyncService:
                 if count is not None:
                     await self.store.set_last_sync_time("stocks")
                     logger.info(f"Synced {count} offer stocks from KeyCRM")
+                else:
+                    keycrm_failed = "stocks"
         except Exception as exc:  # noqa: BLE001 — recorded, published, retried
             self.inventory_step.failed(step, exc)
             self._inventory_retry_at = time.monotonic() + INVENTORY_RETRY_AFTER_S
@@ -956,7 +1106,11 @@ class SyncService:
                 exc, exc_info=True)
             return
 
-        if ran:
+        if keycrm_failed is not None:
+            self.inventory_step.failed(
+                keycrm_failed,
+                self._inventory_keycrm_error or KeyCRMError("KeyCRM fetch failed"))
+        elif ran:
             self.inventory_step.succeeded()
         if stocked:
             await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
@@ -999,9 +1153,18 @@ class SyncService:
         # and rebuilt Gold for all of it every two minutes around the clock.
         changed_ids: list[int] = []
         if orders:
+            self._last_unparseable = 0
             order_count, expense_count = await self._upsert_orders_with_expenses(
                 orders, changed_ids_out=changed_ids,
             )
+            # Nothing landed and the parse refused orders: a shape nothing
+            # could read, not one bad order. A failure, before the watermark
+            # moves (`OrdersRefused`).
+            if not order_count and not expense_count and self._last_unparseable:
+                raise OrdersRefused(
+                    f"none of the {len(orders)} order(s) fetched landed and the "
+                    f"parse could not read {self._last_unparseable} of them; "
+                    "their ids are in the log above")
             stats["orders"] = order_count
             stats["expenses"] = expense_count
             # The derivation is owed by the writer itself: chain 3 raises
@@ -1051,8 +1214,9 @@ class SyncService:
         """The hourly products step, chain 6's (step 14's S14-09 deleted the
         DuckDB one). Never raises a chain fault: a watermark it cannot read, a
         catalogue Postgres refuses or a Postgres that is down is recorded, and
-        the tick goes on to managers, buyers and inventory. A KeyCRM error
-        propagates, as it always has.
+        the tick goes on to managers, buyers and inventory. So does a KeyCRM
+        error, recorded under the step without a `meta.mirror_state` stamp
+        (L1-02); it used to end the tick.
 
         Nothing is put in `stats` but a count: the tick sums it."""
         from core.pg_landing import _record_failure
@@ -1076,8 +1240,17 @@ class SyncService:
 
         logger.info("Syncing products (hourly, chain 6)...")
         products = []
-        async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
-            products.extend(batch)
+        try:
+            async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
+                products.extend(batch)
+        except KeyCRMError as exc:
+            # KeyCRM's, contained like the other steps' (L1-02): an open
+            # breaker or a page that would not decode here used to end the
+            # tick, so managers, buyers and inventory never ran. Recorded under
+            # the step and retried after the hold; nothing in Postgres says
+            # the catalogue is failing, because nothing there failed.
+            self._catalogue_step_failed(exc)
+            return
         try:
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")
@@ -1350,10 +1523,11 @@ class SyncService:
             logger.info(f"All chunks complete. Total: {stats['orders']} orders, {stats['expenses']} expenses")
 
             # Sync offers (needed for proper stock-to-product linking)
-            stats["offers"] = await self.sync_offers()
+            offers = await self.sync_offers()
+            stats["offers"] = offers or 0
 
-            # Sync stocks
-            stats["stocks"] = await self.sync_stocks()
+            # Sync stocks — not after a failed offers fetch, whose map they read
+            stats["stocks"] = await self.sync_stocks() if offers is not None else 0
 
             # Refresh Layer 1: sku_inventory_status
             await self.store.refresh_sku_inventory_status()
@@ -1420,6 +1594,7 @@ class SyncService:
             try:
                 changed_ids = await self._orders_step(client, stats)
                 self.orders_step.succeeded(refused=self._last_refused)
+                await self._clear_orders_failure()
             except KeyCRMError:
                 raise
             except Exception as exc:
@@ -1552,6 +1727,10 @@ class SyncService:
 
         Returns:
             Dict with sync statistics
+
+        Raises:
+            KeyCRMConnectionError: KeyCRM could not be reached, an open
+                circuit breaker included — so the run is recorded as failed.
         """
         stats = {"orders": 0, "expenses": 0, "days_back": days_back}
 
@@ -1614,7 +1793,13 @@ class SyncService:
             stats["backdated"] = await self._refresh_backdated_orders(start_date.date())
 
         except KeyCRMConnectionError as e:
-            logger.warning(f"Status refresh connection error (will retry): {e}")
+            # Raised, the way `full_sync` raises it: returned as stats, a
+            # morning KeyCRM did not answer read in /api/jobs as a successful
+            # run that refreshed 0 orders. An open breaker is one of these
+            # since it became a `KeyCRMConnectionError` (A10), and raised past
+            # this handler until then.
+            logger.warning(f"Status refresh connection error: {e}")
+            raise
         except KeyCRMError as e:
             logger.error(f"Status refresh error: {e}")
 
@@ -1693,6 +1878,21 @@ class SyncService:
             return {"requested": 0, "attempted": 0, "repaired": 0,
                     "failed": 0, "remaining": 0, "failures": {}}
 
+        # Postgres' clock before the first fetch (L1-12): an order some writer
+        # stores after this instant is newer than the payload we are about to
+        # fetch, and written under force the payload would put the older state
+        # back — the 05:15 refresh's status, overwritten by a stale fetch that
+        # carried the same `updated_at`. Best effort: unread, nothing is
+        # skipped, and a Postgres that cannot answer fails the write anyway.
+        try:
+            from core.pg_orders_read import postgres_now
+
+            fetch_began = await postgres_now()
+        except Exception as exc:  # noqa: BLE001 — see above
+            logger.warning("Order repair: Postgres' clock unread, every fetched "
+                           "order is written: %s", type(exc).__name__)
+            fetch_began = None
+
         client = await get_async_client()
         for order_id in attempted:
             try:
@@ -1709,14 +1909,37 @@ class SyncService:
                 failures[order_id] = f"{type(exc).__name__}: {exc}"
 
         repaired = 0
+        rewritten: list = []
+        refused: list = []
         if fetched:
             held = lock if lock is not None else contextlib.nullcontext()
             async with held:
+                # Under the lock, so nothing the sync writes can land between
+                # this read and the write below.
+                if fetch_began is not None:
+                    try:
+                        from core.pg_orders_read import rewritten_since
+
+                        rewritten = await rewritten_since(
+                            [o["id"] for o in fetched], fetch_began)
+                    except Exception as exc:  # noqa: BLE001 — as for the clock
+                        logger.warning("Order repair: could not ask which orders "
+                                       "were rewritten: %s", type(exc).__name__)
+                if rewritten:
+                    newer = set(rewritten)
+                    fetched = [o for o in fetched if int(o["id"]) not in newer]
                 # force_update: the whole point is to overwrite what we hold,
                 # and KeyCRM's updated_at may well be older than our last touch.
-                repaired, _ = await self._upsert_orders_with_expenses(
-                    fetched, force_update=True,
-                )
+                if fetched:
+                    self._last_refused_ids = ()
+                    repaired, _ = await self._upsert_orders_with_expenses(
+                        fetched, force_update=True,
+                    )
+                    refused = list(getattr(self, "_last_refused_ids", ()))
+        # A refused order is a failure the caller can ledger, so the id scan
+        # moves on instead of asking KeyCRM for it every run (L1-10).
+        for order_id, why in refused:
+            failures[int(order_id)] = f"Postgres refused: {why}"
 
         result = {
             "requested": len(ids),
@@ -1728,6 +1951,8 @@ class SyncService:
             # permanently absent and must never be asked for again; handing it
             # ten of thirty-seven meant the rest came round every hour forever.
             "failures": failures,
+            # Fetched, and not written: Postgres held a newer write of them.
+            "rewritten_since_fetch": sorted(rewritten),
         }
         logger.info(
             "Order repair: %s",
