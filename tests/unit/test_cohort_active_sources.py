@@ -42,6 +42,18 @@ ORDERS = [
 ]
 RETIRED_MONEY = (5000, 300, 5300, 5700, 6700, 7400)
 
+# A second purchase on a retired source, for the one body ORDERS cannot tell
+# apart: buyer 21 bought on Instagram, ten days later on Opencart, and thirty
+# days after that on Instagram again. Their second purchase is the second
+# Instagram order, 40 days after the first; the Opencart one, 10 days after,
+# was what the body read until O5.
+SECOND_ON_A_RETIRED_SOURCE = [
+    (201, 21, "2026-03-01", 1, True, 600),
+    (202, 21, "2026-03-11", 3, False, 250),
+    (203, 21, "2026-04-10", 1, True, 350),
+]
+SECOND_ON_A_RETIRED_SOURCE_EXPECTED = [("31-60", 1, 40.0, 40.0, 40.0, 1)]
+
 # (body, bound values) — the values the tab binds.
 BODIES = {
     "cohort_retention_select": [12],
@@ -195,6 +207,13 @@ class TestTheAnswer:
     def test_no_cell_carries_retired_money(self, name):
         for row in run_on_duckdb(name):
             assert not set(row) & set(RETIRED_MONEY), (name, row)
+
+    def test_the_second_purchase_is_the_next_on_an_active_source(self):
+        """Mutation: join the second purchase on `order_num = 2` again, or
+        drop `AND c2.is_active_source` — the Opencart order ten days on is
+        then the second purchase, in the 0-30 bucket."""
+        assert run_on_duckdb("days_to_second_purchase_select",
+                             SECOND_ON_A_RETIRED_SOURCE) == SECOND_ON_A_RETIRED_SOURCE_EXPECTED
 
     def test_the_opencart_buyer_is_never_acquired_again(self):
         """Their Instagram orders in May and June open no cohort of their own:

@@ -22,7 +22,8 @@ import pytest
 import core.sql_dialect as dialects
 from core.sql_dialect import CLICKHOUSE_ANALYTICS
 from tests.unit.test_cohort_active_sources import (
-    BODIES, EXPECTED, ORDERS, RETAIL, RETIRED_MONEY,
+    BODIES, EXPECTED, ORDERS, RETAIL, RETIRED_MONEY, SECOND_ON_A_RETIRED_SOURCE,
+    SECOND_ON_A_RETIRED_SOURCE_EXPECTED,
 )
 
 needs_clickhouse = pytest.mark.skipif(
@@ -39,7 +40,7 @@ TYPES = {
 }
 
 
-async def _seed():
+async def _seed(orders=ORDERS):
     """`silver.orders` by the shipper's own DDL, so the column types are
     production's (`is_active_source Bool`, `LowCardinality` sales type)."""
     from core.ch_common import execute
@@ -51,7 +52,7 @@ async def _seed():
     values = ", ".join(
         f"({oid}, {buyer}, toDate('{day}'), false, 'retail', {total}, {source},"
         f" {'true' if active else 'false'})"
-        for oid, buyer, day, source, active, total in ORDERS)
+        for oid, buyer, day, source, active, total in orders)
     await execute("INSERT INTO silver.orders (id, buyer_id, order_date, is_return,"
                   " sales_type, grand_total, source_id, is_active_source)"
                   f" VALUES {values}")
@@ -95,3 +96,11 @@ async def test_clickhouse_answers_without_the_retired_source(name):
     assert rows == expected
     for row in rows:
         assert not set(row) & set(RETIRED_MONEY), (name, row)
+
+
+@pytest.mark.asyncio
+async def test_clickhouse_takes_the_second_purchase_on_an_active_source():
+    """Mutation: join the second purchase on `order_num = 2` again — the
+    Opencart order ten days after the first is then the second purchase."""
+    await _seed(SECOND_ON_A_RETIRED_SOURCE)
+    assert await _ask("days_to_second_purchase_select") == SECOND_ON_A_RETIRED_SOURCE_EXPECTED
