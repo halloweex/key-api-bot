@@ -19,6 +19,45 @@ export function formatCurrency(value: number): string {
 }
 
 /**
+ * Hryvnia in as few characters as stay readable, for a tile too narrow to
+ * hold the full figure (which it keeps in its tooltip): from a million up
+ * `₴108 млн` / `₴68,1 млн` (`₴68.1M` in English); below it the full figure,
+ * which is already the shorter of the two.
+ */
+export function formatCurrencyShort(value: number): string {
+  if (Math.abs(value) < 1_000_000) return formatCurrency(value)
+  const compact = new Intl.NumberFormat(getLocale(), {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value)
+  return `₴${compact}`
+}
+
+/**
+ * A report's dates as two numeric days, `01.04 – 10.04.2026`, the start
+ * carrying its own year when it differs from the end's
+ * (`02.12.2023 – 05.11.2026`: without it the whole history read as a span
+ * inside 2026). A full calendar month is its name, `КВІТЕНЬ 2026`.
+ */
+export function formatReportRange(startDate: string, endDate: string): string {
+  const locale = getLocale()
+  const start = new Date(startDate + 'T00:00:00')
+  const end = new Date(endDate + 'T00:00:00')
+
+  const sameYear = start.getFullYear() === end.getFullYear()
+  const sameMonth = sameYear && start.getMonth() === end.getMonth()
+  const lastDayOfMonth = new Date(end.getFullYear(), end.getMonth() + 1, 0).getDate()
+  if (sameMonth && start.getDate() === 1 && end.getDate() === lastDayOfMonth) {
+    return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(start).toUpperCase()
+  }
+
+  const day: Intl.DateTimeFormatOptions = { day: '2-digit', month: '2-digit' }
+  const fmtStart = new Intl.DateTimeFormat(locale, sameYear ? day : { ...day, year: 'numeric' }).format(start)
+  const fmtEnd = new Intl.DateTimeFormat(locale, { ...day, year: 'numeric' }).format(end)
+  return `${fmtStart} – ${fmtEnd}`
+}
+
+/**
  * Format number with thousands separator
  */
 export function formatNumber(value: number): string {

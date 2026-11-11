@@ -27,7 +27,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.filters import HISTORY_START, MAX_RANGE_DAYS, has_comparison, parse_period
+from core.filters import HISTORY_START, MAX_RANGE_DAYS, by_month, has_comparison, parse_period
+from core.repositories.customers import CustomersMixin
 from core.repositories.revenue import RevenueMixin
 from core.validators import validate_period
 from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
@@ -137,6 +138,76 @@ class TestTheTrendByMonth:
         assert result["comparison"]["period"]["type"] == "previous_period"
 
 
+class TestByMonth:
+
+    def test_every_month_touched_with_its_days_inside(self):
+        """The first and last month are partial, a month with no orders is a
+        zero point, and orders stay integers."""
+        daily = {date(2023, 12, 30): (10.0, 1), date(2024, 1, 31): (2.5, 2),
+                 date(2024, 3, 1): (4.0, 1), date(2024, 3, 9): (99.0, 9)}
+        assert by_month(date(2023, 12, 30), date(2024, 3, 1), daily) == [
+            ("12.2023", 10.0, 1), ("01.2024", 2.5, 2),
+            ("02.2024", 0.0, 0), ("03.2024", 4.0, 1)]
+
+    def test_an_empty_range_is_no_months(self):
+        assert by_month(date(2024, 2, 2), date(2024, 2, 1), {}) == []
+
+
+class _Insights(CustomersMixin):
+    """Customer insights over Gold rows written out: each statement is
+    answered by what it selects, so a monthly AOV can only come from the
+    day's two sums."""
+
+    def __init__(self, days):
+        self.days = days  # {day: (revenue, orders)}
+        self.asked: list[str] = []
+
+    async def _dashboard_run(self, sql, params=()):
+        self.asked.append(sql)
+        if len(params) < 2 or not isinstance(params[0], date):
+            return [(0, 0, 0, 0)]  # the lifetime statements, no window
+        a, b = params[0], params[1]
+        days = {d: v for d, v in self.days.items() if a <= d <= b}
+        if "SUM(revenue) AS revenue, SUM(orders_count) AS orders" in sql:
+            return [(d, rev, n) for d, (rev, n) in sorted(days.items())]
+        if "AS aov" in sql:
+            return [(d, rev / n) for d, (rev, n) in sorted(days.items())]
+        if "AS total_orders" in sql:
+            return [(sum(n for _, n in days.values()), sum(r for r, _ in days.values()))]
+        return [(0, 0, 0, 0)]
+
+
+DAYS = {
+    date(2024, 1, 1): (1000.0, 1),    # one big order: AOV 1 000
+    date(2024, 1, 2): (100.0, 10),    # ten small ones: AOV 10
+    date(2024, 2, 1): (300.0, 3),
+}
+
+
+class TestTheAovByMonth:
+
+    @pytest.mark.asyncio
+    async def test_a_months_aov_is_its_revenue_over_its_orders(self):
+        """January is ₴1 100 over 11 orders, ₴100 — not 505, the mean of its
+        two days' AOVs. Mutation: average the daily AOVs."""
+        store = _Insights(DAYS)
+        result = await store.get_customer_insights(
+            date(2024, 1, 1), date(2024, 3, 31), granularity="monthly")
+        trend = result["aovTrend"]
+        assert trend["labels"] == ["01.2024", "02.2024", "03.2024"]
+        assert trend["datasets"][0]["data"] == [100.0, 100.0, 0]
+        assert trend["granularity"] == "monthly"
+
+    @pytest.mark.asyncio
+    async def test_by_day_is_as_it_was(self):
+        store = _Insights(DAYS)
+        result = await store.get_customer_insights(date(2024, 1, 1), date(2024, 1, 3))
+        trend = result["aovTrend"]
+        assert trend["labels"] == ["01.01", "02.01", "03.01"]
+        assert trend["datasets"][0]["data"] == [1000.0, 10.0, 0]
+        assert "granularity" not in trend
+
+
 # ─── Through the routes ───────────────────────────────────────────────────────
 
 def _trend_spy(monkeypatch):
@@ -168,6 +239,30 @@ class TestTheTrendRoute:
     def test_an_unknown_granularity_is_named(self, admin_client, monkeypatch):
         _trend_spy(monkeypatch)
         r = admin_client.get("/api/revenue/trend?period=month&granularity=weekly")
+        assert r.status_code == 400
+        assert r.json()["detail"].startswith("granularity")
+
+
+class TestTheInsightsRoute:
+
+    def _spy(self, monkeypatch):
+        from web.services import dashboard_service
+
+        spy = AsyncMock(return_value={})
+        monkeypatch.setattr(dashboard_service, "get_customer_insights", spy)
+        return spy
+
+    def test_it_hands_the_granularity_on(self, admin_client, monkeypatch):
+        spy = self._spy(monkeypatch)
+        r = admin_client.get("/api/customers/insights?period=all_time&granularity=monthly")
+        assert r.status_code == 200, r.text
+        assert spy.await_args.kwargs["granularity"] == "monthly"
+        r = admin_client.get("/api/customers/insights?period=month")
+        assert spy.await_args.kwargs["granularity"] == "daily"
+
+    def test_an_unknown_granularity_is_named(self, admin_client, monkeypatch):
+        self._spy(monkeypatch)
+        r = admin_client.get("/api/customers/insights?period=month&granularity=weekly")
         assert r.status_code == 400
         assert r.json()["detail"].startswith("granularity")
 

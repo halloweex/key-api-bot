@@ -8,33 +8,10 @@ import { useFileExport } from './useFileExport'
 import { exportCsvFromUrl } from '../utils/deliverFile'
 import { useMarketingReport } from '../hooks/useApi'
 import { useFilterStore } from '../store/filterStore'
-import { formatCurrency, formatNumber } from '../utils/formatters'
-import i18n, { LANGUAGE_LOCALES, type SupportedLanguage } from '../lib/i18n'
+import { formatCurrency, formatNumber, formatReportRange as formatDateRange } from '../utils/formatters'
 import type { MarketingMonthStats, MarketingBrandRow, MarketingSourceRow } from '../types/api'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
-
-function formatDateRange(startDate: string, endDate: string): string {
-  const locale = LANGUAGE_LOCALES[i18n.language as SupportedLanguage] || 'uk-UA'
-  const start = new Date(startDate + 'T00:00:00')
-  const end = new Date(endDate + 'T00:00:00')
-
-  // Check if it's a full calendar month
-  const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear()
-  const isFirstDay = start.getDate() === 1
-  const lastDayOfMonth = new Date(end.getFullYear(), end.getMonth() + 1, 0).getDate()
-  const isLastDay = end.getDate() === lastDayOfMonth
-
-  if (sameMonth && isFirstDay && isLastDay) {
-    // Full month — show "APRIL 2026"
-    return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(start).toUpperCase()
-  }
-
-  // Range — show "01.04 – 10.04.2026"
-  const fmtStart = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit' }).format(start)
-  const fmtEnd = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit', year: 'numeric' }).format(end)
-  return `${fmtStart} – ${fmtEnd}`
-}
 
 function pctChange(cur: number, prev: number): string {
   if (prev === 0) return cur > 0 ? '+100%' : '0%'

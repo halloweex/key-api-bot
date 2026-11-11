@@ -5,7 +5,7 @@ import { StatCard, StatCardSkeleton, type StatCardVariant } from './StatCard'
 import { TileGrid } from './TileGrid'
 import { MilestoneProgress } from './MilestoneProgress'
 import { useSummary, useReturns } from '../hooks'
-import { formatCurrency, formatNumber, formatPercent } from '../utils/formatters'
+import { formatCurrency, formatCurrencyShort, formatNumber, formatPercent } from '../utils/formatters'
 import type { SummaryResponse, ReturnOrder } from '../types/api'
 import {
   type IconComponent,
@@ -24,6 +24,7 @@ interface CardConfig {
   icon: IconComponent
   getValue: (data: SummaryResponse) => number
   formatter: (value: number) => string
+  shortFormatter?: (value: number) => string
   getSubtitle?: (data: SummaryResponse) => string | undefined
   ariaLabel?: (data: SummaryResponse) => string
 }
@@ -47,6 +48,7 @@ const CARD_CONFIGS: (Omit<CardConfig, 'label'> & { labelKey: string })[] = [
     icon: CurrencyIcon,
     getValue: (data) => data.totalRevenue,
     formatter: formatCurrency,
+    shortFormatter: formatCurrencyShort,
   },
   {
     id: 'avgCheck',
@@ -55,6 +57,7 @@ const CARD_CONFIGS: (Omit<CardConfig, 'label'> & { labelKey: string })[] = [
     icon: CalculatorIcon,
     getValue: (data) => data.avgCheck,
     formatter: formatCurrency,
+    shortFormatter: formatCurrencyShort,
   },
 ]
 
@@ -262,6 +265,7 @@ export function SummaryCards() {
         label={t(config.labelKey)}
         value={config.getValue(data)}
         formatter={config.formatter}
+        shortFormatter={config.shortFormatter}
         variant={config.variant}
         icon={config.icon}
         subtitle={config.getSubtitle?.(data)}
