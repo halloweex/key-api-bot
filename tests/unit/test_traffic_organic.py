@@ -23,7 +23,7 @@ from typing import Optional
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from tests.integration.pg_tab_seed import (
     needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
 )
@@ -299,7 +299,7 @@ class TestTheBreakdown:
     async def test_the_rows_inside_a_channel_are_ranked_and_capped(
         self, tab, monkeypatch,
     ):
-        monkeypatch.setattr(DuckDBStore, "ORGANIC_DETAIL_LIMIT", 2)
+        monkeypatch.setattr(AnalyticsStore, "ORGANIC_DETAIL_LIMIT", 2)
         store, pool = tab
         for i, (name, total) in enumerate(
                 [("Welcome", 100), ("Cart", 300), ("Winback", 200),

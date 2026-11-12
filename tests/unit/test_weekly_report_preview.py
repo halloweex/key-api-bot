@@ -75,23 +75,17 @@ class TestItRefusesBeforeReading:
 
 
 class TestTheStoreItHandsTheReaders:
-    def test_it_refuses_to_connect_and_creates_no_file(self, tmp_path, monkeypatch):
-        """The store has no DuckDB half since step 14's S14-18: a reader that
-        still reached for it meets the refusal (`StoreRemoved`), and nothing
-        is opened or created. Mutation: hand the readers anything whose
-        `connection()` answers."""
-        from core.store import AnalyticsStore, StoreRemoved
+    def test_it_has_no_connection_and_creates_no_file(self, tmp_path, monkeypatch):
+        """The store has no DuckDB half since step 14's S14-18, and no
+        `connection()` at all since the final stage (it refused with
+        `StoreRemoved` until then): nothing is opened or created. Mutation:
+        hand the readers anything with a `connection()`."""
+        from core.store import AnalyticsStore
 
         monkeypatch.chdir(tmp_path)
         store = preview._store()
         assert isinstance(store, AnalyticsStore)
-
-        async def ask():
-            async with store.connection():
-                pass
-
-        with pytest.raises(StoreRemoved):
-            asyncio.run(ask())
+        assert not hasattr(store, "connection")
         assert list(tmp_path.iterdir()) == []
 
 
@@ -162,13 +156,14 @@ class TestTheTrafficReport:
         """`send_traffic` hands the traffic report's builder the store that
         refuses to connect, and sends what it built to the one chat.
 
-        Mutation: build the week on a store whose `connection()` answers —
-        the shape this script had before S14-03 opened (and created) the
-        file. The store the builder was handed must refuse a connection the
-        way `_store()` does (`StoreRemoved` since step 14's S14-18).
+        Mutation: build the week on a store with a `connection()` — the
+        shape this script had before S14-03 opened (and created) the file.
+        The store the builder was handed has none, as `_store()`'s has none
+        since the final stage (it refused with `StoreRemoved` from step 14's
+        S14-18 until then).
         """
         from core import telegram_alerts, traffic_report
-        from core.store import StoreRemoved
+        from core.store import AnalyticsStore
 
         handed = {}
 
@@ -186,13 +181,8 @@ class TestTheTrafficReport:
 
         assert handed["today"] == date(2026, 9, 7)
         store = handed["store"]
-
-        async def ask():
-            async with store.connection():
-                pass
-
-        with pytest.raises(StoreRemoved):
-            asyncio.run(ask())
+        assert isinstance(store, AnalyticsStore)
+        assert not hasattr(store, "connection")
         assert sent.await_count == 1
         assert sent.await_args.kwargs["chat_ids"] == [7]
         assert "31.08" in sent.await_args.args[0], sent.await_args.args[0]

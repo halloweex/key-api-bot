@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from core.repositories.customers import DlrEventRebound
 from tests.integration import pg_sms_seed
 from tests.integration.pg_sms_seed import as_tuple, pg_conn
@@ -36,7 +36,7 @@ async def _postgres(request, monkeypatch):
 SENT = datetime(2026, 8, 10, 9, 0)
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
+async def _make_store(tmp_path: Path) -> AnalyticsStore:
     return pg_sms_seed.store(tmp_path, "test.duckdb")
 
 

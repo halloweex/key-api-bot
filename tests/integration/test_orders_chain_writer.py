@@ -78,13 +78,13 @@ async def stores(tmp_path, monkeypatch):
     """A real DuckDB, a live Postgres, and the flag on — production's value;
     since step 14's S14-09 nothing reads it to route, and the preconditions
     it once waited on are gone."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \

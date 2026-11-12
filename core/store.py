@@ -13,28 +13,25 @@ same mixins on top of a DuckDB connection, its schema and its migrations, its
 checkpoint and nightly backup, its FATAL bookkeeping and its counts. Web had
 not opened the file since 2026-10-16 (`KS_DUCKDB=off`, a constant in web
 since S14-00), so every one of those had no caller left, and S14-18 deleted
-them. `core/duckdb_store.py` stays one release as a shim
-(`DuckDBStore = AnalyticsStore`, `get_store`, `close_store`) for the callers
-that still import it by that name; S14-21 renames them.
+them. `core/duckdb_store.py` stayed as a shim (`DuckDBStore = AnalyticsStore`,
+`get_store`, `close_store`), and `connection()` as a refusal (`StoreRemoved`,
+a counted 503 naming `duckdb`), until the final stage (2026-11-12): every
+caller imports this module by its own name since, and nothing reaches for a
+connection — a test walks the code for one.
 
-`connection()` stays one release too, as a refusal (`StoreRemoved`): a
-caller nobody found would otherwise meet an `AttributeError` — a 500 naming
-nothing — where it now gets the counted 503 naming `duckdb` that every read
-refused gets, and `read_refused` pages it.
-
-The file itself is not this module's: `data/analytics.duckdb`, its backups,
-the export and the Arks stay on disk, untouched, until the final stage.
+The file itself was never this module's. The final stage deleted
+`data/analytics.duckdb`, its backups and the export on the host; the Arks
+and the off-site Parquet archive keep its history.
 """
 import asyncio
 import logging
 from datetime import datetime, date
-from typing import Optional, List, Dict, Any, NoReturn, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cost
     from core.models import Buyer
 
-from core import read_fallback
 from core.duckdb_constants import DEFAULT_TZ, DISPLAY_TIMEZONE
 from core.repositories import (
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
@@ -43,20 +40,6 @@ from core.repositories import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class StoreRemoved(read_fallback.ReadUnavailable):
-    """A caller reached for the DuckDB connection this store no longer has.
-
-    A `ReadUnavailable` naming `duckdb`, so `web/main.py` answers it as it
-    answers every refused read: a 503 carrying the surface, never a 500. It
-    is counted where it is raised (`read_fallback.refuse`, published as
-    `read_fallback_mode.refused.duckdb` on `/api/health`) and the canary
-    pages it as `read_refused`. Raised by `AnalyticsStore.connection()` and
-    nothing else; it goes with that stub (S14-21)."""
-
-    def __init__(self) -> None:
-        super().__init__("duckdb")
 
 
 class AnalyticsStore(
@@ -70,20 +53,6 @@ class AnalyticsStore(
     reads, and each writer its transaction when it writes. So building one
     touches nothing, and one instance (`get_store()`) serves the process.
     """
-
-    def connection(self) -> NoReturn:
-        """Refused: the DuckDB connection was removed in step 14's S14-18.
-
-        Kept one release so that a caller still written `async with
-        store.connection()` — none is known; the stage 5 sweep found none
-        before it was deleted — gets the counted 503 naming `duckdb` and the
-        `read_refused` page, not an `AttributeError`. It depends on nothing
-        DuckDB: not the switch, not the driver, not a handler of its own."""
-        cause = RuntimeError(
-            "the DuckDB half of the analytics store was removed in step 14's "
-            "S14-18; this caller reached for its connection")
-        read_fallback.refuse("duckdb", cause)
-        raise StoreRemoved() from cause
 
     async def get_last_sync_time(self, key: str = "orders") -> Optional[datetime]:
         """Get last sync timestamp for incremental updates — from

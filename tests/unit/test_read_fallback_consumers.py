@@ -227,7 +227,7 @@ KEPT_ENTRIES = {
 
 # The routes the sweep does not run, and where a refusal stops on each before
 # the 503 handler — empty means it reaches the handler. The assistant's stop
-# at its tools, by design (`IN_BAND_ROUTES`). `POST /duckdb/sync-buyers`
+# at its tools, by design (`IN_BAND_ROUTES`). `POST /sync/sync-buyers`
 # reaches the handler: the buyers step passes a refusal on and the route lets
 # it through (chain 4's PR-3). Until then the step's `except Exception`
 # answered it, and the route said "Buyer sync failed" with a 500.
@@ -356,7 +356,7 @@ def build_graph(tops=WALKED) -> Graph:
 
     # The store: AnalyticsStore and the mixins it is composed of (it was
     # `DuckDBStore` in `core/duckdb_store.py` until step 14's S14-18, which
-    # left that module a shim of the name).
+    # left that module a shim of the name until the final stage deleted it).
     store_def = classes[("core/store.py", "AnalyticsStore")]
     composed = {b.id for b in store_def.bases if isinstance(b, ast.Name)}
     composed.add("AnalyticsStore")

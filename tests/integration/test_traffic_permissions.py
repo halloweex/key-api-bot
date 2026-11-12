@@ -102,7 +102,7 @@ def _login(monkeypatch, role: str) -> dict:
     async def _fake_get_store():
         return store
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+    monkeypatch.setattr("core.store.get_store", _fake_get_store)
     monkeypatch.setattr("web.routes.api.traffic.get_store", _fake_get_store)
 
     uid = ADMIN_ID if role == "hardcoded_admin" else 555_000_444

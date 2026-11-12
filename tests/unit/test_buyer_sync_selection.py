@@ -40,9 +40,9 @@ class TestTheTiebreak:
         import inspect
         import textwrap
 
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(DuckDBStore.get_missing_buyer_ids)))
+        tree = ast.parse(textwrap.dedent(inspect.getsource(AnalyticsStore.get_missing_buyer_ids)))
         doc = ast.get_docstring(tree.body[0], clean=False)
         sql = "".join(n.value for n in ast.walk(tree)
                       if isinstance(n, ast.Constant) and isinstance(n.value, str)
@@ -62,9 +62,9 @@ class TestUnderChain4TheSelectionFollowsTheWrites:
     @pytest.fixture
     def store(self, tmp_path):
         """A real store whose DuckDB fails the test if the selection reads it."""
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        s = DuckDBStore()
+        s = AnalyticsStore()
 
         def refused():
             raise AssertionError("the selection read DuckDB")

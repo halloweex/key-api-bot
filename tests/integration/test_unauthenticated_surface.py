@@ -105,7 +105,7 @@ def store(monkeypatch):
     async def _fake_get_store():
         return fake
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+    monkeypatch.setattr("core.store.get_store", _fake_get_store)
     return fake
 
 

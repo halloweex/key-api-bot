@@ -263,7 +263,7 @@ class TestSchedulerJob:
         sample = {"sampled_at": datetime.now(timezone.utc), "db_size_mb": 7_200,
                   "disk_pct_used": 25.0, "disk_free_gb": 55.0}
         with patch("core.disk_monitor.sample_disk_state", return_value=sample), \
-             patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+             patch("core.store.get_store", AsyncMock(return_value=store)), \
              patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
             result = await scheduler._run_disk_watchdog()
 
@@ -333,7 +333,7 @@ class TestSchedulerJob:
 
         with patch("core.disk_monitor.sample_disk_state", side_effect=disk_state), \
              patch("core.disk_monitor.sample_data_dir", side_effect=data_dir), \
-             patch("core.duckdb_store.get_store", _no_store), \
+             patch("core.store.get_store", _no_store), \
              patch("core.store.get_store", _no_store), \
              patch.object(watchdog_samples, "disk_tick",
                           AsyncMock(return_value=dict(watchdog_samples.EMPTY_DISK))), \
@@ -370,7 +370,7 @@ class TestSchedulerJob:
                 "db_size_mb": 2_082.0, "disk_pct_used": 61.8,
                 "disk_free_gb": 25.4,
             },
-        ), patch("core.duckdb_store.get_store", AsyncMock(return_value=_store(tmp_path))), \
+        ), patch("core.store.get_store", AsyncMock(return_value=_store(tmp_path))), \
            patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
             result = await scheduler._run_disk_watchdog()
 
@@ -390,7 +390,7 @@ class TestSchedulerJob:
                 "db_size_mb": 2_480, "disk_pct_used": 92.0,
                 "disk_free_gb": 6.0,
             },
-        ), patch("core.duckdb_store.get_store", AsyncMock(return_value=_store(tmp_path))), \
+        ), patch("core.store.get_store", AsyncMock(return_value=_store(tmp_path))), \
            patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
             result = await scheduler._run_disk_watchdog()
 
@@ -426,7 +426,7 @@ class TestSchedulerJob:
                 "db_size_mb": 2_480, "disk_pct_used": 92.0,
                 "disk_free_gb": 6.0,
             },
-        ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+        ), patch("core.store.get_store", AsyncMock(return_value=store)), \
            patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
             result = await scheduler._run_disk_watchdog()
 

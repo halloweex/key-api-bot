@@ -1249,7 +1249,7 @@ class PredictionService:
         Excludes today's incomplete data, uses last 6 complete months as folds.
         Returns detailed metrics, feature importance, and residual analysis.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         df = await self._query_daily_revenue(store, sales_type, days_back=780)
@@ -1269,7 +1269,7 @@ class PredictionService:
 
         Saves best params to data/lgbm_best_params.json for use by train/evaluate.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         df = await self._query_daily_revenue(store, sales_type, days_back=780)
@@ -1314,7 +1314,7 @@ class PredictionService:
         if first > last:
             return None
 
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
         predictions, trained_at = await store.get_stored_forecast(
             first, last, sales_type)
@@ -1347,7 +1347,7 @@ class PredictionService:
         from core import read_fallback
 
         try:
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
 
             # Query daily revenue for the last ~25 months
@@ -1463,7 +1463,7 @@ class PredictionService:
         if not self.is_ready:
             return []
 
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         if historical_df is None:
@@ -1534,7 +1534,7 @@ class PredictionService:
         it — after a training in the same process. One answer now, and one
         any process can give.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         today = _today_kyiv()

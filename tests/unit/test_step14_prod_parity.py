@@ -1277,10 +1277,16 @@ def main(argv) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         data = Path(tmp) / "data"
         data.mkdir()
-        from core import chain_latch, duckdb_store
+        from core import chain_latch
 
-        # The DuckDB store's file, where the tree still has one (until S14-18).
-        duckdb_store.DB_DIR, duckdb_store.DB_PATH = data, data / "analytics.duckdb"
+        # The DuckDB store's file, where the tree still has one (until S14-18;
+        # the module, a shim since, went at the final stage).
+        try:
+            from core import duckdb_store
+        except ImportError:
+            duckdb_store = None
+        if duckdb_store is not None:
+            duckdb_store.DB_DIR, duckdb_store.DB_PATH = data, data / "analytics.duckdb"
         chain_latch.MARKER_DIR = data / "write-chain-owners"
         _place_files(data, markers == "11")
         _stub_the_old_start()
@@ -1302,7 +1308,7 @@ import pytest  # noqa: E402 — the script above runs without the suite
 def production(monkeypatch, tmp_path):
     """This process as production's web: its environment and the backup
     markers; the chain markers are each test's to place."""
-    from core import backup_evidence, duckdb_store
+    from core import backup_evidence
 
     def prepare(*, markers: bool, junk=(), absent=()):
         for name in (*PROD_ENV, *STOPPED_READING):
@@ -1311,10 +1317,8 @@ def production(monkeypatch, tmp_path):
             monkeypatch.setenv(name, value)
         data = tmp_path / "data"
         data.mkdir(exist_ok=True)
-        # The DuckDB store held a file until S14-18; set where it still does.
-        monkeypatch.setattr(duckdb_store, "DB_DIR", data, raising=False)
-        monkeypatch.setattr(duckdb_store, "DB_PATH", data / "analytics.duckdb",
-                            raising=False)
+        # The DuckDB store held a file until S14-18, which this tree has no
+        # module to point at since the final stage deleted `core.duckdb_store`.
         monkeypatch.setattr(backup_evidence, "DATA_DIR", data)
         _place_files(data, markers)
 

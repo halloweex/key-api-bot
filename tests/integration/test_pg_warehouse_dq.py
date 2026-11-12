@@ -888,15 +888,15 @@ class TestTheJobEndToEnd:
 
     @pytest_asyncio.fixture
     async def job(self, pool, tmp_path, monkeypatch):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
         monkeypatch.setattr(scheduler, "_resolve_dq_layer", AsyncMock())
-        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)):
+        with patch("core.store.get_store", new=AsyncMock(return_value=store)):
             yield scheduler, store, sent
 
     async def _issues(self, store, run_id):
@@ -982,14 +982,14 @@ class TestTheJobEndToEnd:
     async def resolving_job(self, pool, tmp_path, monkeypatch):
         """`job`, with the real `_resolve_dq_layer`: what reaches the Gate as
         still firing is what a test asserts on, captured at `resolve_group`."""
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
-        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)):
+        with patch("core.store.get_store", new=AsyncMock(return_value=store)):
             yield scheduler, store, sent
 
     @pytest.mark.asyncio

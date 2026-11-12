@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from tests.integration import pg_sms_seed
 from tests.integration.pg_sms_seed import insert, needs_postgres, order_row, pg_conn
 
@@ -28,7 +28,7 @@ SENT = datetime(2026, 8, 1, 10, 0)
 SENT_DATE = date(2026, 8, 1)
 
 
-async def _make_store(tmp_path: Path) -> DuckDBStore:
+async def _make_store(tmp_path: Path) -> AnalyticsStore:
     store = pg_sms_seed.store(tmp_path, "test.duckdb")
     async with pg_conn() as conn:
         await conn.execute(

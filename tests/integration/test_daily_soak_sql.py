@@ -19,8 +19,8 @@ never sets it. Here it is a fixed Wednesday noon in Kyiv in 2030, far from any
 row another test committed, so a heavy-job window or a stray `mirrored_at`
 cannot make a verdict depend on when CI happened to run.
 
-`psql` variables (`:'buyers_override_floor'` and P1's record) mean nothing to
-asyncpg, so `render` substitutes them the way `psql -v` would.
+`psql` variables (`:'buyers_override_floor'`) mean nothing to asyncpg, so
+`render` substitutes them the way `psql -v` would.
 
 Until S14-20 the checks also took a KS_WRITE_* state per chain (0, 1, held,
 pending, invalid, unknown), chain 9's `dq_journal_direct`, KS_DUCKDB and the
@@ -51,11 +51,9 @@ REPO = Path(__file__).resolve().parents[2]
 SQL_DIR = REPO / "deploy" / "daily_soak"
 FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
-VARIABLES = {"buyers_override_floor": "",
-             # The DuckDB file (P1, OD-17 (a)); tests/integration/test_stage5_soak_sql.py.
-             "duckdb_file_last": "none",
-             "duckdb_file_since": "", "duckdb_file_since_reason": "",
-             "duckdb_file_checked_at": "", "duckdb_file_missing_at": ""}
+# B3's floor, the one variable a check reads. P1's five — the DuckDB file's
+# hash record — went with P1 at the final stage (2026-11-12).
+VARIABLES = {"buyers_override_floor": ""}
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (

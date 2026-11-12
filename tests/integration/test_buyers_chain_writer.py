@@ -51,7 +51,7 @@ async def stores(tmp_path, monkeypatch):
     """A real DuckDB, a live Postgres, the flag on and every reader of the
     buyers on postgres — the precondition without which the flag moves
     nothing."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
@@ -59,7 +59,7 @@ async def stores(tmp_path, monkeypatch):
     for reader in READERS:
         monkeypatch.setenv(reader, "postgres")
     monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \

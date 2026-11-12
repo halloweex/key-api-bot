@@ -44,12 +44,14 @@ REPO = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = ("core", "web", "bot", "scripts", "deploy")
 
 DELETED_MODULES = ("core.warehouse_cutover", "core.pg_order_utm")
-# Names that left production in S14-15, by where they lived.
+# Names that left production in S14-15, by where they lived — the store's
+# under `core.store`, its own name since the final stage deleted the shim
+# `core.duckdb_store`.
 DELETED_ATTRS = {
-    "core.duckdb_store": ("GOLD_REVENUE_SELECT_SQL", "DUCKDB_GOLD_COLUMNS",
-                          "GOLD_SOURCE_MEASURES", "gold_select_items",
-                          "MAX_VALIDATION_RETRIES", "STUCK_REBUILD_COOLDOWN_SECONDS",
-                          "UTM_DATE_LOOKUP_LIMIT"),
+    "core.store": ("GOLD_REVENUE_SELECT_SQL", "DUCKDB_GOLD_COLUMNS",
+                   "GOLD_SOURCE_MEASURES", "gold_select_items",
+                   "MAX_VALIDATION_RETRIES", "STUCK_REBUILD_COOLDOWN_SECONDS",
+                   "UTM_DATE_LOOKUP_LIMIT"),
     "core.pg_derivation": ("ENV", "PIGGYBACK", "OWN", "configure_mode", "mode",
                            "mode_error", "owns", "mark_if_owned"),
     "core.pg_utm_parse": ("ENV", "DUCKDB", "POSTGRES", "configure_mode", "mode",
@@ -117,10 +119,10 @@ class TestWhatIsGone:
         assert left == [], f"{module} still has {left}"
 
     def test_the_store_and_the_scheduler_lost_their_methods(self):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
-        assert [m for m in DELETED_STORE_METHODS if hasattr(DuckDBStore, m)] == []
+        assert [m for m in DELETED_STORE_METHODS if hasattr(AnalyticsStore, m)] == []
         assert [m for m in DELETED_SCHEDULER_METHODS
                 if hasattr(BackgroundScheduler, m)] == []
 

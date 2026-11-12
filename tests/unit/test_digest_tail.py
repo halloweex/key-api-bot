@@ -77,7 +77,7 @@ class TestDigestWiring:
             sent.append(text)
             return 2
 
-        with patch("core.duckdb_store.get_store",
+        with patch("core.store.get_store",
                    AsyncMock(return_value=store)), \
              patch("core.scheduler.BackgroundScheduler._collect_digest_sections",
                    new=AsyncMock(return_value=([], None)), create=True), \

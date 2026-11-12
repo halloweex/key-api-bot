@@ -85,9 +85,9 @@ class TestTheRoutingIsGone:
 
     @pytest.mark.parametrize("name", ["upsert_orders", "upsert_expenses_batch"])
     def test_the_store_has_no_order_writer_of_its_own(self, name):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        assert not hasattr(DuckDBStore, name)
+        assert not hasattr(AnalyticsStore, name)
 
     @pytest.mark.parametrize("name", ["writes_postgres", "env_writes_postgres"])
     def test_and_s14_11_took_what_stayed(self, name):
@@ -136,9 +136,9 @@ class TestTheDeclaration:
 
 @pytest_asyncio.fixture
 async def duck(tmp_path, flags):
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
     flags.setenv("KS_MIRROR_LANDING", "0")
     yield store
 
@@ -339,7 +339,8 @@ class TestTheSelectionsFollow:
         met.setenv("KS_WRITE_ORDERS", "postgres")
         read = AsyncMock(return_value=answer)
         met.setattr(pg_orders_read, reader, read)
-        met.setattr(duck, "connection", MagicMock(side_effect=AssertionError("DuckDB read")))
+        met.setattr(duck, "connection",
+                    MagicMock(side_effect=AssertionError("DuckDB read")), raising=False)
         assert await getattr(duck, method)(*args) == answer
         read.assert_awaited_once()
 

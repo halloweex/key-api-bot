@@ -165,10 +165,12 @@ Both new entries alert on their own through `deploy/notify.sh`
 depends on anybody reading root's local mail. The drill takes `--quiet` when
 you are iterating on it at a keyboard; cron runs without it.
 
-`offsite_check.sh` reads the marker `data/.offsite_last_ok` and alerts if no
-copy has left in 36 h, and since DN-09 also reads
-`data/.pg_offsite_last_ok` on the same threshold. Its three checks each record
-a verdict and the run continues: on a host where the 07:40 cron is not
+`offsite_check.sh` read the marker `data/.offsite_last_ok` and alerted if no
+copy had left in 36 h, until the final stage (2026-11-12) deleted the DuckDB
+file and every judgement of its copy; since DN-09 it reads
+`data/.pg_offsite_last_ok` on the same threshold, and that is the off-site
+copy it judges now, beside the disk watchdog. Its checks each record a
+verdict and the run continues: on a host where the 07:40 cron is not
 installed yet the Postgres marker is absent every morning, and under the old
 fail-fast shape that would have silenced the disk-watchdog check indefinitely.
 It runs from the **host** crontab rather than the app scheduler on

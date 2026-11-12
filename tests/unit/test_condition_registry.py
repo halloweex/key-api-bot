@@ -89,7 +89,7 @@ def collect_freshness_names() -> set:
 def collect_literal_send_keys() -> set:
     """Every literal key=... passed to a send/throttle call, all emitters."""
     keys = set()
-    for path in ("core/scheduler.py", "core/duckdb_store.py", "bot/main.py",
+    for path in ("core/scheduler.py", "core/store.py", "bot/main.py",
                  "core/prediction_service.py", "web/routes/api/webhooks.py"):
         for node in ast.walk(_parse(path)):
             if isinstance(node, ast.Call):

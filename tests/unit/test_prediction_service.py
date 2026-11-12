@@ -358,7 +358,7 @@ class TestTheRangeForecastIsTheStoredOne:
 
         monkeypatch.setattr(ps, "_today_kyiv", lambda: self.TODAY)
         monkeypatch.setattr(ps, "_predict_future", never)
-        monkeypatch.setattr("core.duckdb_store.get_store", store)
+        monkeypatch.setattr("core.store.get_store", store)
         svc = ps.PredictionService()
         monkeypatch.setattr(svc, "_query_daily_revenue", never)
         assert not svc.is_ready

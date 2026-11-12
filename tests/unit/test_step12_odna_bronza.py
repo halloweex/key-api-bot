@@ -68,12 +68,12 @@ class TestTheGoldReader:
         answers zeros, the owner's decision 5 for step 14. Mutation: route
         3 or 5 to `_pg_gold_summary` — the fetch is awaited and the zeros
         become the source's money."""
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         fetch = AsyncMock(return_value=(9, 900.0, 1, 10.0))
         monkeypatch.setattr(pg_gold_read, "fetch_summary", fetch)
 
-        mixin = DuckDBStore.__new__(DuckDBStore)
+        mixin = AnalyticsStore.__new__(AnalyticsStore)
         out = await mixin.get_summary_stats(
             date(2026, 8, 1), date(2026, 8, 27), source_id=source,
         )
@@ -84,12 +84,12 @@ class TestTheGoldReader:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("source", [None, 1, 2, 4])
     async def test_every_other_source_is_asked_of_gold(self, monkeypatch, source):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         fetch = AsyncMock(return_value=(2, 300.0, 0, 0.0))
         monkeypatch.setattr(pg_gold_read, "fetch_summary", fetch)
 
-        mixin = DuckDBStore.__new__(DuckDBStore)
+        mixin = AnalyticsStore.__new__(AnalyticsStore)
         out = await mixin.get_summary_stats(
             date(2026, 8, 1), date(2026, 8, 27), source_id=source, sales_type="b2b",
         )
@@ -163,14 +163,14 @@ class TestTheLockIsNeverHeldAcrossTheNetwork:
     @pytest.mark.asyncio
     async def test_summary_from_pg_never_touches_the_store(self, monkeypatch):
         from core import pg_gold_read
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         monkeypatch.setattr(
             pg_gold_read, "fetch_summary",
             AsyncMock(return_value=(10, 1000.0, 1, 50.0)),
         )
 
-        store = DuckDBStore.__new__(DuckDBStore)
+        store = AnalyticsStore.__new__(AnalyticsStore)
 
         def forbidden():
             raise AssertionError("store lock was taken for a PG-answered read")
@@ -190,7 +190,7 @@ class TestTheLockIsNeverHeldAcrossTheNetwork:
         # Both series — current and comparison — must be awaited before
         # connection() is entered; the fake lock records the ordering.
         from core import pg_gold_read
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         calls: list = []
 
@@ -200,7 +200,7 @@ class TestTheLockIsNeverHeldAcrossTheNetwork:
 
         monkeypatch.setattr(pg_gold_read, "fetch_series", fake_series)
 
-        store = DuckDBStore.__new__(DuckDBStore)
+        store = AnalyticsStore.__new__(AnalyticsStore)
 
         def forbidden():
             raise AssertionError("store lock was taken for a PG-answered trend")

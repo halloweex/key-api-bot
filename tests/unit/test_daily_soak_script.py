@@ -107,10 +107,7 @@ def _run(workdir: Path, **fake: str) -> Run:
     calls.write_text("")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FAKE_", "SOAK_"))}
     env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                "FAKE_DOCKER_CALLS": str(calls),
-                # The file-hash record P1 reads: none, unless a test makes
-                # one. Never the host's /root/duckdb-silence.
-                "DUCKDB_SILENCE_STATE_DIR": str(workdir / "silence"), **fake})
+                "FAKE_DOCKER_CALLS": str(calls), **fake})
     done = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True,
                           text=True, timeout=120)
     return Run(done, calls.read_text().splitlines())
@@ -229,11 +226,14 @@ class TestWhatTheScriptPromises:
         assert "flip" not in run.out.lower()
 
     def test_the_override_floor_is_passed(self, tmp_path, healthy):
-        """B3's one knob, kept: the fewest human overrides there may be."""
-        assert all("buyers_override_floor= " in c for c in healthy.psql), healthy.psql
+        """B3's one knob, kept: the fewest human overrides there may be. The
+        report's first line names it when it is set, and only then."""
+        assert all(re.search(r" buyers_override_floor=(\s|$)", c)
+                   for c in healthy.psql), healthy.psql
+        assert "override floor" not in healthy.out
         run = _run(tmp_path, SOAK_BUYERS_OVERRIDE_FLOOR="3")
-        assert all("buyers_override_floor=3 " in c for c in run.psql), run.psql
-        assert "override floor 3" in run.out
+        assert all(re.search(r" buyers_override_floor=3(\s|$)", c) for c in run.psql), run.psql
+        assert "override floor 3" in run.out.splitlines()[0]
 
     def test_a_bar_inside_a_detail_survives(self, healthy):
         assert healthy.rows["D1 owed rebuild"][1] == "detail for D1 owed rebuild | with a bar"
@@ -259,16 +259,13 @@ def test_the_order_checks_are_in_the_report(healthy):
 # readings: every chain writes Postgres whatever its flag or its marker says.
 
 
-class TestTheDuckDBFile:
-    """The DuckDB file (P1, OD-17 (a)): the file's hash record read with
-    `--status` — which hashes nothing and writes nothing. P2–P4 and F1 went
-    at step 14's S14-02, and with P4 the report's one reason to read `.env`;
-    KS_DUCKDB, which P1 was gated on, went at S14-20."""
-
-    def test_no_record(self, healthy):
-        assert all("duckdb_file_last=none " in c and "duckdb_file_since= " in c
-                   for c in healthy.psql), healthy.psql
-        assert "DuckDB file record: none" in healthy.out
+class TestTheRetiredChecks:
+    """P2–P4 and F1 went at step 14's S14-02, and with P4 the report's one
+    reason to read `.env`; KS_DUCKDB, which P1 was gated on, went at S14-20.
+    P1 itself — the DuckDB file's hash, read from the hourly host cron's
+    record with `deploy/duckdb_silence_check.sh --status` — went at the final
+    stage (2026-11-12) with the file and the check: a file that no longer
+    exists can only ever read MISSING, which P1 failed as a DROP."""
 
     def test_the_retired_checks_and_their_inputs_are_gone(self, healthy):
         """The parallel period's declared start and `.env`'s reading went with
@@ -283,79 +280,33 @@ class TestTheDuckDBFile:
                     if any(word in ln for word in ("duckdb_env.sh", "ks_duckdb_env_read",
                                                    "SOAK_ENV_FILE", "SOAK_PARALLEL_FROM"))], code
         labels = set(LABELS.values())
-        assert not {label for label in labels if label.split()[0] in ("P2", "P3", "P4", "F1")}, labels
+        assert not {label for label in labels
+                    if label.split()[0] in ("P1", "P2", "P3", "P4", "F1")}, labels
 
-    def test_the_record_is_read_and_left_as_it_was(self, tmp_path):
-        """The hourly cron's record, made by the real script, then read by the
-        report: every field passed through, and the record byte for byte as
-        it was. Mutation: call the check without `--status` in the report —
-        it would hash the file and write the record."""
-        db = tmp_path / "analytics.duckdb"
-        db.write_bytes(b"duck")
-        state = tmp_path / "silence"
-        base = {k: v for k, v in os.environ.items() if not k.startswith("DUCKDB_")}
-        made = subprocess.run(
-            ["bash", str(REPO / "deploy" / "duckdb_silence_check.sh")],
-            env={**base, "DUCKDB_FILE": str(db), "DUCKDB_SILENCE_STATE_DIR": str(state),
-                 "DUCKDB_SILENCE_NOW": "1900000000"},
-            capture_output=True, text=True, timeout=60)
-        assert made.returncode == 2, made.stdout + made.stderr
-        before = {p.name: p.read_bytes() for p in state.iterdir()}
-        db.write_bytes(b"changed")  # a record-mode run would now say CHANGED
-
-        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state), DUCKDB_FILE=str(db))
-        assert all("duckdb_file_last=BASELINE " in c
-                   and "duckdb_file_since=2030-03-17T17:46:40Z " in c
-                   and "duckdb_file_since_reason=baseline " in c
-                   and "duckdb_file_checked_at=2030-03-17T17:46:40Z" in c
-                   for c in run.psql), run.psql
-        assert {p.name: p.read_bytes() for p in state.iterdir()} == before
-
-    def test_a_missing_episode_reaches_the_checks(self, tmp_path):
-        """The review of 02.10's sequence, by the real script: baseline, the
-        file moved away for a check, moved back. The record reads UNCHANGED
-        since the baseline; `missing_at` is what tells P1. Mutation:
-        drop the `missing_at=*` case from `silence_record`."""
-        db = tmp_path / "analytics.duckdb"
-        db.write_bytes(b"duck")
-        state = tmp_path / "silence"
-        base = {k: v for k, v in os.environ.items() if not k.startswith("DUCKDB_")}
-        env = {**base, "DUCKDB_FILE": str(db), "DUCKDB_SILENCE_STATE_DIR": str(state)}
-        check = ["bash", str(REPO / "deploy" / "duckdb_silence_check.sh")]
-        for now, move in ((1900000000, None), (1900003600, "away"), (1900007200, "back")):
-            if move == "away":
-                db.rename(tmp_path / "away")
-            elif move == "back":
-                (tmp_path / "away").rename(db)
-            subprocess.run(check, env={**env, "DUCKDB_SILENCE_NOW": str(now)},
-                           capture_output=True, text=True, timeout=60)
-        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state), DUCKDB_FILE=str(db))
-        assert all("duckdb_file_last=UNCHANGED " in c
-                   and "duckdb_file_since_reason=baseline " in c
-                   and "duckdb_file_missing_at=2030-03-17T18:46:40Z" in c
-                   for c in run.psql), run.psql
-        assert "last missing 2030-03-17T18:46:40Z" in run.out
-
-    def test_an_unreadable_record_is_an_error_not_a_pass(self, tmp_path):
-        state = tmp_path / "silence"
-        state.mkdir()
-        (state / "state").write_text("nonsense=1\n")
-        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state))
-        assert all("duckdb_file_last=error " in c for c in run.psql)
-
-    def test_the_check_is_only_ever_asked_for_its_status(self):
-        calls = re.findall(r'"\$SILENCE_CHECK"[^\n]*', SCRIPT.read_text())
-        assert calls == ['"$SILENCE_CHECK" --status 2>&1 || true)"'], calls
+    def test_the_file_check_and_its_record_are_gone(self, healthy):
+        """Nothing asks the silence check (deleted with the file), passes a
+        `duckdb_file_*` variable, or prints the record's line; and no check
+        file is P1's. Mutation: put `silence_record` or a `-v
+        duckdb_file_last=` back, or restore P1's file under daily_soak/."""
+        code = [ln for ln in SCRIPT.read_text().splitlines()
+                if not ln.lstrip().startswith("#")]
+        assert not [ln for ln in code if "silence" in ln.lower()
+                    or "duckdb_file" in ln or "FILE_LAST" in ln], code
+        assert not any("duckdb_file_" in c for c in healthy.psql), healthy.psql
+        assert "DuckDB file record" not in healthy.out
+        assert not [p.name for p in FILES if "_p1_" in p.name or "duckdb" in p.name]
+        assert not (REPO / "deploy" / "duckdb_silence_check.sh").exists()
 
 
 def test_every_variable_a_check_reads_is_passed():
     """Walked over the checks, not listed: a `:'name'` a file reads that the
     script does not pass reaches the server as psql's literal text, and the
     check judges that. And nothing else is passed: a `-v` no check reads is
-    an input left behind by a check that went (S14-02 took P2–P4's three),
-    computed every morning for nobody. Every read is the quoted form, so
-    the walk sees them all. Mutation: drop `-v duckdb_file_last=...` from
-    the script, or put back `-v parallel_from=...`."""
+    an input left behind by a check that went (S14-02 took P2–P4's three,
+    the final stage P1's five), computed every morning for nobody. Every
+    read is the quoted form, so the walk sees them all. Mutation: drop
+    `-v buyers_override_floor=...` from the script, or put back
+    `-v parallel_from=...`."""
     passed = set(re.findall(r"-v (\w+)=", SCRIPT.read_text())) - {"ON_ERROR_STOP"}
     read = set()
     for path in FILES:

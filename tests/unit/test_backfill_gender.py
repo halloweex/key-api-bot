@@ -149,9 +149,9 @@ class TestTheWritePathIsPostgres:
 
     @pytest.fixture
     def pg(self, monkeypatch):
-        from core import duckdb_store, pg_buyers_write
+        from core import pg_buyers_write, store as core_store
 
-        monkeypatch.setattr(duckdb_store, "get_store", AsyncMock(
+        monkeypatch.setattr(core_store, "get_store", AsyncMock(
             side_effect=AssertionError("DuckDB opened by the script")))
         derive = AsyncMock(return_value={
             "pending": 3, "written": 3, "female": 2, "male": 1, "null": 0,

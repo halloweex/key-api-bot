@@ -506,7 +506,7 @@ class TestTheMondayJobStoresRetail:
                 async def _get_store():
                     return store
 
-                monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+                monkeypatch.setattr("core.store.get_store", _get_store)
                 result = await BackgroundScheduler()._run_seasonality_calc()
 
             assert result["retail_months"] == 12

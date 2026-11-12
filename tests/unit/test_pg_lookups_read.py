@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
@@ -63,12 +63,12 @@ class TestEveryLookupReadsPostgres:
         self, tmp_path, monkeypatch, name, args,
     ):
         monkeypatch.setenv("KS_READ_LOOKUPS", "duckdb")   # not read any more
-        store = DuckDBStore()
+        store = AnalyticsStore()
 
         def boom(*_a, **_k):
             raise AssertionError(f"{name} reached for DuckDB")
 
-        with patch.object(type(store), "connection", boom), \
+        with patch.object(type(store), "connection", boom, create=True), \
              patch("core.pg_lookups_read.fetch",
                    new=AsyncMock(return_value=[])) as fetch:
             await getattr(store, name)(*args)

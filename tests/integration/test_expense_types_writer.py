@@ -64,13 +64,13 @@ async def stores(tmp_path, monkeypatch):
     """A real DuckDB with the whole schema and a live Postgres, flag off —
     and `KS_READ_EXPENSES=postgres`, the precondition without which the flag
     moves nothing (`TestTheReadFlagComesFirst` takes it away)."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \

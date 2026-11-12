@@ -106,9 +106,9 @@ IDS = [r[0] for r in READERS]
 def store(tmp_path, monkeypatch):
     """A store that is never connected, whose connection is a trap: nothing
     here may reach for DuckDB, under any value of any switch."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     def trap(*_a, **_k):
         raise AssertionError("a Postgres-only dashboard read reached for DuckDB")

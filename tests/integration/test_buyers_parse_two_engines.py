@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from core.landing_rows import BUYER_COLUMNS
 from core.models import Buyer
 
@@ -80,7 +80,7 @@ def _normal(value):
 @pytest_asyncio.fixture
 async def both_engines(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
 
     async def clear():

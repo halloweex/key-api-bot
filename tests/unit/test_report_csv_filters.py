@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 WINDOW = (date(2026, 10, 1), date(2026, 10, 31))
@@ -36,7 +36,7 @@ COMBINATIONS = [
 
 def _capturing_store():
     """A store whose report queries are recorded instead of run."""
-    store = DuckDBStore.__new__(DuckDBStore)
+    store = AnalyticsStore.__new__(AnalyticsStore)
     calls: list[tuple[str, list]] = []
 
     async def run(sql, params=None):

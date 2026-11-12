@@ -653,16 +653,16 @@ class TestTheJobWhenTheDuckDBHalfFails:
 
     @pytest_asyncio.fixture
     async def job(self, latched, tmp_path, monkeypatch):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
         monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         scheduler = BackgroundScheduler()
         sent = AsyncMock(return_value=True)
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
         resolve = AsyncMock(return_value=0)
-        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
+        with patch("core.store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.alerting.resolve_group", resolve):
             yield latched[0], scheduler, store, sent, resolve
 

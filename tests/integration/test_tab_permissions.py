@@ -106,7 +106,7 @@ def _fresh_permissions():
 # to the real store. Named here rather than discovered per test, because the
 # failure mode is a green test that opened a database.
 _STORE_HOLDERS = (
-    "core.duckdb_store.get_store",
+    "core.store.get_store",
     "web.routes.api._deps.get_store",
     "web.routes.api.traffic.get_store",
     "web.routes.api.users.get_store",

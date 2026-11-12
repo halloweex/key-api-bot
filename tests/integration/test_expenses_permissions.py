@@ -145,9 +145,9 @@ def _login_with_store(monkeypatch, role: str, deletes: bool = True):
         return store
 
     # _resolve_session and get_permissions_for_role_async import get_store from
-    # core.duckdb_store at call time; the /api/expenses handler holds a
+    # core.store at call time; the /api/expenses handler holds a
     # reference bound in web.routes.api.expenses at import time.
-    monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+    monkeypatch.setattr("core.store.get_store", _fake_get_store)
     monkeypatch.setattr("web.routes.api.expenses.get_store", _fake_get_store)
     # Non-hardcoded id so the role actually comes from the fake store.
     uid = 555_000_222
@@ -189,7 +189,7 @@ class TestExpenseReadAllowedForPrivilegedRoles:
         async def _fake_get_store():
             return store
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+        monkeypatch.setattr("core.store.get_store", _fake_get_store)
         monkeypatch.setattr("web.routes.api.expenses.get_store", _fake_get_store)
         headers = _cookie_header(_make_cookie(ADMIN_ID, role="admin"))
         assert client.get(path, headers=headers).status_code == 200

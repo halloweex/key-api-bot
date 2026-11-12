@@ -3,7 +3,7 @@ import logging
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, date
 
-from core.duckdb_store import get_store
+from core.store import get_store
 from core.filters import parse_period as _parse_period_core
 
 logger = logging.getLogger(__name__)

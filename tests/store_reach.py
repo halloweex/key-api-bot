@@ -36,9 +36,10 @@ FILE_REACHES: FrozenSet[str] = frozenset({
 FILE_MODULES: Sequence[str] = ("duckdb", "core.duckdb_switch")
 
 # A router hands its statement to Postgres and to nothing else, so it may not
-# touch the store at all — not even to fetch it.
+# touch the store at all — not even to fetch it, by the store's module or by
+# the old shim's name (`core.duckdb_store`, deleted at the final stage).
 ROUTER_REACHES: FrozenSet[str] = FILE_REACHES | {"get_store"}
-ROUTER_MODULES: Sequence[str] = tuple(FILE_MODULES) + ("core.duckdb_store",)
+ROUTER_MODULES: Sequence[str] = tuple(FILE_MODULES) + ("core.duckdb_store", "core.store")
 
 _IMPORTERS = ("import_module", "__import__")
 

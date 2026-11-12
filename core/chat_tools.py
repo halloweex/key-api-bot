@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from core import read_fallback
-from core.duckdb_store import get_store
+from core.store import get_store
 from core.meilisearch_client import MeiliUnavailable, get_meili_client
 from core.observability import get_logger
 

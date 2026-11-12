@@ -42,12 +42,12 @@ def flag(monkeypatch):
 @pytest.fixture
 def no_duckdb(monkeypatch):
     """Any reach for DuckDB's store fails the test."""
-    from core import duckdb_store
+    from core import store as core_store
 
     def connection(self):
         raise AssertionError("the samples opened a DuckDB connection")
 
-    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
+    monkeypatch.setattr(core_store.AnalyticsStore, "connection", connection, raising=False)
 
 
 def _sample(at=None, pct=40.0, free=100.0):
@@ -213,7 +213,7 @@ class TestTheTick:
         store = SimpleNamespace(db_path=tmp_path / "analytics.duckdb")
         with patch("core.disk_monitor.sample_disk_state",
                    return_value=_sample(pct=97.0, free=1.5)), \
-             patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+             patch("core.store.get_store", AsyncMock(return_value=store)), \
              patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)):
             result = await BackgroundScheduler()._run_disk_watchdog()
         assert result["alert_fired"] is True, result
@@ -243,7 +243,7 @@ class TestTheTick:
         # is replaced and the alert path is not reached.
         monkeypatch.setattr("core.memory_monitor.evaluate_memory", evaluate_memory)
         get_store = AsyncMock(side_effect=AssertionError("the memory job asked a store"))
-        with patch("core.duckdb_store.get_store", get_store):
+        with patch("core.store.get_store", get_store):
             result = await BackgroundScheduler()._run_memory_monitor()
         assert judged["previous_oom_kills"] == 0, judged
         assert result["peak_working_set_mb_24h"] == 600

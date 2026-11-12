@@ -13,8 +13,8 @@ key-api-bot/
 ├── core/                         # Shared modules (bot + web), 120 files
 │   ├── config.py                # Shared configuration
 │   ├── keycrm.py                # Unified async KeyCRM client
-│   ├── store.py                 # The analytics store (AnalyticsStore), over Postgres
-│   ├── duckdb_store.py          # Its old name, a shim for one release (S14-18)
+│   ├── store.py                 # The analytics store (AnalyticsStore), over Postgres;
+│   │                            # its old name's shim, duckdb_store.py, went at the final stage
 │   ├── repositories/            # Nine mixins composed into AnalyticsStore
 │   ├── pg_*_write.py            # The thirteen write chains, one writer per table set
 │   ├── pg_derivation.py         # Silver, Gold and UTM derived in Postgres on a signal
@@ -59,7 +59,6 @@ key-api-bot/
 ├── deploy/                       # Reached only from host cron, never imported
 │   ├── offsite_check.sh         # 09:00 daily — freshness, in-app watchdog liveness
 │   ├── daily_soak.sh            # The daily soak report, by hand; checks in daily_soak/
-│   ├── duckdb_silence_check.sh  # Hourly: the frozen DuckDB file's hash, until it is deleted
 │   ├── api_fingerprint.py       # sha256 of past-window API answers, before/after a deploy
 │   └── restore_from_export.py   # The only restore path, on the pinned image. Never delete.
 │
@@ -371,7 +370,15 @@ date outside 2000-01-01..2099-12-31 answered 400 and a marketing report on
    roll back.
 2. **`.env` by exact names** (the plan's H3): every one at production's value
    — that image reads them all again, and for many an absent value means
-   `duckdb` (`KS_USER_STORE` absent is a 401 for everybody).
+   `duckdb` (`KS_USER_STORE` absent is a 401 for everybody). Above all
+   `KS_DUCKDB=off`: the final stage deleted the DuckDB file (2026-11-12), and
+   that image runs without it only under `off`. `off` is necessary, not
+   enough: that image falls back to `on` whenever a coherence key is unmet
+   (OD-S5-1 (a)), a start that cannot reach Postgres included, and under `on`
+   it creates an empty `data/analytics.duckdb` and starts the empty-DuckDB
+   boot sync. Right after such a rollback, confirm `/api/health`'s
+   `duckdb_switch.held_back` is empty, no `duckdb_off_held_back` page fired
+   and no new `data/analytics.duckdb` appeared; if any did, stop that image.
 3. **`meta.alembic_version`** is the revision that image requires
    (`0035_batch_e_chains` for every image built before S14-00), or roll back
    to the last image that requires the one there instead.
@@ -504,7 +511,9 @@ TZ=UTC KS_PG_DSN=... pytest -q
 production DuckDB file, went in step 14's S14-03 with `scripts/check_date.py`
 and `scripts/force_resync.py`. `reconciliation_pg` makes that comparison every
 morning, and a resync is `POST /api/sync/resync` (`/api/duckdb/resync`
-until step 14's S14-17, kept as an alias until its final stage).
+until step 14's S14-17, then an alias until the final stage removed it on
+2026-11-12; a POST there answers 405 now and a GET the JSON 404, as for any
+path no route serves).
 
 ### Type checking
 
@@ -3214,8 +3223,25 @@ and each PR's own description.
   comparisons, mirrors and copies, the DuckDB integrity scan, step 13's
   switch, the read fallback, DuckDB's `/api/health` blocks and the store's
   DuckDB half with the compaction. S14-19 took `duckdb` out of the images;
-  S14-20 is this section. Deleting the file itself is the final stage, on
+  S14-20 is this section. Deleting the file itself was the final stage, on
   the owner's separate yes, after a rehearsed restore from the second Ark.
+- **The final stage (2026-11-11 to 2026-11-12).** The rehearsal (Z1,
+  2026-11-11) fetched the second Ark's off-site copy, decrypted it with the
+  escrowed passphrase, verified it (L0–L2 clean), found a declared fate for
+  every table, and compared its history with Postgres: nothing in DuckDB was
+  missing from Postgres. On the owner's yes the deletion (Z2, 2026-11-12)
+  removed, on the host, `data/analytics.duckdb` (with any `.wal` beside
+  it), its `.old`, the nightly backups `data/backups/analytics-*.duckdb`,
+  `data/export_parquet/`, `data/duckdb_tmp/` and
+  `data/.duckdb_index_short.json`, and the silence check's line from root's
+  crontab. The pull request that followed deleted what only looked at the
+  file or kept its old names: `deploy/duckdb_silence_check.sh` and the daily soak's
+  P1, the `/api/duckdb/*` aliases of the sync levers (with their
+  `SLOW_ENDPOINTS` entries and their part of nginx's long-timeout regex),
+  the shim `core/duckdb_store.py` with the store's refusing `connection()`
+  (owner decision O9 (b)), and `deploy/offsite_check.sh`'s judgement of the
+  DuckDB off-site copy. Z3, retiring `rollback-step14` as a rollback target,
+  is a later yes.
 
 ### Where the decisions are
 
@@ -3230,15 +3256,17 @@ steps and the alert conditions it removed.
 
 ### What is left, and why
 
-Kept on disk, untouched by every step-14 PR (rule 5): `data/analytics.duckdb`
-and its `.old`, the nightly backups `data/backups/analytics-*.duckdb`,
-`data/export_parquet/`, the off-site Parquet archive, both Arks (local and on
-the Storage Box), `data/write-chain-owners/`, `data/report-ledger-pending/`,
-`data/warehouse-utm-reparsed-at`, `data/.duckdb_index_short.json` and the
-`marks` in `data/alert-gate-*.json`. The file has not changed since
-2026-10-16; `deploy/duckdb_silence_check.sh` hashes it hourly from root's
-crontab, and P1 of the daily soak report reads that record, until the final
-stage deletes the file.
+Deleted at the final stage (2026-11-12), after the rehearsal of 2026-11-11:
+`data/analytics.duckdb` (unchanged since 2026-10-16, as the hourly hash
+attested until then) and its `.old`, the nightly backups
+`data/backups/analytics-*.duckdb`, `data/export_parquet/`,
+`data/duckdb_tmp/` and `data/.duckdb_index_short.json`. Kept on disk: both
+Arks (local and on the Storage Box), the off-site Parquet archive,
+`data/write-chain-owners/` (the latch markers, until Z3),
+`data/report-ledger-pending/`, `data/warehouse-utm-reparsed-at`, the `marks`
+in `data/alert-gate-*.json`, and the hash check's record under
+`/root/duckdb-silence`, as history. The image `rollback-step14` stays on the
+host: it runs under `KS_DUCKDB=off` without the file.
 
 Kept in Postgres as history, with no writer and no DROP (OD-11):
 `app.sync_metadata`, `app.warehouse_refreshes` and `app.reconciliation_log`;
@@ -3263,17 +3291,22 @@ an absent value means `duckdb` there. What to check before such a rollback is
 What the week changed on the host stays changed: root's crontab no longer
 runs the Sunday compaction (`scripts/weekly_compact.sh`) or the nightly
 DuckDB snapshot (`deploy/daily_offsite.sh`) — both retired on 2026-10-16 and
-deleted in step 14's S14-18 — and runs the hourly
-`deploy/duckdb_silence_check.sh`. `.env` keeps `KS_DUCKDB=off`, written bare
-on a line of its own: a step-14 web ignores it, but the host scripts read it
-(`deploy/duckdb_env.sh`), `deploy/offsite_check.sh` reports the DuckDB copy as
-frozen on it, and `deploy/restore-test.sh` passes `-e KS_DUCKDB=on` to its
-own sidecar so the drill still runs. The crontab change was made by a person
-from the print of `deploy/duckdb_silence_check.sh --crontab`, never by a
-script, and that print also carries the way back.
+deleted in step 14's S14-18. It ran the hourly hash of the file,
+`deploy/duckdb_silence_check.sh`, from the week's start until the final
+stage: on 2026-11-12, after the restore from the second Ark was rehearsed on
+2026-11-11, its line came out of the crontab, the file was deleted, and the
+script went from this checkout. Its record under `/root/duckdb-silence`
+stays, as history. `.env` keeps `KS_DUCKDB=off`, written bare on a line of
+its own: a step-14 web ignores it, `deploy/restore-test.sh` reads it
+(`deploy/duckdb_env.sh`) and passes `-e KS_DUCKDB=on` to its own sidecar so
+the drill still runs, and an image from before step 14 runs without the file
+only under it. `deploy/offsite_check.sh` reported the DuckDB copy as frozen
+on it until the final stage, which took every judgement of that copy out of
+the check. The crontab changes were made by a person from the print of
+`deploy/duckdb_silence_check.sh --crontab`, never by a script.
 
 **On a step-14 image there is no way back to make**: leave `.env` at
-`KS_DUCKDB=off` and do not re-add those two cron lines — the scripts are gone
+`KS_DUCKDB=off` and do not re-add those three cron lines — the scripts are gone
 from this checkout, and a step-14 web runs `off` whatever `.env` says. The
 way back is a rollback to an image from before step 14 first ("Before any
 rollback to an image from before step 14"), whose own code knows
@@ -3281,8 +3314,9 @@ rollback to an image from before step 14"), whose own code knows
 back, `deploy/backup.env` must set `BACKUP_RESTORE_IMAGE` to the image tagged
 `rollback-step14`, and that tag must be on the host: the snapshot has had no
 default image since S14-02, and without both it refuses every night (exit 2)
-and pages "Daily snapshot FAILED". Starting the week again would then need a
-new Ark, because the file changes the moment web runs `on`.
+and pages "Daily snapshot FAILED". And since the final stage there is no
+file for `on` to open: that image runs under `off`, and `on` would first need
+a warehouse rebuilt from the second Ark (`deploy/restore_from_export.py`).
 
 ### What is left on disk, and how to restore it
 
@@ -3293,9 +3327,10 @@ schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`. The restore
 drill (`deploy/restore-test.sh`) pulls the newest off-site archive and
 rebuilds a validated warehouse in a throwaway container of that image;
 `deploy/restore_from_export.py` is the one restore path and is never deleted;
-`deploy/duckdb_table_fates_check.py` reads a backup against the frozen
-manifest. The two sections below are how those tools are held to the image,
-and what each table became.
+`deploy/duckdb_table_fates_check.py` reads a copy against the frozen
+manifest — an Ark's byte copy, with `--file`, since the final stage left no
+nightly backup to read. The two sections below are how those tools are held
+to the image, and what each table became.
 
 ### The archive tools on a pinned image (step 14, S14-02)
 
@@ -3453,7 +3488,9 @@ decide, 2 refused. A copy of the 2026-08-31 production backup read 58 of 58.
 It refuses what it cannot see, too: a newest backup over 48 h old (`--file`
 reads an older one on purpose), and a file without `orders`, `sync_metadata`
 and `schema_migrations` or holding under half of today's schema — an empty
-file used to read "clean".
+file used to read "clean". Since the final stage there is no nightly backup
+and no live file to refuse: the rehearsal of 2026-11-11 read the second
+Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from core.repositories.customers import (
     BUILTIN_AUDIENCE_PRESETS, SINGLE_GROUP_NAME, SmsAudienceFilters,
 )
@@ -33,7 +33,7 @@ async def _postgres(request, monkeypatch):
         yield
 
 
-async def _store(tmp_path: Path) -> DuckDBStore:
+async def _store(tmp_path: Path) -> AnalyticsStore:
     return pg_sms_seed.store(tmp_path, "filters.duckdb")
 
 
@@ -71,7 +71,7 @@ async def _order(
         quantity=1, price_sold=total)])
 
 
-async def _seed(store: DuckDBStore) -> None:
+async def _seed(store: AnalyticsStore) -> None:
     """Four buyers, each the sole answer to one question.
 
     Values are chosen so nobody qualifies for VIP or CORE: everyone here is a

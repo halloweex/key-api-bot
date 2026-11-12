@@ -100,12 +100,12 @@ async def stores(tmp_path, monkeypatch):
     Since step 14's S14-07 every goal read is Postgres' whatever any flag
     says; the history used to be seeded in DuckDB and its Silver copied
     across. DuckDB is here for what must not reach it."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
     from tests.integration.pg_tab_seed import tab_in_postgres
     from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
 
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     async def populate(conn, pool):
         await _clean(pool)
@@ -565,7 +565,7 @@ class TestTheForecastShownSaysWhichTrainingMadeIt:
         def never(*args, **kwargs):
             raise AssertionError("the model ran on a request")
 
-        monkeypatch.setattr("core.duckdb_store.get_store", the_store)
+        monkeypatch.setattr("core.store.get_store", the_store)
         monkeypatch.setattr(ps, "_today_kyiv", lambda: date(2026, 10, 9))
         monkeypatch.setattr(ps, "_predict_future", never)
         svc = ps.PredictionService()

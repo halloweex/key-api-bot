@@ -201,16 +201,16 @@ class TestTheStoreReadsThroughIt:
         """The point of the move. A `CT_1001` here again means the rule has
         two homes, which is where #101 came from."""
         import inspect
-        from core import duckdb_store
+        from core import store as core_store
 
-        src = inspect.getsource(duckdb_store)
+        src = inspect.getsource(core_store)
         assert "CT_1001" not in src
         assert 'min_price' not in src
 
     @pytest.mark.asyncio
     async def test_an_empty_list_still_writes_nothing(self, tmp_path):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
         assert await store.upsert_categories([]) == 0
         assert await store.upsert_products([]) == 0

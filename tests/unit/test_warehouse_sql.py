@@ -18,12 +18,12 @@ Three things are held here:
   changed one would change the stored Silver or Gold at the next derivation.
   The literals are `tests/warehouse_sql_57fd7c22.py`, captured from 57fd7c22
   by running that module as a script against it;
-* **every old name is the same object as the new one**, for the one release
-  the re-exports live;
+* **the old home holds none of them**: `core.duckdb_store` re-exported them
+  until S14-18 and was a shim of the store until the final stage deleted it;
 * **the derivation path imports no DuckDB module**: none of the modules S14-01
   repointed names one, and a fresh interpreter that imports them and renders
-  every statement they own has neither `duckdb` nor `core.duckdb_store` nor
-  pandas loaded. `tests/integration/test_derivation_loads_no_duckdb.py` holds
+  every statement they own has neither `duckdb` nor the store nor pandas
+  loaded. `tests/integration/test_derivation_loads_no_duckdb.py` holds
   the same of a whole derivation tick against a real Postgres.
 """
 from __future__ import annotations
@@ -127,22 +127,25 @@ SHARED_SQL = (
 
 class TestTheOldNamesAreTheNewObjects:
     @pytest.mark.parametrize("name", SHARED_SQL)
-    def test_duckdb_store_holds_no_copy_of_the_warehouse_sql(self, name):
+    def test_the_store_holds_no_copy_of_the_warehouse_sql(self, name):
         """`core/duckdb_store.py` re-exported these as the same objects from
-        S14-01 until S14-18, which made it a shim of the store alone. Neither
-        a re-export nor a copy is left there: a copy would be two homes of
-        one rule, which is what #101 proved diverges. Mutation: define or
-        re-export any of them in the shim again."""
-        from core import duckdb_store, warehouse_sql
+        S14-01 until S14-18, which made it a shim of the store alone, and the
+        final stage deleted the shim. No copy is left in the store either: a
+        copy would be two homes of one rule, which is what #101 proved
+        diverges. Mutation: define or re-export any of them in the store."""
+        import importlib.util
+
+        from core import store, warehouse_sql
 
         assert hasattr(warehouse_sql, name)
-        assert not hasattr(duckdb_store, name)
+        assert not hasattr(store, name)
+        assert importlib.util.find_spec("core.duckdb_store") is None
 
     def test_upsert_result(self):
         """Re-exported by `core/duckdb_store.py` until S14-18."""
-        from core import duckdb_store, pg_orders_write
+        from core import pg_orders_write, store
 
-        assert not hasattr(duckdb_store, "UpsertResult")
+        assert not hasattr(store, "UpsertResult")
         assert pg_orders_write.UpsertResult.__module__ == "core.pg_orders_write"
 
     def test_the_data_directory(self):
@@ -297,10 +300,11 @@ class TestNoDuckDBModuleOnTheDerivationPath:
     def test_a_fresh_interpreter_renders_everything_without_duckdb(self):
         """Import the five modules the plan names, render every statement they
         own, take the order writer's no-row path, and look. Then import the
-        store's old name, which loads no driver since step 14's S14-18, and
-        the driver itself, in the same interpreter, so a check that could not
-        see the driver cannot pass. Fails on S14-00's tree: `pass1_sql` loads
-        it."""
+        store, which loads no driver since step 14's S14-18 (it was imported
+        by its old name, `core.duckdb_store`, until the final stage deleted
+        that shim), and the driver itself, in the same interpreter, so a
+        check that could not see the driver cannot pass. Fails on S14-00's
+        tree: `pass1_sql` loads it."""
         program = r"""
 import asyncio, json, sys
 sys.path.insert(0, sys.argv[1])
@@ -314,9 +318,9 @@ core.ch_silver.derive_gold_sql()
 core.pg_warehouse_dq._row_values_sql()
 result, expenses = asyncio.run(core.pg_orders_write.upsert_orders_with_expenses([]))
 assert (result.count, result.changed_ids, expenses) == (0, [], 0), result
-watched = ("duckdb", "core.duckdb_store", "pandas")
+watched = ("duckdb", "core.store", "pandas")
 before = sorted(m for m in watched if m in sys.modules)
-import core.duckdb_store
+import core.store
 shim = sorted(m for m in watched if m in sys.modules)
 import duckdb
 after = sorted(m for m in watched if m in sys.modules)
@@ -331,5 +335,5 @@ print(json.dumps({"before": before, "shim": shim, "after": after}))
         # pandas came with the store until step 14's S14-09 deleted its last
         # user there (`upsert_orders`), and the driver until S14-18 deleted
         # its DuckDB half; the driver imported by name is the control's point.
-        assert seen["shim"] == ["core.duckdb_store"], seen
-        assert seen["after"] == ["core.duckdb_store", "duckdb"], seen
+        assert seen["shim"] == ["core.store"], seen
+        assert seen["after"] == ["core.store", "duckdb"], seen
