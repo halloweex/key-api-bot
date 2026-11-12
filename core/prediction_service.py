@@ -1225,7 +1225,6 @@ class PredictionService:
         self._metrics: Dict[str, float] = {}
         self._dow_corrections: Dict[int, float] = {}
         self._clip_ratio: float = 1.0
-        self._training = False
         self._training_lock = asyncio.Lock()
         # Whether the last `predict_month` stored its forecast: True, False, or
         # None before any. `predict_month` swallows a failed store (the model
@@ -1335,11 +1334,7 @@ class PredictionService:
             return {"status": "already_training"}
 
         async with self._training_lock:
-            self._training = True
-            try:
-                return await self._train_impl(sales_type)
-            finally:
-                self._training = False
+            return await self._train_impl(sales_type)
 
     async def _train_impl(self, sales_type: str) -> Dict[str, Any]:
         """Internal training implementation."""

@@ -24,15 +24,6 @@ class ToolCall:
     input: Dict[str, Any]
 
 
-@dataclass
-class ChatMessage:
-    """Chat message."""
-    role: str  # "user" or "assistant"
-    content: str
-    tool_calls: Optional[List[ToolCall]] = None
-    tool_results: Optional[List[Dict[str, Any]]] = None
-
-
 class LLMClient:
     """Async client for Claude LLM."""
 

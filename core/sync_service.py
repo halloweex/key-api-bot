@@ -27,7 +27,6 @@ from core.events import (
     emit_sync_started,
     emit_sync_completed,
     emit_sync_failed,
-    emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
 from core import read_fallback
@@ -428,9 +427,6 @@ class SyncService:
 
     def __init__(self, store: AnalyticsStore):
         self.store = store
-        self._sync_task: Optional[asyncio.Task] = None
-        # Track if ordered_between filter is supported
-        self._use_ordered_between: Optional[bool] = None
 
         # Adaptive sync state
         self._consecutive_empty_syncs = 0
@@ -2070,8 +2066,6 @@ async def force_resync(days_back: int = 730) -> dict:
     logger.warning(f"Force resync requested - rewriting the last {days_back} days in place")
 
     sync_service = await get_sync_service()
-    # Reset the filter detection flag
-    sync_service._use_ordered_between = None
     stats = await sync_service.full_sync(days_back=days_back, force_update=True)
 
     logger.info(f"Force resync complete: {stats}")

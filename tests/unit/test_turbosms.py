@@ -19,7 +19,6 @@ from core.turbosms import (
     PartialSendError,
     ViberMessage,
     match_webhook_signature,
-    verify_webhook_signature,
 )
 
 
@@ -237,25 +236,6 @@ async def test_unconfigured_client_refuses_to_send():
     assert excinfo.value.unsent is True
 
 
-# ─── status ──────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_statuses_maps_ids_to_states():
-    def handler(request):
-        return httpx.Response(200, json={
-            "response_code": 0, "response_status": "OK",
-            "response_result": [
-                {"message_id": "aaa-111", "status": "Delivered", "response_code": 0},
-                {"message_id": "bbb-222", "status": "Undelivered", "response_code": 0},
-            ],
-        })
-
-    async with _client_with(handler) as c:
-        assert await c.statuses(["aaa-111", "bbb-222"]) == {
-            "aaa-111": "Delivered", "bbb-222": "Undelivered",
-        }
-
-
 # ─── DLR classification ──────────────────────────────────────────────────
 
 @pytest.mark.parametrize("status,expected", [
@@ -275,18 +255,18 @@ class TestWebhookSignature:
 
     def test_accepts_a_correct_signature(self):
         sig = hashlib.sha1(b"s3cretevt-1").hexdigest()
-        assert verify_webhook_signature("evt-1", sig, "s3cret") is True
+        assert match_webhook_signature("evt-1", sig, "s3cret") is not None
 
     def test_accepts_uppercase_signature(self):
         sig = hashlib.sha1(b"s3cretevt-1").hexdigest().upper()
-        assert verify_webhook_signature("evt-1", sig, "s3cret") is True
+        assert match_webhook_signature("evt-1", sig, "s3cret") is not None
 
     def test_rejects_a_forged_signature(self):
-        assert verify_webhook_signature("evt-1", "deadbeef", "s3cret") is False
+        assert match_webhook_signature("evt-1", "deadbeef", "s3cret") is None
 
     def test_rejects_signature_from_another_event(self):
         sig = hashlib.sha1(b"s3cretevt-2").hexdigest()
-        assert verify_webhook_signature("evt-1", sig, "s3cret") is False
+        assert match_webhook_signature("evt-1", sig, "s3cret") is None
 
     @pytest.mark.parametrize("event_id,sig,secret", [
         ("", "abc", "s3cret"),
@@ -294,7 +274,7 @@ class TestWebhookSignature:
         ("evt-1", "abc", ""),          # unset local secret must fail closed
     ])
     def test_rejects_missing_pieces(self, event_id, sig, secret):
-        assert verify_webhook_signature(event_id, sig, secret) is False
+        assert match_webhook_signature(event_id, sig, secret) is None
 
 
 class TestSignatureOrder:

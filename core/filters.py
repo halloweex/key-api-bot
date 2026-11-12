@@ -211,32 +211,6 @@ def _read_date(raw: str, field: str) -> date:
     return value
 
 
-def get_period_label(period: str) -> str:
-    """
-    Get human-readable label for period.
-
-    Args:
-        period: Period shortcut
-
-    Returns:
-        Human-readable label
-    """
-    labels = {
-        "today": "Today",
-        "yesterday": "Yesterday",
-        "week": "This Week",
-        "thisweek": "This Week",
-        "last_week": "Last Week",
-        "month": "This Month",
-        "thismonth": "This Month",
-        "last_month": "Last Month",
-        "last_7_days": "Last 7 Days",
-        "last_28_days": "Last 28 Days",
-        "all_time": "All Time",
-    }
-    return labels.get(period, period.title() if period else "Today")
-
-
 def has_comparison(period: Optional[str]) -> bool:
     """Whether a period has anything before it to be compared with.
 

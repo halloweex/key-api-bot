@@ -51,8 +51,6 @@ INT = "int"
 FLOAT = "float"
 TEXT = "text"
 
-RETENTION_TYPES: Tuple[str, ...] = (TEXT, INT, INT, INT, FLOAT)
-
 
 def _typed(row: Sequence[str], types: Sequence[str]) -> tuple:
     """One TabSeparated row in the shape DuckDB would have returned."""

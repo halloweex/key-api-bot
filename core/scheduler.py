@@ -260,7 +260,6 @@ def weekly_report_rich_enabled() -> bool:
 
 class JobStatus(Enum):
     """Job execution status."""
-    PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
@@ -289,7 +288,6 @@ class JobInfo:
     next_run: Optional[datetime] = None
     last_run: Optional[datetime] = None
     last_status: Optional[JobStatus] = None
-    last_duration_ms: Optional[float] = None
     run_count: int = 0
     error_count: int = 0
     last_error: Optional[str] = None

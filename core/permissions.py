@@ -157,23 +157,6 @@ def default_tabs(role: str):
 # PERMISSION HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def can(role: str, feature: str, action: str = "view") -> bool:
-    """
-    Check if a role has permission to perform an action on a feature.
-
-    Args:
-        role: User role (admin, editor, viewer)
-        feature: Feature key (dashboard, expenses, etc.)
-        action: Action (view, edit, delete)
-
-    Returns:
-        True if permitted, False otherwise
-    """
-    role_perms = ROLE_PERMISSIONS.get(role, {})
-    feature_perms = role_perms.get(feature, set())
-    return action in feature_perms
-
-
 def get_permissions_for_role(role: str) -> Dict[str, Dict[str, bool]]:
     """
     Get all permissions for a role in frontend-friendly format.

@@ -12,40 +12,7 @@ from core.models import (
     ProductOffer,
     OrderProduct,
     Order,
-    Product,
-    Category,
-    SalesSourceData,
-    TopProduct,
-    SummaryStats,
 )
-
-
-class TestSourceId:
-    """Tests for SourceId enum."""
-
-    def test_active_sources(self):
-        """active_sources should exclude Opencart."""
-        active = SourceId.active_sources()
-        assert SourceId.INSTAGRAM in active
-        assert SourceId.TELEGRAM in active
-        assert SourceId.SHOPIFY in active
-        assert SourceId.OPENCART not in active
-
-    def test_display_name(self):
-        """display_name should return human-readable name."""
-        assert SourceId.INSTAGRAM.display_name == "Instagram"
-        assert SourceId.TELEGRAM.display_name == "Telegram"
-        assert SourceId.SHOPIFY.display_name == "Shopify"
-
-    def test_emoji(self):
-        """emoji should return appropriate emoji."""
-        assert SourceId.INSTAGRAM.emoji == "📸"
-        assert SourceId.TELEGRAM.emoji == "✈️"
-
-    def test_color(self):
-        """color should return hex color."""
-        assert SourceId.INSTAGRAM.color == "#7C3AED"
-        assert SourceId.TELEGRAM.color == "#2563EB"
 
 
 class TestOrderStatus:
@@ -90,28 +57,6 @@ class TestBuyer:
 
         buyer = Buyer(id=1)
         assert buyer.full_name is None
-
-    def test_is_returning(self):
-        """is_returning should check if buyer existed before period."""
-        period_start = datetime(2025, 1, 15, tzinfo=timezone.utc)
-
-        # Buyer created before period - returning
-        old_buyer = Buyer(
-            id=1,
-            created_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
-        )
-        assert old_buyer.is_returning(period_start) is True
-
-        # Buyer created during period - new
-        new_buyer = Buyer(
-            id=2,
-            created_at=datetime(2025, 1, 20, tzinfo=timezone.utc)
-        )
-        assert new_buyer.is_returning(period_start) is False
-
-        # No created_at - not returning
-        unknown_buyer = Buyer(id=3)
-        assert unknown_buyer.is_returning(period_start) is False
 
 
 class TestOrderProduct:
@@ -199,108 +144,3 @@ class TestOrder:
         )
         assert order.matches_manager(["19", "22"]) is True
         assert order.matches_manager(["1", "2"]) is False
-
-
-class TestProduct:
-    """Tests for Product dataclass."""
-
-    def test_from_api_with_brand(self):
-        """from_api should extract brand from custom_fields."""
-        data = {
-            "id": 100,
-            "name": "Test Product",
-            "category_id": 5,
-            "custom_fields": [
-                {"name": "Brand", "value": ["TestBrand"]},
-            ],
-        }
-        product = Product.from_api(data)
-
-        assert product.id == 100
-        assert product.name == "Test Product"
-        assert product.category_id == 5
-        assert product.brand == "TestBrand"
-
-    def test_from_api_with_brand_uuid(self):
-        """from_api should extract brand using CT_1001 uuid."""
-        data = {
-            "id": 101,
-            "name": "Test Product 2",
-            "category_id": 5,
-            "custom_fields": [
-                {"uuid": "CT_1001", "value": ["AnotherBrand"]},
-            ],
-        }
-        product = Product.from_api(data)
-
-        assert product.brand == "AnotherBrand"
-
-    def test_from_api_no_brand(self):
-        """from_api should handle missing brand."""
-        data = {"id": 100, "name": "Test"}
-        product = Product.from_api(data)
-        assert product.brand is None
-
-
-class TestSalesSourceData:
-    """Tests for SalesSourceData dataclass."""
-
-    def test_from_source(self):
-        """from_source should create from SourceId enum."""
-        data = SalesSourceData.from_source(
-            SourceId.INSTAGRAM,
-            orders=50,
-            revenue=10000.555
-        )
-        assert data.source_id == 1
-        assert data.name == "Instagram"
-        assert data.orders == 50
-        assert data.revenue == 10000.56  # Rounded
-        assert data.color == "#7C3AED"
-
-    def test_to_dict(self):
-        """to_dict should return serializable dict."""
-        data = SalesSourceData(
-            source_id=1,
-            name="Instagram",
-            orders=10,
-            revenue=1000.0,
-            color="#7C3AED"
-        )
-        d = data.to_dict()
-        assert d["source_id"] == 1
-        assert d["name"] == "Instagram"
-
-
-class TestTopProduct:
-    """Tests for TopProduct dataclass."""
-
-    def test_to_dict(self):
-        """to_dict should round values."""
-        product = TopProduct(
-            name="Test",
-            quantity=10,
-            revenue=1234.567,
-            percentage=15.789
-        )
-        d = product.to_dict()
-        assert d["revenue"] == 1234.57
-        assert d["percentage"] == 15.8
-
-
-class TestSummaryStats:
-    """Tests for SummaryStats dataclass."""
-
-    def test_to_dict(self):
-        """to_dict should round monetary values."""
-        stats = SummaryStats(
-            total_orders=100,
-            total_revenue=50000.999,
-            avg_check=500.555,
-            returns_count=5,
-            returns_revenue=2500.111
-        )
-        d = stats.to_dict()
-        assert d["total_revenue"] == 50001.0
-        assert d["avg_check"] == 500.56
-        assert d["returns_revenue"] == 2500.11
