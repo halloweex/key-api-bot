@@ -1155,6 +1155,8 @@ export interface TrafficFunnelResponse {
   by_type: FunnelRow[]
   by_channel: FunnelRow[]
   by_device: FunnelRow[]
+  /** Whose visits these are: Ukraine with the visitors GA4 could not place, or every country. */
+  country: 'ua' | 'all'
   stale: boolean
   fetched_at: string
 }

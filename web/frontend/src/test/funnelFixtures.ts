@@ -69,6 +69,7 @@ export const FUNNEL: TrafficFunnelResponse = {
   by_type: BY_TYPE,
   by_channel: BY_CHANNEL,
   by_device: BY_DEVICE,
+  country: 'ua',
   stale: false,
   fetched_at: '2026-11-04T08:42:00Z',
 }

@@ -27,7 +27,7 @@ def slow(monkeypatch):
     g._reset_cache()
     asked: list = []
 
-    async def ask(start, end, client, today):
+    async def ask(start, end, client, today, countries=None):
         asked.append((start, end))
         await asyncio.sleep(0.5)
         return {"x": len(asked)}
@@ -72,7 +72,7 @@ async def test_different_periods_fetch_side_by_side(slow):
 async def test_the_locks_keep_the_cache_s_bound(monkeypatch):
     g._reset_cache()
 
-    async def ask(start, end, client, today):
+    async def ask(start, end, client, today, countries=None):
         return {"x": 1}
 
     monkeypatch.setattr(g, "_ask", ask)
@@ -112,7 +112,7 @@ async def test_ga4_never_has_more_than_the_cap_in_flight(monkeypatch):
     async def token(client, **kwargs):
         return "tok"
 
-    async def run_funnel(client, tok, start, end, breakdown=None):
+    async def run_funnel(client, tok, start, end, breakdown=None, countries=None):
         nonlocal in_flight, peak, calls
         in_flight += 1
         calls += 1
@@ -144,7 +144,7 @@ async def test_a_period_ga4_failed_for_leaves_no_lock(monkeypatch):
 
     g._reset_cache()
 
-    async def ask(start, end, client, today):
+    async def ask(start, end, client, today, countries=None):
         await asyncio.sleep(0)
         raise ga4.GA4Unavailable("GA4 answered 503")
 
@@ -176,7 +176,7 @@ async def test_a_reader_waiting_on_a_failed_fetch_keeps_its_lock(monkeypatch):
     g._reset_cache()
     asked: list = []
 
-    async def ask(start, end, client, today):
+    async def ask(start, end, client, today, countries=None):
         asked.append((start, end))
         await asyncio.sleep(0.05)
         if len(asked) == 1:

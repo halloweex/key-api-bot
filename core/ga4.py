@@ -30,7 +30,7 @@ import json
 import os
 import time
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -144,8 +144,21 @@ async def access_token(client: httpx.AsyncClient, *, now: Optional[float] = None
     return str(body["access_token"])
 
 
-def funnel_request(start: date, end: date, breakdown: Optional[str] = None) -> Dict[str, Any]:
-    """The body of a closed funnel over ``start..end``, both included."""
+def funnel_request(
+    start: date,
+    end: date,
+    breakdown: Optional[str] = None,
+    countries: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """The body of a closed funnel over ``start..end``, both included.
+
+    ``countries`` keeps the people GA4 saw from those countries, as GA4 names
+    them. It filters the whole report rather than its first step, so every
+    step counts what a breakdown by country gives row by row. Measured on
+    2026-11-12 for 1–10 Nov: Ukraine and "(not set)" made 8 559 entered and
+    212 bought this way, against 8 567 and 212 summed from the breakdown. The
+    eight are people seen from both, whom the breakdown counts twice.
+    """
     body: Dict[str, Any] = {
         "dateRanges": [{"startDate": start.isoformat(), "endDate": end.isoformat()}],
         "funnel": {
@@ -160,6 +173,10 @@ def funnel_request(start: date, end: date, breakdown: Optional[str] = None) -> D
         body["funnelBreakdown"] = {
             "breakdownDimension": {"name": breakdown}, "limit": BREAKDOWN_LIMIT,
         }
+    if countries:
+        body["dimensionFilter"] = {"filter": {
+            "fieldName": "country", "inListFilter": {"values": list(countries)},
+        }}
     return body
 
 
@@ -198,13 +215,14 @@ async def run_funnel(
     start: date,
     end: date,
     breakdown: Optional[str] = None,
+    countries: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, int]]:
     """One closed funnel over ``start..end``, parsed by ``parse_funnel``."""
     url = f"{API}/properties/{property_id()}:runFunnelReport"
     try:
         response = await client.post(
             url,
-            json=funnel_request(start, end, breakdown),
+            json=funnel_request(start, end, breakdown, countries),
             headers={"Authorization": f"Bearer {token}"},
             timeout=TIMEOUT_S,
         )
