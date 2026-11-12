@@ -38,7 +38,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from core.paths import DATA_DIR
 
@@ -101,41 +101,6 @@ def read_markers(base: Optional[Path] = None) -> Tuple[Optional[Marker], Optiona
     missing."""
     root = _directory(base)
     return _parse(root / PITR_DRILL), _parse(root / REMOTE_DRILL), _parse(root / OFFSITE)
-
-
-def unmet(now: Optional[datetime] = None, base: Optional[Path] = None) -> List[str]:
-    """Each piece of chain 3's backup evidence that does not hold, as a key
-    and a sentence. Empty when all of it does. Never raises. No path beyond
-    the marker's own name and no host appears: these sentences reach
-    `/api/health` through the registry's `unmet_precondition`, and that
-    endpoint is public."""
-    now = now or datetime.now(timezone.utc)
-    pitr, remote, offsite = read_markers(base)
-    out: List[str] = []
-
-    if pitr is None:
-        out.append("pitr_drill: no PITR drill has passed on this host "
-                   "(deploy/pg_pitr_drill.sh leaves data/.pg_pitr_drill_last_ok)")
-    elif pitr.age_h(now) > DRILL_MAX_AGE_H:
-        out.append(f"pitr_drill: the last PITR drill to pass is "
-                   f"{pitr.age_h(now) / 24:.1f} days old (limit "
-                   f"{DRILL_MAX_AGE_H // 24})")
-
-    if offsite is None:
-        out.append("pg_offsite: no Postgres dump has left this host "
-                   "(deploy/pg_offsite.sh leaves data/.pg_offsite_last_ok)")
-    elif offsite.age_h(now) > OFFSITE_MAX_AGE_H:
-        out.append(f"pg_offsite: the last Postgres dump shipped off this host "
-                   f"is {offsite.age_h(now):.0f} h old (limit {OFFSITE_MAX_AGE_H})")
-
-    if remote is None:
-        out.append("remote_restore: the off-site copy has never been restored "
-                   "(deploy/pg_restore_drill.sh --from-remote)")
-    elif remote.age_h(now) > DRILL_MAX_AGE_H:
-        out.append(f"remote_restore: the off-site copy was last restored "
-                   f"{remote.age_h(now) / 24:.1f} days ago (limit "
-                   f"{DRILL_MAX_AGE_H // 24})")
-    return out
 
 
 def published(now: Optional[datetime] = None, base: Optional[Path] = None) -> Dict[str, object]:

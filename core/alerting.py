@@ -62,9 +62,6 @@ class ConditionSpec:
     clears: str = ""
 
 
-C, E = Kind.CONDITION, Kind.EVENT
-
-
 def _c(clears: str) -> ConditionSpec:
     return ConditionSpec(Kind.CONDITION, clears)
 
@@ -467,15 +464,6 @@ REGISTRY["mirror_failing:silver.order_utm"] = _c("failures_since_ok back to zero
 for _entity in ("orders", "products", "buyers", "offers", "stocks",
                 "managers", "categories", "expense_types"):
     REGISTRY[f"freshness_{_entity}"] = _c("a sync moves the entity's watermark")
-
-
-# Keys whose emitter exists but has not landed on the branch yet — the SMS
-# session's tree carries `_note_rejection("event_rebound", ...)` uncommitted,
-# so the committed tree cannot emit it while the local tree can. The
-# completeness test skips these in its reverse direction only; delete the
-# entry here the moment the emitter's commit lands, or it becomes the exact
-# stale documentation the reverse direction exists to forbid.
-PENDING_EMITTERS: FrozenSet[str] = frozenset({"turbosms:webhook:event_rebound"})
 
 
 # Channel messages that ride the same throttle machinery but are not

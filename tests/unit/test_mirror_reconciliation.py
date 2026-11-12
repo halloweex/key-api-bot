@@ -394,15 +394,14 @@ class TestIgnoredBookkeepingColumns:
         assert dk != pg
 
     def test_masking_does_not_move_the_key(self):
-        """`_row_key` and `sample_index` address by position, so the ignored
-        column is substituted rather than dropped."""
+        """`_row_key` addresses by position, so the ignored column is
+        substituted rather than dropped."""
         from core.mirror_reconciliation import _normalise_row, _row_key
         spec = self._spec(ignore_columns=("updated_at",))
         row = (7, 5, 2, "whenever")
         assert len(_normalise_row(row, spec.columns, spec.numeric,
                                   spec.ignore_columns)) == len(spec.columns)
         assert _row_key(spec, row) == 7
-        assert spec.sample_index == 0
 
 class TestSyncedColumnDualRole:
     """A stamp may be both the clock and a compared value — on one condition.

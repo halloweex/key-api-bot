@@ -47,14 +47,6 @@ RETURN_STATUS_IDS = tuple(int(s) for s in OrderStatus.return_statuses())
 
 # ─── Per-order facts ──────────────────────────────────────────────────────────
 
-# The fields compared order by order. Money fields are compared with a tolerance;
-# everything else must match exactly.
-ORDER_FIELDS = (
-    "status_id", "source_id", "manager_id", "buyer_id",
-    "grand_total", "order_date", "n_lines", "qty", "line_amount",
-)
-MONEY_FIELDS = frozenset({"grand_total", "line_amount"})
-
 # An order id → its facts. Both extractors below produce this shape, and the
 # rollup is derived from it, so the two sides cannot aggregate differently.
 OrderFacts = Dict[int, Dict[str, object]]
@@ -196,7 +188,7 @@ def classify_expense_discrepancies(
         fields=EXPENSE_FIELDS, money_fields=frozenset(), max_ids=max_ids)
 
 
-# The header-only slice of ORDER_FIELDS: what ClickHouse's silver can answer
+# The header-only slice of the order facts: what ClickHouse's silver can answer
 # for. Silver is order-grain by design — no line items — so the third arm
 # compares everything except n_lines/qty/line_amount, and says so rather than
 # pretending the missing columns matched.

@@ -194,16 +194,6 @@ class MirroredTable:
             and self.synced_column not in self.ignore_columns
         )
 
-    @property
-    def sample_index(self) -> int:
-        """Which column supplies `IntegrityIssue.sample_ids`.
-
-        Always the first key column: sample ids are integers, and a composite
-        key cannot be one. For `manager_classifications` that is the manager,
-        which is what a human would go looking for anyway.
-        """
-        return self.columns.index(self.key_columns[0])
-
 
 # What a disagreement means for a table that is *copied* rather than mirrored,
 # so that a finding does not send its reader hunting a shared write path that
@@ -247,8 +237,8 @@ def _as_decimal(value: Any) -> Optional[Decimal]:
 
 # Substituted for a column both stores hold and neither can agree on — see
 # `MirroredTable.ignore_columns`. A sentinel rather than dropping the column,
-# because `_row_key` and `sample_index` address values by position and a
-# shorter tuple would silently move the key.
+# because `_row_key` addresses values by position and a shorter tuple would
+# silently move the key.
 _IGNORED = "<ignored>"
 
 

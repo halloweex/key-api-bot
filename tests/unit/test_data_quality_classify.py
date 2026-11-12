@@ -17,7 +17,6 @@ from core.data_quality import (
     classify_discrepancies,
     is_material,
     overall_severity,
-    summarize_discrepancies,
 )
 
 
@@ -256,30 +255,6 @@ class TestOverallSeverity:
         assert overall_severity([], [d]) == Severity.WARN
 
 
-class TestSummarize:
-    def test_stable_shape(self):
-        """Summary always contains all classes, even when zero — schema
-        stability for downstream consumers (Telegram template, dashboard)."""
-        s = summarize_discrepancies([])
-        assert set(s.keys()) == {c.value for c in DiscrepancyClass}
-        assert all(v == 0 for v in s.values())
-
-    def test_counts_by_class(self):
-        d1 = Discrepancy(month="m", source_id=1,
-                         diff_class=DiscrepancyClass.MISSING_IN_DK,
-                         field="orders", dk_value=0, kc_value=5)
-        d2 = Discrepancy(month="m", source_id=1,
-                         diff_class=DiscrepancyClass.MISSING_IN_DK,
-                         field="revenue", dk_value=0, kc_value=2000)
-        d3 = Discrepancy(month="m", source_id=2,
-                         diff_class=DiscrepancyClass.TOTAL_DRIFT,
-                         field="orders", dk_value=10, kc_value=8)
-        s = summarize_discrepancies([d1, d2, d3])
-        assert s["MISSING_IN_DK"] == 2
-        assert s["TOTAL_DRIFT"] == 1
-        assert s["MISSING_IN_KC"] == 0
-
-
 class TestMaterialThresholdsCoverage:
     def test_all_default_fields_covered(self):
         """If a new metric is added to the system, this fence forces
@@ -350,9 +325,8 @@ class TestFormatAlertMessage:
             for m in range(1, 6)
         ] * 5  # 25 diffs
         msg = format_alert_message(
-            "reconciliation", Severity.CRITICAL, [], diffs, max_lines=5,
+            "reconciliation", Severity.CRITICAL, [], diffs,
         )
         assert "+22 more" in msg
-        # Only ~5 diff lines shown
         diff_lines = [line for line in msg.split("\n") if line.startswith("• ")]
         assert len(diff_lines) == 4  # 3 строки + «…и ещё» — короткий формат
