@@ -1,0 +1,22 @@
+# The Rust pilot: one endpoint, never deployed. See rust/README.md.
+[workspace]
+resolver = "3"
+members = ["crates/ks-api", "crates/ks-loadgen"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.release]
+# Thin LTO and stripped symbols: what a service image would ship. The build
+# times in the report are for this profile.
+lto = "thin"
+strip = "symbols"

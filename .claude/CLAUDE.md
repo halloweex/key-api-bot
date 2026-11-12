@@ -66,10 +66,14 @@ key-api-bot/
 ├── tests/                        # 326 test modules. pytest.ini sets testpaths, so only
 │                                # this tree is collected — scripts/ is not.
 │
+├── rust/                         # Pilot, NOT deployed: /api/revenue/trend in Rust,
+│                                # answer for answer with Python (rust/README.md).
+│                                # Checks no session — never reachable by a person.
 ├── nginx/nginx.conf             # Reverse proxy configuration
 ├── .github/workflows/deploy.yml # GitHub Actions auto-deployment
 ├── Dockerfile                   # Bot container
 ├── Dockerfile.web               # Web dashboard container (multi-stage with Node.js)
+├── Dockerfile.rust              # The pilot's image: built by its workflow and bench.sh only
 └── docker-compose.yml           # Container orchestration
 ```
 
