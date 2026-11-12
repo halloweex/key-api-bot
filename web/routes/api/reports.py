@@ -315,8 +315,6 @@ async def export_report_csv(
     output = io.StringIO()
     writer = csv.writer(output)
 
-    source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
-
     if type == "summary":
         data = await store.get_report_summary(s, e, st, src, cat, br)
         products_by_source = await store.get_report_products_by_source(s, e, st, src, cat, br)

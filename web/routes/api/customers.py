@@ -16,7 +16,7 @@ from core.gender import CONFIDENCE_LADDER, GENDERS
 from core.validators import INT32_MAX
 from core.sms_refusals import REFUSAL_REASONS
 from core.repositories.customers import (
-    BUILTIN_AUDIENCE_PRESETS, DEFAULT_WINDOW_DAYS, MAX_AUDIENCE_GROUPS,
+    DEFAULT_WINDOW_DAYS, MAX_AUDIENCE_GROUPS,
     SMS_GROUPINGS, SMS_LTV_BASES, SMS_RECENT_CAMPAIGN_HOURS, SMS_TIER_DEFAULTS,
     SmsAudienceFilters, SmsAudienceGroup,
 )

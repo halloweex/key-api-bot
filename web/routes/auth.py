@@ -5,7 +5,7 @@ import os
 import logging
 from typing import Sequence
 
-from fastapi import APIRouter, Request, Response, HTTPException, Depends
+from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
