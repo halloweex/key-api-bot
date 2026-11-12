@@ -1459,8 +1459,12 @@ class GoalsMixin:
     ) -> Dict[date, float]:
         """Daily revenue for a list of specific dates, from Silver.
 
-        Returns dict mapping date -> revenue total.
-        Used for extending comparison data to cover forecast dates.
+        Returns dict mapping date -> revenue total. Nothing calls it since
+        2026-11-12: it extended the trend's comparison under the forecast
+        days, and that comes with the rest of the trend from Gold now
+        (`dashboard_service.fit_trend`). It stays while
+        `tests/integration/golden/goals.json` records it, a file not to be
+        edited by hand.
         """
         if not dates:
             return {}

@@ -867,6 +867,8 @@ class RevenueMixin:
         compare_type: str = "previous_period",
         promocode: Optional[str] = None,
         granularity: str = "daily",
+        period_end: Optional[date] = None,
+        through: Optional[date] = None,
     ) -> Dict[str, Any]:
         """Get daily revenue trend for chart.
 
@@ -876,6 +878,23 @@ class RevenueMixin:
         last month hold only their days inside the range. A month has no
         counterpart in a window of the same number of days, so a monthly
         answer carries no comparison.
+
+        **The comparison is the whole period's** (owner's decision,
+        2026-11-12). `period_end` is the last day of the period the request
+        names when it runs past `end_date`: this month's or this week's last
+        day, where `end_date` is today. The comparison window is then that of
+        `[start_date, period_end]`, and its series holds every day of it by
+        position, day *i* of the period beside day *i* of the window, longer
+        than `labels`: the route lays it under the forecast days it appends
+        and cuts it back to the labels (`dashboard_service.fit_trend`).
+        `through` is the last day that has happened. With it the totals, the
+        growth badge, add up only the positions through it, on both sides,
+        so this week's Monday to Thursday is set beside last week's Monday
+        to Thursday. Without it they add up both whole series, as they did
+        before. Until 2026-11-12 the month compared 1–12 November with 20–31
+        October and set each forecast day beside the day as many days back
+        as there were forecast days: under 19–30 November the line drew 1–12
+        November.
 
         **Two measures live here, and which one you get depends on the filter.**
         That is deliberate, and the response says which one it used.
@@ -919,7 +938,7 @@ class RevenueMixin:
         if monthly:
             include_comparison = False
         prev_start, prev_end = self._comparison_window(
-            start_date, end_date, compare_type)
+            start_date, max(end_date, period_end or end_date), compare_type)
         if not use_lines and gold_can_answer:
             results = await self._pg_gold_series(
                 start_date, end_date, sales_type, source_id)
@@ -996,8 +1015,13 @@ class RevenueMixin:
         comparison = None
         if include_comparison and len(datasets) > 1:
             prev_dataset = datasets[1]
-            current_total = sum(data)
-            prev_total = sum(prev_dataset["data"])
+            if through is None:
+                current_total = sum(data)
+                prev_total = sum(prev_dataset["data"])
+            else:
+                counted = max(0, min(len(data), (through - start_date).days + 1))
+                current_total = sum(data[:counted])
+                prev_total = sum(prev_dataset["data"][:counted])
             growth_percent = ((current_total - prev_total) / prev_total * 100) if prev_total > 0 else 0
 
             comparison = {
