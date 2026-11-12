@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.342
+
+- fix(marketing): a brand's «Заказов» counts orders, as the brand card does
+
+
 ## 3.0.341
 
 - fix(marketing): the report counts customers as people, as the dashboard does
