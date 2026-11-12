@@ -5,11 +5,8 @@ is the pilot at `KS_RUST_PILOT_URL`. Every request below goes to both.
 
 WHAT IS COMPARED
 
-`GET /api/revenue/trend`, the six `GET /api/margin/*` and six
-`GET /api/products/intel/*` routes (wave 1's tabs, read from Postgres as
-production reads them) and the SPA catch-all's
-JSON 404 for an `/api` path are the endpoints the pilot answers, and they
-are compared whole: status,
+`GET /api/revenue/trend` and the SPA catch-all's JSON 404 for an `/api`
+path are the endpoints the pilot answers, and they are compared whole: status,
 content type and body — byte for byte unless the answer is a 200, which is
 compared as parsed JSON, `0` and `0.0` apart.
 
@@ -73,7 +70,7 @@ from urllib.parse import urlsplit
 import pytest
 import pytest_asyncio
 
-from tests import rust_wave1
+from tests import rust_handover
 
 asyncpg = pytest.importorskip("asyncpg")
 httpx = pytest.importorskip("httpx")
@@ -90,29 +87,7 @@ pytestmark = [
 
 TREND = "/api/revenue/trend"
 # The routes the pilot answers past the gates, by method and template.
-MARGIN = tuple(f"/api/margin/{name}" for name in (
-    "overview", "by-brand", "by-category", "trend", "brand-category", "alerts"))
-PRODUCTS_INTEL = tuple(f"/api/products/intel/{name}" for name in (
-    "summary", "pairs", "basket-distribution", "category-combos", "brand-affinity", "momentum"))
-# /reports' four under `reports:view`, /marketing's two under `marketing:view`.
-REPORTS = tuple(f"/api/reports/{name}" for name in (
-    "summary", "top-products", "all-products", "export/csv",
-    "marketing-summary", "marketing-summary/export/csv"))
-# The expenses router's four reads, all under `expenses:view`; its POST and
-# DELETE stay the app's.
-EXPENSES = ("/api/expense-types", "/api/expenses/summary", "/api/expenses/profit",
-            "/api/expenses")
-# The goal routes' seven reads, all under `dashboard:view`.
-GOALS = tuple(f"/api/goals{name}" for name in (
-    "", "/history", "/smart", "/seasonality", "/growth", "/weekly-patterns", "/forecast"))
-# The inventory router's ten reads, all under `inventory:view`; its POST
-# stays the app's.
-INVENTORY = tuple(f"/api/stocks/{name}" for name in (
-    "summary", "average", "trend", "analysis", "turnover", "skus", "brand-rotation",
-    "abc/{abc_class}", "actions", "alerts"))
-PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
-          | {("GET", path) for path in
-             MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS + INVENTORY})
+PORTED = {("GET", TREND), ("GET", "/{path:path}")}
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -316,7 +291,7 @@ def _first_difference(a, b, path="$") -> Optional[str]:
 
 
 def _differs(py, rs, ported: bool) -> Optional[str]:
-    handed = rust_wave1.handover(rs)
+    handed = rust_handover.handover(rs)
     if handed is not None and handed != "route":
         # Handed to Python, whose answer the person reads: `Batch` counts it.
         return handed
@@ -347,12 +322,6 @@ def _differs(py, rs, ported: bool) -> Optional[str]:
             f"CSV bodies differ: {py.content[:160]!r} | {rs.content[:160]!r}")
     if py.status_code == 200:
         a, b = json.loads(py.content), json.loads(rs.content)
-        # A smart goal says when it was computed, to the microsecond of each
-        # service's own clock: the goals harness compares it under a pinned
-        # one, this one compares everything else.
-        for answer in (a, b):
-            if isinstance(answer, dict) and isinstance(answer.get("metadata"), dict):
-                answer["metadata"].pop("calculatedAt", None)
         if json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True):
             return None
         return _first_difference(a, b) or "the same values, differently serialised"
@@ -385,7 +354,7 @@ class Batch:
         if py.status_code not in (200, PASSED) and py.content == rs.content:
             self.kinds["byte-identical refusal or error"] += 1
         found = _differs(py, rs, ported)
-        if isinstance(found, rust_wave1.HandedOver):
+        if isinstance(found, rust_handover.HandedOver):
             self.kinds[f"handed to Python: {found}"] += 1
             if not self.may_hand_over:
                 self.differences.append(
@@ -539,20 +508,6 @@ async def services(world, duckdb_off, monkeypatch):
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_GOLD", "postgres")
-    monkeypatch.setenv("KS_READ_MARGIN", "postgres")
-    monkeypatch.setenv("KS_READ_PRODUCTS_INTEL", "postgres")
-    monkeypatch.setenv("KS_READ_REPORTS", "postgres")
-    monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-    monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
-    monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
-    monkeypatch.setenv("KS_READ_GOALS", "postgres")
-    monkeypatch.setenv("KS_READ_INVENTORY", "postgres")
-    # `backfilled()` latches per process: ask it afresh, as the pilot does
-    # on every read.
-    from core import pg_expenses_read
-    monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
-    monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
-    monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
     monkeypatch.setenv("KS_USER_STORE", "postgres")
     monkeypatch.setenv("KS_BOT_STORE", "postgres")
     monkeypatch.setattr(limiter, "enabled", True)

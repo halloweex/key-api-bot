@@ -105,10 +105,13 @@ def _rate_limits(endpoint: Any) -> List[Dict[str, Any]]:
         raise ContractError(f"{name}: a dynamic limit, which the pilot has no form for")
     out = []
     for lim in limiter._route_limits.get(name, []):
+        # slowapi counts a limit under `lim.scope or endpoint`: a
+        # `shared_limit`'s scope is the counter's name, which the pilot keys
+        # by as it is given. A scope computed per request has no form there.
+        if lim.scope is not None and not isinstance(lim.scope, str):
+            raise ContractError(f"{name}: a limit scoped by a function, which the pilot does not implement")
         unusual = {
             "key_func": lim.key_func is not client_key,
-            # slowapi scopes a limit by `lim.scope or endpoint`.
-            "scope": bool(lim.scope),
             "per_method": bool(lim.per_method),
             "methods": lim.methods is not None,
             "error_message": lim.error_message is not None,
@@ -121,7 +124,7 @@ def _rate_limits(endpoint: Any) -> List[Dict[str, Any]]:
                 f"which the pilot does not implement"
             )
         out.append({"limit": str(lim.limit), "amount": lim.limit.amount,
-                    "expiry_s": lim.limit.get_expiry(), "scope": name})
+                    "expiry_s": lim.limit.get_expiry(), "scope": lim.scope or name})
     return out
 
 

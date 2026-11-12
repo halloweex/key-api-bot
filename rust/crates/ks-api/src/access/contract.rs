@@ -114,7 +114,8 @@ pub struct RateLimit {
     pub limit: String,
     pub amount: u64,
     pub expiry_s: u64,
-    /// slowapi scopes a limit by endpoint, `module.function`.
+    /// The counter's name: slowapi counts a limit under its scope — a
+    /// `shared_limit`'s own — or else the endpoint, `module.function`.
     pub scope: String,
 }
 
