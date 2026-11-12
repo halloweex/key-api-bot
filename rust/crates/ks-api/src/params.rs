@@ -63,6 +63,8 @@ pub struct Query {
     /// `Query("previous_period")`.
     pub compare_type: String,
     pub include_forecast: bool,
+    /// `Query("daily")`: `daily` or `monthly`, checked by the route.
+    pub granularity: String,
 }
 
 /// `[+-]?[0-9]+`, normalised the way `int()` would print it.
@@ -185,6 +187,7 @@ pub fn parse(raw: &str) -> Result<Query, Vec<FieldError>> {
             false
         }),
     };
+    let granularity = take("granularity").unwrap_or_else(|| "daily".to_owned());
 
     if !errors.is_empty() {
         return Err(errors);
@@ -200,6 +203,7 @@ pub fn parse(raw: &str) -> Result<Query, Vec<FieldError>> {
         sales_type,
         compare_type,
         include_forecast,
+        granularity,
     })
 }
 

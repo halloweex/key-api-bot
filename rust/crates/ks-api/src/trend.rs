@@ -161,9 +161,42 @@ struct Body<'a> {
     labels: &'a [String],
     revenue: &'a [PyNum],
     orders: &'a [i64],
-    datasets: [Dataset<'a>; 2],
+    datasets: Vec<Dataset<'a>>,
     measure: &'static str,
-    comparison: Comparison<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    granularity: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison: Option<Comparison<'a>>,
+}
+
+/// `core.filters.by_month`: every calendar month the range touches, oldest
+/// first, as `(MM.YYYY, revenue, orders)` summed over its days in range, a
+/// day with no row `(0.0, 0)`.
+fn by_month(
+    start: NaiveDate,
+    end: NaiveDate,
+    daily: &HashMap<NaiveDate, (f64, i64)>,
+) -> Result<Vec<(String, f64, i64)>, Raised> {
+    let mut months: Vec<(String, f64, i64)> = Vec::new();
+    let mut day = start;
+    while day <= end {
+        let (value, count) = daily.get(&day).copied().unwrap_or((0.0, 0));
+        let label = day.format("%m.%Y").to_string();
+        match months.last_mut() {
+            Some(month) if month.0 == label => {
+                month.1 += value;
+                month.2 += count;
+            }
+            _ => {
+                // The bucket starts at `[0.0, 0]`: `0.0 + -0.0` is `0.0`.
+                let mut total = 0.0;
+                total += value;
+                months.push((label, total, count));
+            }
+        }
+        day = period::add_days(day, 1)?;
+    }
+    Ok(months)
 }
 
 fn iso(date: NaiveDate) -> String {
@@ -184,6 +217,7 @@ pub async fn revenue_trend<G: Gold>(
     admit()?;
     let bad = Failure::BadRequest;
     validate::period(q.period.as_deref()).map_err(bad)?;
+    validate::granularity(&q.granularity).map_err(bad)?;
     let source_id = validate::source_id(q.source_id.as_ref()).map_err(bad)?;
     let category = validate::category_id(q.category_id.as_ref()).map_err(bad)?;
     let brand = validate::brand(q.brand.as_deref()).map_err(bad)?;
@@ -209,18 +243,25 @@ pub async fn revenue_trend<G: Gold>(
         return Err(Failure::NotInPilot("source_without_gold_channel"));
     }
 
-    // Python's order: the current series, then the window, then the
-    // previous series — so a read that fails answers 503 before a window
-    // that overflows could answer 500.
+    // A monthly answer and the whole history carry no comparison
+    // (`has_comparison`, on the period as sent). The window is computed
+    // first all the same, before any read, as `get_revenue_trend` does since
+    // step 14: a window that overflows answers 500 before a read that fails
+    // could answer 503.
+    let monthly = q.granularity == "monthly";
+    let include_comparison = q.period.as_deref() != Some("all_time") && !monthly;
+    let (prev_start, prev_end) = period::comparison_window(start, end, compare_type)?;
     let current = gold
         .series(start, end, &sales_type, source_id)
         .await
         .map_err(|e| Failure::Unavailable("dashboard", e))?;
-    let (prev_start, prev_end) = period::comparison_window(start, end, compare_type)?;
-    let previous = gold
-        .series(prev_start, prev_end, &sales_type, source_id)
-        .await
-        .map_err(|e| Failure::Unavailable("dashboard", e))?;
+    let previous = if include_comparison {
+        gold.series(prev_start, prev_end, &sales_type, source_id)
+            .await
+            .map_err(|e| Failure::Unavailable("dashboard", e))?
+    } else {
+        Vec::new()
+    };
 
     let by_day: HashMap<NaiveDate, (f64, i64)> = current
         .iter()
@@ -228,6 +269,14 @@ pub async fn revenue_trend<G: Gold>(
         .collect();
     let (mut labels, mut revenue, mut orders) = (Vec::new(), Vec::new(), Vec::new());
     let mut day = start;
+    if monthly {
+        for (label, value, count) in by_month(start, end, &by_day)? {
+            labels.push(label);
+            revenue.push(PyNum::Float(round_float(value, 2)));
+            orders.push(count);
+        }
+        day = period::add_days(end, 1)?;
+    }
     while day <= end {
         labels.push(day.format("%d.%m").to_string());
         // A day with no row is `(0, 0)`: two ints, and `round(0, 2)` is `0`.
@@ -246,7 +295,7 @@ pub async fn revenue_trend<G: Gold>(
         previous.iter().map(|row| (row.date, row.revenue)).collect();
     let mut prev = Vec::new();
     let mut day = prev_start;
-    while day <= prev_end {
+    while include_comparison && day <= prev_end {
         prev.push(
             prev_by_day
                 .get(&day)
@@ -266,7 +315,7 @@ pub async fn revenue_trend<G: Gold>(
 
     // The route's forecast overlay, attempted under exactly its condition.
     let current_period = matches!(q.period.as_deref(), Some("month" | "week"));
-    if q.include_forecast && source_id.is_none() && (current_period || end > today) {
+    if q.include_forecast && !monthly && source_id.is_none() && (current_period || end > today) {
         return Err(Failure::NotInPilot("forecast_overlay"));
     }
 
@@ -275,7 +324,7 @@ pub async fn revenue_trend<G: Gold>(
         revenue: &revenue,
         orders: &orders,
         datasets: [
-            Dataset {
+            Some(Dataset {
                 label: "This Period",
                 data: &revenue,
                 border_color: "#16A34A",
@@ -284,8 +333,8 @@ pub async fn revenue_trend<G: Gold>(
                 tension: 0.3,
                 border_width: 2,
                 border_dash: None,
-            },
-            Dataset {
+            }),
+            include_comparison.then_some(Dataset {
                 label: "Previous Period",
                 data: &prev,
                 border_color: "#9CA3AF",
@@ -294,10 +343,14 @@ pub async fn revenue_trend<G: Gold>(
                 tension: 0.3,
                 border_width: 2,
                 border_dash: Some([5, 5]),
-            },
-        ],
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         measure: "revenue",
-        comparison: Comparison {
+        granularity: monthly.then_some("monthly"),
+        comparison: include_comparison.then_some(Comparison {
             labels: &labels,
             revenue: &prev,
             orders: [],
@@ -311,7 +364,7 @@ pub async fn revenue_trend<G: Gold>(
                 previous: round_num(prev_total, 2),
                 growth_percent: round_num(growth, 1),
             },
-        },
+        }),
     };
     Ok(serde_json::to_vec(&body).expect("the body is plain data"))
 }
@@ -397,6 +450,18 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[tokio::test]
+    async fn monthly_and_the_whole_history_carry_no_comparison() {
+        let b = body("start_date=2026-09-30&end_date=2026-10-20&granularity=monthly").await;
+        assert_eq!(b["labels"], serde_json::json!(["09.2026", "10.2026"]));
+        assert_eq!(b["granularity"], "monthly");
+        assert!(b.get("comparison").is_none());
+        assert_eq!(b["datasets"].as_array().unwrap().len(), 1);
+        let all = body("period=all_time").await;
+        assert_eq!(all["labels"][0], "02.12");
+        assert!(all.get("comparison").is_none() && all.get("granularity").is_none());
     }
 
     #[tokio::test]

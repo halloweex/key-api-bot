@@ -11,7 +11,7 @@
 use crate::params::PyInt;
 use crate::pyrt::{py_isspace, py_lower_strip, py_strip, repr_str};
 
-const PERIODS: [&str; 8] = [
+const PERIODS: [&str; 9] = [
     "today",
     "yesterday",
     "week",
@@ -20,6 +20,7 @@ const PERIODS: [&str; 8] = [
     "last_month",
     "last_7_days",
     "last_28_days",
+    "all_time",
 ];
 /// `KNOWN_SALES_TYPES | {"all"}` (`core/duckdb_constants.py`).
 const SALES_TYPES: [&str; 5] = ["retail", "b2b", "internal", "exhibition", "all"];
@@ -47,6 +48,19 @@ pub fn period(value: Option<&str>) -> Result<(), String> {
         sorted_list(&PERIODS),
         repr_str(&value)
     ))
+}
+
+/// The route's own check of `granularity` (#367): `daily` or `monthly`, as
+/// sent, after `validate_period` and before every other validator.
+pub fn granularity(value: &str) -> Result<(), String> {
+    if value == "daily" || value == "monthly" {
+        Ok(())
+    } else {
+        Err(format!(
+            "granularity: Must be one of: daily, monthly (got: {})",
+            repr_str(value)
+        ))
+    }
 }
 
 /// `validate_source_id` against `VALID_SOURCE_IDS = {1, 2, 3, 4}`.
@@ -187,7 +201,7 @@ mod tests {
     fn messages_are_the_python_ones() {
         assert_eq!(
             period(Some("xyz")).unwrap_err(),
-            "period: Must be one of: last_28_days, last_7_days, last_month, last_week, \
+            "period: Must be one of: all_time, last_28_days, last_7_days, last_month, last_week, \
              month, today, week, yesterday (got: 'xyz')"
         );
         assert_eq!(

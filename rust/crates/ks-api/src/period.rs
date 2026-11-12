@@ -23,6 +23,9 @@ pub const MAX_RANGE_DAYS: i64 = 3660;
 /// `EARLIEST_DATE` and `LATEST_DATE`: the dates an explicit date may name.
 const EARLIEST: (i32, u32, u32) = (2000, 1, 1);
 const LATEST: (i32, u32, u32) = (2099, 12, 31);
+/// `HISTORY_START`: the first day the store holds an order, where
+/// `all_time` starts (#363).
+const HISTORY_START: (i32, u32, u32) = (2023, 12, 2);
 
 /// Where the Python code would have raised: the route answers 500.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +133,7 @@ pub fn parse_period(
         }
         Some("last_7_days") => return Ok((add_days(today, -6)?, today)),
         Some("last_28_days") => return Ok((add_days(today, -27)?, today)),
+        Some("all_time") => return Ok((ymd(HISTORY_START), today)),
         _ => {}
     }
     if let (Some(start), Some(end)) = (non_empty(start_date), non_empty(end_date)) {
