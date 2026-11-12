@@ -211,7 +211,14 @@ few of the orders on a month (October 2026: 1 295 against 1 299 orders and
 1 231 people) and 42 880 against 19 425 people over the whole history. A
 person new in the window who comes back in it is in both new and returning,
 as on the dashboard. `tests/integration/test_marketing_counts_people.py`
-holds the report to the dashboard's answer.
+holds the report to the dashboard's answer. Its brand table's «Заказов» is
+the orders that contained the brand, each once, by the dashboard brand
+card's statement (`_BRAND_ANALYTICS_SQL`; owner's decision, 2026-11-12), and
+the brand's average check is its revenue over those. It summed DuckDB's
+per-product cells until then, one order per product of the brand it held:
+NEOGEN, October 2026, 1 429 against 748. These figures go to suppliers.
+`test_marketing_two_engines.py` names the recorded values the decision moved
+(`BRAND_ORDERS_SINCE_2026_11_12`) and holds the table to the brand card.
 
 `start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
 `core/filters.parse_period`, and only as a pair: one alone is ignored, and a

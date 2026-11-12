@@ -1943,58 +1943,38 @@ class RevenueMixin:
             previous, _ = await _fetch_month(prev_start, prev_end)
             year_ago, _ = await _fetch_month(yoy_start, yoy_end)
 
-        # Brands, from the order-line level rather than `gold_daily_products`.
+        # Brands, from the order-line level, by the dashboard's brand card's
+        # own statement (`_BRAND_ANALYTICS_SQL`): «Заказов» is the orders that
+        # contained the brand, each once (owner's decision, 2026-11-12).
         #
-        # That table exists only in DuckDB, and deriving it here was the
-        # obvious move and the wrong size: `core/duckdb_store.py` records that
-        # the level reproduces it to the kopeck under Gold's own predicate —
-        # ₴132,077,453.75 on both sides, 986 dates, zero disagreeing.
-        #
-        # The inner grouping is not decoration. `order_count` in that table is
-        # `COUNT(DISTINCT id)` at the grain (date, sales_type, source, product,
-        # name-as-sold, brand, category…), and the report *sums* it. A plain
-        # `COUNT(DISTINCT order_id)` per brand is a different, smaller number —
-        # correct-looking and not the one this report has always shown. So the
-        # grain is reproduced first and summed after.
-        brand_sales_where = ("l.sales_type = ?" if sales_type != "all" else "1=1") + line_filter_sql
+        # Until then this reproduced `gold_daily_products`, DuckDB's table:
+        # `COUNT(DISTINCT order_id)` per (date, sales_type, source, product,
+        # name-as-sold, category) cell, summed — one order counted once per
+        # product of the brand it held. NEOGEN, October 2026, retail: 1 429
+        # against 748 orders, the brand card's figure. These numbers go to
+        # suppliers. The brand's average check follows, revenue over orders.
+        # Revenue and quantity read the same either way.
+        # Not `brand_where`: that is the imported helper the line filter above
+        # calls, and a local of the same name shadows it for the whole function.
+        brand_table_where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return",
+                             "l.is_active_source",
+                             ("l.sales_type = ?" if sales_type != "all" else "1=1")
+                             + line_filter_sql]
         brand_params = [start_date, end_date] + sales_params + line_filter_params
-        brand_results = await self._marketing_run(f"""
-            WITH product_days AS (
-                SELECT
-                    l.brand,
-                    SUM(l.quantity) AS quantity_sold,
-                    SUM(l.line_amount) AS product_revenue,
-                    COUNT(DISTINCT l.order_id) AS order_count
-                FROM {{order_lines}} l
-                WHERE NOT l.is_return
-                  AND l.is_active_source
-                  AND l.order_date BETWEEN ? AND ?
-                  AND {brand_sales_where}
-                GROUP BY
-                    l.order_date, l.sales_type, l.source_id, l.product_id,
-                    l.product_name, l.brand, l.category_id, l.category_name,
-                    l.parent_category_name
-            )
-            SELECT
-                COALESCE(brand, 'Unknown') AS brand_name,
-                SUM(product_revenue) AS revenue,
-                SUM(order_count) AS orders,
-                SUM(quantity_sold) AS quantity
-            FROM product_days
-            GROUP BY COALESCE(brand, 'Unknown')
-            -- Repeated rather than aliased: PostgreSQL does not see a select
-            -- alias in HAVING, and `HAVING revenue > 0` is what the DuckDB
-            -- original wrote.
-            HAVING SUM(product_revenue) > 0
-            -- Brands can tie on revenue and the page renders them in order.
-            ORDER BY revenue DESC, brand_name
-        """, brand_params)
+        brand_results = [
+            r for r in await self._marketing_run(
+                _BRAND_ANALYTICS_SQL.replace("{where}",
+                                             " AND ".join(brand_table_where)),
+                brand_params)
+            # A brand that sold nothing in the window is not a row, as before.
+            if float(r[1]) > 0
+        ]
 
         total_brand_revenue = sum(float(r[1]) for r in brand_results)
         brands = []
         for r in brand_results:
             rev = float(r[1])
-            ord_count = int(r[2])
+            ord_count = int(r[3])
             brands.append({
                 "brand": r[0],
                 "revenue": round(rev, 2),

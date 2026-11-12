@@ -7,8 +7,9 @@ Two of the three parts of this tab were not a table rename when they moved:
     roll-up rows only, since three of them are `COUNT(DISTINCT buyer_id)` and
     distinct counts do not add up;
   * the brand table used to read `gold_daily_products`, which exists only in
-    DuckDB, and now reads the order-line level — reproducing that table's grain
-    so `SUM(order_count)` keeps meaning what the report has always shown.
+    DuckDB, and now reads the order-line level by the dashboard brand card's
+    statement. It reproduced that table's grain, one order per product, until
+    the owner chose orders on 2026-11-12 (`BRAND_ORDERS_SINCE_2026_11_12`).
 
 ONE ENGINE SINCE STEP 14 (S14-05)
 
@@ -149,7 +150,39 @@ CALLS = (
 )
 async def test_postgres_answers_what_duckdb_answered(in_postgres, name, kwargs):
     assert comparable(await _answer(in_postgres, name, kwargs)) == \
-        GOLDEN[call_key(name, kwargs)]
+        _expected(call_key(name, kwargs))
+
+
+# The owner's decision of 2026-11-12, and the only departure from DuckDB's
+# recorded answers: a brand's «Заказов» counts the orders that contained it,
+# once each. DuckDB summed its per-product cells, so order 1 — Serum under two
+# names-as-sold — was two of BrandA's three. The literals stay as recorded
+# (rule 9); every value the decision moves is named here, with what it is now.
+BRAND_ORDERS_SINCE_2026_11_12 = {
+    call_key("get_marketing_report_by_dates", k): {"BrandA": (2, 1000.0)}
+    for k in ({}, {"sales_type": "all"}, {"brand": "BrandA"},
+              {"category_id": 1})
+}
+
+
+def _expected(key: str):
+    import copy
+
+    expected = copy.deepcopy(GOLDEN[key])
+    for row in expected.get("brands", []) if isinstance(expected, dict) else []:
+        moved = BRAND_ORDERS_SINCE_2026_11_12.get(key, {}).get(row["brand"])
+        if moved:
+            row["orders"], row["avg_check"] = moved
+    return expected
+
+
+def test_every_departure_moves_a_recorded_value():
+    """A departure that matches the literal would hide a stale entry."""
+    for key, brands in BRAND_ORDERS_SINCE_2026_11_12.items():
+        recorded = {b["brand"]: b for b in GOLDEN[key]["brands"]}
+        for brand, (orders, avg_check) in brands.items():
+            assert (recorded[brand]["orders"], recorded[brand]["avg_check"]) \
+                != (orders, avg_check), key
 
 
 def test_every_literal_is_a_call_and_every_call_has_one():
@@ -183,17 +216,30 @@ async def test_a_buyer_on_two_channels_is_counted_once(in_postgres):
 
 
 @pytest.mark.asyncio
-async def test_the_brand_table_reproduces_the_gold_grain(in_postgres):
-    """One product twice on one order under two names-as-sold is two rows in
-    `gold_daily_products`, and the report sums their `order_count`. The
-    rewritten query must reproduce that, not improve on it."""
+async def test_a_brand_counts_each_order_once(in_postgres):
+    """Order 1 carries Serum twice under two names-as-sold, and order 2 once:
+    BrandA was in two orders. DuckDB's grain summed per-product cells and said
+    three; the owner chose orders (2026-11-12)."""
     out = await _answer(in_postgres, "get_marketing_report_by_dates", {})
     brands = {b["brand"]: b for b in out["brands"]}
     assert set(brands) == {"BrandA", "BrandB", "Unknown"}, brands
-    # Order 1 carries Serum twice under two names, so BrandA's summed
-    # order_count is 2 for that day plus 1 for order 2 — not the 2 a plain
-    # COUNT(DISTINCT order_id) would give.
-    assert brands["BrandA"]["orders"] == 3, brands["BrandA"]
+    assert brands["BrandA"]["orders"] == 2, brands["BrandA"]
+    assert brands["BrandA"]["avg_check"] == 1000.0, brands["BrandA"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sales_type", ["retail", "all", "b2b"])
+async def test_the_brand_table_and_the_brand_card_count_alike(
+        in_postgres, sales_type):
+    """The report's table and the dashboard's brand card: one window, one
+    statement, one answer per brand."""
+    report = await _answer(in_postgres, "get_marketing_report_by_dates",
+                           {"sales_type": sales_type})
+    card = await _answer(in_postgres, "get_brand_analytics",
+                         {"sales_type": sales_type})
+    top = card["topByRevenue"]
+    assert {b["brand"]: b["orders"] for b in report["brands"]} == \
+        dict(zip(top["labels"], top["orders"]))
 
 
 @pytest.mark.asyncio
