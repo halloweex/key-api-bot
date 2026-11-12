@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.343
+
+- Z2 review: nginx keeps the rollback image's resync slow until Z3; the rollback check after off
+- Z2 docs: CLAUDE.md says what the final stage deleted, and what stays
+- Z2: offsite_check judges no DuckDB copy
+- Z2: the shim core/duckdb_store.py and the store's connection() stub go
+- Z2: the /api/duckdb/* aliases of the sync levers go
+- Z2: the DuckDB file's hourly hash and the soak's P1 go with the file
+
+
 ## 3.0.342
 
 - fix(marketing): a brand's «Заказов» counts orders, as the brand card does
