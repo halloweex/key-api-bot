@@ -137,35 +137,6 @@ class UsersMixin:
             "allowed_features": parse_features(row[13]),
         }
 
-    async def get_user_by_status(self, status: str) -> List[Dict[str, Any]]:
-        """Get all users with a given status."""
-        rows = await self._users_run("""
-            SELECT user_id, username, first_name, last_name, photo_url,
-                   role, status, requested_at, reviewed_at, last_activity,
-                   allowed_features
-            FROM {users} WHERE status = ?
-            -- `user_id` closes the sort: `requested_at` can tie, and two
-            -- engines break a tie differently.
-            ORDER BY requested_at DESC, user_id
-        """, [status])
-
-        return [
-            {
-                "user_id": row[0],
-                "username": row[1],
-                "first_name": row[2],
-                "last_name": row[3],
-                "photo_url": row[4],
-                "role": row[5],
-                "status": row[6],
-                "requested_at": self._stamp(row[7]),
-                "reviewed_at": self._stamp(row[8]),
-                "last_activity": self._stamp(row[9]),
-                "allowed_features": parse_features(row[10]),
-            }
-            for row in rows
-        ]
-
     async def list_users(
         self,
         status: Optional[str] = None,

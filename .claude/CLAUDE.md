@@ -18,7 +18,7 @@ key-api-bot/
 │   ├── repositories/            # Nine mixins composed into AnalyticsStore
 │   ├── pg_*_write.py            # The thirteen write chains, one writer per table set
 │   ├── pg_derivation.py         # Silver, Gold and UTM derived in Postgres on a signal
-│   ├── models.py                # Data models (Order, Product, Category, Buyer)
+│   ├── models.py                # Data models (Order, OrderProduct, Buyer, Manager) and the source/status enums
 │   ├── filters.py               # Date period parsing (DateRange, parse_period)
 │   ├── scheduler.py             # APScheduler jobs, addressed by string id
 │   └── prediction_service.py    # LightGBM revenue prediction (train, predict, forecast)

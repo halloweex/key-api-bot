@@ -5,7 +5,6 @@ Provides streaming responses and function calling capabilities.
 Supports Ukrainian, Russian, and English responses.
 """
 from typing import Optional, List, Dict, Any, AsyncGenerator
-from dataclasses import dataclass
 
 import anthropic
 from anthropic import AsyncAnthropic
@@ -14,14 +13,6 @@ from core.config import config
 from core.observability import get_logger
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class ToolCall:
-    """Represents a tool call from the LLM."""
-    id: str
-    name: str
-    input: Dict[str, Any]
 
 
 class LLMClient:

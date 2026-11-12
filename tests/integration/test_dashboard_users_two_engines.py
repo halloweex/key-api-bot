@@ -105,8 +105,6 @@ READS = (
     ("get_user", {"user_id": 11}),
     ("get_user", {"user_id": 13}),          # NULL username, NULL last_activity
     ("get_user", {"user_id": 999}),         # absent
-    ("get_user_by_status", {"status": "approved"}),
-    ("get_user_by_status", {"status": "frozen"}),
     ("list_users", {}),
     ("list_users", {"status": "approved"}),
     ("list_users", {"role": "viewer"}),
@@ -131,7 +129,7 @@ async def test_the_reads_agree(store, name, kwargs):
 @pytest.mark.asyncio
 async def test_the_fixture_reaches_the_awkward_rows(store):
     """A comparison of two empty answers agrees about nothing."""
-    approved = await store.get_user_by_status("approved")
+    approved = await store.list_users(status="approved")
     assert len(approved) == 3
     assert any(u["username"] is None for u in approved), "the NULL username is not reached"
     assert {u["role"] for u in approved} == {"admin", "viewer", "marketer"}
