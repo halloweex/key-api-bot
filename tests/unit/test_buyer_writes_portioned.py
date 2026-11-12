@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 from core.models import Buyer
 
 def _buyers(n, *, base=1, name="Покупець"):
@@ -37,7 +37,7 @@ class TestPortions:
     def test_the_production_portion_is_a_thousand(self):
         # Below the measured failure point with room to spare: 6 500 commit,
         # 8 000 run out of memory under the production 4 GB limit.
-        assert DuckDBStore.BUYER_WRITE_PORTION == 1000
+        assert AnalyticsStore.BUYER_WRITE_PORTION == 1000
 
 
 class _FakeLock:

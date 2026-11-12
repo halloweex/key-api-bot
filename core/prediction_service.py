@@ -286,7 +286,6 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     # lag_same_dow: revenue from the same weekday 1 week ago (shift by 7 is already lag_7d,
     #   but this is semantically a DOW feature computed on sorted data with gaps filled)
     # rolling_mean_4w_same_dow: average revenue for the same weekday over last 4 weeks
-    shifted_rev = df['revenue'].shift(1)
     dow = df['day_of_week']
     same_dow_mean = pd.Series(np.nan, index=df.index, dtype=float)
     for d in range(7):
@@ -1226,7 +1225,6 @@ class PredictionService:
         self._metrics: Dict[str, float] = {}
         self._dow_corrections: Dict[int, float] = {}
         self._clip_ratio: float = 1.0
-        self._training = False
         self._training_lock = asyncio.Lock()
         # Whether the last `predict_month` stored its forecast: True, False, or
         # None before any. `predict_month` swallows a failed store (the model
@@ -1249,7 +1247,7 @@ class PredictionService:
         Excludes today's incomplete data, uses last 6 complete months as folds.
         Returns detailed metrics, feature importance, and residual analysis.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         df = await self._query_daily_revenue(store, sales_type, days_back=780)
@@ -1269,7 +1267,7 @@ class PredictionService:
 
         Saves best params to data/lgbm_best_params.json for use by train/evaluate.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         df = await self._query_daily_revenue(store, sales_type, days_back=780)
@@ -1314,7 +1312,7 @@ class PredictionService:
         if first > last:
             return None
 
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
         predictions, trained_at = await store.get_stored_forecast(
             first, last, sales_type)
@@ -1336,18 +1334,14 @@ class PredictionService:
             return {"status": "already_training"}
 
         async with self._training_lock:
-            self._training = True
-            try:
-                return await self._train_impl(sales_type)
-            finally:
-                self._training = False
+            return await self._train_impl(sales_type)
 
     async def _train_impl(self, sales_type: str) -> Dict[str, Any]:
         """Internal training implementation."""
         from core import read_fallback
 
         try:
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
 
             # Query daily revenue for the last ~25 months
@@ -1463,7 +1457,7 @@ class PredictionService:
         if not self.is_ready:
             return []
 
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         if historical_df is None:
@@ -1534,7 +1528,7 @@ class PredictionService:
         it — after a training in the same process. One answer now, and one
         any process can give.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         today = _today_kyiv()

@@ -60,12 +60,12 @@ async def stores(tmp_path, monkeypatch):
     The DuckDB store is real rather than refused, because the point of most of
     these tests is that a row did NOT land in it.
     """
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \

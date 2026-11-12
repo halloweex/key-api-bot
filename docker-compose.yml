@@ -442,9 +442,9 @@ services:
     # for DuckDB work a cancelled job left in flight (~30 s) and close()'s
     # checkpoint (~7 s with a 900 MB WAL), ~67 s for an ordinary request; the
     # store holds no file since S14-18 and the 120 s are kept as they were.
-    # NOT for the ten SLOW_ENDPOINTS in web/middleware.py (300 s; resync and
-    # refresh-statuses by both their paths, reclassify, goals/recalculate and
-    # forecast/train among them): one in flight outlasts this and is killed.
+    # NOT for the eight SLOW_ENDPOINTS in web/middleware.py (300 s; resync,
+    # refresh-statuses, reclassify, goals/recalculate and forecast/train
+    # among them): one in flight outlasts this and is killed.
     # None of them writes DuckDB since S14-15 (derived in
     # tests/unit/test_web_stop_grace.py), so a kill costs the request in
     # flight and leaves no WAL. Covering them (~340 s, plus the pull, the

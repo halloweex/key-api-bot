@@ -1,16 +1,24 @@
-"""The sync levers under `/api/sync/`, and the `/api/duckdb/` names they keep.
+"""The sync levers under `/api/sync/`, and the `/api/duckdb/` names they lost.
 
 Step 14's S14-17 (the owner's decision 6 for step 14, OD-S5-8) renamed the
 four doors that start a sync from KeyCRM by hand — the resync, the status
 refresh and the two buyer syncs — from `/api/duckdb/…`, a name from the days
-they wrote DuckDB, to `/api/sync/…`. The old paths stay until step 14's final
-stage as aliases: the same function behind both, left out of the schema, its
-rate limit shared. Each slow one keeps its long timeout by both names, in the
-app (`SLOW_ENDPOINTS`, 300 s, else a 504 at 30 s while the handler runs on)
-and in nginx (`proxy_read_timeout 300`, else a 504 at 60 s).
+they wrote DuckDB, to `/api/sync/…`. The old paths stayed until step 14's
+final stage as aliases, the same function behind both, out of the schema.
+The final stage removed them (2026-11-12), with their two entries in
+`SLOW_ENDPOINTS`. nginx keeps `duckdb/resync` in its long-timeout regex until
+Z3: the rollback image serves its resync only there. Each slow
+lever keeps its long timeout by its one name, in the app (`SLOW_ENDPOINTS`,
+300 s, else a 504 at 30 s while the handler runs on) and in nginx
+(`proxy_read_timeout 300`, else a 504 at 60 s).
+
+What an old name answers now is what every path no route serves answers: a
+POST is a JSON 405, because the pages router's catch-all takes GET alone, and
+a GET is the JSON 404 every unmatched `/api/` GET gets — never the SPA shell,
+and never the lever.
 
 `GET /api/duckdb/stats`, the fifth door under the old prefix, was deleted
-outright: DuckDB's row counts, `off` since S14-00, read by nothing.
+outright in S14-17: DuckDB's row counts, `off` since S14-00, read by nothing.
 """
 from __future__ import annotations
 
@@ -19,18 +27,27 @@ from pathlib import Path
 
 import pytest
 
-from tests.routes_helper import iter_endpoints
+from tests.routes_helper import aliases, iter_endpoints
+from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 REPO = Path(__file__).resolve().parents[2]
 NGINX = REPO / "nginx" / "nginx.conf"
 
-NEW = {
-    "/api/sync/resync": "/api/duckdb/resync",
-    "/api/sync/refresh-statuses": "/api/duckdb/refresh-statuses",
-    "/api/sync/sync-buyers": "/api/duckdb/sync-buyers",
-    "/api/sync/sync-all-buyers": "/api/duckdb/sync-all-buyers",
+DOORS = ("/api/sync/resync", "/api/sync/refresh-statuses",
+         "/api/sync/sync-buyers", "/api/sync/sync-all-buyers")
+# The names the final stage removed, each beside the door it reached.
+RETIRED = {
+    "/api/duckdb/resync": "/api/sync/resync",
+    "/api/duckdb/refresh-statuses": "/api/sync/refresh-statuses",
+    "/api/duckdb/sync-buyers": "/api/sync/sync-buyers",
+    "/api/duckdb/sync-all-buyers": "/api/sync/sync-all-buyers",
 }
 SLOW = {"/api/sync/resync", "/api/sync/refresh-statuses"}
+# What each lever's handler calls first, patched so that a request reaching
+# one would be seen and would do nothing — the full buyer fetch above all,
+# which is KeyCRM's ~460 pages.
+_HANDLERS = ("core.sync_service.force_resync", "core.sync_service.get_sync_service",
+             "web.routes.api.admin._sync_all_buyers")
 
 
 def _posts() -> dict:
@@ -39,45 +56,44 @@ def _posts() -> dict:
     return {e.path: e for e in iter_endpoints(app) if "POST" in e.methods}
 
 
-def test_the_table_in_the_module_is_this_one():
-    from web.routes.api.admin import SYNC_DOORS
-
-    assert {f"/api{k}": f"/api{v}" for k, v in SYNC_DOORS.items()} == NEW
-
-
-@pytest.mark.parametrize("new, old", sorted(NEW.items()))
-def test_both_paths_are_one_function(new, old):
-    """Mutation: give the alias a handler of its own, or drop it."""
-    posts = _posts()
-    assert new in posts and old in posts, (new, old)
-    assert posts[new].route.endpoint is posts[old].route.endpoint
-
-
-def test_only_the_new_names_are_in_the_schema():
+@pytest.mark.parametrize("door", DOORS)
+def test_every_door_is_registered_and_in_the_schema(door):
     from fastapi.testclient import TestClient
 
     from web.main import app
 
-    paths = TestClient(app).get("/openapi.json").json()["paths"]
-    for new, old in NEW.items():
-        assert new in paths and old not in paths, (new, old)
-    assert not [p for p in paths if p.startswith("/api/duckdb/")]
+    assert door in _posts(), door
+    assert door in TestClient(app).get("/openapi.json").json()["paths"], door
 
 
-def test_the_stats_route_is_gone():
+def test_no_path_under_the_old_prefix_is_registered():
+    """Mutation: put any of the four `@router.post("/duckdb/…")` back."""
     from web.main import app
 
-    assert not [e for e in iter_endpoints(app) if e.path == "/api/duckdb/stats"]
+    paths = {e.path for e in iter_endpoints(app)}
+    assert not [p for p in paths if p.startswith("/api/duckdb/")], sorted(paths)
 
 
-def test_both_names_of_each_slow_lever_get_the_long_timeout():
-    """Mutation: drop either name from `SLOW_ENDPOINTS`."""
+def test_no_route_is_an_alias_of_another():
+    """The aliases were the app's only routes out of the schema serving a
+    function a route in the schema serves at another path. Mutation: register
+    any lever under a second path, in the schema or out of it."""
+    from web.main import app
+
+    assert aliases(app) == frozenset()
+    functions = [e.route.endpoint for e in iter_endpoints(app)
+                 if e.path in DOORS]
+    assert len(functions) == len(set(functions)) == len(DOORS)
+
+
+def test_the_slow_levers_get_the_long_timeout_by_their_one_name():
+    """Mutation: drop a lever from `SLOW_ENDPOINTS`, or put an alias back."""
     from web.middleware import SLOW_ENDPOINTS
 
-    for new in SLOW:
-        assert {new, NEW[new]} <= set(SLOW_ENDPOINTS), new
-    for new in set(NEW) - SLOW:
-        assert new not in SLOW_ENDPOINTS and NEW[new] not in SLOW_ENDPOINTS, new
+    assert SLOW <= set(SLOW_ENDPOINTS)
+    for door in set(DOORS) - SLOW:
+        assert door not in SLOW_ENDPOINTS, door
+    assert not [p for p in SLOW_ENDPOINTS if p.startswith("/api/duckdb/")]
 
 
 def _long_timeout_locations() -> list:
@@ -86,62 +102,90 @@ def _long_timeout_locations() -> list:
         r"location ~ (\S+) \{(?:(?!location).)*?proxy_read_timeout 300;", text, re.S)]
 
 
-@pytest.mark.parametrize("path", sorted(SLOW | {"/api/duckdb/resync"}))
+@pytest.mark.parametrize("path", sorted(SLOW))
 def test_nginx_gives_the_slow_levers_its_long_timeout(path):
-    """The regex the plan names: `sync/(resync|refresh-statuses)` beside the
-    old `duckdb/resync`, which keeps its timeout. Mutation: drop either."""
+    """The regex names `sync/(resync|refresh-statuses)`. Mutation: drop it."""
     assert any(re.match(rx, path) for rx in _long_timeout_locations()), path
 
 
-def test_nginx_names_no_other_sync_door_slow():
-    for path in ("/api/sync/sync-buyers", "/api/sync/sync-all-buyers"):
-        assert not any(re.match(rx, path) for rx in _long_timeout_locations()), path
+@pytest.mark.parametrize("path", ["/api/sync/sync-buyers", "/api/sync/sync-all-buyers",
+                                  *sorted(set(RETIRED) - {"/api/duckdb/resync"})])
+def test_nginx_names_no_other_sync_door_slow(path):
+    """The buyer syncs never were slow; the old names are gone. Mutation: add
+    `duckdb/refresh-statuses` to the regex."""
+    assert not any(re.match(rx, path) for rx in _long_timeout_locations()), path
 
 
-@pytest.mark.parametrize("new, old", sorted(NEW.items()))
-def test_every_doors_limit_is_shared_by_both_its_names(new, old):
-    """slowapi keys a plain `@limiter.limit` by the URL, so each name would get
-    a counter of its own and the full buyer fetch (1/hour) could run twice an
-    hour by alternating them. `shared_limit` with the new path as its scope is
-    what makes it one lever — held here for all four doors, not only the
-    resync the request test below exercises. Mutation: give any door a plain
-    `@limiter.limit` back."""
+def test_nginx_keeps_the_rollback_images_resync_slow_until_z3():
+    """rollback-step14, a rollback target until Z3, serves the resync only at
+    `/api/duckdb/resync` and runs it inside the request: without the long
+    timeout nginx would answer 504 at 60 s while the handler runs on.
+    Mutation: drop `duckdb/resync` from the regex."""
+    assert any(re.match(rx, "/api/duckdb/resync") for rx in _long_timeout_locations())
+
+
+@pytest.mark.parametrize("door", DOORS)
+def test_every_doors_limit_is_one_counter_scoped_by_its_path(door):
+    """The `shared_limit` each door took while it had two names, scoped by its
+    path: one counter per lever. Mutation: drop a door's limit, or scope it
+    by another name."""
     import inspect
 
     from web.ratelimit import limiter
 
-    posts = _posts()
-    func = inspect.unwrap(posts[new].route.endpoint)
-    assert inspect.unwrap(posts[old].route.endpoint) is func, (new, old)
+    func = inspect.unwrap(_posts()[door].route.endpoint)
     limits = limiter._route_limits.get(f"{func.__module__}.{func.__name__}")
-    assert limits, f"{new}: no rate limit registered"
-    assert {limit.scope for limit in limits} == {new.removeprefix("/api/")}, (
-        new, [(str(limit.limit), limit.scope) for limit in limits])
+    assert limits, f"{door}: no rate limit registered"
+    assert {limit.scope for limit in limits} == {door.removeprefix("/api/")}, (
+        door, [(str(limit.limit), limit.scope) for limit in limits])
 
 
-def test_an_alias_shares_its_rate_limit():
-    """One limit for the lever, not one per name: the resync allows one a
-    minute, and the second through the other name is refused."""
-    import time
+def test_the_resync_still_allows_one_a_minute(admin_client):  # noqa: F811
+    """The limit survives the alias: the second resync in a minute is
+    refused, and the refused one never reaches the lever."""
     from unittest.mock import AsyncMock, patch
 
-    from fastapi.testclient import TestClient
-
-    from core.permissions import ADMIN_USER_IDS
-    from web.main import app
-    from web.ratelimit import limiter
-    from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
-
-    limiter.reset()
-    client = TestClient(app)
-    client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data({
-        "id": str(sorted(ADMIN_USER_IDS)[0]), "first_name": "T", "last_name": "U",
-        "username": "t", "auth_date": str(int(time.time()))}, role="admin")))
-    try:
-        with patch("core.sync_service.force_resync", AsyncMock(return_value={"orders": 0})):
-            first = client.post("/api/sync/resync", params={"days": 1})
-            second = client.post("/api/duckdb/resync", params={"days": 1})
-    finally:
-        limiter.reset()
+    with patch("core.sync_service.force_resync",
+               AsyncMock(return_value={"orders": 0})) as resync:
+        first = admin_client.post("/api/sync/resync", params={"days": 1})
+        second = admin_client.post("/api/sync/resync", params={"days": 1})
     assert first.status_code == 200, first.text
     assert second.status_code == 429, second.text
+    assert resync.await_count == 1
+
+
+@pytest.mark.parametrize("old", sorted(RETIRED))
+def test_an_old_name_answers_as_no_route_and_runs_nothing(admin_client, old):  # noqa: F811
+    """An admin's POST to an old name is the JSON 405 of a path no route
+    serves, and a GET is the JSON 404 of every unmatched `/api/` GET — not
+    the SPA shell, and neither reaches a lever. Until the final stage the
+    POST ran the lever. Mutation: put the alias back — the POST answers as
+    the lever does."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    with patch(_HANDLERS[0], AsyncMock(return_value={"orders": 0})) as resync, \
+            patch(_HANDLERS[1], AsyncMock(return_value=MagicMock())) as sync, \
+            patch(_HANDLERS[2], AsyncMock(return_value={})) as fetch_all, \
+            patch("web.routes.api.admin.get_store", AsyncMock(return_value=MagicMock())):
+        post = admin_client.post(old, params={"days": 1}, follow_redirects=False)
+        get = admin_client.get(old, follow_redirects=False)
+    assert post.status_code == 405, (old, post.status_code, post.text[:120])
+    assert post.headers["content-type"].startswith("application/json")
+    assert get.status_code == 404, (old, get.status_code, get.text[:120])
+    assert get.json() == {"detail": "Not Found"}
+    resync.assert_not_awaited()
+    sync.assert_not_awaited()
+    fetch_all.assert_not_called()
+
+
+@pytest.mark.parametrize("old", ["/api/duckdb/stats", *sorted(RETIRED)])
+def test_an_old_get_is_the_json_404_even_without_a_session(old):
+    """Answered before the session check, as every unmatched `/api/` GET is
+    (`tests/unit/test_od10_retired_doors.py`)."""
+    from fastapi.testclient import TestClient
+
+    from web.main import app
+
+    response = TestClient(app).get(old, follow_redirects=False)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}

@@ -176,9 +176,9 @@ class TestPostgresDownAtBoot:
 
     @pytest_asyncio.fixture
     async def store(self, tmp_path):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        s = DuckDBStore()
+        s = AnalyticsStore()
         yield s
 
     @pytest.mark.asyncio
@@ -218,9 +218,9 @@ class TestAWriteThatNeverReachesPostgres:
 
     @pytest_asyncio.fixture
     async def store(self, tmp_path):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        s = DuckDBStore()
+        s = AnalyticsStore()
         yield s
 
     @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
@@ -720,9 +720,9 @@ class TestTheWatermarkGoesToPostgresAskingNothing:
         (step 14's S14-11; until then it asked the key's chain, whose answer
         was the latch). The store's DuckDB path must not be taken, latched or
         not, whatever the flag says."""
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
         if latched:
             chain_latch.latch("pg_inventory_write")
         flags.setenv("KS_WRITE_INVENTORY", "duckdb")

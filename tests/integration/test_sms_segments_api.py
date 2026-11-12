@@ -288,7 +288,7 @@ class TestSmsSegmentsAuth:
         viewer_id = 555_000_222
         assert viewer_id not in ADMIN_USER_IDS
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("viewer"))
+        monkeypatch.setattr("core.store.get_store", _role_store("viewer"))
 
         r = client.get(
             path,
@@ -303,7 +303,7 @@ class TestSmsSegmentsAuth:
         assert reader_id not in ADMIN_USER_IDS
 
         monkeypatch.setattr(
-            "core.duckdb_store.get_store", _role_store("viewer", ["sms"]))
+            "core.store.get_store", _role_store("viewer", ["sms"]))
 
         r = client.get(
             SEGMENTS_PATH,
@@ -320,7 +320,7 @@ class TestSmsSegmentsAuth:
         assert person_id not in ADMIN_USER_IDS
 
         monkeypatch.setattr(
-            "core.duckdb_store.get_store", _role_store("viewer", ["sms"]))
+            "core.store.get_store", _role_store("viewer", ["sms"]))
         refused = client.get(
             CSV_PATH,
             headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(person_id, role='viewer')}"},
@@ -328,7 +328,7 @@ class TestSmsSegmentsAuth:
         assert refused.status_code == 403, refused.text
 
         monkeypatch.setattr(
-            "core.duckdb_store.get_store", _role_store("editor", ["sms"]))
+            "core.store.get_store", _role_store("editor", ["sms"]))
         allowed = client.get(
             CSV_PATH,
             headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(person_id, role='editor')}"},
@@ -337,7 +337,7 @@ class TestSmsSegmentsAuth:
 
     def test_viewer_cannot_pull_customer_rows(self, client, store, monkeypatch):
         """`view` is sizes. The rows themselves are names and phone numbers."""
-        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("viewer"))
+        monkeypatch.setattr("core.store.get_store", _role_store("viewer"))
 
         headers = {"Cookie": f"{SESSION_COOKIE}={_make_cookie(555_000_444, role='viewer')}"}
         assert client.get(SEGMENTS_PATH, headers=headers).status_code == 403

@@ -18,7 +18,7 @@ from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
 
 from core.keycrm import get_async_client
-from core.duckdb_store import get_store, DuckDBStore
+from core.store import get_store, AnalyticsStore
 from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError, KeyCRMTruncated
 from core.observability import get_logger, correlation_context
 from core.events import (
@@ -27,7 +27,6 @@ from core.events import (
     emit_sync_started,
     emit_sync_completed,
     emit_sync_failed,
-    emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
 from core import read_fallback
@@ -426,11 +425,8 @@ class SyncService:
     OFF_HOURS_END = 7               # 7 AM Kyiv
     OFF_HOURS_INTERVAL = 300        # 5 min during off-hours
 
-    def __init__(self, store: DuckDBStore):
+    def __init__(self, store: AnalyticsStore):
         self.store = store
-        self._sync_task: Optional[asyncio.Task] = None
-        # Track if ordered_between filter is supported
-        self._use_ordered_between: Optional[bool] = None
 
         # Adaptive sync state
         self._consecutive_empty_syncs = 0
@@ -1399,7 +1395,7 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info(
                 f"Starting full sync (last {days_back} days)",
                 extra={"days_back": days_back, "sync_type": "full"}
@@ -2070,8 +2066,6 @@ async def force_resync(days_back: int = 730) -> dict:
     logger.warning(f"Force resync requested - rewriting the last {days_back} days in place")
 
     sync_service = await get_sync_service()
-    # Reset the filter detection flag
-    sync_service._use_ordered_between = None
     stats = await sync_service.full_sync(days_back=days_back, force_update=True)
 
     logger.info(f"Force resync complete: {stats}")

@@ -18,16 +18,12 @@ import logging
 import json
 import time
 import uuid
-import functools
 from contextvars import ContextVar
-from typing import Optional, Any, Dict, Callable
+from typing import Optional, Any, Dict
 from datetime import datetime, timezone
 
 # Context variable for request correlation ID
 _correlation_id: ContextVar[Optional[str]] = ContextVar("correlation_id", default=None)
-
-# Context variable for additional context (user_id, etc.)
-_log_context: ContextVar[Dict[str, Any]] = ContextVar("log_context", default={})
 
 
 def get_correlation_id() -> Optional[str]:
@@ -60,17 +56,6 @@ class correlation_context:
         _correlation_id.reset(self.token)
 
 
-def add_log_context(**kwargs) -> None:
-    """Add extra context to be included in all log messages."""
-    current = _log_context.get()
-    _log_context.set({**current, **kwargs})
-
-
-def clear_log_context() -> None:
-    """Clear the log context."""
-    _log_context.set({})
-
-
 class StructuredFormatter(logging.Formatter):
     """
     JSON log formatter for structured logging.
@@ -78,7 +63,7 @@ class StructuredFormatter(logging.Formatter):
     Outputs logs as JSON with:
     - timestamp, level, logger, message
     - correlation_id (if set)
-    - extra fields from log context
+    - extra fields from the record
     - exception info (if present)
     """
 
@@ -94,11 +79,6 @@ class StructuredFormatter(logging.Formatter):
         correlation_id = get_correlation_id()
         if correlation_id:
             log_entry["correlation_id"] = correlation_id
-
-        # Add context vars
-        context = _log_context.get()
-        if context:
-            log_entry.update(context)
 
         # Add extra fields from record (but exclude standard attributes)
         standard_attrs = {
@@ -241,59 +221,6 @@ class Timer:
                 f"{self.name} completed",
                 extra={"duration_ms": round(self.elapsed_ms, 2)}
             )
-
-
-def timed(name: Optional[str] = None, warn_threshold_ms: float = 1000):
-    """
-    Decorator for timing function execution.
-
-    Args:
-        name: Operation name (defaults to function name)
-        warn_threshold_ms: Log at WARNING level if exceeds this threshold
-    """
-    def decorator(func: Callable) -> Callable:
-        operation_name = name or func.__name__
-        func_logger = get_logger(func.__module__)
-
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            start = time.perf_counter()
-            try:
-                return await func(*args, **kwargs)
-            finally:
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                level = logging.WARNING if elapsed_ms > warn_threshold_ms else logging.DEBUG
-                func_logger.log(
-                    level,
-                    f"{operation_name} completed",
-                    extra={"duration_ms": round(elapsed_ms, 2)}
-                )
-
-        @functools.wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            start = time.perf_counter()
-            try:
-                return func(*args, **kwargs)
-            finally:
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                level = logging.WARNING if elapsed_ms > warn_threshold_ms else logging.DEBUG
-                func_logger.log(
-                    level,
-                    f"{operation_name} completed",
-                    extra={"duration_ms": round(elapsed_ms, 2)}
-                )
-
-        if asyncio_iscoroutinefunction(func):
-            return async_wrapper
-        return sync_wrapper
-
-    return decorator
-
-
-def asyncio_iscoroutinefunction(func: Callable) -> bool:
-    """Check if function is async."""
-    import asyncio
-    return asyncio.iscoroutinefunction(func)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

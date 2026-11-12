@@ -105,7 +105,7 @@ def store(monkeypatch):
     async def _fake_get_store():
         return fake
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+    monkeypatch.setattr("core.store.get_store", _fake_get_store)
     return fake
 
 
@@ -388,8 +388,8 @@ class TestASocketOutlivesTheSessionThatOpenedIt:
     HTTP re-reads role and status from the store on every request, so a denied
     user is cut off by their next call. A socket authenticates once at the
     handshake and nothing re-checks it — not on a timer, and not on a message.
-    `cleanup_stale_connections` exists but has no caller outside the tests, so
-    the window is not five minutes: it is until the client closes.
+    Nothing reaps an idle socket either, so the window is until the client
+    closes.
 
     Judged low because of what the rooms carry. Every broadcast is a
     cache-invalidation signal — `orders_synced {count}`, `products_synced

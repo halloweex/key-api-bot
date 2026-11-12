@@ -33,7 +33,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -78,7 +78,7 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
 

@@ -18,7 +18,6 @@ from pathlib import Path
 
 from core.alerting import (
     EXCLUDED_MESSAGE_KEYS,
-    PENDING_EMITTERS,
     REGISTRY,
     Kind,
     spec_for,
@@ -89,7 +88,7 @@ def collect_freshness_names() -> set:
 def collect_literal_send_keys() -> set:
     """Every literal key=... passed to a send/throttle call, all emitters."""
     keys = set()
-    for path in ("core/scheduler.py", "core/duckdb_store.py", "bot/main.py",
+    for path in ("core/scheduler.py", "core/store.py", "bot/main.py",
                  "core/prediction_service.py", "web/routes/api/webhooks.py"):
         for node in ast.walk(_parse(path)):
             if isinstance(node, ast.Call):
@@ -277,18 +276,11 @@ class TestCompleteness:
     def test_every_registered_key_is_emittable(self):
         """The direction that keeps the registry honest: an entry nobody can
         emit is documentation of a condition that does not exist."""
-        stale = set(REGISTRY) - emittable() - PENDING_EMITTERS
+        stale = set(REGISTRY) - emittable()
         assert not stale, (
             f"registry entries no emitter produces: {sorted(stale)} — delete "
             "them or fix the collector that should have found them"
         )
-
-    def test_pending_emitters_are_registered_and_stay_small(self):
-        """PENDING is a coordination valve for the shared branch, not a
-        loophole: every pending key must already be registered, and the set
-        must not quietly grow into a second registry."""
-        assert PENDING_EMITTERS <= set(REGISTRY)
-        assert len(PENDING_EMITTERS) <= 3
 
     def test_excluded_keys_are_not_registered(self):
         """The digest and the recovery notice are channel messages, not

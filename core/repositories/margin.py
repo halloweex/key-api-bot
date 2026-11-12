@@ -69,7 +69,7 @@ class MarginMixin:
 
     def _margin_base_where(self, sales_type: str, params: list) -> str:
         """The line predicate, which is not margin's to define — see
-        `core.duckdb_store.line_window_where`."""
+        `core.duckdb_constants.line_window_where`."""
         return line_window_where(sales_type, params)
 
     async def get_margin_overview(

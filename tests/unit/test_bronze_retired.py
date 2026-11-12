@@ -142,7 +142,9 @@ class TestTheSubsystemIsGone:
         )
 
     def test_the_schema_no_longer_declares_it(self):
-        src = (REPO / "core" / "duckdb_store.py").read_text(encoding="utf-8")
+        # The store's module: `core/duckdb_store.py` held the schema until
+        # S14-18 and was a shim until the final stage deleted it.
+        src = (REPO / "core" / "store.py").read_text(encoding="utf-8")
         for obj in ("bronze_order_events", "seq_bronze_order_events_id",
                     "idx_bronze_processed_at", "idx_bronze_order",
                     "idx_bronze_event_ts"):

@@ -265,7 +265,7 @@ class TestWhatOffWouldRefuseIsSeen:
     async def test_refused_exactly_without_an_address_and_counted(
         self, fresh_read_fallback, monkeypatch, tmp_path, switch, url,
     ):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         if switch is None:
             monkeypatch.delenv("KS_READ_COHORTS", raising=False)
@@ -280,7 +280,7 @@ class TestWhatOffWouldRefuseIsSeen:
             return ""
 
         monkeypatch.setattr("core.ch_common.execute", _answers)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         try:
             rows = await store._analytics_rows(
                 lambda d: f"SELECT 1 FROM {d.silver_orders} o", [], ("int",))

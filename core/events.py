@@ -16,7 +16,6 @@ Usage:
     await events.emit(SyncEvent.ORDERS_SYNCED, {"count": 100, "duration_ms": 1234})
 """
 import asyncio
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -27,8 +26,6 @@ from typing import (
     Dict,
     List,
     Optional,
-    Set,
-    TypeVar,
     Union,
 )
 
@@ -51,24 +48,12 @@ class SyncEvent(Enum):
     # Entity-specific sync events
     ORDERS_SYNCED = "orders.synced"
     PRODUCTS_SYNCED = "products.synced"
-    CATEGORIES_SYNCED = "categories.synced"
-    MANAGERS_SYNCED = "managers.synced"
-    EXPENSES_SYNCED = "expenses.synced"
 
     # Inventory events
-    INVENTORY_SNAPSHOT_TAKEN = "inventory.snapshot_taken"
     INVENTORY_UPDATED = "inventory.updated"
 
     # Analytics events
-    SEASONALITY_CALCULATED = "analytics.seasonality_calculated"
     GOALS_UPDATED = "analytics.goals_updated"
-
-    # Cache events
-
-    # Scheduler events
-    JOB_STARTED = "scheduler.job_started"
-    JOB_COMPLETED = "scheduler.job_completed"
-    JOB_FAILED = "scheduler.job_failed"
 
 
 @dataclass
@@ -156,42 +141,6 @@ class EventBus:
 
         return decorator
 
-    def subscribe(
-        self, event_type: Optional[SyncEvent], handler: EventHandler
-    ) -> None:
-        """
-        Programmatically subscribe to an event.
-
-        Args:
-            event_type: Event type to subscribe to, or None for all events
-            handler: Async function to handle the event
-        """
-        if event_type is None:
-            self._wildcard_handlers.append(handler)
-        else:
-            if event_type not in self._handlers:
-                self._handlers[event_type] = []
-            self._handlers[event_type].append(handler)
-
-    def unsubscribe(
-        self, event_type: Optional[SyncEvent], handler: EventHandler
-    ) -> bool:
-        """
-        Unsubscribe a handler from an event.
-
-        Returns:
-            True if handler was found and removed
-        """
-        if event_type is None:
-            if handler in self._wildcard_handlers:
-                self._wildcard_handlers.remove(handler)
-                return True
-        else:
-            if event_type in self._handlers and handler in self._handlers[event_type]:
-                self._handlers[event_type].remove(handler)
-                return True
-        return False
-
     async def emit(
         self,
         event_type: SyncEvent,
@@ -252,12 +201,8 @@ class EventBus:
         return event
 
     async def _safe_call(self, handler: EventHandler, event: Event) -> None:
-        """Safely call a handler with error isolation."""
-        try:
-            await handler(event.data)
-        except Exception as e:
-            # Re-raise to be caught by gather
-            raise
+        """Call a handler; a raise is caught by emit()'s gather."""
+        await handler(event.data)
 
     def get_history(
         self, event_type: Optional[SyncEvent] = None, limit: int = 20
@@ -340,12 +285,3 @@ async def emit_sync_failed(sync_type: str, error: str, **kwargs) -> Event:
         SyncEvent.SYNC_FAILED,
         {"sync_type": sync_type, "error": error, **kwargs},
     )
-
-
-async def emit_orders_synced(count: int, duration_ms: float, **kwargs) -> Event:
-    """Emit orders synced event."""
-    return await events.emit(
-        SyncEvent.ORDERS_SYNCED,
-        {"count": count, "duration_ms": duration_ms, **kwargs},
-    )
-

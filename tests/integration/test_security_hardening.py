@@ -125,12 +125,11 @@ class TestApiRequiresAuth:
         "/api/revenue/forecast/tune",
         "/api/expenses",
         "/api/stocks/snapshot/refresh",
-        # The sync levers by both their names (step 14's S14-17): the alias
-        # under /api/duckdb/ is the same function and must refuse the same.
+        # The sync levers (step 14's S14-17). Their aliases under
+        # /api/duckdb/ went at the final stage; what those paths answer now
+        # is held in tests/unit/test_sync_doors.py.
         "/api/sync/sync-buyers",
-        "/api/duckdb/sync-buyers",
         "/api/sync/resync",
-        "/api/duckdb/resync",
     ]
 
     @pytest.mark.parametrize("path", PROTECTED_GETS)
@@ -227,7 +226,7 @@ class TestAuthorizationStructure:
             return _Store()
 
         # _resolve_session imports get_store from core.duckdb_store at call time
-        monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+        monkeypatch.setattr("core.store.get_store", _fake_get_store)
 
         r = client.get("/api/jobs", headers=_cookie_header(_make_cookie(viewer_id, role="viewer")))
         assert r.status_code == 403
@@ -328,7 +327,7 @@ class TestCustomerPiiIsAdminOnly:
         async def _fake_get_store():
             return _Store()
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+        monkeypatch.setattr("core.store.get_store", _fake_get_store)
 
         headers = _cookie_header(_make_cookie(viewer_id, role="viewer"))
         for path in ("/api/search/buyers?q=ab", "/api/search/orders?q=1",
@@ -385,7 +384,7 @@ def _install_store(monkeypatch, store):
     async def _fake():
         return store
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _fake)
+    monkeypatch.setattr("core.store.get_store", _fake)
     monkeypatch.setattr("web.routes.api.users.get_store", _fake)
     return store
 

@@ -33,6 +33,7 @@ went with the copy-back in S14-04.
 from __future__ import annotations
 
 import os
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -75,13 +76,13 @@ async def stores(tmp_path, monkeypatch):
     Postgres, and the page reading Postgres — production's read mode. The goal
     reads follow the chain whatever that flag says; `TestTheReadsFollowTheChain`
     puts it back to `duckdb` to prove it."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
@@ -367,7 +368,8 @@ class TestTheReadsFollowTheChain:
         await self._flip_after_a_shipped_goal(store, env)
         env.setenv("KS_READ_MARKETING", "duckdb")
 
-        report = await store.get_marketing_report(2026, 8)
+        report = await store.get_marketing_report_by_dates(
+            date(2026, 8, 1), date(2026, 8, 31))
 
         assert report["general_sales"]["monthly_goal"] == self.TYPED
 
@@ -424,7 +426,8 @@ class TestTheReadsFollowTheChain:
 
         with patch.object(pg_marketing_read, "fetch", new=goals_table_down):
             with pytest.raises(read_fallback.ReadUnavailable) as raised:
-                await store.get_marketing_report(2026, 8)
+                await store.get_marketing_report_by_dates(
+                    date(2026, 8, 1), date(2026, 8, 31))
         assert raised.value.surface == "marketing"
         assert isinstance(raised.value.__cause__, ConnectionError)
         assert read_fallback.refusals()["marketing"]["count"] == 1

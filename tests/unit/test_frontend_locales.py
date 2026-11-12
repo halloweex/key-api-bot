@@ -23,7 +23,9 @@ from core.permissions import ACCESS_PRESETS, Role, TAB_FEATURE_KEYS
 from core.sms_refusals import REFUSAL_REASONS
 from core.ga4 import COLUMNS as FUNNEL_STEPS
 from core.utm_classify import FIRST_CHANNEL_OTHER, ORGANIC_CHANNELS
-from web.services.ga4_funnel_service import COLD as FUNNEL_COLD, TYPES as FUNNEL_TYPES, WARM as FUNNEL_WARM
+from web.services.ga4_funnel_service import (
+    COLD as FUNNEL_COLD, SCOPES as FUNNEL_SCOPES, TYPES as FUNNEL_TYPES, WARM as FUNNEL_WARM,
+)
 
 LOCALES = Path(__file__).resolve().parents[2] / "web" / "frontend" / "src" / "locales"
 LANGUAGES = ("en", "uk", "ru")
@@ -70,6 +72,12 @@ VOCABULARIES = {
     # as GA4 names it (`i18n.exists`), so only the ones the service sorts into
     # cold and warm are required.
     "traffic.funnelChannelDesc.": sorted(FUNNEL_COLD | FUNNEL_WARM),
+    # Whose visits the funnel counts: the scope's short name on the chip and
+    # the segments (`traffic.funnel.country.${scope}`), and its label and what
+    # it means in the phone's sheet (`…countryOption.`, `…countryNote.`).
+    "traffic.funnel.country.": sorted(FUNNEL_SCOPES),
+    "traffic.funnel.countryOption.": sorted(FUNNEL_SCOPES),
+    "traffic.funnel.countryNote.": sorted(FUNNEL_SCOPES),
 }
 
 

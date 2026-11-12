@@ -63,7 +63,6 @@ class MeiliClient:
         self.master_key = master_key
         self._client: Optional[meilisearch.Client] = None
         self._search_client: Optional[meilisearch.Client] = None
-        self._initialized = False
 
     @property
     def client(self) -> meilisearch.Client:
@@ -160,14 +159,12 @@ class MeiliClient:
                 })
             )
 
-            self._initialized = True
             logger.info("Meilisearch indexes initialized")
             return True
 
         except MeilisearchApiError as e:
             # Index already exists is OK
             if "index_already_exists" in str(e):
-                self._initialized = True
                 logger.info("Meilisearch indexes already exist")
                 return True
             logger.error(f"Failed to initialize Meilisearch indexes: {e}")

@@ -68,11 +68,11 @@ async def _clean(pool):
 async def stores(tmp_path, monkeypatch):
     """A real DuckDB, a live Postgres, the landing mirror on, and no chain
     flag set (none routes anything since step 14's S14-11)."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_MIRROR_LANDING", "on")
-    store = DuckDBStore()
+    store = AnalyticsStore()
     pool = await asyncpg.create_pool(DSN, min_size=2, max_size=6)
     await _clean(pool)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \

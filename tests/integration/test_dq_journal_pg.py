@@ -251,12 +251,12 @@ class TestTheBeat:
         it: the copy answers, and nothing opens DuckDB. (Until step 14's
         S14-18 it ran under both values of `KS_DUCKDB`; the switch is
         deleted.) Mutation: inherit only under off, as before S14-10."""
-        from core import duckdb_store
+        from core import store as core_store
 
         def _no_duckdb(self):
             raise AssertionError("the digest opened DuckDB")
 
-        monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", _no_duckdb)
+        monkeypatch.setattr(core_store.AnalyticsStore, "connection", _no_duckdb, raising=False)
         async with pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO app.sync_metadata (key, value, updated_at) "

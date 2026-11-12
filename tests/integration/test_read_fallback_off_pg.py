@@ -92,7 +92,7 @@ async def stores(tmp_path, monkeypatch):
     and a pool handed out through `core.pg.get_pool` that the test can
     count and close."""
     from core import pg_expenses_read
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
     for name in [n for n in os.environ if n.startswith("KS_READ_")]:
         monkeypatch.delenv(name, raising=False)
@@ -107,7 +107,7 @@ async def stores(tmp_path, monkeypatch):
 
     read_fallback.reset_counts()
 
-    store = DuckDBStore()
+    store = AnalyticsStore()
 
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)

@@ -34,7 +34,7 @@ from core import (
     pg_chain_watermarks, pg_frozen_metadata, pg_traffic_ledger_write,
     pg_weekly_ledger_write, report_ledger,
 )
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 UTC = timezone.utc
 NOW = datetime(2026, 10, 10, 9, 0, tzinfo=UTC)
@@ -88,7 +88,7 @@ def duckdb_off(monkeypatch):
     conftest's `duckdb_off`), and the proof was the switch's refusal count
     and a data directory never made; the switch is deleted, and the store's
     `connection()` is all a reader could still reach."""
-    from core import duckdb_store
+    from core import store as core_store
 
     reached = []
 
@@ -96,7 +96,8 @@ def duckdb_off(monkeypatch):
         reached.append(True)
         raise AssertionError("reached DuckDB")
 
-    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
+    monkeypatch.setattr(core_store.AnalyticsStore, "connection", connection,
+                        raising=False)
     return reached
 
 
@@ -125,7 +126,7 @@ class TestTheInheritedWatermark:
         chain_latch.latch(chain)
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
         copy = Copy(flags, {f"last_sync_{key}": frozen.isoformat()})
-        assert await DuckDBStore().get_last_sync_time(key) == frozen
+        assert await AnalyticsStore().get_last_sync_time(key) == frozen
         assert copy.asked == [f"last_sync_{key}"]
         _untouched(duckdb_off)
 
@@ -136,7 +137,7 @@ class TestTheInheritedWatermark:
         chain_latch.latch("pg_orders_write")
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=live))
         copy = Copy(flags, {"last_sync_orders": (NOW - timedelta(days=3)).isoformat()})
-        assert await DuckDBStore().get_last_sync_time("orders") == live
+        assert await AnalyticsStore().get_last_sync_time("orders") == live
         assert copy.asked == []
         _untouched(duckdb_off)
 
@@ -148,7 +149,7 @@ class TestTheInheritedWatermark:
         chain_latch.latch("pg_orders_write")
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
         Copy(flags)
-        assert await DuckDBStore().get_last_sync_time("orders") is None
+        assert await AnalyticsStore().get_last_sync_time("orders") is None
         _untouched(duckdb_off)
 
     @pytest.mark.asyncio
@@ -167,7 +168,7 @@ class TestTheInheritedWatermark:
         chain_latch.latch(chain)
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
         copy = Copy(flags, {f"last_sync_{key}": NOW.isoformat()})
-        assert await DuckDBStore().get_last_sync_time(key) is None
+        assert await AnalyticsStore().get_last_sync_time(key) is None
         assert copy.asked == []
         _untouched(duckdb_off)
 
@@ -181,7 +182,7 @@ class TestTheInheritedWatermark:
         copy = Copy(flags)
         copy.refuse = ConnectionRefusedError("down")
         with pytest.raises(ConnectionRefusedError):
-            await DuckDBStore().get_last_sync_time("orders")
+            await AnalyticsStore().get_last_sync_time("orders")
         _untouched(duckdb_off)
 
 
@@ -373,12 +374,13 @@ def pg_beat(monkeypatch):
 @pytest.fixture
 def no_duckdb(monkeypatch):
     """A store whose file may not be reached, wherever the code looks for it."""
-    from core import duckdb_store
+    from core import store as core_store
 
     def connection(self):
         raise AssertionError("reached DuckDB")
 
-    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
+    monkeypatch.setattr(core_store.AnalyticsStore, "connection", connection,
+                        raising=False)
 
 
 class TestTheDigestBeat:
@@ -537,7 +539,7 @@ class TestAgainstARealCopy:
         frozen = NOW - timedelta(hours=2)
         await _copy(pg_copy, {"last_sync_orders": frozen.isoformat()})
         chain_latch.latch("pg_orders_write")
-        assert await DuckDBStore().get_last_sync_time("orders") == frozen
-        await DuckDBStore().set_last_sync_time("orders", NOW)
-        assert await DuckDBStore().get_last_sync_time("orders") == NOW
+        assert await AnalyticsStore().get_last_sync_time("orders") == frozen
+        await AnalyticsStore().set_last_sync_time("orders", NOW)
+        assert await AnalyticsStore().get_last_sync_time("orders") == NOW
         _untouched(duckdb_off)

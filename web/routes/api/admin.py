@@ -27,23 +27,15 @@ _BACKGROUND_TASKS: set = set()
 # since step 14's S14-17 (the owner's decision 6 for step 14, OD-S5-8: renamed
 # when the DuckDB code went). They were `/duckdb/…`, a name from the days they
 # wrote DuckDB; each writes Postgres alone since the chains. The old paths
-# stay as aliases out of the schema — the same function, its rate limit
-# shared — until step 14's final stage, so a runbook, a bookmark or a
-# person's habit still reaches the lever. Each limit is shared by its two
-# names (`shared_limit`, scoped by the new path): slowapi scopes a plain
-# `limit` by the request's path, which would give each name a count of its
-# own. `SLOW_ENDPOINTS` and nginx's long timeout name both paths of the two
-# slow ones.
-SYNC_DOORS = {
-    "/sync/resync": "/duckdb/resync",
-    "/sync/refresh-statuses": "/duckdb/refresh-statuses",
-    "/sync/sync-buyers": "/duckdb/sync-buyers",
-    "/sync/sync-all-buyers": "/duckdb/sync-all-buyers",
-}
+# were kept as aliases out of the schema until step 14's final stage, which
+# removed them (2026-11-12): a POST there is a 405 and a GET the JSON 404 of
+# every unmatched `/api/` path. Each limit is still a `shared_limit` scoped by
+# its path, the form it took while it had two names: one counter per lever,
+# as a plain `limit` gives one per path. `SLOW_ENDPOINTS` and nginx's long
+# timeout name the two slow ones.
 
 
 @router.post("/sync/resync")
-@router.post("/duckdb/resync", include_in_schema=False)
 @limiter.shared_limit("1/minute", scope="sync/resync")
 async def trigger_resync(
     request: Request,
@@ -75,7 +67,6 @@ async def trigger_resync(
 
 
 @router.post("/sync/refresh-statuses")
-@router.post("/duckdb/refresh-statuses", include_in_schema=False)
 @limiter.shared_limit("10/hour", scope="sync/refresh-statuses")
 async def refresh_order_statuses(
     request: Request,
@@ -311,7 +302,6 @@ async def _sync_all_buyers(store) -> dict:
 
 
 @router.post("/sync/sync-buyers")
-@router.post("/duckdb/sync-buyers", include_in_schema=False)
 @limiter.shared_limit("120/minute", scope="sync/sync-buyers")
 async def sync_buyers(
     request: Request,
@@ -348,7 +338,6 @@ async def sync_buyers(
 
 
 @router.post("/sync/sync-all-buyers")
-@router.post("/duckdb/sync-all-buyers", include_in_schema=False)
 @limiter.shared_limit("1/hour", scope="sync/sync-all-buyers")
 async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)):
     """Start a sync of ALL buyers from KeyCRM, detached. Requires admin.
@@ -713,6 +702,10 @@ async def get_events(
                 if et.name.lower() == event_type.lower():
                     filter_type = et
                     break
+            else:
+                # An unknown type used to fall through to the unfiltered
+                # history; a filter that filters nothing reads as an answer.
+                raise HTTPException(status_code=400, detail="event_type: unknown event type")
 
     return {
         "events": events.get_history(event_type=filter_type, limit=limit),

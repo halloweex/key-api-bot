@@ -253,7 +253,7 @@ class TestTheHourlyRiderDerivesWhereTheChainWrites:
 
         store = object()
         pg = AsyncMock(return_value={"written": 0})
-        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
+        with patch("core.store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.pg_buyers_write.derive_gender_pg", new=pg), \
              patch("core.pg_bot_state.replicate_bot_state",
                    new=AsyncMock(return_value={})):

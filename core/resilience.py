@@ -4,21 +4,17 @@ Resilience patterns for API clients.
 Provides:
 - Exponential backoff retry
 - Circuit breaker
-- Rate limiter
 """
 import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Callable, Any, TypeVar
-from functools import wraps
+from typing import Optional, Callable, Any
 
 from core.exceptions import KeyCRMConnectionError
 from core.observability import get_logger
 
 logger = get_logger(__name__)
-
-T = TypeVar("T")
 
 
 class CircuitState(Enum):
@@ -114,11 +110,6 @@ class CircuitBreaker:
                     )
                     self.state = CircuitState.OPEN
 
-    @property
-    def is_open(self) -> bool:
-        """Check if circuit is open (rejecting requests)."""
-        return self.state == CircuitState.OPEN
-
 
 class CircuitOpenError(KeyCRMConnectionError):
     """Raised when circuit breaker is open.
@@ -130,58 +121,6 @@ class CircuitOpenError(KeyCRMConnectionError):
     `mirror_failing:bronze.orders` for a KeyCRM outage (L1-02). It is raised
     before the retry wrapper, so no backoff ever retries an open breaker.
     """
-
-
-@dataclass
-class RateLimiter:
-    """
-    Token bucket rate limiter.
-
-    Args:
-        rate: Requests per second
-        burst: Maximum burst size
-    """
-    rate: float = 10.0
-    burst: int = 20
-    tokens: float = field(default=0, init=False)
-    last_update: float = field(default=0, init=False)
-
-    def __post_init__(self):
-        self.tokens = float(self.burst)
-        self.last_update = time.time()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self, timeout: float = 10.0) -> bool:
-        """
-        Acquire a token, waiting if necessary.
-
-        Args:
-            timeout: Maximum time to wait for a token
-
-        Returns:
-            True if token acquired, False if timeout
-        """
-        start_time = time.time()
-
-        while True:
-            async with self._lock:
-                now = time.time()
-                # Replenish tokens
-                elapsed = now - self.last_update
-                self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
-                self.last_update = now
-
-                if self.tokens >= 1:
-                    self.tokens -= 1
-                    return True
-
-            # Check timeout
-            if time.time() - start_time >= timeout:
-                return False
-
-            # Wait for tokens to replenish
-            wait_time = (1 - self.tokens) / self.rate
-            await asyncio.sleep(min(wait_time, 0.1))
 
 
 async def retry_with_backoff(
@@ -251,32 +190,3 @@ async def retry_with_backoff(
             await asyncio.sleep(delay)
 
     raise last_exception
-
-
-def with_retry(
-    config: Optional[RetryConfig] = None,
-    retryable_exceptions: tuple = (Exception,)
-):
-    """
-    Decorator for adding retry logic to async functions.
-
-    Usage:
-        @with_retry(RetryConfig(max_attempts=3))
-        async def fetch_data():
-            ...
-    """
-    config = config or RetryConfig()
-
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            return await retry_with_backoff(
-                func, *args,
-                config=config,
-                retryable_exceptions=retryable_exceptions,
-                **kwargs
-            )
-        return wrapper
-    return decorator
-
-

@@ -28,58 +28,13 @@ def _all_fresh(root):
     _write(root, ev.OFFSITE, NOW - timedelta(hours=2))
 
 
-def _keys(unmet):
-    return sorted(line.split(":", 1)[0] for line in unmet)
-
-
-def test_everything_fresh_is_met(tmp_path):
-    _all_fresh(tmp_path)
-    assert ev.unmet(NOW, tmp_path) == []
-
-
-def test_nothing_on_disk_is_every_piece_missing(tmp_path):
-    """Mutation: treat an absent marker as met."""
-    assert _keys(ev.unmet(NOW, tmp_path)) == ["pg_offsite", "pitr_drill", "remote_restore"]
-
-
-def test_one_provider_is_enough(tmp_path):
-    """OD-01 (c) was cancelled by the owner on 2026-10-01: one Storage Box,
-    risk accepted in writing. Mutation: put the second-provider check back —
-    this host, with one fresh shipment, would read as unmet for ever."""
-    _all_fresh(tmp_path)
-    assert not [line for line in ev.unmet(NOW, tmp_path) if "provider" in line]
-
-
-@pytest.mark.parametrize("name,key", [
-    (ev.PITR_DRILL, "pitr_drill"),
-    (ev.REMOTE_DRILL, "remote_restore"),
-])
-def test_a_drill_older_than_a_week_and_a_day_is_unmet(tmp_path, name, key):
-    """Mutation: compare against hours where the limit is days, or drop the
-    age check — a drill that passed once would vouch for ever."""
-    _all_fresh(tmp_path)
-    _write(tmp_path, name, NOW - timedelta(days=9))
-    assert _keys(ev.unmet(NOW, tmp_path)) == [key]
-    _write(tmp_path, name, NOW - timedelta(days=7, hours=23))
-    assert ev.unmet(NOW, tmp_path) == []
-
-
-def test_a_stale_shipment_is_unmet_at_offsite_checks_limit(tmp_path):
-    """Mutation: a limit other than `deploy/offsite_check.sh`'s 36 hours."""
-    _all_fresh(tmp_path)
-    _write(tmp_path, ev.OFFSITE, NOW - timedelta(hours=37))
-    assert _keys(ev.unmet(NOW, tmp_path)) == ["pg_offsite"]
-    _write(tmp_path, ev.OFFSITE, NOW - timedelta(hours=35))
-    assert ev.unmet(NOW, tmp_path) == []
-
-
 def test_a_half_written_temporary_file_is_not_a_shipment(tmp_path):
     """The scripts write `<marker>.tmp` and rename it. Mutation: read the
     marker by prefix."""
     _all_fresh(tmp_path)
     (tmp_path / ev.OFFSITE).unlink()
     _write(tmp_path, ev.OFFSITE + ".tmp", NOW)
-    assert _keys(ev.unmet(NOW, tmp_path)) == ["pg_offsite"]
+    assert ev.read_markers(tmp_path)[2] is None
 
 
 def test_an_unreadable_line_falls_back_to_the_file_s_own_time(tmp_path):
@@ -90,10 +45,6 @@ def test_an_unreadable_line_falls_back_to_the_file_s_own_time(tmp_path):
     os.utime(path, (old, old))
     marker = ev.read_markers(tmp_path)[0]
     assert marker is not None and marker.age_h(NOW) == pytest.approx(480)
-
-
-def test_a_missing_directory_is_evidence_missing_not_a_raise(tmp_path):
-    assert len(ev.unmet(NOW, tmp_path / "nope")) == 3
 
 
 def test_the_published_block_carries_ages_only(tmp_path):
@@ -201,6 +152,49 @@ def test_the_canary_warns_on_each_stale_marker_and_names_its_script(field, age, 
     ((key, message),) = canary.check_backup_evidence(_block(**{field: age}))
     assert key == "backup_evidence_stale"
     assert script in message and f"{age:.1f} h old" in message
+
+
+@pytest.mark.parametrize("field,script", [
+    ("pitr", "deploy/pg_pitr_drill.sh"),
+    ("remote", "deploy/pg_restore_drill.sh --from-remote"),
+])
+def test_a_drill_older_than_a_week_and_a_day_is_stale(field, script):
+    """The limit written out in hours, because every other test here names
+    `DRILL_MAX_AGE_H` and follows it wherever it moves. Both drills run on
+    Mondays: a week and a day is one drill plus the day it can slip by.
+    Mutation: a limit in days compared against hours, no age check at all,
+    or a limit moved off eight days either way (7 d 23 h stale, 9 d fresh)."""
+    from bot import canary
+
+    assert canary.check_backup_evidence(_block(**{field: 7 * 24 + 23})) == []
+    ((key, message),) = canary.check_backup_evidence(_block(**{field: 9 * 24}))
+    assert key == "backup_evidence_stale" and script in message
+
+
+def test_a_stale_shipment_is_stale_at_offsite_checks_limit():
+    """The limit written out in hours, for the same reason. Mutation: a limit
+    other than `deploy/offsite_check.sh`'s 36 hours (35 h stale, 37 h
+    fresh)."""
+    from bot import canary
+
+    assert canary.check_backup_evidence(_block(offsite=35)) == []
+    ((key, message),) = canary.check_backup_evidence(_block(offsite=37))
+    assert key == "backup_evidence_stale" and "deploy/pg_offsite.sh" in message
+
+
+def test_the_shipments_limit_is_offsite_checks_default():
+    """`deploy/offsite_check.sh` pages the same marker CRITICAL past its own
+    limit, and `test_pg_offsite_scripts.py` holds that one by running the
+    script. Read off its assignment, not its prose. Mutation: move either
+    number without the other — the host would page a shipment the canary
+    calls fresh, or the other way round."""
+    import re
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[2] / "deploy" / "offsite_check.sh").read_text()
+    (default,) = re.findall(
+        r'^PG_MAX_AGE_HOURS="\$\{BACKUP_PG_MAX_ARCHIVE_AGE_HOURS:-(\d+)\}"$', script, re.M)
+    assert int(default) == ev.OFFSITE_MAX_AGE_H
 
 
 def test_an_age_just_past_its_limit_reads_as_past_it():

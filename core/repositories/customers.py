@@ -384,11 +384,6 @@ class SmsAudienceFilters:
                     [int(self.period_days)])
         raise ValueError("no period to count")
 
-    @property
-    def content_only(self) -> tuple:
-        """The content predicates, if any — the ones needing an EXISTS."""
-        return (self.brands, self.category_ids, self.source_ids, self.promocode)
-
     def is_empty(self) -> bool:
         """No predicate at all, so no filtering stage to speak of."""
         return not any(

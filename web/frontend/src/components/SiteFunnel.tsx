@@ -1,9 +1,9 @@
 import { Fragment, memo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ArrowLeftRight, CalendarX, Check, ChevronDown, Clock, CloudOff, Users } from 'lucide-react'
+import { ArrowLeftRight, CalendarX, Clock, CloudOff, Users } from 'lucide-react'
 import { ApiErrorState } from './ApiErrorState'
-import { BottomSheet } from './BottomSheet'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
+import { ChoiceChip } from './ChoiceChip'
 import { DataTable, Td, Th, Tr } from './DataTable'
 import { HelpSheet } from './HelpSheet'
 import type { IconComponent } from './icons'
@@ -181,64 +181,6 @@ function Notices({ items }: { items: Notice[] }) {
 
 // ─── What the period is set beside ───────────────────────────────────────────
 
-/** A phone's comparison: the window as a chip on the title row, the choice in
- *  a sheet with each window's dates. The segmented control and its dates line
- *  took two rows of the first screen. */
-function CompareChip({ against, chip, options, onChange }: {
-  against: Against
-  chip: { label: string; dates: string }
-  options: { value: Against; label: string; note: string; ok: boolean }[]
-  onChange: (value: Against) => void
-}) {
-  const { t } = useTranslation()
-  const [open, setOpen] = useState(false)
-  const title = t('traffic.funnel.compare.sheetTitle')
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={t('traffic.funnel.compare.chip', { dates: chip.dates })}
-        className="-my-1.5 inline-flex min-h-11 items-center"
-      >
-        <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3
-                         text-[13px] font-medium text-slate-800 shadow-sm">
-          <ArrowLeftRight className="h-3.5 w-3.5 text-slate-500" aria-hidden />
-          {chip.label}
-          <ChevronDown className="h-3.5 w-3.5 text-slate-500" aria-hidden />
-        </span>
-      </button>
-      <BottomSheet open={open} title={title} onClose={() => setOpen(false)} closeLabel={t('traffic.close')}>
-        <div role="radiogroup" aria-label={title} className="flex flex-col gap-2 pb-2">
-          {options.map(({ value, label, note, ok }) => {
-            const on = value === against
-            return (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={on}
-                disabled={!ok}
-                onClick={() => { onChange(value); setOpen(false) }}
-                className={`flex min-h-11 items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left ${
-                  on ? 'border-blue-600 bg-blue-50' : 'border-slate-200'} ${ok ? '' : 'opacity-60'}`}
-              >
-                <span className="flex flex-1 flex-col">
-                  <span className="text-sm font-semibold text-slate-900">{label}</span>
-                  <span className="text-xs text-slate-600">{note}</span>
-                </span>
-                {on && <Check className="h-5 w-5 shrink-0 text-blue-700" aria-hidden />}
-              </button>
-            )
-          })}
-        </div>
-      </BottomSheet>
-    </>
-  )
-}
-
 const CompareWith = memo(function CompareWith({
   data, against, prevOk, yearOk, onChange,
 }: {
@@ -262,14 +204,21 @@ const CompareWith = memo(function CompareWith({
     return t('traffic.funnel.compare.datesPrevious', { dates: span, n: formatNumber(n), word: plural(t, 'word.days', n) })
   }
   const window = data.periods[against]
+  // A phone's comparison: the window as a chip on the title row, the choice in
+  // a sheet with each window's dates. The segmented control and its dates line
+  // took two rows of the first screen.
   if (phone) {
     return (
-      <CompareChip
-        against={against}
-        chip={{ label: compareChip(window.start, window.end), dates: formatSpan(window.start, window.end) }}
+      <ChoiceChip<Against>
+        icon={ArrowLeftRight}
+        label={compareChip(window.start, window.end)}
+        ariaLabel={t('traffic.funnel.compare.chip', { dates: formatSpan(window.start, window.end) })}
+        sheetTitle={t('traffic.funnel.compare.sheetTitle')}
+        closeLabel={t('traffic.close')}
+        value={against}
         options={([['previous', prevOk], ['year_ago', yearOk]] as const).map(([value, ok]) => ({
           value,
-          ok,
+          disabled: !ok,
           label: t(`traffic.funnel.compare.${value}`),
           note: ok ? datesOf(value) : t(value === 'previous' ? 'traffic.funnel.compare.noPrevious' : 'traffic.funnel.compare.noYear', { date: since }),
         }))}
@@ -480,7 +429,13 @@ const FunnelBars = memo(function FunnelBars({
 /** The CRM's count of the website's orders beside the funnel's buyers, in a
  *  line, and why the two differ one tap away. Without the count it still says
  *  the funnel counts people, not orders. */
-function CrmLine({ buyers, orders, oneDay }: { buyers: number; orders: number | null; oneDay: boolean }) {
+function CrmLine({ buyers, orders, oneDay, abroadLeftOut }: {
+  buyers: number
+  orders: number | null
+  oneDay: boolean
+  /** The funnel counts Ukraine alone, while the CRM's orders come from anywhere. */
+  abroadLeftOut: boolean
+}) {
   const { t } = useTranslation()
   const line = orders != null
     ? t(oneDay ? 'traffic.funnel.crm.lineDay' : 'traffic.funnel.crm.lineDays', {
@@ -500,6 +455,7 @@ function CrmLine({ buyers, orders, oneDay }: { buyers: number; orders: number | 
           </p>
         )}
         <p>{t('traffic.funnel.crm.sheetWhy')}</p>
+        {abroadLeftOut && <p>{t('traffic.funnel.crm.sheetAbroad')}</p>}
       </HelpSheet>
     </div>
   )
@@ -813,6 +769,7 @@ const FunnelBody = memo(function FunnelBody({ data }: { data: TrafficFunnelRespo
             buyers={now.purchased}
             orders={orders.data?.totalOrders ?? null}
             oneDay={inclusiveDays(ordersFrom, period.end) === 1}
+            abroadLeftOut={data.country === 'ua'}
           />
         </Wrapper>
         {phoneLines.length > 0 && (

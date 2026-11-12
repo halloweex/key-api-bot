@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Optional, List, Dict, Any
 
-from core.duckdb_constants import _date_in_kyiv
-from core.models import OrderStatus
 from core import read_fallback
 
 logger = logging.getLogger(__name__)
@@ -104,7 +102,7 @@ class ExpensesMixin:
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get expense summary for a date range."""
-        params = [start_date, end_date]
+        params: List[Any] = [start_date, end_date]
         # `s.order_date` rather than `_date_in_kyiv(o.ordered_at)`: Silver
         # stores the Kyiv date, computed by the same expression, so reading
         # the column is the same answer without converting per row.
@@ -222,7 +220,7 @@ class ExpensesMixin:
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get profit analysis: revenue vs expenses."""
-        params = [start_date, end_date]
+        params: List[Any] = [start_date, end_date]
         # Silver carries all three: the Kyiv date as a column, the return flag,
         # and the classification. `NOT is_return` was checked against the old
         # `status_id NOT IN (15,18,19,21,22,23)` over the whole catalogue —

@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from core.data_quality import _freshness_check, check_internal_integrity
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 ENTITIES = ("orders", "products", "buyers", "offers", "stocks",
@@ -171,7 +171,7 @@ class TestTheWiringHasOneHome:
         with the flags); the getter asks the registry only whether an absent
         key inherits DuckDB's frozen stamp."""
         sides = {"get_last_sync_time": "get_value", "set_last_sync_time": "set_value"}
-        for fn in (DuckDBStore.get_last_sync_time, DuckDBStore.set_last_sync_time):
+        for fn in (AnalyticsStore.get_last_sync_time, AnalyticsStore.set_last_sync_time):
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             called = {getattr(n.func, "id", getattr(n.func, "attr", None))
                       for n in ast.walk(tree) if isinstance(n, ast.Call)}

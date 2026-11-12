@@ -18,9 +18,7 @@ from functools import wraps
 from core.filters import parse_period
 from bot.config import (
     ConversationState,
-    REPORT_TYPES,
     SOURCE_NAMES,
-    SOURCE_EMOJIS,
     DEFAULT_TIMEZONE,
     TELEGRAM_MANAGER_IDS,
     TOP10_SOURCES,
@@ -836,7 +834,7 @@ async def top10_source_callback(update: Update, context: ContextTypes.DEFAULT_TY
     source_selection = query.data.split('_')[-1]
 
     # Update session with source selection
-    session = update_user_session(user_id, {"top10_source": source_selection})
+    update_user_session(user_id, {"top10_source": source_selection})
 
     # Proceed to date range selection
     source_name = SOURCE_NAMES.get(source_selection, "Unknown")
@@ -2258,7 +2256,7 @@ async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> 
                     # Same ISO week, same weekday, previous year
                     ly_start = date.fromisocalendar(iso_year - 1, iso_week, iso_dow)
                     ly_end = ly_start + (period["end"] - period["start"])
-                _, _, ly_total_orders, ly_revenue_by_source, _ = (
+                _, _, _, ly_revenue_by_source, _ = (
                     await asyncio.to_thread(
                         report_service.aggregate_sales_data,
                         target_date=(ly_start.strftime('%Y-%m-%d'), ly_end.strftime('%Y-%m-%d')),

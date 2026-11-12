@@ -33,8 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.ch_common import (
@@ -172,8 +171,6 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
                 "ch_history: ids-diff healed %d version(s) below the "
                 "watermark — rows the copy had lost", healed,
             )
-            from datetime import datetime, timezone
-
             last_heal.update(at=datetime.now(timezone.utc), shipped=healed)
         elif shipped:
             logger.info("ch_history: appended %d version(s)", shipped)
@@ -308,8 +305,6 @@ async def reconcile_ch_history(*, max_samples: int = 10) -> List[IntegrityIssue]
     pg_buckets = {int(r[0]): int(r[1]) for r in records}
 
     issues: List[IntegrityIssue] = []
-    from datetime import datetime, timezone
-
     now = datetime.now(timezone.utc)
     stalled = _stall(now, ceiling, unshipped, state)
     if stalled is not None:

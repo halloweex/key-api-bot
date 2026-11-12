@@ -56,15 +56,15 @@ def flag(monkeypatch):
 def no_duckdb(monkeypatch):
     """Any reach for DuckDB's store fails the test: the journal's doors take
     no store and open no connection since S14-10."""
-    from core import duckdb_store
+    from core import store as core_store
 
     boom = AsyncMock(side_effect=AssertionError("the journal reached for DuckDB"))
-    monkeypatch.setattr(duckdb_store, "get_store", boom)
+    monkeypatch.setattr(core_store, "get_store", boom)
 
     def connection(self):
         raise AssertionError("the journal opened a DuckDB connection")
 
-    monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", connection)
+    monkeypatch.setattr(core_store.AnalyticsStore, "connection", connection, raising=False)
     return boom
 
 

@@ -54,7 +54,7 @@ class TestAlertsGoToAdminsOnly:
         All of it landed here first, which is the guard working.
         """
         hits = []
-        for path in ("core/scheduler.py", "core/duckdb_store.py",
+        for path in ("core/scheduler.py", "core/store.py",
                      "core/alerting.py", "core/alert_escalator.py",
                      "core/alert_archive.py", "core/prediction_service.py",
                      "bot/main.py", "bot/canary.py", "bot/memory_watch.py",

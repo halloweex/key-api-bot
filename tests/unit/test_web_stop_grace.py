@@ -50,14 +50,12 @@ HEALTH_GATE_S = 180          # the deploy's `timeout 180` wait for /api/health
 
 # The slow paths a stop can be killed in the middle of, by name: adding one is
 # a decision about this gap, and CLAUDE.md and docker-compose.yml name them.
-# The resync and the status refresh by both their names since step 14's
-# S14-17: `/api/sync/…`, and the `/api/duckdb/…` alias they keep until the
-# final stage, one function behind each pair (tests/unit/test_sync_doors.py).
+# The resync and the status refresh by their names under `/api/sync/` since
+# step 14's S14-17; their `/api/duckdb/…` aliases stood beside them until the
+# final stage removed them (tests/unit/test_sync_doors.py).
 KNOWN_SLOW_ENDPOINTS = {
     "/api/sync/resync",
     "/api/sync/refresh-statuses",
-    "/api/duckdb/resync",
-    "/api/duckdb/refresh-statuses",
     "/api/goals/recalculate",
     "/api/stocks/analysis",
     "/api/revenue/forecast/train",
@@ -77,7 +75,6 @@ KNOWN_SLOW_ENDPOINTS = {
 SLOW_DUCKDB_WRITERS: set = set()
 MOVED_TO_POSTGRES = {"/api/goals/recalculate", "/api/revenue/forecast/train",
                      "/api/sync/resync", "/api/sync/refresh-statuses",
-                     "/api/duckdb/resync", "/api/duckdb/refresh-statuses",
                      "/api/traffic/reclassify"}
 
 

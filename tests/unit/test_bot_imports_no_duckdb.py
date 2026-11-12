@@ -9,7 +9,8 @@ what the other sees.
 - **What the bot imports.** In a fresh interpreter, every module under
   `bot/`, then every repository module any line of `bot/` imports —
   function-level imports included, which is where most of the bot's
-  `core.*` arrive. Neither the driver nor `core.duckdb_store` may be loaded.
+  `core.*` arrive. Neither the driver nor the store (`core.store`) may be
+  loaded.
 - **What the bot calls.** An import inside a `core` function arrives only
   when that function runs — `core.permissions` imports the store inside the
   three async permission readers web uses, and the bot imports
@@ -40,8 +41,8 @@ from typing import Dict, Set
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
 # What the bot's process must never hold: the driver, and the store that was
-# the one reach for it — `core.duckdb_store`, a shim of `core.store` since
-# step 14's S14-18, and `core.store` itself (the switch,
+# the one reach for it — `core.store`, and `core.duckdb_store`, its shim from
+# step 14's S14-18 until the final stage deleted it (the switch,
 # `core/duckdb_switch.py`, went in S14-18).
 FORBIDDEN = ("duckdb", "core.duckdb_store", "core.store")
 # A function that asks for the store or the file by these names.

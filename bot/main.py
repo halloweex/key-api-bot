@@ -11,7 +11,6 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    ContextTypes,
     ConversationHandler,
     filters,
 )
@@ -62,8 +61,8 @@ async def send_admin_message(
 ) -> int:
     """Broadcast `text` to every admin. Returns how many it actually reached.
 
-    Imported by core/scheduler.py, core/duckdb_store.py and
-    core/prediction_service.py — all of which run inside the *web* container,
+    Imported by core/scheduler.py and core/prediction_service.py — both
+    of which run inside the *web* container,
     where no Application exists. Dropping the message there meant warehouse
     validation could fail for days without anyone hearing about it, so with no
     Application we fall back to the HTTP Bot API, which needs only the token.

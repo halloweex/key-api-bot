@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -114,12 +114,12 @@ class TestItDoesNotTakeTheDuckDbLock:
         # switch says (step 14, S14-05 and S14-06); their fetches are stubbed
         # below.
         # A store never connected, as web's is under `KS_DUCKDB=off`.
-        store = DuckDBStore()
+        store = AnalyticsStore()
 
         def boom(*_a, **_k):
             raise AssertionError(f"{name} reached for DuckDB")
 
-        with patch.object(type(store), "connection", boom), \
+        with patch.object(type(store), "connection", boom, create=True), \
              patch("core.pg_lookups_read.fetch",
                    new=AsyncMock(return_value=[])), \
              patch("core.pg_dashboard_read.fetch",

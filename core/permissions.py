@@ -6,7 +6,7 @@ DB permissions take precedence when available.
 """
 import logging
 from enum import Enum
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -156,23 +156,6 @@ def default_tabs(role: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 # PERMISSION HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def can(role: str, feature: str, action: str = "view") -> bool:
-    """
-    Check if a role has permission to perform an action on a feature.
-
-    Args:
-        role: User role (admin, editor, viewer)
-        feature: Feature key (dashboard, expenses, etc.)
-        action: Action (view, edit, delete)
-
-    Returns:
-        True if permitted, False otherwise
-    """
-    role_perms = ROLE_PERMISSIONS.get(role, {})
-    feature_perms = role_perms.get(feature, set())
-    return action in feature_perms
-
 
 def get_permissions_for_role(role: str) -> Dict[str, Dict[str, bool]]:
     """
@@ -466,8 +449,6 @@ async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]
 
     Falls back to hardcoded permissions if DB unavailable.
     """
-    global _permissions_cache
-
     # The cache is checked before the store is even fetched. It used to be
     # checked after, which cost nothing — until per-user tabs put a permission
     # dependency on roughly 120 of the 140 endpoints instead of the ~20 that
@@ -477,7 +458,7 @@ async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]
         return _permissions_cache[role]
 
     try:
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         # Ensure defaults are seeded
@@ -528,7 +509,7 @@ async def get_all_permissions_async() -> Dict[str, Dict[str, Dict[str, bool]]]:
     global _permissions_cache
 
     try:
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
 
         # Ensure defaults are seeded
@@ -555,7 +536,7 @@ async def set_permission_async(
     global _permissions_cache
 
     try:
-        from core.duckdb_store import get_store
+        from core.store import get_store
         store = await get_store()
         result = await store.set_permission(role, feature, can_view, can_edit, can_delete, updated_by)
 

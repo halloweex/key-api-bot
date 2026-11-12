@@ -141,7 +141,7 @@ def _login(monkeypatch, role: str) -> dict:
     async def _fake_get_store():
         return store
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+    monkeypatch.setattr("core.store.get_store", _fake_get_store)
 
     uid = 555_000_888
     assert uid not in ADMIN_USER_IDS
@@ -340,7 +340,7 @@ class TestPublicHealthCarriesNoExceptionText:
             asked.append(True)
             raise RuntimeError(detail)
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _raise)
+        monkeypatch.setattr("core.store.get_store", _raise)
         monkeypatch.setattr("web.routes.api._deps.get_store", _raise)
         yield asked
 

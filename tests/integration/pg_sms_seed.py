@@ -82,9 +82,9 @@ async def on_postgres(monkeypatch, tables: Sequence[str] = SMS_TABLES, *,
     and prove nothing."""
     import asyncpg
 
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    monkeypatch.setattr(DuckDBStore, "connection", _trap(what))
+    monkeypatch.setattr(AnalyticsStore, "connection", _trap(what), raising=False)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=max_size)
     try:
         async with pool.acquire() as conn:
@@ -117,9 +117,9 @@ async def for_async_tests(request, monkeypatch, tables: Sequence[str] = SMS_TABL
 def store(tmp_path, name: str = "never.duckdb"):
     """The repository, on a store that is never connected. Its connection is
     a trap for as long as `on_postgres` is open."""
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    return DuckDBStore()
+    return AnalyticsStore()
 
 
 @asynccontextmanager

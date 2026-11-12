@@ -372,12 +372,12 @@ class TestUnderDuckdbOff:
         store's connection a trap: since step 14's S14-18 it would be a
         refusal naming `duckdb`, not this tab), and the log names no
         switch."""
-        from core import duckdb_store
+        from core import store as core_store
 
         def _no_duckdb(self):
             raise AssertionError("the route reached for the DuckDB connection")
 
-        monkeypatch.setattr(duckdb_store.DuckDBStore, "connection", _no_duckdb)
+        monkeypatch.setattr(core_store.AnalyticsStore, "connection", _no_duckdb, raising=False)
         (switch, _value), = case.env.items()
         monkeypatch.setenv(switch, "duckdb")
 
@@ -721,7 +721,7 @@ def _imported_modules(path: pathlib.Path) -> set:
 def http_files() -> List[pathlib.Path]:
     """Every repository module reachable by import from `web/` — the code an
     HTTP route can run. Computed, not listed: `core/prediction_service.py`
-    and `core/duckdb_store.py` are on HTTP paths without being routers."""
+    and `core/store.py` are on HTTP paths without being routers."""
     seen = set()
     queue = [p for p in sorted((REPO / "web").rglob("*.py"))
              if "frontend" not in p.parts and "node_modules" not in p.parts]
@@ -857,7 +857,7 @@ class TestNoHandlerSwallowsARefusal:
             assert any(isinstance(n, ast.ExceptHandler) and _names_read_unavailable(n)
                        for n in ast.walk(tree)), rel
             assert REPO / rel in files
-        for rel in ("core/prediction_service.py", "core/duckdb_store.py",
+        for rel in ("core/prediction_service.py", "core/store.py",
                     "core/read_fallback.py", "core/pg_traffic_read.py"):
             assert REPO / rel in files, rel
 

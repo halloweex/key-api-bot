@@ -123,7 +123,7 @@ def _login(monkeypatch, role: str, allowed_features=None) -> dict:
         return store
 
     # _resolve_session imports get_store from core.duckdb_store at call time.
-    monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+    monkeypatch.setattr("core.store.get_store", _fake_get_store)
     # Non-hardcoded id so the role actually comes from the fake store.
     uid = 555_000_333
     assert uid not in ADMIN_USER_IDS
@@ -184,7 +184,7 @@ class TestMarginReadAllowedForAdmin:
         async def _fake_get_store():
             return store
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+        monkeypatch.setattr("core.store.get_store", _fake_get_store)
         headers = _cookie_header(_make_cookie(ADMIN_ID, role="admin"))
         assert client.get(path, headers=headers).status_code == 200
 

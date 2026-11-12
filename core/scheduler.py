@@ -21,7 +21,6 @@ import asyncio
 import functools
 import os
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Sequence
 from dataclasses import dataclass
@@ -261,7 +260,6 @@ def weekly_report_rich_enabled() -> bool:
 
 class JobStatus(Enum):
     """Job execution status."""
-    PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
@@ -290,7 +288,6 @@ class JobInfo:
     next_run: Optional[datetime] = None
     last_run: Optional[datetime] = None
     last_status: Optional[JobStatus] = None
-    last_duration_ms: Optional[float] = None
     run_count: int = 0
     error_count: int = 0
     last_error: Optional[str] = None
@@ -541,9 +538,6 @@ class BackgroundScheduler:
 
     async def _register_jobs(self) -> None:
         """Register all background jobs."""
-        # Import here to avoid circular imports
-        from core.sync_service import get_sync_service
-        from core.duckdb_store import get_store
 
         # Job: Incremental sync (every 60 seconds)
         self._add_job(
@@ -1049,7 +1043,7 @@ class BackgroundScheduler:
         try:
             async with self._heavy_job_lock:
                 sync_service.orders_step.done_waiting()
-                with correlation_context() as corr_id:
+                with correlation_context():
                     logger.debug("Starting incremental sync job")
 
                     stats = await sync_service.incremental_sync()
@@ -1065,7 +1059,7 @@ class BackgroundScheduler:
     async def _run_full_sync(self) -> Dict[str, Any]:
         """Run full sync job (90 days)."""
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.info("Starting weekly full sync job")
 
                 from core.sync_service import get_sync_service
@@ -1080,10 +1074,10 @@ class BackgroundScheduler:
 
     async def _run_inventory_snapshot(self) -> Dict[str, Any]:
         """Run inventory snapshot job."""
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info("Starting inventory snapshot job")
 
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
 
             # Refresh Layer 1
@@ -1169,10 +1163,10 @@ class BackgroundScheduler:
 
     async def _run_manager_stats(self) -> Dict[str, Any]:
         """Run manager stats update job."""
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info("Starting manager stats job")
 
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
             updated = await store.update_manager_stats()
 
@@ -1186,7 +1180,7 @@ class BackgroundScheduler:
     async def _run_revenue_prediction(self) -> Dict[str, Any]:
         """Train revenue prediction model and generate forecasts."""
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.info("Starting revenue prediction training job")
 
                 from core import read_fallback
@@ -1213,10 +1207,10 @@ class BackgroundScheduler:
 
     async def _run_seasonality_calc(self) -> Dict[str, Any]:
         """Run seasonality calculation job."""
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info("Starting seasonality calculation job")
 
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
 
             # Retail only. `seasonal_indices` and `growth_metrics` are keyed
@@ -1270,7 +1264,7 @@ class BackgroundScheduler:
         status change is captured.
         """
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.info("Starting order status refresh job")
 
                 from core.sync_service import get_sync_service
@@ -1286,7 +1280,7 @@ class BackgroundScheduler:
     async def _run_meilisearch_sync(self) -> Dict[str, Any]:
         """Sync data to Meilisearch for chat search."""
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.debug("Starting Meilisearch sync job")
 
                 from core.sync_service import get_sync_service
@@ -1741,7 +1735,7 @@ class BackgroundScheduler:
             overall_severity,
         )
 
-        with correlation_context() as corr_id:
+        with correlation_context():
             started_at = datetime.now(timezone.utc)
             logger.info("DQ Layer-1 integrity scan starting")
 
@@ -2307,10 +2301,10 @@ class BackgroundScheduler:
         )
         from core import watchdog_samples
 
-        with correlation_context() as corr_id:
-            # The DuckDB file itself, which stays on disk until the final
-            # stage: its size is the sample's `db_size_mb`. It sits in the data
-            # directory, `core.paths.DATA_DIR`, where everything below is
+        with correlation_context():
+            # The DuckDB file itself: its size is the sample's `db_size_mb`,
+            # 0 since the final stage deleted it (2026-11-12). It sat in the
+            # data directory, `core.paths.DATA_DIR`, where everything below is
             # sampled too. Until step 14's S14-18 the path was the store's
             # `db_path`; the store holds no file since.
             sample = sample_disk_state(str(DATA_DIR / DUCKDB_FILE_NAME))
@@ -2934,7 +2928,7 @@ class BackgroundScheduler:
         # dying on 429s. `POST /api/reconcile?days=N` widens it on demand.
         WINDOW_DAYS = max(1, int(window_days))
 
-        with correlation_context() as corr_id:
+        with correlation_context():
             started_at = datetime.now(timezone.utc)
             kyiv_now = started_at.astimezone(ZoneInfo("Europe/Kyiv"))
             as_of = started_at - timedelta(hours=WATERMARK_HOURS)
@@ -3116,7 +3110,7 @@ class BackgroundScheduler:
         30 days: the alternative is being permanently blind to an order whose
         line items someone eventually fixes upstream.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core.sync_service import SyncService, get_sync_service
 
         with correlation_context():
@@ -3261,7 +3255,7 @@ class BackgroundScheduler:
 
         from core import read_fallback
         from core.config import ADMIN_USER_IDS, DASHBOARD_URL
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core import report_ledger
         from core.weekly_report import (
             build_report,
@@ -3461,7 +3455,7 @@ class BackgroundScheduler:
 
         from core import read_fallback
         from core.config import DASHBOARD_URL
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core import report_ledger
         from core.traffic_report import (
             TRAFFIC_SALES_TYPE,
@@ -3605,7 +3599,7 @@ class BackgroundScheduler:
         sequence find them without spending a single API call, and the repair
         drains them a batch at a time until there is nothing left to ask for.
         """
-        from core.duckdb_store import get_store
+        from core.store import get_store
         from core.sync_service import get_sync_service
 
         with correlation_context():
@@ -4044,6 +4038,5 @@ async def start_scheduler() -> BackgroundScheduler:
 
 def stop_scheduler() -> None:
     """Stop the background scheduler."""
-    global _scheduler
     if _scheduler:
         _scheduler.shutdown()

@@ -383,7 +383,7 @@ class TestWhatABlindRunHolds:
     def test_whole_blindness_holds_every_group(self):
         held = []
         twins.check_pg_warehouse(Facts.blind("x"), held_out=held)
-        assert set(held) == twins.all_conditions()
+        assert set(held) == {c for cs in twins.GUARD_CONDITIONS.values() for c in cs}
 
     def test_a_collapsed_finding_holds_only_the_blind_groups(self):
         """One line for two blind groups — but silver_arc, read clean in the same
@@ -407,7 +407,8 @@ class TestWhatABlindRunHolds:
         from core.alerting import REGISTRY
 
         assert set(twins.GUARD_CONDITIONS) == set(twins.UNWATCHED_NAMES) == set(twins.GROUPS)
-        names = (twins.all_conditions() | set(twins.UNWATCHED_NAMES.values())
+        names = ({c for cs in twins.GUARD_CONDITIONS.values() for c in cs}
+                 | set(twins.UNWATCHED_NAMES.values())
                  | {twins.WHOLE_UNWATCHED})
         assert names <= set(REGISTRY)
 
@@ -774,7 +775,7 @@ class TestTheJobFilesTheTwins:
     def job(self, tmp_path, monkeypatch):
         from unittest.mock import AsyncMock, patch
 
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
         for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
@@ -783,12 +784,12 @@ class TestTheJobFilesTheTwins:
         from tests.journal_fake import install_journal
 
         journal = install_journal(monkeypatch)
-        store = DuckDBStore()
+        store = AnalyticsStore()
         scheduler = BackgroundScheduler()
         monkeypatch.setattr(scheduler, "_send_dq_alert_throttled",
                             AsyncMock(return_value=True))
         facts = _facts(line_items=self.LI)
-        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
+        with patch("core.store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.alerting.resolve_group", AsyncMock(return_value=0)), \
              patch.object(twins, "read_facts", AsyncMock(return_value=facts)):
             yield scheduler, journal

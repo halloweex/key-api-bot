@@ -180,14 +180,14 @@ def test_the_legacy_job_is_not_registered():
 
 
 def test_the_legacy_comparator_is_gone():
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
     from core.scheduler import BackgroundScheduler
     from core.sync_service import SyncService
 
     assert not hasattr(SyncService, "reconcile_with_api")
     assert not hasattr(BackgroundScheduler, "_run_reconciliation")
     for name in ("get_order_summaries_by_date", "log_reconciliation"):
-        assert not hasattr(DuckDBStore, name), name
+        assert not hasattr(AnalyticsStore, name), name
 
 
 REPO = pathlib.Path(__file__).resolve().parents[2]

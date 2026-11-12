@@ -12,9 +12,9 @@ rendered it into `core.duckdb_store.GOLD_REVENUE_SELECT_SQL` until S14-15.
 
 They lived in `core/duckdb_store.py` until step 14's S14-01, so every
 Postgres derivation tick imported the DuckDB store lazily — and with it the
-`duckdb` driver and pandas — to render a string. They moved here unchanged;
-`core.duckdb_store` re-exports each one as the same object for one release,
-and `tests/unit/test_warehouse_sql.py` holds every rendering to the bytes the
+`duckdb` driver and pandas — to render a string. They moved here unchanged
+(`core.duckdb_store` re-exported each as the same object until S14-18), and
+`tests/unit/test_warehouse_sql.py` holds every rendering to the bytes the
 code before the move produced.
 
 Every builder takes its dialect since step 14's S14-07, when the default —

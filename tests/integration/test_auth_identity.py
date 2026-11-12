@@ -310,7 +310,7 @@ def install_store(monkeypatch, status: str = "approved", role: str = "viewer"):
     async def _get_store():
         return _Store()
 
-    monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
+    monkeypatch.setattr("core.store.get_store", _get_store)
 
 
 class TestOnlyTheUserIdIsTakenFromTheCookie:

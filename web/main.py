@@ -19,7 +19,7 @@ from web.middleware import (
     RejectNulMiddleware, RequestLoggingMiddleware, RequestTimeoutMiddleware,
 )
 from bot.database import init_database
-from core.duckdb_store import get_store, close_store
+from core.store import get_store, close_store
 from core.sync_service import init_and_sync
 from core.runtime_modes import configure_modes
 from core.config import validate_config, ConfigurationError
@@ -114,10 +114,10 @@ async def sms_refusal_handler(request: Request, exc: SmsRefusal):
 
 
 # `DuckDBOpenedWhileOff`'s handler (503 naming `duckdb`) stood here until step
-# 14's S14-18 deleted the switch that raised it (`core/duckdb_switch.py`). A
-# caller still reaching for the store's DuckDB connection meets
-# `core.store.StoreRemoved`, a `ReadUnavailable`, which the handler above
-# answers with the same 503 naming `duckdb`, counted.
+# 14's S14-18 deleted the switch that raised it (`core/duckdb_switch.py`). The
+# store's `connection()` refused the same way (`core.store.StoreRemoved`, a
+# `ReadUnavailable` the handler above answered) until the final stage deleted
+# it: nothing reached for it.
 
 
 @app.exception_handler(Exception)
@@ -177,9 +177,6 @@ app.include_router(pages.router)  # SPA catch-all must be last
 async def startup_event():
     logger.info("KoreanStory Dashboard starting...")
 
-    # Log sync mode for visibility
-    from core.config import config as app_config
-
     # A half-enabled read switch was the same trap as a typo in it: the flag
     # said postgres, the missing DSN quietly served the old store. It was
     # checked here for KS_READ_GOLD alone, then by `configure_modes()` for
@@ -223,8 +220,6 @@ async def startup_event():
         store = await get_store()
         logger.warning("Serving with the boot sync failed — the scheduler "
                        "retries the order step")
-
-    # Migrate users from SQLite to DuckDB (one-time, idempotent)
 
     # ── One historical campaign, restored by hand ────────────────────────
     # `aug-promo-birthday-website` was sent on 2026-08-05, before the columns

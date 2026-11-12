@@ -147,8 +147,8 @@ def _store() -> Any:
     14's S14-05). The jobs get theirs from `get_store()`. Until S14-18 this
     was the DuckDB store with its connect refused (`PostgresOnly`), so a
     reader that still reached for DuckDB stopped the preview rather than
-    open the file; the store has no DuckDB half since, and its one
-    `connection()` refuses (`core.store.StoreRemoved`).
+    open the file; the store has no DuckDB half since, and no
+    `connection()` at all since the final stage.
     """
     from core.store import AnalyticsStore
 

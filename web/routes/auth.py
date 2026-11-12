@@ -5,7 +5,7 @@ import os
 import logging
 from typing import Sequence
 
-from fastapi import APIRouter, Request, Response, HTTPException, Depends
+from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
@@ -276,7 +276,7 @@ async def _resolve_session(session: str | None) -> dict | None:
         # `initialise()`, keeps answering. Every narrowed account would have
         # got its tabs back, logged at WARNING, until somebody noticed.
         try:
-            from core.duckdb_store import get_store
+            from core.store import get_store
             store = await get_store()
             user = await store.get_user(user_id)
         except Exception as e:

@@ -118,11 +118,11 @@ class TestTheRepositoryRoutes:
     ])
     async def test_under_the_flag_the_writer_gets_the_parsed_rows_and_duckdb_nothing(
             self, flagged, method, payload, parse):
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
 
         writer = AsyncMock(return_value=len(payload))
         with patch.object(chain, method, new=writer):
-            written = await getattr(DuckDBStore, method)(_NoDuckDB(), payload)
+            written = await getattr(AnalyticsStore, method)(_NoDuckDB(), payload)
 
         assert written == len(payload)
         (rows,), _ = writer.await_args
@@ -335,7 +335,7 @@ class TestTheFullCatalogueContract:
     @pytest.mark.parametrize("attr", ["upsert_products", "upsert_categories"])
     def test_the_writer_is_reached_from_the_repository_alone(self, attr):
         # `core/store.py` since step 14's S14-18 (`core/duckdb_store.py`
-        # before it, a shim of the name since).
+        # before it, then a shim of the name until the final stage).
         assert _walk_callers(attr, on="pg_catalogue_write") == {
             ("core/store.py", attr)}
 
@@ -453,9 +453,9 @@ class TestFullSyncContainsThisChainOnly:
 
 @pytest_asyncio.fixture
 async def real_store(tmp_path):
-    from core.duckdb_store import DuckDBStore
+    from core.store import AnalyticsStore
 
-    s = DuckDBStore()
+    s = AnalyticsStore()
     yield s
 
 

@@ -14,13 +14,17 @@ root's crontab with nobody watching it:
   `off` before its cleanup trap existed. Its cron line was retired on
   2026-10-16, and step 14's S14-18 deleted it with the Sunday compaction
   (`scripts/weekly_compact.sh`) and both their stand-down tests.
-* `deploy/duckdb_silence_check.sh --crontab` — the week's crontab change,
-  printed and never installed (`test_duckdb_silence_check.py`).
+* `deploy/duckdb_silence_check.sh` — the hourly hash of the file, whose
+  `--crontab` printed the week's crontab change and never installed it. The
+  final stage (2026-11-12) took its line out of the crontab, deleted the file
+  it hashed, and deleted the script with its tests.
 
 What is left here: the reader, the history of the week in CLAUDE.md (its
-runbook until step 14's S14-20), and the restore drill, which runs in a scratch repository root against fakes on PATH that
-record every call. offsite_check's frozen branch and the .env that rides with
-every Postgres shipment are in `test_pg_offsite_scripts.py`.
+runbook until step 14's S14-20), and the restore drill, which runs in a
+scratch repository root against fakes on PATH that record every call.
+offsite_check's judgement of the DuckDB copy went at the final stage; that
+it is gone, and the .env that rides with every Postgres shipment, are in
+`test_pg_offsite_scripts.py`.
 """
 from __future__ import annotations
 
@@ -230,9 +234,11 @@ class TestTheHistory:
     preconditions, the Ark's SOURCE RELEASED, the `.env` copy — went with it
     (their tests are in S14-20's list)."""
 
-    # Named by the history, deleted in step 14's S14-18 with their cron lines
-    # long retired; the history says so.
-    DELETED = frozenset({"scripts/weekly_compact.sh", "deploy/daily_offsite.sh"})
+    # Named by the history: two deleted in step 14's S14-18 with their cron
+    # lines long retired, and the file's hourly hash at the final stage with
+    # its line; the history says so.
+    DELETED = frozenset({"scripts/weekly_compact.sh", "deploy/daily_offsite.sh",
+                         "deploy/duckdb_silence_check.sh"})
 
     def test_every_tool_it_names_exists_or_is_said_gone(self):
         """Mutation: rename a script without the history — or delete one
@@ -248,11 +254,16 @@ class TestTheHistory:
             assert not (REPO / path).exists(), path
         joined = " ".join(text.split())
         assert "deleted in step 14's S14-18" in joined, joined
+        assert ("its line came out of the crontab, the file was deleted, and the "
+                "script went from this checkout") in joined, joined
+        assert "2026-11-12" in joined and "`/root/duckdb-silence`" in joined, joined
 
     def test_it_changes_the_crontab_from_the_print_only(self):
-        """The history never spells a crontab line of its own: the lines are
-        the ones `--crontab` prints, which a test holds to the scripts'
-        headers. Mutation: write `0 2 * * 0` into the section."""
+        """The history never spells a crontab line of its own: the lines were
+        the ones `--crontab` printed, held to the scripts' headers until the
+        final stage deleted the print with the silence check. A line spelled
+        here would be one nobody holds. Mutation: write `0 2 * * 0` into the
+        section."""
         text = _history()
         assert "--crontab" in text
         assert not re.search(r"[0-9*]+ [0-9*]+ \* \* [0-9*]", text)
@@ -266,7 +277,7 @@ class TestTheHistory:
         joined = " ".join(_history().split())
         assert "On a step-14 image there is no way back to make" in joined, joined
         assert "leave `.env` at `KS_DUCKDB=off`" in joined
-        assert "do not re-add those two cron lines" in joined
+        assert "do not re-add those three cron lines" in joined
         assert "a step-14 web runs `off` whatever `.env` says" in joined
         section = "Before any rollback to an image from before step 14"
         assert f'"{section}"' in joined
@@ -286,14 +297,17 @@ class TestTheHistory:
                       "Daily snapshot FAILED"):
             assert words in joined, (words, joined)
 
-    def test_the_crontab_print_names_this_section(self):
-        """The print is what a person pastes from; it points at the section
-        by its name. Mutation: rename the section without the script."""
-        printed = subprocess.run(["bash", str(DEPLOY / "duckdb_silence_check.sh"), "--crontab"],
-                                 capture_output=True, text=True, timeout=30)
-        assert printed.returncode == 0, printed.stderr
-        assert '"The week of silence, and its way back"' in " ".join(printed.stdout.split())
-        assert "Starting the week of silence" not in printed.stdout
+    def test_the_file_is_said_gone_and_off_is_what_a_rollback_runs(self):
+        """The final stage deleted the file: the history says an image from
+        before step 14 runs without it only under `off`, and that `on` would
+        need a warehouse rebuilt from the Ark first. (The print it pointed a
+        person at, `--crontab`, went with the silence check.) Mutation: drop
+        either sentence."""
+        joined = " ".join(_history().split())
+        assert ("an image from before step 14 runs without the file only under "
+                "it") in joined, joined
+        assert "there is no file for `on` to open" in joined, joined
+        assert "`deploy/restore_from_export.py`" in joined, joined
 
 
 # ── the restore drill ─────────────────────────────────────────────────────────

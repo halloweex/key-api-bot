@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.duckdb_store import DuckDBStore
+from core.store import AnalyticsStore
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
@@ -60,12 +60,12 @@ class TestEveryReportReadsPostgres:
         self, tmp_path, monkeypatch, name, kwargs,
     ):
         monkeypatch.setenv("KS_READ_REPORTS", "duckdb")   # not read any more
-        store = DuckDBStore()
+        store = AnalyticsStore()
 
         def boom(*_a, **_k):
             raise AssertionError("the report read reached for DuckDB")
 
-        with patch.object(type(store), "connection", boom), \
+        with patch.object(type(store), "connection", boom, create=True), \
              patch("core.pg_reports_read.fetch",
                    new=AsyncMock(return_value=[])) as reports, \
              patch("core.pg_lookups_read.fetch",
@@ -187,7 +187,7 @@ class TestACategoryThatDoesNotExist:
 
     @pytest.mark.asyncio
     async def test_an_absent_category_gives_an_empty_report_not_a_crash(self, tmp_path):
-        store = DuckDBStore()
+        store = AnalyticsStore()
         with patch("core.pg_lookups_read.fetch", new=AsyncMock(return_value=[])), \
              patch("core.pg_reports_read.fetch",
                    new=AsyncMock(return_value=[])) as reports:

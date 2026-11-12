@@ -17,18 +17,21 @@
 # Install:
 #   0 9 * * *  /opt/key-api-bot/deploy/offsite_check.sh
 #
-# THE WEEK OF SILENCE (stage 5). With KS_DUCKDB=off in .env the DuckDB copy is
-# frozen on purpose: deploy/daily_offsite.sh stood down and its cron line was
-# retired once the second Ark was off-site (2026-10-16), and step 14's S14-18
-# deleted it with deploy/offsite_parquet.sh, so its marker only ages. Judging it
-# would page "off-site copy is stale" every morning from the second day on,
-# and a check that cries wolf every morning is one nobody reads by Monday —
-# so under `off` that marker is reported, "frozen" with its age, and never
-# fails the run. The Postgres marker and the watchdog are judged exactly as
-# before, and the Postgres marker now answers for .env too: since OD-S5-6
-# every Postgres shipment carries it and deploy/pg_offsite.sh writes its
-# marker only once that copy has been read back and opened. The Monday
-# heartbeat keeps speaking, and says the DuckDB copy is frozen.
+# TWO INSTRUMENTS. The Postgres off-site copy, which answers for .env too:
+# since OD-S5-6 every Postgres shipment carries it, and deploy/pg_offsite.sh
+# writes its marker only once that copy has been read back and opened. And
+# the in-app disk watchdog's pulse.
+#
+# The DuckDB copy was a third until the final stage (2026-11-12). Nothing had
+# shipped it since the week of silence (deploy/daily_offsite.sh stood down on
+# 2026-10-16 and step 14's S14-18 deleted it), so its marker,
+# data/.offsite_last_ok, only aged, and the check reported it "frozen" while
+# .env said KS_DUCKDB=off rather than page "off-site copy is stale" every
+# morning. The final stage deleted the file it was a copy of, and every
+# judgement of that copy went with it — the frozen branch and the stale and
+# never branches alike: removing one would have fallen through to the next
+# and paged. The check reads no KS_DUCKDB since. The marker stays on disk,
+# unread.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
@@ -37,24 +40,18 @@ CONFIG="deploy/backup.env"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
 
-MARKER="${BACKUP_MARKER:-data/.offsite_last_ok}"
-# The second marker, written by deploy/pg_offsite.sh. Postgres left this host
+# The marker written by deploy/pg_offsite.sh. Postgres left this host
 # in no form at all until that script existed, and it holds the six tables
 # nothing can rebuild — order_versions, stock_movements, the access list, the
 # SMS roster — so the copy that must not stop is this one.
 PG_MARKER="${BACKUP_PG_MARKER:-data/.pg_offsite_last_ok}"
 # Shipped daily at 07:40, so 36h is one missed run plus slack — the same
-# allowance the warehouse copy gets, and for the same reason.
+# allowance the warehouse copy got, and for the same reason.
 PG_MAX_AGE_HOURS="${BACKUP_PG_MAX_ARCHIVE_AGE_HOURS:-36}"
 # The in-app disk watchdog touches this on every 6-hourly sample. Two periods
 # plus slack: later than this and it has stopped, whatever it last logged.
 WATCHDOG_MARKER="${WATCHDOG_MARKER:-data/health/watchdog_last_sample}"
 WATCHDOG_MAX_AGE_HOURS="${WATCHDOG_MAX_AGE_HOURS:-14}"
-# deploy/daily_offsite.sh shipped nightly, so this was one missed run plus
-# slack (216h when the push rode the weekly compact). Nothing ships the DuckDB
-# copy since step 14's S14-18; the limit is read only when .env does not say
-# KS_DUCKDB=off, and that branch's alerts say to put it back.
-MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-36}"
 
 # `|| true` is load-bearing: grep exits 2 when .env is absent and 1 when the key
 # is, pipefail propagates that, and under `set -e` the caller dies with grep's
@@ -88,15 +85,6 @@ alert_chat_ids() {
 # the kill switch, the instance signature, and a best-effort row in the
 # alert archive. deploy/notify.sh owns the implementation.
 source deploy/notify.sh
-# KS_DUCKDB out of .env by exact name, the same reading as the two scripts
-# whose copy this judges (deploy/duckdb_env.sh).
-# shellcheck source=/dev/null
-source deploy/duckdb_env.sh
-ks_duckdb_env_read .env
-DUCKDB_FROZEN=0
-if ks_duckdb_stands_down; then
-    DUCKDB_FROZEN=1
-fi
 
 _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 
@@ -110,54 +98,16 @@ _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 # must not hide another.
 RC=0
 
-if [ "$DUCKDB_FROZEN" = 1 ]; then
-    # The week of silence: reported, never judged (see the header).
-    if [ -f "$MARKER" ]; then
-        AGE_HOURS=$(( ( $(date +%s) - $(_mtime "$MARKER") ) / 3600 ))
-        FROZEN_LINE="frozen (KS_DUCKDB=off), last copy ${AGE_HOURS}h ago"
-        FROZEN_LINE_RU="заморожена (KS_DUCKDB=off), последняя ${AGE_HOURS}ч назад"
-    else
-        AGE_HOURS=never
-        FROZEN_LINE="frozen (KS_DUCKDB=off), no copy ever left"
-        FROZEN_LINE_RU="заморожена (KS_DUCKDB=off), ни одной не уходило"
-    fi
-    echo "warehouse off-site copy: $FROZEN_LINE — not judged while .env says KS_DUCKDB=off"
-elif [ ! -f "$MARKER" ]; then
-    echo "CRITICAL: no off-site copy has ever succeeded (no $MARKER)"
-    notify "$(printf '%s\n\n%s\n\n%s\n\n%s' \
-        "🚨 Warehouse: off-site copy age = never" \
-        "The database, its local backups and the export all share one volume, so any failure that takes the volume takes every copy with it." \
-        "Nothing ships it since step 14 (S14-18 deleted the scripts that did): put KS_DUCKDB=off back in .env, which this check then reports as frozen" \
-        "$(_where)")"
-    RC=1
-    AGE_HOURS=9999
-else
-    AGE_HOURS=$(( ( $(date +%s) - $(_mtime "$MARKER") ) / 3600 ))
-
-    if [ "$AGE_HOURS" -gt "$MAX_AGE_HOURS" ]; then
-        echo "CRITICAL: newest off-site copy is ${AGE_HOURS}h old (max ${MAX_AGE_HOURS}h)"
-        notify "$(printf '%s\n\n%s\n%s\n\n%s\n\n%s' \
-            "🚨 Warehouse: off-site copy is stale" \
-            "Newest copy: ${AGE_HOURS}h old" \
-            "Allowed: ${MAX_AGE_HOURS}h" \
-            "Nothing ships it since step 14 (S14-18 deleted the scripts that did): put KS_DUCKDB=off back in .env, which this check then reports as frozen." \
-            "$(_where)")"
-        RC=1
-    fi
-fi
-
 # --- has a copy of Postgres left this machine? --------------------------------
 # The warehouse can be rebuilt from KeyCRM; app.order_versions and
 # app.stock_movements cannot be rebuilt from anything. Until deploy/pg_offsite.sh
 # ships, this says "never" every morning — which is correct and is the same
-# deliberate red first reading the header describes for the marker above.
-# Under `off` the Postgres shipment carries the only off-site .env as well, and
-# its alerts say so; under `on` they read as they always did.
-PG_ENV_NOTE="" PG_ENV_SUFFIX=""
-if [ "$DUCKDB_FROZEN" = 1 ]; then
-    PG_ENV_NOTE=$'\n'"With KS_DUCKDB=off it is also the only off-site copy of .env."
-    PG_ENV_SUFFIX=", and with it the only off-site .env"
-fi
+# deliberate red first reading the header describes.
+# The Postgres shipment carries the only off-site .env as well, and its alerts
+# say so. They said it only while .env read KS_DUCKDB=off until the final
+# stage, when the DuckDB copy, the other one that once carried .env, went.
+PG_ENV_NOTE=$'\n'"It is also the only off-site copy of .env."
+PG_ENV_SUFFIX=", and with it the only off-site .env"
 
 if [ ! -f "$PG_MARKER" ]; then
     echo "CRITICAL: no Postgres copy has ever left this host (no $PG_MARKER)${PG_ENV_SUFFIX}"
@@ -228,27 +178,16 @@ fi
 # Speak on a good day too. A check that only ever appears when something is
 # wrong teaches nobody what its silence means, and its own absence becomes
 # invisible — which is the failure it is here to prevent, applied to itself.
-if [ "$DUCKDB_FROZEN" = 1 ]; then
-    echo "instruments ok: off-site $FROZEN_LINE, postgres and .env ${PG_LINE}, watchdog ${WD_LINE}"
-else
-    echo "instruments ok: off-site ${AGE_HOURS}h, postgres ${PG_LINE}, watchdog ${WD_LINE}"
-fi
+echo "instruments ok: postgres and .env ${PG_LINE}, watchdog ${WD_LINE}"
 # Weekly, not daily (owner's no-noise pass, 30.08): a daily "all fine" is
 # noise the reader learns to swipe, but this heartbeat is also the only
 # dead-man's switch on the off-site path itself — so it survives, on
 # Mondays. Failures above still alert every day. (Historical note: until
 # 29.08 this message reached nobody at all — the delivery bug in the old
 # notify(); the first heartbeat anyone actually receives is a weekly one.)
-if [ "$(date +%u)" = "1" ] && [ "$DUCKDB_FROZEN" = 1 ]; then
-    notify "$(printf '%s\n%s\n%s\n%s' \
+if [ "$(date +%u)" = "1" ]; then
+    notify "$(printf '%s\n%s\n%s' \
         "🫀 Приборы в порядке (недельный)" \
-        "внешняя копия DuckDB: ${FROZEN_LINE_RU}" \
         "копия Postgres и .env: ${PG_LINE} (порог ${PG_MAX_AGE_HOURS}ч)" \
-        "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
-elif [ "$(date +%u)" = "1" ]; then
-    notify "$(printf '%s\n%s\n%s\n%s' \
-        "🫀 Приборы в порядке (недельный)" \
-        "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \
-        "копия Postgres: ${PG_LINE} (порог ${PG_MAX_AGE_HOURS}ч)" \
         "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
 fi

@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.345
+
+- feat(traffic): the site funnel counts Ukraine by default, with a country filter
+
+
+## 3.0.344
+
+- Baseline: the finding on the deleted get_user_by_status goes with it
+- Review F2, F3: the sweep's orphans go; an unknown event_type is a 400
+- Review F1: the backup limits are held in hours again, on the canary
+- Sweep web, bot and scripts: dead functions and constants
+- Sweep store reads: dead repository methods
+- Sweep core models, config, events and clients: dead code
+- Sweep core checks and alerting: dead helpers
+- Sweep web and bot: unused imports and locals
+- Sweep core: unused imports, locals and no-op globals
+
+
+## 3.0.343
+
+- Z2 review: nginx keeps the rollback image's resync slow until Z3; the rollback check after off
+- Z2 docs: CLAUDE.md says what the final stage deleted, and what stays
+- Z2: offsite_check judges no DuckDB copy
+- Z2: the shim core/duckdb_store.py and the store's connection() stub go
+- Z2: the /api/duckdb/* aliases of the sync levers go
+- Z2: the DuckDB file's hourly hash and the soak's P1 go with the file
+
+
 ## 3.0.342
 
 - fix(marketing): a brand's «Заказов» counts orders, as the brand card does

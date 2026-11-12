@@ -171,10 +171,10 @@ class TestEmitterWiring:
     async def test_a_clean_disk_run_resolves_the_breach(self, tmp_path):
         """End-to-end through the scheduler job: breach → clean → notice."""
         from datetime import datetime, timezone
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
         scheduler = BackgroundScheduler()
 
         def sample(pct, free):
@@ -189,7 +189,7 @@ class TestEmitterWiring:
         # full suite on the deploy gate's box it is not, the write fails,
         # and the resolution is held back exactly as designed — so the
         # test failed on behaviour that was working.
-        with patch("core.duckdb_store.get_store",
+        with patch("core.store.get_store",
                    AsyncMock(return_value=store)), \
              _archived(), \
              patch("bot.main.send_admin_message",
@@ -212,10 +212,10 @@ class TestEmitterWiring:
         WARN holds — after 2026-09-17 that was a page about bytes gone by
         morning, sitting in every digest tail."""
         from datetime import datetime, timezone
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
         scheduler = BackgroundScheduler()
 
         def sample(pct, free):
@@ -223,7 +223,7 @@ class TestEmitterWiring:
                     "db_size_mb": 2480, "disk_pct_used": pct,
                     "disk_free_gb": free}
 
-        with patch("core.duckdb_store.get_store",
+        with patch("core.store.get_store",
                    AsyncMock(return_value=store)), \
              _archived(), \
              patch("bot.main.send_admin_message",
@@ -251,10 +251,10 @@ class TestEmitterWiring:
         """WARN → CRITICAL must not say the WARN cleared. It would be true of
         the key and false of the disk, at the worst possible moment."""
         from datetime import datetime, timezone
-        from core.duckdb_store import DuckDBStore
+        from core.store import AnalyticsStore
         from core.scheduler import BackgroundScheduler
 
-        store = DuckDBStore()
+        store = AnalyticsStore()
         scheduler = BackgroundScheduler()
 
         def sample(pct, free):
@@ -262,7 +262,7 @@ class TestEmitterWiring:
                     "db_size_mb": 2480, "disk_pct_used": pct,
                     "disk_free_gb": free}
 
-        with patch("core.duckdb_store.get_store",
+        with patch("core.store.get_store",
                    AsyncMock(return_value=store)), \
              _archived(), \
              patch("bot.main.send_admin_message",
