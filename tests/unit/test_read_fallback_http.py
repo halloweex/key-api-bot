@@ -253,8 +253,8 @@ class TestOffRefuses:
         self, params, admin_client, stores, monkeypatch,
     ):
         """The trend's forecast is an overlay, and its reads already degrade
-        to "no forecast" on any failure (`get_forecast_data`, and the handler
-        around it in the route). A refusal there is one of those failures:
+        to "no forecast" on any failure (the handler around
+        `get_range_forecast` in the route). A refusal there is one of those failures:
         the chart answers without the overlay, nothing is served from DuckDB,
         and the refusal is still counted — so a broken goals port stays
         visible under `read_fallback_mode.refused`. The forecast's own

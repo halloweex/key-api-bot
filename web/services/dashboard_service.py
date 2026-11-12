@@ -6,7 +6,7 @@ No in-memory caching needed - DuckDB queries are <10ms.
 """
 import logging
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Sequence, Tuple
 
 from core.store import get_store
 from core.filters import parse_period as _parse_period_core
@@ -47,6 +47,56 @@ def stack_forecast_on_actuals(
     }
 
 
+def last_day_of_period(period: Optional[str], start: date, end: date) -> date:
+    """The last day of the period a trend request names.
+
+    `month` and `week` run from their first day to today (`parse_period`),
+    and the chart draws them to the month's or the week's end: a forecast
+    fills the days ahead, and the comparison is the whole period's (owner's
+    decision, 2026-11-12). Any other period ends where it says.
+    """
+    if period == "month":
+        first_of_next = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return first_of_next - timedelta(days=1)
+    if period == "week":
+        return start + timedelta(days=6)
+    return end
+
+
+def fit_trend(
+    result: Dict[str, Any], start: date, forecast_days: Sequence[date] = (),
+) -> None:
+    """Lay the trend out over the days the chart draws, in place.
+
+    The series' own days come first, then `forecast_days`: a forecast's days
+    past them, at zero revenue and orders, which the chart draws as forecast
+    bars. Beside every one of those days the comparison holds the day at the
+    same position of its window, day `d` beside position `d − start`. The
+    store's comparison runs over the whole period (`period_end`), longer
+    than the series, so this also cuts it back to the days drawn. A position
+    past the window draws 0: 31 October beside a 30-day September has no
+    day there.
+
+    Until 2026-11-12 a forecast day was set beside the day as many days back
+    as there were forecast days, read from Silver while the rest came from
+    Gold: on 12 November the line under 19–30 November drew 1–12 November.
+    """
+    labels = result.get("labels")
+    if labels is None:
+        return
+    positions = list(range(len(labels))) + [(d - start).days for d in forecast_days]
+    for d in forecast_days:
+        labels.append(d.strftime("%d.%m"))
+        result["revenue"].append(0)
+        result["orders"].append(0)
+    comparison = result.get("comparison")
+    if comparison:
+        window = list(comparison["revenue"])
+        # In place: the same list is the "Previous Period" dataset's data.
+        comparison["revenue"][:] = [
+            window[k] if k < len(window) else 0 for k in positions]
+
+
 def _parse_dates(start_date: str, end_date: str) -> Tuple[date, date]:
     """Parse date strings to date objects."""
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -68,8 +118,12 @@ async def get_revenue_trend(
     sales_type: str = "retail",
     compare_type: str = "previous_period",
     promocode: Optional[str] = None,
+    period_end: Optional[date] = None,
+    through: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """Get revenue data over time for line chart."""
+    """Get revenue data over time for line chart. `period_end` and
+    `through` are the store's: the whole period the comparison is of, and
+    the last day the growth badge counts."""
     start, end = _parse_dates(start_date, end_date)
     store = await get_store()
     return await store.get_revenue_trend(
@@ -82,6 +136,8 @@ async def get_revenue_trend(
         compare_type=compare_type,
         promocode=promocode,
         granularity=granularity,
+        period_end=period_end,
+        through=through,
     )
 
 
@@ -93,8 +149,9 @@ async def get_forecast_data(sales_type: str = "retail") -> Optional[Dict[str, An
     (`read_fallback.refuse`) is not one of those (DN-20b): it passes
     through, so `/api/revenue/forecast` answers 503
     naming `goals` instead of "Forecast not available yet", which read an
-    outage as a model nobody had trained. The trend's overlay has a handler
-    of its own around this call and still drops the overlay, not the chart.
+    outage as a model nobody had trained. The trend does not call this: its
+    overlay is `get_range_forecast` over the period (2026-11-12), which reads
+    no actuals, and its handler drops the overlay, not the chart.
     """
     from core.read_fallback import ReadUnavailable
 
@@ -107,45 +164,6 @@ async def get_forecast_data(sales_type: str = "retail") -> Optional[Dict[str, An
     except Exception as e:
         logger.warning(f"Forecast data unavailable: {e}")
         return None
-
-
-async def get_comparison_for_dates(
-    dates: List[date],
-    compare_type: str = "year_ago",
-    sales_type: str = "retail",
-) -> Dict[date, float]:
-    """Get comparison revenue for specific dates.
-
-    Returns dict mapping each date to its comparison-period revenue.
-    E.g. for year_ago, date 2026-02-01 maps to revenue on 2025-02-01.
-    """
-    from dateutil.relativedelta import relativedelta
-
-    if not dates:
-        return {}
-
-    # Compute comparison dates
-    comp_dates = []
-    date_map = {}  # comp_date -> original_date
-    for d in dates:
-        if compare_type == "year_ago":
-            cd = d - relativedelta(years=1)
-        elif compare_type == "month_ago":
-            cd = d - relativedelta(months=1)
-        else:
-            # previous_period: shift by len(dates) days back
-            cd = d - relativedelta(days=len(dates))
-        comp_dates.append(cd)
-        date_map[cd] = d
-
-    if not comp_dates:
-        return {}
-
-    store = await get_store()
-    revenue_by_date = await store.get_daily_revenue_for_dates(comp_dates, sales_type)
-
-    # Map back to original dates
-    return {date_map[cd]: revenue_by_date.get(cd, 0) for cd in comp_dates}
 
 
 async def get_sales_by_source(
