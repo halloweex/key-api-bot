@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.345
+
+- feat(traffic): the site funnel counts Ukraine by default, with a country filter
+
+
 ## 3.0.344
 
 - Baseline: the finding on the deleted get_user_by_status goes with it
