@@ -5662,14 +5662,6 @@
                 }
             },
             {
-                "code": "reportOptionalIterable",
-                "range": {
-                    "startColumn": 23,
-                    "endColumn": 27,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportReturnType",
                 "range": {
                     "startColumn": 15,
