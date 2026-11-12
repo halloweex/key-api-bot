@@ -5,6 +5,7 @@ import type { FilterStore } from '../types/filters'
 
 // Stable selector to prevent unnecessary re-renders
 const selectSalesType = (s: FilterStore) => s.salesType
+const selectFunnelCountry = (s: FilterStore) => s.funnelCountry
 import type {
   SummaryResponse,
   ReturnsResponse,
@@ -671,10 +672,16 @@ export function useTrafficPixelOnly() {
  */
 export function useTrafficFunnel() {
   const queryParams = useQueryParams()
+  // Whose visits count is the funnel's own choice, set in the line under the
+  // /traffic sections, so it reaches this request and no other.
+  const country = useFilterStore(selectFunnelCountry)
+  const params = new URLSearchParams(queryParams)
+  params.set('country', country)
+  const query = params.toString()
 
   return useQuery<TrafficFunnelResponse>({
-    queryKey: queryKeys.trafficFunnel(queryParams),
-    queryFn: () => api.getTrafficFunnel(queryParams),
+    queryKey: queryKeys.trafficFunnel(query),
+    queryFn: () => api.getTrafficFunnel(query),
     staleTime: CACHE_TTL.STANDARD,
     retry: (count, error) => !(error instanceof ApiError && error.status === 503) && count < 2,
   })

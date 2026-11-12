@@ -154,7 +154,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 | `/api/customers/sms-campaigns/{c}/send` | Send through TurboSMS (POST, needs `sms` edit); requires `confirm_campaign`, refuses on balance or a recent overlap — see "What stops an SMS send" |
 | `/api/customers/sms/channels` | Configured channels and tariff; `include_balance=true` adds the gateway's balance |
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
-| `/api/traffic/funnel` | The site's purchase funnel from GA4, live: the period, the one before and a year ago, by traffic type, channel group and device (tab `traffic`). 503 "not configured" without the key — see "Воронка сайта из GA4" |
+| `/api/traffic/funnel` | The site's purchase funnel from GA4, live: the period, the one before and a year ago, by traffic type, channel group and device (tab `traffic`). `country=ua` (default: Ukraine and the visitors GA4 could not place; abroad is mostly bots) or `all`. 503 "not configured" without the key — see "Воронка сайта из GA4" |
 | `/api/me/send-file` | A CSV the page already holds, sent by the bot to the requester's own chat — how every export works inside the Telegram Mini App, whose WebView saves no download (POST, any session; `utils/deliverFile.ts`) |
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
@@ -2961,12 +2961,36 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
   окно две воронки (по группе каналов сеанса, чья итоговая строка — весь сайт,
   и по устройству) — шесть запросов параллельно
   (`web/services/ga4_funnel_service.py`). Ответ держится час в процессе, не
-  больше 32 периодов, и при недоступном GA4 отдаётся последний с `stale:
-  true` — ради квоты GA4 на ресурс в час, не ради скорости.
+  больше 64 ответов (по 32 периода на каждый охват страны), и при
+  недоступном GA4 отдаётся последний с `stale: true` — ради квоты GA4 на
+  ресурс в час, не ради скорости.
 - **Тип трафика решается при чтении** (холодный: Paid Social, Cross-network,
   Paid Shopping/Other/Video, Display; тёплый: Direct, Email, Organic Social,
   Organic Search, Paid Search, Organic Shopping; остальное — «другой»), так
   что деление меняется без перезаписи.
+- **Чьи заходы считать — фильтр самой воронки, по умолчанию Украина**
+  (12.11.2026, владелец: «мы можем добавить фильтр»). Из-за границы заходят
+  в основном боты. Замер в тот день: всё, кроме Украины и «(not set)», —
+  17 % зашедших в сентябре, 24 % в октябре, 30 % за 1–10 ноября, покупки в
+  0,4 % случаев. Это краулеры из США (открывают товары, не покупают), поток
+  из Китая (открывает сайт и только) и с начала ноября заходы на 1–3
+  секунды из Бразилии, Вьетнама, Мексики и ещё десятка стран. С ними
+  «зашли» в октябре выросли на 13 % против 5 % по Украине, а конверсия за
+  1–10 ноября была 1,85 % вместо 2,47 %.
+  `country=ua` (по умолчанию) оставляет Украину и «(not set)» — тех, кого GA4
+  не определил: они покупают (117 покупок в октябре против 938 по Украине).
+  Настоящие покупатели из-за границы, около 5 %, уходят вместе с ботами.
+  `country=all` — как в самом GA4. Фильтр — `dimensionFilter` на весь отчёт,
+  а не условие первого шага: так каждый шаг равен разбивке по странам
+  (1–10 ноября: 8 559 зашли и 212 купили против 8 567 и 212 в сумме
+  разбивки; восемь — люди с обоими значениями).
+  Переключатель стоит в строке «Период: …» под ссылками разделов
+  (`FunnelCountryFilter`): чип с листом на телефоне (`ChoiceChip`, тот же,
+  что у сравнения), два сегмента на широком экране. Отдельный ряд в шапке
+  опустил бы «Итог» с первого экрана. Строка стала выше на 11 px (21 → 32);
+  период через границу месяца в одну строку с чипом не помещается, и чип
+  переносится (+40 px). Выбор живёт в сторе фильтров (`funnelCountry`) и
+  входит в ключ кэша сервиса.
 - **Воронки GA4 видят только 14 месяцев** — максимум для обычного ресурса.
   4.11.2026 они начинались с 2025-09-04 — ровно 14 месяцев назад, по дням, а
   не с начала месяца, — а январь–август 2025 приходили пустыми; агрегатные

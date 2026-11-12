@@ -112,23 +112,29 @@ async def get_traffic_funnel(
     period: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    country: str = Query(ga4_funnel_service.DEFAULT_SCOPE),
 ):
     """The site's purchase funnel from GA4: the period, the one before, a year ago.
 
     GA4 sees the website only, so the tab's source and sales-type filters do
-    not apply. See ``web/services/ga4_funnel_service.py``.
+    not apply. ``country`` is whose visits count: ``ua`` (Ukraine and the
+    visitors GA4 could not place, the default) or ``all``. See
+    ``web/services/ga4_funnel_service.py``.
     """
     try:
         validate_period(period)
         start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if country not in ga4_funnel_service.SCOPES:
+        raise HTTPException(status_code=400, detail="country must be 'ua' or 'all'")
 
     if not ga4.configured():
         raise HTTPException(status_code=503, detail="GA4 is not configured")
     try:
         return await ga4_funnel_service.get_funnel(
             _dt.strptime(start, "%Y-%m-%d").date(), _dt.strptime(end, "%Y-%m-%d").date(),
+            scope=country,
         )
     except ga4.GA4Unavailable as e:
         logger.warning("GA4 funnel unavailable: %s", e)

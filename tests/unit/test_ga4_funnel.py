@@ -127,10 +127,10 @@ class _Clock:
         return self.now
 
 
-async def _get(google: _Google, window=OCT, clock=None) -> dict:
+async def _get(google: _Google, window=OCT, clock=None, scope=svc.DEFAULT_SCOPE) -> dict:
     async with httpx.AsyncClient(transport=httpx.MockTransport(google)) as client:
         return await svc.get_funnel(
-            *window, client=client, clock=clock or _Clock(), today=date(2026, 11, 4),
+            *window, scope=scope, client=client, clock=clock or _Clock(), today=date(2026, 11, 4),
         )
 
 
@@ -187,6 +187,15 @@ class TestTheClient:
             assert google.tokens == 1
             await ga4.access_token(client, now=3550)
         assert google.tokens == 2
+
+    def test_countries_filter_the_whole_report_and_leave_the_steps_alone(self):
+        plain = ga4.funnel_request(*OCT, svc.CHANNEL)
+        assert "dimensionFilter" not in plain
+        body = ga4.funnel_request(*OCT, svc.CHANNEL, ("Ukraine", "(not set)"))
+        assert body["dimensionFilter"] == {"filter": {
+            "fieldName": "country", "inListFilter": {"values": ["Ukraine", "(not set)"]},
+        }}
+        assert body["funnel"] == plain["funnel"]
 
     @pytest.mark.asyncio
     async def test_a_refusal_carries_ga4s_reason(self):
@@ -290,6 +299,40 @@ class TestTheService:
             await _get(_Google(down=True))
 
     @pytest.mark.asyncio
+    async def test_by_default_it_counts_ukraine_and_the_visitors_ga4_could_not_place(self):
+        google = _Google()
+        out = await _get(google)
+        assert out["country"] == "ua"
+        assert len(google.funnels) == 6
+        for body in google.funnels:
+            assert body["dimensionFilter"]["filter"]["inListFilter"]["values"] == ["Ukraine", "(not set)"]
+
+    @pytest.mark.asyncio
+    async def test_all_countries_asks_with_no_filter(self):
+        google = _Google()
+        out = await _get(google, scope="all")
+        assert out["country"] == "all"
+        assert len(google.funnels) == 6
+        assert all("dimensionFilter" not in body for body in google.funnels)
+
+    @pytest.mark.asyncio
+    async def test_each_scope_is_its_own_answer_in_the_cache(self):
+        google, clock = _Google(), _Clock()
+        await _get(google, clock=clock)
+        await _get(google, clock=clock, scope="all")
+        again = await _get(google, clock=clock)
+        assert len(google.funnels) == 12
+        assert len(svc._cache) == 2
+        assert again["country"] == "ua"
+
+    @pytest.mark.asyncio
+    async def test_a_scope_it_does_not_know_is_refused_before_ga4_is_asked(self):
+        google = _Google()
+        with pytest.raises(ValueError):
+            await _get(google, scope="de")
+        assert google.tokens == 0 and google.funnels == []
+
+    @pytest.mark.asyncio
     async def test_the_cache_keeps_at_most_its_bound(self):
         google = _Google()
         for offset in range(svc.MAX_ENTRIES + 3):
@@ -318,3 +361,21 @@ class TestTheRoute:
 
     def test_a_period_it_does_not_know_is_a_400(self):
         assert _admin_client().get("/api/traffic/funnel?period=fortnight").status_code == 400
+
+    def test_a_country_it_does_not_know_is_a_400_that_names_it(self):
+        response = _admin_client().get("/api/traffic/funnel?period=month&country=de")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "country must be 'ua' or 'all'"
+
+    def test_the_country_reaches_the_service_and_ukraine_is_the_default(self, monkeypatch):
+        asked = []
+
+        async def get_funnel(start, end, **kwargs):
+            asked.append(kwargs.get("scope"))
+            return {"ok": True}
+
+        monkeypatch.setattr(svc, "get_funnel", get_funnel)
+        client = _admin_client()
+        assert client.get("/api/traffic/funnel?period=month").status_code == 200
+        assert client.get("/api/traffic/funnel?period=month&country=all").status_code == 200
+        assert asked == ["ua", "all"]
