@@ -18,17 +18,26 @@ clock changes, a leap day, month ends, a year end, before and after the
 history, reversed; dates `strptime` forgives and dates it refuses; the
 validators' 400s and FastAPI's 422s; and the period shortcuts at instants one
 second either side of the Kyiv midnights that matter — `X-Pilot-Now` on the
-Rust side, `core.filters.datetime` pinned on the Python side.
+Rust side, `core.filters.datetime` pinned on the Python side. `all_time`
+and `granularity=monthly` among them.
+
+The forecast overlay, over a stored forecast seeded beside the orders
+(`app.revenue_predictions`): this month and this week at instants either
+side of the midnights that matter, ranges into the future and past the
+60-day horizon, a day the forecast skips, a day stored without one, metrics
+absent or zero, trainings stamped either side of a Kyiv midnight — with
+`core.prediction_service.datetime` pinned as well. And what the page itself
+sends (`tests/frontend_contract.py`): none of it may be handed to Python but
+a line-level filter or a promocode, which are counted apart.
 
 WHAT IS NOT
 
-The branches the pilot answers 501: a line-level filter, a promocode, source
-3 and the forecast overlay. They are asked too, to prove the pilot refuses
-them rather than answering them wrongly; Python's answer is recorded, not
-compared.
+The branches the pilot answers 501: a line-level filter, a promocode and
+source 3. They are asked too, to prove the pilot refuses them rather than
+answering them wrongly; Python's answer is recorded, not compared.
 
-Python cannot have answered from DuckDB: `duckdb_off` refuses the file, and
-the test asks the switch and the fallback counters afterwards.
+Python reads Postgres alone since step 14 took DuckDB out of the code; the
+test asks the read-fallback counters afterwards that nothing was refused.
 
 Skipped without the pilot or without a Postgres; the pilot's own workflow
 (`.github/workflows/rust-pilot.yml`) runs it with both. With
@@ -42,7 +51,8 @@ import os
 import secrets
 from collections import Counter
 from itertools import count
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlencode
@@ -70,7 +80,7 @@ ROUTE = "/api/revenue/trend"
 NOW = "2026-10-21T09:00:00+00:00"
 
 PERIODS = (None, "today", "yesterday", "week", "last_week", "month", "last_month",
-           "last_7_days", "last_28_days")
+           "last_7_days", "last_28_days", "all_time")
 SALES_TYPES = (None, "retail", "b2b", "internal", "exhibition", "all", " B2B ", "", "ALL")
 SOURCES = (None, "1", "2", "4")
 COMPARES = (None, "previous_period", "year_ago", "month_ago", "bogus", "YEAR_AGO")
@@ -135,6 +145,11 @@ RAW = (
     "include_forecast=yes&start_date=2025-01-01&end_date=2025-01-31",
     "source_id=x&category_id=y&include_forecast=maybe", "unknown=1&period=week",
     "start_date=2026-10-01&end_date=2026-10-31&compare_type=",
+    # `granularity`, checked right after the period and before the rest.
+    "granularity=monthly", "granularity=weekly", "granularity=MONTHLY", "granularity=",
+    "granularity=%20monthly", "period=xyz&granularity=weekly", "granularity=weekly&source_id=7",
+    "granularity=monthly&period=month&include_forecast=true", "granularity=daily&period=all_time",
+    "granularity=monthly&period=all_time&compare_type=year_ago",
 )
 # What the pilot leaves to Python, and the branch it names.
 OUT_OF_PILOT = (
@@ -142,9 +157,25 @@ OUT_OF_PILOT = (
     ("brand=BrandA&period=month", "line_level_filter"),
     ("category_id=1&period=month", "line_level_filter"),
     ("promocode=SALE&period=month", "promocode_filter"),
-    ("period=month&include_forecast=true", "forecast_overlay"),
-    ("period=week&include_forecast=true&sales_type=b2b", "forecast_overlay"),
-    ("start_date=2026-10-01&end_date=2026-11-30&include_forecast=true", "forecast_overlay"),
+)
+# The forecast's instants: Wednesday 21 October (NOW), into and out of the
+# 25-hour day (a day the forecast skips), a Monday, the first of November,
+# December and January (whose month holds a day stored without a forecast),
+# a week across the year end, the first predictions.
+FORECAST_INSTANTS = (
+    NOW, "2026-10-24T20:59:59+00:00", "2026-10-24T21:00:00+00:00",
+    "2026-10-18T21:00:00+00:00", "2026-10-31T22:00:00+00:00", "2026-11-30T22:00:00+00:00",
+    "2026-12-31T22:00:00+00:00", "2026-12-27T22:00:00+00:00", "2026-09-30T21:00:00+00:00",
+)
+# Ranges asked at NOW, today being 21 October and the horizon 20 December.
+FORECAST_RANGES = (
+    ("2026-10-15", "2026-11-30"),            # behind and ahead: stacked on the actuals
+    ("2026-10-21", "2026-10-21"),            # today alone: nothing ahead, no overlay
+    ("2026-10-22", "2026-12-31"),            # all ahead, cut at the horizon
+    ("2027-01-01", "2027-01-31"),            # past the horizon: nothing read
+    ("2026-10-01", "2027-03-31"),
+    ("2026-12-10", "2026-11-20"),            # reversed, ahead
+    ("2025-10-01", "2025-10-31"),            # all behind
 )
 # One second either side of the midnights a shortcut's answer turns on.
 INSTANTS = (
@@ -189,7 +220,70 @@ def _cases() -> List[Tuple[str, str]]:
                 for sales_type in (None, "all"):
                     cases.append((_q(period=period, compare_type=compare,
                                      sales_type=sales_type), instant))
+    for period in PERIODS:
+        for sales_type in (None, "all"):
+            for compare in (None, "year_ago"):
+                cases.append((_q(period=period, sales_type=sales_type, compare_type=compare,
+                                 granularity="monthly"), NOW))
+    for start, end in RANGES:
+        cases.append((_q(start_date=start, end_date=end, sales_type="all",
+                         granularity="monthly"), NOW))
+    for instant in FORECAST_INSTANTS:
+        for period in ("month", "week"):
+            for sales_type in (None, "b2b", "all"):
+                for compare in VALID_COMPARES:
+                    cases.append((_q(period=period, sales_type=sales_type, compare_type=compare,
+                                     include_forecast="true"), instant))
+    for start, end in FORECAST_RANGES:
+        for sales_type in (None, "all"):
+            for compare in VALID_COMPARES:
+                cases.append((_q(start_date=start, end_date=end, sales_type=sales_type,
+                                 compare_type=compare, include_forecast="true"), NOW))
     return cases
+
+
+# The stored forecast: retail every day from 25 September to the end of
+# January but two, b2b for the last days of October.
+PREDICTIONS = (date(2026, 9, 25), date(2027, 1, 31))
+SKIPPED = {date(2026, 10, 25), date(2026, 11, 3)}
+NO_FORECAST = date(2027, 1, 20)          # `float(None)` takes the overlay away
+UNSTAMPED = (date(2027, 1, 1), date(2027, 1, 5))
+# 21:30 UTC on 19 October is the 20th in Kyiv: `last_trained` is Kyiv's day.
+TRAININGS = (datetime(2026, 10, 19, 21, 30, tzinfo=timezone.utc),
+             datetime(2026, 10, 22, 8, 0, tzinfo=timezone.utc))
+METRICS = {
+    date(2026, 10, 21): (None, None, None),                      # NOW's first day
+    date(2026, 11, 1): (Decimal("0.00"),) * 3,                   # November's first day
+    date(2026, 12, 28): (Decimal("99.10"), None, Decimal("5.00")),
+}
+
+
+def _prediction_rows() -> List[tuple]:
+    rows = []
+    day = PREDICTIONS[0]
+    while day <= PREDICTIONS[1]:
+        if day not in SKIPPED:
+            value = (None if day == NO_FORECAST else Decimal("0.00") if day == date(2026, 11, 5)
+                     else Decimal((day.toordinal() * 7919) % 20_000_000) / 100)
+            metrics = METRICS.get(day, (Decimal("1234.56"), Decimal("12.34"), Decimal("27.66")))
+            stamp = (None if UNSTAMPED[0] <= day <= UNSTAMPED[1]
+                     else TRAININGS[0] if day <= date(2026, 11, 15) else TRAININGS[1])
+            rows.append((day, "retail", value, *metrics, stamp))
+        day += timedelta(days=1)
+    rows += [(date(2026, 10, d), "b2b", Decimal("777.77"), None, None, None,
+              datetime(2026, 10, 20, 10, tzinfo=timezone.utc)) for d in range(20, 32)]
+    return rows
+
+
+async def _seed_predictions(pool) -> int:
+    rows = _prediction_rows()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM app.revenue_predictions")
+        await conn.executemany(
+            "INSERT INTO app.revenue_predictions (prediction_date, sales_type, predicted_revenue,"
+            " model_mae, model_mape, model_wape, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            rows)
+    return len(rows)
 
 
 class _Clock(datetime):
@@ -215,7 +309,9 @@ def seeded():
     async def _seed():
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
         try:
-            return await seed(pool), await boundary_days(pool)
+            summary = await seed(pool)
+            summary["predictions"] = await _seed_predictions(pool)
+            return summary, await boundary_days(pool)
         finally:
             await pool.close()
 
@@ -223,11 +319,13 @@ def seeded():
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=1)
         try:
             await clear(pool)
+            await pool.execute("DELETE FROM app.revenue_predictions")
         finally:
             await pool.close()
 
     summary, days = asyncio.run(_seed())
-    _REPORT["seed"] = {"orders": summary["orders"], "gold_rows": summary["gold"]["rows"]}
+    _REPORT["seed"] = {"orders": summary["orders"], "gold_rows": summary["gold"]["rows"],
+                       "predictions": summary["predictions"]}
     yield days
     asyncio.run(_clear())
     if REPORT:
@@ -236,7 +334,7 @@ def seeded():
 
 
 @pytest_asyncio.fixture
-async def services(seeded, duckdb_off, monkeypatch):
+async def services(seeded, monkeypatch):
     from core import read_fallback
     from core.permissions import ADMIN_USER_IDS
     from web.main import app
@@ -249,6 +347,7 @@ async def services(seeded, duckdb_off, monkeypatch):
     limiter.reset()
     monkeypatch.setattr("core.filters.datetime", _Clock)
     monkeypatch.setattr("web.routes.api.analytics._datetime", _Clock)
+    monkeypatch.setattr("core.prediction_service.datetime", _Clock)
     read_fallback.reset_counts()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=5)
     # A hardcoded admin: `_resolve_session` answers from the signature alone,
@@ -346,12 +445,12 @@ async def test_a_nul_is_refused_before_routing_byte_for_byte(services):
 
 @pytest.mark.asyncio
 async def test_every_answer_is_the_same(services):
-    from core import duckdb_switch, read_fallback
+    from core import read_fallback
 
     python, rust = services
     cases = _cases()
     statuses: Counter = Counter()
-    mismatches, byte_identical, nonzero = [], 0, 0
+    mismatches, byte_identical, nonzero, forecasts = [], 0, 0, 0
     for query, now in cases:
         py, rs = await _ask(python, rust, query, now)
         statuses[py.status_code] += 1
@@ -360,13 +459,15 @@ async def test_every_answer_is_the_same(services):
             mismatches.append({"query": query, "now": now, "difference": found})
             continue
         byte_identical += py.content == rs.content
-        if py.status_code == 200 and json.loads(py.content)["comparison"]["totals"]["current"]:
-            nonzero += 1
+        if py.status_code == 200:
+            body = json.loads(py.content)
+            nonzero += any(body["revenue"])
+            forecasts += "forecast" in body
 
     _REPORT["matrix"] = {
         "requests": len(cases), "identical": len(cases) - len(mismatches),
         "byte_identical": byte_identical, "statuses": dict(sorted(statuses.items())),
-        "with_revenue": nonzero, "mismatches": mismatches[:50],
+        "with_revenue": nonzero, "with_forecast": forecasts, "mismatches": mismatches[:50],
     }
     assert not mismatches, (
         f"{len(mismatches)} of {len(cases)} requests answered differently; first: "
@@ -376,9 +477,10 @@ async def test_every_answer_is_the_same(services):
     # once broke the route with is a 400.
     assert {200, 400, 422} <= set(statuses), statuses
     assert nonzero > 1000, nonzero
-    # And Python answered from Postgres: no DuckDB open, nothing fell back.
-    assert duckdb_switch.opened() == {}
-    assert read_fallback.counts() == {} and read_fallback.refusals() == {}
+    # The overlay was drawn, not only asked for.
+    assert forecasts > 30, forecasts
+    # And Python's every read answered: nothing refused, nothing fell back.
+    assert read_fallback.refusals() == {}
 
 
 @pytest.mark.asyncio
@@ -405,3 +507,64 @@ async def test_today_on_the_real_clock(services):
             break
     assert _differs(py, rs) is None, _differs(py, rs)
     assert py.status_code == 200
+
+
+# The page phase: an ordinary Wednesday, and the first of a month at its Kyiv
+# midnight; two custom ranges, one reaching ahead.
+PAGE_INSTANTS = (NOW, "2026-10-31T22:00:00+00:00")
+PAGE_RANGES = (("2026-10-01", "2026-10-15"), ("2026-10-15", "2026-11-30"))
+# One of each filter the pilot leaves to Python.
+PAGE_FILTERS = (("category_id", 1), ("brand", "BrandA"), ("promocode", "SALE"))
+LINE_LEVEL = {"category_id", "brand", "promocode"}
+
+
+@pytest.mark.asyncio
+async def test_what_the_page_sends(services):
+    """Every query `useRevenueTrend` builds on `/`, from the page's own code:
+    compared like the matrix, and none handed to Python but those carrying a
+    line-level filter or a promocode — each of which must be, and is counted
+    apart (`tests/rust_handover.py`)."""
+    from tests import frontend_contract as fc
+    from tests.rust_handover import handover
+
+    python, rust = services
+    fc.check_shapes()
+    views = ([{"period": p} for p in fc.periods()]
+             + [{"period": "custom", "start_date": s, "end_date": e} for s, e in PAGE_RANGES])
+    filters = ([{}] + [{"source_id": s} for s in fc.sources()]
+               + [{name: value} for name, value in PAGE_FILTERS])
+    requests, mismatches, unexpected = 0, [], []
+    handed: Counter = Counter()
+    for now in PAGE_INSTANTS:
+        # The hook asks for a custom range's forecast by the browser's UTC day.
+        today_utc = datetime.fromisoformat(now).astimezone(timezone.utc).date()
+        for view in views:
+            for sales_type in fc.sales_types():
+                for compare in fc.compare_types():
+                    for chosen in filters:
+                        query = fc.trend_query(today_utc=today_utc, sales_type=sales_type,
+                                               compare_type=compare, **view, **chosen)
+                        py, rs = await _ask(python, rust, query, now)
+                        requests += 1
+                        reason = handover(rs)
+                        if reason is not None:
+                            handed[reason] += 1
+                            if not LINE_LEVEL & set(chosen):
+                                unexpected.append({"query": query, "now": now, "branch": reason})
+                            continue
+                        if LINE_LEVEL & set(chosen):
+                            unexpected.append({"query": query, "now": now,
+                                               "branch": f"answered {rs.status_code}"})
+                            continue
+                        found = _differs(py, rs)
+                        if found:
+                            mismatches.append({"query": query, "now": now, "difference": found})
+
+    _REPORT["page"] = {"requests": requests, "handed_to_python": dict(sorted(handed.items())),
+                       "mismatches": mismatches[:50], "unexpected": unexpected[:50]}
+    assert not unexpected, json.dumps(unexpected[:5], ensure_ascii=False, indent=1)
+    assert not mismatches, (
+        f"{len(mismatches)} of {requests} page requests answered differently; first: "
+        + json.dumps(mismatches[:5], ensure_ascii=False, indent=1))
+    assert sum(handed.values()) == (len(PAGE_INSTANTS) * len(views) * len(fc.sales_types())
+                                    * len(fc.compare_types()) * len(PAGE_FILTERS)), handed

@@ -500,7 +500,7 @@ def world():
 
 
 @pytest_asyncio.fixture
-async def services(world, duckdb_off, monkeypatch):
+async def services(world, monkeypatch):
     from core import bot_store, read_fallback
     from core.permissions import invalidate_permissions_cache
     from web.main import app

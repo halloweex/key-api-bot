@@ -1,16 +1,16 @@
 //! The Postgres half: `core/pg_gold_read.fetch_series`, statement for
-//! statement. The SQL is the Python's own text, so both services ask the
+//! statement, and `GoalsMixin.get_stored_forecast`'s. The SQL is the Python's own text, so both services ask the
 //! planner the same question and the benchmark measures the services.
 
 use std::time::Duration;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
 use crate::pgread;
-use crate::trend::{DayRow, Gold, ReadError};
+use crate::trend::{DayRow, Gold, PredictionRow, ReadError};
 
 // The four texts `fetch_series` renders. Static, which sqlx 0.9 asks of any
 // statement it is not told is safe — and which is also what makes each one
@@ -31,6 +31,16 @@ const ALL_TYPES_ONE_SOURCE: &str = "SELECT date, SUM(revenue), SUM(orders_count)
      FROM gold.daily_revenue \
      WHERE date BETWEEN $1 AND $2 AND source_id = $3 \
      GROUP BY date ORDER BY date";
+
+/// `_PREDICTIONS_SQL`, with `{revenue_predictions}` rendered as `_goals_run`
+/// renders it.
+const STORED_FORECAST: &str = "SELECT prediction_date, predicted_revenue, model_mae, model_mape, \
+     model_wape, created_at \
+     FROM app.revenue_predictions \
+     WHERE sales_type = $1 \
+       AND prediction_date >= $2 \
+       AND prediction_date <= $3 \
+     ORDER BY prediction_date";
 
 pub struct PgGold {
     pool: PgPool,
@@ -77,6 +87,20 @@ fn decode(row: &PgRow, summed: bool) -> Result<DayRow, sqlx::Error> {
     })
 }
 
+fn decode_prediction(row: &PgRow) -> Result<PredictionRow, sqlx::Error> {
+    let number = |i: usize| -> Result<Option<f64>, sqlx::Error> {
+        Ok(row.try_get::<Option<Decimal>, _>(i)?.map(decimal_to_float))
+    };
+    Ok(PredictionRow {
+        date: row.try_get(0)?,
+        revenue: number(1)?,
+        mae: number(2)?,
+        mape: number(3)?,
+        wape: number(4)?,
+        created_at: row.try_get::<Option<DateTime<Utc>>, _>(5)?,
+    })
+}
+
 impl Gold for PgGold {
     async fn series(
         &self,
@@ -106,6 +130,24 @@ impl Gold for PgGold {
         let rows = pgread::fetch(query.fetch_all(&mut *conn), self.timeout).await?;
         rows.iter()
             .map(|row| decode(row, summed))
+            .collect::<Result<_, _>>()
+            .map_err(|e| ReadError::Failed(e.to_string()))
+    }
+
+    async fn stored_forecast(
+        &self,
+        start: NaiveDate,
+        end: NaiveDate,
+        sales_type: &str,
+    ) -> Result<Vec<PredictionRow>, ReadError> {
+        let query = sqlx::query(STORED_FORECAST)
+            .bind(sales_type)
+            .bind(start)
+            .bind(end);
+        let mut conn = pgread::connection(&self.pool, &self.revision, self.timeout).await?;
+        let rows = pgread::fetch(query.fetch_all(&mut *conn), self.timeout).await?;
+        rows.iter()
+            .map(decode_prediction)
             .collect::<Result<_, _>>()
             .map_err(|e| ReadError::Failed(e.to_string()))
     }
