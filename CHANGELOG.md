@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.344
+
+- Baseline: the finding on the deleted get_user_by_status goes with it
+- Review F2, F3: the sweep's orphans go; an unknown event_type is a 400
+- Review F1: the backup limits are held in hours again, on the canary
+- Sweep web, bot and scripts: dead functions and constants
+- Sweep store reads: dead repository methods
+- Sweep core models, config, events and clients: dead code
+- Sweep core checks and alerting: dead helpers
+- Sweep web and bot: unused imports and locals
+- Sweep core: unused imports, locals and no-op globals
+
+
 ## 3.0.343
 
 - Z2 review: nginx keeps the rollback image's resync slow until Z3; the rollback check after off
