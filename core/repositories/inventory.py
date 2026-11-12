@@ -715,8 +715,6 @@ class InventoryMixin:
                 hold_npv = hold_gross_profit - hold_carry_cost
             elif adv90 > 0:
                 # Only fraction sells in 1 year, rest stays frozen
-                units_sold_yr = adv90 * 365
-                fraction_sold = min(1.0, units_sold_yr / available) if available > 0 else 0
                 hold_gross_profit = float(annual_gross_profit or 0)
                 hold_carry_cost = cost_basis * carrying_rate
                 hold_npv = hold_gross_profit - hold_carry_cost

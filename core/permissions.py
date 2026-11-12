@@ -6,7 +6,7 @@ DB permissions take precedence when available.
 """
 import logging
 from enum import Enum
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -466,8 +466,6 @@ async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]
 
     Falls back to hardcoded permissions if DB unavailable.
     """
-    global _permissions_cache
-
     # The cache is checked before the store is even fetched. It used to be
     # checked after, which cost nothing — until per-user tabs put a permission
     # dependency on roughly 120 of the 140 endpoints instead of the ~20 that

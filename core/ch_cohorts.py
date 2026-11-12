@@ -102,7 +102,7 @@ async def fetch(
     (step 14, S14-07). It used to be `available()`, asked by the router
     before it fell back to DuckDB.
     """
-    from core.ch_common import URL_ENV, configured, execute, parse_tsv
+    from core.ch_common import URL_ENV, configured, execute
 
     if not configured():
         raise RuntimeError(f"{URL_ENV} is not set: there is no ClickHouse to ask")

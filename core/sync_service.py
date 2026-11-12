@@ -1399,7 +1399,7 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info(
                 f"Starting full sync (last {days_back} days)",
                 extra={"days_back": days_back, "sync_type": "full"}

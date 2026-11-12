@@ -16,7 +16,6 @@ Usage:
     await events.emit(SyncEvent.ORDERS_SYNCED, {"count": 100, "duration_ms": 1234})
 """
 import asyncio
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -27,8 +26,6 @@ from typing import (
     Dict,
     List,
     Optional,
-    Set,
-    TypeVar,
     Union,
 )
 
@@ -252,12 +249,8 @@ class EventBus:
         return event
 
     async def _safe_call(self, handler: EventHandler, event: Event) -> None:
-        """Safely call a handler with error isolation."""
-        try:
-            await handler(event.data)
-        except Exception as e:
-            # Re-raise to be caught by gather
-            raise
+        """Call a handler; a raise is caught by emit()'s gather."""
+        await handler(event.data)
 
     def get_history(
         self, event_type: Optional[SyncEvent] = None, limit: int = 20

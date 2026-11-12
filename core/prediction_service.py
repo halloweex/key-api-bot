@@ -286,7 +286,6 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     # lag_same_dow: revenue from the same weekday 1 week ago (shift by 7 is already lag_7d,
     #   but this is semantically a DOW feature computed on sorted data with gaps filled)
     # rolling_mean_4w_same_dow: average revenue for the same weekday over last 4 weeks
-    shifted_rev = df['revenue'].shift(1)
     dow = df['day_of_week']
     same_dow_mean = pd.Series(np.nan, index=df.index, dtype=float)
     for d in range(7):

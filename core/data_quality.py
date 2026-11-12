@@ -22,7 +22,6 @@ Vocabulary
 """
 from __future__ import annotations
 
-import html as html_module
 import importlib
 import json
 import logging
