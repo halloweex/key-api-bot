@@ -37,6 +37,7 @@ thing a branchy implementation could hide indefinitely.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, List, Sequence, Tuple
 
 from core.duckdb_constants import DISPLAY_TIMEZONE
 

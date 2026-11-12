@@ -84,10 +84,6 @@ class ChatService:
         logger.info(f"Created conversation {conv_id}")
         return conv_id
 
-    def get_conversation(self, conv_id: str) -> Optional[Conversation]:
-        """Get conversation by ID (no ownership check — internal use only)."""
-        return self._conversations.get(conv_id)
-
     def resolve_owned(self, conv_id: str, user_id: Optional[Any]) -> Conversation:
         """Return the conversation only if ``user_id`` owns it.
 
@@ -349,32 +345,6 @@ class ChatService:
             })
 
         return results
-
-    def cleanup_old_conversations(self, max_age_hours: int = 24) -> int:
-        """
-        Remove old conversations to free memory.
-
-        Args:
-            max_age_hours: Max age in hours
-
-        Returns:
-            Number of conversations removed
-        """
-        from datetime import timedelta
-
-        cutoff = datetime.now() - timedelta(hours=max_age_hours)
-        to_remove = [
-            conv_id for conv_id, conv in self._conversations.items()
-            if conv.created_at < cutoff
-        ]
-
-        for conv_id in to_remove:
-            del self._conversations[conv_id]
-
-        if to_remove:
-            logger.info(f"Cleaned up {len(to_remove)} old conversations")
-
-        return len(to_remove)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

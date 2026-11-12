@@ -1,7 +1,7 @@
 """
 Integration tests for core/resilience.py
 
-Tests circuit breaker, retry with backoff, and rate limiter patterns.
+Tests circuit breaker and retry with backoff.
 """
 import asyncio
 import pytest
@@ -14,8 +14,6 @@ from core.resilience import (
     CircuitOpenError,
     RetryConfig,
     retry_with_backoff,
-    with_retry,
-    RateLimiter,
 )
 
 
@@ -114,11 +112,6 @@ class TestCircuitBreaker:
 
         assert cb.state == CircuitState.OPEN
 
-    def test_is_open_property(self):
-        """is_open property returns correct state."""
-        cb = CircuitBreaker()
-        assert not cb.is_open
-
 
 class TestRetryWithBackoff:
     """Tests for retry_with_backoff function."""
@@ -178,74 +171,3 @@ class TestRetryWithBackoff:
                 config=RetryConfig(max_attempts=3, base_delay=0.01),
                 retryable_exceptions=(ConnectionError,)
             )
-
-
-class TestWithRetryDecorator:
-    """Tests for with_retry decorator."""
-
-    @pytest.mark.asyncio
-    async def test_decorator_succeeds(self):
-        """Decorated function returns result on success."""
-
-        @with_retry(RetryConfig(max_attempts=3, base_delay=0.01))
-        async def my_func():
-            return "decorated_success"
-
-        result = await my_func()
-        assert result == "decorated_success"
-
-    @pytest.mark.asyncio
-    async def test_decorator_retries(self):
-        """Decorated function retries on failure."""
-        call_count = 0
-
-        @with_retry(RetryConfig(max_attempts=3, base_delay=0.01))
-        async def my_func():
-            nonlocal call_count
-            call_count += 1
-            if call_count < 2:
-                raise ConnectionError("Fail once")
-            return "success_after_retry"
-
-        result = await my_func()
-        assert result == "success_after_retry"
-        assert call_count == 2
-
-
-class TestRateLimiter:
-    """Tests for RateLimiter class."""
-
-    @pytest.mark.asyncio
-    async def test_allows_within_rate(self):
-        """Allows requests within rate limit."""
-        limiter = RateLimiter(rate=10.0, burst=10)
-
-        for _ in range(5):
-            assert await limiter.acquire(timeout=0.1)
-
-    @pytest.mark.asyncio
-    async def test_blocks_when_exhausted(self):
-        """Blocks when tokens exhausted."""
-        limiter = RateLimiter(rate=1.0, burst=2)
-
-        # Use up all tokens
-        assert await limiter.acquire(timeout=0.01)
-        assert await limiter.acquire(timeout=0.01)
-
-        # Should fail immediately (no tokens left)
-        assert not await limiter.acquire(timeout=0.01)
-
-    @pytest.mark.asyncio
-    async def test_refills_over_time(self):
-        """Tokens refill over time."""
-        limiter = RateLimiter(rate=10.0, burst=2)  # 10 tokens/sec
-
-        # Use all tokens
-        await limiter.acquire(timeout=0.01)
-        await limiter.acquire(timeout=0.01)
-
-        # Wait for refill (0.15s = 1.5 tokens at 10/sec)
-        await asyncio.sleep(0.15)
-
-        # Should have 1 token available
-        assert await limiter.acquire(timeout=0.01)

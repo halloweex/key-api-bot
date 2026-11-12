@@ -383,7 +383,7 @@ class TestWhatABlindRunHolds:
     def test_whole_blindness_holds_every_group(self):
         held = []
         twins.check_pg_warehouse(Facts.blind("x"), held_out=held)
-        assert set(held) == twins.all_conditions()
+        assert set(held) == {c for cs in twins.GUARD_CONDITIONS.values() for c in cs}
 
     def test_a_collapsed_finding_holds_only_the_blind_groups(self):
         """One line for two blind groups — but silver_arc, read clean in the same
@@ -407,7 +407,8 @@ class TestWhatABlindRunHolds:
         from core.alerting import REGISTRY
 
         assert set(twins.GUARD_CONDITIONS) == set(twins.UNWATCHED_NAMES) == set(twins.GROUPS)
-        names = (twins.all_conditions() | set(twins.UNWATCHED_NAMES.values())
+        names = ({c for cs in twins.GUARD_CONDITIONS.values() for c in cs}
+                 | set(twins.UNWATCHED_NAMES.values())
                  | {twins.WHOLE_UNWATCHED})
         assert names <= set(REGISTRY)
 

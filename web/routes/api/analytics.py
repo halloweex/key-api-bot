@@ -9,7 +9,6 @@ from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional, List
 
 from core.filters import has_comparison
-from core.filters import has_comparison
 from web.routes.auth import require_admin, require_any_permission, require_permission
 from web.services import dashboard_service
 from web.schemas import CategoryResponse, BrandResponse

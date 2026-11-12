@@ -67,34 +67,19 @@ class ConversationState(IntEnum):
     SELECTING_CUSTOM_END_YEAR = 5
     SELECTING_CUSTOM_END_MONTH = 6
     SELECTING_CUSTOM_END_DAY = 7
-    GENERATING_REPORT = 8
     SELECTING_TOP10_SOURCE = 9
     # Search states
     SEARCH_WAITING_QUERY = 10
     # Settings states
     SETTINGS_MENU = 11
 
-# ─── Report Types ───────────────────────────────────────────────────────────
-REPORT_TYPES = {
-    "summary": "📊 Summary Report",
-    "excel": "📑 Excel Report",
-    "top10": "🏆 TOP-10 Products"
-}
 
-
-# ─── Source Names with Emojis ───────────────────────────────────────────────
+# ─── Source Names ───────────────────────────────────────────────────────────
 SOURCE_NAMES = {
     "1": "Instagram",
     "2": "Telegram",
     "4": "Shopify",
     "all": "All Sources"
-}
-
-SOURCE_EMOJIS = {
-    1: "📸",
-    2: "✈️",
-    3: "🌐",
-    4: "🛍️"
 }
 
 # Sources available for TOP-10 reports (id, name, emoji)

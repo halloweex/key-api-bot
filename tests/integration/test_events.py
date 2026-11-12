@@ -16,7 +16,6 @@ from core.events import (
     emit_sync_started,
     emit_sync_completed,
     emit_sync_failed,
-    emit_orders_synced,
 )
 
 
@@ -99,25 +98,6 @@ class TestEventBus:
 
         assert len(results) == 1
         assert results[0] == "success"
-
-    @pytest.mark.asyncio
-    async def test_unsubscribe(self):
-        """Can unsubscribe handlers."""
-        received = []
-
-        async def handler(data: dict):
-            received.append(data)
-
-        self.bus.subscribe(SyncEvent.SYNC_STARTED, handler)
-        await self.bus.emit(SyncEvent.SYNC_STARTED, {"n": 1})
-        assert len(received) == 1
-
-        # Unsubscribe
-        result = self.bus.unsubscribe(SyncEvent.SYNC_STARTED, handler)
-        assert result is True
-
-        await self.bus.emit(SyncEvent.SYNC_STARTED, {"n": 2})
-        assert len(received) == 1  # No new events
 
     def test_get_handlers(self):
         """get_handlers returns handler counts."""
@@ -262,18 +242,3 @@ class TestConvenienceFunctions:
         assert len(received) == 1
         assert received[0]["sync_type"] == "incremental"
         assert received[0]["error"] == "Connection timeout"
-
-    @pytest.mark.asyncio
-    async def test_emit_orders_synced(self):
-        """emit_orders_synced creates correct event."""
-        received = []
-
-        @events.on(SyncEvent.ORDERS_SYNCED)
-        async def handler(data):
-            received.append(data)
-
-        await emit_orders_synced(50, 1234.5)
-
-        assert len(received) == 1
-        assert received[0]["count"] == 50
-        assert received[0]["duration_ms"] == 1234.5

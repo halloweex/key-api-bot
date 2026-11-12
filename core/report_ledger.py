@@ -86,7 +86,6 @@ class Ledger:
 
 WEEKLY = Ledger("core.pg_weekly_ledger_write")
 TRAFFIC = Ledger("core.pg_traffic_ledger_write")
-LEDGERS = (WEEKLY, TRAFFIC)
 
 
 def check_row(week_start: date, sales_type: str, revenue: Any, orders: Any,

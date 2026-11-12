@@ -702,6 +702,10 @@ async def get_events(
                 if et.name.lower() == event_type.lower():
                     filter_type = et
                     break
+            else:
+                # An unknown type used to fall through to the unfiltered
+                # history; a filter that filters nothing reads as an answer.
+                raise HTTPException(status_code=400, detail="event_type: unknown event type")
 
     return {
         "events": events.get_history(event_type=filter_type, limit=limit),

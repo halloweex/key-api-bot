@@ -12,7 +12,6 @@ from core.i18n import DEFAULT_LANGUAGE, fmt_int, fmt_money, t
 logger = logging.getLogger(__name__)
 
 # Telegram message length limit
-TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 TELEGRAM_SAFE_MESSAGE_LENGTH = 3500  # Leave room for formatting
 
 
@@ -173,12 +172,6 @@ def report_type_label(report_type: str, lang: str = DEFAULT_LANGUAGE) -> str:
     return report_type if label == key else label
 
 
-def date_range_label(range_key: str, lang: str = DEFAULT_LANGUAGE) -> str:
-    key = f"daterange.{range_key}"
-    label = t(key, lang)
-    return range_key if label == key else label
-
-
 def date_span(start_date: date, end_date: date) -> str:
     """`03.08.2026 – 09.08.2026`, in every language.
 
@@ -285,18 +278,3 @@ class ReportFormatters:
             f"{date_span(start_date, end_date)}\n\n"
             f"{t('msg.generating', lang)}"
         )
-
-
-def get_period_type(start_date: date, end_date: date) -> str:
-    """Determine period type: 'daily', 'weekly', 'monthly', or None."""
-    days = (end_date - start_date).days + 1
-
-    if days == 1:
-        return "daily"
-    elif days <= 7:
-        return "weekly"
-    elif days <= 31:
-        return "monthly"
-    return None
-
-

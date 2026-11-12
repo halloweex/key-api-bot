@@ -20,7 +20,6 @@ from core.observability import (
     set_correlation_id,
     get_correlation_id,
     metrics,
-    Timer,
 )
 
 logger = get_logger(__name__)

@@ -57,11 +57,6 @@ def schemes(secret: str, event_id: str) -> "list[tuple[str, str]]":
     ]
 
 
-def sha1_hex(secret: str, event_id: str) -> str:
-    """The reading this code started with: SHA1(secret + id)."""
-    return hashlib.sha1(f"{secret}{event_id}".encode()).hexdigest()
-
-
 def _candidates(explicit: str | None) -> list[tuple[str, str]]:
     """Named secrets worth testing, most likely first.
 

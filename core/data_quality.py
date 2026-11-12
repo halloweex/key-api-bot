@@ -22,7 +22,6 @@ Vocabulary
 """
 from __future__ import annotations
 
-import html as html_module
 import importlib
 import json
 import logging
@@ -301,15 +300,6 @@ def overall_severity(
         if s.rank() == max_rank:
             return s
     return Severity.INFO  # unreachable
-
-
-def summarize_discrepancies(discrepancies: List[Discrepancy]) -> Dict[str, int]:
-    """Per-class counts. Stable shape (zero entries included) so the schema
-    stays consistent across runs."""
-    out: Dict[str, int] = {c.value: 0 for c in DiscrepancyClass}
-    for d in discrepancies:
-        out[d.diff_class.value] += 1
-    return out
 
 
 # ─── Layer 1: Internal integrity checks ───────────────────────────────────────
@@ -1443,7 +1433,6 @@ def format_alert_message(
     discrepancies: List[Discrepancy],
     *,
     window: Optional[Tuple[date, date]] = None,
-    max_lines: int = 12,
     machine_note: Optional[str] = None,
 ) -> str:
     """Три строки, по-русски: что случилось · сколько · что делать.

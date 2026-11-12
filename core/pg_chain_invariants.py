@@ -262,7 +262,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Dict, FrozenSet, List, Mapping, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -690,10 +690,6 @@ CONDITIONS += (LATCH_DISAGREES,)
 # layer files does. `chain_latch_disagrees` was filed on `mirror_landing`
 # until step 14's S14-12 moved it here.
 PREFIX = "chain_"
-
-
-def all_conditions() -> FrozenSet[str]:
-    return frozenset(CONDITIONS)
 
 
 # ─── Which chains ─────────────────────────────────────────────────────────────

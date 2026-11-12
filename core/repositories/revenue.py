@@ -1829,19 +1829,6 @@ class RevenueMixin:
 
     # ─── Marketing Report ────────────────────────────────────────────────────
 
-    async def get_marketing_report(
-        self,
-        year: int,
-        month: int,
-        sales_type: str = "retail",
-    ) -> Dict[str, Any]:
-        """Get monthly marketing report (legacy month-based)."""
-        from calendar import monthrange
-        start_date = date(year, month, 1)
-        _, last_day = monthrange(year, month)
-        end_date = date(year, month, last_day)
-        return await self.get_marketing_report_by_dates(start_date, end_date, sales_type)
-
     async def get_marketing_report_by_dates(
         self,
         start_date: date,

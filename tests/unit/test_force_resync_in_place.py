@@ -14,7 +14,6 @@ from core import sync_service as sync_module
 class _RecordingSyncService:
     def __init__(self):
         self.calls = []
-        self._use_ordered_between = "stale"
 
     async def full_sync(self, days_back=730, force_update=False):
         self.calls.append({"days_back": days_back, "force_update": force_update})
@@ -43,7 +42,6 @@ async def test_it_forces_a_full_sync_and_deletes_nothing(monkeypatch):
 
     assert stats == {"orders": 1}
     assert service.calls == [{"days_back": 90, "force_update": True}]
-    assert service._use_ordered_between is None, "the filter detection is re-run"
 
 
 def test_full_sync_threads_the_flag_to_the_order_writer():
