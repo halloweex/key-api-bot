@@ -84,31 +84,36 @@ class TestTheBrandTableLeftTheGoldItCannotReach:
             "silently not working"
         )
 
-    def test_it_reproduces_the_gold_grain_before_summing(self):
-        """`order_count` in that table is `COUNT(DISTINCT id)` at the product-day
-        grain, and the report sums it. A plain `COUNT(DISTINCT order_id)` per
-        brand is a different, smaller number."""
-        body = self._marketing_sql()
-        assert "WITH product_days AS" in body
-        for column in ("l.order_date", "l.sales_type", "l.source_id", "l.product_id",
-                       "l.product_name", "l.brand", "l.category_id",
-                       "l.category_name", "l.parent_category_name"):
-            assert column in body, f"the grain lost {column}"
-        assert "SUM(order_count)" in body
+    def test_it_counts_orders_by_the_brand_cards_statement(self):
+        """«Заказов» is the orders that held the brand, each once — the
+        dashboard brand card's `_BRAND_ANALYTICS_SQL` (owner's decision,
+        2026-11-12). Until then the report summed per-product cells, one order
+        per product of the brand: NEOGEN, October 2026, 1 429 against 748."""
+        from core.repositories import revenue
 
-    def test_having_does_not_use_a_select_alias(self):
-        """DuckDB accepts `HAVING revenue > 0`; PostgreSQL does not see a
-        select alias there. The original wrote the lenient form.
-
-        Over the statements, not the text: the first version of this failed on
-        the comment that *explains* the change, which is
-        [[feedback_assert_on_structure_not_prose]] for the third time in one
-        session.
-        """
         body = "\n".join(l.split("--")[0].split("#")[0]
                           for l in self._marketing_sql().splitlines())
-        assert "HAVING SUM(product_revenue) > 0" in body
-        assert "HAVING revenue" not in body
+        assert "_BRAND_ANALYTICS_SQL" in body
+        assert "SUM(order_count)" not in body
+        assert "COUNT(DISTINCT l.order_id) AS orders" in revenue._BRAND_ANALYTICS_SQL
+
+    def test_a_brand_that_sold_nothing_is_not_a_row(self):
+        """The old body said `HAVING SUM(product_revenue) > 0`; the brand
+        card's statement has no HAVING, so the report drops those rows itself.
+        Over the syntax tree, not the text: a list comprehension over the
+        brand rows whose condition is `… > 0`."""
+        import textwrap
+
+        node = ast.parse(textwrap.dedent(self._marketing_sql()))
+        filters = [
+            cond for comp in ast.walk(node) if isinstance(comp, ast.ListComp)
+            for gen in comp.generators for cond in gen.ifs
+            if isinstance(cond, ast.Compare)
+            and isinstance(cond.ops[0], ast.Gt)
+            and isinstance(cond.comparators[0], ast.Constant)
+            and cond.comparators[0].value == 0
+        ]
+        assert filters, "a brand with no revenue would become a row"
 
 
 class TestNothingGoesRoundTheRouter:
