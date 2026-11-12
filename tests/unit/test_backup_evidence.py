@@ -154,6 +154,49 @@ def test_the_canary_warns_on_each_stale_marker_and_names_its_script(field, age, 
     assert script in message and f"{age:.1f} h old" in message
 
 
+@pytest.mark.parametrize("field,script", [
+    ("pitr", "deploy/pg_pitr_drill.sh"),
+    ("remote", "deploy/pg_restore_drill.sh --from-remote"),
+])
+def test_a_drill_older_than_a_week_and_a_day_is_stale(field, script):
+    """The limit written out in hours, because every other test here names
+    `DRILL_MAX_AGE_H` and follows it wherever it moves. Both drills run on
+    Mondays: a week and a day is one drill plus the day it can slip by.
+    Mutation: a limit in days compared against hours, no age check at all,
+    or a limit moved off eight days either way (7 d 23 h stale, 9 d fresh)."""
+    from bot import canary
+
+    assert canary.check_backup_evidence(_block(**{field: 7 * 24 + 23})) == []
+    ((key, message),) = canary.check_backup_evidence(_block(**{field: 9 * 24}))
+    assert key == "backup_evidence_stale" and script in message
+
+
+def test_a_stale_shipment_is_stale_at_offsite_checks_limit():
+    """The limit written out in hours, for the same reason. Mutation: a limit
+    other than `deploy/offsite_check.sh`'s 36 hours (35 h stale, 37 h
+    fresh)."""
+    from bot import canary
+
+    assert canary.check_backup_evidence(_block(offsite=35)) == []
+    ((key, message),) = canary.check_backup_evidence(_block(offsite=37))
+    assert key == "backup_evidence_stale" and "deploy/pg_offsite.sh" in message
+
+
+def test_the_shipments_limit_is_offsite_checks_default():
+    """`deploy/offsite_check.sh` pages the same marker CRITICAL past its own
+    limit, and `test_pg_offsite_scripts.py` holds that one by running the
+    script. Read off its assignment, not its prose. Mutation: move either
+    number without the other — the host would page a shipment the canary
+    calls fresh, or the other way round."""
+    import re
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[2] / "deploy" / "offsite_check.sh").read_text()
+    (default,) = re.findall(
+        r'^PG_MAX_AGE_HOURS="\$\{BACKUP_PG_MAX_ARCHIVE_AGE_HOURS:-(\d+)\}"$', script, re.M)
+    assert int(default) == ev.OFFSITE_MAX_AGE_H
+
+
 def test_an_age_just_past_its_limit_reads_as_past_it():
     """192.01 h used to read "192 h old, limit 192 h", which looks fresh."""
     from bot import canary
