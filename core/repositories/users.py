@@ -427,14 +427,6 @@ class UsersMixin:
         )
         return row is not None and row[0] == "approved"
 
-    async def get_pending_users(self) -> List[Dict[str, Any]]:
-        """Get all users with pending status."""
-        return await self.get_user_by_status("pending")
-
-    async def get_approved_users(self) -> List[Dict[str, Any]]:
-        """Get all approved users."""
-        return await self.get_user_by_status("approved")
-
     # ─── Role Permissions ─────────────────────────────────────────────────────
 
     async def get_role_permissions(self, role: str) -> Dict[str, Dict[str, bool]]:

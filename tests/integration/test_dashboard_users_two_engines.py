@@ -115,8 +115,6 @@ READS = (
     ("is_user_authorized", {"user_id": 12}),
     ("is_user_authorized", {"user_id": 15}),
     ("is_user_authorized", {"user_id": 999}),
-    ("get_pending_users", {}),
-    ("get_approved_users", {}),
 )
 
 
