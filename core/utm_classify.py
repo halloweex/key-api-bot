@@ -48,7 +48,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 # hash of `tests/unit/test_utm_classify_golden.py`'s frozen tuples, so a rule
 # change that edits a tuple fails there until this names a new version
 # ("r2", …) and its hash is added beside the old ones.
-RULE_VERSION = "r1"
+#
+# r1: the rules as revision 0036 found them.
+# r2 (2026-11-12): the labels `fbp:` and `fbc:` read as the cookies `_fbp` and
+#     `_fbc` (`_KEY_ALIASES` below); the classifier is unchanged.
+RULE_VERSION = "r2"
 
 
 # A pair value runs until a semicolon, newline, or the next ", key:" pair
