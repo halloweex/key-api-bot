@@ -12,7 +12,8 @@ every request against a per-property hourly quota, and a day's numbers go on
 settling for a day or two, so an hour of reuse costs nothing in truth and
 bounds what a busy tab can spend. While GA4 cannot be asked, the last good
 answer for the period comes back marked stale. Bounded by construction: at
-most ``MAX_ENTRIES`` periods, the oldest dropped first.
+most ``MAX_ENTRIES`` answers, each a period in one scope, the oldest dropped
+first.
 
 **Only the days GA4 holds are asked.** A funnel exists from ``earliest_day``
 to today, Kyiv time, so a window is cut to those days before it is asked, and
@@ -22,16 +23,32 @@ dashboard's date window admits a backwards range and days before 2015-08-14,
 GA4's first day. Asked for either, GA4 answered 400 (measured 2026-11-04),
 and the route answered "GA4 is unavailable".
 
-**The traffic type is decided here, at read time,** from GA4's channel group,
-so the split can change without anything to rewrite. Cold is advertising shown
-to people who do not know the brand yet; warm is people who know it or look
-for the product themselves; other is what GA4 could not place, links from
-other sites and AI assistants.
+**Whose visits count is the page's choice, and Ukraine is the default.**
+Visits from abroad are mostly bots. Measured on 2026-11-12, everyone outside
+Ukraine and "(not set)" was 17 % of the people entering in September 2026,
+24 % in October and 30 % on 1–10 November, and bought 0.4 % of the time.
+They are crawlers from the US that open products and never buy, a stream
+from China that opens the site and nothing else, and since early November
+one-to-three-second visits from Brazil, Vietnam, Mexico and a dozen more.
+Counted, they made "entered" grow by 13 % in October where Ukraine grew by
+5 %, and put 1–10 November's conversion at 1.85 % where Ukraine's was 2.47 %.
+
+``"ua"`` keeps Ukraine and "(not set)", the people GA4 could not place: in
+October those made 117 purchases against Ukraine's 938. Real buyers abroad,
+about 5 % of purchases, go with the bots. ``"all"`` counts everybody, as GA4
+itself does. The scope is part of the cache key.
+
+**The traffic type is decided at read time,** from GA4's channel group
+(``core.ga4.channel_type``), so the split can change without anything to
+rewrite. The capture of closed periods (``core/ga4_capture.py``) stores the
+type as decided then, with ``TRAFFIC_RULE``, the rule's version. Cold is
+advertising shown to people who do not know the brand yet; warm is people who
+know it or look for the product themselves; other is what GA4 could not place,
+links from other sites and AI assistants.
 """
 from __future__ import annotations
 
 import asyncio
-import calendar
 import contextlib
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
@@ -42,31 +59,29 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from core import ga4
+# The rule and the vocabulary the GA4 capture shares (`core/ga4_capture.py`),
+# defined beside the client so a `core` module need not import `web`.
+from core.ga4 import (  # noqa: F401 — some only re-exported, for their readers
+    CHANNEL, COLD, DEVICE, RETENTION_MONTHS, SCOPES, TRAFFIC_RULE, TYPES, WARM,
+    channel_type, earliest_day,
+)
 
 #: The property counts days in Kyiv time, so its "today" is Kyiv's.
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 TTL_S = 3600
-MAX_ENTRIES = 32
+#: Answers kept: 32 periods in each of the two scopes.
+MAX_ENTRIES = 64
 #: GA4 requests in flight at once, across every period. The Data API admits
 #: ten concurrent requests per standard property; one period's six still go
 #: side by side under it.
 GA4_CONCURRENCY = 6
-CHANNEL = "sessionDefaultChannelGroup"
-DEVICE = "deviceCategory"
-#: GA4 keeps event data this many months, and funnels are built from events.
-RETENTION_MONTHS = 14
+DEFAULT_SCOPE = "ua"
 
-COLD = frozenset({
-    "Paid Social", "Cross-network", "Paid Shopping", "Paid Other", "Paid Video", "Display",
-})
-WARM = frozenset({
-    "Direct", "Email", "Organic Social", "Organic Search", "Paid Search",
-    "Organic Shopping", "SMS", "Mobile Push Notifications",
-})
-TYPES = ("cold", "warm", "other")
+#: A period in one scope: (start, end, scope).
+_Key = Tuple[date, date, str]
 
-# (start, end) → {"payload": dict, "fetched_at": iso str, "expires_at": monotonic}
-_cache: "OrderedDict[Tuple[date, date], Dict[str, Any]]" = OrderedDict()
+# (start, end, scope) → {"payload": dict, "fetched_at": iso str, "expires_at": monotonic}
+_cache: "OrderedDict[_Key, Dict[str, Any]]" = OrderedDict()
 # One lock per period, so two readers of one period ask GA4 once, and a fresh
 # answer for one period never waits behind another period's fetch (L3-05: a
 # cached hit waited 2.97 s behind an unrelated period's six requests, under
@@ -74,8 +89,8 @@ _cache: "OrderedDict[Tuple[date, date], Dict[str, Any]]" = OrderedDict()
 # and goes with its last user whatever the fetch did: pruned only after a
 # fetch that succeeded, a period GA4 failed for left its lock behind for as
 # long as GA4 kept failing.
-_locks: "Dict[Tuple[date, date], asyncio.Lock]" = {}
-_lock_users: "Dict[Tuple[date, date], int]" = {}
+_locks: "Dict[_Key, asyncio.Lock]" = {}
+_lock_users: "Dict[_Key, int]" = {}
 # The cap across periods: per-period locks let three uncached periods put
 # eighteen requests in flight at once. Made on the running loop the first time
 # it is asked for there, since an asyncio primitive belongs to one loop.
@@ -92,7 +107,7 @@ def _reset_cache() -> None:
 
 
 @contextlib.asynccontextmanager
-async def _period_lock(key: Tuple[date, date]) -> AsyncIterator[None]:
+async def _period_lock(key: _Key) -> AsyncIterator[None]:
     """Hold `key`'s lock. The count is taken before the wait and given back
     after the release, synchronously both times, so a lock is never dropped
     while a reader waits on it: a reader that came later would make a second
@@ -121,7 +136,7 @@ def _ga4_slots() -> asyncio.Semaphore:
     return _slots[1]
 
 
-def _fresh(key: Tuple[date, date], clock: Callable[[], float]) -> Optional[Dict[str, Any]]:
+def _fresh(key: _Key, clock: Callable[[], float]) -> Optional[Dict[str, Any]]:
     """The cached answer for `key` while it is fresh, else None. Synchronous,
     so it needs no lock: nothing can interleave with it on the event loop."""
     cached = _cache.get(key)
@@ -129,14 +144,6 @@ def _fresh(key: Tuple[date, date], clock: Callable[[], float]) -> Optional[Dict[
         _cache.move_to_end(key)
         return {**cached["payload"], "stale": False, "fetched_at": cached["fetched_at"]}
     return None
-
-
-def channel_type(channel: str) -> str:
-    if channel in COLD:
-        return "cold"
-    if channel in WARM:
-        return "warm"
-    return "other"
 
 
 def previous_window(start: date, end: date) -> Tuple[date, date]:
@@ -152,17 +159,6 @@ def year_ago(day: date) -> date:
         return day.replace(year=day.year - 1)
     except ValueError:
         return day.replace(year=day.year - 1, day=28)
-
-
-def earliest_day(today: date) -> date:
-    """The first day GA4 still holds funnel data for: the same date 14 months back.
-
-    Measured on 2026-11-04: one funnel per day came back from 2025-09-04 on, and
-    empty for the 1st to the 3rd. The retention rolls by the day, not the month.
-    """
-    months = today.year * 12 + (today.month - 1) - RETENTION_MONTHS
-    year, month = months // 12, months % 12 + 1
-    return date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
 
 
 def asked_window(start: date, end: date, today: date) -> Optional[Tuple[date, date]]:
@@ -225,7 +221,13 @@ def assemble(
     }
 
 
-async def _ask(start: date, end: date, client: httpx.AsyncClient, today: date) -> Dict[str, Any]:
+async def _ask(
+    start: date,
+    end: date,
+    client: httpx.AsyncClient,
+    today: date,
+    countries: Optional[Tuple[str, ...]] = None,
+) -> Dict[str, Any]:
     prev = previous_window(start, end)
     windows = {"current": (start, end), "previous": prev, "year_ago": (year_ago(start), year_ago(end))}
     names = list(windows)
@@ -241,7 +243,7 @@ async def _ask(start: date, end: date, client: httpx.AsyncClient, today: date) -
 
         async def one(s: date, e: date, breakdown: str) -> Dict[str, Dict[str, int]]:
             async with slots:
-                return await ga4.run_funnel(client, token, s, e, breakdown)
+                return await ga4.run_funnel(client, token, s, e, breakdown, countries=countries)
 
         answers = list(await asyncio.gather(*(
             one(s, e, breakdown) for _, s, e, breakdown in plan
@@ -257,17 +259,22 @@ async def get_funnel(
     start: date,
     end: date,
     *,
+    scope: str = DEFAULT_SCOPE,
     client: Optional[httpx.AsyncClient] = None,
     clock: Callable[[], float] = time.monotonic,
     today: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """The funnel for ``start..end`` with ``stale`` and ``fetched_at``.
+    """The funnel for ``start..end`` in ``scope``, with ``stale`` and ``fetched_at``.
 
     Fresh within ``TTL_S``; otherwise asked again. If asking fails and an
     earlier answer for the period exists, it comes back with ``stale: true``.
-    Only with no earlier answer does it raise ``ga4.GA4Unavailable``.
+    Only with no earlier answer does it raise ``ga4.GA4Unavailable``. A scope
+    not in ``SCOPES`` is a ``ValueError``: the route refuses it first.
     """
-    key = (start, end)
+    if scope not in SCOPES:
+        raise ValueError(f"unknown funnel scope: {scope!r}")
+    countries = SCOPES[scope]
+    key = (start, end, scope)
     day = today or datetime.now(_KYIV_TZ).date()
     hit = _fresh(key, clock)
     if hit is not None:
@@ -281,10 +288,11 @@ async def get_funnel(
         cached = _cache.get(key)
         try:
             if client is not None:
-                payload = await _ask(start, end, client, day)
+                payload = await _ask(start, end, client, day, countries)
             else:
                 async with httpx.AsyncClient() as own:
-                    payload = await _ask(start, end, own, day)
+                    payload = await _ask(start, end, own, day, countries)
+            payload = {**payload, "country": scope}
         except ga4.GA4Unavailable:
             if cached is not None:
                 return {**cached["payload"], "stale": True, "fetched_at": cached["fetched_at"]}

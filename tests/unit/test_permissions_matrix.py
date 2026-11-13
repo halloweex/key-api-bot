@@ -15,7 +15,6 @@ from core.permissions import (
     Feature,
     ROLE_PERMISSIONS,
     Role,
-    can,
     get_all_features,
     get_all_roles,
     get_permissions_for_role,
@@ -50,12 +49,12 @@ class TestSmsIsAnAreaAndAnAction:
     def test_the_matrix_is_depth_only(self, level):
         """Every level may *view* every feature it is asked about — the matrix
         no longer decides areas, so it cannot say "not for you" about one."""
-        assert can(level, Feature.SMS, "view")
+        assert "view" in ROLE_PERMISSIONS[level][Feature.SMS]
 
     def test_only_editor_and_above_may_send(self):
-        assert not can(Role.VIEWER, Feature.SMS, "edit")
-        assert can(Role.EDITOR, Feature.SMS, "edit")
-        assert can(Role.ADMIN, Feature.SMS, "edit")
+        assert "edit" not in ROLE_PERMISSIONS[Role.VIEWER][Feature.SMS]
+        assert "edit" in ROLE_PERMISSIONS[Role.EDITOR][Feature.SMS]
+        assert "edit" in ROLE_PERMISSIONS[Role.ADMIN][Feature.SMS]
 
     def test_the_area_is_what_actually_opens_the_page(self):
         """A level alone opens nothing: without the tab the page is closed,
@@ -93,4 +92,4 @@ class TestSmsIsAnAreaAndAnAction:
     def test_no_level_below_admin_manages_users(self):
         for level in (Role.VIEWER, Role.EDITOR):
             for action in Action:
-                assert not can(level, Feature.USER_MANAGEMENT, action)
+                assert action not in ROLE_PERMISSIONS[level][Feature.USER_MANAGEMENT]

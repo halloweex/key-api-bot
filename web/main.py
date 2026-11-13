@@ -177,9 +177,6 @@ app.include_router(pages.router)  # SPA catch-all must be last
 async def startup_event():
     logger.info("KoreanStory Dashboard starting...")
 
-    # Log sync mode for visibility
-    from core.config import config as app_config
-
     # A half-enabled read switch was the same trap as a typo in it: the flag
     # said postgres, the missing DSN quietly served the old store. It was
     # checked here for KS_READ_GOLD alone, then by `configure_modes()` for
@@ -223,8 +220,6 @@ async def startup_event():
         store = await get_store()
         logger.warning("Serving with the boot sync failed — the scheduler "
                        "retries the order step")
-
-    # Migrate users from SQLite to DuckDB (one-time, idempotent)
 
     # ── One historical campaign, restored by hand ────────────────────────
     # `aug-promo-birthday-website` was sent on 2026-08-05, before the columns

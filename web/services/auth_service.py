@@ -9,7 +9,7 @@ import time
 import json
 import logging
 from urllib.parse import parse_qs
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 from bot.config import BOT_TOKEN
 from bot.database import is_user_authorized, get_user_auth_status

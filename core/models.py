@@ -22,44 +22,6 @@ class SourceId(IntEnum):
     OPENCART = 3  # Deprecated, not used
     SHOPIFY = 4
 
-    @classmethod
-    def active_sources(cls) -> List["SourceId"]:
-        """Get list of active sources (excluding deprecated)."""
-        return [cls.INSTAGRAM, cls.TELEGRAM, cls.SHOPIFY]
-
-    @property
-    def display_name(self) -> str:
-        """Human-readable source name."""
-        names = {
-            self.INSTAGRAM: "Instagram",
-            self.TELEGRAM: "Telegram",
-            self.OPENCART: "Opencart",
-            self.SHOPIFY: "Shopify",
-        }
-        return names.get(self, f"Source {self.value}")
-
-    @property
-    def emoji(self) -> str:
-        """Emoji for this source."""
-        emojis = {
-            self.INSTAGRAM: "📸",
-            self.TELEGRAM: "✈️",
-            self.OPENCART: "🌐",
-            self.SHOPIFY: "🛍️",
-        }
-        return emojis.get(self, "📦")
-
-    @property
-    def color(self) -> str:
-        """Chart color for this source."""
-        colors = {
-            self.INSTAGRAM: "#7C3AED",  # Purple
-            self.TELEGRAM: "#2563EB",   # Blue
-            self.OPENCART: "#F59E0B",   # Orange
-            self.SHOPIFY: "#eb4200",    # Orange-red
-        }
-        return colors.get(self, "#999999")
-
 
 # KeyCRM groups every order status. Group 6 is the lost/cancel group, and it
 # is the only one excluded from revenue. Verified against the API on
@@ -256,17 +218,6 @@ class Buyer:
             updated_at=updated_at,
         )
 
-    @property
-    def display_name(self) -> str:
-        """Get buyer's display name."""
-        return self.full_name or "Unknown"
-
-    def is_returning(self, period_start: datetime) -> bool:
-        """Check if buyer existed before the given period start."""
-        if not self.created_at:
-            return False
-        return self.created_at < period_start
-
 
 @dataclass
 class Manager:
@@ -309,7 +260,6 @@ class OrderProduct:
     quantity: int
     price_sold: float
     offer: Optional[ProductOffer] = None
-    line_item_id: Optional[int] = None  # API-provided line item ID
 
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> "OrderProduct":
@@ -319,7 +269,6 @@ class OrderProduct:
             quantity=int(data.get("quantity", 1)),
             price_sold=float(data.get("price_sold", 0)),
             offer=ProductOffer.from_api(data.get("offer")),
-            line_item_id=data.get("id"),  # Use API id to avoid synthetic collision
         )
 
     @property
@@ -442,129 +391,3 @@ class Order:
         if not self.manager:
             return False
         return str(self.manager.id) in manager_ids
-
-
-@dataclass
-class Product:
-    """Product from KeyCRM catalog."""
-    id: int
-    name: str
-    category_id: Optional[int] = None
-    brand: Optional[str] = None
-    sku: Optional[str] = None
-    price: Optional[float] = None
-
-    @classmethod
-    def from_api(cls, data: Dict[str, Any]) -> "Product":
-        """Create Product from KeyCRM API response."""
-        # Extract brand from custom_fields if present
-        brand = None
-        custom_fields = data.get("custom_fields", [])
-        if isinstance(custom_fields, list):
-            for cf in custom_fields:
-                if cf.get("name") == "Brand" or cf.get("uuid") == "CT_1001":
-                    values = cf.get("value", [])
-                    if values and isinstance(values, list):
-                        brand = values[0]
-                    break
-
-        return cls(
-            id=data.get("id", 0),
-            name=data.get("name", "Unknown"),
-            category_id=data.get("category_id"),
-            brand=brand,
-            sku=data.get("sku"),
-            price=float(data.get("price", 0)) if data.get("price") else None,
-        )
-
-
-@dataclass
-class Category:
-    """Product category from KeyCRM."""
-    id: int
-    name: str
-    parent_id: Optional[int] = None
-
-    @classmethod
-    def from_api(cls, data: Dict[str, Any]) -> "Category":
-        """Create Category from KeyCRM API response."""
-        return cls(
-            id=data.get("id", 0),
-            name=data.get("name", "Unknown"),
-            parent_id=data.get("parent_id"),
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# AGGREGATION RESULTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class SalesSourceData:
-    """Aggregated sales data for a single source."""
-    source_id: int
-    name: str
-    orders: int
-    revenue: float
-    color: str
-
-    @classmethod
-    def from_source(cls, source: SourceId, orders: int, revenue: float) -> "SalesSourceData":
-        """Create from SourceId enum."""
-        return cls(
-            source_id=source.value,
-            name=source.display_name,
-            orders=orders,
-            revenue=round(revenue, 2),
-            color=source.color,
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dict for JSON serialization."""
-        return {
-            "source_id": self.source_id,
-            "name": self.name,
-            "orders": self.orders,
-            "revenue": self.revenue,
-            "color": self.color,
-        }
-
-
-@dataclass
-class TopProduct:
-    """Product in top products list."""
-    name: str
-    quantity: int
-    revenue: float
-    percentage: float = 0.0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dict for JSON serialization."""
-        return {
-            "name": self.name,
-            "quantity": self.quantity,
-            "revenue": round(self.revenue, 2),
-            "percentage": round(self.percentage, 1),
-        }
-
-
-@dataclass
-class SummaryStats:
-    """Summary statistics for a period."""
-    total_orders: int
-    total_revenue: float
-    avg_check: float
-    returns_count: int
-    returns_revenue: float
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dict for JSON serialization."""
-        return {
-            "total_orders": self.total_orders,
-            "total_revenue": round(self.total_revenue, 2),
-            "avg_check": round(self.avg_check, 2),
-            "returns_count": self.returns_count,
-            "returns_revenue": round(self.returns_revenue, 2),
-        }
-
-

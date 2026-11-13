@@ -12,10 +12,6 @@ DB_DIR = DATA_DIR
 DB_PATH = DB_DIR / "analytics.duckdb"
 DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 
-# Query timeout settings
-DEFAULT_QUERY_TIMEOUT = 30.0  # seconds
-LONG_QUERY_TIMEOUT = 120.0   # for sync operations
-
 # B2B (wholesale) manager ID - Olga D
 B2B_MANAGER_ID = 15
 

@@ -20,7 +20,7 @@ import httpx
 from core.exceptions import (
     KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError, KeyCRMTruncated,
 )
-from core.models import Order, Product, Buyer
+from core.models import Buyer
 from core.observability import get_logger, get_correlation_id, Timer
 from core.resilience import (
     CircuitBreaker,
@@ -207,7 +207,7 @@ class KeyCRMClient:
                 await _circuit_breaker.record_failure()
             raise
 
-        except KeyCRMConnectionError as e:
+        except KeyCRMConnectionError:
             await _circuit_breaker.record_failure()
             raise
 
@@ -231,7 +231,7 @@ class KeyCRMClient:
             request_headers["X-Request-ID"] = correlation_id
 
         try:
-            with Timer(f"keycrm_{endpoint}", logger) as timer:
+            with Timer(f"keycrm_{endpoint}", logger):
                 response = await self._client.request(
                     method=method,
                     url=url,

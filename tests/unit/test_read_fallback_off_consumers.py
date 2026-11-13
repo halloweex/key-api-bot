@@ -431,7 +431,7 @@ class TestAssistant:
         answer = await service.chat(conv_id, "how was the week?", user_id=1)
 
         assert answer["content"] == "Those numbers are unavailable."
-        results = [block for m in service.get_conversation(conv_id).messages
+        results = [block for m in service.resolve_owned(conv_id, 1).messages
                    if isinstance(m["content"], list)
                    for block in m["content"] if block.get("type") == "tool_result"]
         assert len(results) == 1

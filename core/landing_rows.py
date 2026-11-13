@@ -416,10 +416,10 @@ def expense_rows(orders_with_expenses: List[Dict[str, Any]]) -> List[ExpenseRow]
 # line-item id — and that is what moves here, for the same reason the catalogue
 # did: two stores, one rule.
 
-# A line item's id is `order_id * STRIDE + position`. KeyCRM does supply its own
-# `id` per line (`OrderProduct.line_item_id`), and this deliberately does not use
-# it: the stored ids would change under every existing row and nothing in the
-# warehouse could tell an id change from a data change.
+# A line item's id is `order_id * STRIDE + position`. KeyCRM does serve its own
+# `id` on each line, and this deliberately does not use it: the stored ids
+# would change under every existing row and nothing in the warehouse could
+# tell an id change from a data change.
 #
 # The stride bounds two things at once — products per order, and how far order
 # ids can grow before the arithmetic collides. Measured on production
@@ -615,7 +615,6 @@ class ContactRow(NamedTuple):
 
 
 BUYER_COLUMNS = BuyerRow._fields
-CONTACT_COLUMNS = ContactRow._fields
 
 # `core.models.Buyer.from_api` already writes this for a missing or empty name;
 # it is the one spelling a nameless buyer has in either store.
@@ -829,9 +828,6 @@ class ManagerRow(NamedTuple):
     email: Any
     status: Any
     is_retail: bool
-
-
-MANAGER_ROW_COLUMNS = ManagerRow._fields
 
 
 def manager_row(payload: Dict[str, Any]) -> ManagerRow:

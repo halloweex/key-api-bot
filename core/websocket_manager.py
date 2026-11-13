@@ -54,7 +54,6 @@ class ConnectionInfo:
     room: str
     connected_at: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)
-    message_count: int = 0
     # Which tabs the viewer on the other end may open, resolved once at the
     # handshake. `None` means "not scoped" — an admin socket, or a caller the
     # route did not resolve — and receives everything the room gets.
@@ -240,29 +239,6 @@ class ConnectionManager:
 
         return sent_count
 
-    async def broadcast_all(
-        self, event: WebSocketEvent | str, data: Dict[str, Any]
-    ) -> int:
-        """
-        Broadcast a message to all connected clients across all rooms.
-
-        Args:
-            event: Event type
-            data: Event payload
-
-        Returns:
-            Total number of connections that received the message
-        """
-        async with self._lock:
-            rooms = list(self._rooms.keys())
-
-        total_sent = 0
-        for room in rooms:
-            sent = await self.broadcast(room, event, data)
-            total_sent += sent
-
-        return total_sent
-
     async def _send_to_connection(
         self, conn: ConnectionInfo, event: str | WebSocketEvent, data: Dict[str, Any]
     ) -> bool:
@@ -293,7 +269,6 @@ class ConnectionManager:
         try:
             await conn.websocket.send_text(message)
             conn.last_activity = datetime.now()
-            conn.message_count += 1
             return True
         except Exception as e:
             logger.debug(f"Failed to send message: {e}")
@@ -358,11 +333,6 @@ class ConnectionManager:
         """Total number of connections ever made."""
         return self._total_connections
 
-    @property
-    def total_messages_sent(self) -> int:
-        """Total number of messages sent."""
-        return self._total_messages_sent
-
     def get_stats(self) -> Dict[str, Any]:
         """
         Get connection statistics.
@@ -385,39 +355,6 @@ class ConnectionManager:
             "total_messages_sent": self._total_messages_sent,
             "rooms": rooms_info,
         }
-
-    async def cleanup_stale_connections(self, max_idle_seconds: int = 300) -> int:
-        """
-        Remove connections that have been idle too long.
-
-        Args:
-            max_idle_seconds: Max seconds of inactivity before cleanup
-
-        Returns:
-            Number of connections removed
-        """
-        now = datetime.now()
-        stale_connections = []
-
-        async with self._lock:
-            for room, connections in self._rooms.items():
-                for conn in connections.values():
-                    idle_seconds = (now - conn.last_activity).total_seconds()
-                    if idle_seconds > max_idle_seconds:
-                        stale_connections.append(conn)
-
-        # Disconnect stale connections outside the lock
-        for conn in stale_connections:
-            try:
-                await conn.websocket.close()
-            except Exception:
-                pass
-            await self.disconnect(conn)
-
-        if stale_connections:
-            logger.info(f"Cleaned up {len(stale_connections)} stale connections")
-
-        return len(stale_connections)
 
 
 # Global manager instance

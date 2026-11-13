@@ -21,7 +21,6 @@ import asyncio
 import functools
 import os
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Sequence
 from dataclasses import dataclass
@@ -261,7 +260,6 @@ def weekly_report_rich_enabled() -> bool:
 
 class JobStatus(Enum):
     """Job execution status."""
-    PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
@@ -290,7 +288,6 @@ class JobInfo:
     next_run: Optional[datetime] = None
     last_run: Optional[datetime] = None
     last_status: Optional[JobStatus] = None
-    last_duration_ms: Optional[float] = None
     run_count: int = 0
     error_count: int = 0
     last_error: Optional[str] = None
@@ -541,9 +538,6 @@ class BackgroundScheduler:
 
     async def _register_jobs(self) -> None:
         """Register all background jobs."""
-        # Import here to avoid circular imports
-        from core.sync_service import get_sync_service
-        from core.store import get_store
 
         # Job: Incremental sync (every 60 seconds)
         self._add_job(
@@ -895,6 +889,25 @@ class BackgroundScheduler:
         # `reconciliation_log` keeps its history, in DuckDB and Postgres alike;
         # nothing writes it any more.
 
+        # Job: the GA4 funnel capture (daily, 02:40 Kyiv), revision 0036.
+        #
+        # GA4 drops a funnel's events after fourteen months. This keeps each
+        # closed day, week and month in `app.ga4_funnel`, oldest first, at
+        # most 24 periods a run and an hour (`core/ga4_capture.py`, which
+        # states the quota arithmetic). 02:40 is clear of the 01/07/13/19
+        # checks, 05:00-05:50, 07:20-07:45, 08:55-09:55 and the 03:00-04:00
+        # DST hour. It is also night, when nobody on /traffic spends the same
+        # hourly GA4 quota. It stands down without a GA4 key.
+        self._add_job(
+            job_id="ga4_capture",
+            name="GA4 funnel capture",
+            description="Keep each closed period's GA4 funnel before the 14-month horizon drops it",
+            func=self._run_ga4_capture,
+            trigger=CronTrigger(hour=2, minute=40),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Memory monitor (every 30 minutes)
         # Reads cgroup memory stats and alerts admin via Telegram
         # when usage crosses warning/critical thresholds
@@ -1049,7 +1062,7 @@ class BackgroundScheduler:
         try:
             async with self._heavy_job_lock:
                 sync_service.orders_step.done_waiting()
-                with correlation_context() as corr_id:
+                with correlation_context():
                     logger.debug("Starting incremental sync job")
 
                     stats = await sync_service.incremental_sync()
@@ -1065,7 +1078,7 @@ class BackgroundScheduler:
     async def _run_full_sync(self) -> Dict[str, Any]:
         """Run full sync job (90 days)."""
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.info("Starting weekly full sync job")
 
                 from core.sync_service import get_sync_service
@@ -1080,7 +1093,7 @@ class BackgroundScheduler:
 
     async def _run_inventory_snapshot(self) -> Dict[str, Any]:
         """Run inventory snapshot job."""
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info("Starting inventory snapshot job")
 
             from core.store import get_store
@@ -1167,9 +1180,22 @@ class BackgroundScheduler:
                 logger.info("ClickHouse sync: %s", result)
             return result
 
+    async def _run_ga4_capture(self) -> Dict[str, Any]:
+        """The GA4 funnel of each closed period, kept before GA4 drops it.
+
+        Never raises, as `_run_ch_sync` does not: a GA4 or Postgres fault is
+        the capture's stamp and its result's `error`, not the failure history
+        the scheduler shares with the sync. No heavy lock: it reads GA4 and
+        writes only `app.ga4_funnel`.
+        """
+        from core.ga4_capture import run_capture
+
+        with correlation_context():
+            return await run_capture()
+
     async def _run_manager_stats(self) -> Dict[str, Any]:
         """Run manager stats update job."""
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info("Starting manager stats job")
 
             from core.store import get_store
@@ -1186,7 +1212,7 @@ class BackgroundScheduler:
     async def _run_revenue_prediction(self) -> Dict[str, Any]:
         """Train revenue prediction model and generate forecasts."""
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.info("Starting revenue prediction training job")
 
                 from core import read_fallback
@@ -1213,7 +1239,7 @@ class BackgroundScheduler:
 
     async def _run_seasonality_calc(self) -> Dict[str, Any]:
         """Run seasonality calculation job."""
-        with correlation_context() as corr_id:
+        with correlation_context():
             logger.info("Starting seasonality calculation job")
 
             from core.store import get_store
@@ -1270,7 +1296,7 @@ class BackgroundScheduler:
         status change is captured.
         """
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.info("Starting order status refresh job")
 
                 from core.sync_service import get_sync_service
@@ -1286,7 +1312,7 @@ class BackgroundScheduler:
     async def _run_meilisearch_sync(self) -> Dict[str, Any]:
         """Sync data to Meilisearch for chat search."""
         async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
+            with correlation_context():
                 logger.debug("Starting Meilisearch sync job")
 
                 from core.sync_service import get_sync_service
@@ -1741,7 +1767,7 @@ class BackgroundScheduler:
             overall_severity,
         )
 
-        with correlation_context() as corr_id:
+        with correlation_context():
             started_at = datetime.now(timezone.utc)
             logger.info("DQ Layer-1 integrity scan starting")
 
@@ -1852,7 +1878,23 @@ class BackgroundScheduler:
                     (), f"{type(e).__name__}: {e}")
             chain_issues = pg_chain_invariants.judge(chain_facts)
             chain_unverified = pg_chain_invariants.unverified_conditions(chain_issues)
-            issues = issues + pg_issues + chain_issues
+
+            # The analysts' captures (revision 0036): their stamps, judged
+            # here beside the chains' invariants and for their reason. WARN
+            # at most — owner decision D8 (b): digested, never a page — so
+            # nothing below pages on them nor builds a page with them, and a
+            # blind read or the switch off holds them through its finding's
+            # `unverified`.
+            from core import analytics_captures
+
+            try:
+                capture_facts = await analytics_captures.read_facts()
+            except Exception as e:  # noqa: BLE001 — it promises not to; if it does, it is blindness
+                logger.exception("capture stamps' read raised")
+                capture_facts = analytics_captures.Facts(
+                    unwatched=f"{type(e).__name__}: {e}")
+            capture_issues = analytics_captures.judge(capture_facts)
+            issues = issues + pg_issues + chain_issues + capture_issues
 
             # A run in which the twins and the chain invariants could look at
             # nothing is journalled failed (O10 (a), 2026-11-11), the way the
@@ -1890,18 +1932,24 @@ class BackgroundScheduler:
             # pages: they did look, and their verdict does not depend on it.
             pg_critical = any(i.severity == Severity.CRITICAL for i in pg_issues)
             chain_critical = any(i.severity == Severity.CRITICAL for i in chain_issues)
+            # The page is built without the captures' findings (D8 (b): they
+            # are journalled and digested, never paged). Riding along they
+            # would enter its bullets and its Gate bucket, and a capture
+            # stamping between two runs would deliver a standing CRITICAL
+            # again as a new incident.
+            paged = [i for i in issues if not analytics_captures.is_capture_finding(i)]
             if sev == Severity.CRITICAL and (
                     not error_message or pg_critical or chain_critical):
                 msg = format_alert_message(
-                    "integrity", sev, issues, [],
+                    "integrity", sev, paged, [],
                     machine_note=machine_attempts_note(),
                 )
                 await self._send_dq_alert_throttled(
                     "integrity", msg,
-                    alert_fingerprint("integrity", sev, issues, []),
-                    conditions=[i.check_name for i in issues
+                    alert_fingerprint("integrity", sev, paged, []),
+                    conditions=[i.check_name for i in paged
                                 if i.severity == Severity.CRITICAL],
-                    evidence=evidence_for_agent("integrity", issues, run_id=run_id),
+                    evidence=evidence_for_agent("integrity", paged, run_id=run_id),
                 )
             from core.data_quality import unverified_conditions
 
@@ -2307,7 +2355,7 @@ class BackgroundScheduler:
         )
         from core import watchdog_samples
 
-        with correlation_context() as corr_id:
+        with correlation_context():
             # The DuckDB file itself: its size is the sample's `db_size_mb`,
             # 0 since the final stage deleted it (2026-11-12). It sat in the
             # data directory, `core.paths.DATA_DIR`, where everything below is
@@ -2934,7 +2982,7 @@ class BackgroundScheduler:
         # dying on 429s. `POST /api/reconcile?days=N` widens it on demand.
         WINDOW_DAYS = max(1, int(window_days))
 
-        with correlation_context() as corr_id:
+        with correlation_context():
             started_at = datetime.now(timezone.utc)
             kyiv_now = started_at.astimezone(ZoneInfo("Europe/Kyiv"))
             as_of = started_at - timedelta(hours=WATERMARK_HOURS)
@@ -4044,6 +4092,5 @@ async def start_scheduler() -> BackgroundScheduler:
 
 def stop_scheduler() -> None:
     """Stop the background scheduler."""
-    global _scheduler
     if _scheduler:
         _scheduler.shutdown()

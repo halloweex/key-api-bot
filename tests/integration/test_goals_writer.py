@@ -33,6 +33,7 @@ went with the copy-back in S14-04.
 from __future__ import annotations
 
 import os
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -367,7 +368,8 @@ class TestTheReadsFollowTheChain:
         await self._flip_after_a_shipped_goal(store, env)
         env.setenv("KS_READ_MARKETING", "duckdb")
 
-        report = await store.get_marketing_report(2026, 8)
+        report = await store.get_marketing_report_by_dates(
+            date(2026, 8, 1), date(2026, 8, 31))
 
         assert report["general_sales"]["monthly_goal"] == self.TYPED
 
@@ -424,7 +426,8 @@ class TestTheReadsFollowTheChain:
 
         with patch.object(pg_marketing_read, "fetch", new=goals_table_down):
             with pytest.raises(read_fallback.ReadUnavailable) as raised:
-                await store.get_marketing_report(2026, 8)
+                await store.get_marketing_report_by_dates(
+                    date(2026, 8, 1), date(2026, 8, 31))
         assert raised.value.surface == "marketing"
         assert isinstance(raised.value.__cause__, ConnectionError)
         assert read_fallback.refusals()["marketing"]["count"] == 1

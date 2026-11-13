@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { useMemo } from 'react'
 import { useRouter } from '../hooks/useRouter'
 import { filtersForPath } from '../utils/pageFilters'
-import type { FilterStore, Period, SalesType } from '../types/filters'
+import type { FilterStore, FunnelCountry, Period, SalesType } from '../types/filters'
 
 const initialState = {
   period: 'month' as Period,
@@ -13,6 +13,8 @@ const initialState = {
   categoryId: null,
   brand: null,
   promocode: null,
+  // Visits from abroad are mostly bots, so the funnel opens on Ukraine.
+  funnelCountry: 'ua' as FunnelCountry,
 }
 
 export const useFilterStore = create<FilterStore>((set) => ({
@@ -38,6 +40,9 @@ export const useFilterStore = create<FilterStore>((set) => ({
 
   setPromocode: (promocode: string | null) =>
     set({ promocode }),
+
+  setFunnelCountry: (funnelCountry: FunnelCountry) =>
+    set({ funnelCountry }),
 
   resetFilters: () =>
     set(initialState),

@@ -41,6 +41,16 @@ import re
 from typing import Any, Callable, Dict, Optional, Tuple
 
 
+# The name of the rules below, written beside every verdict the analysts'
+# verdict log keeps (`app.order_channel_verdicts`, `core/pg_utm_parse.py`), so a
+# verdict decided by one set of rules is never read as another's. It moves
+# with the golden: `tests/unit/test_capture_verdicts.py` pins each version to a
+# hash of `tests/unit/test_utm_classify_golden.py`'s frozen tuples, so a rule
+# change that edits a tuple fails there until this names a new version
+# ("r2", …) and its hash is added beside the old ones.
+RULE_VERSION = "r1"
+
+
 # A pair value runs until a semicolon, newline, or the next ", key:" pair
 # (comma-separated lists), so one malformed separator can't swallow the
 # remaining pairs into a single corrupted value.

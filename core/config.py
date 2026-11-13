@@ -33,9 +33,7 @@ class APIConfig:
     base_url: str = "https://openapi.keycrm.app/v1"
     key: str = field(default_factory=lambda: os.getenv("KEYCRM_API_KEY", ""))
     page_limit: int = 50
-    request_timeout: int = 30
     rate_limit_delay: float = 0.3
-    order_sync_buffer_hours: int = 24
 
 
 @dataclass(frozen=True)
@@ -76,10 +74,6 @@ class WebConfig:
     host: str = "0.0.0.0"
     port: int = 8080
 
-    # Rate limiting
-    rate_limit_per_minute: int = 30
-    rate_limit_burst: int = 10
-
 
 @dataclass(frozen=True)
 class MeilisearchConfig:
@@ -100,9 +94,6 @@ class ChatConfig:
     anthropic_api_key: str = field(
         default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "")
     )
-    # Rate limiting
-    rate_limit_per_minute: int = 10
-    max_tokens_per_response: int = 1000
     # Model
     model: str = "claude-sonnet-4-20250514"
 
@@ -120,45 +111,9 @@ class SourceConfig:
         5: "Виставка",
     })
 
-    # Emojis for each source
-    emojis: Dict[int, str] = field(default_factory=lambda: {
-        1: "📸",
-        2: "✈️",
-        3: "🌐",
-        4: "🛍️",
-        5: "🎪",
-    })
-
-    # Colors for charts
-    colors: Dict[int, str] = field(default_factory=lambda: {
-        1: "#7C3AED",  # Instagram - purple
-        2: "#2563EB",  # Telegram - blue
-        3: "#F59E0B",  # Opencart - orange
-        4: "#eb4200",  # Shopify - orange-red
-        5: "#0D9488",  # Виставка - teal
-    })
-
-    # Sources included in dashboard visualizations (excludes deprecated Opencart)
-    dashboard_sources: List[int] = field(default_factory=lambda: [1, 2, 4, 5])
-
-    # Sources available for TOP-10 reports
-    top10_sources: List[tuple] = field(default_factory=lambda: [
-        (1, "Instagram", "📸"),
-        (4, "Shopify", "🛍️"),
-        (2, "Telegram", "✈️"),
-    ])
-
     def get_name(self, source_id: int, default: str = "Unknown") -> str:
         """Get source name by ID."""
         return self.mapping.get(source_id, default)
-
-    def get_emoji(self, source_id: int, default: str = "") -> str:
-        """Get source emoji by ID."""
-        return self.emojis.get(source_id, default)
-
-    def get_color(self, source_id: int, default: str = "#999999") -> str:
-        """Get source color by ID."""
-        return self.colors.get(source_id, default)
 
 
 @dataclass(frozen=True)
@@ -178,28 +133,6 @@ class OrderConfig:
 
 
 @dataclass(frozen=True)
-class MilestoneConfig:
-    """Revenue milestone configuration for celebrations."""
-
-    milestones: Dict[str, List[Dict]] = field(default_factory=lambda: {
-        "daily": [
-            {"amount": 300000, "message": "300K Daily Revenue!", "emoji": "🎉"},
-        ],
-        "weekly": [
-            {"amount": 1000000, "message": "1 MILLION Weekly!", "emoji": "🚀🎆"},
-            {"amount": 2000000, "message": "2 MILLION Weekly!", "emoji": "💎🎇"},
-        ],
-        "monthly": [
-            {"amount": 10000000, "message": "10 MILLION Monthly!", "emoji": "👑🎇🎆"},
-        ],
-    })
-
-    def get_milestones(self, period_type: str) -> List[Dict]:
-        """Get milestones for a period type."""
-        return self.milestones.get(period_type, [])
-
-
-@dataclass(frozen=True)
 class AppConfig:
     """Main application configuration."""
 
@@ -209,7 +142,6 @@ class AppConfig:
     web: WebConfig = field(default_factory=WebConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
     orders: OrderConfig = field(default_factory=OrderConfig)
-    milestones: MilestoneConfig = field(default_factory=MilestoneConfig)
     meilisearch: MeilisearchConfig = field(default_factory=MeilisearchConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
 

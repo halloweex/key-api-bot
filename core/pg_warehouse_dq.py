@@ -543,10 +543,6 @@ UNWATCHED_NAMES: Dict[str, str] = {
 WHOLE_UNWATCHED = "pg_warehouse_unwatched"
 
 
-def all_conditions() -> FrozenSet[str]:
-    return frozenset(c for cs in GUARD_CONDITIONS.values() for c in cs)
-
-
 # ─── Reading ──────────────────────────────────────────────────────────────────
 
 _WATERMARK_SQL = """

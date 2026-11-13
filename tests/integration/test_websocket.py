@@ -11,7 +11,6 @@ Tests:
 import asyncio
 import json
 import pytest
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import WebSocket
@@ -160,29 +159,6 @@ class TestConnectionManager:
         assert manager.connection_count("dashboard") == 1
 
     @pytest.mark.asyncio
-    async def test_broadcast_all_sends_to_all_rooms(self, manager):
-        """Test that broadcast_all() sends to all rooms."""
-        ws1 = AsyncMock(spec=WebSocket)
-        ws1.accept = AsyncMock()
-        ws1.send_text = AsyncMock()
-
-        ws2 = AsyncMock(spec=WebSocket)
-        ws2.accept = AsyncMock()
-        ws2.send_text = AsyncMock()
-
-        await manager.connect(ws1, room="dashboard")
-        await manager.connect(ws2, room="admin")
-
-        ws1.send_text.reset_mock()
-        ws2.send_text.reset_mock()
-
-        total_sent = await manager.broadcast_all("global_event", {"global": True})
-
-        assert total_sent == 2
-        ws1.send_text.assert_called_once()
-        ws2.send_text.assert_called_once()
-
-    @pytest.mark.asyncio
     async def test_handle_ping_message(self, manager, mock_websocket):
         """Test that ping messages are handled with pong response."""
         conn_info = await manager.connect(mock_websocket, room="dashboard")
@@ -241,24 +217,6 @@ class TestConnectionManager:
         assert "dashboard" in stats["rooms"]
         assert stats["rooms"]["dashboard"]["count"] == 1
 
-    @pytest.mark.asyncio
-    async def test_cleanup_stale_connections(self, manager):
-        """Test cleanup of stale connections."""
-        ws = AsyncMock(spec=WebSocket)
-        ws.accept = AsyncMock()
-        ws.send_text = AsyncMock()
-        ws.close = AsyncMock()
-
-        conn_info = await manager.connect(ws, room="dashboard")
-
-        # Artificially age the connection
-        conn_info.last_activity = datetime(2020, 1, 1)
-
-        removed = await manager.cleanup_stale_connections(max_idle_seconds=60)
-
-        assert removed == 1
-        assert manager.connection_count("dashboard") == 0
-
 
 class TestWebSocketEvents:
     """Tests for WebSocket event types."""
@@ -283,7 +241,6 @@ class TestConnectionInfo:
         assert info.id == 1
         assert info.websocket == ws
         assert info.room == "test"
-        assert info.message_count == 0
         assert info.connected_at is not None
         assert info.last_activity is not None
 

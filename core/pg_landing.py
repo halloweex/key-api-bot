@@ -100,6 +100,22 @@ async def _write_rows(conn, table: str, columns: Sequence[str],
     await conn.execute(_WATERMARK_OK, table, len(rows))
 
 
+# The statement `_record_failure` runs, public for the analysts' captures
+# (`core/analytics_captures.py`), which stamp a failure on the connection they
+# already hold — inside the writer's transaction, where acquiring a second
+# connection could wait on a full pool. One text, so `failures_since_ok`
+# counts the same way for every row.
+RECORD_FAILURE_SQL = """
+                INSERT INTO meta.mirror_state
+                       (table_name, last_attempted_at, failures_since_ok, last_error)
+                VALUES ($1, now(), 1, $2)
+                ON CONFLICT (table_name) DO UPDATE SET
+                    last_attempted_at = now(),
+                    failures_since_ok = meta.mirror_state.failures_since_ok + 1,
+                    last_error        = EXCLUDED.last_error
+                """
+
+
 async def _record_failure(table: str, error: str) -> bool:
     """Best effort: say in Postgres that the mirror failed.
 
@@ -118,18 +134,7 @@ async def _record_failure(table: str, error: str) -> bool:
 
         pool = await get_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO meta.mirror_state
-                       (table_name, last_attempted_at, failures_since_ok, last_error)
-                VALUES ($1, now(), 1, $2)
-                ON CONFLICT (table_name) DO UPDATE SET
-                    last_attempted_at = now(),
-                    failures_since_ok = meta.mirror_state.failures_since_ok + 1,
-                    last_error        = EXCLUDED.last_error
-                """,
-                table, error[:2000],
-            )
+            await conn.execute(RECORD_FAILURE_SQL, table, error[:2000])
         return True
     except Exception as exc:
         logger.debug("mirror: could not record the failure either: %s", exc)

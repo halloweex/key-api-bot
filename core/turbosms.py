@@ -136,10 +136,6 @@ class MessageCost:
     characters: int    # billable units, not len(text) — GSM-7 escapes count twice
     parts: int
 
-    @property
-    def unicode(self) -> bool:
-        return self.encoding == "ucs2"
-
 
 def count_segments(text: str) -> MessageCost:
     """
@@ -321,11 +317,6 @@ def match_webhook_signature(
     return None
 
 
-def verify_webhook_signature(event_id: str, signature: str, secret: str) -> bool:
-    """Whether a DLR callback carries a signature made with our secret."""
-    return match_webhook_signature(event_id, signature, secret) is not None
-
-
 def classify_dlr(status: str) -> Optional[bool]:
     """
     Map a DLR status to delivered (True) / failed (False) / still open (None).
@@ -428,7 +419,7 @@ class TurboSmsClient:
         be written to stand on its own — the fallback has no button to press.
 
         Returns one result per recipient either way; the gateway does not say
-        which channel it used at send time, only later via `statuses`.
+        which channel it used at send time, only later in the delivery report.
 
         A stoplisted recipient comes back with message_id=None and code 404 —
         that is a signal to record, not an error to swallow.
@@ -485,18 +476,6 @@ class TurboSmsClient:
             "viber+sms" if viber is not None else "sms",
         )
         return results
-
-    async def statuses(self, message_ids: List[str]) -> Dict[str, str]:
-        """Current delivery status per message id, for ids the gateway knows."""
-        if not message_ids:
-            return {}
-
-        body = await self._post("/message/status.json", {"messages": message_ids})
-        return {
-            item["message_id"]: str(item.get("status", ""))
-            for item in body.get("response_result") or []
-            if item.get("message_id")
-        }
 
     async def balance(self) -> Optional[float]:
         """Account balance, or None if the reply carries no usable figure."""

@@ -286,7 +286,6 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     # lag_same_dow: revenue from the same weekday 1 week ago (shift by 7 is already lag_7d,
     #   but this is semantically a DOW feature computed on sorted data with gaps filled)
     # rolling_mean_4w_same_dow: average revenue for the same weekday over last 4 weeks
-    shifted_rev = df['revenue'].shift(1)
     dow = df['day_of_week']
     same_dow_mean = pd.Series(np.nan, index=df.index, dtype=float)
     for d in range(7):
@@ -1226,7 +1225,6 @@ class PredictionService:
         self._metrics: Dict[str, float] = {}
         self._dow_corrections: Dict[int, float] = {}
         self._clip_ratio: float = 1.0
-        self._training = False
         self._training_lock = asyncio.Lock()
         # Whether the last `predict_month` stored its forecast: True, False, or
         # None before any. `predict_month` swallows a failed store (the model
@@ -1336,11 +1334,7 @@ class PredictionService:
             return {"status": "already_training"}
 
         async with self._training_lock:
-            self._training = True
-            try:
-                return await self._train_impl(sales_type)
-            finally:
-                self._training = False
+            return await self._train_impl(sales_type)
 
     async def _train_impl(self, sales_type: str) -> Dict[str, Any]:
         """Internal training implementation."""

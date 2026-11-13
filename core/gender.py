@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Iterable, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from core import gender_data as D
 
@@ -511,8 +511,3 @@ def _surname_agrees(roles: _Roles, gender: str) -> bool:
     s = roles.surname if _CYRILLIC.search(roles.surname) else _cyrillicise(roles.surname)
     marked = _surname_gender(s)
     return marked is None or marked == gender
-
-
-def classify_many(rows: Iterable) -> list:
-    """[(buyer_id, full_name)] -> [(buyer_id, Verdict)], in the order given."""
-    return [(buyer_id, classify(name)) for buyer_id, name in rows]

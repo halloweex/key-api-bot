@@ -2,6 +2,10 @@ export type Period = 'today' | 'yesterday' | 'week' | 'last_week' | 'month' | 'l
 
 export type SalesType = 'retail' | 'b2b' | 'exhibition' | 'internal' | 'all'
 
+/** Whose visits the site funnel counts: Ukraine with the visitors GA4 could
+ *  not place, or every country, bots included (`/api/traffic/funnel?country=`). */
+export type FunnelCountry = 'ua' | 'all'
+
 export interface FilterState {
   period: Period
   startDate: string | null
@@ -11,6 +15,7 @@ export interface FilterState {
   categoryId: number | null
   brand: string | null
   promocode: string | null
+  funnelCountry: FunnelCountry
 }
 
 export interface FilterActions {
@@ -21,6 +26,7 @@ export interface FilterActions {
   setCategoryId: (categoryId: number | null) => void
   setBrand: (brand: string | null) => void
   setPromocode: (promocode: string | null) => void
+  setFunnelCountry: (country: FunnelCountry) => void
   resetFilters: () => void
 }
 

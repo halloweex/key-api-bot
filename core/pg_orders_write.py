@@ -97,6 +97,14 @@ that holds a list, and for an order that is not refused:
   An id listed anywhere in the batch is never deleted (an expense KeyCRM moved
   to another order is rewritten under it instead). A payload without the key,
   or with something that is not a list under it, deletes nothing;
+- what was deleted is kept, since revision 0036: one row per expense in
+  `app.expense_deletions` (id, order, type, amount), fed from the DELETE's own
+  RETURNING in the same transaction, under a savepoint of its own
+  (`analytics_captures.capture_in_transaction`). A capture that fails is
+  rolled back alone and stamped `capture.app.expense_deletions` in
+  `meta.mirror_state` (WARN `capture_failed:app.expense_deletions` in the
+  digest), and the deletion commits without it; `KS_ANALYTICS_CAPTURES=off`
+  skips it. Until then the INFO line was the deleted row's only trace;
 - an expense is written only when it is new or differs from the stored row in
   a written column, so a batch whose orders are in their state and whose
   expenses are already stored as listed reads that before the latch and
@@ -497,11 +505,22 @@ _EXPENSES_STORED_SQL = (
     "SELECT {cols} FROM bronze.expenses "
     "WHERE order_id = ANY($1::int[]) OR id = ANY($2::int[]) ORDER BY id")
 
-# The deletion, with what it deleted for the log. Run only on ids the locked
-# read inside the same transaction chose.
+# The deletion, with what it deleted for the log and the capture below. Run
+# only on ids the locked read inside the same transaction chose.
 _EXPENSES_DELETE_SQL = (
     "DELETE FROM bronze.expenses WHERE id = ANY($1::int[]) "
-    "RETURNING id, order_id, amount")
+    "RETURNING id, order_id, expense_type_id, amount")
+
+# What the deletion removed, kept in `app.expense_deletions` (revision 0036,
+# the analysts' captures). Fed from the DELETE's own RETURNING, so it is the
+# deleted rows by construction: a SELECT of the same ids before the DELETE
+# would agree only while the row locks and the predicate stay as they are.
+# `deleted_at` is the column's default, the transaction's `now()`. Bounded by
+# arithmetic: one row per expense KeyCRM stops listing, tens a year (the
+# design's §3.3); append-only, nothing deletes from it.
+_EXPENSE_DELETIONS_CAPTURE_SQL = (
+    "INSERT INTO app.expense_deletions (expense_id, order_id, expense_type_id, amount) "
+    "SELECT * FROM unnest($1::int[], $2::int[], $3::int[], $4::numeric[])")
 
 
 def _cents(value: Any) -> Any:
@@ -576,6 +595,18 @@ async def _stored_expenses(conn, listed, costs, *, lock: bool) -> List[Any]:
     sql = _EXPENSES_STORED_SQL.format(cols=", ".join(EXPENSE_COLUMNS))
     return list(await conn.fetch(sql + (" FOR UPDATE" if lock else ""),
                                  order_ids, expense_ids))
+
+
+async def _capture_deletions(conn, gone: Sequence[Any]) -> None:
+    """Keep the rows `_EXPENSES_DELETE_SQL` returned in `app.expense_deletions`,
+    inside the deleting transaction on `conn`. The helper never raises into
+    the writer: its savepoint rolls a failure back alone and stamps it."""
+    from core.analytics_captures import capture_in_transaction
+
+    await capture_in_transaction(
+        conn, "app.expense_deletions", _EXPENSE_DELETIONS_CAPTURE_SQL,
+        [r["id"] for r in gone], [r["order_id"] for r in gone],
+        [r["expense_type_id"] for r in gone], [r["amount"] for r in gone])
 
 
 async def _already_in_state(conn, orders, expenses, listed=(), all_listed=(), *,
@@ -888,6 +919,8 @@ async def upsert_orders_with_expenses(
                             gone = list(await conn.fetch(
                                 _EXPENSES_DELETE_SQL,
                                 sorted(int(r[0]) for r in stale)))
+                        if gone:
+                            await _capture_deletions(conn, gone)
                         if changed or stale:
                             await pg_landing._write_rows(
                                 conn, "bronze.expenses", EXPENSE_COLUMNS,

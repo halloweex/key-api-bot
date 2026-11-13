@@ -72,7 +72,14 @@ VERSION_TABLE = "alembic_version"
 # (`core.chain_latch.lockout_unmet`). Since step 14's S14-00 no flag moves
 # anything; chains 3 and 6 lost the attribute in S14-09, and their lock-out
 # is the literal `tests/unit/test_chain_lockout.LOCKOUT_RETIRED`.
-REQUIRED_REVISION = "0035_batch_e_chains"
+#
+# 0036 is the analysts' captures (owner decision D2): eleven new tables in
+# `app`, landed before Z3. Every image before it requires 0035,
+# `rollback-step14` included, so an image-only rollback below it needs
+# `alembic downgrade 0035_batch_e_chains` with the 0036 migrate image first.
+# That downgrade moves the stamp and nothing else; the tables and their rows
+# stay, and the next `upgrade head` is a no-op.
+REQUIRED_REVISION = "0036_analytics_captures"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()

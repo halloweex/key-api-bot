@@ -1,6 +1,6 @@
 """Revenue, summary, returns, sales-by-source, products, brands, categories endpoints."""
 import logging
-from datetime import datetime as _datetime, timedelta as _timedelta
+from datetime import date as _date, datetime as _datetime
 from zoneinfo import ZoneInfo
 
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
@@ -8,7 +8,6 @@ _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional, List
 
-from core.filters import has_comparison
 from core.filters import has_comparison
 from web.routes.auth import require_admin, require_any_permission, require_permission
 from web.services import dashboard_service
@@ -98,77 +97,51 @@ async def get_revenue_trend(
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # The whole history has nothing before it to be compared with
-    # (`has_comparison`), and a forecast is merged into daily labels.
+    first, last = _date.fromisoformat(start), _date.fromisoformat(end)
+    today = _datetime.now(_KYIV_TZ).date()
+    # This month and this week end today, and the chart draws them to their
+    # last day: the comparison is the whole period's, day by day, and the
+    # growth badge counts the days through today on both sides (owner's
+    # decision, 2026-11-12). The whole history has nothing before it to be
+    # compared with (`has_comparison`).
+    period_end = dashboard_service.last_day_of_period(period, first, last)
     result = await dashboard_service.get_revenue_trend(
         start, end, category_id=category_id, brand=brand, source_id=source_id,
         sales_type=sales_type, compare_type=compare_type, promocode=promocode,
         include_comparison=has_comparison(period), granularity=granularity,
+        period_end=period_end, through=min(last, today),
     )
 
     # Attach forecast data when requested (no filters applied)
-    today = _datetime.now(_KYIV_TZ).date()
-    has_future = end > today.isoformat()
+    has_future = last > today
     is_current_period = period in ("month", "week")
     allow_forecast = (is_current_period or has_future) and granularity == "daily"
+    forecast_days: List[_date] = []
     if include_forecast and allow_forecast and not category_id and not brand and not promocode and not source_id:
         try:
-            if period == "month":
-                forecast = await dashboard_service.get_forecast_data(sales_type)
-                if forecast and forecast.get("daily_predictions"):
-                    month_end = forecast.get("month_end", "")
-                    forecast["daily_predictions"] = [
-                        p for p in forecast["daily_predictions"]
-                        if p["date"] <= month_end
-                    ]
-            # The week and a custom range read the stored forecast too, as the
-            # month does: the model never runs on a request.
-            elif period == "week":
-                from core.prediction_service import get_prediction_service
-                service = get_prediction_service()
-                end_of_week = today + _timedelta(days=6 - today.weekday())
-                forecast = await service.get_range_forecast(today, end_of_week, sales_type)
-            else:
-                from core.prediction_service import get_prediction_service
-                service = get_prediction_service()
-                forecast = await service.get_range_forecast(
-                    _datetime.strptime(start, "%Y-%m-%d").date(),
-                    _datetime.strptime(end, "%Y-%m-%d").date(),
-                    sales_type,
-                )
+            # The stored forecast for the period's days from today on, read
+            # one way for the month, the week and a range: the model never
+            # runs on a request, and no actuals are read for it — the badge
+            # is stacked on the series below. The month's went through
+            # `get_forecast_data` until 2026-11-12, which read the month's
+            # actuals only for them to be replaced here.
+            from core.prediction_service import get_prediction_service
+            forecast = await get_prediction_service().get_range_forecast(
+                first, period_end, sales_type)
             if forecast and forecast.get("daily_predictions"):
                 # The badge is what the bars add up to, from the series the
                 # chart draws: taken before the future days are appended.
                 forecast.update(dashboard_service.stack_forecast_on_actuals(
-                    _datetime.strptime(start, "%Y-%m-%d").date(),
-                    result["revenue"], forecast["daily_predictions"]))
+                    first, result["revenue"], forecast["daily_predictions"]))
                 result["forecast"] = forecast
-
-                preds = forecast.get("daily_predictions", [])
-                comparison = result.get("comparison")
-                if preds and comparison:
-                    existing_labels = set(result.get("labels", []))
-                    extra_dates = []
-                    for p in preds:
-                        parts = p["date"].split("-")
-                        label = f"{parts[2]}.{parts[1]}"
-                        if label not in existing_labels:
-                            extra_dates.append(_datetime.strptime(p["date"], "%Y-%m-%d").date())
-
-                    if extra_dates:
-                        comp_type = comparison.get("period", {}).get("type", compare_type)
-                        extra_comp = await dashboard_service.get_comparison_for_dates(
-                            extra_dates, comp_type, sales_type=sales_type,
-                        )
-                        for d in extra_dates:
-                            label = d.strftime("%d.%m")
-                            result["labels"].append(label)
-                            result["revenue"].append(0)
-                            result["orders"].append(0)
-                            comparison["revenue"].append(round(extra_comp.get(d, 0), 2))
+                forecast_days = [
+                    day for day in (_date.fromisoformat(p["date"])
+                                    for p in forecast["daily_predictions"])
+                    if day > last]
         except Exception as e:
             logger.warning(f"Forecast unavailable: {e}")
 
+    dashboard_service.fit_trend(result, first, forecast_days)
     return result
 
 

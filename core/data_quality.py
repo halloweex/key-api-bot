@@ -22,7 +22,6 @@ Vocabulary
 """
 from __future__ import annotations
 
-import html as html_module
 import importlib
 import json
 import logging
@@ -301,15 +300,6 @@ def overall_severity(
         if s.rank() == max_rank:
             return s
     return Severity.INFO  # unreachable
-
-
-def summarize_discrepancies(discrepancies: List[Discrepancy]) -> Dict[str, int]:
-    """Per-class counts. Stable shape (zero entries included) so the schema
-    stays consistent across runs."""
-    out: Dict[str, int] = {c.value: 0 for c in DiscrepancyClass}
-    for d in discrepancies:
-        out[d.diff_class.value] += 1
-    return out
 
 
 # ─── Layer 1: Internal integrity checks ───────────────────────────────────────
@@ -1313,6 +1303,30 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("gold_values_unwatched",
      "Set KS_CH_URL, or clear the ch_* finding beside it; then "
      "POST /api/jobs/dq_mirror_landing/trigger to re-check Gold"),
+    # The analysts' captures (revision 0036, `core/analytics_captures.py`):
+    # WARN in the digest, never a page (D8 (b)). A capture failing never
+    # touched its writer's write; what is missing is a stretch of a history.
+    ("capture_failed:",
+     "Its writer's write committed: read last_error in meta.mirror_state "
+     "capture.<table> and 'capture failed' in the web log; fix the capture"),
+    ("capture_self_check_failed:",
+     "Nothing was written and the history is intact: read the refusal in "
+     "meta.mirror_state capture.<table>, then the writer's log"),
+    # The catalogue's mass-delete guard refuses a genuine mass retirement in
+    # KeyCRM as it refuses a wiped bronze.products: the lever is a person's.
+    ("capture_self_check_failed:app.catalogue_versions",
+     "Read last_error in meta.mirror_state capture.app.catalogue_versions; a "
+     "mass retirement seen in KeyCRM: _capture_versions(guard=False), once"),
+    ("capture_stalled:",
+     "Read the writer's job in /api/jobs and meta.mirror_state capture.<table>; "
+     "check KS_ANALYTICS_CAPTURES is not off"),
+    ("captures_unwatched",
+     "The capture stamps were not read: read the reason in the finding, then check KS_PG_DSN"),
+    ("captures_switched_off",
+     "KS_ANALYTICS_CAPTURES=off skips every capture: unset it in .env and up -d web to resume"),
+    ("ga4_backfill_incomplete",
+     "Read ga4_capture's result in /api/jobs (left, error); a night it "
+     "missed: POST /api/jobs/ga4_capture/trigger"),
 )
 
 DEFAULT_REMEDIATION = (
@@ -1372,6 +1386,14 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "chain_manager_intervals_broken": "a manager's classification history overlaps or gaps",
     "chain_manager_retail_disagrees": "a manager's retail flag ≠ its classification",
 }
+
+
+# The analysts' captures (revision 0036), a family over their tables: the
+# words are read off the module that files them, so a capture added there is
+# named here too.
+from core import analytics_captures as _captures  # noqa: E402
+
+HUMAN_CHECK_NAMES.update(_captures.human_names())
 
 
 def human_check_name(name: str) -> str:
@@ -1443,7 +1465,6 @@ def format_alert_message(
     discrepancies: List[Discrepancy],
     *,
     window: Optional[Tuple[date, date]] = None,
-    max_lines: int = 12,
     machine_note: Optional[str] = None,
 ) -> str:
     """Три строки, по-русски: что случилось · сколько · что делать.
@@ -1744,7 +1765,10 @@ def blindness_names() -> FrozenSet[str]:
     walks every hold function in `core/` and fails on a name one of them
     reacts to that this set lacks.
     """
-    from core import ch_history, ch_silver, pg_chain_invariants, pg_warehouse_dq
+    from core import (
+        analytics_captures, ch_history, ch_silver, pg_chain_invariants,
+        pg_warehouse_dq,
+    )
 
     return frozenset({
         "inventory_continuity_unwatched", "sync_watermarks_unwatched",
@@ -1752,6 +1776,8 @@ def blindness_names() -> FrozenSet[str]:
         pg_chain_invariants.UNWATCHED,
         ch_silver.GOLD_UNWATCHED,
         ch_history.HISTORY_UNREACHABLE,
+        # Both hold the capture conditions through the finding's `unverified`.
+        analytics_captures.UNWATCHED, analytics_captures.SWITCHED_OFF,
     })
 
 

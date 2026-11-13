@@ -42,7 +42,6 @@ from bot.config import (
     SOURCE_MAPPING,
     DEFAULT_TIMEZONE,
     TELEGRAM_MANAGER_IDS,
-    RETURN_STATUS_IDS,
     API_PAGE_LIMIT,
     API_REQUEST_DELAY,
     ORDER_SYNC_BUFFER_HOURS
@@ -133,7 +132,6 @@ class ReportService:
         all_orders = []
         returned_orders = []
         tz = ZoneInfo(tz_name)
-        return_status_ids = set(RETURN_STATUS_IDS)
 
         # Calculate UTC boundaries for the ENTIRE period
         local_period_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)

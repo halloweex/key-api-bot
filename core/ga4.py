@@ -26,11 +26,12 @@ series is therefore one funnel per day, never one trended call.
 from __future__ import annotations
 
 import base64
+import calendar
 import json
 import os
 import time
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -49,6 +50,58 @@ COLUMNS: tuple[str, ...] = tuple(column for column, _ in STEPS)
 
 #: The key a funnel table gives its whole-property row under.
 TOTAL = ""
+
+#: The two breakdowns the site funnel is asked by: /traffic's route
+#: (`web/services/ga4_funnel_service.py`) and the capture of closed periods
+#: (`core/ga4_capture.py`) both, so they live here, beside the client.
+CHANNEL = "sessionDefaultChannelGroup"
+DEVICE = "deviceCategory"
+#: GA4 keeps event data this many months, and funnels are built from events.
+RETENTION_MONTHS = 14
+
+#: The traffic type of a channel group: cold is advertising shown to people
+#: who do not know the brand yet, warm is people who know it or look for the
+#: product themselves, other is what GA4 could not place.
+COLD = frozenset({
+    "Paid Social", "Cross-network", "Paid Shopping", "Paid Other", "Paid Video", "Display",
+})
+WARM = frozenset({
+    "Direct", "Email", "Organic Social", "Organic Search", "Paid Search",
+    "Organic Shopping", "SMS", "Mobile Push Notifications",
+})
+TYPES = ("cold", "warm", "other")
+#: The version of the cold/warm/other rule above. The GA4 capture
+#: (`core/ga4_capture.py`) stores it beside each channel group's type, so a
+#: row kept under an older rule says which rule placed it. Change it in the
+#: same commit as COLD or WARM, to a later date: `tests/unit/test_capture_ga4.py`
+#: holds every version to its content in an append-only map.
+TRAFFIC_RULE = "2026-11-04"
+
+#: Whose visits the funnel counts: the countries GA4 names, or None for all.
+#: "(not set)" is a visitor GA4 could not place, and those people buy.
+SCOPES: Dict[str, Optional[Tuple[str, ...]]] = {
+    "ua": ("Ukraine", "(not set)"),
+    "all": None,
+}
+
+
+def channel_type(channel: str) -> str:
+    if channel in COLD:
+        return "cold"
+    if channel in WARM:
+        return "warm"
+    return "other"
+
+
+def earliest_day(today: date) -> date:
+    """The first day GA4 still holds funnel data for: the same date 14 months back.
+
+    Measured on 2026-11-04: one funnel per day came back from 2025-09-04 on, and
+    empty for the 1st to the 3rd. The retention rolls by the day, not the month.
+    """
+    months = today.year * 12 + (today.month - 1) - RETENTION_MONTHS
+    year, month = months // 12, months % 12 + 1
+    return date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
 
 SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
 API = "https://analyticsdata.googleapis.com/v1alpha"
@@ -144,8 +197,21 @@ async def access_token(client: httpx.AsyncClient, *, now: Optional[float] = None
     return str(body["access_token"])
 
 
-def funnel_request(start: date, end: date, breakdown: Optional[str] = None) -> Dict[str, Any]:
-    """The body of a closed funnel over ``start..end``, both included."""
+def funnel_request(
+    start: date,
+    end: date,
+    breakdown: Optional[str] = None,
+    countries: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """The body of a closed funnel over ``start..end``, both included.
+
+    ``countries`` keeps the people GA4 saw from those countries, as GA4 names
+    them. It filters the whole report rather than its first step, so every
+    step counts what a breakdown by country gives row by row. Measured on
+    2026-11-12 for 1–10 Nov: Ukraine and "(not set)" made 8 559 entered and
+    212 bought this way, against 8 567 and 212 summed from the breakdown. The
+    eight are people seen from both, whom the breakdown counts twice.
+    """
     body: Dict[str, Any] = {
         "dateRanges": [{"startDate": start.isoformat(), "endDate": end.isoformat()}],
         "funnel": {
@@ -160,6 +226,10 @@ def funnel_request(start: date, end: date, breakdown: Optional[str] = None) -> D
         body["funnelBreakdown"] = {
             "breakdownDimension": {"name": breakdown}, "limit": BREAKDOWN_LIMIT,
         }
+    if countries:
+        body["dimensionFilter"] = {"filter": {
+            "fieldName": "country", "inListFilter": {"values": list(countries)},
+        }}
     return body
 
 
@@ -198,13 +268,14 @@ async def run_funnel(
     start: date,
     end: date,
     breakdown: Optional[str] = None,
+    countries: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, int]]:
     """One closed funnel over ``start..end``, parsed by ``parse_funnel``."""
     url = f"{API}/properties/{property_id()}:runFunnelReport"
     try:
         response = await client.post(
             url,
-            json=funnel_request(start, end, breakdown),
+            json=funnel_request(start, end, breakdown, countries),
             headers={"Authorization": f"Bearer {token}"},
             timeout=TIMEOUT_S,
         )

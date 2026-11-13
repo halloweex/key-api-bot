@@ -42,9 +42,9 @@ copy of each with a third сверка. The copy costs one ship of 46,698 rows
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 from core.ch_common import (
     URL_ENV,
