@@ -736,7 +736,8 @@ class GoalsMixin:
         period_type: str,
         amount: float,
         is_custom: bool = True,
-        growth_factor: float = 1.10
+        growth_factor: float = 1.10,
+        change_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Set a revenue goal.
@@ -746,6 +747,10 @@ class GoalsMixin:
             amount: Goal amount in UAH
             is_custom: True if manually set, False if auto-calculated
             growth_factor: Growth factor used for calculation
+            change_kind: what the goal's version in
+                `app.revenue_goal_history` says the write was
+                (`pg_goals_write.CHANGE_KINDS`); None derives it from
+                `is_custom`
 
         Returns:
             Updated goal data
@@ -765,7 +770,7 @@ class GoalsMixin:
 
         await pg_goals_write.set_goal(
             period_type, amount, is_custom, calculated, growth_factor,
-            datetime.now(DEFAULT_TZ))
+            datetime.now(DEFAULT_TZ), change_kind)
 
         return {
             "periodType": period_type,
@@ -793,7 +798,8 @@ class GoalsMixin:
             period_type=period_type,
             amount=suggested,
             is_custom=False,
-            growth_factor=1.10
+            growth_factor=1.10,
+            change_kind="reset_to_auto",
         )
 
     # ─── Smart Seasonality Methods ─────────────────────────────────────────────

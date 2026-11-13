@@ -26,10 +26,21 @@ changed statement): chain 3's four `orders_*` scenarios for A5, the expenses
 that follow KeyCRM (O2 (a)) — the stored expenses read before the latch and
 under lock — and `orders_expense_dropped` added, which pins the deletion. Every
 other scenario is the literal of `d544144c`, unchanged.
+
+Re-recorded a second time, under the owner's approval of the analysts'
+warehouse (design revision 3.1, phase 1, 2026-11-13): `orders_expense_dropped`
+only, whose deletion now returns `expense_type_id` too — the one statement that
+moved. The captures of revision 0036 that ride on chains 3 and 6 (the expense
+deletions inside chain 3's transaction, the catalogue's versions after chain
+6's) are recorded switched off here (`KS_ANALYTICS_CAPTURES=off`): this pins the
+chains' own statements, and each capture's place beside them is held by its own
+tests, on a real server (`tests/integration/test_capture_expenses_pg.py`,
+`tests/unit/test_capture_catalogue.py`).
 """
 from __future__ import annotations
 
 import json
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -48,6 +59,10 @@ class _Recorder:
     def __init__(self, rows=None):
         self.calls = []
         self.rows = rows or (lambda sql: [])
+        self.depth = 0
+
+    def is_in_transaction(self):
+        return self.depth > 0
 
     async def execute(self, sql, *args, **kw):
         self.calls.append(["execute", sql, len(args)])
@@ -76,8 +91,10 @@ class _Recorder:
         class _Tx:
             async def __aenter__(self):
                 recorder.calls.append(["begin"])
+                recorder.depth += 1
 
             async def __aexit__(self, *exc):
+                recorder.depth -= 1
                 recorder.calls.append(["end", exc[0] is None])
                 return False
 
@@ -116,7 +133,8 @@ def _payload(oid, expenses=(), comment="utm_source=ig"):
 async def _record(writer, rows=None):
     recorder = _Recorder(rows)
     with patch("core.pg.get_pool", new=AsyncMock(return_value=_Pool(recorder))), \
-            patch("core.pg.require_revision", new=AsyncMock()):
+            patch("core.pg.require_revision", new=AsyncMock()), \
+            patch.dict(os.environ, {"KS_ANALYTICS_CAPTURES": "off"}):
         await writer()
     return recorder.calls
 
@@ -136,7 +154,7 @@ def _held_with_a_dropped_expense(sql):
                  "amount": Decimal("10.00"), "description": None, "status": "paid",
                  "payment_date": None, "created_at": None}]
     if sql.startswith("DELETE FROM bronze.expenses"):
-        return [{"id": 9, "order_id": 1, "amount": Decimal("10.00")}]
+        return [{"id": 9, "order_id": 1, "expense_type_id": 1, "amount": Decimal("10.00")}]
     return _held(sql)
 
 

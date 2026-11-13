@@ -84,6 +84,46 @@ written here must be compared on one clock, not on two machines' idea of it.
 The Postgres column has no default, so a writer that forgot it would leave
 the handover nothing to order by; `core/pg_chain_invariants.py` watches for
 that.
+
+AND EVERY GOAL IS KEPT (revision 0036)
+
+`ON CONFLICT (period_type)` overwrites, so until revision 0036 the goal in
+force last month was gone the moment somebody typed this month's. Every write
+now also appends the row it stored to `app.revenue_goal_history`, with what
+the write was (`CHANGE_KINDS`): `set` for a goal typed on /goals,
+`reset_to_auto` for the DELETE that stores the suggestion, `recalculated` for
+a goal the service stores for itself — no caller does today: the Monday job
+recalculates the seasonality tables and stores no goal. The capture is read
+back from the row this transaction wrote, so the history holds what Postgres
+kept, rounding included, and a period's latest version is the live row,
+`updated_at` included (as its `set_at`).
+
+Before the write overwrites the goal in force, that goal is appended too
+when the history does not already end with it (`_GOAL_IN_FORCE_SQL`): the
+goal stored before revision 0036 deployed, which the first write after it
+would otherwise overwrite unrecorded and a goal never edited again would
+never enter the history at all; one written while the captures were off, or
+by an image at 0035 in a rollback's window; and one whose own version failed.
+It says `set` for a custom goal and `reset_to_auto` for any other, with its
+own `updated_at` as `set_at`.
+
+It runs inside the goal's transaction under a SAVEPOINT of its own
+(`core.analytics_captures.capture_in_transaction`): a goal the transaction
+rolls back leaves no version, and a capture that fails rolls back alone,
+stamps `capture.app.revenue_goal_history` in `meta.mirror_state` and leaves
+the goal written — it never fails the write it rides on.
+`KS_ANALYTICS_CAPTURES=off` skips it. A failure is a WARN in the 09:00 digest
+(`capture_failed:app.revenue_goal_history`, owner decision D8 (b)); a goal is
+set when a human sets one, so there is no stall to judge. When the goal in
+force could not be kept, the new goal's version is not attempted either: its
+ok stamp would clear the failure, and the next write keeps it as the goal in
+force.
+
+What the history does not hold yet is a goal in force that nobody has
+written over since it was stored unrecorded — the goal stored before revision
+0036, until the first write after it. So the goals in force over time are
+`app.revenue_goal_history`, then the live row of `app.revenue_goals` where the
+history does not end with it; the warehouse's `goal_history` reads both.
 """
 from __future__ import annotations
 
@@ -92,6 +132,7 @@ from datetime import datetime
 from typing import Any, Optional, Tuple
 
 from core import chain_latch
+from core.analytics_captures import capture_in_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +152,52 @@ CHAIN_TABLES: Tuple[str, ...] = ("app.revenue_goals",)
 # before it gets here; restated so this writer cannot be the one that
 # widens the table's domain.
 PERIOD_TYPES: Tuple[str, ...] = ("daily", "weekly", "monthly")
+
+# Revision 0036's capture: every goal written, in `CAPTURE_TABLE`, with what
+# the write was. Not one of `CHAIN_TABLES` — a capture is declared in
+# `core.analytics_captures.CAPTURES`, and claims no owner row.
+CAPTURE_TABLE = "app.revenue_goal_history"
+CHANGE_KINDS: Tuple[str, ...] = ("set", "recalculated", "reset_to_auto")
+
+# The capture's statement: the row this transaction has just stored, read
+# back, so the version is what Postgres kept and never what the caller meant
+# to keep. A module constant, so the repository walk
+# (`tests/unit/test_write_chains.py`, `TestTheCaptureTables`) finds this
+# module as the table's one writer. Bounded by arithmetic: one row per goal a
+# person writes or resets, tens a year; append-only, nothing deletes from it.
+_GOAL_HISTORY_SQL = (
+    "INSERT INTO app.revenue_goal_history "
+    "(period_type, goal_amount, is_custom, calculated_goal, growth_factor, "
+    " change_kind, set_at) "
+    "SELECT period_type, goal_amount, is_custom, calculated_goal, "
+    "growth_factor, $2, updated_at "
+    "FROM app.revenue_goals WHERE period_type = $1"
+)
+
+# The goal in force, kept before the write overwrites it, when the period's
+# latest version is not it: the goal stored before revision 0036 deployed,
+# one written while the captures were off or by an image at 0035 during a
+# rollback, or one whose own version failed. It says `set` for a custom goal
+# and `reset_to_auto` for any other — the only two writes a stored goal can
+# have come from — and its `set_at` is its own `updated_at`. Nothing when the
+# history already ends with it, so it adds a row once per such goal: the same
+# arithmetic as `_GOAL_HISTORY_SQL`'s.
+_GOAL_IN_FORCE_SQL = (
+    "INSERT INTO app.revenue_goal_history "
+    "(period_type, goal_amount, is_custom, calculated_goal, growth_factor, "
+    " change_kind, set_at) "
+    "SELECT g.period_type, g.goal_amount, g.is_custom, g.calculated_goal, "
+    "g.growth_factor, "
+    "CASE WHEN g.is_custom THEN 'set' ELSE 'reset_to_auto' END, "
+    "COALESCE(g.updated_at, now()) "
+    "FROM app.revenue_goals g WHERE g.period_type = $1 "
+    "AND NOT EXISTS ("
+    "SELECT 1 FROM (SELECT * FROM app.revenue_goal_history h "
+    "WHERE h.period_type = $1 ORDER BY h.id DESC LIMIT 1) l "
+    "WHERE (l.goal_amount, l.is_custom, l.calculated_goal, l.growth_factor, l.set_at) "
+    "IS NOT DISTINCT FROM "
+    "(g.goal_amount, g.is_custom, g.calculated_goal, g.growth_factor, g.updated_at))"
+)
 
 # The hole every shared statement that reads this chain's table carries —
 # `core.sql_dialect.render_tables` fills it with `revenue_goals` or
@@ -192,15 +279,25 @@ async def set_goal(
     calculated_goal: float,
     growth_factor: float,
     updated_at: datetime,
+    change_kind: Optional[str] = None,
 ) -> Tuple[Any, ...]:
     """Write one goal; returns the stored row in `GOAL_COLUMNS` order.
 
     The caller builds its answer from what it passed, as the DuckDB branch
     does, so the response of `POST /api/goals` does not change with the
     engine; the row is returned for the callers that want to see what landed.
+
+    `change_kind` is what the version in `app.revenue_goal_history` says the
+    write was; left out, a custom goal is `set` and any other `recalculated`.
+    The reset says `reset_to_auto` itself (`GoalsMixin.reset_goal_to_auto`).
     """
     if period_type not in PERIOD_TYPES:
         raise ValueError(f"Invalid period_type: {period_type}")
+    kind = change_kind or ("set" if is_custom else "recalculated")
+    if kind not in CHANGE_KINDS:
+        # A caller's mistake, refused before the latch like every other
+        # argument: the history must not gain a kind its readers do not know.
+        raise ValueError(f"Invalid change_kind: {change_kind!r}")
     # Everything Postgres could refuse on input is refused here, before the
     # latch — see `_fits`. `is_custom` and `updated_at` have no default and
     # `core/pg_chain_invariants.py` pages on a NULL in either, so the writer
@@ -222,6 +319,10 @@ async def set_goal(
         # can never outlive the write that earned it.
         async with conn.transaction():
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+            # Revision 0036: the goal in force first, before the upsert below
+            # overwrites it, when the history does not already end with it.
+            in_force_kept = await capture_in_transaction(
+                conn, CAPTURE_TABLE, _GOAL_IN_FORCE_SQL, period_type)
             # `ON CONFLICT (period_type)` — one row per period, rewritten in
             # place, as DuckDB's statement does. Spelled here rather than in a
             # module constant so the latch guard's walk, which reads each
@@ -245,4 +346,12 @@ async def set_goal(
                 period_type, amount, is_custom, calculated_goal,
                 growth_factor, updated_at,
             )
+            # Revision 0036: the version, under a savepoint of its own — a
+            # capture that fails is rolled back and stamped alone, and the
+            # goal above commits regardless. Not after a goal in force that
+            # was not kept: its ok stamp would clear that failure, and this
+            # goal is kept by the next write anyway, as the goal in force.
+            if in_force_kept:
+                await capture_in_transaction(
+                    conn, CAPTURE_TABLE, _GOAL_HISTORY_SQL, period_type, kind)
     return tuple(row)

@@ -87,6 +87,7 @@ from typing import (
 )
 
 from core import chain_latch
+from core.analytics_captures import capture_in_transaction
 from core.landing_rows import (
     OFFER_COLUMNS,
     STOCK_MOVEMENT_COLUMNS,
@@ -144,6 +145,33 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_offers", "last_sync_stocks")
 # guard before either has committed. Held for the transaction and released by
 # COMMIT or ROLLBACK, so a writer that dies cannot leave it behind.
 CHAIN_LOCK_KEY = 0x6B73_0000_0000_0001
+
+# The analysts' cost history (revision 0036, `core.analytics_captures`).
+# `bronze.offer_stocks.purchased_price` is overwritten by every stock sync and
+# KeyCRM keeps no history of it, so this is the only record of what an offer
+# cost on a past day. Written in the per-SKU photograph's transaction, under a
+# SAVEPOINT of its own, dated with the photograph's own day: one row per offer
+# `offer_stocks` holds, once a Kyiv day. Not in `CHAIN_TABLES`: a capture is
+# not a chain's table (`core.write_chains.CAPTURE_TABLES`), and `claim` would
+# stamp owner rows for it.
+#
+# DO NOTHING, never UPDATE: the row is the cost as the day's photograph found
+# it, and nothing retakes a photograph once the day has one. A cost changed
+# later that day is the next day's row; an UPDATE would replace a cost
+# that was true for part of the day with a later one and keep no record that
+# the first existed, which is the overwrite this table exists to undo. So no
+# statement changes a stored row, and a re-run of a day adds only the offers
+# its first run did not see.
+#
+# Bounded by arithmetic: one row per offer a day, ~920 offers on 2026-10-29,
+# so about 336 000 rows a year. Measured on PostgreSQL 17.2 with its key:
+# 90 bytes a row, 29 MB a year. It grows with the catalogue, never faster.
+_COST_CAPTURE_SQL = """
+INSERT INTO app.offer_cost_daily (date, offer_id, sku, purchased_price, price)
+SELECT $1, s.id, s.sku, s.purchased_price, s.price
+FROM bronze.offer_stocks s
+ON CONFLICT (date, offer_id) DO NOTHING
+"""
 
 
 def _latch() -> str:
@@ -601,6 +629,13 @@ async def record_sku_inventory_snapshot(today: Optional[date] = None) -> bool:
     under READ COMMITTED: both could still pass the guard before either had
     committed, and the second would die on the primary key. `_chain_lock` is
     what makes the second one wait and then find today already taken.
+
+    The cost of every offer goes into `app.offer_cost_daily` in the same
+    transaction, with the same `day` (`_COST_CAPTURE_SQL`). It rides the
+    photograph and never fails it: a capture that raises rolls back alone,
+    is stamped `capture.app.offer_cost_daily` in `meta.mirror_state`, and the
+    photograph commits. A day already taken returns before it, so the
+    capture runs once a day, with the photograph.
     """
     from core.pg import get_pool, require_revision
 
@@ -625,6 +660,8 @@ async def record_sku_inventory_snapshot(today: Optional[date] = None) -> bool:
                 "FROM app.sku_inventory_status",
                 day,
             )
+            await capture_in_transaction(
+                conn, "app.offer_cost_daily", _COST_CAPTURE_SQL, day)
             return True
 
 
