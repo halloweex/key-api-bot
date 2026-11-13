@@ -138,6 +138,62 @@ Kept: `WRITE_ENV` as a name (revision 0035's comments name it, and an image
 from before step 14 reads it) and the latch and its owner rows (decision 3:
 that image routes by them). `env_writes_postgres` and `writes_postgres()`,
 which the registry read until then, went in S14-11 with the flag.
+
+THE CATALOGUE'S HISTORY: `app.catalogue_versions` (revision 0036)
+
+Every products write overwrites a product's name, brand and category in place,
+so a brand answer about last month moves the day somebody edits the product in
+KeyCRM. After each products write, once its transaction has committed and its
+connection is back in the pool, `_capture_versions` keeps the history the
+analysts' warehouse asks for (design 3.1, 3.3): SCD2 by content diff, in a
+transaction of its own (`analytics_captures.run_own_transaction`), so it never
+touches the write it follows and a missed run only coarsens when a change
+became known. The chain's own statements are unchanged
+(`tests/unit/test_chain_writers_sql_frozen.py`); the capture is a second unit
+of work after them.
+
+- A version is a change, not an observation: a row is written only when the
+  product's canonical row — name, brand, category_id, exactly as
+  `bronze.products` holds them — hashes differently from its latest version,
+  or its deletion state moved. The first run seeds one version per product.
+  `known_from` is the capture's clock, read after its lock.
+- Brand is stored as bronze holds it. `''` (an emptied KeyCRM custom field,
+  `landing_rows.brand_of`) and NULL (no field) both mean "no brand"; the
+  reader folds them with `NULLIF(brand, '')`, as `dim_product` does (design
+  3.1). A flip between the two is a version because bronze changed: one
+  redundant row, never a wrong answer, and the self-check can stay exact.
+- A tombstone (`is_deleted`) says the product left the catalogue. The writer
+  never deletes ("RETIRED IS TOLD FROM LOST BY ONE CLOCK" above), so a product
+  KeyCRM retires stays in `bronze.products` with its old `mirrored_at`; only a
+  human or a defect removes a row. So a tombstone is written for a product
+  that LEFT BOTH OF THE LAST TWO full writes (`mirrored_at` before the chain
+  record's `previous`), carrying its content as bronze still holds it — one
+  short write never retires anything, because a truncated catalogue
+  (`chain_catalogue_short_write`) is put right by the next one — and for a
+  product whose row is gone from `bronze.products`, carrying its last
+  version's content. A product served again gets a live version.
+- The mass-delete guard: more than max(50, 1 %) of the products held live
+  tombstoned in one run is refused whole (`CaptureRefused`, WARN
+  `capture_self_check_failed:app.catalogue_versions`) and nothing is written.
+  A wiped or half-restored `bronze.products` is the case it is for, and it
+  clears itself once the rows are back. A genuine mass retirement in KeyCRM
+  looks the same from here and holds the refusal until a person who has seen
+  it in KeyCRM runs the capture once with `guard=False` (the docstring of
+  `_capture_versions` has the line); until then no catalogue change is
+  versioned, and none is lost either: the next accepted run diffs against
+  the last version kept.
+- A zero-tolerance self-check, after the write and in the same snapshot:
+  every product's latest version holds what `bronze.products` holds, with
+  the deletion state the rule above gives it, no live version names a
+  product bronze lacks, and every latest `row_hash` is the hash of its own
+  row — the last asked before the diff too, so a latest version edited by
+  hand is refused rather than superseded. Any difference refuses the run
+  whole. The diff itself compares columns, never the hash: the canonical
+  row is not injective, and two contents that hash alike are two versions.
+- Repeatable read, behind a lock on the history table taken before the first
+  read: two captures queue instead of both writing one change twice, and a
+  products write committing in the middle cannot make the self-check read
+  another catalogue than the diff did.
 """
 from __future__ import annotations
 
@@ -147,6 +203,7 @@ from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from core import chain_latch
+from core.analytics_captures import CaptureRefused, run_own_transaction
 from core.landing_rows import (
     CATEGORY_COLUMNS, PRODUCT_COLUMNS, CategoryRow, ProductRow,
 )
@@ -262,6 +319,116 @@ _RECORD_WRITE_SQL = (
 _INT32 = (-2 ** 31, 2 ** 31 - 1)
 # `price NUMERIC(12,2)` (revision 0002), DuckDB's `DECIMAL(12,2)` beside it.
 PRICE_NUMERIC = (12, 2)
+
+# ─── The catalogue's history (revision 0036; module docstring, last section) ──
+
+VERSIONS = "app.catalogue_versions"
+
+# The mass-delete guard: more than max(50, 1 %) of the products the history
+# holds live, tombstoned in one run, is refused whole (design 3.3).
+MASS_DELETE_MIN = 50
+MASS_DELETE_PCT = 1
+# How many ids a refusal names.
+CAPTURE_SAMPLE = 10
+
+
+def _row_hash(alias: str) -> str:
+    """The canonical row's 64-bit md5 prefix, as a signed BIGINT: name, brand
+    and category_id as text, `\\N` for NULL, chr(31) between them (design
+    3.4's conventions). Brand verbatim, so `''` and NULL hash apart."""
+    return ("('x' || substr(md5("
+            f"COALESCE({alias}.name, '\\N') || chr(31) || "
+            f"COALESCE({alias}.brand, '\\N') || chr(31) || "
+            f"COALESCE({alias}.category_id::text, '\\N')"
+            "), 1, 16))::bit(64)::bigint")
+
+
+# A product left out of both of the last two full writes: its `mirrored_at`
+# is older than the write before the last (the record's `previous`, $1). No
+# `previous` yet retires nothing. Read inside `bronze.products` alone, where
+# `mirrored_at` is unambiguous.
+_RETIRED_SQL = "COALESCE(" + STAMP_SQL + " < $1::bigint, false)"
+
+_LATEST_SQL = """latest AS (
+    SELECT DISTINCT ON (product_id)
+           product_id, name, brand, category_id, row_hash, is_deleted
+    FROM app.catalogue_versions
+    ORDER BY product_id, known_from DESC, id DESC
+)"""
+
+# Repeatable read, and the lock before the first read: the snapshot is taken
+# at that read, after the lock, so a second capture waits for this one and
+# then sees its rows. Only this module writes the table; readers are not held.
+_VERSIONS_ISOLATION_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+_VERSIONS_LOCK_SQL = "LOCK TABLE app.catalogue_versions IN SHARE ROW EXCLUSIVE MODE"
+_VERSIONS_CLOCK_SQL = "SELECT clock_timestamp()"
+_RECORD_READ_SQL = "SELECT value FROM meta.chain_watermarks WHERE key = $1"
+_VERSIONS_LIVE_SQL = "WITH " + _LATEST_SQL + " SELECT count(*) FROM latest WHERE NOT is_deleted"
+# Before the diff: a latest version whose hash is not its own row's was
+# edited by hand (or written by a broken renderer). The diff compares
+# columns, so it would version bronze's content over it as a change nobody
+# made; refused instead, as the self-check refuses the same after a run.
+_VERSIONS_MISHASHED_SQL = (
+    "WITH " + _LATEST_SQL + " SELECT count(*) FROM latest l WHERE l.row_hash <> "
+    + _row_hash("l"))
+
+# Every version this run owes: a product bronze holds whose content or
+# deletion state differs from its latest version (or that has none), and a
+# product held live whose row bronze no longer has. `tombstoned` marks a live
+# version turning into a tombstone — what the guard counts. Content is
+# compared column by column, as the self-check compares it, never by
+# `row_hash`: the canonical row is not injective (NULL and the text `\N`
+# render alike, and a chr(31) inside a value moves the separators), so two
+# contents that hash alike would write no version and the self-check would
+# refuse every run after. The hash is stored and verified, not trusted.
+_VERSIONS_DIFF_SQL = (
+    "WITH " + _LATEST_SQL + """,
+held AS (
+    SELECT p.id AS product_id, p.name, p.brand, p.category_id,
+           """ + _row_hash("p") + """ AS row_hash,
+           """ + _RETIRED_SQL + """ AS is_deleted
+    FROM bronze.products p
+)
+SELECT c.product_id, c.name, c.brand, c.category_id, c.row_hash, c.is_deleted,
+       (c.is_deleted AND l.product_id IS NOT NULL AND NOT l.is_deleted) AS tombstoned
+FROM held c
+LEFT JOIN latest l ON l.product_id = c.product_id
+WHERE l.product_id IS NULL OR l.is_deleted <> c.is_deleted
+   OR (l.name, l.brand, l.category_id) IS DISTINCT FROM (c.name, c.brand, c.category_id)
+UNION ALL
+SELECT l.product_id, l.name, l.brand, l.category_id, l.row_hash, true, true
+FROM latest l
+WHERE NOT l.is_deleted
+  AND NOT EXISTS (SELECT 1 FROM bronze.products p WHERE p.id = l.product_id)
+ORDER BY 1""")
+
+# Bounded by arithmetic: one seed row per product the first run finds, then a
+# row per product whose name, brand or category moves, or that leaves or comes
+# back — 1-2 k a year (the design's §3.3), well under 1 MB. Append-only:
+# nothing deletes from it.
+_VERSION_INSERT_SQL = """
+INSERT INTO app.catalogue_versions
+    (product_id, known_from, name, brand, category_id, row_hash, is_deleted)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+"""
+
+# The self-check, column by column rather than by hash, so a fault in the
+# hash cannot vouch for itself; and every latest hash against its own row.
+_VERSIONS_SELF_CHECK_SQL = (
+    "WITH " + _LATEST_SQL + """
+SELECT
+    (SELECT count(*) FROM bronze.products p
+     LEFT JOIN latest l ON l.product_id = p.id
+     WHERE l.product_id IS NULL
+        OR l.name IS DISTINCT FROM p.name
+        OR l.brand IS DISTINCT FROM p.brand
+        OR l.category_id IS DISTINCT FROM p.category_id
+        OR l.is_deleted <> """ + _RETIRED_SQL + """) AS differ,
+    (SELECT count(*) FROM latest l
+     WHERE NOT l.is_deleted
+       AND NOT EXISTS (SELECT 1 FROM bronze.products p WHERE p.id = l.product_id)) AS orphaned,
+    (SELECT count(*) FROM latest l
+     WHERE l.row_hash <> """ + _row_hash("l") + """) AS mis_hashed""")
 
 
 class CatalogueRefused(ValueError):
@@ -419,6 +586,69 @@ async def _land(conn, table: str, sql: str, rows: List[tuple]) -> None:
                        sorted(record.stamps), previous_ok_at)
 
 
+async def _capture_versions(conn, *, guard: bool = True) -> int:
+    """The catalogue's history, one run (module docstring, last section).
+    `run_own_transaction` hands it a connection inside a fresh transaction of
+    its own and stamps it; returns how many versions it wrote. Raises
+    `CaptureRefused` for the mass-delete guard and the self-check, which
+    leaves nothing written.
+
+    `guard=False` is the lever for a mass retirement a person has confirmed
+    in KeyCRM, run once in the web container (`docker compose exec web`):
+
+        python -c "import asyncio, functools; from core import analytics_captures as a, pg_catalogue_write as c; print(asyncio.run(a.run_own_transaction(c.VERSIONS, functools.partial(c._capture_versions, guard=False))))"
+    """
+    await conn.execute(_VERSIONS_ISOLATION_SQL)
+    await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
+    await conn.execute(_VERSIONS_LOCK_SQL)
+    known_from = await conn.fetchval(_VERSIONS_CLOCK_SQL)
+    value = await conn.fetchval(_RECORD_READ_SQL, record_key(PRODUCTS))
+    previous = parse_record(value).previous if value is not None else None
+
+    mis_hashed = await conn.fetchval(_VERSIONS_MISHASHED_SQL)
+    if mis_hashed:
+        raise CaptureRefused(
+            f"self-check: {mis_hashed} latest version(s) whose row_hash is not "
+            "of their own row before the run — edited by hand, or a hash "
+            "renderer changed; nothing written",
+            mis_hashed_before=mis_hashed)
+    live = await conn.fetchval(_VERSIONS_LIVE_SQL)
+    owed = await conn.fetch(_VERSIONS_DIFF_SQL, previous)
+    tombstoned = [r["product_id"] for r in owed if r["tombstoned"]]
+    limit = max(MASS_DELETE_MIN, live * MASS_DELETE_PCT // 100)
+    if guard and len(tombstoned) > limit:
+        shown = ", ".join(str(i) for i in tombstoned[:CAPTURE_SAMPLE])
+        raise CaptureRefused(
+            f"mass-delete guard: {len(tombstoned)} of the {live} products held "
+            f"live would be tombstoned in one run, over the {limit} allowed "
+            f"(e.g. id {shown}); nothing written. A truncated or emptied "
+            "bronze.products clears this once its rows are back; a retirement "
+            "confirmed in KeyCRM is accepted with guard=False "
+            "(pg_catalogue_write._capture_versions)",
+            tombstoned=len(tombstoned), live=live, limit=limit,
+            sample_ids=tuple(tombstoned[:CAPTURE_SAMPLE]))
+    if owed:
+        await conn.executemany(_VERSION_INSERT_SQL, [
+            (r["product_id"], known_from, r["name"], r["brand"], r["category_id"],
+             r["row_hash"], r["is_deleted"]) for r in owed])
+
+    check = await conn.fetchrow(_VERSIONS_SELF_CHECK_SQL, previous)
+    if check["differ"] or check["orphaned"] or check["mis_hashed"]:
+        raise CaptureRefused(
+            f"self-check: {check['differ']} product(s) whose latest version is "
+            f"not what bronze.products holds, {check['orphaned']} live "
+            "version(s) of a product bronze.products lacks, "
+            f"{check['mis_hashed']} latest row_hash(es) not of their own row; "
+            "nothing written",
+            differ=check["differ"], orphaned=check["orphaned"],
+            mis_hashed=check["mis_hashed"])
+    if owed:
+        logger.info("Catalogue history: %d version(s) written, %d of them "
+                    "tombstones (%d newly)", len(owed),
+                    sum(1 for r in owed if r["is_deleted"]), len(tombstoned))
+    return len(owed)
+
+
 async def upsert_products(rows: List[ProductRow]) -> int:
     """The whole product catalogue, from the rows `core.landing_rows` parsed.
     Raises. Returns how many distinct products were written.
@@ -455,6 +685,11 @@ async def upsert_products(rows: List[ProductRow]) -> int:
             await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             await _land(conn, PRODUCTS, sql, rows)
+    # The write has committed and its connection is back in the pool. The
+    # history is a unit of work of its own, on a connection of its own: it
+    # never raises, and its failure is a gap in the history, stamped and
+    # digested (module docstring, last section).
+    await run_own_transaction(VERSIONS, _capture_versions)
     return len(rows)
 
 

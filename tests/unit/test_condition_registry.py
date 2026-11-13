@@ -69,6 +69,13 @@ def collect_static_check_names() -> set:
 
     names |= set(pg_chain_invariants.CONDITIONS)
     names.add(pg_chain_invariants.UNWATCHED)
+    # The analysts' captures (revision 0036): a family over their tables, one
+    # key per table, from the function their watch files by — and that
+    # `tests/unit/test_analytics_captures.py` holds to every name `judge` can
+    # file.
+    from core import analytics_captures
+
+    names |= set(analytics_captures.conditions())
     return names
 
 

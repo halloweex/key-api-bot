@@ -277,10 +277,10 @@ def _resolve(module, name, modules):
     return None
 
 
-def _walk_modules() -> dict:
+def _walk_modules(folders=_WALKED) -> dict:
     root = CORE.parent
     modules = {}
-    for folder in _WALKED:
+    for folder in folders:
         for path in sorted((root / folder).rglob("*.py")):
             m = _Module(path)
             modules[m.name] = m
@@ -410,8 +410,8 @@ def _pg_write_targets(module, fn, modules, executors=frozenset()) -> set:
 class _Walk:
     """The whole tree, once per test session."""
 
-    def __init__(self):
-        self.modules = _walk_modules()
+    def __init__(self, folders=_WALKED):
+        self.modules = _walk_modules(folders)
         self.fns = {(m.rel, name): (m, fn)
                     for m in self.modules.values() for name, fn in m.funcs.items()}
         self.calls = {key: _called_names(fn) for key, (_m, fn) in self.fns.items()}
@@ -846,3 +846,111 @@ class TestEveryChainNamesItselfOnce:
         from core.write_chains import WRITE_CHAINS
         assert all(os.getenv(c.WRITE_ENV) is None for c in WRITE_CHAINS)
 
+
+# ─── The analysts' captures (revision 0036) ──────────────────────────────────
+#
+# Walked over every tree that holds Python a container runs — the bot and the
+# host tools too, which the order-table walk above has no need of: a capture
+# table's second writer anywhere would be a history written two ways.
+_CAPTURE_WALKED = _WALKED + ("bot", "deploy")
+
+
+@pytest.fixture(scope="module")
+def capture_walk():
+    return _Walk(_CAPTURE_WALKED)
+
+
+def _path(module: str) -> str:
+    return module.replace(".", "/") + ".py"
+
+
+def _modules_writing(walk, table: str) -> set:
+    return {key[0] for key, targets in walk.writers().items() if table in targets}
+
+
+def _capture_tables():
+    from core.write_chains import CAPTURE_TABLES
+
+    return sorted(CAPTURE_TABLES)
+
+
+def _key_tables():
+    from core.write_chains import KEY_TABLES
+
+    return sorted(KEY_TABLES)
+
+
+class TestTheCaptureTables:
+    """Each capture table has one writer, the module `CAPTURE_TABLES` names
+    (the design's §3.3, "Captures stay out of CHAIN_TABLES"); the key tables
+    have none in this build. Read off the walk, so a second module writing a
+    capture fails here whichever tree it is in.
+
+    `at most its named writer` and `exactly` are two tests on purpose: the
+    first fails on a second writer, the second on a writer that stopped."""
+
+    def test_they_are_no_chains_tables(self):
+        """Kills: a capture put in a chain's `CHAIN_TABLES` — it would have to
+        succeed a DuckDB table in the frozen FATES, and `chain_latch.claim`
+        would stamp owner rows for it on every write."""
+        from core.write_chains import CAPTURE_TABLES, KEY_TABLES, chain_tables
+
+        assert not (set(CAPTURE_TABLES) | set(KEY_TABLES)) & chain_tables()
+        assert not set(CAPTURE_TABLES) & set(KEY_TABLES)
+
+    def test_they_are_revision_0036s_tables(self):
+        """Kills: a table created with no writer named, or a writer named for
+        a table no revision creates."""
+        from core.write_chains import CAPTURE_TABLES, KEY_TABLES
+        from tests import migration_replay as replay
+
+        rev = replay.load(replay.VERSIONS / "0036_analytics_captures.py")
+        assert set(CAPTURE_TABLES) | set(KEY_TABLES) == set(rev.TABLES)
+
+    @pytest.mark.parametrize("table", _capture_tables())
+    def test_a_capture_has_no_writer_but_its_own(self, capture_walk, table):
+        from core.write_chains import CAPTURE_TABLES
+
+        assert _modules_writing(capture_walk, table) <= {_path(CAPTURE_TABLES[table])}
+
+    @pytest.mark.parametrize("table", _capture_tables())
+    def test_a_capture_has_exactly_its_one_writer(self, capture_walk, table):
+        """Kills: a capture whose writer stopped writing it — the call
+        removed, or moved into a module the spec does not name."""
+        from core.write_chains import CAPTURE_TABLES
+
+        assert _modules_writing(capture_walk, table) == {_path(CAPTURE_TABLES[table])}
+
+    @pytest.mark.parametrize("table", _key_tables())
+    def test_the_key_tables_have_no_writer_yet(self, capture_walk, table):
+        """D3: the person key's tables, and the buyer key's, are only created
+        in phase 1; their writer is the warehouse job, in phase 2. Kills: a
+        writer of them landing early, before D3's guards come with it."""
+        assert not _modules_writing(capture_walk, table)
+
+    def test_the_helpers_write_no_capture_themselves(self, capture_walk):
+        """The capture helpers execute the statement the writer hands them,
+        so the walk attributes the write to the writer. Kills: a helper that
+        spelled a capture's statement itself — every capture would then read
+        as written by `core/analytics_captures.py`."""
+        assert "capture_in_transaction" in capture_walk.executors
+        assert not [key for key in capture_walk.writers()
+                    if key[0] == "core/analytics_captures.py"]
+
+    def test_a_writer_through_the_helper_is_the_writer(self, capture_walk):
+        """The shape every in-transaction capture takes: its own constant,
+        handed to `capture_in_transaction`. The control for the two tests
+        above — the walk sees the table through the helper."""
+        module = _Module.from_source("core/_capture_probe.py", """
+            from core.analytics_captures import capture_in_transaction
+
+            _COST_SQL = "INSERT INTO app.offer_cost_daily (date, offer_id) SELECT $1, id FROM bronze.offers"
+
+            async def snapshot(conn, today):
+                await capture_in_transaction(conn, "app.offer_cost_daily", _COST_SQL, today)
+        """)
+        modules = dict(capture_walk.modules)
+        modules[module.name] = module
+        module.load_consts(modules)
+        assert _pg_write_targets(module, module.funcs["snapshot"], modules,
+                                 capture_walk.executors) == {"app.offer_cost_daily"}

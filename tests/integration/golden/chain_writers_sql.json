@@ -1,7 +1,7 @@
 {
  "WATERMARK_OK_SQL": "\nINSERT INTO meta.mirror_state\n       (table_name, last_attempted_at, last_ok_at,\n        failures_since_ok, last_error, last_rows)\nVALUES ($1, now(), now(), 0, NULL, $2)\nON CONFLICT (table_name) DO UPDATE SET\n    last_attempted_at = now(),\n    last_ok_at        = now(),\n    failures_since_ok = 0,\n    last_error        = NULL,\n    last_rows         = EXCLUDED.last_rows\n",
  "_RECORD_WRITE_SQL": "UPDATE meta.chain_watermarks SET updated_at = now(), value = jsonb_build_object('stamps', (SELECT COALESCE(jsonb_agg(s ORDER BY s), '[]'::jsonb) FROM (SELECT DISTINCT (extract(epoch FROM mirrored_at) * 1000000)::bigint AS s FROM {table} WHERE mirrored_at = now() OR (extract(epoch FROM mirrored_at) * 1000000)::bigint = ANY($2::bigint[])) kept), 'previous', (extract(epoch FROM $3::timestamptz) * 1000000)::bigint)::text WHERE key = $1",
- "captured_on": "d544144c (S14-09's base); equal to 57fd7c22 under KS_PG_DERIVE=own. Chain 3's four orders_* scenarios re-recorded and orders_expense_dropped added under O1 (a) for A5 (expenses follow KeyCRM, owner decision O2 (a))",
+ "captured_on": "d544144c (S14-09's base); equal to 57fd7c22 under KS_PG_DERIVE=own. Chain 3's four orders_* scenarios re-recorded and orders_expense_dropped added under O1 (a) for A5 (expenses follow KeyCRM, owner decision O2 (a)); orders_expense_dropped re-recorded for the analysts' warehouse, phase 1 (2026-11-13): the deletion returns expense_type_id; the captures of revision 0036 are recorded switched off",
  "scenarios": {
   "categories": [
    [
@@ -573,7 +573,7 @@
    ],
    [
     "fetch",
-    "DELETE FROM bronze.expenses WHERE id = ANY($1::int[]) RETURNING id, order_id, amount",
+    "DELETE FROM bronze.expenses WHERE id = ANY($1::int[]) RETURNING id, order_id, expense_type_id, amount",
     1
    ],
    [

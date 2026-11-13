@@ -38,16 +38,17 @@ October those made 117 purchases against Ukraine's 938. Real buyers abroad,
 about 5 % of purchases, go with the bots. ``"all"`` counts everybody, as GA4
 itself does. The scope is part of the cache key.
 
-**The traffic type is decided here, at read time,** from GA4's channel group,
-so the split can change without anything to rewrite. Cold is advertising shown
-to people who do not know the brand yet; warm is people who know it or look
-for the product themselves; other is what GA4 could not place, links from
-other sites and AI assistants.
+**The traffic type is decided at read time,** from GA4's channel group
+(``core.ga4.channel_type``), so the split can change without anything to
+rewrite. The capture of closed periods (``core/ga4_capture.py``) stores the
+type as decided then, with ``TRAFFIC_RULE``, the rule's version. Cold is
+advertising shown to people who do not know the brand yet; warm is people who
+know it or look for the product themselves; other is what GA4 could not place,
+links from other sites and AI assistants.
 """
 from __future__ import annotations
 
 import asyncio
-import calendar
 import contextlib
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
@@ -58,6 +59,12 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from core import ga4
+# The rule and the vocabulary the GA4 capture shares (`core/ga4_capture.py`),
+# defined beside the client so a `core` module need not import `web`.
+from core.ga4 import (  # noqa: F401 — some only re-exported, for their readers
+    CHANNEL, COLD, DEVICE, RETENTION_MONTHS, SCOPES, TRAFFIC_RULE, TYPES, WARM,
+    channel_type, earliest_day,
+)
 
 #: The property counts days in Kyiv time, so its "today" is Kyiv's.
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
@@ -68,26 +75,6 @@ MAX_ENTRIES = 64
 #: ten concurrent requests per standard property; one period's six still go
 #: side by side under it.
 GA4_CONCURRENCY = 6
-CHANNEL = "sessionDefaultChannelGroup"
-DEVICE = "deviceCategory"
-#: GA4 keeps event data this many months, and funnels are built from events.
-RETENTION_MONTHS = 14
-
-COLD = frozenset({
-    "Paid Social", "Cross-network", "Paid Shopping", "Paid Other", "Paid Video", "Display",
-})
-WARM = frozenset({
-    "Direct", "Email", "Organic Social", "Organic Search", "Paid Search",
-    "Organic Shopping", "SMS", "Mobile Push Notifications",
-})
-TYPES = ("cold", "warm", "other")
-
-#: Whose visits the funnel counts: the countries GA4 names, or None for all.
-#: "(not set)" is a visitor GA4 could not place, and those people buy.
-SCOPES: Dict[str, Optional[Tuple[str, ...]]] = {
-    "ua": ("Ukraine", "(not set)"),
-    "all": None,
-}
 DEFAULT_SCOPE = "ua"
 
 #: A period in one scope: (start, end, scope).
@@ -159,14 +146,6 @@ def _fresh(key: _Key, clock: Callable[[], float]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def channel_type(channel: str) -> str:
-    if channel in COLD:
-        return "cold"
-    if channel in WARM:
-        return "warm"
-    return "other"
-
-
 def previous_window(start: date, end: date) -> Tuple[date, date]:
     """The period of equal length ending the day before ``start``."""
     days = (end - start).days + 1
@@ -180,17 +159,6 @@ def year_ago(day: date) -> date:
         return day.replace(year=day.year - 1)
     except ValueError:
         return day.replace(year=day.year - 1, day=28)
-
-
-def earliest_day(today: date) -> date:
-    """The first day GA4 still holds funnel data for: the same date 14 months back.
-
-    Measured on 2026-11-04: one funnel per day came back from 2025-09-04 on, and
-    empty for the 1st to the 3rd. The retention rolls by the day, not the month.
-    """
-    months = today.year * 12 + (today.month - 1) - RETENTION_MONTHS
-    year, month = months // 12, months % 12 + 1
-    return date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
 
 
 def asked_window(start: date, end: date, today: date) -> Optional[Tuple[date, date]]:

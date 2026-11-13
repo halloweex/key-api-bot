@@ -81,6 +81,17 @@ def fresh_layer_lock():
         yield
 
 
+@pytest.fixture(autouse=True)
+def verdict_log_stood_in_for():
+    """The parse alone. The verdict log the parses append to (revision 0036)
+    is `test_capture_verdicts_pg.py`'s; here its capture answers "kept"
+    without running — inside this file's rolled-back transaction it would
+    refuse a connection that is in one, and a full parse whose capture was
+    not kept is refused (owner decision D12)."""
+    with patch.object(parse, "capture_verdicts", AsyncMock(return_value=True)):
+        yield
+
+
 @pytest_asyncio.fixture
 async def conn():
     c = await asyncpg.connect(DSN)

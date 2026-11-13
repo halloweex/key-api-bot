@@ -69,10 +69,13 @@ async def _reparse(*, force_ship: bool) -> None:
 
     `full`, because the comments restored above may change any verdict: the
     table is re-parsed whole out of `bronze.orders`, in Postgres. It refuses a
-    result under 90% of what Postgres holds and logs the refusal rather than
-    raising, so read the line below. `--force-ship` is the only way past that
-    guard anywhere in the repository, and it is here, behind a flag an
-    operator types, because this is the one caller that may mean a shrink.
+    result under 90% of what Postgres holds, and a parse whose verdict log did
+    not first keep what the table holds (owner decision D12:
+    `KS_ANALYTICS_CAPTURES=off`, or the capture failing), and logs the refusal
+    rather than raising, so read the line below. `--force-ship` is the only
+    way past either guard anywhere in the repository, and it is here, behind a
+    flag an operator types, because this is the one caller that may mean a
+    shrink.
 
     Until step 14's S14-15 it re-parsed DuckDB's `silver_order_utm` first while
     DuckDB derived, and under step 13 noted the Postgres-only re-parse for a
