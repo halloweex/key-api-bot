@@ -57,7 +57,8 @@ number on any screen, so it is counted and digested:
   second connection could wait on a full pool;
 - the integrity job (01, 07, 13, 19 Kyiv) reads those rows (`read_facts`) and
   files WARN findings (`judge`): `capture_failed:<table>`,
-  `capture_self_check_failed:<table>` and `capture_stalled:<table>`, which the
+  `capture_self_check_failed:<table>`, `capture_stalled:<table>` and
+  `ga4_backlog_at_risk`, which the
   09:00 digest carries, and two INFO ones that ride along without summoning
   it (`capture_unstarted:<table>`, `ga4_backfill_incomplete`). Nothing here
   is CRITICAL, so the integrity job pages on none of it, and it builds any

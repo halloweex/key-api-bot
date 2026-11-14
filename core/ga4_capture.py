@@ -361,8 +361,10 @@ def nights_to_spare(missing: Sequence[Period], first: date) -> Optional[Slack]:
     needing the `needed`-th can lose `left - needed` of them, wherever they
     fall, and still be kept; the least of that over the backlog is how many
     nights the capture could fail and keep everything. Periods falling due
-    meanwhile are the newest: they sort behind every one of these and leave
-    fourteen months later, so they move nobody's turn."""
+    meanwhile are among the newest: a day sorts behind every one of these, but
+    a week or month can start before the backlog's last few days and push
+    their turn back a run. Those days leave the window fourteen months later,
+    so the least slack, which the oldest periods decide, does not move."""
     best: Optional[Slack] = None
     for i, period in enumerate(missing):
         needed = i // PERIODS_PER_RUN + 1
