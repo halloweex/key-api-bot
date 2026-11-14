@@ -1296,6 +1296,15 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("pg_status_group_vs_return_list", "The source's status group wins over the legacy list"),
     ("pg_order_landing_unwatched",
      "The Postgres twins did not read bronze.orders: read the reason in the finding"),
+    # The owner's decision of 2026-11-14: a sale to the company's own legal
+    # entity is revenue nowhere. The INFO asks nothing; the WARN asks a person
+    # which list a card belongs on, and a deploy then rebuilds Silver with it.
+    ("pg_own_entity_orders", "Nothing to do: the decision working, counted"),
+    ("pg_own_entity_unlisted",
+     "Open the cards in KeyCRM: the entity's id goes in OWN_ENTITY_BUYER_IDS "
+     "(core/duckdb_constants.py), anyone else's in NOT_OWN_ENTITY_BUYER_IDS; deploy"),
+    ("pg_own_entity_unwatched",
+     "The Postgres twins did not read the own entity's orders: read the reason in the finding"),
     # The canary's, not a check's: a backup marker past its limit (S14-00).
     ("backup_evidence_stale",
      "On the host run the script named: deploy/pg_pitr_drill.sh, "
@@ -1382,6 +1391,9 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_status_group_vs_return_list": "status group ≠ return list (Postgres)",
     "pg_order_landing_unwatched": "Postgres order landing not examined",
     "pg_warehouse_unwatched": "Postgres twins did not look",
+    "pg_own_entity_orders": "sales to our own legal entity, kept out of revenue",
+    "pg_own_entity_unlisted": "a buyer card like our own legal entity, counted as revenue",
+    "pg_own_entity_unwatched": "own legal entity's orders not examined",
     "pg_order_utm_missing": "orders with no traffic verdict (Postgres)",
     "pg_order_utm_stale": "traffic verdict older than its order (Postgres)",
     "pg_order_utm_in_flight": "traffic verdicts still on their way",

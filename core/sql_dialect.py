@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Sequence, Tuple
 
-from core.duckdb_constants import DISPLAY_TIMEZONE
+from core.duckdb_constants import DISPLAY_TIMEZONE, not_own_entity
 
 
 @dataclass(frozen=True)
@@ -477,6 +477,9 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
 # The status tuple is spelled here rather than taken from `RETURN_STATUS_IDS`
 # because it is NOT that list: last_sale_date excludes four cancelled states
 # and deliberately keeps 15 and 18. Changing it changes what "last sold" means.
+# It also keeps an order to the company's own legal entity, which the owner's
+# decision of 2026-11-14 takes out of revenue: when a product last left the
+# warehouse is a stock fact, and goods sent to the other entity left it.
 _SKU_STATUS_REBUILD_BODY = """
     INSERT INTO {sku_inventory_status} (
         offer_id, product_id, sku, name, brand, category_id,
@@ -1062,6 +1065,13 @@ CLICKHOUSE_ANALYTICS = AnalyticsDialect(
 # Opencart's orders and money as well; the default 12-month view held none,
 # the 24-month view's cohorts of November and December 2024 did.
 #
+# The company's own legal entity is in no cohort (the owner's decision of
+# 2026-11-14): a sale to ourselves is revenue nowhere, and the buyer it names
+# is no customer. Its orders are out of every measure already, through
+# `is_active_source`; the membership, which reads every source, leaves the
+# entity out by `core.duckdb_constants.not_own_entity`, or it would stand in
+# its b2b and internal cohorts, never retained, one more in every size.
+#
 # Everything else in this body was run on DuckDB 1.5.5 and ClickHouse
 # 24.8.14.39 against the same rows: `DATE_TRUNC`, `DATEDIFF`, `median`,
 # `FILTER (WHERE …)`, CTEs, `COUNT(DISTINCT …)` and `ROUND` all agree, and
@@ -1076,6 +1086,7 @@ _COHORT_RETENTION_BODY = """
                 FROM {silver_orders} o
                 WHERE o.buyer_id IS NOT NULL
                   AND NOT o.is_return
+                  AND {not_own_entity}
                   {sales_type_filter}
                 GROUP BY o.buyer_id
             ),
@@ -1133,6 +1144,7 @@ def cohort_retention_select(
         today=dialect.today,
         sales_type_filter=sales_type_filter,
         months_back=int(months_back),
+        not_own_entity=not_own_entity("o"),
     )
 
 
@@ -1149,6 +1161,7 @@ _ENHANCED_COHORT_RETENTION_SELECT_BODY = """            WITH customer_first_orde
                 FROM {silver_orders} o
                 WHERE o.buyer_id IS NOT NULL
                   AND NOT o.is_return
+                  AND {not_own_entity}
                   {sales_type_filter}
                 GROUP BY o.buyer_id
             ),
@@ -1229,6 +1242,7 @@ def enhanced_cohort_retention_select(
         today=dialect.today,
         sales_type_filter=sales_type_filter,
         months_back=int(months_back),
+        not_own_entity=not_own_entity("o"),
     )
 
 _DAYS_TO_SECOND_PURCHASE_SELECT_BODY = """            WITH customer_orders_ranked AS (
@@ -1240,6 +1254,7 @@ _DAYS_TO_SECOND_PURCHASE_SELECT_BODY = """            WITH customer_orders_ranke
                 FROM {silver_orders} o
                 WHERE o.buyer_id IS NOT NULL
                   AND NOT o.is_return
+                  AND {not_own_entity}
                   {sales_type_filter}
             ),
             second_purchase AS (
@@ -1311,6 +1326,7 @@ def days_to_second_purchase_select(
         today=dialect.today,
         sales_type_filter=sales_type_filter,
         months_back=int(months_back),
+        not_own_entity=not_own_entity("o"),
     )
 
 _COHORT_LTV_SELECT_BODY = """            WITH customer_cohorts AS (
@@ -1320,6 +1336,7 @@ _COHORT_LTV_SELECT_BODY = """            WITH customer_cohorts AS (
                 FROM {silver_orders} o
                 WHERE o.buyer_id IS NOT NULL
                   AND NOT o.is_return
+                  AND {not_own_entity}
                   {sales_type_filter}
                 GROUP BY o.buyer_id
             ),
@@ -1377,6 +1394,7 @@ def cohort_ltv_select(
         today=dialect.today,
         sales_type_filter=sales_type_filter,
         months_back=int(months_back),
+        not_own_entity=not_own_entity("o"),
     )
 
 _AT_RISK_CUSTOMERS_SELECT_BODY = """            WITH customer_activity AS (
@@ -1395,6 +1413,7 @@ _AT_RISK_CUSTOMERS_SELECT_BODY = """            WITH customer_activity AS (
                 FROM {silver_orders} o
                 WHERE o.buyer_id IS NOT NULL
                   AND NOT o.is_return
+                  AND {not_own_entity}
                   {sales_type_filter}
                 GROUP BY o.buyer_id
             )
@@ -1437,6 +1456,7 @@ def at_risk_customers_select(
         today=dialect.today,
         sales_type_filter=sales_type_filter,
         months_back=int(months_back),
+        not_own_entity=not_own_entity("o"),
     )
 
 
@@ -1611,7 +1631,11 @@ HAVING COUNT(*) >= 5""",
     ),
     # Dead stock and overstock classification. `days_of_supply` uses the
     # 90-day velocity rather than the 30-day one: more stable, and a single
-    # promo week must not reclassify half the catalogue.
+    # promo week must not reclassify half the catalogue. The velocity reads
+    # `is_active_source`, so since the owner's decision of 2026-11-14 it
+    # leaves out goods sent to the company's own legal entity, which
+    # `last_sale_date` (`_SKU_STATUS_REBUILD_BODY`) keeps; the body is frozen
+    # in revisions 0014/0015, so counting them here again would take one.
     (
         "v_sku_status",
         """SELECT
@@ -2001,7 +2025,9 @@ def inventory_view_selects(dialect: Dialect) -> tuple[tuple[str, str], ...]:
 # engines, so the chain's Postgres writer and DuckDB's cannot come to count a
 # manager's orders differently. Silver reads none of these three columns, which
 # is why neither writer raises the derivation signal for them
-# (`core/pg_managers_write.py`).
+# (`core/pg_managers_write.py`). They count the orders a manager handled, an
+# order to the company's own legal entity among them: activity, not revenue,
+# which is all the owner's decision of 2026-11-14 moved.
 _MANAGER_STATS_BODY = """
     UPDATE {managers} m
     SET

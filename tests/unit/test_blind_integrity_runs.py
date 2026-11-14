@@ -44,6 +44,7 @@ JUDGES = {
     "line_items": "_line_items_check",
     "derivation_signal": "_signal_check",
     "order_landing": "_order_landing_check",
+    "own_entity": "_own_entity_check",
     "silver_row_values": "_row_values_check",
 }
 
@@ -60,7 +61,7 @@ class TestTheTwinsLookedAtNothing:
         assert set(JUDGES) == set(twins.GROUPS)
 
     def test_every_combination_of_unread_and_raised_groups(self, monkeypatch):
-        """Each group unread, raised while judged, or looked: 3^6 runs. The
+        """Each group unread, raised while judged, or looked: 3^7 runs. The
         twins looked at nothing exactly when no group looked. Mutation: count
         the collapsed finding once (`blind += 1`), or call any blind group
         nothing (`blind >= 1`)."""
