@@ -14,7 +14,9 @@
 {
   // Everything the pyflakes guard walks except the suite: tests patch and
   // fake on purpose, and that reads to a checker as a wrong type per line.
-  "include": ["core", "web", "bot", "scripts", "deploy", "migrations"],
+  // `rust` holds the pilot's Python: its benchmark app and the generators of
+  // its CPython fixtures.
+  "include": ["core", "web", "bot", "scripts", "deploy", "migrations", "rust"],
 
   // What the images and CI run (Dockerfile.web: python:3.14-slim, Linux).
   "pythonVersion": "3.14",
