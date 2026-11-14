@@ -897,13 +897,16 @@ class BackgroundScheduler:
         # states the quota arithmetic). 02:40 is clear of the 01/07/13/19
         # checks, 05:00-05:50, 07:20-07:45, 08:55-09:55 and the 03:00-04:00
         # DST hour. It is also night, when nobody on /traffic spends the same
-        # hourly GA4 quota. It stands down without a GA4 key.
+        # hourly GA4 quota. It stands down without a GA4 key. The time is
+        # `ga4_capture.RUN_AT`, which the backlog's slack counts runs from.
+        from core.ga4_capture import RUN_AT as GA4_RUN_AT
+
         self._add_job(
             job_id="ga4_capture",
             name="GA4 funnel capture",
             description="Keep each closed period's GA4 funnel before the 14-month horizon drops it",
             func=self._run_ga4_capture,
-            trigger=CronTrigger(hour=2, minute=40),
+            trigger=CronTrigger(hour=GA4_RUN_AT.hour, minute=GA4_RUN_AT.minute),
             max_instances=1,
             coalesce=True,
         )

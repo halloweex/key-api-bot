@@ -65,10 +65,17 @@ requests, asked one at a time.
 
 FAILURE
 
-Each closed period still missing is counted by the integrity job
-(`backlog`, `ga4_backfill_incomplete`, WARN): right after revision 0036
-deploys that is the backfill working through its first three weeks, and after
-it a nightly run that is not keeping up.
+Each closed period still missing is counted by the integrity job (`backlog`)
+and judged by its slack (`nights_to_spare`): how many nights the capture
+could still fail, at `PERIODS_PER_RUN` a night oldest first, and keep every
+period before it leaves GA4's window. With at least
+`analytics_captures.GA4_MARGIN_NIGHTS` to spare the backlog is
+`ga4_backfill_incomplete`, INFO: the backfill working through its first three
+weeks after revision 0036, safely. Below that it is `ga4_backlog_at_risk`,
+WARN, a name of its own so that the morning it appears is news in the digest.
+A night that fails or does not run is a WARN that morning already
+(`capture_failed`, `capture_stalled`); the slack is what says that runs which
+succeed are still not keeping up.
 
 No GA4 key or property is a supported state (`ga4.configured`): the job stands
 down with nothing asked, written or stamped. If production loses its key, the
@@ -93,8 +100,8 @@ import calendar
 import contextlib
 import logging
 import os
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
+from datetime import date, datetime, time, timedelta
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -116,6 +123,9 @@ EDGE_MARGIN_DAYS = 1
 #: The throttle (see "THE THROTTLE, AND ITS ARITHMETIC").
 PERIODS_PER_RUN = 24
 PERIODS_PER_HOUR = 24
+#: When the nightly run fires, Kyiv time. The scheduler registers the job at
+#: it, and the slack counts the runs left from it (`first_night`).
+RUN_AT = time(2, 40)
 #: Each scope's two funnels: (breakdown as stored, GA4's dimension).
 BREAKDOWNS = (("channel_group", ga4.CHANNEL), ("device", ga4.DEVICE))
 STATEMENT_TIMEOUT = "15s"
@@ -307,14 +317,89 @@ def overdue_periods(today: date) -> List[Period]:
     return [p for p in due_periods(today) if p.end <= since]
 
 
-async def backlog(conn, today: date) -> Tuple[int, Optional[Period]]:
-    """How many overdue periods are not kept, and the oldest of them, read
-    on `conn` (`analytics_captures.read_facts`, inside its transaction).
-    Every one of them is still inside GA4's horizon; the oldest is the next
-    to leave it."""
+def leaves_window_on(period: Period) -> date:
+    """The first Kyiv day whose run can no longer keep `period`: the day its
+    first day falls before `first_capturable_day`. The run of the day before
+    is the last that can. Fourteen months after its first day, moved on to
+    where `ga4.earliest_day` clamps a short month."""
+    months = period.start.year * 12 + (period.start.month - 1) + ga4.RETENTION_MONTHS
+    year, month = months // 12, months % 12 + 1
+    day = date(year, month, min(period.start.day, calendar.monthrange(year, month)[1]))
+    while first_capturable_day(day) <= period.start:
+        day += timedelta(days=1)
+    while first_capturable_day(day - timedelta(days=1)) > period.start:
+        day -= timedelta(days=1)
+    return day
+
+
+def first_night(now: datetime) -> date:
+    """The Kyiv day of the next nightly run after `now` (timezone-aware):
+    today's while `RUN_AT` has not come yet, else tomorrow's."""
+    today = kyiv_today(now)
+    if now.astimezone(_KYIV_TZ).time() < RUN_AT:
+        return today
+    return today + timedelta(days=1)
+
+
+class Slack(NamedTuple):
+    """How many nights the capture could still fail and keep every period,
+    and the period that decides it (`nights_to_spare`)."""
+    spare: int          # negative: a period leaves unkept even if no run fails
+    period: Period      # the tightest of the missing periods
+    leaves_on: date     # the first day no run can keep it (`leaves_window_on`)
+    nights_left: int    # the runs from the first night to the day before that
+    nights_needed: int  # the run, counted from the first night, that reaches it
+
+
+def nights_to_spare(missing: Sequence[Period], first: date) -> Optional[Slack]:
+    """The slack of a backlog: `missing` oldest first, as the run asks them,
+    and `first` the Kyiv day of the next run. None when nothing is missing.
+
+    The i-th period (from 0) is kept by the run `i // PERIODS_PER_RUN + 1`
+    nights on, if every run keeps its full budget, and can be kept by any run
+    before `leaves_window_on`. A period with `left` runs before that and
+    needing the `needed`-th can lose `left - needed` of them, wherever they
+    fall, and still be kept; the least of that over the backlog is how many
+    nights the capture could fail and keep everything. Periods falling due
+    meanwhile are the newest: they sort behind every one of these and leave
+    fourteen months later, so they move nobody's turn."""
+    best: Optional[Slack] = None
+    for i, period in enumerate(missing):
+        needed = i // PERIODS_PER_RUN + 1
+        leaves = leaves_window_on(period)
+        left = (leaves - first).days
+        if best is None or left - needed < best.spare:
+            best = Slack(left - needed, period, leaves, left, needed)
+    return best
+
+
+class Backlog(NamedTuple):
+    """The overdue periods not kept yet, oldest first, and the Kyiv day of the
+    next run, the first that can keep them (`backlog`)."""
+    periods: Tuple[Period, ...]
+    first_night: date
+
+    @property
+    def missing(self) -> int:
+        return len(self.periods)
+
+    @property
+    def oldest(self) -> Optional[Period]:
+        return self.periods[0] if self.periods else None
+
+    def slack(self) -> Optional[Slack]:
+        return nights_to_spare(self.periods, self.first_night)
+
+
+async def backlog(conn, now: datetime) -> Backlog:
+    """The overdue periods not kept, oldest first, as of `now` (the server's,
+    timezone-aware), read on `conn` (`analytics_captures.read_facts`, inside
+    its transaction). Every one of them is still inside GA4's horizon; the
+    oldest is the next to leave it."""
+    today = kyiv_today(now)
     kept = await _kept(conn, first_capturable_day(today))
-    missing = [p for p in overdue_periods(today) if (p.grain, p.start) not in kept]
-    return len(missing), (missing[0] if missing else None)
+    missing = tuple(p for p in overdue_periods(today) if (p.grain, p.start) not in kept)
+    return Backlog(missing, first_night(now))
 
 
 # ─── The job ──────────────────────────────────────────────────────────────────

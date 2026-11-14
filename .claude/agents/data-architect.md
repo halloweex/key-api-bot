@@ -61,9 +61,13 @@ while documented as "pre-aggregated daily statistics by source". Anything
 trusting it would have read zeros.
 
 **Revenue and product pages read different columns.** `grand_total` vs summed
-line items. KeyCRM permits orders billed at zero with products invoiced
-separately — ₴4.16M of them — so the two disagree by construction and nobody
-had said so.
+line items. KeyCRM permits orders billed at zero with goods in them, so the
+two disagree by construction, and for months nobody had said what those
+orders were. The owner's decision of 2026-11-14 did: a retail (or exhibition)
+one is a certificate redeemed — the certificate was sold first and its money
+counted then — and a b2b one is a test shipment to a partner. On 2026-11-14
+that was 461 orders and ₴1.02M of goods, 350 of them (₴0.81M) b2b tests
+(`pg_headline_vs_line_items`, INFO, says the split every run).
 
 ## How to answer
 

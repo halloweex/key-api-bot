@@ -103,6 +103,7 @@ _DUCKDB_GONE = {
 _CHAIN_FUNCS = {
     "set_digest_marker", "latest_run", "run_by_id", "previous_run", "baseline_run",
     "run_issues", "run_diffs", "last_success_ages", "digest_marker",
+    "findings_since",
 }
 _DOOR_FUNCS = _DUCKDB_GONE | _CHAIN_FUNCS
 _ROUTER = {"core/data_quality.py", "core/dq_journal.py", "core/pg_dq_journal_write.py"}
