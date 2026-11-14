@@ -302,7 +302,8 @@ meta ──── the store's own bookkeeping
 - `app.dashboard_users`, `app.role_permissions` - Access (see "Which tabs one person may open"); `app.authorized_users`, `app.user_preferences` - the bot's
 - `app.sms_campaigns`, `app.sms_campaign_members`, `app.sms_dlr_events`, `app.marketing_optouts` - The SMS campaigns, their rosters, delivery reports and opt-outs
 - `app.alert_series` / `app.alert_events` - The alert journal
-- `meta.chain_watermarks` - Each chain's `last_sync_*` keys and its `owner:<table>` rows; `meta.mirror_state` - per-table write stamps; `meta.derivation_signal` / `meta.derivation_runs` - the derivation's request counter and journal
+- `app.offer_cost_daily`, `app.catalogue_versions`, `app.revenue_prediction_vintages`, `app.revenue_goal_history`, `app.order_channel_verdicts`, `app.expense_deletions`, `app.ga4_funnel` - The analysts' captures (revision 0036): what Postgres overwrites, kept as it was, each by one writer; `app.analytics_buyer_key` and the person key's three tables are created and written by nothing yet (see "The analysts' captures")
+- `meta.chain_watermarks` - Each chain's `last_sync_*` keys and its `owner:<table>` rows; `meta.mirror_state` - per-table write stamps, and each capture's `capture.<table>`; `meta.derivation_signal` / `meta.derivation_runs` - the derivation's request counter and journal
 - History, written by nothing (OD-11): `app.sync_metadata`, `app.warehouse_refreshes` (~65k rows back to 2026-03-14, still the best forensic trail of the DuckDB warehouse), `app.reconciliation_log`
 
 ClickHouse holds a second copy of Silver and derives its own Gold from it
@@ -356,7 +357,9 @@ revision `0035_batch_e_chains`. Every step-14 image routes by none of them
 (S14-00). **The target is `rollback-step14`, the last image before step 14,
 pinned at S14-00's deploy** (the plan's H1; 3.0.292 is kept as
 `rollback-step14-3.0.292`), or, for a later step-14 PR, the image before it
-(`:s14-NN`, H8, which needs none of what follows). Not 3.0.292 by number:
+(`:s14-NN`, H8, which needs none of the three steps below — but, like every
+image that requires a revision earlier than the database's, it needs
+"Rolling back below a revision" first). Not 3.0.292 by number:
 the images after it carry fixes a rollback to it would undo, among them
 `/api/health`'s `sync` block and the web memory watchdog's alerts (3.0.293),
 a malformed dashboard date or an over-long range answered 400 (3.0.295), the
@@ -384,12 +387,69 @@ date outside 2000-01-01..2099-12-31 answered 400 and a marketing report on
    `duckdb_switch.held_back` is empty, no `duckdb_off_held_back` page fired
    and no new `data/analytics.duckdb` appeared; if any did, stop that image.
 3. **`meta.alembic_version`** is the revision that image requires
-   (`0035_batch_e_chains` for every image built before S14-00), or roll back
-   to the last image that requires the one there instead.
+   (`0035_batch_e_chains` for every image built before S14-00, and for every
+   image before revision 0036). From `0036_analytics_captures` on it is not:
+   "Rolling back below a revision", below, comes first, and its step 1 goes
+   before the retag.
 
 Fast: `docker tag …:rollback-step14 …:latest` for web, bot and migrate, then
-`docker compose up -d` without `pull`. Proper: `git revert` the PR and let CI
-deploy.
+`docker compose up -d` without `pull` — after the stamp has moved, from 0036
+on. Proper, for an image that requires the database's revision: `git revert`
+the PR and let CI deploy. For one below it, Proper is the Fast rollback
+first and the revert after, for the record (below).
+
+### Rolling back below a revision
+
+From revision 0036 on, a rollback to any image that requires an earlier
+revision than the database is at — `rollback-step14`, an `:s14-NN`, the
+image just before 0036's own PR, any earlier version by number —
+moves `meta.alembic_version` down first, with a migrate image that knows the
+revision the database is at. Alembic steps down from a revision only through
+that revision's own module, and an older migrate image has none.
+
+1. **The stamp, while `keycrm-migrate:latest` is still the image at the
+   database's revision** — before any retag or pull:
+   `docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains`.
+   It moves the stamp and executes nothing else: the eleven tables of the
+   analysts' captures and their rows stay (owner decision D2), and the
+   captures stop while the older image runs.
+2. **The images, at once**: tag the target as `latest` for web, bot and
+   migrate — `…:rollback-step14`, or `docker pull …/keycrm-<image>:<VERSION>`
+   for an earlier version by number, which every deploy pushes beside
+   `latest` — and `docker compose up -d` without `pull`. The older migrate's
+   `upgrade head` is then a no-op, and web and bot start.
+3. **A `git revert` only after**, if one is wanted for the record: its deploy
+   meets a database at 0035, and its migrate is a no-op.
+
+**Skipped, the stamp move stops the running web and bot — they do not merely
+stay old.** A retag's `up -d`, or a revert's deploy, recreates them, and they
+wait for `migrate` to complete successfully; the older migrate image's own
+`alembic upgrade head` exits 255 ("Can't locate revision identified by
+'0036_analytics_captures'"), so web and bot are left `Created`, not running
+(measured with Compose 2.23). A revert deployed first is the same outage for
+the whole CI build and deploy, and by then `latest` is the older migrate
+image, which cannot step down. The other order costs seconds: between steps
+1 and 2 the running 0036 web refuses every Postgres read (`require_revision`
+asks the stamp on each, uncached: a 401 for every session but a hardcoded
+admin's, a 503 on every tab), so the two go together, in one sitting.
+
+**A stamp move missed**: the image at the database's revision is still on
+Docker Hub under its version (`deploy.yml` pushes `:<VERSION>` beside
+`:latest`; the host's `docker image prune -f` may have taken it locally).
+Bring it back as `latest` for migrate alone, step down, and go on with step 2:
+
+```bash
+docker pull …/keycrm-migrate:<the version at 0036>
+docker tag …/keycrm-migrate:<the version at 0036> …/keycrm-migrate:latest
+docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains
+# then step 2: tag the target as latest for web, bot and migrate; up -d
+```
+
+Measured 2026-11-13 on a throwaway Postgres with origin/main's migrate tree
+(0035): at 0036 its `upgrade head` exited 255 and its `require_revision`
+raised; after the downgrade its `upgrade head` was a no-op and
+`require_revision` passed, every table and row intact; the 0036 tree's
+`upgrade head` then put the stamp back and moved nothing else.
 
 ## Docker Commands
 
@@ -629,7 +689,7 @@ What does exist:
 - LightGBM with 500 rounds, early stopping (patience=50), time-series validation (last 60 days)
 - **Performance** (6-fold walk-forward CV): WAPE=27.66%, R²=0.066, beats best baseline by 1.53%
 - Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no model artefact on disk
-- Predictions stored in Postgres `app.revenue_predictions`, written by chain 7b-3 (DuckDB's `revenue_predictions` until it latched)
+- Predictions stored in Postgres `app.revenue_predictions`, written by chain 7b-3 (DuckDB's `revenue_predictions` until it latched). The rows each training replaces are kept in `app.revenue_prediction_vintages` (revision 0036), inside the training's transaction under a savepoint that never fails it; the forecast a past day was shown last is never replaced and stays in `app.revenue_predictions`, so the history of forecasts shown is both (see "The analysts' captures")
 - Frontend shows forecast bars (lighter opacity) on Revenue Trend chart for the month, the week and a custom range with future days
 - **Every forecast a page shows is read from `revenue_predictions`; no request runs the model** (owner's decision, 2026-11-04 — the Rust council's decision 6). It is as of the last training (Mon/Thu), retail only — b2b and the other sales types show none — and `last_trained` (the Kyiv day of the rows' `created_at`) and `model_metrics` come from the same rows, so any process, the Rust read API included, can answer it. Until then the week and a custom range ran the model on the request over 780 days of Gold, and `last_trained` came from web's memory — null after every restart, until the next training
 - "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
@@ -1278,11 +1338,12 @@ whole reason the group is read from the source now.
 |---|---|---|
 | `pg_warehouse_derive` | every 1 min | Postgres derives Silver and Gold when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
-| `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants |
+| `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants, the analysts' capture stamps (WARN at most) |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses included (Postgres only, O3 (a)) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
 | `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
+| `ga4_capture` | daily 02:40 | keep each closed GA4 day, ISO week and month in `app.ga4_funnel` before the 14-month horizon drops it, oldest first, at most 24 periods a run and an hour; stands down without a GA4 key or under `KS_ANALYTICS_CAPTURES=off` (revision 0036) |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
@@ -1833,7 +1894,8 @@ amount is the number asyncpg sends, rounded as `NUMERIC(12,2)` rounds it: a
 float by its binary value, so 2.675 is stored as 2.67, and text as written,
 so "2.675" is 2.68. An order whose expenses differ is re-fetched
 last in the same batch, and its write deletes what KeyCRM no longer lists
-(O2 (a)). History below.
+(O2 (a)); since revision 0036 what that delete removes is kept in
+`app.expense_deletions` (see "The analysts' captures"). History below.
 
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the
@@ -2179,11 +2241,190 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0035_batch_e_chains` today, and every
+mismatch, ahead or behind. It is `0036_analytics_captures` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
 migration; only a restart before its image is replaced would fail.
+
+### The analysts' captures: what Postgres overwrites, kept (revision 0036)
+
+Seven things this system writes are overwritten in place, and until revision
+0036 nothing recorded what they had been: what an offer cost, which brand a
+product was under, the forecast the page showed, the goal, the channel an
+order was credited to, an expense KeyCRM stopped listing, and the GA4 funnel
+once Google's fourteen months ran out. Each is a question an analyst will ask
+about the past, and each day not kept is a day nobody can ask about again.
+Revision 0036 gives each a table in `app`. It is phase 1 of the analysts'
+warehouse (design revision 3.1, every recommendation approved by the owner on
+2026-11-13), landed before Z3 by decision D2, and it touches no ClickHouse.
+
+| Table | A row is | Written by | When | Bound, a year |
+|---|---|---|---|---|
+| `app.offer_cost_daily` | an offer's `purchased_price` and `price` as the day's per-SKU photograph found them, NULL kept | chain 1, `pg_inventory_write.record_sku_inventory_snapshot` | in the photograph's transaction, once a Kyiv day, `ON CONFLICT DO NOTHING`: a cost changed during day D is D+1's row | ~920 offers × 365 = 336 k rows, 29 MB (measured) |
+| `app.catalogue_versions` | a version of a product's name, brand and category (SCD2), or a tombstone | chain 6, `pg_catalogue_write._capture_versions` | a content diff after each products write, in its own transaction | 1–2 k rows |
+| `app.revenue_prediction_vintages` | a stored forecast row a training replaced, with its `made_at` (NULL kept) | chain 7b-3, `pg_forecast_write.store_predictions` | in the training's transaction, after its lock, before its DELETE | ≤ 61 a training, ~6.3 k rows, < 1 MB |
+| `app.revenue_goal_history` | every goal written: `set`, `reset_to_auto`, `recalculated`; and the goal in force before a write overwrites it, when the history does not end with it | chain 7a, `pg_goals_write.set_goal` | in the goal's transaction, read back from the stored row | tens of rows |
+| `app.order_channel_verdicts` | an order's verdict when it first appeared and each time it moved, with `rule_version` | `pg_utm_parse` | a content diff after each parse commits, in its own transaction | 15–50 k rows, < 10 MB, after a seed of one row per verdict held |
+| `app.expense_deletions` | an expense chain 3 deleted because KeyCRM stopped listing it (O2 (a)) | chain 3, `pg_orders_write` | in the group's transaction, from the DELETE's own `RETURNING` | tens of rows |
+| `app.ga4_funnel` | a closed day's, ISO week's or month's funnel, by channel group and device, in both scopes | `core/ga4_capture.py`, job `ga4_capture` | daily 02:40, oldest first, 24 periods a run | ~73 k rows, 12 MB (measured), after a backfill of what GA4 still holds |
+
+**Anything that accumulates declares its bound, and these are histories kept
+on purpose**: append-only, nothing deletes from them, and the bound is the
+arithmetic in the last column — about 50 MB a year together, most of it
+`offer_cost_daily` (the design's "under 30 MB" was that table alone). Each
+writer states its own beside its statement. If a rate ever changes, the
+retention is decided there.
+
+Four more tables come with the revision and are written by nothing:
+`app.analytics_buyer_key`, and the person key's `app.analytics_person_key`,
+`app.analytics_phone_excluded` and `app.analytics_person_merges` (D3 is yes,
+but their writer, `core.ch_mart`, comes in phase 2 with the person key's
+guards).
+
+**One writer each, and not a chain.** `core.analytics_captures.CAPTURES` names
+each capture's module, `core.write_chains.CAPTURE_TABLES` is read off it, and
+the repository walk (`tests/unit/test_write_chains.py`,
+`TestTheCaptureTables`, over `core`, `web`, `scripts`, `bot` and `deploy`)
+requires that module and nothing else to write the table, and nothing to write
+the four key tables. None is in a chain's `CHAIN_TABLES`: a chain's table must
+succeed a DuckDB table in the frozen `FATES`, and `chain_latch.claim` would
+stamp `owner:` rows an image from before step 14 reads. Each capture's
+statement is its writer module's own constant, so the walk finds the writer
+and not the helper that runs it.
+
+**A capture never fails the writer it rides on.** The four in-transaction
+captures (cost, vintages, goals, expense deletions) go through
+`capture_in_transaction`, which runs the statement under a SAVEPOINT of its
+own: if it raises, only the savepoint rolls back, the failure is stamped in a
+savepoint of its own and logged at ERROR (`capture failed`), and the writer's
+write commits as if the capture had not been there. The design's revision 2
+had no savepoint, and a NULL `created_at` in `app.revenue_predictions` aborted
+the whole forecast write (its test T8). Each of its statements, the stamps
+included, carries asyncpg's per-call timeout, `CAPTURE_TIMEOUT_S` (5 s): a
+capture blocked on a lock — a non-concurrent CREATE INDEX, REINDEX or VACUUM
+FULL on its table, its stamp row held — holds the writer, and every lock the
+writer took (the order sync's and the 01:00 photograph's heavy-job lock
+among them), 5 s, or 10 s when the stamp row is what is held, rather than
+`KS_PG_TIMEOUT`'s 30 s or 60 s. Not `SET LOCAL`: under a savepoint it
+survives RELEASE and would bound the rest of the writer's transaction. The two content diffs (catalogue,
+verdicts) and the GA4 job go through `run_own_transaction`, after their
+writer's transaction has committed: a missed run only coarsens when a change
+became known, because the next run diffs against the last version kept. Their
+self-checks and the catalogue's mass-delete guard refuse with
+`CaptureRefused`, and a refusal writes nothing. Neither helper raises
+anything but a cancellation.
+
+**The switch is `KS_ANALYTICS_CAPTURES`.** `off`, `0` or `false` stops every
+capture, the in-transaction ones included — the statement is skipped and
+nothing is stamped — and the GA4 job asks Google nothing. Unset is on, which
+is production: neither `docker-compose.yml` nor `.env` needs a line for it,
+and since web reads `.env` through `env_file`, switching off is a line there
+and `up -d web`. An unrecognised value stays on and logs one WARNING per
+value: it is not a store selector, and a typo must not take a writer down.
+Every day it is off is a gap in every history.
+
+**A failure is a WARN in the 09:00 digest, never a page** (owner decision
+D8 (b)). Not `raise_alert`: that is a Telegram page, and the bot escalates a
+condition archived as firing after six hours, while a capture that failed
+costs a stretch of a history and no number on any screen. Each capture stamps
+its row in `meta.mirror_state`, `capture.<table>`, with the mirror's own
+statements — `WATERMARK_OK_SQL` in the same savepoint or transaction as its
+rows, `pg_landing.RECORD_FAILURE_SQL` on the connection it already holds (a
+second one could wait on a full pool inside a writer's transaction). The
+integrity job (01, 07, 13, 19) reads them (`analytics_captures.read_facts`)
+and files, on layer `integrity`:
+
+| Condition | Severity | Filed when |
+|---|---|---|
+| `capture_failed:<table>` | WARN | a run failed since the capture's last success; all seven |
+| `capture_self_check_failed:<table>` | WARN | the catalogue's or the verdicts' self-check or guard refused; nothing was written |
+| `capture_stalled:<table>` | WARN | no success inside the writer's cadence plus grace, or none yet: cost 26 h, catalogue and verdicts 3 h, vintages 4 d 3 h, GA4 30 h. Goals and expense deletions run only when something moves them and are judged on failures alone |
+| `ga4_backfill_incomplete` | WARN | closed periods inside GA4's horizon, due since yesterday, not kept yet (`ga4_capture.backlog`); only where GA4 is configured |
+| `captures_unwatched` | WARN | the stamps could not be read; holds every condition above, and is news in every digest (`blindness_names`) |
+| `captures_switched_off` | WARN | the switch is off: no stamp is judged and every stamp finding standing is held, not cleared; news in every digest (`blindness_names`), since every day it stands is a day missing from each history. The GA4 backlog is still read and judged |
+
+The design's §9 had the self-check CRITICAL; D8 (b) made every one of them
+WARN. The names are new (rule 15), registered as a family over `CAPTURES`
+(`analytics_captures.conditions()`), and each has a REMEDIATION line and
+words in the digest (`analytics_captures.human_names`, "cost history: capture
+stalled"). They never ride a page either: when an integrity CRITICAL pages,
+the job builds the message, the Gate's bucket and the agent's evidence
+without them (`is_capture_finding`), so a capture that stamps between two
+runs cannot make a standing CRITICAL a new incident. What the watch cannot
+keep: a failure the capture's next run clears before the integrity job reads
+the row is in the web log only.
+
+**After the deploy, expect** `capture_stalled` ("never stamped") for each
+capture until its writer has run once — the cost at the first photograph after
+Kyiv midnight, the vintages at the next Monday or Thursday training, GA4 at
+02:40 — and `ga4_backfill_incomplete` for about three weeks while the backfill
+works through some 500 periods, 24 a night. A host with Postgres and no GA4
+key (a dev copy) keeps `capture_stalled:app.ga4_funnel`: the job stands down
+there and stamps nothing, so that a production key gone missing says so too.
+
+**The decisions worth knowing, per capture:**
+
+- *Cost.* With the day's first per-SKU photograph only, from its own `day`; a
+  failed night stays a gap, never filled from a later hour, which would date a
+  later observation as the photograph's.
+- *Catalogue.* Brand `''` and NULL are stored as bronze holds them and folded
+  by readers (`NULLIF(brand, '')`). A tombstone needs a product left out of
+  both of the last two full writes (one short write never retires anything)
+  or its bronze row gone. More than max(50, 1 %) of the products held live
+  tombstoned in one run is refused whole; a genuine mass retirement in KeyCRM
+  holds the refusal until a person who has seen it runs `_capture_versions`
+  with `guard=False` once (its docstring has the line). Repeatable read,
+  behind a lock on the history table, so two captures queue. The diff
+  compares columns, never `row_hash`: the canonical row is not injective
+  (NULL and the text `\N` render alike), and deciding by the hash would
+  write no version for such a change while the column-wise self-check
+  refused every run after. A latest version whose hash is not its own row's
+  (edited by hand) is refused before the diff.
+- *Vintages.* Copied after the training's advisory lock, so two trainings at
+  once keep both forecasts. A training that stores nothing stamps nothing and
+  reads as stalled after 4 d 3 h, as it should. **They are the replaced
+  forecasts, not every forecast shown**: a training replaces today onwards,
+  so the forecast a past day was shown last (horizons 0 to 3 under Mon/Thu
+  trainings) is never replaced and stays in `app.revenue_predictions`. The
+  forecast history is the vintages together with that table's rows dated
+  before today (`made_at` their `created_at`); accuracy by horizon read from
+  the vintages alone has no forecast made a day or two ahead.
+- *Goals.* Every write is a version, the same number typed twice included,
+  and `set_at` is the row's own `updated_at`. Before a write overwrites the
+  goal in force, that goal is appended too when the history does not end
+  with it — the goal stored before 0036, one written while the switch was
+  off or by an image at 0035, one whose version failed — as `set` if custom,
+  else `reset_to_auto`, with its own `updated_at`; when it cannot be kept the
+  new goal's version is not attempted (its ok stamp would clear the failure)
+  and the next write keeps it. So the goals in force over time are the
+  history, then the live row where the history does not end with it (a goal
+  stored before 0036 that nobody has written over since). The suggestion
+  `get_goals` shows for a period with no stored row is never stored.
+- *Verdicts.* The whole `silver.order_utm` is diffed against each order's
+  latest log row under the parse's advisory key; `rule_version` moves with
+  the rule (the /traffic section, "The verdicts now have a history"). A
+  `first` verdict today's rules do not make of the order's comment says
+  `pre-r1` (`pg_utm_parse.earlier_rules`): on the seed, the verdicts not
+  re-parsed since an earlier rule decided them (3 769 in the 2026-08-31 dry
+  run), which under `r1` would read as the next version's drift. A full
+  parse captures before it replaces the table, and is refused when that
+  capture was not kept (D12).
+- *Expense deletions.* Run and stamped only when the DELETE removed rows:
+  stamping a success every minute would clear a failure before the integrity
+  job could read it.
+- *GA4.* A day is closed from D-3 back, a week or month when its last day is,
+  and a period is asked only while its first day lies more than a day inside
+  the horizon. `traffic_kind` and `traffic_rule` (`core.ga4.TRAFFIC_RULE`,
+  bumped with `COLD` or `WARM`) are stored as decided at capture. A period is
+  kept once (`ON CONFLICT DO NOTHING`); a GA4 error stops the run and keeps
+  what was kept. 24 periods a run and in any hour, counted from
+  `captured_at`, is 96 requests: under 7 % of the Cloud project's hourly
+  quota at Google's typical 10 tokens a request (not measured on this
+  property).
+
+Rolling back below 0036 moves the stamp first, before the retag: "Rolling
+back below a revision", under Deployment.
 
 ### The port in front of the bot's state
 
@@ -2644,6 +2885,24 @@ LOCK снимка не фиксирует и пережидает тик; пус
 прогонами и возвращается `COPY FROM` без единого расхождения. Цифры на сегодня
 даёт только прогон на проде — это и есть вход для OD-06.
 
+**The verdicts now have a history: `app.order_channel_verdicts`** (revision
+0036; owner decision D12: it lands before any reclassify). After each parse
+commits, `pg_utm_parse` appends a row for every order whose verdict first
+appeared (`first`) or moved (`change`, or `reclassify` when a full parse moved
+it), with `rule_version` — `core.utm_classify.RULE_VERSION`, held to the
+goldens by `tests/unit/test_capture_verdicts.py` (`GOLDEN_SHA256`,
+append-only), or `pre-r1` on a `first` verdict today's rules do not make. A
+rule change therefore bumps the version in the same commit as the golden,
+and PR #380 must make it `r2`. **D12 is in the code**: a full parse first
+logs what the table holds (an incremental capture, so the seed if the log is
+empty), and is refused — the reclassify door's 409, `UNLOGGED_REFUSAL` —
+when that was not kept: the switch off, or the capture failing. Only the
+CLI's `--force-ship` passes it. The full parse's log line carries
+`verdicts_logged`, for what it moved. Before a reclassify on production:
+`capture.app.order_channel_verdicts` in `meta.mirror_state` at
+`failures_since_ok = 0`, and the log's distinct orders at least
+`silver.order_utm`'s rows. See "The analysts' captures".
+
 **Три решения на карточке ROAS, каждое — утверждение, которого не считали.**
 
 - Выручку карточка берёт из **своего же** ответа (`blended.revenue`), а не из
@@ -3009,10 +3268,13 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 - **Трендовая воронка GA4 — не дневная**: на отрезке она считает человека
   один раз, в первый его день (за 01–02.10.2026 «вошли 2-го» 1 428 против
   1 552 у воронки одного дня). Ряд по дням — только воронкой на каждый день.
-- **История в базе — следующий шаг**, после шага 14 (новая ревизия меняет
-  откат). До тех пор помесячная и понедельная история с сентября 2025 по
-  каналам и устройствам и дневная по каналам сохранены страховочной
-  выгрузкой в файлах артефакта «Воронка сайта KoreanStory».
+- **History is kept in the database since revision 0036**: each closed day,
+  ISO week and month, both scopes, by channel group and by device, in
+  `app.ga4_funnel` (job `ga4_capture`, see "The analysts' captures"). Its
+  first runs backfill what GA4 still holds, oldest first; anything older was
+  lost before then except the owner's safety export (monthly and weekly from
+  September 2025 by channel and device, daily by channel) in the files of the
+  artefact «Воронка сайта KoreanStory», in another shape and not loaded.
 
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
 
@@ -3536,4 +3798,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-05 (step 14, S14-20)*
+*Last updated: 2026-11-13 (revision 0036, the analysts' captures)*

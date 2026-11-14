@@ -88,6 +88,27 @@ Until all four hold, an unlatched chain runs as duckdb whatever
 (`write_chain_precondition_unmet`). A latched chain keeps writing Postgres
 (OD-19 (a)), and the same warning then says its inputs may come from DuckDB.
 
+THE FORECAST AS IT WAS SHOWN (revision 0036)
+
+`store_predictions` replaces a range, so the forecast a page showed until the
+next training is gone once it runs. The rows about to be deleted are copied
+first into `app.revenue_prediction_vintages`, the analysts' forecast history
+(the warehouse design 3.1, §3.3), and this module is its one writer
+(`core.analytics_captures.CAPTURES`). The copy rides the replacement's
+transaction under a SAVEPOINT of its own (`capture_in_transaction`): a copy
+that fails rolls back alone and the forecast is stored as before, and
+`KS_ANALYTICS_CAPTURES=off` skips it. It is not one of `CHAIN_TABLES`: no
+DuckDB table preceded it, and the latch claims nothing for it.
+
+The vintages are not every forecast shown, only the replaced ones: a training
+replaces today onwards, so the forecast a past day was shown last — by the
+last training on or before it, horizons 0 to 3 under Mon/Thu trainings — is
+never replaced and stays in `app.revenue_predictions`, past rows being kept.
+The forecast history is therefore `app.revenue_prediction_vintages` together
+with `app.revenue_predictions`' rows dated before today (`made_at` their
+`created_at`); a reader of accuracy by horizon reads both, or it sees no
+forecast made a day or two ahead.
+
 THE WAY BACK
 
 `scripts/chain_copy_back.py forecast` was the only thing that released the
@@ -108,6 +129,7 @@ from datetime import date, datetime
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from core import chain_latch
+from core.analytics_captures import capture_in_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +168,32 @@ TABLE_HOLES: Tuple[str, ...] = (
 # second collides on the primary key, and a Monday job beside an admin POST
 # would interleave two goal sets.
 CHAIN_LOCK_KEY = 0x6B73_0000_0000_7B03
+
+# The vintages' capture: the stored rows `store_predictions` is about to
+# delete, by the DELETE's own predicate and arguments, run just before it and
+# under the chain's advisory lock, so two trainings at once each keep what the
+# other stored. `made_at` is their `created_at`, which revision 0025 left
+# nullable: a NULL is kept as NULL and fails nothing (the design's T8).
+# `captured_at` is the column's default, the replacing transaction's `now()`:
+# when they stopped being shown. A constant of this module, so the walk in
+# `tests/unit/test_write_chains.py` finds the table's one writer here.
+#
+# BOUND: a training replaces at most its 61 days (today to +60,
+# `prediction_service.FORECAST_HORIZON_DAYS`). Mon and Thu are 104 retail
+# trainings a year, so about 6.3 k rows of nine narrow columns, under 1 MB; an
+# admin's retrain or a b2b training adds at most 61 more. Arithmetic, not
+# policy: nothing deletes them, as nothing deletes a past prediction.
+VINTAGES_TABLE = "app.revenue_prediction_vintages"
+_VINTAGES_CAPTURE_SQL = (
+    "INSERT INTO app.revenue_prediction_vintages "
+    "(made_at, prediction_date, sales_type, predicted_revenue, model_mae, "
+    " model_mape, model_wape) "
+    "SELECT created_at, prediction_date, sales_type, predicted_revenue, "
+    "model_mae, model_mape, model_wape "
+    "FROM app.revenue_predictions "
+    "WHERE sales_type = $1 AND prediction_date >= $2 "
+    "AND prediction_date <= $3 "
+    "ORDER BY prediction_date")
 
 # `NUMERIC(precision, scale)` of revision 0025, and DuckDB's `DECIMAL`s beside it.
 NUMERIC_COLUMNS = {
@@ -422,7 +470,9 @@ async def store_predictions(
 
     DELETE over `[min(date), max(date)]` then INSERT, in one transaction —
     DuckDB's statement pair exactly: past rows outside the range stay.
-    `created_at` is one stamp per run, the caller's clock.
+    `created_at` is one stamp per run, the caller's clock. The rows the
+    DELETE takes are first copied into `app.revenue_prediction_vintages`
+    (`_VINTAGES_CAPTURE_SQL`); the copy never fails this write.
 
     BOUND: past predictions are never deleted — one row per day per trained
     sales type, about 365 rows a year, as in DuckDB. Arithmetic, not policy.
@@ -439,6 +489,11 @@ async def store_predictions(
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock($1)", CHAIN_LOCK_KEY)
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+            # Under a savepoint of its own: whatever it returns, the
+            # replacement below goes ahead.
+            await capture_in_transaction(
+                conn, VINTAGES_TABLE, _VINTAGES_CAPTURE_SQL,
+                sales_type, first, last)
             await conn.execute(
                 "DELETE FROM app.revenue_predictions "
                 "WHERE sales_type = $1 AND prediction_date >= $2 "

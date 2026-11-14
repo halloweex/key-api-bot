@@ -465,6 +465,26 @@ for _entity in ("orders", "products", "buyers", "offers", "stocks",
                 "managers", "categories", "expense_types"):
     REGISTRY[f"freshness_{_entity}"] = _c("a sync moves the entity's watermark")
 
+# The analysts' captures (revision 0036), judged on the integrity layer from
+# their `capture.<table>` stamps. WARN at most and never a page — owner
+# decision D8 (b): counted in the stamps and said in the 09:00 digest. One key
+# per capture table, a family over `core.analytics_captures.CAPTURES` as
+# `mirror_stale:{table}` is over its tables, plus the GA4 capture's backlog;
+# `conditions()` names exactly what `judge` can file. New names, none ever
+# used or retired (rule 15).
+from core import analytics_captures as _captures  # noqa: E402
+
+_CAPTURE_CLEARS = {
+    _captures.FAILED: "the capture's next run succeeds",
+    _captures.STALLED: "the capture stamps a success inside its cadence again",
+    _captures.SELF_CHECK_FAILED: "the capture's next run passes its self-check",
+    _captures.UNWATCHED: "the integrity job reads the capture stamps again",
+    _captures.SWITCHED_OFF: "KS_ANALYTICS_CAPTURES is unset or on again",
+    _captures.GA4_BACKFILL: "every closed period inside GA4's horizon is kept",
+}
+for _key in _captures.conditions():
+    REGISTRY[_key] = _c(_CAPTURE_CLEARS[_key.split(":", 1)[0]])
+
 
 # Channel messages that ride the same throttle machinery but are not
 # conditions: the digest is a scheduled report. (canary:recovery lived here

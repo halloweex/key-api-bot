@@ -25,8 +25,9 @@ chain cannot be written and forgotten.
 from __future__ import annotations
 
 from types import ModuleType
-from typing import FrozenSet, Optional
+from typing import Dict, FrozenSet, Optional
 
+from core.analytics_captures import CAPTURES
 from core import (
     pg_buyers_write, pg_expense_types_write, pg_expenses_write, pg_goals_write,
     pg_inventory_write, pg_managers_write, pg_orders_write,
@@ -48,6 +49,28 @@ WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
                 pg_managers_write, pg_catalogue_write, pg_forecast_write,
                 pg_dq_journal_write, pg_watchdog_write,
                 pg_weekly_ledger_write, pg_traffic_ledger_write)
+
+
+# The analysts' captures (revision 0036): each capture table and the one
+# module that writes it, read off `core.analytics_captures.CAPTURES`.
+# Deliberately NOT a chain's `CHAIN_TABLES` (the design's §3.3): a chain's
+# tables must each succeed a DuckDB table in the frozen `FATES`, and none of
+# these ever had one; and `chain_latch.claim` would stamp `owner:<table>` rows
+# for them on every write, which an image from before step 14 reads. The walk
+# in `tests/unit/test_write_chains.py` holds each to its one writer.
+CAPTURE_TABLES: Dict[str, str] = {table: spec.writer
+                                  for table, spec in CAPTURES.items()}
+
+# The key tables revision 0036 creates beside the captures, and the module
+# that will write them: the warehouse job, phase 2 (the buyer key's top-up and,
+# by owner decision D3, the person key). Nothing in this build writes them,
+# and the same walk holds that.
+KEY_TABLES: Dict[str, str] = {
+    "app.analytics_buyer_key": "core.ch_mart",
+    "app.analytics_person_key": "core.ch_mart",
+    "app.analytics_phone_excluded": "core.ch_mart",
+    "app.analytics_person_merges": "core.ch_mart",
+}
 
 
 def chain_name(chain: ModuleType) -> str:

@@ -328,7 +328,9 @@ async def reclassify_traffic(
     re-parsed, and `silver.order_utm` is replaced whole — a `DELETE` of every
     row and the re-parsed verdicts inserted, in one transaction. A result that
     would shrink the table under `FULL_PARSE_FLOOR_PCT` of its rows is refused
-    (409) and the table keeps what it holds.
+    (409) and the table keeps what it holds; so is a reclassify whose verdict
+    log did not first keep what the table holds (owner decision D12:
+    `KS_ANALYTICS_CAPTURES=off`, or the capture failing).
 
     **A 504 in the browser does not mean it failed.** The work is synchronous,
     and a proxy that gives up first serves its own error page while the

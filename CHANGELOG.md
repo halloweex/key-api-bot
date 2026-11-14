@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.347
+
+- feat(captures): revision 0036 keeps seven histories Postgres overwrites (analysts' warehouse, phase 1)
+
+
 ## 3.0.346
 
 - fix(trend): the comparison is the whole period's, day by day

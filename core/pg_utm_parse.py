@@ -108,6 +108,79 @@ reaches `parse_full` from the CLI's flag and from nowhere else. The router
 never raises: the doors read its answer. Until step 14's S14-15 each door ran
 DuckDB's parse first, and under `KS_UTM_PARSE=duckdb` the router shipped
 DuckDB's copy instead (`ship_after_reparse`).
+
+THE VERDICT LOG (revision 0036, the analysts' captures)
+
+Both parses overwrite a verdict in place, and a reclassify (OD-06, PR #380)
+overwrites thousands at once, so nothing would say what an order was called
+last month. `app.order_channel_verdicts` keeps one row per change of an
+order's verdict — `traffic_type`, `platform`, `utm_source`, `utm_medium`,
+`utm_campaign` — appended by `capture_verdicts` once the parse's own
+transaction has committed, in a transaction of its own
+(`analytics_captures.run_own_transaction`): a content diff of the whole of
+`silver.order_utm` against each order's latest captured verdict. Whole, not
+the rows this run parsed, so a missed run is caught up by the next and only
+coarsens `known_from`. It never fails the parse: a capture that raises is
+rolled back alone and stamped in `meta.mirror_state`
+(`capture.app.order_channel_verdicts`), which the integrity job digests as a
+WARN (owner decision D8 (b)); `KS_ANALYTICS_CAPTURES=off` skips it. A full
+parse's result, and so its log line, says whether the log kept it
+(`verdicts_logged`): that is the reclassify, read there by its operator.
+
+A full parse also captures BEFORE it replaces the table (owner decision D12:
+the log lands before any reclassify, and the verdicts a reclassify overwrites
+are the ones it lands for). That run is incremental — a change the last parse
+moved is `change`, and against an empty log it is the seed — and a full parse
+whose pre-capture was not kept, the switch off or the capture failing, is
+refused (`UNLOGGED_REFUSAL`, the reclassify door's 409) unless forced.
+
+- `change_kind` is `first` for an order with no row yet; otherwise
+  `reclassify` after a full parse and `change` after an incremental one. A
+  full parse is the only way a rule change reaches an order whose comment
+  has not moved, and its two callers are the reclassify door and the backfill
+  CLI, whose restored comments land on orders that had no verdict (`first`).
+  The one mislabel: an order whose comment moved and that the incremental had
+  not yet re-parsed when a full parse ran is called `reclassify` — the orders
+  synced since the last derivation, minutes' worth.
+- `rule_version` is `utm_classify.RULE_VERSION` of the process that captured
+  the row. For a verdict a parse just decided, those are its rules. A `first`
+  row whose verdict those rules do not make of the order's comment today says
+  `pre-r1` (`earlier_rules`) instead: on the seed — the first run writes
+  `first` for every verdict already stored — those are the verdicts decided
+  under earlier rules, since `silver.order_utm` keeps a verdict until its
+  order moves or a reclassify runs (the dry run counted 3 769 such on
+  2026-08-31). Labelled `r1`, a reclassify's move of them would read as the
+  next version's drift. The one other case is an order whose comment moved
+  and is not re-parsed yet, which the parse just before the capture leaves
+  only when the capture runs ahead of a full parse.
+- `known_from` is the capture's clock, read after it holds the advisory key.
+- An order whose row left `silver.order_utm` — only a full parse deletes, for
+  a comment KeyCRM has since emptied — is recorded, as a row of NULLs: the
+  readers' `LEFT JOIN … COALESCE` reads a missing row and a row of NULLs
+  alike (`utm_columns` writes NULLs for a comment with no tracking data for
+  that reason), so in the log they are one state, and the log says what
+  /traffic said. A row of NULLs after a row of NULLs is no change. No guard
+  on the count: the full parse refuses a shrink under `FULL_PARSE_FLOOR_PCT`
+  unless forced, and a row lost outside a parse is re-parsed by the parse
+  that runs just before the capture.
+- Its self-check, zero tolerance, before it commits: every order's latest
+  captured verdict equals `silver.order_utm`'s, column by column, and every
+  latest row's `row_hash` is its columns' hash. Either failing raises
+  `CaptureRefused`: nothing is kept and the stamp says so.
+
+It runs inside the parse's `PG_LAYER_LOCK` hold, so no in-process parse lands
+between a parse and its capture, and takes `ADVISORY_LOCK_KEY` in its own
+transaction, so no parse in any process does while it reads. That lengthens
+the derivation's last step, and the scheduler's heavy-job lock the order sync
+waits on, by the capture: measured on 50 000 synthetic orders, 0.53 s for the
+seed and 0.12 s for a run with nothing to append
+(`.planning/clickhouse-dwh/impl-0036/WRITER-verdicts.md`).
+
+Append-only and unbounded by design, like `app.order_versions`, and for its
+reason: it is the only record. Its bound is arithmetic — about 170 bytes a
+row with its index (measured), the seed once (~33 000 rows), then one row for
+each new order's first verdict and one per verdict that moves: 15–50 000 rows
+a year (the design's §3.3), a reclassify included — under 10 MB a year.
 """
 from __future__ import annotations
 
@@ -117,7 +190,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.pg_derivation import DERIVED_MAX_AGE_S
-from core.utm_classify import utm_columns
+from core.utm_classify import RULE_VERSION, utm_columns
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +290,120 @@ ORDER BY o.id
 
 COUNT_SQL = f"SELECT count(*) FROM {UTM_TABLE}"
 
+# ─── The verdict log (revision 0036) — THE VERDICT LOG in the docstring ──────
+
+VERDICTS_TABLE = "app.order_channel_verdicts"
+
+# A verdict, to the log: the two columns /traffic charts by and the three tags
+# its tables name. `verdict_hash_sql` reads them in this order.
+VERDICT_COLUMNS: Tuple[str, ...] = (
+    "traffic_type", "platform", "utm_source", "utm_medium", "utm_campaign")
+
+FIRST, CHANGE, RECLASSIFY = "first", "change", "reclassify"
+
+
+def verdict_hash_sql(alias: str) -> str:
+    """The design's row hash (§3.4) over `alias`'s verdict columns: the first
+    60 bits of the md5 of the canonical row — `\\N` for NULL, chr(31) between
+    columns — so it is never negative and ClickHouse computes the same number.
+    A missing row and a row of NULLs hash alike."""
+    canon = " || chr(31) || ".join(
+        f"COALESCE({alias}.{c}, '\\N')" for c in VERDICT_COLUMNS)
+    return f"('x' || substr(md5({canon}), 1, 15))::bit(60)::bigint"
+
+
+def _verdict_columns(alias: str) -> str:
+    return ", ".join(f"{alias}.{c}" for c in VERDICT_COLUMNS)
+
+
+# Each order's latest captured verdict: `known_from` first, as the analysts
+# read the log, and `id` for a tie.
+_LATEST_VERDICTS = f"""
+latest AS (
+    SELECT DISTINCT ON (v.order_id) v.order_id, {_verdict_columns('v')}, v.row_hash
+    FROM app.order_channel_verdicts v
+    ORDER BY v.order_id, v.known_from DESC, v.id DESC
+)"""
+
+# Every order whose latest captured verdict is not what the table says: no row
+# yet (`is_first`), a verdict that moved, or a row that left the table — whose
+# columns read NULL here, as they do through the readers' LEFT JOIN, so a
+# missing row after a row of NULLs is no change.
+_VERDICT_DIFF = f"""
+SELECT COALESCE(u.order_id, l.order_id) AS order_id,
+       l.order_id IS NULL AS is_first,
+       {_verdict_columns('u')}
+FROM {UTM_TABLE} u
+FULL JOIN latest l ON l.order_id = u.order_id
+WHERE l.order_id IS NULL
+   OR ({_verdict_columns('u')}) IS DISTINCT FROM ({_verdict_columns('l')})
+"""
+
+# A `first` row whose verdict the current rules do not make of the order's
+# comment was decided under earlier ones, and says so: `pre-r1` under `r1`.
+def earlier_rules(version: str = RULE_VERSION) -> str:
+    return f"pre-{version}"
+
+
+# The orders that have no row in the log yet, with what the table holds and
+# the comment it was parsed from — the candidates for `first`. On the seed
+# every verdict held; after it, the orders new since the last capture.
+_UNLOGGED_SQL = f"""
+SELECT u.order_id, {_verdict_columns('u')}, o.manager_comment
+FROM {UTM_TABLE} u
+LEFT JOIN bronze.orders o ON o.id = u.order_id
+WHERE NOT EXISTS (SELECT 1 FROM app.order_channel_verdicts v
+                  WHERE v.order_id = u.order_id)
+"""
+
+# $1 known_from, $2 rule_version, $3 the change_kind of an order that has a
+# row, $4 the orders whose `first` verdict the current rules do not make,
+# $5 the rule_version those say.
+VERDICT_INSERT_SQL = f"""
+WITH {_LATEST_VERDICTS}
+INSERT INTO app.order_channel_verdicts
+       (order_id, known_from, rule_version, change_kind,
+        {', '.join(VERDICT_COLUMNS)}, row_hash)
+SELECT d.order_id, $1::timestamptz,
+       CASE WHEN d.is_first AND d.order_id = ANY($4::int[]) THEN $5::text
+            ELSE $2::text END,
+       CASE WHEN d.is_first THEN '{FIRST}' ELSE $3::text END,
+       {_verdict_columns('d')}, {verdict_hash_sql('d')}
+FROM ({_VERDICT_DIFF}) d
+ORDER BY d.order_id
+"""
+
+
+def not_these_rules(records: Sequence[Any]) -> List[int]:
+    """`_UNLOGGED_SQL`'s records → the order ids whose stored verdict is not
+    what `utm_columns` makes of their comment today. Pure and synchronous,
+    for a thread: on the seed it parses every comment once (~0.4 s)."""
+    index = {c: i for i, c in enumerate(UTM_COLUMNS[1:-1])}
+    out = []
+    for r in records:
+        decided = utm_columns(r["manager_comment"])
+        if tuple(decided[index[c]] for c in VERDICT_COLUMNS) != tuple(
+                r[c] for c in VERDICT_COLUMNS):
+            out.append(r["order_id"])
+    return out
+
+# The self-check, zero tolerance, in the capture's transaction after its
+# INSERT: nothing differs any more, column by column, and every latest row's
+# hash is its columns'. Up to five order ids of each, for the stamp.
+VERDICT_CHECK_SQL = f"""
+WITH {_LATEST_VERDICTS},
+differing AS ({_VERDICT_DIFF}),
+mishashed AS (
+    SELECT l.order_id FROM latest l WHERE l.row_hash <> {verdict_hash_sql('l')}
+)
+SELECT (SELECT count(*) FROM differing) AS differing,
+       (SELECT array_agg(order_id) FROM (SELECT order_id FROM differing
+                                         ORDER BY order_id LIMIT 5) s) AS differing_ids,
+       (SELECT count(*) FROM mishashed) AS mishashed,
+       (SELECT array_agg(order_id) FROM (SELECT order_id FROM mishashed
+                                         ORDER BY order_id LIMIT 5) s) AS mishashed_ids
+"""
+
 
 def _values() -> str:
     # `parsed_at` is the order's `updated_at`, and the wall clock only when the
@@ -295,6 +482,54 @@ async def _lock(conn) -> None:
     await conn.execute("SELECT pg_advisory_xact_lock($1)", ADVISORY_LOCK_KEY)
 
 
+async def _append_verdicts(conn, kind: str) -> int:
+    """The verdict log's content diff, inside `run_own_transaction`'s
+    transaction: the parse's key, the rows, the self-check. Returns how many
+    rows it appended; raises `CaptureRefused` when the self-check refuses."""
+    from core.analytics_captures import CaptureRefused
+
+    started = time.monotonic()
+    # After the key: no parse commits between this read of the table and the
+    # self-check, and `known_from` is later than every earlier capture's,
+    # whose transaction held the key until it committed.
+    await _lock(conn)
+    known_from = await conn.fetchval("SELECT clock_timestamp()")
+    unlogged = await conn.fetch(_UNLOGGED_SQL)
+    earlier = await asyncio.to_thread(not_these_rules, unlogged) if unlogged else []
+    status = await conn.execute(VERDICT_INSERT_SQL, known_from, RULE_VERSION, kind,
+                                earlier, earlier_rules())
+    check = await conn.fetchrow(VERDICT_CHECK_SQL)
+    if check["differing"] or check["mishashed"]:
+        raise CaptureRefused(
+            f"{check['differing']} order(s) whose latest captured verdict is not "
+            f"{UTM_TABLE}'s after the capture (e.g. {check['differing_ids'] or []}), "
+            f"{check['mishashed']} whose latest row_hash is not its columns' "
+            f"(e.g. {check['mishashed_ids'] or []}); nothing appended",
+            differing=check["differing"],
+            differing_ids=tuple(check["differing_ids"] or ()),
+            mishashed=check["mishashed"],
+            mishashed_ids=tuple(check["mishashed_ids"] or ()))
+    appended = int(str(status).rsplit(" ", 1)[-1])
+    if appended:
+        logger.info("Order channel verdicts: %d appended (%s, %s) in %d ms",
+                    appended, kind, RULE_VERSION,
+                    int((time.monotonic() - started) * 1000))
+    return appended
+
+
+async def capture_verdicts(conn, *, full: bool) -> bool:
+    """Append what this parse moved to `app.order_channel_verdicts`, in a
+    transaction of its own on the parse's connection once the parse has
+    committed. Never raises, a cancellation apart: a failure is the capture's,
+    rolled back, stamped and logged by `run_own_transaction`, and never the
+    parse's. `full` is a full parse's, whose changes are `reclassify`."""
+    from core.analytics_captures import run_own_transaction
+
+    kind = RECLASSIFY if full else CHANGE
+    return await run_own_transaction(
+        VERDICTS_TABLE, lambda c: _append_verdicts(c, kind), conn=conn)
+
+
 async def parse_incremental(pool=None) -> Dict[str, Any]:
     """Parse what is new or changed in `bronze.orders` into the table. Raises.
 
@@ -330,6 +565,9 @@ async def parse_incremental(pool=None) -> Dict[str, Any]:
                 total = await conn.fetchval(COUNT_SQL)
                 # Zero parsed is a success like any other. See the docstring.
                 await conn.execute(_WATERMARK_OK, UTM_TABLE, total)
+            # Committed: the verdict log reads what this run left. Never
+            # raises, so nothing it does reaches the `except` below.
+            await capture_verdicts(conn, full=False)
     except Exception as exc:
         await _record_failure(UTM_TABLE, f"{type(exc).__name__}: {exc}")
         raise
@@ -364,6 +602,10 @@ async def parse_full(pool=None, *, force: bool = False) -> Dict[str, Any]:
     reclassify is kept. A raised failure reaches a log only through the
     caller; this module logs refusals, not exceptions.
 
+    Refused too, with nothing parsed into the table, when the verdict log did
+    not keep what the table holds first (`UNLOGGED_REFUSAL`, owner decision
+    D12): the switch off, or the capture failing. `force` passes both.
+
     Takes `PG_LAYER_LOCK` itself, so it must never be called by code already
     holding it: `asyncio.Lock` is not reentrant, and the call would wait out
     `LOCK_WAIT_S` on itself and then fail.
@@ -386,17 +628,36 @@ async def parse_full(pool=None, *, force: bool = False) -> Dict[str, Any]:
         PG_LAYER_LOCK.release()
 
 
+# Why a full parse is refused when the verdict log did not keep what it would
+# replace (owner decision D12). `meta.mirror_state.last_error` quotes the
+# first 300 characters, so the lever comes early.
+UNLOGGED_REFUSAL = (
+    "refused: the verdict log did not keep the verdicts a full parse would "
+    f"replace (owner decision D12: {VERDICTS_TABLE} lands before any "
+    "reclassify); nothing replaced. → unset KS_ANALYTICS_CAPTURES=off, or read "
+    "last_error in meta.mirror_state capture.app.order_channel_verdicts; a "
+    "parse that is meant without it runs with force=True")
+
+
 async def _parse_full_locked(pool, *, force: bool) -> Dict[str, Any]:
     from core.pg import get_pool, require_revision
     from core.pg_landing import _WATERMARK_OK, _record_failure
 
     started = time.monotonic()
     refused: Optional[str] = None
+    logged = False
     try:
         pool = pool or await get_pool()
         await require_revision()
 
         async with pool.acquire() as conn:
+            # D12: what the table holds is in the log before anything
+            # replaces it — the verdicts a reclassify overwrites are the ones
+            # the log exists for. An incremental capture, so a change the
+            # last parse moved and no capture has kept yet is `change`, and
+            # the seed against an empty log is `first`. Under PG_LAYER_LOCK,
+            # so no in-process parse lands in between.
+            pre_logged = await capture_verdicts(conn, full=False)
             async with conn.transaction():
                 await _lock(conn)
                 # Counted in the transaction that would replace the table,
@@ -405,12 +666,16 @@ async def _parse_full_locked(pool, *, force: bool) -> Dict[str, Any]:
                 records = await conn.fetch(FULL_SELECT_SQL)
                 rows = await asyncio.to_thread(parse_rows, records)
                 if not force:
-                    refused = refusal(len(rows), current)
+                    refused = (UNLOGGED_REFUSAL if not pre_logged
+                               else refusal(len(rows), current))
                 if refused is None:
                     # DELETE, never TRUNCATE: see the module docstring.
                     await conn.execute(f"DELETE FROM {UTM_TABLE}")
                     await _write_chunked(conn, insert_sql(), rows)
                     await conn.execute(_WATERMARK_OK, UTM_TABLE, len(rows))
+            # A refused parse replaced nothing, so it has nothing to log.
+            if refused is None:
+                logged = await capture_verdicts(conn, full=True)
     except Exception as exc:
         await _record_failure(UTM_TABLE, f"{type(exc).__name__}: {exc}")
         raise
@@ -427,6 +692,10 @@ async def _parse_full_locked(pool, *, force: bool) -> Dict[str, Any]:
         "rows": len(rows),
         "replaced": current,
         "duration_ms": int((time.monotonic() - started) * 1000),
+        # Whether the verdict log kept what this parse moved, as `reclassify`
+        # — where the operator of a reclassify reads its outcome, this line.
+        # False is a gap the next derivation's capture fills as `change`.
+        "verdicts_logged": logged,
     }
     if force:
         result["forced"] = True
