@@ -1871,6 +1871,17 @@ Cap what rebounds; only delete what stays deleted.
   404 "identical" messages.
 - **Daily digest** (`dq_digest`) is the only route by which WARN findings reach
   anyone. INFO findings ride along but never summon a digest on their own.
+  **A finding that changes severity changes its name.** "News" is decided per
+  non-INFO finding by its count against the same name's in the last delivered
+  digest's run (`_delta_note`); severity is not compared, so a finding that
+  moved from INFO to WARN under one name with one count reads "=" and arrives
+  silently. Since 2026-11-14 three findings are INFO while they say nothing to
+  act on, each with its WARN under a name of its own:
+  `capture_unstarted:<table>` → `capture_stalled:<table>`,
+  `ga4_backfill_incomplete` → `ga4_backlog_at_risk` (see "The analysts'
+  captures"); and `pg_headline_vs_line_items`, INFO with no WARN, explained by
+  the owner's decision (see "What the warehouse validation can and cannot
+  see"). `tests/unit/test_dq_digest_owner_noise.py` replays that morning.
 - **Run-age watchdog**: `/api/health` publishes the age of the last successful
   run per layer, keyed on `error_message IS NULL` — a failed run writes a row
   too, so row-existence alone reads green. `bot/canary.py` judges it from the
@@ -2400,8 +2411,10 @@ and files, on layer `integrity`:
 |---|---|---|
 | `capture_failed:<table>` | WARN | a run failed since the capture's last success; all seven |
 | `capture_self_check_failed:<table>` | WARN | the catalogue's or the verdicts' self-check or guard refused; nothing was written |
-| `capture_stalled:<table>` | WARN | no success inside the writer's cadence plus grace, or none yet: cost 26 h, catalogue and verdicts 3 h, vintages 4 d 3 h, GA4 30 h. Goals and expense deletions run only when something moves them and are judged on failures alone |
-| `ga4_backfill_incomplete` | WARN | closed periods inside GA4's horizon, due since yesterday, not kept yet (`ga4_capture.backlog`); only where GA4 is configured |
+| `capture_stalled:<table>` | WARN | no success inside the writer's cadence plus grace: cost 26 h, catalogue and verdicts 3 h, vintages 4 d 3 h, GA4 30 h; or none yet, the same time after the first integrity run that found it so. Goals and expense deletions run only when something moves them and are judged on failures alone |
+| `capture_unstarted:<table>` | INFO | never stamped, and found so for less than that time (2026-11-14). Measured from the journal — the newest unbroken streak of successful integrity runs that filed this name or `capture_stalled` for the table (`analytics_captures.missing_since`), so a restart or a deploy moves nothing; a run that could not read the stamps is passed over, one with the switch off ends the streak. A journal that cannot be read gives no grace: `capture_stalled` at once, as before |
+| `ga4_backfill_incomplete` | INFO | closed periods inside GA4's horizon, due since yesterday, not kept yet (`ga4_capture.backlog`), with `GA4_MARGIN_NIGHTS` (7) or more nights to spare: the runs the capture could fail, wherever they fall, at 24 periods a night oldest first, and still keep every period before it leaves the window (`ga4_capture.nights_to_spare`). Only where GA4 is configured |
+| `ga4_backlog_at_risk` | WARN | the same backlog with fewer than 7 nights to spare (2026-11-14). Seven is a week before the first loss — the digest's restatement beat, a weekend and a deploy inside it; a night that fails or does not run is already `capture_failed` or `capture_stalled` that morning |
 | `captures_unwatched` | WARN | the stamps could not be read; holds every condition above, and is news in every digest (`blindness_names`) |
 | `captures_switched_off` | WARN | the switch is off: no stamp is judged and every stamp finding standing is held, not cleared; news in every digest (`blindness_names`), since every day it stands is a day missing from each history. The GA4 backlog is still read and judged |
 
@@ -2416,13 +2429,18 @@ runs cannot make a standing CRITICAL a new incident. What the watch cannot
 keep: a failure the capture's next run clears before the integrity job reads
 the row is in the web log only.
 
-**After the deploy, expect** `capture_stalled` ("never stamped") for each
-capture until its writer has run once — the cost at the first photograph after
-Kyiv midnight, the vintages at the next Monday or Thursday training, GA4 at
-02:40 — and `ga4_backfill_incomplete` for about three weeks while the backfill
-works through some 500 periods, 24 a night. A host with Postgres and no GA4
-key (a dev copy) keeps `capture_stalled:app.ga4_funnel`: the job stands down
-there and stamps nothing, so that a production key gone missing says so too.
+**After the deploy, expect** `capture_unstarted` (INFO) for each capture until
+its writer has run once — the cost at the first photograph after Kyiv
+midnight, the vintages at the next Monday or Thursday training, GA4 at 02:40 —
+and `ga4_backfill_incomplete` (INFO) for about three weeks while the backfill
+works through some 500 periods, 24 a night: on 2026-11-14, 471 left and 19
+nights to spare, the slack growing about 20 nights a night. Until 2026-11-14
+both were WARNs, and the second's count moved every night, so the digest was
+news every morning for nothing (owner: "why does this come regularly"). A
+host with Postgres and no GA4 key (a dev copy) turns
+`capture_stalled:app.ga4_funnel` 30 h after its first integrity run: the job
+stands down there and stamps nothing, so that a production key gone missing
+says so too.
 
 **The decisions worth knowing, per capture:**
 
@@ -3470,6 +3488,24 @@ The `sales_type` partition assertion (Gold known types == Silver total) is
 deliberately **not** part of `validation_passed`: no rebuild can invent a
 sales_type the code does not know, so it reports and stops rather than driving
 a rebuild every two minutes.
+
+**Orders billed at zero with goods in them are explained, not watched**
+(`pg_headline_vs_line_items`, INFO since the owner's decision of 2026-11-14).
+Revenue reads `grand_total` and the product, brand and category figures read
+line items, so these orders separate the two. A retail one — and the
+exhibition's, a fair staffed by retail managers — is a certificate redeemed:
+the certificate was sold first, as a sale of its own, and its money counted
+then. A b2b one is a test shipment to a partner, so a client can try the goods
+before deciding to buy. On 2026-11-14: 461 orders and 1 023 472.67 of goods,
+350 of them (809 553) b2b, 106 retail and 5 exhibition; the finding says the
+split every run (`pg_warehouse_dq.ZERO_TOTAL_KINDS`), and names a sales type
+no decision covers if one ever appears. It was a WARN until then — for a
+month the digest's only standing one, sent whenever a certificate or a test
+moved its count. What would make such an order a defect, a `grand_total`
+stored differently from KeyCRM's, is not this check's: `dq_reconciliation`
+compares the total of every order of the last 90 days with KeyCRM's each
+morning (VALUE_MISMATCH, `reconciliation_pg`) and re-fetches what differs. Internal orders with goods
+and no sale are `pg_goods_shipped_without_sale`, INFO, as before.
 
 ### The standing watch on a moved chain's tables
 

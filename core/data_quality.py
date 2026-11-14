@@ -1249,7 +1249,11 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # The Postgres twins (step 8a). The lever depends on who derives.
     ("pg_silver_", "Postgres Silver: POST /api/warehouse/refresh (the derivation, past its floor)"),
     ("pg_attribution_coverage_", "Not ours to repair: check the shop's order-comment template; rule out a stale silver.order_utm copy first"),
-    ("pg_headline_vs_line_items", "Standing (certificates); the signal is growth, not level"),
+    # INFO since the owner's decision of 2026-11-14: certificate redemptions
+    # and test shipments to b2b partners, the finding says how many of each.
+    ("pg_headline_vs_line_items",
+     "Not a defect: certificate redemptions and b2b test shipments (2026-11-14); "
+     "a grand_total stored wrong is reconciliation_pg's VALUE_MISMATCH"),
     ("pg_goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),
     ("pg_warehouse_", "The Postgres twins did not look: read the reason, then check KS_PG_DSN and PG_LAYER_LOCK holders"),
     # The two findings that page (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS`
@@ -1329,13 +1333,22 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("capture_stalled:",
      "Read the writer's job in /api/jobs and meta.mirror_state capture.<table>; "
      "check KS_ANALYTICS_CAPTURES is not off"),
+    # INFO: never stamped, inside the grace its writer's cadence gives it.
+    ("capture_unstarted:",
+     "Nothing to do yet: its writer has not had its turn. Past the time the "
+     "finding names, it is capture_stalled"),
     ("captures_unwatched",
      "The capture stamps were not read: read the reason in the finding, then check KS_PG_DSN"),
     ("captures_switched_off",
      "KS_ANALYTICS_CAPTURES=off skips every capture: unset it in .env and up -d web to resume"),
+    # INFO while the backlog has a week of nights to spare; the WARN below
+    # is what says it has not.
     ("ga4_backfill_incomplete",
-     "Read ga4_capture's result in /api/jobs (left, error); a night it "
-     "missed: POST /api/jobs/ga4_capture/trigger"),
+     "Nothing to do while it has nights to spare: the backfill, 24 periods a "
+     "night; ga4_backlog_at_risk says when it has not"),
+    ("ga4_backlog_at_risk",
+     "Read ga4_capture's result in /api/jobs (budget, left, error); then "
+     "POST /api/jobs/ga4_capture/trigger, once an hour, until a week is spare"),
 )
 
 DEFAULT_REMEDIATION = (
@@ -1361,7 +1374,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_silver_missing_rows": "orders missing from Postgres Silver",
     "pg_silver_orphan_rows": "ghost rows in Postgres Silver",
     "pg_attribution_coverage_website": "website orders lost their tags (Postgres)",
-    "pg_headline_vs_line_items": "order total ≠ line items (Postgres)",
+    "pg_headline_vs_line_items": "zero-total orders: certificates, b2b tests (Postgres)",
     "pg_goods_shipped_without_sale": "shipments without a sale (Postgres)",
     "pg_silver_arc_unwatched": "Postgres Silver not examined",
     "pg_attribution_coverage_unwatched": "Postgres attribution not examined",
@@ -1740,6 +1753,21 @@ BASELINE_RUN_ID_SQL = """
             ORDER BY run_id DESC
             LIMIT 1
         """
+
+# A layer's successful runs started inside the last `?` seconds, newest first,
+# each with which of the `?` names it filed (`dq_journal.recent_findings`).
+# Successful as `last_success_sql` and the two above mean it.
+RECENT_FINDINGS_SQL = """
+        SELECT r.started_at,
+               ARRAY(SELECT i.check_name FROM {issues} i
+                     WHERE i.run_id = r.run_id AND i.check_name = ANY(?::text[])
+                     ORDER BY i.check_name) AS names
+        FROM {runs} r
+        WHERE r.layer = ?
+          AND r.error_message IS NULL AND r.status <> 'FAILED'
+          AND r.started_at > now() - make_interval(secs => ?)
+        ORDER BY r.started_at DESC, r.run_id DESC
+    """
 
 
 # ─── Daily digest ─────────────────────────────────────────────────────────────

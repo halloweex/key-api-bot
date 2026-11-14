@@ -365,7 +365,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_silver_missing_rows": _c("a Postgres derivation carries the rows"),
     "pg_silver_orphan_rows": _c("a Postgres derivation drops the orphans"),
     "pg_attribution_coverage_website": _c("website orders carry campaign tags again"),
-    "pg_headline_vs_line_items": _c("never fully — the standing ones are certificates"),
+    "pg_headline_vs_line_items": _c(
+        "never fully — certificate redemptions and b2b test shipments (INFO)"),
     "pg_goods_shipped_without_sale": _c("by design it never fully clears"),
     "pg_silver_arc_unwatched": _c("the twin reads Postgres Silver again"),
     "pg_attribution_coverage_unwatched": _c("the twin can tell a quiet week from a stopped mirror"),
@@ -478,16 +479,19 @@ for _entity in ("orders", "products", "buyers", "offers", "stocks",
 # per capture table, a family over `core.analytics_captures.CAPTURES` as
 # `mirror_stale:{table}` is over its tables, plus the GA4 capture's backlog;
 # `conditions()` names exactly what `judge` can file. New names, none ever
-# used or retired (rule 15).
+# used or retired (rule 15); `capture_unstarted:{table}` and
+# `ga4_backlog_at_risk` joined them on 2026-11-14.
 from core import analytics_captures as _captures  # noqa: E402
 
 _CAPTURE_CLEARS = {
     _captures.FAILED: "the capture's next run succeeds",
     _captures.STALLED: "the capture stamps a success inside its cadence again",
+    _captures.UNSTARTED: "the capture stamps its first success (INFO until then)",
     _captures.SELF_CHECK_FAILED: "the capture's next run passes its self-check",
     _captures.UNWATCHED: "the integrity job reads the capture stamps again",
     _captures.SWITCHED_OFF: "KS_ANALYTICS_CAPTURES is unset or on again",
     _captures.GA4_BACKFILL: "every closed period inside GA4's horizon is kept",
+    _captures.GA4_AT_RISK: "the GA4 backlog has a week of nights to spare again, or is kept",
 }
 for _key in _captures.conditions():
     REGISTRY[_key] = _c(_CAPTURE_CLEARS[_key.split(":", 1)[0]])

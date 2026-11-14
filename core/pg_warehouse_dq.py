@@ -423,6 +423,9 @@ class LineItems:
     goods: int
     goods_amount: float
     goods_sample: Tuple[int, ...]
+    # The headline's orders by sales type, `(sales_type, orders, amount)`,
+    # sorted by sales type: what `_line_items_check` explains them by.
+    headline_by_type: Tuple[Tuple[str, int, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -636,15 +639,20 @@ WHERE s.source_id = $4 AND NOT s.is_return AND s.is_active_source
   AND s.order_date >= $1::date - $3::int AND s.order_date < $1::date
 """
 
+# By sales type, because the owner's decision of 2026-11-14 explains the
+# headline's orders by it (`_line_items_check`). The sample's amounts come back
+# beside its ids so the reader can merge the types' samples in the order each
+# was taken in: the largest first, the newest id on a tie.
 _LINE_ITEMS_SQL = """
 WITH li AS (
     SELECT order_id, SUM(price_sold * quantity) AS amount
     FROM bronze.order_products GROUP BY order_id
 )
-SELECT (s.sales_type = 'internal') AS internal,
+SELECT s.sales_type,
        count(*) AS n,
        COALESCE(SUM(li.amount), 0) AS amount,
-       (array_agg(s.id ORDER BY li.amount DESC, s.id DESC))[1:10] AS sample
+       (array_agg(s.id ORDER BY li.amount DESC, s.id DESC))[1:10] AS sample,
+       (array_agg(li.amount ORDER BY li.amount DESC, s.id DESC))[1:10] AS sample_amounts
 FROM silver.orders s
 JOIN li ON li.order_id = s.id
 WHERE NOT s.is_return AND s.is_active_source
@@ -984,16 +992,31 @@ async def _read_attribution(conn, watermark: Watermark) -> Union[Attribution, Un
 async def _read_line_items(conn, watermark: Watermark) -> Union[LineItems, Unwatched]:
     if not watermark.backfilled:
         return Unwatched("bronze.orders history is not backfilled (meta.mirror_state.backfilled_at)")
-    by = {bool(r["internal"]): r for r in await conn.fetch(_LINE_ITEMS_SQL)}
+    return line_items_from_rows(await conn.fetch(_LINE_ITEMS_SQL))
 
-    def part(internal):
-        r = by.get(internal)
-        if r is None:
-            return 0, 0.0, ()
-        return int(r["n"]), float(r["amount"]), _ids(r["sample"])
 
-    h, g = part(False), part(True)
-    return LineItems(h[0], h[1], h[2], g[0], g[1], g[2])
+def line_items_from_rows(rows) -> LineItems:
+    """`_LINE_ITEMS_SQL`'s rows, one per sales type, as the two findings read
+    them: `internal` is the goods shipped without a sale, every other type the
+    headline. The headline's sample is the ten largest across its types, in
+    the order the statement takes each type's (amount, then id, descending)."""
+    goods = next((r for r in rows if r["sales_type"] == "internal"), None)
+    headline = sorted((r for r in rows if r["sales_type"] != "internal"),
+                      key=lambda r: str(r["sales_type"]))
+    pairs = sorted(
+        ((float(a), int(i)) for r in headline
+         for a, i in zip(r["sample_amounts"] or (), r["sample"] or ())),
+        reverse=True)
+    return LineItems(
+        headline=sum(int(r["n"]) for r in headline),
+        headline_amount=sum(float(r["amount"]) for r in headline),
+        headline_sample=tuple(i for _, i in pairs[:10]),
+        goods=0 if goods is None else int(goods["n"]),
+        goods_amount=0.0 if goods is None else float(goods["amount"]),
+        goods_sample=() if goods is None else _ids(goods["sample"]),
+        headline_by_type=tuple((str(r["sales_type"]), int(r["n"]), float(r["amount"]))
+                               for r in headline),
+    )
 
 
 async def _read_journal(conn) -> DerivationJournal:
@@ -1411,6 +1434,58 @@ def _attribution_check(att: Attribution, watermark: Watermark) -> list:
                      "are not."))]
 
 
+# What an order billed at zero with goods in it is, by its sales type — the
+# owner's decision of 2026-11-14. A retail one is a certificate redeemed: the
+# certificate was sold first, as a sale of its own, and its money counted
+# then; the order that later exchanges it for goods carries none (one with a
+# top-up carries the top-up, and is not billed at zero). The exhibition's are
+# the same: the fair was staffed by retail managers and took certificates. A
+# b2b one is a test shipment to a partner, so a client can try the goods and
+# decide whether to buy. A type not here is named as such in the finding.
+CERTIFICATE_REDEMPTION = "certificate"
+PARTNER_TEST_SHIPMENT = "partner_test"
+ZERO_TOTAL_KINDS: Dict[str, str] = {
+    "retail": CERTIFICATE_REDEMPTION,
+    "exhibition": CERTIFICATE_REDEMPTION,
+    "b2b": PARTNER_TEST_SHIPMENT,
+}
+_KIND_WORDS = (
+    (CERTIFICATE_REDEMPTION,
+     "are certificate redemptions: the certificate was sold first and its money "
+     "counted then, and the order exchanging it for goods carries none"),
+    (PARTNER_TEST_SHIPMENT,
+     "are test shipments to b2b partners, so a client can try the goods and "
+     "decide whether to buy"),
+    (None, "are of a sales type no decision covers"),
+)
+
+
+def _headline_description(li: LineItems) -> str:
+    """The headline finding's sentence: the orders, then what each part of
+    them is, with its count and amount."""
+    head = (f"In Postgres, {li.headline:,} order(s) have grand_total = 0 but "
+            f"{li.headline_amount:,.2f} in line items.")
+    parts: Dict[Optional[str], List[Tuple[str, int, float]]] = {}
+    for sales_type, n, amount in li.headline_by_type:
+        parts.setdefault(ZERO_TOTAL_KINDS.get(sales_type), []).append((sales_type, n, amount))
+    said = []
+    for kind, words in _KIND_WORDS:
+        rows = parts.get(kind)
+        if not rows:
+            continue
+        n = sum(r[1] for r in rows)
+        amount = sum(r[2] for r in rows)
+        types = (rows[0][0] if len(rows) == 1
+                 else ", ".join(f"{t} {k:,}" for t, k, _ in rows))
+        said.append(f"{n:,} worth {amount:,.2f} ({types}) {words}")
+    why = (" By the owner's decision of 2026-11-14, " + "; ".join(said) + "."
+           if said else "")
+    return (head + why + " Revenue figures read grand_total and product/brand/"
+            "category figures read line items, so the two differ by this amount "
+            "by design. Counted so it is a number rather than a silence; a "
+            "grand_total stored wrong is dq_reconciliation's VALUE_MISMATCH.")
+
+
 def _line_items_check(li: LineItems) -> list:
     """The line-item twins. Until step 14's S14-14 they compared with
     DuckDB's own checks while those looked, filing `pg_line_items_disagree`
@@ -1420,13 +1495,19 @@ def _line_items_check(li: LineItems) -> list:
 
     issues = []
     if li.headline:
+        # INFO since the owner's decision of 2026-11-14: nothing in it is
+        # unexplained (`ZERO_TOTAL_KINDS`). As a WARN it was the digest's only
+        # standing finding for a month, news every time a certificate was
+        # redeemed or a partner sent a test, and it kept the weekly
+        # restatement alive. What would make one of these orders a defect —
+        # a grand_total our sync stored differently from KeyCRM's — is not
+        # this check's to see: `dq_reconciliation` compares the grand_total of
+        # every order of the last 90 days with KeyCRM's each morning
+        # (VALUE_MISMATCH, `reconciliation_pg`) and re-fetches what differs.
         issues.append(_issue(
             check_name="pg_headline_vs_line_items", table_name="silver.orders",
-            severity=Severity.WARN, count=li.headline, sample_ids=li.headline_sample,
-            description=(f"In Postgres, {li.headline} order(s) have grand_total = 0 but "
-                         f"{li.headline_amount:,.2f} in line items. Revenue figures read "
-                         "grand_total and product/brand/category figures read line items, "
-                         "so the two disagree by this amount.")))
+            severity=Severity.INFO, count=li.headline, sample_ids=li.headline_sample,
+            description=_headline_description(li)))
     if li.goods:
         issues.append(_issue(
             check_name="pg_goods_shipped_without_sale", table_name="silver.orders",

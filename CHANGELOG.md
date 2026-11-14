@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.348
+
+- docs(dq): name ga4_backlog_at_risk among the capture WARNs; weeks and months can move a late day's turn
+- fix(dq): the digest stops being news for three findings that ask nothing of anyone
+
+
 ## 3.0.347
 
 - feat(captures): revision 0036 keeps seven histories Postgres overwrites (analysts' warehouse, phase 1)
