@@ -2906,8 +2906,8 @@ appeared (`first`) or moved (`change`, or `reclassify` when a full parse moved
 it), with `rule_version` — `core.utm_classify.RULE_VERSION`, held to the
 goldens by `tests/unit/test_capture_verdicts.py` (`GOLDEN_SHA256`,
 append-only), or `pre-r1` on a `first` verdict today's rules do not make. A
-rule change therefore bumps the version in the same commit as the golden,
-and PR #380 must make it `r2`. **D12 is in the code**: a full parse first
+rule change therefore bumps the version in the same commit as the golden;
+`r2` (PR #380, the Meta cookies' labels below) was the first. **D12 is in the code**: a full parse first
 logs what the table holds (an incremental capture, so the seed if the log is
 empty), and is refused — the reclassify door's 409, `UNLOGGED_REFUSAL` —
 when that was not kept: the switch off, or the capture failing. Only the
@@ -2916,6 +2916,33 @@ CLI's `--force-ship` passes it. The full parse's log line carries
 `capture.app.order_channel_verdicts` in `meta.mirror_state` at
 `failures_since_ok = 0`, and the log's distinct orders at least
 `silver.order_utm`'s rows. See "The analysts' captures".
+
+**Куки Meta без подчёркивания** (12.11.2026, правила `r2`). С конца сентября
+2026 шаблон комментария пишет поле на строку и подписывает куки пикселя Meta
+`fbp:` и `fbc:`, а разбор искал только `_fbp`/`_fbc`: в `silver.order_utm` за
+сентябрь 594 `fbp` и 295 `fbc`, за октябрь и ноябрь ни одной. Ничего не упало,
+просто замолчали два правила: «`_fbc` без источника и канала → `paid_likely`,
+facebook» и «один `_fbp` → `pixel_only`». Теперь `fbp`/`fbc` читаются как
+`_fbp`/`_fbc` везде, где читалась сама кука (`_KEY_ALIASES` в
+`core/utm_classify.py`): в блоке `UTM:`, парой запроса и голой парой; при двух
+написаниях в одном комментарии выигрывает первое. Порядок разбора прежний:
+если метки есть в URL посадочной, остальные строки не читаются, как не
+читались и `_fbp:`. Это правка правила, а не рефакторинг: `RULE_VERSION`
+стал `r2`, а `PARSE_GOLDEN_FB_LABELS` держит новые ответы на выдуманных
+комментариях. Отдельный список, потому что `PARSE_GOLDEN` по позициям
+сверяется с записанными ответами DuckDB; хеш `GOLDEN_SHA256` поэтому обходит
+все списки голдена, а не два названных. Заказы, разобранные раньше, хранят
+вердикт `r1` до реклассификации. Её запуск — решение владельца, как и судьба
+самого правила: `fbc` ставит любой переход по ссылке с `fbclid`,
+органический тоже, так что «вероятно реклама» — утверждение правила, а не
+замер. Прогон вхолостую на проде 13.11.2026: с правилами `r1` расходится
+ноль строк; с `r2` реклассификация перепишет 1 150 из 35 054, вердикт
+сдвинется у 170, остальные только получат `fbp`/`fbc`. С сентября парсер
+читает каждую строку `fbp:` (1 149) и `fbc:` (587). За 12 недель
+17.08–08.11 62 розничных заказа на ₴131 029 уходят из «источник не
+определён» в facebook/`paid_likely` (55 из `pixel_only`, 7 из `unknown`), и
+ещё 41 на ₴94 814 — из `unknown` в `pixel_only`. Снимок до реклассификации —
+`/root/utm-snapshots/order_utm-20261113-175758.csv.gz`.
 
 **Три решения на карточке ROAS, каждое — утверждение, которого не считали.**
 

@@ -48,7 +48,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 # hash of `tests/unit/test_utm_classify_golden.py`'s frozen tuples, so a rule
 # change that edits a tuple fails there until this names a new version
 # ("r2", …) and its hash is added beside the old ones.
-RULE_VERSION = "r1"
+#
+# r1: the rules as revision 0036 found them.
+# r2 (2026-11-12): the labels `fbp:` and `fbc:` read as the cookies `_fbp` and
+#     `_fbc` (`_KEY_ALIASES` below); the classifier is unchanged.
+RULE_VERSION = "r2"
 
 
 # A pair value runs until a semicolon, newline, or the next ", key:" pair
@@ -56,9 +60,29 @@ RULE_VERSION = "r1"
 # remaining pairs into a single corrupted value.
 _UTM_PAIR_RE = re.compile(r'(\w+):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
 # Query-string style (utm_source=fbads&fbclid=... — raw or inside a URL)
-_UTM_QS_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_fbp|_fbc)=([^&\s;]+)')
+_UTM_QS_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_?fbp|_?fbc)=([^&\s;]+)')
 # "key: value" pairs without any "UTM:" prefix (tracking keys only)
-_UTM_BARE_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_fbp|_fbc):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
+_UTM_BARE_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_?fbp|_?fbc):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
+
+# The Meta pixel's two cookies are `_fbp` and `_fbc`, and those are the keys
+# every reader of a parse asks for (`classify_traffic`, `utm_columns`). Since
+# late September 2026 the shop's comment template writes one field per line
+# and labels them `fbp:` and `fbc:`, without the underscore, and the parse
+# stopped seeing either. Nothing failed: `silver.order_utm` held 594 `fbp`
+# and 295 `fbc` for September's orders and none for October's or November's
+# (measured on production 2026-11-12). `_fbc` without a source or medium is
+# what rule 12 below calls a likely ad click, and `_fbp` alone is what makes
+# an order pixel-only, so in the 90 days to 2026-11-12, 83 retail website
+# orders (₴180K) that carry `fbc` and no source or medium were filed as
+# pixel-only or unknown.
+#
+# So a label without the underscore is read as the cookie it names, wherever
+# the cookie itself is read: inside the "UTM:" block, as a query-string pair
+# and as a bare pair. When a comment holds both spellings, the first one met
+# wins, as for any key a comment repeats. Reading a comment differently moves
+# stored verdicts, so this is a reclassify decision (DN-15), not a refactor;
+# `tests/unit/test_utm_classify_golden.py` freezes what it changed.
+_KEY_ALIASES: Dict[str, str] = {'fbp': '_fbp', 'fbc': '_fbc'}
 
 
 def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
@@ -70,7 +94,8 @@ def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
     Also tolerates real-world deviations: lowercase "utm:", pairs
     separated by newlines/commas, query-string form (utm_source=x&...)
     including UTM parameters inside URLs, and pairs without the
-    "UTM:" prefix. Extracts pixel IDs like _fbp, _fbc, ttp, fbclid.
+    "UTM:" prefix. Extracts pixel IDs like _fbp, _fbc, ttp, fbclid, and
+    reads the labels `fbp` and `fbc` as `_fbp` and `_fbc` (`_KEY_ALIASES`).
     """
     if not comment:
         return {}
@@ -79,6 +104,7 @@ def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
 
     def take(key: str, value: str) -> None:
         key = key.strip().lower()
+        key = _KEY_ALIASES.get(key, key)
         value = value.strip().rstrip('.,')
         if value and key not in utm_data:
             utm_data[key] = value
@@ -87,9 +113,11 @@ def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
     #    NOT a global IGNORECASE — that would make the [A-Z] terminator
     #    class match lowercase and cut the block at any newline. The block
     #    ends at a blank line or a line starting with a capital letter
-    #    (next comment section), unless that line is itself a UTM key.
+    #    (next comment section), unless that line is itself a UTM key —
+    #    `Fbp:` and `Fbc:` among them, which stay in the block as `_Fbp:`
+    #    does, since an underscore is no capital letter.
     utm_match = re.search(
-        r'(?i:UTM):\s*(.+?)(?:\n\s*\n|\n(?!(?i:utm_|_fb|ttp|fbclid))[A-ZА-ЯІЇЄ]|$)',
+        r'(?i:UTM):\s*(.+?)(?:\n\s*\n|\n(?!(?i:utm_|_fb|ttp|fbclid|fbp|fbc))[A-ZА-ЯІЇЄ]|$)',
         comment, re.DOTALL,
     )
     if utm_match:
