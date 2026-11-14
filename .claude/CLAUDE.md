@@ -3497,7 +3497,9 @@ exhibition's, a fair staffed by retail managers — is a certificate redeemed:
 the certificate was sold first, as a sale of its own, and its money counted
 then. A b2b one is a test shipment to a partner, so a client can try the goods
 before deciding to buy. On 2026-11-14: 461 orders and 1 023 472.67 of goods,
-350 of them (809 553) b2b, 106 retail and 5 exhibition; the finding says the
+350 of them (809 553) b2b, 106 retail and 5 exhibition — 458 and 347 b2b once
+the own legal entity's three test shipments left revenue, and with it this
+check, which reads `is_active_source` (see "Retail / B2B / Internal"); the finding says the
 split every run (`pg_warehouse_dq.ZERO_TOTAL_KINDS`), and names a sales type
 no decision covers if one ever appears. It was a WARN until then — for a
 month the digest's only standing one, sent whenever a certificate or a test
