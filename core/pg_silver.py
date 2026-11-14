@@ -80,7 +80,8 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # The Silver rule — `silver_recompute_ctes`, `REVENUE_SOURCE_IDS`,
-# the return statuses, the manager constants — cannot change inside a process.
+# `OWN_ENTITY_BUYER_IDS`, the return statuses, the manager constants — cannot
+# change inside a process.
 # So a rebuild this process committed ran the rule the row-values twin
 # (`pg_warehouse_dq`) recomputes with, and a rebuild before it may have run the
 # previous process's. Two moments carry that, and neither dates a row:

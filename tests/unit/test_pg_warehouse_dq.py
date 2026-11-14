@@ -64,11 +64,17 @@ class TestWhatMovedFromTheScan:
                 for c, t in twins._SILVER_ROW_COLUMNS} == {'source_id': 'r.source_id IS DISTINCT FROM s.source_id', 'status_id': 'r.status_id IS DISTINCT FROM s.status_id', 'grand_total': 'ABS(COALESCE(r.grand_total, 0) - COALESCE(s.grand_total, 0)) > 0.01', 'ordered_at': 'r.ordered_at IS DISTINCT FROM s.ordered_at', 'buyer_id': 'r.buyer_id IS DISTINCT FROM s.buyer_id', 'manager_id': 'r.manager_id IS DISTINCT FROM s.manager_id', 'order_date': 'r.order_date IS DISTINCT FROM s.order_date', 'is_return': 'r.is_return IS DISTINCT FROM s.is_return', 'sales_type': 'r.sales_type IS DISTINCT FROM s.sales_type', 'is_active_source': 'r.is_active_source IS DISTINCT FROM s.is_active_source', 'source_name': 'r.source_name IS DISTINCT FROM s.source_name', 'is_new_customer': 'r.is_new_customer IS DISTINCT FROM s.is_new_customer', 'buyer_first_order_date': 'r.buyer_first_order_date IS DISTINCT FROM s.buyer_first_order_date', 'promocode': 'r.promocode IS DISTINCT FROM s.promocode'}
 
     def test_the_row_values_statement_renders_as_before(self):
+        """Re-recorded under the owner's decision of 2026-11-14 (a sale to
+        the company's own legal entity is not revenue): the recompute carries
+        Silver's rule, and `is_active_source` gained its buyer half — the 70
+        characters of `\\n` + 16 spaces + `AND (o.buyer_id IS NULL OR
+        o.buyer_id NOT IN (17358))` and nothing else; it was 8703,
+        da06407885f9234570f2654aac326bb1fa558e9e7c0dc509f71cc47300fef2c2."""
         import hashlib
 
         sql = twins._row_values_sql()
         assert (len(sql), hashlib.sha256(sql.encode()).hexdigest()) == (
-            8703, "da06407885f9234570f2654aac326bb1fa558e9e7c0dc509f71cc47300fef2c2")
+            8773, "c5ab88916e93b71c7d20835d7dc72a1031878bfed9d47e39682a5b92bb17bf64")
 
     def test_the_thresholds(self):
         """The attribution check's defaults and the landing check's
@@ -171,7 +177,7 @@ class TestLineItems:
 def _facts(**groups):
     base = dict(silver_arc=ARC_CLEAN, attribution=ATT_OK, line_items=LI_NONE,
                 derivation_signal=JOURNAL_QUIET, order_landing=OrderLanding(),
-                silver_row_values=RV_CLEAN)
+                own_entity=twins.OwnEntity(), silver_row_values=RV_CLEAN)
     base.update(groups)
     return Facts(whole=None, watermark=WM, **base)
 

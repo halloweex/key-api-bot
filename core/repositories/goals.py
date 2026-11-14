@@ -197,6 +197,12 @@ _SHARED_GOAL_TABLES_SQL = """
 # moves from ₴4.0M to ₴4.2M. The bridge never filtered on source, so leaving it
 # out is what kept the numbers. A test pins a source-3 order as counted.
 #
+# The column's other half is not absent: since the owner's decision of
+# 2026-11-14 `is_active_source` also leaves out a sale to the company's own
+# legal entity, and that half is spelled out here (`not_own_entity`), because
+# a sale to ourselves is no more a growth baseline than it is revenue. It
+# moves b2b, internal and "all" baselines; retail held no such order.
+#
 # `{where}` is `_silver_history_where`'s, and every date bound is a parameter
 # computed in Python from the Kyiv clock — never `CURRENT_DATE`, which the two
 # engines disagree about for three hours a day (`core/pg_goals_read.py`).
@@ -355,20 +361,25 @@ _SILVER_RECENT_MONTHS_SQL = """
 
 
 def _silver_history_where(sales_type: str) -> tuple[str, List[Any]]:
-    """`(clause, params)` over `{silver_orders} s`: not a return, and one
-    `sales_type` unless `'all'`. No `is_active_source` — see above. An unknown
-    sales_type raises: it used to fall through an else and quietly mean
-    retail."""
-    from core.duckdb_constants import KNOWN_SALES_TYPES
+    """`(clause, params)` over `{silver_orders} s`: not a return, not a sale
+    to the company's own legal entity, and one `sales_type` unless `'all'`.
+    No `is_active_source` — see above — and so the own entity is spelled out
+    (`not_own_entity`): the column carries it (the owner's decision of
+    2026-11-14), and this history, which reads around the column, would
+    otherwise count a sale to ourselves in every b2b, internal and "all"
+    baseline. Retail holds no such order. An unknown sales_type raises: it
+    used to fall through an else and quietly mean retail."""
+    from core.duckdb_constants import KNOWN_SALES_TYPES, not_own_entity
 
+    counted = f"NOT s.is_return AND {not_own_entity('s')}"
     if sales_type == "all":
-        return "NOT s.is_return", []
+        return counted, []
     if sales_type not in KNOWN_SALES_TYPES:
         raise ValueError(
             f"unknown sales_type {sales_type!r}; expected one of "
             f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
         )
-    return "NOT s.is_return AND s.sales_type = ?", [sales_type]
+    return f"{counted} AND s.sales_type = ?", [sales_type]
 
 
 def _first_of_next_month(d: date) -> date:

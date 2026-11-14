@@ -388,6 +388,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_value_domain_orders_source_id": _c("the unknown source ids are registered or gone"),
     "pg_status_group_vs_return_list": _c("the stored group and the legacy list agree in bronze"),
     "pg_order_landing_unwatched": _c("the twins read bronze.orders and its line items again"),
+    # The company's own legal entity, kept out of revenue by the owner's
+    # decision of 2026-11-14. New names (rule 15): no image ever filed them.
+    "pg_own_entity_orders": _c("by design it never fully clears: the orders stay kept out"),
+    "pg_own_entity_unlisted": _c(
+        "each card is listed: in OWN_ENTITY_BUYER_IDS if it is the entity, "
+        "else in NOT_OWN_ENTITY_BUYER_IDS"),
+    "pg_own_entity_unwatched": _c("the twins read the own entity's orders and cards again"),
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
     # Every order the UTM parser reads has a current verdict in Postgres
     # (DN-16, mirror_landing). Read from Postgres alone, so it clears on
