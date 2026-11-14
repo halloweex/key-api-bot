@@ -9,7 +9,7 @@
     "key_digest": "sha1",
     "mac_digest": "sha1"
   },
-  "required_revision": "0035_batch_e_chains",
+  "required_revision": "0036_analytics_captures",
   "public_api_paths": [
     "/api/health",
     "/api/webhooks/turbosms"
