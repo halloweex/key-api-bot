@@ -1,0 +1,17 @@
+[package]
+name = "ks-loadgen"
+version = "0.1.0"
+description = "Closed-loop HTTP load generator for the pilot's Python-vs-Rust benchmark"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

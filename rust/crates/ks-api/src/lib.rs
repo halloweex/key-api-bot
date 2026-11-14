@@ -1,0 +1,18 @@
+//! The Rust pilot: `GET /api/revenue/trend` of the KoreanStory dashboard,
+//! answer for answer with the Python app over the same Postgres Gold.
+//!
+//! It is not deployed and serves no one. `tests/integration/test_rust_pilot_trend.py`
+//! sends both services the same requests and requires the same answers.
+
+pub mod gold;
+mod http;
+pub mod params;
+pub mod period;
+pub mod pyrt;
+#[rustfmt::skip]
+mod pytables;
+pub mod strptime;
+pub mod trend;
+pub mod validate;
+
+pub use http::{AppState, router};
