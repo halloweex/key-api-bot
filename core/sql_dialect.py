@@ -1631,7 +1631,11 @@ HAVING COUNT(*) >= 5""",
     ),
     # Dead stock and overstock classification. `days_of_supply` uses the
     # 90-day velocity rather than the 30-day one: more stable, and a single
-    # promo week must not reclassify half the catalogue.
+    # promo week must not reclassify half the catalogue. The velocity reads
+    # `is_active_source`, so since the owner's decision of 2026-11-14 it
+    # leaves out goods sent to the company's own legal entity, which
+    # `last_sale_date` (`_SKU_STATUS_REBUILD_BODY`) keeps; the body is frozen
+    # in revisions 0014/0015, so counting them here again would take one.
     (
         "v_sku_status",
         """SELECT

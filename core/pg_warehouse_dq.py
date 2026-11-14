@@ -772,12 +772,17 @@ ORDER BY revenue DESC, a.id
 # "KOREAN-STORY" "koreanstory". Character for character, by `translate()`,
 # because this database's LOWER and ~* do not fold Cyrillic (measured on
 # production, 2026-11-14); Python's `str.lower` builds the lower half, so the
-# table cannot hold a wrong pair.
+# table cannot hold a wrong pair. The characters dropped include the ones a
+# pasted name carries unseen — the typographic spaces, thin and narrow
+# no-break spaces, the zero-width characters, the byte-order mark and the
+# soft hyphen — or a second card spelled with one would read as nobody's.
 OWN_ENTITY_FOLD_UPPER = ("АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯЁЫЭЪ"
                          "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 OWN_ENTITY_FOLD_LOWER = OWN_ENTITY_FOLD_UPPER.lower()
 OWN_ENTITY_FOLD_DROP = (" \t\r\n\u00a0\"'`\u00ab\u00bb\u201e\u201c\u201d\u2018\u2019\u02bc"
-                        "-\u2010\u2011\u2013\u2014\u2212_.,()/\\")
+                        "-\u2010\u2011\u2013\u2014\u2212_.,()/\\"
+                        "\u00ad\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+                        "\u2009\u200a\u200b\u200c\u200d\u202f\u205f\u2060\u3000\ufeff")
 
 # The entity's name, folded, in the spellings a card is written with: the
 # Ukrainian one and its Russian renderings, with the Latin letters that look

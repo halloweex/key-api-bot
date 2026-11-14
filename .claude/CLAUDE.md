@@ -394,6 +394,11 @@ date outside 2000-01-01..2099-12-31 answered 400 and a marketing report on
    "Rolling back below a revision", below, comes first, and its step 1 goes
    before the retag.
 
+Every image before the own-entity rule (2026-11-14), this target among them,
+counts the company's own legal entity's orders as revenue again from its
+first derivation tick (758 755.00 of 2026), and the roll forward takes them
+out again on its own; see "A sale to ourselves is revenue nowhere".
+
 Fast: `docker tag …:rollback-step14 …:latest` for web, bot and migrate, then
 `docker compose up -d` without `pull` — after the stamp has moved, from 0036
 on. Proper, for an image that requires the database's revision: `git revert`
@@ -785,11 +790,12 @@ them:
 stays revenue and the NOT NULL column never meets a NULL). Every Gold measure
 in Postgres and ClickHouse, the line level, the inventory views and every
 dashboard, report, SMS, traffic and forecast reader read the column, not the
-rule — no revision. The readers that read around it name the entity through
-the same helper: the goals' growth history and the /expenses profit (both
-keep Opencart), the cohorts' membership (any source, O5), the subcategory
-drill-down and the assistant's top products. The bot's live KeyCRM reports ask
-for `include=buyer` and skip such an order, sale or return. The expense
+rule — no revision. The readers that read around it leave the entity out
+too: the goals' growth history and the /expenses profit (both keep Opencart),
+the cohorts' membership (any source, O5) and the assistant's top products
+through `not_own_entity`; the subcategory drill-down by reading
+`is_active_source` beside its own source list. The bot's live KeyCRM reports
+ask for `include=buyer` and skip such an order, sale or return. The expense
 summary keeps its costs: costs, not revenue.
 
 Measured on production on 2026-11-14: one card, 35 orders, all in 2026. Out of
@@ -798,8 +804,13 @@ sales types −758 755.00; retail unchanged. With it move the wholesale
 manager's 365-day figure on `/api/managers`, the b2b, internal and "all" brand
 tables, smart goals and cohorts; the three zero-total b2b test shipments leave
 `pg_headline_vs_line_items`, and the entity's shipments leave the inventory
-velocity and days of supply (frozen views over the column; counting them there
-would take a revision). The integrity layer files `pg_own_entity_orders`
+velocity, sell-through, ABC, restock quantities and days of supply (frozen
+views over the column; counting them there would take a revision) while
+`last_sale_date`, a stock fact read from bronze, keeps them. So a SKU moved
+mostly to the other entity reads recently sold with little velocity and a
+long days of supply. The decision named revenue only; whether goods sent to
+the other entity should drive restocking is the owner's open question. The
+integrity layer files `pg_own_entity_orders`
 (INFO: what is kept out, billed and in goods, by sales type) and
 `pg_own_entity_unlisted` (WARN: a card whose name reads like the entity's and
 whose id is in neither `OWN_ENTITY_BUYER_IDS` nor `NOT_OWN_ENTITY_BUYER_IDS` —
@@ -815,8 +826,10 @@ within about eleven minutes; `POST /api/warehouse/refresh` skips the floor.
 Until then `pg_silver_row_values` holds the entity's rows as a rule change
 (INFO), not a page. ClickHouse's Silver, its Gold and the cohorts follow at
 the next hourly `ch_sync`; the bot's five-minute cache expires on its own. A
-rollback to an image from before step 14 derives the old rule again, and the
-entity's orders are revenue there from its first derivation.
+rollback to any image before this change — `rollback-step14`, an `:s14-NN`
+tag or an earlier 3.0.3xx — derives the old rule again: the entity's orders
+are revenue there from its first derivation tick, which rebuilds Silver and
+Gold whole.
 
 `managers.is_retail` is seeded from `RETAIL_MANAGER_IDS` for managers the
 warehouse has never seen and **never overwritten afterwards** — it used to be

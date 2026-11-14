@@ -440,6 +440,11 @@ LOOKS_LIKE_THE_ENTITY = (
     "Кориан Стори", "Кореан Стори", "ООО «Кориан Стори»", "Коріан\u00a0Сторі",
     "Korean Story", "KOREAN STORY", "KoreanStory", "korean-story", "Korean_Story LLC",
     "TOV Korean Story", "Korian Story", "Korean Stori", "Kоrean Story",
+    # Characters a pasted name carries unseen: a thin space, a narrow no-break
+    # space, a soft hyphen, a zero-width space, a byte-order mark, an
+    # ideographic space.
+    "Коріан\u2009Сторі", "ТОВ\u202f«Коріан\u00adСторі»",
+    "Korean\u200bStory", "\ufeffKorean\u3000Story",
 )
 NOT_THE_ENTITY = (
     "", "Korean Shop", "Story Korean", "Korea Story", "Корея", "Історія", "Сторінка",
@@ -475,6 +480,20 @@ class TestTheNameRule:
         from core.pg_warehouse_dq import own_entity_name_matches
 
         assert not own_entity_name_matches(None)
+
+    def test_the_statement_folds_by_translate_alone(self):
+        """Production's statement folds by `translate()` and matches by `~`,
+        never by an operator that folds case itself. CI's store is
+        initialised `C.UTF-8`, whose LOWER and `~*` fold Cyrillic, and
+        production's `C` (docker-compose.yml), whose do not: a statement
+        rewritten with them would pass every Postgres test in CI and match no
+        upper-case Cyrillic card in production. Mutation: `lower(b.full_name)
+        ~ $4`, `~*` or ILIKE."""
+        from core.pg_warehouse_dq import _OWN_ENTITY_LOOKALIKES_SQL as sql
+
+        assert sql.count("translate(") == 2
+        for folding in ("lower(", "upper(", "initcap(", "~*", "ilike"):
+            assert folding not in sql.lower(), folding
 
     def test_the_patterns_are_plain_enough_for_both_engines(self):
         """Bracket classes of literal letters, joined by `|`: the subset

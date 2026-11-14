@@ -308,9 +308,12 @@ class TestTheNameRuleInPostgres:
     async def test_postgres_and_python_read_every_spelling_alike(self, own):
         """The fold by `translate()` and the pattern by `~`, over every
         spelling the unit test claims either way: the same verdict as the
-        Python mirror. Mutation: fold with LOWER, which this database's
-        production twin does not apply to Cyrillic, or a pattern construct
-        the two engines read differently."""
+        Python mirror. Mutation: a pattern construct or a fold character the
+        two engines read differently. Folding by LOWER or matching by `~*`
+        instead is not caught here and cannot be: CI's store is `C.UTF-8`,
+        whose LOWER folds Cyrillic, and production's `C`, whose does not.
+        The unit test's statement guard
+        (`test_the_statement_folds_by_translate_alone`) is what stops it."""
         from core import pg_warehouse_dq as twins
         from tests.unit.test_own_entity_not_revenue import LOOKS_LIKE_THE_ENTITY, NOT_THE_ENTITY
 
@@ -348,13 +351,24 @@ class TestClickHouse:
         directly — the entity is out of it too, not merely equal to a wrong
         Postgres."""
         from core.ch_common import execute
-        from core.ch_silver import GOLD_STATE, SILVER_STATE, reconcile_clickhouse
+        from core.ch_silver import (
+            GOLD_STAGING, GOLD_STATE, GOLD_TABLE, SILVER_STAGING, SILVER_STATE, SILVER_TABLE,
+            reconcile_clickhouse,
+        )
 
         _store, pool = own
         async with pool.acquire() as conn:
             saved = await conn.fetch(
                 "SELECT * FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
                 [SILVER_STATE, GOLD_STATE])
+        # From nothing: the ship creates a table only if it is absent, and the
+        # cohort tests leave `silver.orders` in a ten-column shape of their
+        # own, which one EXCHANGE turns into a staging table no full row fits.
+        for database, tables in (("silver", (SILVER_TABLE, SILVER_STAGING)),
+                                 ("gold", (GOLD_TABLE, GOLD_STAGING))):
+            await execute(f"CREATE DATABASE IF NOT EXISTS {database}")
+            for table in tables:
+                await execute(f"DROP TABLE IF EXISTS {table}")
         try:
             issues = await reconcile_clickhouse()
             assert [(i.check_name, i.description) for i in issues] == []
