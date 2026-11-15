@@ -55,6 +55,7 @@ from core.duckdb_constants import (
     B2B_MANAGER_ID,
     EXHIBITION_SOURCE_ID,
     KNOWN_SALES_TYPES,
+    OFFLINE_STORE_SOURCE_ID,
     RETAIL_MANAGER_IDS,
 )
 from core.models import OrderStatus
@@ -127,10 +128,17 @@ ORDERS = [
     (13, 1, 1, LISTED_BUT_NOT_RETAIL, _kyiv_noon(date(2026, 2, 15))),
     (14, 1, 1, UNLISTED_RETAIL, _kyiv_noon(date(2026, 2, 15))),
     (15, 1, 1, AS_OF, datetime.combine(SWITCH - timedelta(days=1), time(23, 30), tzinfo=KYIV)),
+    # The offline store (the owner's decision of 2026-11-15): its own sales
+    # type whoever sells there — a manager on no retail list, a retail one,
+    # nobody named.
+    (16, OFFLINE_STORE_SOURCE_ID, 1, INTERNAL, _kyiv_noon(date(2026, 2, 16))),
+    (17, OFFLINE_STORE_SOURCE_ID, 1, RETAIL, _kyiv_noon(date(2026, 2, 16))),
+    (18, OFFLINE_STORE_SOURCE_ID, 1, None, _kyiv_noon(date(2026, 2, 17))),
 ]
 
 ALL_IDS = {o[0] for o in ORDERS}
 EXHIBITION = {3, 9, 10}
+OFFLINE = {16, 17, 18}
 
 # What each scenario must select, written out rather than derived, so that a
 # rule changed in the CASE itself — and therefore in Silver too — still fails.
@@ -139,6 +147,7 @@ EXPECTED = {
         "retail": {1, 4, 6, 7, 11, 12, 14},
         "b2b": {2},
         "exhibition": EXHIBITION,
+        "offline": OFFLINE,
         "internal": {5, 8, 13, 15},
     },
     # No intervals at all: `managers.is_retail` decides.
@@ -146,6 +155,7 @@ EXPECTED = {
         "retail": {1, 4, 7, 11, 14},
         "b2b": {2},
         "exhibition": EXHIBITION,
+        "offline": OFFLINE,
         "internal": {5, 6, 8, 12, 13, 15},
     },
     # Neither table has spoken: the listed ids decide.
@@ -153,6 +163,7 @@ EXPECTED = {
         "retail": {1, 4, 7, 11, 13},
         "b2b": {2},
         "exhibition": EXHIBITION,
+        "offline": OFFLINE,
         "internal": {5, 6, 8, 12, 14, 15},
     },
 }

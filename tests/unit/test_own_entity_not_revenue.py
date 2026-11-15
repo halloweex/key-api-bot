@@ -238,7 +238,9 @@ class TestTheSubcategories:
         asyncio.run(Probe().get_subcategory_breakdown(
             date(2026, 11, 1), date(2026, 11, 2), "Care", sales_type="b2b"))
         (sql,) = seen
-        assert "l.is_active_source" in sql and "l.source_id IN (1, 2, 4)" in sql
+        # The list gained the offline store (7) by the owner's decision of
+        # 2026-11-15; the column is what this test is about.
+        assert "l.is_active_source" in sql and "l.source_id IN (1, 2, 4, 7)" in sql
 
 
 class TestTheAssistant:

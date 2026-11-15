@@ -6140,24 +6140,6 @@
                 }
             }
         ],
-        "./scripts/utm_reclassify_dryrun.py": [
-            {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 77,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 51,
-                    "endColumn": 60,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./scripts/weekly_report_preview.py": [
             {
                 "code": "reportArgumentType",

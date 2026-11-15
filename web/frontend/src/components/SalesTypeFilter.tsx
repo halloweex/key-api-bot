@@ -10,6 +10,10 @@ import type { SalesType } from '../types/filters'
 // the API enforces that independently: hiding the button is not a control.
 const SALES_TYPES: { value: SalesType; labelKey: string; adminOnly?: boolean }[] = [
   { value: 'retail', labelKey: 'filter.retail' },
+  // The offline store (source 7) is retail sold over a counter, and a category
+  // of its own by the owner's decision of 2026-11-15 — beside retail, visible
+  // to every viewer, and not gated by the API.
+  { value: 'offline', labelKey: 'filter.offline' },
   { value: 'b2b', labelKey: 'filter.b2b' },
   // Виставка (source 5) is a real sales channel, not staff activity, so it is
   // visible to every viewer — and the API does not gate it either.
@@ -42,8 +46,10 @@ export function SalesTypeFilter() {
     setSalesType(type)
   }, [setSalesType])
 
+  // Scrolls sideways when the row is narrower than the buttons — a phone, in
+  // Ukrainian or Russian — rather than running over what stands beside it.
   return (
-    <div className="flex items-center gap-0.5 bg-slate-100/80 rounded-lg sm:rounded-xl p-0.5 sm:p-1 border border-slate-200/60">
+    <div className="flex w-fit max-w-full overflow-x-auto scrollbar-hide items-center gap-0.5 bg-slate-100/80 rounded-lg sm:rounded-xl p-0.5 sm:p-1 border border-slate-200/60">
       {visibleTypes.map(({ value, labelKey }) => (
         <Button
           key={value}

@@ -129,7 +129,10 @@ export const CONDITION_FAMILIES: Array<{ key: string; types: ConditionType[] }> 
 // The active sources, as Silver classifies them. Opencart (3) is retired and
 // never reaches revenue, so offering it would offer an empty set. Labels are
 // `sms.source.<id>`: "Shopify" is the website to the people using this page.
-export const SOURCES: number[] = [1, 2, 4, 5]
+// 7 is the offline store, a revenue source since the owner's decision of
+// 2026-11-15; its orders are sales type `offline`, so an audience of another
+// sales type finds nobody through it.
+export const SOURCES: number[] = [1, 2, 4, 5, 7]
 
 // Bounds the server holds; a value outside them is a 422, so the page treats
 // it as not filled in rather than sending it.

@@ -850,7 +850,7 @@ class GoalsMixin:
         `recalculate_goal_tables`.
 
         Args:
-            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition', 'offline' or 'all'
 
         Returns:
             Dictionary mapping month (1-12) to seasonality data
@@ -866,7 +866,7 @@ class GoalsMixin:
         growth trend. Stored only by `recalculate_goal_tables`.
 
         Args:
-            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition', 'offline' or 'all'
 
         Returns:
             Growth metrics including overall YoY, monthly YoY, and trend slope
@@ -907,7 +907,7 @@ class GoalsMixin:
         `POST /goals/recalculate`; the Monday job does not store them (OQ-2).
 
         Args:
-            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition', 'offline' or 'all'
 
         Returns:
             Dictionary mapping month -> week_of_month -> weight (percentage)
@@ -1151,7 +1151,7 @@ class GoalsMixin:
         Args:
             target_year: Year to generate goals for
             target_month: Month (1-12) to generate goals for
-            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition', 'offline' or 'all'
 
         Returns:
             Smart goals with monthly total and weekly breakdown

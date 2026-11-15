@@ -5,7 +5,7 @@ import logging
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
-from core.duckdb_constants import UNKNOWN_BRAND, brand_where
+from core.duckdb_constants import OFFLINE_STORE_SOURCE_ID, UNKNOWN_BRAND, brand_where
 from core.filters import by_month
 from core.models import OrderStatus
 from core.repositories.customers import _INSIGHTS_PERIOD_SQL
@@ -270,6 +270,19 @@ _MANAGER_SALES_365D_SQL = """
 # `tests/unit/test_step12_odna_bronza.py`
 # (`test_a_source_gold_is_not_asked_about_never_reaches_it`) pins it.
 _NO_GOLD_SOURCE_TOTALS: Tuple[int, int, int, int] = (0, 0, 0, 0)
+
+
+# The sources `/reports` lists a row for, and the names it lists them under
+# (the CSV prints them as they stand). The three online channels it has always
+# listed, and the offline store since the owner's decision of 2026-11-15 — a
+# source the report did not list would answer `source_id=7` with an empty
+# table and zero totals. The exhibition (5) is still left out, by decision 5.
+# Said in Ukrainian like Silver's `source_name` for it; the page shows its own
+# words for the offline store (`SourceTable`).
+_REPORT_SOURCE_NAMES: Dict[int, str] = {
+    1: "Instagram", 2: "Telegram", 4: "Shopify",
+    OFFLINE_STORE_SOURCE_ID: "Офлайн-магазин",
+}
 
 
 def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
@@ -640,7 +653,12 @@ class RevenueMixin:
     # too; it is not asked, so a number on screen did not move when the
     # engine did. The trend routes those two to Silver's order grain, which
     # answers them; the summary answers `_NO_GOLD_SOURCE_TOTALS`.
-    _GOLD_SOURCE_IDS = frozenset({1, 2, 4})
+    #
+    # The offline store (7, the owner's decision of 2026-11-15) is asked
+    # about from its first day: it had no number on screen to keep still, so
+    # its summary and trend read Gold's fine rows, which carry it as they
+    # carry every source.
+    _GOLD_SOURCE_IDS = frozenset({1, 2, 4, OFFLINE_STORE_SOURCE_ID})
 
     def _build_silver_filtered_summary_queries(
         self,
@@ -1356,12 +1374,16 @@ class RevenueMixin:
         # leaves out a sale to the company's own legal entity, and the list
         # alone would count one in b2b, internal and "all". The list stays as
         # it was — it is narrower than the column (no exhibition), and
-        # widening it is not what that decision moved.
+        # widening it is not what that decision moved. The offline store
+        # joined it with the owner's decision of 2026-11-15, so that its sales
+        # type and `source_id=7` drill down to real numbers rather than an
+        # empty chart.
         where_clauses = [
             "l.order_date BETWEEN ? AND ?",
             "NOT l.is_return",
             "l.is_active_source",
-            "l.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
+            # Exclude Opencart (deprecated) and the exhibition.
+            f"l.source_id IN (1, 2, 4, {OFFLINE_STORE_SOURCE_ID})",
         ]
 
         if sales_type != "all":
@@ -1487,7 +1509,7 @@ class RevenueMixin:
         brand: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get per-source breakdown report for a date range."""
-        source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+        source_names = _REPORT_SOURCE_NAMES
 
         params: list = [start_date, end_date]
         where_clauses = ["s.order_date BETWEEN ? AND ?", "s.is_active_source"]
@@ -1694,7 +1716,7 @@ class RevenueMixin:
         took none of the three: a summary of one brand listed every brand's
         products.
         """
-        source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+        source_names = _REPORT_SOURCE_NAMES
 
         params: list = [start_date, end_date]
         where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]

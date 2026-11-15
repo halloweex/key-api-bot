@@ -31,6 +31,7 @@ import pytest
 import pytest_asyncio
 
 from core.utm_classify import FIRST_CHANNEL_OTHER, classify_traffic, first_order_channel
+from scripts.utm_reclassify_dryrun import fallback_verdict
 from tests.integration.pg_tab_seed import (
     needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
 )
@@ -48,11 +49,12 @@ class TestTheRule:
     def test_each_kind_of_first_order(self):
         def first(utm=None, *, source_id=4):
             if utm is None:
+                # The tab's fallback, as the dry run spells it (and a test
+                # there holds that spelling to the SQL).
+                traffic_type, platform = fallback_verdict(source_id)
                 return first_order_channel(
-                    source_id=source_id, tagged=False,
-                    platform={1: "instagram", 2: "telegram"}.get(source_id, "unattributed"),
-                    traffic_type="organic" if source_id in (1, 2) else "unknown",
-                    utm_medium="", utm_campaign="")
+                    source_id=source_id, tagged=False, platform=platform,
+                    traffic_type=traffic_type, utm_medium="", utm_campaign="")
             tt, platform = classify_traffic(utm)
             return first_order_channel(
                 source_id=source_id, tagged=True, platform=platform,
@@ -67,6 +69,9 @@ class TestTheRule:
         assert first({"utm_campaign": "sales_manager_anna"}) == ("manager", "manager")
         assert first(source_id=3) == ("unknown", "opencart")
         assert first(source_id=5) == ("unknown", "exhibition")
+        # The offline store's counter sales (the owner's decision of
+        # 2026-11-15): organic, a channel of their own.
+        assert first(source_id=7) == ("organic", "offline_store")
         assert first(source_id=4) == ("unknown", "unknown")
 
     def test_the_other_keys_are_the_ones_the_tab_names(self):

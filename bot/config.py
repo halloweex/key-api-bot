@@ -53,7 +53,10 @@ SOURCE_MAPPING = {
     2: 'Telegram',
     3: 'Opencart',
     4: 'Shopify',
-    5: 'Виставка'
+    5: 'Виставка',
+    # The offline store (owner's decision 2026-11-15). Named here so the
+    # bot's live reports print it rather than a bare "7".
+    7: 'Офлайн-магазин',
 }
 
 # ─── Conversation States ────────────────────────────────────────────────────

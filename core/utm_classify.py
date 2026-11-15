@@ -340,11 +340,22 @@ def tab_platform(platform: str, traffic_type: str) -> str:
 # listing. Measured on production 2026-10-19, 180 days of retail: Direct is
 # ₴9.0M of the ₴14.1M, the profile link ₴3.1M, email ₴0.9M (automated letters
 # more than two thirds of it), Telegram ₴0.7M, Google's free listings ₴0.3M.
+#
+# `offline_store` is a sale in the offline store (source 7, the owner's
+# decision of 2026-11-15), which no tag reaches: like Direct, a sale with no
+# visit to the website, and its own channel, never the website's.
 ORGANIC_CHANNELS: Tuple[str, ...] = (
     "instagram_direct", "instagram_site", "instagram_stories", "telegram",
+    "offline_store",
     "email_campaigns", "email_flows", "google_organic", "ai",
     "facebook", "tiktok", "other",
 )
+
+# The source whose untagged orders are the offline store's channel. A literal
+# here as in `TrafficMixin._PLATFORM_EXPR`, because this module imports `re`
+# and nothing else; a test holds both to
+# `core.duckdb_constants.OFFLINE_STORE_SOURCE_ID`.
+_OFFLINE_STORE_SOURCE_ID = 7
 
 # Klaviyo tags a campaign `utm_medium=klaviyo` and names it
 # "[MM/DD/YY] Campaign #N: …"; its flows (welcome, abandoned cart, post
@@ -368,13 +379,16 @@ def organic_channel(
     `tagged` is whether the parser gave the order a verdict at all. An order
     without one is organic only through the readers' COALESCE — source 1 or 2,
     taken by a manager in Instagram or Telegram with nothing in the comment —
-    and that is the whole of what "Instagram Direct" means here.
+    and that is the whole of what "Instagram Direct" means here; or source 7,
+    a sale in the offline store, which is its own channel.
 
     Read at query time from the stored tags, never stored, so changing this
     rule needs no reclassify: unlike `classify_traffic`, nothing materialises
     what it returns.
     """
     if not tagged:
+        if source_id == _OFFLINE_STORE_SOURCE_ID:
+            return "offline_store"
         return "telegram" if source_id == 2 else "instagram_direct"
     medium = (utm_medium or "").strip().lower()
     if platform == "instagram":
