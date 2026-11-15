@@ -1350,9 +1350,17 @@ class RevenueMixin:
         # the sales_type rule. The level answers all three, and answers them
         # the way Gold does: `is_return` prefers KeyCRM's status *group*,
         # which is what caught status 20 in July.
+        #
+        # `is_active_source` beside the source list: the column says "counts
+        # as revenue", which since the owner's decision of 2026-11-14 also
+        # leaves out a sale to the company's own legal entity, and the list
+        # alone would count one in b2b, internal and "all". The list stays as
+        # it was — it is narrower than the column (no exhibition), and
+        # widening it is not what that decision moved.
         where_clauses = [
             "l.order_date BETWEEN ? AND ?",
             "NOT l.is_return",
+            "l.is_active_source",
             "l.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
         ]
 

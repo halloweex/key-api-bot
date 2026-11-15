@@ -158,6 +158,10 @@ async def high_watermark() -> Optional[datetime]:
 
 
 async def buyers_frame(last_sync: Optional[datetime]):
+    # `order_count` is what a buyer's search card says they ordered, returns
+    # aside — the company's own legal entity's orders included, on its own
+    # card: a fact about the card, not revenue, which is all the owner's
+    # decision of 2026-11-14 moved.
     base = """
         SELECT b.id, b.full_name, b.phone, b.email, b.city, b.note,
                b.manager_id, b.created_at, COUNT(DISTINCT o.id) AS order_count

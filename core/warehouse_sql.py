@@ -28,8 +28,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict
 
+from core import duckdb_constants
 from core.duckdb_constants import (
     B2B_MANAGER_ID, EXHIBITION_SOURCE_ID, RETAIL_MANAGER_IDS, REVENUE_SOURCE_IDS,
+    not_own_entity,
 )
 from core.models import LOST_STATUS_GROUP_ID, OrderStatus
 
@@ -98,12 +100,26 @@ def silver_select_sql(dialect: "Dialect") -> str:
     `DUCKDB` rendered it against DuckDB's `orders` until step 14 (its callers
     went in S14-15 and S14-18). See that module for the two — and only two —
     places the dialects differ.
+
+    **`is_active_source` means "counts as revenue"**, whatever its name says:
+    an order on a revenue source (`REVENUE_SOURCE_IDS`) whose buyer is not
+    the company's own legal entity (`OWN_ENTITY_BUYER_IDS`, the owner's
+    decision of 2026-11-14 — a sale to ourselves is not revenue). The name
+    stays because renaming the column would cost a revision, ClickHouse's DDL
+    and the rollback to an image before step 14. Every Gold measure, the line
+    level and the inventory views read the column rather than the rule, so
+    this is the one place either half is decided. The buyer half is NULL-safe
+    (`not_own_entity`): an order with no buyer stays revenue, and the column
+    is never NULL.
     """
     # KeyCRM's own grouping decides when we have it; the id list covers rows
     # synced before the column existed. Verified equal for every status the
     # warehouse holds — see core/models.py.
     return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
     revenue_sources = ", ".join(str(s) for s in REVENUE_SOURCE_IDS)
+    counts_as_revenue = f"o.source_id IN ({revenue_sources})"
+    if duckdb_constants.OWN_ENTITY_BUYER_IDS:
+        counts_as_revenue += f"\n                AND {not_own_entity('o')}"
     return f"""
             o.id, o.source_id, o.status_id, o.grand_total,
             o.ordered_at, o.buyer_id, o.manager_id,
@@ -114,7 +130,7 @@ def silver_select_sql(dialect: "Dialect") -> str:
                 ELSE o.status_id IN {return_statuses}
             END AS is_return,
             {silver_sales_type_case(dialect)} AS sales_type,
-            o.source_id IN ({revenue_sources}) AS is_active_source,
+            {counts_as_revenue} AS is_active_source,
             CASE o.source_id
                 WHEN 1 THEN 'Instagram'
                 WHEN 2 THEN 'Telegram'

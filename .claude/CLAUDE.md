@@ -126,6 +126,7 @@ RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]  # seeds managers.is_retail for 
 EXHIBITION_SOURCE_ID = 5                        # the fair: sales_type exhibition, whoever staffed it
 SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)             # what we pull from KeyCRM and reconcile
 REVENUE_SOURCE_IDS = (1, 2, 4, 5)               # what counts as revenue (is_active_source)
+OWN_ENTITY_BUYER_IDS = (17358,)                 # our own second legal entity: revenue nowhere (2026-11-14)
 KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 ```
 
@@ -309,6 +310,11 @@ ClickHouse holds a second copy of Silver and derives its own Gold from it
 **Source filtering** (`REVENUE_SOURCE_IDS`, materialised as Silver's `is_active_source`):
 - Included: Instagram (1), Telegram (2), Shopify (4), Виставка (5) — the exhibition, its own `sales_type`
 - Excluded: Opencart (3) - deprecated; still synced and reconciled (`SYNCED_SOURCE_IDS`), never revenue
+- Excluded on every source and in every sales type: an order whose buyer is the
+  company's own second legal entity (`OWN_ENTITY_BUYER_IDS`, owner's decision
+  2026-11-14) — a sale to ourselves. So `is_active_source` means "counts as
+  revenue", not only "an active source"; see "A sale to ourselves" under
+  "Retail / B2B / Internal".
 
 ## Deployment
 
@@ -387,6 +393,11 @@ date outside 2000-01-01..2099-12-31 answered 400 and a marketing report on
    image before revision 0036). From `0036_analytics_captures` on it is not:
    "Rolling back below a revision", below, comes first, and its step 1 goes
    before the retag.
+
+Every image before the own-entity rule (2026-11-14), this target among them,
+counts the company's own legal entity's orders as revenue again from its
+first derivation tick (758 755.00 of 2026), and the roll forward takes them
+out again on its own; see "A sale to ourselves is revenue nowhere".
 
 Fast: `docker tag …:rollback-step14 …:latest` for web, bot and migrate, then
 `docker compose up -d` without `pull` — after the stamp has moved, from 0036
@@ -767,6 +778,59 @@ once `/api/dashboard/batch` was deleted — it was the only route that took
 reason. Any new POST accepting `sales_type` in a body reopens the hole and
 needs the same treatment.
 
+**A sale to ourselves is revenue nowhere** (owner's decision, 2026-11-14). The
+company's second legal entity buys under its own KeyCRM buyer card: goods moved
+between our two entities, not a sale. Its orders stay in Silver, under
+whatever `sales_type` the CASE above gives them (on production b2b, by the
+wholesale manager, and internal), and Silver's `is_active_source` is FALSE for
+them:
+`o.source_id IN (1, 2, 4, 5) AND (o.buyer_id IS NULL OR o.buyer_id NOT IN
+(17358))` (`core.warehouse_sql.silver_select_sql`; the buyer half is
+`core.duckdb_constants.not_own_entity`, NULL-safe, so an order with no buyer
+stays revenue and the NOT NULL column never meets a NULL). Every Gold measure
+in Postgres and ClickHouse, the line level, the inventory views and every
+dashboard, report, SMS, traffic and forecast reader read the column, not the
+rule — no revision. The readers that read around it leave the entity out
+too: the goals' growth history and the /expenses profit (both keep Opencart),
+the cohorts' membership (any source, O5) and the assistant's top products
+through `not_own_entity`; the subcategory drill-down by reading
+`is_active_source` beside its own source list. The bot's live KeyCRM reports
+ask for `include=buyer` and skip such an order, sale or return. The expense
+summary keeps its costs: costs, not revenue.
+
+Measured on production on 2026-11-14: one card, 35 orders, all in 2026. Out of
+revenue: b2b −179 065.00 of 12 786 199 (−1.4 %), internal −579 690.00, all
+sales types −758 755.00; retail unchanged. With it move the wholesale
+manager's 365-day figure on `/api/managers`, the b2b, internal and "all" brand
+tables, smart goals and cohorts; the three zero-total b2b test shipments leave
+`pg_headline_vs_line_items`, and the entity's shipments leave the inventory
+velocity, sell-through, ABC, restock quantities and days of supply (frozen
+views over the column; counting them there would take a revision) while
+`last_sale_date`, a stock fact read from bronze, keeps them. So a SKU moved
+mostly to the other entity reads recently sold with little velocity and a
+long days of supply. The decision named revenue only; whether goods sent to
+the other entity should drive restocking is the owner's open question. The
+integrity layer files `pg_own_entity_orders`
+(INFO: what is kept out, billed and in goods, by sales type) and
+`pg_own_entity_unlisted` (WARN: a card whose name reads like the entity's and
+whose id is in neither `OWN_ENTITY_BUYER_IDS` nor `NOT_OWN_ENTITY_BUYER_IDS` —
+a second card would silently be revenue; list it and deploy). The name is
+folded by `translate()` over an explicit table, because production's `LOWER`
+and `~*` do not fold Cyrillic, and never leaves Postgres: the finding carries
+card ids.
+
+After a deploy nothing is done by hand. Web restarts, and the first
+`pg_warehouse_derive` tick past the 600 s floor (measured from the last attempt
+journalled in Postgres) rebuilds Silver and Gold whole as `first_tick` —
+within about eleven minutes; `POST /api/warehouse/refresh` skips the floor.
+Until then `pg_silver_row_values` holds the entity's rows as a rule change
+(INFO), not a page. ClickHouse's Silver, its Gold and the cohorts follow at
+the next hourly `ch_sync`; the bot's five-minute cache expires on its own. A
+rollback to any image before this change — `rollback-step14`, an `:s14-NN`
+tag or an earlier 3.0.3xx — derives the old rule again: the entity's orders
+are revenue there from its first derivation tick, which rebuilds Silver and
+Gold whole.
+
 `managers.is_retail` is seeded from `RETAIL_MANAGER_IDS` for managers the
 warehouse has never seen and **never overwritten afterwards** — it used to be
 recomputed on every sync, which made a human's classification impossible to
@@ -777,7 +841,8 @@ on a rebuild.
 **"First purchase" has four definitions, kept on purpose** (owner's decision
 O7, 2026-11-11). Silver's (`silver_recompute_ctes`, which Gold's
 `new_customers` counts): the earliest non-return order on any source and of any
-sales type, and `is_new_customer` only on an active-source order of that day.
+sales type, and `is_new_customer` only on an active-source order of that day
+(so never on the own entity's, since 2026-11-14).
 `app.customer_profile`'s: retail orders on active sources (frozen since O6).
 The SMS audience's: retail order lines on active sources, so an order without
 lines does not count. The cohorts' (`core/sql_dialect.py`): the earliest
@@ -3432,7 +3497,9 @@ exhibition's, a fair staffed by retail managers — is a certificate redeemed:
 the certificate was sold first, as a sale of its own, and its money counted
 then. A b2b one is a test shipment to a partner, so a client can try the goods
 before deciding to buy. On 2026-11-14: 461 orders and 1 023 472.67 of goods,
-350 of them (809 553) b2b, 106 retail and 5 exhibition; the finding says the
+350 of them (809 553) b2b, 106 retail and 5 exhibition — 458 and 347 b2b once
+the own legal entity's three test shipments left revenue, and with it this
+check, which reads `is_active_source` (see "Retail / B2B / Internal"); the finding says the
 split every run (`pg_warehouse_dq.ZERO_TOTAL_KINDS`), and names a sales type
 no decision covers if one ever appears. It was a WARN until then — for a
 month the digest's only standing one, sent whenever a certificate or a test
