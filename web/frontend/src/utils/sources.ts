@@ -10,10 +10,27 @@
  */
 export const OFFLINE_STORE_SOURCE_ID = 7
 
+/**
+ * What the server calls the offline store wherever it names it: Silver's
+ * `source_name`, `/reports` and the doughnut by source
+ * (`_REPORT_SOURCE_NAMES` in core/repositories/revenue.py, which
+ * tests/unit/test_offline_store.py holds to this line).
+ */
+export const OFFLINE_STORE_SERVER_NAME = 'Офлайн-магазин'
+
 export function sourceName(
   id: number | null | undefined,
   name: string,
   t: (key: string) => string,
 ): string {
   return id === OFFLINE_STORE_SOURCE_ID ? t('source.offlineStore') : name
+}
+
+/**
+ * The same, for an answer that names its sources and carries no ids: the
+ * doughnut by source (`/api/sales/by-source`), whose shape the recorded
+ * answers in tests/integration/golden/dashboard.json pin.
+ */
+export function sourceLabel(name: string, t: (key: string) => string): string {
+  return name === OFFLINE_STORE_SERVER_NAME ? t('source.offlineStore') : name
 }

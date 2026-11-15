@@ -9,7 +9,7 @@ from core.duckdb_constants import OFFLINE_STORE_SOURCE_ID, UNKNOWN_BRAND, brand_
 from core.filters import by_month
 from core.models import OrderStatus
 from core.repositories.customers import _INSIGHTS_PERIOD_SQL
-from core.sql_dialect import TODAY_IN_KYIV
+from core.sql_dialect import DOUGHNUT_SOURCE_IDS, TODAY_IN_KYIV
 from core import read_fallback
 
 logger = logging.getLogger(__name__)
@@ -1084,9 +1084,17 @@ class RevenueMixin:
         promocode: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get sales breakdown by source (from Gold/Silver layers)."""
-        source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
-        source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200"}
+        """Get sales breakdown by source (from Gold/Silver layers).
+
+        A slice per source of `DOUGHNUT_SOURCE_IDS`: the three online
+        channels, and the offline store since the owner's decision of
+        2026-11-15 — named as `/reports` names it, coloured as the page
+        colours it (`utils/colors.SOURCE_COLORS`). The exhibition still has
+        no slice.
+        """
+        source_names = {sid: _REPORT_SOURCE_NAMES[sid] for sid in DOUGHNUT_SOURCE_IDS}
+        source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200",
+                         OFFLINE_STORE_SOURCE_ID: "#B45309"}
 
         if category_id or brand or promocode:
             # The line level, because a category or brand is a fact about a
@@ -1140,13 +1148,15 @@ class RevenueMixin:
                     "{where}", " AND ".join(where_clauses)),
                 params,
             )
-            result = rows[0] if rows else (0,) * 6
+            result = rows[0] if rows else (0,) * (2 * len(DOUGHNUT_SOURCE_IDS))
 
-            # Build source list sorted by revenue desc
+            # `(orders, revenue)` per source, interleaved in
+            # `DOUGHNUT_SOURCE_IDS`' order (`channel_measures`); then sorted by
+            # revenue desc, stably, so a tie keeps that order.
             source_data = [
-                (1, "Instagram", int(result[0] or 0), float(result[1] or 0)),
-                (2, "Telegram", int(result[2] or 0), float(result[3] or 0)),
-                (4, "Shopify", int(result[4] or 0), float(result[5] or 0)),
+                (sid, source_names[sid],
+                 int(result[2 * i] or 0), float(result[2 * i + 1] or 0))
+                for i, sid in enumerate(DOUGHNUT_SOURCE_IDS)
             ]
             source_data.sort(key=lambda x: x[3], reverse=True)
 

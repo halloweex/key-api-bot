@@ -317,9 +317,11 @@ ClickHouse holds a second copy of Silver and derives its own Gold from it
 - Excluded: Opencart (3) - deprecated; still synced and reconciled (`SYNCED_SOURCE_IDS`), never revenue
 - A new KeyCRM source is registered once, in `SYNCED_SOURCE_IDS`: the
   integrity layer's `KNOWN_SOURCE_IDS` (whose `pg_value_domain_orders_source_id`
-  WARN names an unregistered one) and the reconciliation's `ACTIVE_SOURCES`
-  read it. They were literals of their own until source 7, which stood as a
-  WARN from its first order and was compared by no reconciliation arm.
+  WARN names an unregistered one, and whose lever line says so) and the
+  reconciliation's `ACTIVE_SOURCES` read it; `REVENUE_SOURCE_IDS` and a
+  branch in Silver's sales_type CASE are decisions beside it. They were
+  literals of their own until source 7, which stood as a WARN from its first
+  order and was compared by no reconciliation arm.
 - Excluded on every source and in every sales type: an order whose buyer is the
   company's own second legal entity (`OWN_ENTITY_BUYER_IDS`, owner's decision
   2026-11-14) — a sale to ourselves. So `is_active_source` means "counts as
@@ -799,29 +801,67 @@ weekly report. Source 7 is in `REVENUE_SOURCE_IDS` and `SYNCED_SOURCE_IDS`,
 partition check and the frontend union follow), and every viewer may select
 it — `api_gate` gates only `internal`. Silver names it `Офлайн-магазин`.
 
-Every route that takes `source_id` answers 7 with real numbers:
+Every route that filters by `source_id` answers 7 with real numbers:
 `VALID_SOURCE_IDS` holds it, `/api/summary` and the trend read Gold's fine
 rows for it (`RevenueMixin._GOLD_SOURCE_IDS`), `/reports` lists it
 (`_REPORT_SOURCE_NAMES`) and the subcategory drill-down's source list carries
-it. The exhibition (5) is still a 400 there and Opencart (3) still zeros on
-the summary — decision 5, which this did not move. On /traffic a store order
-carries no tag, so the readers' fallback (`TrafficMixin._PLATFORM_EXPR` and
+it. Two routes take the parameter and are not that: `/api/sales/by-source`
+validates it and ignores it (a breakdown by source), and the SMS audience
+routes build retail audiences only (below). The exhibition (5) is still a 400
+there and Opencart (3) still zeros on the summary — decision 5, which this did
+not move. The header's source filter offers the store beside the sales-type
+pill, and the two are independent, as every pair of filters here is: source 7
+under any sales type but `offline` or `all` answers zeros. On /traffic a store
+order carries no tag, so the readers' fallback (`TrafficMixin._PLATFORM_EXPR` and
 `_TRAFFIC_TYPE_EXPR`, the one spelling every query reads since) places an
 untagged source-7 order on platform `offline_store`, traffic type `organic`,
 and `organic_channel` gives it the channel `offline_store` (under GA4's
 groups the page says "off-site", as for Direct: GA4 never sees it) — never
 the website's "source not identified". The bot's live
-reports name it from `SOURCE_MAPPING`, the assistant's revenue tools take
-`sales_type='offline'`, and the SMS source condition offers it.
+reports name it from `SOURCE_MAPPING`, and the assistant's revenue tools take
+`sales_type='offline'`.
+
+**The doughnut by source draws the store a slice**: the dashboard's three
+charts by source (`/api/sales/by-source`) read
+`core.sql_dialect.DOUGHNUT_SOURCE_IDS` — the three channels, then 7 — through
+`channel_measures` on the Gold branch
+and by name on the line branch, coloured `#B45309` as `utils/colors` does.
+Without it `sales_type=offline` drew nothing beside a non-zero summary, and
+under `all` the store's money was in the card and in no slice, so every
+channel's share of the slices read high. The answer names its sources and
+carries no ids (its shape is pinned by `tests/integration/golden/dashboard.json`),
+so the page translates the store by the server's name
+(`utils/sources.sourceLabel`, held to `_REPORT_SOURCE_NAMES` by a test). The
+exhibition still has no slice, as it never had.
 
 **Retail-only, and kept so**: the Monday sales report, the traffic report
 and the forecast are about the online shop; the store is not retail and is
-in none of them. The dashboard's doughnut by source and the marketing
-report's channels know only Instagram, Telegram and Shopify
-(`core.sql_dialect._CHANNELS`), and the bot's TOP-10 the same three
-(`TOP10_SOURCES`), as they never knew the exhibition: an `offline` doughnut
-is empty, and the store's money is in `all`'s totals and in no slice.
-Widening them is its own decision.
+in none of them.
+
+**Not widened, each its own decision**: the marketing report's channels
+(`core.sql_dialect._CHANNELS`, which `DOUGHNUT_SOURCE_IDS` extends rather than
+changes) and the bot's TOP-10 (`TOP10_SOURCES`) know only Instagram, Telegram
+and Shopify, as they never knew the exhibition. So /marketing and its CSV,
+which go to suppliers, list Сайт, Telegram and Instagram at 0 under
+`sales_type=offline`, beside a general-sales block carrying the store's
+revenue, and under `all` the three rows' shares fall short of 100 % with
+nothing naming the rest. The SMS wizard builds retail audiences only
+(`salesType: 'retail'`; the content filter asks the campaign's sales type of
+the same order line), so its source condition «Офлайн-магазин» matches nobody,
+as «Виставка» never has: a store buyer is reachable by no audience the page
+can build. Goals and milestones for `offline` show the fallback targets
+(₴50 000 a day, ₴1 000 000 a month, a "fallback" smart goal), as the
+exhibition's do. An offline-store order billed at zero with goods in it reads
+in `pg_headline_vs_line_items` (INFO) as "a sales type no decision covers":
+`ZERO_TOTAL_KINDS` waits for the owner to say whether the store redeems
+certificates as retail does.
+
+**What 7 joining `is_active_source` moves besides revenue**, as the
+exhibition's orders always have: the inventory velocity and stock-out views
+(revisions 0014 and 0015, `NOT is_return AND is_active_source`, no sales
+type) count counter sales as goods leaving, and an SMS campaign's conversion
+(`customers.py`'s `window_orders`, no sales type) counts a messaged buyer's
+purchase in the store.
 
 Measured on production on 2026-11-15: five store orders since 2026-11-12,
 single cosmetics at retail prices, all five cancelled (status 19, the lost
@@ -908,9 +948,10 @@ on a rebuild.
 O7, 2026-11-11). Silver's (`silver_recompute_ctes`, which Gold's
 `new_customers` counts): the earliest non-return order on any source and of any
 sales type, and `is_new_customer` only on an active-source order of that day
-(so never on the own entity's, since 2026-11-14; on an offline-store order,
-since 2026-11-15, as on the exhibition's — and a buyer whose first purchase
-was over the counter is not new on their first online order).
+(so never on the own entity's, since 2026-11-14; and on an offline-store
+order since 2026-11-15, as on the exhibition's). The first order was read on
+every source before the store was revenue too, so a buyer whose first purchase
+was over the counter was never new on a later online order, and still is not.
 `app.customer_profile`'s: retail orders on active sources (frozen since O6).
 The SMS audience's: retail order lines on active sources, so an order without
 lines does not count. The cohorts' (`core/sql_dialect.py`): the earliest

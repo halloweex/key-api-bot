@@ -130,8 +130,12 @@ export const CONDITION_FAMILIES: Array<{ key: string; types: ConditionType[] }> 
 // never reaches revenue, so offering it would offer an empty set. Labels are
 // `sms.source.<id>`: "Shopify" is the website to the people using this page.
 // 7 is the offline store, a revenue source since the owner's decision of
-// 2026-11-15; its orders are sales type `offline`, so an audience of another
-// sales type finds nobody through it.
+// 2026-11-15. Its orders are sales type `offline`, and every audience this page
+// builds is retail (`salesType: 'retail'` in SmsCampaignWizard; the content
+// filter asks the campaign's sales type of the same order line), so through
+// this page it matches nobody — as the exhibition (5), sales type
+// `exhibition`, never has. Reaching either's buyers takes an audience of its
+// sales type, which is the owner's decision and not taken here.
 export const SOURCES: number[] = [1, 2, 4, 5, 7]
 
 // Bounds the server holds; a value outside them is a 422, so the page treats

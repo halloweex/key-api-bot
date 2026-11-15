@@ -17,7 +17,8 @@ is proved:
   of retail, and the derivation's validation — partition included — passes;
 * **the API** answers `/api/summary` with real numbers for `sales_type=offline`
   and for `source_id=7`, over HTTP, and the retail answer is unmoved; the
-  reports, the top products and the drill-down list the store;
+  reports, the top products and the drill-down list the store, and the
+  doughnut by source draws it a slice that adds up to the summary;
 * **the integrity layer** files no `pg_value_domain_orders_source_id`, which
   it does file for the same rows against the old list;
 * **the reconciliation's Postgres arm** compares the store's orders;
@@ -166,6 +167,39 @@ class TestTheDashboard:
         out = await store.get_summary_stats(DAY, DAY, **kwargs)
         assert (out["totalOrders"], out["totalRevenue"], out["totalReturns"],
                 out["returnsRevenue"]) == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [
+        {"sales_type": "offline"},
+        {"sales_type": "all"},
+        {"sales_type": "offline", "brand": "BrandA"},
+        {"sales_type": "all", "brand": "BrandA"},
+    ], ids=["offline", "all", "offline-brand", "all-brand"])
+    async def test_the_doughnut_has_the_stores_slice_and_adds_up_to_the_summary(
+            self, store_rows, kwargs):
+        """The dashboard's three charts by source. Mutation: leave the store
+        out of `DOUGHNUT_SOURCE_IDS` — `offline` draws nothing beside 1 550,
+        and `all` sums to 2 000 against 3 550. (The fixture has no exhibition
+        order, which has no slice.)"""
+        store, _pool = store_rows
+        doughnut = await store.get_sales_by_source(DAY, DAY, **kwargs)
+        summary = await store.get_summary_stats(DAY, DAY, **kwargs)
+        assert (sum(doughnut["orders"]), sum(doughnut["revenue"])) == (
+            summary["totalOrders"], summary["totalRevenue"])
+        slices = dict(zip(doughnut["labels"], zip(
+            doughnut["orders"], doughnut["revenue"], doughnut["backgroundColor"])))
+        expected = (2, 1250.0) if "brand" in kwargs else (3, 1550.0)
+        assert slices["Офлайн-магазин"] == (*expected, "#B45309")
+        if kwargs["sales_type"] == "offline":
+            assert list(slices) == ["Офлайн-магазин"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [{}, {"brand": "BrandA"}], ids=["gold", "lines"])
+    async def test_the_retail_doughnut_has_no_store(self, store_rows, kwargs):
+        store, _pool = store_rows
+        doughnut = await store.get_sales_by_source(DAY, DAY, sales_type="retail", **kwargs)
+        assert "Офлайн-магазин" not in doughnut["labels"]
+        assert doughnut["labels"]
 
     @pytest.mark.asyncio
     async def test_the_trend_for_the_store_reads_its_gold_rows(self, store_rows):

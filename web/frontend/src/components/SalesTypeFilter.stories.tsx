@@ -50,7 +50,9 @@ export const Admin: Story = {
   ),
 }
 
-/** At a phone's width, where the header puts its filters two to a row. */
+/** At a phone's width, alone. The header gives the sales types a row of
+ *  their own there, and the row scrolls when the buttons do not fit it —
+ *  `Filters/FilterBar`'s `Phone` shows them in the header's grid. */
 export const Phone: Story = {
   globals: { viewport: { value: 'mobile2', isRotated: false } },
   render: () => (

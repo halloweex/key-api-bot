@@ -11,9 +11,12 @@ change its orders were `internal` by the manager rule, outside revenue
 * the constants — 7 synced, revenue, and the `offline` sales type known;
 * Silver's CASE — source 7 is `offline` whoever the manager is, executed in
   DuckDB in memory over the rendering's own text;
-* the source lists that read `SYNCED_SOURCE_IDS` rather than restate it;
+* the source lists that read `SYNCED_SOURCE_IDS` rather than restate it,
+  every reconciliation arm run and asking for 7, and the finding's lever
+  naming the one list;
 * the API — `source_id=7` and `sales_type=offline` validated, `offline` not
-  gated to admins, the exhibition and Opencart unmoved (decision 5);
+  gated to admins, the exhibition and Opencart unmoved (decision 5), and the
+  doughnut by source drawing the store a slice the page can name;
 * /traffic — untagged offline-store orders are organic, on a platform and a
   channel of their own, never the website's "source not identified";
 * the labels in three languages, and the bot naming the store.
@@ -88,12 +91,94 @@ class TestTheSourceListsAgree:
         assert not [n for n in ast.walk(value) if isinstance(n, ast.Constant)], (
             f"{module}'s {name} restates source ids; read SYNCED_SOURCE_IDS")
 
-    def test_the_reconciliation_reads_the_store_on_every_arm(self):
-        """The KeyCRM snapshot, Postgres and ClickHouse all filter on the one
-        list, so a source-7 order is compared on all three or on none."""
-        source = (ROOT / "core/reconciliation_io.py").read_text(encoding="utf-8")
-        assert source.count('", ".join(str(s) for s in ACTIVE_SOURCES)') == 2
-        assert "if src not in ACTIVE_SOURCES:" in source
+    def test_the_findings_lever_names_the_one_list(self):
+        """The `pg_value_domain_` line said to register a source in
+        `KNOWN_SOURCE_IDS`, which is derived now and which the test above
+        fails if a number is written into it."""
+        from core.data_quality import remediation_for
+
+        (line,) = remediation_for(["pg_value_domain_orders_source_id"])
+        assert "SYNCED_SOURCE_IDS" in line and "REVENUE_SOURCE_IDS" in line
+        assert "KNOWN_SOURCE_IDS" not in line
+
+
+def _sources_in(sql: str) -> set:
+    """The ids of the one `source_id IN (...)` a statement sent carries."""
+    (listed,) = re.findall(r"source_id IN \(([^)]*)\)", sql)
+    return {int(i) for i in listed.split(",")}
+
+
+class TestEveryReconciliationArmComparesTheStore:
+    """The KeyCRM snapshot, Postgres and ClickHouse all filter on the one
+    list, so a source-7 order is compared on all three or on none. Each arm
+    is run, with its store stubbed, and what it would send is read."""
+
+    def test_the_keycrm_snapshot_keeps_a_store_order(self):
+        from datetime import date, datetime, timezone
+
+        from core.reconciliation_io import _process_batch
+
+        def order(oid, source_id):
+            return {"id": oid, "source_id": source_id, "status_id": 1,
+                    "grand_total": 450, "ordered_at": "2026-11-12T10:00:00+00:00",
+                    "updated_at": "2026-11-12T10:00:00+00:00", "products": []}
+
+        orders, inflight = {}, set()
+        _process_batch([order(1, STORE), order(2, 6)], orders,
+                       datetime(2026, 11, 13, tzinfo=timezone.utc),
+                       date(2026, 11, 1), date(2026, 11, 30), inflight)
+        assert set(orders) == {1}, "an unsynced source (6) is dropped, the store is kept"
+        assert orders[1]["source_id"] == STORE
+
+    def test_the_postgres_arm_asks_for_the_store(self):
+        import asyncio
+        from datetime import date, datetime, timezone
+
+        from core.reconciliation_io import postgres_orders_in_window
+
+        sent = []
+
+        class Conn:
+            async def fetch(self, sql, *args):
+                sent.append(sql)
+                return []
+
+        class Acquired:
+            async def __aenter__(self):
+                return Conn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class Pool:
+            def acquire(self):
+                return Acquired()
+
+        asyncio.run(postgres_orders_in_window(
+            Pool(), date(2026, 11, 1), date(2026, 11, 30),
+            watermark=datetime(2026, 11, 13, tzinfo=timezone.utc)))
+        (sql,) = sent
+        assert _sources_in(sql) == set(SYNCED_SOURCE_IDS)
+        assert STORE in _sources_in(sql)
+
+    def test_the_clickhouse_arm_asks_for_the_store(self, monkeypatch):
+        import asyncio
+        from datetime import date
+
+        from core import ch_common
+        from core.reconciliation_io import clickhouse_orders_in_window
+
+        sent = []
+
+        async def execute(sql, **_kw):
+            sent.append(sql)
+            return ""
+
+        monkeypatch.setattr(ch_common, "execute", execute)
+        asyncio.run(clickhouse_orders_in_window(date(2026, 11, 1), date(2026, 11, 30)))
+        (sql,) = sent
+        assert _sources_in(sql) == set(SYNCED_SOURCE_IDS)
+        assert STORE in _sources_in(sql)
 
 
 # ─── Silver's CASE ──────────────────────────────────────────────────────────
@@ -217,6 +302,74 @@ class TestTheFilters:
         assert f"l.source_id IN (1, 2, 4, {STORE})" in sql
 
 
+class TestTheDoughnut:
+    """`/api/sales/by-source` (the dashboard's three charts by source) draws a
+    slice for the store. Without one, `sales_type=offline` drew nothing beside
+    a non-zero summary, and under `all` the store's money was in the card and
+    in no slice. The marketing report's channels are not widened with it."""
+
+    def test_the_store_is_a_slice_and_the_channels_are_unmoved(self):
+        from core.sql_dialect import _CHANNELS, DOUGHNUT_SOURCE_IDS, POSTGRES
+        from core.sql_dialect import marketing_period_measures
+
+        assert DOUGHNUT_SOURCE_IDS == (1, 2, 4, STORE)
+        assert _CHANNELS == (("instagram", 1), ("telegram", 2), ("shopify", 4))
+        marketing = marketing_period_measures(POSTGRES)
+        assert len(marketing.split(",\n")) == 11
+        assert f"source_id = {STORE}" not in marketing
+
+    @staticmethod
+    def _answer(rows, **kwargs):
+        import asyncio
+        from datetime import date
+
+        from core.repositories.revenue import RevenueMixin
+
+        seen = []
+
+        async def run(sql, params=None):
+            seen.append(sql)
+            return rows
+
+        class Probe(RevenueMixin):
+            _dashboard_run = staticmethod(run)
+
+        out = asyncio.run(Probe().get_sales_by_source(
+            date(2026, 11, 1), date(2026, 11, 2), **kwargs))
+        return out, seen
+
+    def test_the_gold_branch_unpacks_the_stores_pair(self):
+        """Eight numbers, `(orders, revenue)` per source in
+        `DOUGHNUT_SOURCE_IDS`' order; a source with neither is no slice."""
+        out, (sql,) = self._answer(
+            [(1, 100.0, 0, 0, 2, 50.0, 3, 300.0)], sales_type="all")
+        assert "{channel_measures}" in sql
+        assert out == {
+            "labels": ["Офлайн-магазин", "Instagram", "Shopify"],
+            "orders": [3, 1, 2],
+            "revenue": [300.0, 100.0, 50.0],
+            "backgroundColor": ["#B45309", "#7C3AED", "#eb4200"],
+        }
+
+    def test_the_line_branch_names_the_store_and_still_not_the_exhibition(self):
+        out, _sql = self._answer(
+            [(STORE, 2, 1250.0), (1, 1, 1000.0), (EXHIBITION_SOURCE_ID, 1, 99.0)],
+            sales_type="all", brand="BrandA")
+        assert (out["labels"], out["orders"], out["revenue"]) == (
+            ["Офлайн-магазин", "Instagram"], [2, 1], [1250.0, 1000.0])
+
+    def test_the_page_knows_the_name_the_server_gives_it(self):
+        """The doughnut's answer names its sources and carries no ids (its
+        shape is pinned by the recorded answers), so the page translates the
+        store by the server's name: one literal on each side, held equal."""
+        from core.repositories.revenue import _REPORT_SOURCE_NAMES
+
+        source = (ROOT / "web/frontend/src/utils/sources.ts").read_text(encoding="utf-8")
+        (name,) = re.findall(
+            r"^export const OFFLINE_STORE_SERVER_NAME = '([^']*)'$", source, re.M)
+        assert name == _REPORT_SOURCE_NAMES[STORE]
+
+
 class TestTheGate:
     """`internal` is the one admin-only sales type. The offline store is a
     sales channel, like the exhibition, and every viewer may read it."""
@@ -294,10 +447,38 @@ class TestTraffic:
 
     def test_one_spelling_of_the_fallback_in_the_mixin(self):
         """The transactions and the campaigns carried copies of their own; a
-        copy is where the next source is forgotten."""
-        source = (ROOT / "core/repositories/traffic.py").read_text(encoding="utf-8")
-        assert len(re.findall(r"THEN 'telegram'", source)) == 1
-        assert len(re.findall(r"source_id IN \(1, 2", source)) == 1
+        copy is where the next source is forgotten. Parsed: no string in the
+        module but the two class attributes' values spells the fallback —
+        the COALESCE over the UTM row's column, or a CASE on the source that
+        names a platform or the organic sources."""
+        tree = ast.parse((ROOT / "core/repositories/traffic.py").read_text(encoding="utf-8"))
+        owners = {
+            target.id: node.value
+            for node in ast.walk(tree) if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+            and target.id in ("_PLATFORM_EXPR", "_TRAFFIC_TYPE_EXPR")
+        }
+        assert set(owners) == {"_PLATFORM_EXPR", "_TRAFFIC_TYPE_EXPR"}
+        docstrings = {
+            id(node.body[0].value) for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef))
+            and node.body and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+        }
+        spells = re.compile(r"COALESCE\(u\.(platform|traffic_type)\b"
+                            r"|THEN 'telegram'|s\.source_id IN \(")
+        copies = [
+            (node.lineno, node.value[:60]) for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and all(node is not value for value in owners.values())
+            and spells.search(node.value)
+        ]
+        assert not copies, f"a second spelling of the fallback: {copies}"
+        assert all(spells.search(v.value) for v in owners.values()
+                   if isinstance(v, ast.Constant))
 
     def test_the_routes_accept_the_platform(self):
         from web.routes.api.traffic import _VALID_PLATFORMS

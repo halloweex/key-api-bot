@@ -37,9 +37,9 @@ thing a branchy implementation could hide indefinitely.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
-from core.duckdb_constants import DISPLAY_TIMEZONE, not_own_entity
+from core.duckdb_constants import DISPLAY_TIMEZONE, OFFLINE_STORE_SOURCE_ID, not_own_entity
 
 
 @dataclass(frozen=True)
@@ -410,6 +410,19 @@ _PERIOD_MEASURES = ("revenue", "orders_count", "unique_customers",
                     "new_customers", "returning_customers")
 _CHANNELS = (("instagram", 1), ("telegram", 2), ("shopify", 4))
 
+# The sources `/dashboard`'s three charts by source draw a slice for: the
+# three channels above, then the offline store (KeyCRM source 7, a sales type
+# of its own by the owner's decision of 2026-11-15). Not `_CHANNELS` itself:
+# that tuple is also the marketing report's channel rows, which go to
+# suppliers, and the channel totals of the Monday report, the assistant and
+# the forecast, and widening any of them is a decision of its own. Without the
+# store here the doughnut was empty under `sales_type=offline`, and under
+# `all` the store's money was in the summary card and in no slice, so every
+# channel's share of the slices read high. The exhibition (5) has never had a
+# slice, and still has none.
+DOUGHNUT_SOURCE_IDS: Tuple[int, ...] = (
+    tuple(sid for _name, sid in _CHANNELS) + (OFFLINE_STORE_SOURCE_ID,))
+
 
 def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
     """Fill a body's table holes for one engine.
@@ -572,14 +585,16 @@ def marketing_period_measures(dialect: Dialect) -> str:
 
 
 def channel_measures(dialect: Dialect) -> str:
-    """Orders and revenue per channel, in the order `SOURCE_MAPPING` lists them.
+    """Orders and revenue per source of `DOUGHNUT_SOURCE_IDS`, in its order.
 
-    Six select items — `(orders, revenue)` for Instagram, Telegram and Shopify,
-    interleaved, which is the order `/dashboard`'s doughnut unpacks. The
-    eleven-item `marketing_period_measures` groups them differently because its
-    caller does, so the shared thing between them is not the string: it is
-    `_channel_items`, the one place that knows a channel is a *dimension* in
-    Postgres' Gold (it was a *column* in DuckDB's, until step 14's S14-07).
+    Eight select items — `(orders, revenue)` for Instagram, Telegram, Shopify
+    and the offline store, interleaved, which is the order `/dashboard`'s
+    doughnut unpacks (six, the three channels, until the owner's decision of
+    2026-11-15). The eleven-item `marketing_period_measures` groups them
+    differently because its caller does, so the shared thing between them is
+    not the string: it is `_channel_items`, the one place that knows a channel
+    is a *dimension* in Postgres' Gold (it was a *column* in DuckDB's, until
+    step 14's S14-07).
 
     Splitting it that way rather than reusing the eleven wholesale is the
     charter's rule 1 read literally. Two callers wanting different orderings of
@@ -588,15 +603,19 @@ def channel_measures(dialect: Dialect) -> str:
     because the day somebody adds a fourth channel column is the day two
     hand-written copies stop agreeing.
     """
-    items = _channel_items(dialect)
-    rev, orders = items[:3], items[3:]
+    items = _channel_items(dialect, DOUGHNUT_SOURCE_IDS)
+    count = len(DOUGHNUT_SOURCE_IDS)
+    rev, orders = items[:count], items[count:]
     return ",\n        ".join(
         item for pair in zip(orders, rev) for item in pair
     )
 
 
-def _channel_items(dialect: Dialect) -> List[str]:
-    """Three revenues then three order counts, one channel each.
+def _channel_items(
+    dialect: Dialect, sources: Optional[Sequence[int]] = None,
+) -> List[str]:
+    """The revenues then the order counts, one per source — the three
+    channels of `_CHANNELS` unless `sources` names others.
 
     The only place in the repository that knows how a channel is spelled in
     Gold. Postgres carries `source_id` and can name any source — which is why
@@ -605,10 +624,11 @@ def _channel_items(dialect: Dialect) -> List[str]:
     channel, went with step 14's S14-07 (`marketing_period_measures` says
     why); `dialect` is still taken, so the holes render for any.
     """
+    ids = [sid for _name, sid in _CHANNELS] if sources is None else list(sources)
     return ([f"COALESCE(SUM(revenue) FILTER (WHERE source_id = {sid}), 0)"
-             for _name, sid in _CHANNELS]
+             for sid in ids]
             + [f"COALESCE(SUM(orders_count) FILTER (WHERE source_id = {sid}), 0)"
-               for _name, sid in _CHANNELS])
+               for sid in ids])
 
 
 def channel_totals_items(dialect: Dialect) -> "List[Tuple[str, str, str]]":

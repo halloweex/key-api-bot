@@ -3,7 +3,9 @@ import en from '../../locales/en.json'
 import uk from '../../locales/uk.json'
 import ru from '../../locales/ru.json'
 import { SOURCES } from '../smsConditions'
-import { OFFLINE_STORE_SOURCE_ID, sourceName } from '../sources'
+import {
+  OFFLINE_STORE_SERVER_NAME, OFFLINE_STORE_SOURCE_ID, sourceLabel, sourceName,
+} from '../sources'
 
 const t = (key: string) => `t:${key}`
 
@@ -23,6 +25,15 @@ describe('sourceName', () => {
     expect(OFFLINE_STORE_SOURCE_ID).toBe(7)
   })
 
+  it('says it in the reader’s words where the answer carries only names', () => {
+    // The doughnut by source: names, no ids (tests/unit/test_offline_store.py
+    // holds the constant to the server's name).
+    expect(OFFLINE_STORE_SERVER_NAME).toBe('Офлайн-магазин')
+    expect(sourceLabel(OFFLINE_STORE_SERVER_NAME, t)).toBe('t:source.offlineStore')
+    expect(sourceLabel('Instagram', t)).toBe('Instagram')
+    expect(sourceLabel('Shopify', t)).toBe('Shopify')
+  })
+
   it('has the words in every language', () => {
     for (const dict of [en, uk, ru] as Record<string, string>[]) {
       expect(dict['source.offlineStore']).toBeTruthy()
@@ -32,6 +43,8 @@ describe('sourceName', () => {
 })
 
 describe('the SMS source condition', () => {
+  // Offered, and under this page's retail-only audiences it matches nobody,
+  // as the exhibition never has (the comment on SOURCES says why).
   it('offers the offline store, with a label in every language', () => {
     expect(SOURCES).toContain(OFFLINE_STORE_SOURCE_ID)
     for (const dict of [en, uk, ru] as Record<string, string>[]) {
