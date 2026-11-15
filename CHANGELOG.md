@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.349
+
+- docs: the zero-total split after the own entity left revenue (458 orders, 347 b2b)
+- fix(own-entity): the review's findings — invisible spaces, a locale guard, a hermetic ClickHouse test
+- feat(revenue): a sale to our own legal entity is revenue nowhere
+
+
 ## 3.0.348
 
 - docs(dq): name ga4_backlog_at_risk among the capture WARNs; weeks and months can move a late day's turn
