@@ -275,6 +275,28 @@ async def _classify(store):
     return await store.set_manager_retail_status(34, True, date(2026, 10, 7), 1, "x")
 
 
+async def _restore_discounts(_store):
+    """Chain 3's discount backfill (revision 0037), on an order Postgres holds
+    without its discount — without one it reads, finds nothing owed and
+    returns before the latch, which is the point of reading first. Seeded
+    through the pool the test hands out, which serves anybody but the
+    writer's module the live pool."""
+    from datetime import datetime
+
+    from core.pg import get_pool
+
+    payload = _order_payload()
+    stamp = datetime.fromisoformat(payload["updated_at"])
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.orders (id, source_id, status_id, grand_total, "
+            "ordered_at, updated_at) VALUES ($1, 1, 12, 100, $2, $2) "
+            "ON CONFLICT (id) DO NOTHING", ORDER_ID, stamp)
+    return await pg_orders_write.restore_discounts(
+        [dict(payload, products_total="100.00", total_discount=0)])
+
+
 def _journal_run(_store):
     """Chain 9's writer, with the values the router would hand it."""
     from datetime import datetime, timezone
@@ -354,6 +376,8 @@ WRITERS = {
     # NULL comment to fill it still opens its transaction and claims.
     "restore_manager_comments": (pg_orders_write, lambda _s: (
         pg_orders_write.restore_manager_comments({ORDER_ID: "utm_source=ig"}))),
+    # Reached from `scripts/backfill_discounts.py`, page by page.
+    "restore_discounts": (pg_orders_write, _restore_discounts),
     "upsert_managers": (pg_managers_write, lambda s: s.upsert_managers(
         [{"id": 1, "name": "M1"}])),
     "update_manager_stats": (pg_managers_write, lambda s: s.update_manager_stats()),

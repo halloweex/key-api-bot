@@ -72,9 +72,14 @@ class TestTheSharedRow:
             "id", "source_id", "status_id", "status_group_id", "grand_total",
             "ordered_at", "created_at", "updated_at", "buyer_id", "manager_id",
             "manager_comment", "promocode",
+            # The discount, revision 0037: appended, so no position moved.
+            "products_total", "total_discount", "discount_amount",
+            "discount_percent", "discount_data",
         )
         assert ORDER_PRODUCT_COLUMNS == (
             "id", "order_id", "product_id", "name", "quantity", "price_sold",
+            "price", "total_discount", "discount_percent", "discount_amount",
+            "loyalty_discount", "individual_discount",
         )
 
     def test_no_bookkeeping_column_is_shared(self):

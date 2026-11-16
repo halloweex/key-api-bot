@@ -430,7 +430,11 @@ LINE_ITEM_ID_STRIDE = 1000
 
 
 class OrderRow(NamedTuple):
-    """An order header as KeyCRM describes it. Column order is the write order."""
+    """An order header as KeyCRM describes it. Column order is the write order.
+
+    The five after `promocode` are the discount (revision 0037), appended so
+    that every position before them keeps its meaning (`pg_landing` reads
+    `grand_total` as `row[4]`)."""
     id: Optional[int]
     source_id: Optional[int]
     status_id: Optional[int]
@@ -443,20 +447,127 @@ class OrderRow(NamedTuple):
     manager_id: Optional[int]
     manager_comment: Optional[str]
     promocode: Optional[str]
+    products_total: Optional[decimal.Decimal] = None
+    total_discount: Optional[decimal.Decimal] = None
+    discount_amount: Optional[decimal.Decimal] = None
+    discount_percent: Optional[decimal.Decimal] = None
+    # KeyCRM's `discount_data` as JSON text (`discount_data_json`).
+    discount_data: Optional[str] = None
 
 
 class OrderProductRow(NamedTuple):
-    """One line item. Column order is the write order."""
+    """One line item. Column order is the write order; the six after
+    `price_sold` are the discount (revision 0037), appended like the
+    header's. `total_discount` is per UNIT, as KeyCRM serves it."""
     id: int
     order_id: int
     product_id: Optional[int]
     name: str
     quantity: int
     price_sold: float
+    price: Optional[decimal.Decimal] = None
+    total_discount: Optional[decimal.Decimal] = None
+    discount_percent: Optional[decimal.Decimal] = None
+    discount_amount: Optional[decimal.Decimal] = None
+    loyalty_discount: Optional[decimal.Decimal] = None
+    individual_discount: Optional[decimal.Decimal] = None
 
 
 ORDER_COLUMNS = OrderRow._fields
 ORDER_PRODUCT_COLUMNS = OrderProductRow._fields
+
+# ─── The discount columns (revision 0037) ────────────────────────────────────
+#
+# Until 2026-11-16 the parse kept `promocode` and nothing else of KeyCRM's
+# discount, so "how many orders were bought at a discount" could be answered
+# only by asking KeyCRM again, page by page. These are the figures it serves
+# on `GET /order?include=products`, landed beside the order.
+#
+# THEY NEVER COST AN ORDER. `grand_total` and `price_sold` refuse the order
+# when they cannot be read, because without them there is no order. A
+# discount figure that cannot be read, or that its column cannot hold, lands
+# as NULL and the order lands with it (`_discount`): an order lost to a
+# malformed `loyalty_discount` would be revenue lost to a footnote.
+#
+# Each value is rounded here to its column's scale, half away from zero as
+# Postgres rounds, so a row holds exactly what Postgres will store — which is
+# what lets the backfill (`pg_orders_write.restore_discounts`) tell a
+# discount already landed from one still owed by plain equality.
+#
+# `(precision, scale)` per column. Money KeyCRM states to the kopeck is
+# NUMERIC(12,2), as `grand_total` and `price_sold` are. A percent, and a
+# line's discount per unit — which an order-level percent spread over a
+# line's units need not leave whole kopecks of — are NUMERIC(12,4).
+ORDER_DISCOUNT_NUMERICS: Dict[str, Tuple[int, int]] = {
+    "products_total": (12, 2),
+    "total_discount": (12, 2),
+    "discount_amount": (12, 2),
+    "discount_percent": (12, 4),
+}
+LINE_DISCOUNT_NUMERICS: Dict[str, Tuple[int, int]] = {
+    "price": (12, 2),
+    "total_discount": (12, 4),
+    "discount_percent": (12, 4),
+    "discount_amount": (12, 4),
+    "loyalty_discount": (12, 4),
+    "individual_discount": (12, 4),
+}
+ORDER_DISCOUNT_COLUMNS: Tuple[str, ...] = (
+    tuple(ORDER_DISCOUNT_NUMERICS) + ("discount_data",))
+LINE_DISCOUNT_COLUMNS: Tuple[str, ...] = tuple(LINE_DISCOUNT_NUMERICS)
+_ORDER, _LINE = ORDER_DISCOUNT_NUMERICS, LINE_DISCOUNT_NUMERICS
+
+
+def _discount(value: Any, digits: Tuple[int, int]) -> Optional[decimal.Decimal]:
+    """A discount figure as its column stores it, or None.
+
+    None for anything `models.optional_decimal` cannot read and for a number
+    the column cannot hold (`pg_numeric.refusal`); otherwise the number
+    rounded to the column's scale, half away from zero."""
+    from core.models import optional_decimal
+    from core.pg_numeric import refusal
+
+    number = optional_decimal(value)
+    if number is None or refusal("discount", number, *digits, nullable=True):
+        return None
+    return number.quantize(decimal.Decimal(1).scaleb(-digits[1]),
+                           rounding=decimal.ROUND_HALF_UP)
+
+
+def _json_safe(value: Any) -> Any:
+    """`value` with U+0000 removed from every string in it, keys included:
+    Postgres' JSONB refuses `\\u0000`, as its TEXT refuses the character."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_json_safe(k) if isinstance(k, str) else k: _json_safe(v)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def discount_data_json(value: Any) -> Optional[str]:
+    """KeyCRM's `discount_data` as the JSON text `bronze.orders.discount_data`
+    stores, or None.
+
+    KeyCRM serves a dict (with a `loyalty` key when a loyalty programme
+    applied), an empty list, or null. Empty — `[]`, `{}`, null, '' — is None:
+    the three say the same thing, that nothing was recorded. Keys sorted, so
+    one object is always one text. Anything JSON cannot carry as Postgres
+    reads it (NaN, a lone surrogate, an object that is not JSON) is None, by
+    the rule above: a discount figure never costs the order."""
+    import json
+
+    if not value or not isinstance(value, (dict, list)):
+        return None
+    try:
+        text = json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True,
+                          allow_nan=False)
+        text.encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        return None
+    return text
 
 
 @dataclass(frozen=True)
@@ -502,6 +613,11 @@ def order_row(order: "Order") -> OrderRow:
         manager_id=order.manager.id if order.manager else None,
         manager_comment=order.manager_comment,
         promocode=order.promocode,
+        products_total=_discount(order.products_total, _ORDER["products_total"]),
+        total_discount=_discount(order.total_discount, _ORDER["total_discount"]),
+        discount_amount=_discount(order.discount_amount, _ORDER["discount_amount"]),
+        discount_percent=_discount(order.discount_percent, _ORDER["discount_percent"]),
+        discount_data=discount_data_json(order.discount_data),
     )
 
 
@@ -515,6 +631,13 @@ def order_product_rows(order: "Order") -> List[OrderProductRow]:
             name=item.name,
             quantity=item.quantity,
             price_sold=float(item.price_sold),
+            price=_discount(item.price, _LINE["price"]),
+            total_discount=_discount(item.total_discount, _LINE["total_discount"]),
+            discount_percent=_discount(item.discount_percent, _LINE["discount_percent"]),
+            discount_amount=_discount(item.discount_amount, _LINE["discount_amount"]),
+            loyalty_discount=_discount(item.loyalty_discount, _LINE["loyalty_discount"]),
+            individual_discount=_discount(item.individual_discount,
+                                          _LINE["individual_discount"]),
         )
         for position, item in enumerate(order.products)
     ]

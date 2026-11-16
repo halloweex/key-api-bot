@@ -79,7 +79,14 @@ VERSION_TABLE = "alembic_version"
 # `alembic downgrade 0035_batch_e_chains` with the 0036 migrate image first.
 # That downgrade moves the stamp and nothing else; the tables and their rows
 # stay, and the next `upgrade head` is a no-op.
-REQUIRED_REVISION = "0036_analytics_captures"
+#
+# 0037 is the discount on orders and their lines (2026-11-16): eleven nullable
+# columns on `bronze.orders` and `bronze.order_products`, which chain 3 writes
+# from this image on. Same shape as 0036: an image-only rollback below it needs
+# `alembic downgrade 0036_analytics_captures` (or further) with the 0037
+# migrate image first; the downgrade moves the stamp and keeps the columns,
+# which an older image never names.
+REQUIRED_REVISION = "0037_order_discounts"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()

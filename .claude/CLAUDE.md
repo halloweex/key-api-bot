@@ -283,8 +283,8 @@ meta ──── the store's own bookkeeping
 ```
 
 **Key tables:**
-- `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text)
-- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted
+- `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text), and since revision 0037 the discount: `products_total` (the lines before the order's discount), `total_discount` (that discount in money), `discount_amount`/`discount_percent` (as typed), `discount_data` (KeyCRM's object, JSONB: a `loyalty` key when a programme applied)
+- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted. Since revision 0037 also `price` (before any discount), `total_discount` — **per unit**, so a line's discount in money is `total_discount * quantity` — `discount_percent`, `discount_amount`, `loyalty_discount`, `individual_discount`. **A gift-certificate redemption is an order discount in KeyCRM** — its face value as `discount_amount`, so in `total_discount`, `discount_percent` 0, no promocode (measured on the 2026-08-22 certificate orders) — so `total_discount > 0` is not "bought at a discount"; revision 0037's docstring has the split. NULL on all eleven means not landed yet (before 0037, until `scripts/backfill_discounts.py` reached the order); a figure KeyCRM sends that its column cannot hold also lands NULL, never refusing the order (`core.landing_rows._discount`). Not versioned: `app.order_versions` compares none of them
 - `bronze.products` / `bronze.categories` - The catalogue (hierarchical categories by parent_id); a product KeyCRM retires stays, never deleted
 - `bronze.expenses` / `bronze.expense_types` - Order-level expenses (delivery, commission, etc.)
 - `silver.orders` - One row per order with `sales_type` materialised and the Kyiv `order_date`; what every tab reads
@@ -419,7 +419,15 @@ that revision's own module, and an older migrate image has none.
    `docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains`.
    It moves the stamp and executes nothing else: the eleven tables of the
    analysts' captures and their rows stay (owner decision D2), and the
-   captures stop while the older image runs.
+   captures stop while the older image runs. From 0037 the same command
+   steps down through 0037 first, which keeps the eleven discount columns
+   of `bronze.orders` and `bronze.order_products` the same way: an image at
+   0036 or below names its order columns one by one and never sees them.
+   A rollback to an image at 0036 itself is
+   `alembic downgrade 0036_analytics_captures` instead. The orders such an
+   image writes keep the discount they held; after the roll forward,
+   re-run `scripts/backfill_discounts.py` from the page holding the first
+   order it wrote.
 2. **The images, at once**: tag the target as `latest` for web, bot and
    migrate — `…:rollback-step14`, or `docker pull …/keycrm-<image>:<VERSION>`
    for an earlier version by number, which every deploy pushes beside
@@ -2313,7 +2321,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0036_analytics_captures` today, and every
+mismatch, ahead or behind. It is `0037_order_discounts` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
@@ -3897,4 +3905,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-13 (revision 0036, the analysts' captures)*
+*Last updated: 2026-11-16 (revision 0037, the discount on orders and their lines)*

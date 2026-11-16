@@ -36,6 +36,14 @@ deletions inside chain 3's transaction, the catalogue's versions after chain
 chains' own statements, and each capture's place beside them is held by its own
 tests, on a real server (`tests/integration/test_capture_expenses_pg.py`,
 `tests/unit/test_capture_catalogue.py`).
+
+Re-recorded a third time, for revision 0037 (2026-11-16: the discount on orders
+and their lines, landed beside the order). Three statement texts moved and
+nothing else: `pg_landing._ORDER_UPSERT` and `_ORDER_PRODUCT_INSERT` name the
+eleven discount columns, and `restore_manager_comments`' locked read selects
+them with the rest of `landing_rows.ORDER_COLUMNS`. The recording was held to
+the previous literal with exactly those three texts substituted before it was
+written — the same calls, counts, arguments and transactions.
 """
 from __future__ import annotations
 
