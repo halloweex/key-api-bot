@@ -29,6 +29,7 @@ of its failures. What it replaced, and why each part went:
 import asyncio
 import os
 import logging
+import time
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
@@ -51,6 +52,12 @@ _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 def _today_kyiv() -> date:
     """Get today's date in Kyiv timezone (matches Gold layer dates)."""
     return datetime.now(_KYIV_TZ).date()
+
+
+def _monotonic() -> float:
+    """The clock `OUTLOOK_TTL_S` is measured by; a name of its own so a
+    test can move it without moving the event loop's."""
+    return time.monotonic()
 
 
 def _trained_on(stamp: Optional[datetime]) -> Optional[str]:
@@ -94,6 +101,15 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
 
 # How far ahead to predict (days)
 FORECAST_HORIZON_DAYS = 60
+
+# The month's 80% range and Black Friday line beside the forecast
+# (`core/forecast_range.py`, 2026-11-18). One computation per Kyiv day, sales
+# type and stored forecast, kept an hour at most so a read just after
+# midnight, before yesterday's last orders are derived, is not the whole
+# day's; a computation waiting longer than the timeout for the one ML thread
+# (a training on it) is dropped from the queue and the keys are null.
+OUTLOOK_TTL_S = 3600.0
+OUTLOOK_TIMEOUT_S = 10.0
 
 # A11-6 model-validation gate: reject a freshly trained model whose holdout
 # WAPE is implausibly bad rather than let it overwrite a working model and feed
@@ -1054,6 +1070,11 @@ class PredictionService:
         # refused by Postgres under chain 7b-3 — or by DuckDB — showed nowhere
         # but the log. `_train_impl` publishes it as `predictions_stored`.
         self._last_store_ok: Optional[bool] = None
+        # `get_forecast`'s range and Black Friday line: one entry, keyed by
+        # (Kyiv day, sales type, the forecast's `created_at`), with the
+        # monotonic time it was computed (`OUTLOOK_TTL_S`).
+        self._outlook_cache: Dict[Tuple[date, str, Optional[datetime]],
+                                  Tuple[float, Dict[str, Any]]] = {}
 
     @property
     def is_ready(self) -> bool:
@@ -1343,6 +1364,12 @@ class PredictionService:
         every restart, the full in-memory dict — sixty validation days with
         it — after a training in the same process. One answer now, and one
         any process can give.
+
+        `month_range` and `black_friday` (2026-11-18) are what the month's
+        badge says beside its point: the 80% range of the month total and
+        what last year's Black Friday would add (`core/forecast_range.py`,
+        `_month_outlook`). Retail only, and null whenever they cannot be
+        said — never a reason for this answer to fail.
         """
         from core.store import get_store
         store = await get_store()
@@ -1370,6 +1397,7 @@ class PredictionService:
 
         predicted_remaining = sum(p['predicted_revenue'] for p in predictions)
         predicted_total = actual_to_date + predicted_remaining
+        outlook = await self._month_outlook(sales_type, today, predictions, trained_at)
 
         return {
             "actual_to_date": round(actual_to_date, 2),
@@ -1381,7 +1409,65 @@ class PredictionService:
             "month_start": month_start.isoformat(),
             "month_end": month_end.isoformat(),
             "forecast_end": forecast_end.isoformat(),
+            "month_range": outlook["month_range"],
+            "black_friday": outlook["black_friday"],
         }
+
+    async def _month_outlook(
+        self,
+        sales_type: str,
+        today: date,
+        predictions: List[Dict[str, Any]],
+        trained_at: Optional[datetime],
+    ) -> Dict[str, Any]:
+        """The month's 80% range and Black Friday line, or nulls.
+
+        The range is K + F × [q10, q90]: K the month's actual through
+        yesterday, F the stored forecast from today to the month's end, and
+        the two ratios simulated from the days before today. Both are read
+        here — 900 days of Gold through yesterday, the history the
+        simulation needs, by the training frame's own reader — and computed
+        on the ML thread, then kept for the day, the sales type and the
+        training that made `predictions` (at most `OUTLOOK_TTL_S`).
+
+        Retail only: it is the one sales type trained. Any failure is logged
+        and answered with nulls, and not kept, so the next request tries
+        again; the forecast itself is answered all the same.
+        """
+        empty: Dict[str, Any] = {"month_range": None, "black_friday": None}
+        if sales_type != "retail":
+            return empty
+        key = (today, sales_type, trained_at)
+        cached = self._outlook_cache.get(key)
+        now = _monotonic()
+        if cached is not None and now - cached[0] < OUTLOOK_TTL_S:
+            return cached[1]
+
+        try:
+            from core import forecast_range, pg_forecast_read
+
+            left = forecast_range.forecast_left(predictions, today)
+            if left is None:
+                outlook = empty
+            else:
+                frame = await pg_forecast_read.fetch_frame(
+                    today - timedelta(days=forecast_range.HISTORY_DAYS), today,
+                    sales_type, exclude_today=True)
+                rows = list(zip(frame["date"].dt.date,
+                                frame["revenue"].astype(float)))
+                loop = asyncio.get_running_loop()
+                outlook = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _executor, forecast_range.month_outlook, rows, today, left),
+                    OUTLOOK_TIMEOUT_S)
+        except Exception as e:
+            logger.warning(
+                f"The month's range and Black Friday line are unavailable "
+                f"({sales_type}): {e!r}", exc_info=True)
+            return empty
+
+        self._outlook_cache = {key: (now, outlook)}
+        return outlook
 
     async def _query_daily_revenue(
         self, store: Any, sales_type: str, days_back: int,

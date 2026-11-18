@@ -40,6 +40,38 @@ export interface RevenueForecastDaily {
   model_mape: number
 }
 
+/**
+ * The month total's 80% range, from `/api/revenue/forecast` (2026-11-18):
+ * the actual through yesterday plus the stored forecast of the days left
+ * times the 10th and 90th percentiles of their simulated ratio to it.
+ */
+export interface RevenueForecastRange {
+  lo: number
+  hi: number
+  coverage: number
+  days_left: number
+}
+
+/**
+ * What last year's big promotions of this month would add, their days still
+ * ahead, at today's ordinary day — in 2024–2026, Black Friday alone. Never
+ * inside the forecast or the range.
+ */
+export interface RevenueForecastBlackFriday {
+  extra: number
+  /** The morning's month: actual through yesterday + the days left's
+   *  forecast + `extra`. Today's sales do not move it, as they do not the range. */
+  total: number
+  /** Last year's days still ahead, in ordinary days of that month. */
+  size_days: number
+  normal_day: number
+  /** The first and last of last year's days counted. */
+  last_year_start: string
+  last_year_end: string
+  /** November's is Black Friday; any other month's, a big promotion. */
+  kind: 'black_friday' | 'big_promotion'
+}
+
 export interface RevenueForecast {
   actual_to_date: number
   predicted_remaining: number
@@ -53,6 +85,10 @@ export interface RevenueForecast {
   month_start: string
   month_end: string
   forecast_end?: string
+  /** `/api/revenue/forecast` only, retail only; null when it cannot be said. */
+  month_range?: RevenueForecastRange | null
+  /** `/api/revenue/forecast` only; null unless last year's month had one ahead. */
+  black_friday?: RevenueForecastBlackFriday | null
 }
 
 /**
