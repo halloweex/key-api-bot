@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.351
+
+- docs(traffic): what the r2 reclassify would move, measured on production
+- fix(traffic): the Meta cookies' labels are rule version r2
+- fix(traffic): read the Meta cookies' labels without the underscore
+
+
 ## 3.0.350
 
 - fix(offline): the doughnut by source draws the store a slice; review follow-ups
