@@ -41,7 +41,7 @@ COPY migrations/ ./migrations/
 #
 # Omitting `__init__.py` makes `core` a namespace package, so `core.pg`
 # imports without running the real package's `__init__`, which pulls in
-# config, validators, pagination and httpx. Verified: the import succeeds
+# config, validators and httpx. Verified: the import succeeds
 # with an empty environment and loads none of them.
 COPY core/pg.py ./core/pg.py
 
