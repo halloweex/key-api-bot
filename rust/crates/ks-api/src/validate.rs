@@ -23,7 +23,7 @@ const PERIODS: [&str; 9] = [
     "all_time",
 ];
 /// `KNOWN_SALES_TYPES | {"all"}` (`core/duckdb_constants.py`).
-const SALES_TYPES: [&str; 5] = ["retail", "b2b", "internal", "exhibition", "all"];
+const SALES_TYPES: [&str; 6] = ["retail", "b2b", "internal", "exhibition", "offline", "all"];
 const MAX_BRAND_LENGTH: usize = 255;
 const MAX_PROMOCODE_LENGTH: usize = 100;
 
@@ -63,13 +63,15 @@ pub fn granularity(value: &str) -> Result<(), String> {
     }
 }
 
-/// `validate_source_id` against `VALID_SOURCE_IDS = {1, 2, 3, 4}`.
+/// `validate_source_id` against `VALID_SOURCE_IDS = {1, 2, 3, 4, 7}`: the
+/// offline store is 7 (`OFFLINE_STORE_SOURCE_ID`, the owner's decision of
+/// 2026-11-15); the exhibition (5) is still refused.
 pub fn source_id(value: Option<&PyInt>) -> Result<Option<i32>, String> {
     match value {
         None => Ok(None),
-        Some(PyInt::Small(v @ 1..=4)) => Ok(i32::try_from(*v).ok()),
+        Some(PyInt::Small(v @ (1..=4 | 7))) => Ok(i32::try_from(*v).ok()),
         Some(other) => Err(format!(
-            "source_id: Must be one of [1, 2, 3, 4] (got: {})",
+            "source_id: Must be one of [1, 2, 3, 4, 7] (got: {})",
             other.repr()
         )),
     }
@@ -206,11 +208,11 @@ mod tests {
         );
         assert_eq!(
             sales_type("WHOLESALE").unwrap_err(),
-            "sales_type: Must be one of: all, b2b, exhibition, internal, retail (got: 'wholesale')"
+            "sales_type: Must be one of: all, b2b, exhibition, internal, offline, retail (got: 'wholesale')"
         );
         assert_eq!(
             source_id(Some(&PyInt::Small(5))).unwrap_err(),
-            "source_id: Must be one of [1, 2, 3, 4] (got: 5)"
+            "source_id: Must be one of [1, 2, 3, 4, 7] (got: 5)"
         );
         assert_eq!(
             brand(Some("  ")).unwrap_err(),
@@ -223,6 +225,8 @@ mod tests {
         assert_eq!(period(Some("TODAY")), Ok(()));
         assert_eq!(promocode(Some("   ")), Ok(false));
         assert_eq!(sales_type(" B2B "), Ok("b2b".to_owned()));
+        assert_eq!(sales_type("Offline"), Ok("offline".to_owned()));
+        assert_eq!(source_id(Some(&PyInt::Small(7))), Ok(Some(7)));
         assert_eq!(compare_type("YEAR_AGO"), "previous_period");
     }
 }

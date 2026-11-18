@@ -39,7 +39,7 @@ FIRST_DAY = date(2023, 12, 1)
 LAST_DAY = date(2027, 1, 31)
 
 # Weighted the way the shop is: Instagram and the website carry most of it.
-SOURCES = (1, 1, 1, 1, 2, 2, 4, 4, 4, 3, 5)
+SOURCES = (1, 1, 1, 1, 2, 2, 4, 4, 4, 3, 5, 7)
 # A manager decides `sales_type` (`silver_sales_type_case`): none is retail,
 # the wholesale manager is b2b, a retail-list manager is retail, anyone else
 # is internal. Source 5 is exhibition whoever sold it.

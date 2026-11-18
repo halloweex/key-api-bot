@@ -81,8 +81,9 @@ NOW = "2026-10-21T09:00:00+00:00"
 
 PERIODS = (None, "today", "yesterday", "week", "last_week", "month", "last_month",
            "last_7_days", "last_28_days", "all_time")
-SALES_TYPES = (None, "retail", "b2b", "internal", "exhibition", "all", " B2B ", "", "ALL")
-SOURCES = (None, "1", "2", "4")
+SALES_TYPES = (None, "retail", "b2b", "internal", "exhibition", "offline", "all", " B2B ", "",
+               "ALL", " Offline ")
+SOURCES = (None, "1", "2", "4", "7")
 COMPARES = (None, "previous_period", "year_ago", "month_ago", "bogus", "YEAR_AGO")
 VALID_COMPARES = ("previous_period", "year_ago", "month_ago")
 

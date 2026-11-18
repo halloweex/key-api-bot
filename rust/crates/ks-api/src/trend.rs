@@ -5,7 +5,7 @@
 //! WHAT IT SERVES, AND WHAT IT ANSWERS 501
 //!
 //! The Gold branch: no category, no brand, no promocode, and a source Gold
-//! has a channel for (none, 1, 2 or 4) — and on it the forecast overlay,
+//! has a channel for (none, 1, 2, 4 or the offline store, 7) — and on it the forecast overlay,
 //! read from `app.revenue_predictions` as the route reads it. The
 //! line-level branch, the promocode branch and source 3 are answered 501 —
 //! but only after every check Python makes before reaching them, so a
@@ -23,9 +23,11 @@ use crate::period::{self, Raised, Refused};
 use crate::pyrt::{PyNum, py_sum, round_float, round_num};
 use crate::validate;
 
-/// `_GOLD_SOURCE_COLUMNS`: the sources DuckDB's Gold had a column for, and
-/// so the sources the Postgres reader is allowed to answer.
-const GOLD_SOURCES: [i32; 3] = [1, 2, 4];
+/// `RevenueMixin._GOLD_SOURCE_IDS`: the sources DuckDB's Gold had a column
+/// for, and the offline store (7), read from Gold's fine rows from its first
+/// day (the owner's decision of 2026-11-15) — the sources the Postgres reader
+/// is allowed to answer.
+const GOLD_SOURCES: [i32; 4] = [1, 2, 4, 7];
 
 /// One row of `fetch_series`: `(date, float(revenue), int(orders_count))`.
 #[derive(Clone, Debug, PartialEq)]

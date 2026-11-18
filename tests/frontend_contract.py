@@ -79,14 +79,25 @@ def compare_types() -> Tuple[str, ...]:
 
 
 def sources() -> Tuple[int, ...]:
-    """The source ids the header offers: `SourceFilter`'s `SOURCES`. The
-    other three filters offer what `/api/categories`, `/api/brands` and
-    `/api/promocodes` answer, so a harness reads those off the app."""
+    """The source ids the header offers: `SourceFilter`'s `SOURCES`, each a
+    literal or a constant `utils/sources.ts` exports (the offline store's
+    `OFFLINE_STORE_SOURCE_ID`). An id that is neither fails, rather than
+    dropping a source the page offers. The other three filters offer what
+    `/api/categories`, `/api/brands` and `/api/promocodes` answer, so a
+    harness reads those off the app."""
     m = re.search(r"const SOURCES\s*=\s*\[(.*?)\]", _read("components/SourceFilter.tsx"), re.S)
-    ids = tuple(int(i) for i in re.findall(r"\bid:\s*(\d+)", m.group(1))) if m else ()
+    named = re.findall(r"\bid:\s*([A-Za-z_]\w*|\d+)", m.group(1)) if m else []
+    constants = dict(re.findall(r"export const ([A-Za-z_]\w*)\s*=\s*(\d+)\b", _read("utils/sources.ts")))
+    ids = []
+    for name in named:
+        if name.isdigit() or name in constants:
+            ids.append(int(constants.get(name, name)))
+        else:
+            raise FrontendShapeError(f"components/SourceFilter.tsx: source id {name} is neither "
+                                     "a literal nor a constant of utils/sources.ts")
     if not ids:
         raise FrontendShapeError("components/SourceFilter.tsx: no `const SOURCES = [{ id: … }]`")
-    return ids
+    return tuple(ids)
 
 
 def chart_default_compare() -> str:

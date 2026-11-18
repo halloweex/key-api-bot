@@ -26,8 +26,8 @@ def test_the_page_builds_the_trend_query_as_read():
 def test_what_the_header_and_the_chart_offer():
     assert fc.periods() == ("today", "yesterday", "week", "last_week", "month", "last_month",
                             "last_7_days", "last_28_days", "all_time")
-    assert fc.sales_types() == ("retail", "b2b", "exhibition", "internal", "all")
-    assert fc.sources() == (1, 2, 4), (
+    assert fc.sales_types() == ("retail", "offline", "b2b", "exhibition", "internal", "all")
+    assert fc.sources() == (1, 2, 4, 7), (
         "the header offers another source: a source Gold has no channel for is "
         "handed to Python, so teach the Rust trend first")
     assert fc.compare_types() == ("previous_period", "year_ago", "month_ago")
