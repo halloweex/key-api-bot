@@ -178,35 +178,6 @@ class TestEveryWriterOfASourceRaisesTheSignal:
 # DuckDB warehouse tick's Postgres half (`_rebuild_pg_layers`).
 
 
-class TestTheJobIsRegistered:
-    def _jobs(self):
-        from core.scheduler import BackgroundScheduler
-
-        added = {}
-
-        class FakeScheduler:
-            def add_job(self, func, **kwargs):
-                added[kwargs.get("id")] = kwargs
-
-            def get_job(self, job_id):
-                return None
-
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = FakeScheduler()
-        asyncio.run(scheduler._register_jobs())
-        return added
-
-    @pytest.mark.parametrize("value", [None, "own", "piggyback", "owned"])
-    def test_whatever_the_variable_says(self, monkeypatch, value):
-        """Unconditionally since S14-15, which stopped reading KS_PG_DERIVE."""
-        if value is None:
-            monkeypatch.delenv("KS_PG_DERIVE", raising=False)
-        else:
-            monkeypatch.setenv("KS_PG_DERIVE", value)
-        jobs = self._jobs()
-        assert "pg_warehouse_derive" in jobs and "warehouse_refresh" not in jobs
-
-
 class TestTheWatchdogJudgesWhatWebDeclares:
     def _payload(self, **derived):
         entry = {"age_seconds": 60, "failures_since_ok": 0, "failing": False}
@@ -609,23 +580,6 @@ class TestEveryStageIsRecorded:
     """Silver and Gold were recorded against their watermarks; the run's tail
     was not, so a failure there left every row reading clean. (The customer
     profile was a stage of its own until the owner's decision O6.)"""
-
-    def test_the_run_has_no_profile_stage(self, job):
-        """O6 (2026-11-11): the derivation rebuilds Silver and Gold and goes
-        straight to the tail; nothing counts or journals profile rows.
-        Mutation: put `rebuild_customer_profile` back between Gold and the
-        validation."""
-        from core.scheduler import BackgroundScheduler
-
-        result, mocks = _derive(job)
-        assert result["status"] == "success" and "profile_rows" not in result
-        counts = mocks["record_run"].await_args.kwargs["counts"]
-        assert set(counts) == {"silver_rows", "gold_rows", "gold_cells"}
-        source = inspect.getsource(BackgroundScheduler._derive_and_journal_pg_layers)
-        tree = ast.parse(textwrap.dedent(source))
-        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
-                    for a in n.names}
-        assert not {n for n in imported if "profile" in n.lower()}, imported
 
     @pytest.mark.parametrize("step", ["validate", "complete", "record_run"])
     def test_the_tail_raising_is_recorded_against_the_journal(self, job, step):

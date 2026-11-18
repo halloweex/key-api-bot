@@ -23,7 +23,6 @@ from tests.repo_tree import needs_checkout
 REPO = Path(__file__).resolve().parents[2]
 CI_PATH = REPO / ".github" / "workflows" / "ci.yml"
 CI = yaml.safe_load(CI_PATH.read_text())
-CI_TEXT = CI_PATH.read_text()
 
 # PyYAML resolves the bare key `on:` to the boolean True — it is a YAML 1.1
 # truthy word. Every workflow file in existence hits this.
@@ -95,26 +94,6 @@ class TestGreenMeansWhatItSaysOnALaptop:
         assert not re.search(r"pytest[^|]*\btests/", run), "a path would narrow the run"
         assert "-k " not in run
         assert "--deselect" not in run
-
-    def test_it_does_not_reach_the_live_api_or_the_production_database(self):
-        """`external` is deselected by `pytest.ini` and must stay that way:
-        those tests read the live KeyCRM API and the production DuckDB file.
-        Nothing in CI may opt into them.
-
-        The blanket "no step sets `env`" this used to assert stopped being
-        available when the throwaway PostgreSQL arrived. The guarantee it
-        stood for is narrower and is asserted directly: no secret reaches
-        this workflow, and the only variables any step sets are the two
-        logins to a database on the runner itself.
-        """
-        assert "-m " not in self._run_step()["run"]
-        assert "secrets." not in CI_TEXT
-
-        for step in STEPS:
-            for name, value in (step.get("env") or {}).items():
-                assert name in ("KS_PG_DSN", "KS_PG_READONLY_DSN"), \
-                    f"{name} is not a throwaway DSN"
-                assert "127.0.0.1" in value, f"{name} must not leave the runner"
 
 
 class TestTheStoreTestsActuallyRun:

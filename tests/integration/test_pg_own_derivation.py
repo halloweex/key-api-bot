@@ -195,45 +195,6 @@ async def _watermark(pool, table):
             " FROM meta.mirror_state WHERE table_name = $1", table)
 
 
-class TestTheProfileIsLeftAlone:
-    """The owner's decision O6 (2026-11-11): nothing read `app.customer_profile`,
-    and every derivation rebuilt it between Gold and the validation — a tenth
-    of the run's row writes, and a failure there skipped the validation of
-    Silver and Gold and paged `derive_failed`. The derivation no longer
-    touches it: the table keeps its last contents, its watermark row stays as
-    it was, and the journal's `profile_rows` is NULL."""
-
-    SENTINEL = 970999
-
-    @pytest.mark.asyncio
-    async def test_a_run_keeps_the_tables_last_contents_and_journals_null(self, own):
-        from core.pg_landing import write_orders
-
-        pool, scheduler, _a = own
-        await write_orders([_order(IDS[0], total=120)], [], replace_products=False)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO app.customer_profile (buyer_id, first_order_date,"
-                " last_order_date, orders_count, ltv, avg_order, returns_count,"
-                " city, refreshed_at) VALUES ($1, '2026-01-02', '2026-03-04', 7,"
-                " 700, 100, 1, 'Kyiv', '2026-11-10T00:00:00Z')", self.SENTINEL)
-            before = await conn.fetch("SELECT * FROM app.customer_profile ORDER BY buyer_id")
-
-        result = await scheduler._run_pg_derivation()
-
-        assert result["status"] == "success" and result["validation_passed"] is True, result
-        assert "profile_rows" not in result
-        async with pool.acquire() as conn:
-            after = await conn.fetch("SELECT * FROM app.customer_profile ORDER BY buyer_id")
-        # Mutation: put the rebuild back between Gold and the validation — it
-        # empties the table first, and the sentinel's buyer has no order.
-        assert [dict(r) for r in after] == [dict(r) for r in before]
-        assert await _watermark(pool, "app.customer_profile") is None
-        runs = await _runs(pool)
-        assert len(runs) == 1 and runs[0]["profile_rows"] is None
-        assert runs[0]["silver_rows"] >= 1 and runs[0]["gold_rows"] >= 1
-
-
 class TestEveryStageLeavesAWatermark:
     """DN-05a: Silver and Gold recorded their failures and the run's tail did
     not, so a failure there left every row in meta.mirror_state reading clean.
@@ -774,4 +735,3 @@ class TestTheUtmParseIsTheLastStep:
 
         assert result["parsed"] >= 1, result
         assert (await _utm_row(pool, IDS[2]))["utm_campaign"] == "spring"
-

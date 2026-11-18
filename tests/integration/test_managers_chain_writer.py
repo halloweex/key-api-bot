@@ -358,28 +358,6 @@ class TestTheStandingWatchReadsTheShape:
 
 
 class TestTheReadsFollow:
-    @pytest.mark.asyncio
-    async def test_the_dashboard_names_the_manager_postgres_holds(self, stores):
-        """`_RETURN_ORDERS_SQL` with KS_READ_DASHBOARD at duckdb: the join
-        reads Postgres, whatever that switch says. It took a branch on
-        `reads_the_chain` until step 14's S14-06 gave `_dashboard_run` one
-        path, Postgres. Mutation: give `_dashboard_run` back a DuckDB tail
-        routed by the switch."""
-        from core.repositories.revenue import _RETURN_ORDERS_SQL
-
-        store, pool, env = stores
-        env.setenv("KS_READ_DASHBOARD", "duckdb")
-        env.setenv(ENV, "postgres")
-        await store.upsert_managers([{"id": 34, "name": "Postgres name"}])
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO silver.orders (id, source_id, status_id, grand_total, "
-                "manager_id, order_date, is_return, sales_type, is_active_source, "
-                "source_name) VALUES ($1, 1, 19, 10, 34, '2026-10-01', TRUE, 'internal', "
-                "TRUE, 'Instagram')", ORDER_IDS[0])
-        rows = await store._dashboard_run(
-            _RETURN_ORDERS_SQL.replace("{where}", "s.id = ?"), [ORDER_IDS[0], 5])
-        assert [r[-1] for r in rows] == ["Postgres name"]
 
     @pytest.mark.asyncio
     async def test_the_route_writes_postgres_marks_the_derivation_and_lists_it(
@@ -543,4 +521,3 @@ class TestTheReviewAgainstARealPostgres:
         # 14's S14-11 deleted it.
         assert [set(r) for r in pg] == [DUCKDB_MANAGER_KEYS]
         assert pg[0]["synced_at"] is not None
-

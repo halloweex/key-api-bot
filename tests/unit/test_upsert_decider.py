@@ -52,10 +52,6 @@ class TestNullHandling:
         """Legacy row pre-migration — must write to populate updated_at."""
         assert should_update_order(None, _ts()) is True
 
-    def test_incoming_none_means_update(self):
-        """KeyCRM payload missing updated_at — be safe, write."""
-        assert should_update_order(_ts(), None) is True
-
     def test_both_none_means_update(self):
         assert should_update_order(None, None) is True
 

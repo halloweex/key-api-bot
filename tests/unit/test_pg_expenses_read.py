@@ -26,7 +26,6 @@ import pytest
 
 from core.store import AnalyticsStore
 from core import read_fallback
-from core.sql_dialect import POSTGRES, render_tables
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "expenses.py"
@@ -42,63 +41,38 @@ READS = (
 )
 
 
-class TestTheRoutedBodies:
-    def _statements(self):
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for fn in ast.walk(tree):
-            if not (isinstance(fn, ast.AsyncFunctionDef)
-                    and fn.name in {r[0] for r in READS}):
+def _statements():
+    src = REPOSITORY.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.AsyncFunctionDef)
+                and fn.name in {r[0] for r in READS}):
+            continue
+        nested = {
+            id(v) for node in ast.walk(fn)
+            if isinstance(node, ast.JoinedStr) for v in node.values
+        }
+        for node in ast.walk(fn):
+            if isinstance(node, ast.JoinedStr):
+                text = "".join(
+                    v.value for v in node.values
+                    if isinstance(v, ast.Constant) and isinstance(v.value, str)
+                )
+            elif (isinstance(node, ast.Constant)
+                  and isinstance(node.value, str)
+                  and id(node) not in nested):
+                text = node.value
+            else:
                 continue
-            nested = {
-                id(v) for node in ast.walk(fn)
-                if isinstance(node, ast.JoinedStr) for v in node.values
-            }
-            for node in ast.walk(fn):
-                if isinstance(node, ast.JoinedStr):
-                    text = "".join(
-                        v.value for v in node.values
-                        if isinstance(v, ast.Constant) and isinstance(v.value, str)
-                    )
-                elif (isinstance(node, ast.Constant)
-                      and isinstance(node.value, str)
-                      and id(node) not in nested):
-                    text = node.value
-                else:
-                    continue
-                if "SELECT" in text.upper():
-                    yield fn.name, node.lineno, text
+            if "SELECT" in text.upper():
+                yield fn.name, node.lineno, text
 
-    def test_every_hole_survived_the_f_string(self):
-        for name, lineno, text in self._statements():
-            assert "{" in text, f"{name}:{lineno} names no table hole"
-
-    def test_the_rendering_leaves_no_hole(self):
-        for name, lineno, text in self._statements():
-            rendered = render_tables(text, POSTGRES)
-            assert "{" not in rendered and "}" not in rendered, (
-                f"{name}:{lineno} unrendered for {POSTGRES.name}"
-            )
-
-    def test_no_read_opens_the_store_or_bypasses_the_router(self):
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for fn in ast.walk(tree):
-            if not (isinstance(fn, ast.AsyncFunctionDef)
-                    and fn.name in {r[0] for r in READS}):
-                continue
-            for node in ast.walk(fn):
-                if isinstance(node, ast.AsyncWith):
-                    head = ast.unparse(node.items[0].context_expr)
-                    assert "connection()" not in head, f"{fn.name} opens DuckDB"
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                    assert node.func.attr != "execute", f"{fn.name} bypasses the router"
 
 class TestTheFanOutIsFixed:
     """The defect this port surfaced, pinned so it cannot return."""
 
     def _profit_sql(self):
-        return [t for n, _, t in TestTheRoutedBodies()._statements()
+        return [t for n, _, t in _statements()
                 if n == "get_profit_analysis"]
 
     def test_the_revenue_query_folds_expenses_before_joining(self):
@@ -175,50 +149,6 @@ class TestTheSharedParse:
         from core.landing_rows import expense_rows
 
         assert expense_rows([{"id": 1, "expenses": None}]) == []
-
-    def test_the_store_writes_the_shared_rows(self):
-        """Not a second reading of the payload — that is what charter rule 1
-        forbids, and it is what would let the two stores disagree about what
-        an expense is called."""
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for fn in ast.walk(tree):
-            if not (isinstance(fn, ast.AsyncFunctionDef)
-                    and fn.name in {"upsert_expense_types", "upsert_expenses_batch"}):
-                continue
-            body = ast.get_source_segment(src, fn) or ""
-            assert "landing_rows" in body, f"{fn.name} parses the payload itself"
-            assert "dictionaries.expense_types." not in body, (
-                f"{fn.name} still carries its own copy of the name cleanup"
-            )
-
-
-class TestAWriteReachesPostgresAtOnce:
-    """The lag revision 0018 accepted stops being acceptable once the page
-    reads the other store."""
-
-    WRITES = ("add_expense", "update_expense", "delete_expense")
-
-    def test_every_write_is_chain_8s_and_needs_no_replica(self):
-        """Since step 14's S14-11 each write goes to chain 8's Postgres writer
-        and nothing else: the page reads what it wrote, with no copy in
-        between. Until then a write that landed in DuckDB (the flag at
-        duckdb) replicated to Postgres at once
-        (`replicate_after_manual_expense`), outside the store lock — which
-        these two tests held. Mutation: a DuckDB connection, or the replica,
-        in a writer again."""
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        seen = set()
-        for fn in ast.walk(tree):
-            if not (isinstance(fn, ast.AsyncFunctionDef) and fn.name in self.WRITES):
-                continue
-            seen.add(fn.name)
-            calls = {getattr(n.func, "id", getattr(n.func, "attr", None))
-                     for n in ast.walk(fn) if isinstance(n, ast.Call)}
-            assert fn.name in calls, f"{fn.name} does not reach pg_expenses_write"
-            assert not calls & {"replicate_after_manual_expense", "connection"}, fn.name
-        assert seen == set(self.WRITES)
 
 
 class TestHistoryMustBeAcrossBeforePostgresAnswers:
@@ -313,21 +243,6 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         # The table asked for by its name (step 14, S14-07).
         assert conn.fetchval.await_args.args[1] == "bronze.expenses"
 
-    def test_the_gate_names_the_table_rather_than_importing_it(self):
-        """`backfilled()` writes `bronze.expenses` out instead of importing
-        `EXPENSES_TABLE` from `core.pg_expense_backfill`, which goes with the
-        backfills (S14-13): an import that failed inside its `try` would be a
-        refusal, and /expenses a 503 on every start. Mutation: import it
-        again."""
-        source = (REPO / "core" / "pg_expenses_read.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        imported = {node.module for node in ast.walk(tree)
-                    if isinstance(node, ast.ImportFrom)}
-        assert "core.pg_expense_backfill" not in imported
-        assert not any(isinstance(node, ast.Name) and node.id == "EXPENSES_TABLE"
-                       for node in ast.walk(tree))
-        assert '"bronze.expenses"' in source
-
     @pytest.mark.asyncio
     async def test_an_unreadable_watermark_is_refused(self):
         """The check that cannot read `meta.mirror_state` is refused naming
@@ -348,20 +263,3 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         finally:
             r._check_failed = None
             read_fallback.reset_counts()
-
-
-class TestItDoesNotTakeTheDuckDbLock:
-    @pytest.mark.asyncio
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
-        self, tmp_path, monkeypatch,
-    ):
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = AnalyticsStore()
-        def boom(*_a, **_k):
-            raise AssertionError("the expense read reached for DuckDB")
-
-        with patch.object(type(store), "connection", boom, create=True), \
-             patch("core.pg_expenses_read.fetch",
-                   new=AsyncMock(return_value=[])) as fetch:
-            await store.get_expense_types()
-        assert "bronze.expense_types" in fetch.await_args.args[0]

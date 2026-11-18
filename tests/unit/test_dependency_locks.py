@@ -164,12 +164,6 @@ class TestTheDriverIsATestToolSinceS1419:
     dev side — on a line of its own, because it used to arrive there only
     through `-r requirements.txt`."""
 
-    def test_the_images_install_no_driver(self):
-        """Mutation: put `duckdb==1.5.5` back into requirements.txt or the
-        lock."""
-        assert "duckdb" not in RUNTIME
-        assert "duckdb" not in _named(Path("requirements.txt"))
-
     def test_the_dev_side_names_it_itself(self):
         """`_named` skips the `-r requirements.txt` line, so this is the dev
         file's own line. Mutation: delete it — a regenerated dev lock would

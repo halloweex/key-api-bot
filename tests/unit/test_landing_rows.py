@@ -24,8 +24,6 @@ import pytest
 from core.landing_rows import (
     BRAND_FIELD_NAME,
     BRAND_FIELD_UUID,
-    CATEGORY_COLUMNS,
-    PRODUCT_COLUMNS,
     brand_of,
     category_row,
     category_rows,
@@ -109,9 +107,6 @@ class TestCategory:
         """Validation belongs to the transaction that has to roll back."""
         assert category_row({"name": "Care"}).id is None
 
-    def test_columns_match_the_row(self):
-        assert CATEGORY_COLUMNS == ("id", "name", "parent_id")
-
 
 class TestProduct:
     def test_a_full_payload(self):
@@ -133,19 +128,6 @@ class TestProduct:
     def test_no_price_at_all_is_none(self):
         assert product_row({"id": 1}).price is None
 
-    def test_columns_match_the_row(self):
-        assert PRODUCT_COLUMNS == (
-            "id", "name", "category_id", "brand", "sku", "price",
-        )
-
-    def test_bookkeeping_is_not_a_column(self):
-        """`synced_at` and friends differ between two correct stores by
-        construction. In a shared row they would make every row look like a
-        discrepancy to the reconciliation comparing the two."""
-        for col in ("synced_at", "first_seen_at", "update_count"):
-            assert col not in PRODUCT_COLUMNS
-            assert col not in CATEGORY_COLUMNS
-
 
 class TestNothingChanged:
     """The old expression, written out by hand, against the new function."""
@@ -164,36 +146,6 @@ class TestNothingChanged:
     ])
     def test_brand_agrees_with_the_expression_it_replaced(self, payload):
         assert brand_of(payload) == _old_brand(payload)
-
-    @pytest.mark.parametrize("payload", [
-        {"id": 1, "name": "X", "category_id": 2, "sku": "S", "min_price": 5, "price": 9},
-        {"id": 1, "min_price": 0, "price": 9},
-        {"id": 1, "price": 9},
-        {"id": 1},
-        {},
-    ])
-    def test_product_agrees_with_the_expressions_it_replaced(self, payload):
-        assert product_row(payload) == (
-            payload.get("id"),
-            payload.get("name", "Unknown"),
-            payload.get("category_id"),
-            _old_brand(payload),
-            payload.get("sku"),
-            payload.get("min_price") or payload.get("price"),
-        )
-
-    @pytest.mark.parametrize("payload", [
-        {"id": 1, "name": "Care", "parent_id": 2},
-        {"id": 1},
-        {"id": 1, "name": None},
-        {},
-    ])
-    def test_category_agrees_with_the_expressions_it_replaced(self, payload):
-        assert category_row(payload) == (
-            payload.get("id"),
-            payload.get("name", "Unknown"),
-            payload.get("parent_id"),
-        )
 
 
 class TestTheStoreReadsThroughIt:

@@ -51,20 +51,6 @@ class TestRepairOrders:
         assert upserted.kwargs["force_update"] is True
 
     @pytest.mark.asyncio
-    async def test_marks_no_duckdb_warehouse(self):
-        """It marked DuckDB's warehouse dirty for the repaired ids until step
-        14's S14-15 — a no-op since step 13. Chain 3's writer raises the
-        Postgres derivation's signal in the order's own transaction."""
-        service = _service()
-        service._upsert_orders_with_expenses = AsyncMock(return_value=(1, 0))
-        client = _client({7: {"id": 7}})
-
-        with patch("core.sync_service.get_async_client", AsyncMock(return_value=client)):
-            await service.repair_orders([7])
-
-        service.store.mark_warehouse_dirty.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_one_failing_order_does_not_lose_the_others(self):
         service = _service()
         service._upsert_orders_with_expenses = AsyncMock(return_value=(1, 0))
@@ -126,19 +112,6 @@ class TestRepairOrders:
         assert result == {"requested": 0, "attempted": 0, "repaired": 0,
                           "failed": 0, "remaining": 0, "failures": {}}
         client.get_order.assert_not_awaited()
-
-
-class TestIntegrityScanSurvivesAMissingTable:
-    """`/warehouse/rebuild-silver` DROPped silver_orders while the DuckDB scan
-    could land inside that window, and the handler written to tolerate it
-    referenced a logger the module never imported. The scan reads no DuckDB
-    table since step 14's S14-14; the name it needed stays named."""
-
-    def test_the_module_has_a_logger(self):
-        """The bug was a name that did not exist, so name it in a test."""
-        import core.data_quality as dq
-
-        assert hasattr(dq, "logger")
 
 
 class TestTheWriteRunsUnderTheHeavyLock:

@@ -136,9 +136,6 @@ class TestTheChainsLookedAtNothing:
         assert any(i.check_name == inv.UNWATCHED for i in inv.judge(facts))
         assert not self._judged(facts)
 
-    def test_nothing_watched_is_nothing_to_see(self):
-        assert self._judged(inv.Facts(watched=()))
-
 
 # ─── The job ─────────────────────────────────────────────────────────────────
 

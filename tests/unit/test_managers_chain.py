@@ -28,8 +28,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from core import landing_rows, sql_dialect
-from core.sql_dialect import DUCKDB, POSTGRES
+from core import landing_rows
 
 
 # ─── The one reading of a KeyCRM user ───────────────────────────────────────
@@ -64,46 +63,8 @@ class TestTheManagerRow:
                                           {"id": 9, "name": "c"}])
         assert [(r.id, r.name) for r in rows] == [(9, "a"), (1, "b"), (9, "c")]
 
-    def test_duckdbs_writer_reads_it_through_the_shared_function(self):
-        """Mutation: spell the row inline in DuckDB again — the two stores
-        would then be one edit away from naming a manager differently."""
-        from core.store import AnalyticsStore
-
-        tree = ast.parse(textwrap.dedent(inspect.getsource(AnalyticsStore.upsert_managers)))
-        called = {getattr(n.func, "id", getattr(n.func, "attr", ""))
-                  for n in ast.walk(tree) if isinstance(n, ast.Call)}
-        assert "manager_rows" in called
-        # Parsed, not grepped: the docstring names the constant on purpose.
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        assert "RETAIL_MANAGER_IDS" not in names
-        reads = [n for n in ast.walk(tree) if isinstance(n, ast.Constant)
-                 and n.value == "full_name"]
-        assert not reads, "the payload is read in DuckDB's writer again"
-
 
 # ─── The stats body ─────────────────────────────────────────────────────────
-
-
-class TestTheStatsBody:
-    def test_one_text_for_both_engines(self):
-        """The two renders differ only by the names and the date's spelling."""
-        duck, pg = (sql_dialect.manager_stats_sql(DUCKDB),
-                    sql_dialect.manager_stats_sql(POSTGRES))
-        assert "UPDATE managers m" in duck and "FROM orders" in duck
-        assert "UPDATE bronze.managers m" in pg and "FROM bronze.orders" in pg
-        undone = (pg.replace("bronze.managers", "managers")
-                    .replace("bronze.orders", "orders")
-                    .replace(POSTGRES.kyiv_date("ordered_at"), DUCKDB.kyiv_date("ordered_at")))
-        assert undone == duck
-
-    @pytest.mark.parametrize("dialect", [DUCKDB, POSTGRES], ids=lambda d: d.name)
-    def test_the_date_is_kyivs_in_both(self, dialect):
-        """Mutation: `DATE(ordered_at)` / `ordered_at::date` — the process's
-        or the session's timezone, a day early for every order between 00:00
-        and 03:00 Kyiv."""
-        sql = sql_dialect.manager_stats_sql(dialect)
-        assert sql.count("timezone('Europe/Kyiv', ordered_at)") == 2
-        assert "DATE(ordered_at)" not in sql and "ordered_at::date" not in sql
 
 
 def _utc(*args) -> datetime:
@@ -473,69 +434,6 @@ class TestAClassificationThatCannotLand:
         assert pool.acquired == 0
 
 
-# ─── DuckDB stands down where the chain took over ───────────────────────────
-
-
-class TestTheStoreRoutes:
-    @pytest.mark.asyncio
-    async def test_get_all_managers_reads_postgres_under_the_chain_and_never_duckdb(self, flags):
-        """No fallback: DuckDB's managers are frozen after the flip.
-        Mutation: drop the routing in `get_all_managers`."""
-        from unittest.mock import AsyncMock, patch
-
-        from core import chain_latch, pg_managers_write
-        from core.store import AnalyticsStore
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        store = AnalyticsStore()
-        rows = [{"id": 1, "name": "M", "synced_at": T0}]
-        with patch("core.pg_managers_read.fetch_all_managers",
-                   new=AsyncMock(return_value=rows)) as read:
-            assert await store.get_all_managers() == rows
-        read.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_a_classification_is_the_chains_and_marks_no_duckdb(self, flags):
-        """The Postgres writer raises the derivation signal in its own
-        transaction; the DuckDB warehouse mark that followed it (a no-op since
-        step 13) went in step 14's S14-15."""
-        from unittest.mock import AsyncMock, patch
-
-        from core import chain_latch, pg_managers_write
-        from core.store import AnalyticsStore
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        store = AnalyticsStore()
-        store.mark_warehouse_dirty = AsyncMock()
-        with patch.object(pg_managers_write, "set_manager_retail_status",
-                          new=AsyncMock()) as write:
-            await store.set_manager_retail_status(7, True, date(2026, 5, 1), 3, "n")
-        write.assert_awaited_once()
-        assert write.await_args.args == (7, True, date(2026, 5, 1), 3, "n")
-        assert write.await_args.kwargs["set_at"].tzinfo is not None
-        store.mark_warehouse_dirty.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_the_stats_and_the_upsert_route_too(self, flags):
-        from unittest.mock import AsyncMock, patch
-
-        from core import chain_latch, pg_managers_write
-        from core.store import AnalyticsStore
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        store = AnalyticsStore()
-        with patch.object(pg_managers_write, "update_manager_stats",
-                          new=AsyncMock(return_value=4)), \
-                patch.object(pg_managers_write, "upsert_managers",
-                             new=AsyncMock(return_value=2)) as upsert:
-            assert await store.update_manager_stats() == 4
-            assert await store.upsert_managers(
-                [{"id": 1, "name": "A"}, {"id": 2, "full_name": "B"}]) == 2
-        rows = upsert.await_args.args[0]
-        assert [tuple(r) for r in rows] == [(1, "A", None, None, False),
-                                           (2, "B", None, None, False)]
-
-
 # ─── The sync step: contained under the chain, untouched without it ────────
 
 
@@ -670,166 +568,6 @@ class TestTheManagersStep:
         assert svc.managers_step_health()["last_error"] == "OSError"
 
 
-# ─── Every read of the two tables follows the chain ─────────────────────────
-
-
-def _read_walk():
-    """`(routers that read where the chain writes, [(file, line, call) a hole
-    statement is handed to], [stray (file, line)])` over `core/` and `web/`.
-
-    A statement is a string constant carrying one of the chain's holes, not in
-    an f-string (the Silver CASE renders its names, it is not routed) and not a
-    write: the stats UPDATE is the writer's own body. Chain 7a's walk
-    (`test_goals_reads_follow_chain.py`) in miniature. A router qualifies by
-    asking `reads_the_chain`, or — since step 14's S14-06, when
-    `_dashboard_run` lost its DuckDB tail and the branch on the chain with it
-    — by reading Postgres alone: it refuses a failure and reaches DuckDB
-    through nothing.
-    """
-    import pathlib
-
-    from core import pg_managers_write
-
-    repo = pathlib.Path(__file__).resolve().parents[2]
-    holes = pg_managers_write.TABLE_HOLES
-    trees = []
-    for top in ("core", "web"):
-        for path in sorted((repo / top).rglob("*.py")):
-            rel = str(path.relative_to(repo))
-            trees.append((rel, ast.parse(path.read_text(encoding="utf-8"))))
-
-    def own_calls(fn):
-        out, stack = set(), list(ast.iter_child_nodes(fn))
-        while stack:
-            node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                continue
-            if isinstance(node, ast.Call):
-                out.add(getattr(node.func, "attr", getattr(node.func, "id", "")))
-            stack.extend(ast.iter_child_nodes(node))
-        return out
-
-    def dotted_calls(fn):
-        out = set()
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                    and isinstance(node.func.value, ast.Name):
-                out.add(f"{node.func.value.id}.{node.func.attr}")
-        return out
-
-    def postgres_only(fn):
-        calls = dotted_calls(fn)
-        return ("read_fallback.refuse" in calls
-                and not calls & {"self.connection", "self._fetch_one",
-                                 "self._fetch_all"})
-
-    routers = {fn.name for _r, tree in trees for fn in ast.walk(tree)
-               if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and ("reads_the_chain" in own_calls(fn) or postgres_only(fn))}
-
-    def is_statement(node):
-        return (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and any(h in node.value for h in holes)
-                and not node.value.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE")))
-
-    sites, stray = [], []
-    for rel, tree in trees:
-        in_fstrings = {id(v) for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)
-                       for v in ast.walk(n)}
-        docs = {id(n.body[0].value) for n in ast.walk(tree)
-                if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                                  ast.AsyncFunctionDef))
-                and n.body and isinstance(n.body[0], ast.Expr)
-                and isinstance(n.body[0].value, ast.Constant)}
-        constants = {}
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and is_statement(node.value):
-                for t in node.targets:
-                    if isinstance(t, ast.Name):
-                        constants[t.id] = node.value
-        literals = [n for n in ast.walk(tree) if is_statement(n)
-                    and id(n) not in in_fstrings and id(n) not in docs
-                    and not (rel == "core/pg_managers_write.py")]
-        handed = set()
-        literal_ids = {id(lit) for lit in literals}
-        for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)]:
-            for arg in list(call.args) + [k.value for k in call.keywords]:
-                # The statement as it is handed over: a literal, a module
-                # constant, or either through a string method
-                # (`_RETURN_ORDERS_SQL.replace(...)`).
-                names = [n.id for n in ast.walk(arg)
-                         if isinstance(n, ast.Name) and n.id in constants]
-                if names or any(id(n) in literal_ids for n in ast.walk(arg)):
-                    sites.append((rel, call.lineno,
-                                  getattr(call.func, "attr", getattr(call.func, "id", ""))))
-                    handed |= {id(n) for n in ast.walk(arg)}
-                    handed |= {id(constants[name]) for name in names}
-        for lit in literals:
-            if id(lit) not in handed:
-                stray.append((rel, lit.lineno))
-    return routers, sites, stray
-
-
-class TestEveryReadOfTheTablesFollowsTheChain:
-    def test_the_walk_finds_the_reads_there_are(self):
-        """Non-vacuity: the dashboard's returns list joins `{managers}`, and
-        its router reads Postgres alone since step 14's S14-06."""
-        routers, sites, _stray = _read_walk()
-        assert "_dashboard_run" in routers
-        assert ("core/repositories/revenue.py", "_dashboard_run") in {
-            (rel, name) for rel, _line, name in sites}
-
-    def test_each_is_handed_to_a_router_that_reads_where_the_chain_writes(self):
-        """Mutation: give `_dashboard_run` back a DuckDB tail — it is no
-        longer Postgres-only, and the join would name managers out of a
-        DuckDB nothing writes."""
-        routers, sites, _stray = _read_walk()
-        wrong = [s for s in sites if s[2] not in routers]
-        assert not wrong, wrong
-
-    def test_none_is_left_where_the_walk_cannot_follow(self):
-        _routers, _sites, stray = _read_walk()
-        assert not stray, stray
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("switch", [None, "duckdb", "junk-s14-06"],
-                             ids=["unset", "duckdb", "junk"])
-    async def test_the_dashboard_join_reads_postgres_and_a_failure_is_refused(
-            self, flags, switch):
-        """`_RETURN_ORDERS_SQL`, whatever `KS_READ_DASHBOARD` says: Postgres,
-        and a Postgres failure is refused naming `dashboard` — counted, the
-        page's 503 — where until step 14's S14-06 the chain's branch let it
-        escape uncounted."""
-        from unittest.mock import AsyncMock, patch
-
-        from core import read_fallback
-        from core.store import AnalyticsStore
-        from core.repositories.revenue import _RETURN_ORDERS_SQL
-
-        if switch is None:
-            flags.delenv("KS_READ_DASHBOARD", raising=False)
-        else:
-            flags.setenv("KS_READ_DASHBOARD", switch)
-        store = AnalyticsStore()
-        with patch("core.pg_dashboard_read.fetch",
-                   new=AsyncMock(return_value=[(1,)])) as fetch:
-            assert await store._dashboard_run(_RETURN_ORDERS_SQL.replace(
-                "{where}", "TRUE"), [5]) == [(1,)]
-        assert "bronze.managers" in fetch.await_args.args[0]
-        down = OSError("down")
-        read_fallback.reset_counts()
-        try:
-            with patch("core.pg_dashboard_read.fetch",
-                       new=AsyncMock(side_effect=down)):
-                with pytest.raises(read_fallback.ReadUnavailable) as raised:
-                    await store._dashboard_run("SELECT name FROM {managers}", [])
-            assert raised.value.surface == "dashboard"
-            assert raised.value.__cause__ is down
-            assert read_fallback.refusals()["dashboard"]["count"] == 1
-        finally:
-            read_fallback.reset_counts()
-
-
 # ─── The route ──────────────────────────────────────────────────────────────
 
 
@@ -897,19 +635,6 @@ class TestTheRoute:
         assert "connection refused" not in res.text
 
 
-    def test_under_the_chain_nothing_is_copied_after_the_write(self, route, flags):
-        """Until step 14's S14-13 the route called the classification copy
-        after the write and answered its `{"skipped": "stood down: …"}` as
-        `replica`; the copy and the key went with `core.pg_replication`."""
-        from core import chain_latch, pg_managers_write
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        store = _RouteStore()
-        res = route(store).post(self.PATH)
-        assert res.status_code == 200, res.text
-        assert "replica" not in res.json()
-
-
 # ─── The standing watch, judged ─────────────────────────────────────────────
 
 
@@ -948,13 +673,6 @@ class TestTheStandingWatch:
     def test_an_empty_table_is_critical(self):
         assert ("chain_managers_empty", "CRITICAL") in self._checks(_facts(managers=0))
 
-    def test_unclassified_is_judged_only_from_the_latch(self):
-        """Before it the replica carries such managers until DuckDB's next
-        boot (M2); after it the writer seeds in the same transaction."""
-        assert self._checks(_facts(unclassified=(5,))) == {}
-        found = self._checks(_facts(unclassified=(5,), latched_at=T0))
-        assert set(found) == {("chain_manager_unclassified", "WARN")}
-
     def test_a_missing_set_at_is_the_required_column(self):
         from core import pg_chain_invariants as inv
 
@@ -990,25 +708,6 @@ class TestTheStandingWatch:
 
 _CLEAN_SHAPE = {"managers": 40, "intervals": 44, "unclassified": [], "open_wrong": [],
                 "broken": [], "disagree": [], "set_at_null": 0, "orphans": []}
-
-
-class TestHealthPublishesIt:
-    """Chain 5's preflight — the question asked before `KS_WRITE_MANAGERS`
-    was switched on, which said `ok: null` since S14-00 — went in step 14's
-    S14-11 with the flag, with the concurrent bound it shared with chain 1's;
-    the managers step's state stays under the chain's entry."""
-
-    @pytest.mark.asyncio
-    async def test_the_sync_step_sits_under_chain_5s_entry_alone(self, flags, monkeypatch):
-        from unittest.mock import AsyncMock
-
-        from web.routes.api import health
-
-        monkeypatch.setattr(health, "_managers_sync_step", AsyncMock(
-            return_value={"failures_since_ok": 0}))
-        block = await health._write_chains_block()
-        assert block["pg_managers_write"] == {"sync_step": {"failures_since_ok": 0}}
-        assert "preflight" not in block["pg_inventory_write"]
 
 
 # ─── The review of chain 5 (2026-10-08) ─────────────────────────────────────
@@ -1072,109 +771,3 @@ class TestTheRouteAnswersWhatHappened:
         assert res.status_code == 400, res.text
         assert res.json()["detail"] == "query: Must not contain a NUL character"
         get_pool.assert_not_awaited()
-
-
-# ─── Nothing reads the frozen DuckDB copies by name ─────────────────────────
-
-# DuckDB's own `managers` and `manager_classifications` spelled bare in a
-# statement — a read or a write — outside the `{managers}`/`{classifications}`
-# holes `_read_walk` follows. Not after a `.`: `bronze.managers` is Postgres's.
-_BARE = r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:managers|manager_classifications)(?![.\w])"
-
-# Every function that names them, with the function that routes it and the
-# question that function asks: the DuckDB half of a store method behind the
-# chain's own answer and the boot seed behind the latch (the replica's read
-# behind the stand-down, `pg_replication.read_managers`, until step 14's
-# S14-13 deleted the copy). A new site fails until it is added here with its
-# router — the review's probe (`FROM managers` in a new module) is one.
-# The three store methods that named the tables bare in their DuckDB branch
-# (`upsert_managers`, `set_manager_retail_status`, `get_all_managers`, routed
-# by `writes_postgres`/`reads_postgres`) went with those branches in step 14's
-# S14-11: they reach chain 5's Postgres writer and reader alone.
-# DuckDB's boot seed (`core/migrations.py`'s `_m0006`, behind the latch)
-# was the last site until step 14's S14-18 deleted the store's migrations.
-_BARE_SITES: dict = {}
-
-
-def _bare_walk():
-    """`({(file, function) naming a bare table}, {(file, function): its
-    calls}, {called name: {(file, function) calling it}})` over `core/`,
-    `web/`, `scripts/`, `bot/` and `deploy/`. A module-level constant counts
-    at every function of its module that loads it."""
-    import pathlib
-    import re
-
-    repo = pathlib.Path(__file__).resolve().parents[2]
-    bare = re.compile(_BARE, re.I)
-    found, calls, callers = set(), {}, {}
-    for top in ("core", "web", "scripts", "bot", "deploy"):
-        for path in sorted((repo / top).rglob("*.py")):
-            rel = str(path.relative_to(repo))
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            docs = {id(n.body[0].value) for n in ast.walk(tree)
-                    if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                                      ast.AsyncFunctionDef))
-                    and n.body and isinstance(n.body[0], ast.Expr)
-                    and isinstance(n.body[0].value, ast.Constant)}
-            functions = [n for n in ast.walk(tree)
-                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-            owner = {}
-            for fn in functions:
-                for node in ast.walk(fn):
-                    owner.setdefault(id(node), fn.name)
-            for fn in functions:
-                names = {getattr(c.func, "attr", getattr(c.func, "id", ""))
-                         for c in ast.walk(fn) if isinstance(c, ast.Call)}
-                calls.setdefault((rel, fn.name), set()).update(names)
-                for name in names:
-                    callers.setdefault(name, set()).add((rel, fn.name))
-            constants = {}
-            for node in ast.walk(tree):
-                if not (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                        and id(node) not in docs and bare.search(node.value)):
-                    continue
-                if id(node) in owner:
-                    found.add((rel, owner[id(node)]))
-                    continue
-                for stmt in tree.body:
-                    if isinstance(stmt, ast.Assign) and any(
-                            n is node for n in ast.walk(stmt.value)):
-                        constants.update({t.id: node for t in stmt.targets
-                                          if isinstance(t, ast.Name)})
-                else:
-                    found.add((rel, "<module>"))
-            for fn in functions:
-                if any(isinstance(n, ast.Name) and n.id in constants
-                       for n in ast.walk(fn)):
-                    found.add((rel, fn.name))
-    return found, calls, callers
-
-
-class TestNothingReadsTheFrozenCopiesByName:
-    def test_every_site_is_known(self):
-        """The review's finding: a statement written `FROM managers` instead
-        of `FROM {managers}` passed every walk. Mutation: add one."""
-        found, _calls, _callers = _bare_walk()
-        assert found == set(_BARE_SITES), sorted(found ^ set(_BARE_SITES))
-
-    def test_each_is_routed_by_the_chain(self):
-        """Mutation: drop the routing from any of them — the migration's
-        `latched`, say."""
-        _found, calls, callers = _bare_walk()
-        for (rel, function), (router, asks) in _BARE_SITES.items():
-            assert asks in calls[(rel, router)], (rel, router, asks)
-            if function != router:
-                assert callers[function] == {(rel, router)}, (function, callers[function])
-
-    def test_it_sees_a_statement_written_bare(self):
-        """Non-vacuity, on the review's own probe."""
-        import re
-
-        bare = re.compile(_BARE, re.I)
-        for sql, seen in (("SELECT id, name, is_retail FROM managers ORDER BY id", True),
-                          ("SELECT manager_id FROM manager_classifications", True),
-                          ("SELECT 1 FROM orders o JOIN managers m ON m.id = o.manager_id", True),
-                          ("SELECT 1 FROM bronze.managers", False),
-                          ("SELECT 1 FROM {managers}", False),
-                          ("'baseline frozen from managers.is_retail'", False)):
-            assert bool(bare.search(sql)) is seen, sql

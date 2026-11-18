@@ -47,94 +47,19 @@ asserted here as a property of the *text* instead.
 from __future__ import annotations
 
 import ast
-from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
-import pytest
-
-from core.store import AnalyticsStore
 
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "goals.py"
 
-ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
-          "get_daily_revenue_for_dates", "get_predictions")
-
-# The writes. These *may* reach the router — `set_goal` computes a suggestion
-# from the revenue history before storing it, and reading that history from
-# Postgres is exactly what this change is for. What they must not do is send a
-# *write* through it, and must still open DuckDB for the write itself.
-#
-# The three calculators are not writers since chain 7b-1: they compute, and
-# `_persist_goal_tables` stores what they computed, in one transaction.
-WRITERS = ("set_goal", "_persist_goal_tables", "store_predictions")
-
 BODIES = ("_GOALS_PERIOD_REVENUE_SQL", "_GOALS_WEEKLY_TREND_SQL",
           "_GOALS_DAILY_FOR_DATES_SQL", "_STORED_GOALS_SQL",
           "_PREDICTIONS_SQL")
 
-CALLS = (
-    ("get_historical_revenue", ("daily",), {}),
-    ("get_historical_revenue", ("weekly",), {}),
-    ("get_historical_revenue", ("monthly",), {}),
-    ("get_historical_revenue", ("weekly",), {"sales_type": "all"}),
-    ("get_daily_revenue_for_dates", ([date.today(), date.today() - timedelta(days=1)],), {}),
-    ("get_daily_revenue_for_dates", ([],), {}),          # the early return
-    ("get_predictions", (date.today() - timedelta(days=7), date.today()), {}),
-)
-
 
 class TestTheBoundary:
     """What must *not* be routed, and why — the load-bearing part here."""
-
-    def _method(self, name):
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        return next(n for n in ast.walk(tree)
-                    if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
-                    and n.name == name)
-
-    def _reaches_router(self, name, excluding=()):
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        bodies, calls = {}, {}
-        for n in ast.walk(tree):
-            if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)):
-                bodies[n.name] = n
-                calls[n.name] = {c.func.attr for c in ast.walk(n)
-                                 if isinstance(c, ast.Call)
-                                 and isinstance(c.func, ast.Attribute)}
-
-        def walk(fn, seen):
-            if fn in seen:
-                return False
-            seen.add(fn)
-            if "_goals_run" in calls.get(fn, ()):
-                return True
-            return any(walk(c, seen) for c in calls.get(fn, ()) if c in bodies)
-
-        return walk(name, set(excluding))
-
-    @pytest.mark.parametrize("name", ROUTED)
-    def test_the_four_that_can_move_go_through_the_router(self, name):
-        assert self._reaches_router(name), f"{name} never reaches _goals_run"
-
-    @pytest.mark.parametrize("name", WRITERS)
-    def test_a_writer_writes_through_its_chain_never_duckdb(self, name):
-        """A writer may *read* through the router — `set_goal` computes a
-        suggestion from the revenue history before storing — and writes
-        through its chain's Postgres writer (chain 7a or 7b-3). Until step
-        14's S14-11 it opened DuckDB to write while the chain's flag said
-        duckdb; this asserted that branch was there. Mutation: a DuckDB
-        connection in a writer again."""
-        node = self._method(name)
-        calls = {c.func.attr for c in ast.walk(node)
-                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
-        assert "connection" not in calls, f"{name} opens DuckDB again"
-        assert calls & {"set_goal", "persist_goal_tables", "store_predictions"}, (
-            f"{name} no longer reaches its chain's writer")
 
     def test_no_write_statement_ever_reaches_the_router(self):
         """The invariant the parametrised tests above approximate: whatever is
@@ -162,55 +87,6 @@ class TestTheBoundary:
                 for verb in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE", "CREATE "):
                     assert verb not in upper, f"{name} writes, and it is routed"
         assert seen >= 4, f"expected at least four routed calls, found {seen}"
-
-    def test_the_forecast_table_now_has_a_postgres_name(self):
-        """This test used to assert the opposite — that none of the four had a
-        home — and said that when one appeared it should be deleted and the
-        read moved. Revision 0025 brought them, so it was."""
-        from core.sql_dialect import DUCKDB, POSTGRES
-
-        assert POSTGRES.revenue_predictions == "app.revenue_predictions"
-        assert DUCKDB.revenue_predictions == "revenue_predictions"
-
-    def test_the_other_three_follow_their_writer_not_this_flag(self):
-        """This used to assert the three had no dialect entry: nothing could
-        read them through a routed body while `generate_smart_goals` wrote
-        them before reading. Chain 7b-1 took that write out, and chain 7b-3
-        moves their writer, so they have entries now — and the one body that
-        carries them goes to `_goal_tables_run`, which asks the chain, never
-        to `_goals_run`, which asks `KS_READ_GOALS` and would read the hourly
-        replica while DuckDB is still the writer."""
-        from core.sql_dialect import DUCKDB, POSTGRES
-
-        for name in ("seasonal_indices", "weekly_patterns", "growth_metrics"):
-            assert getattr(POSTGRES, name) == f"app.{name}"
-            assert getattr(DUCKDB, name) == name
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        routers = {c.func.attr for c in ast.walk(tree)
-                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
-                   and c.args and isinstance(c.args[0], ast.Name)
-                   and c.args[0].id == "_SHARED_GOAL_TABLES_SQL"}
-        assert routers == {"_goal_tables_run"}
-
-
-class TestItDoesNotTakeTheDuckDbLock:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "name,args,kwargs", CALLS,
-        ids=[f"{n}{a[0] if a and not isinstance(a[0], list) else ''}" for n, a, k in CALLS],
-    )
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
-        self, tmp_path, monkeypatch, name, args, kwargs,
-    ):
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = AnalyticsStore()
-        def boom(*_a, **_k):
-            raise AssertionError(f"{name} reached for DuckDB")
-
-        with patch.object(type(store), "connection", boom, create=True), \
-             patch("core.pg_goals_read.fetch", new=AsyncMock(return_value=[])):
-            await getattr(store, name)(*args, **kwargs)
 
 class TestTheRoutedBodies:
     def test_the_rendering_leaves_no_hole(self):

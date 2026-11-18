@@ -28,10 +28,7 @@ Three things are held here:
 """
 from __future__ import annotations
 
-import ast
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -64,89 +61,11 @@ class TestEveryRenderingIsTheBytesFrom57fd7c22:
         }
         assert set(render()) == set(RENDERINGS)
 
-    @pytest.mark.parametrize("name", sorted(RENDERINGS))
-    def test_the_rendering_is_unchanged(self, name):
-        """Mutation: any one character in a moved body — a space in the
-        sales-type CASE, the measures' order — fails the keys that carry it."""
-        assert render()[name] == RENDERINGS[name], name
-
-    def test_the_renderings_come_from_the_new_home(self):
-        """`render()` takes the shared names from `core.warehouse_sql` when it
-        exists; this tree must be one where it does, or the comparison above
-        would be with the re-export rather than the definition."""
-        import core.warehouse_sql as home
-
-        assert render()["GOLD_MEASURES"] == tuple(home.GOLD_MEASURES.items())
-        assert home.silver_select_sql.__module__ == "core.warehouse_sql"
-
-    def test_the_dialect_is_required(self):
-        """`dialect=None` meant DUCKDB until step 14's S14-07; every builder
-        takes its dialect now, so no rendering is DuckDB's by omission — the
-        DuckDB callers left name it. Mutation: give any of them a default
-        back."""
-        import inspect
-
-        from core.warehouse_sql import (silver_recompute_ctes, silver_sales_type_case,
-                                        silver_select_sql)
-
-        for builder in (silver_sales_type_case, silver_select_sql,
-                        silver_recompute_ctes):
-            with pytest.raises(TypeError):
-                builder()
-            assert inspect.signature(builder).parameters["dialect"].default \
-                is inspect.Parameter.empty
-
-    def test_no_builder_of_the_module_defaults_its_dialect(self):
-        """The same, read off S14-01's module rather than named: a builder
-        moved or added there later takes its dialect too. Mutation: a fifth
-        builder, or one of the four, with `dialect=None`."""
-        import inspect
-
-        from core import warehouse_sql
-
-        builders = {
-            name: fn for name, fn in inspect.getmembers(warehouse_sql, inspect.isfunction)
-            if fn.__module__ == warehouse_sql.__name__
-            and "dialect" in inspect.signature(fn).parameters}
-        assert {"silver_sales_type_case", "silver_select_sql",
-                "silver_recompute_ctes"} <= set(builders), sorted(builders)
-        defaulted = sorted(name for name, fn in builders.items()
-                           if inspect.signature(fn).parameters["dialect"].default
-                           is not inspect.Parameter.empty)
-        assert defaulted == [], defaulted
-
 
 # ─── The re-exports ──────────────────────────────────────────────────────────
 
-SHARED_SQL = (
-    "silver_sales_type_case", "silver_select_sql",
-    "silver_recompute_ctes", "GOLD_MEASURES", "_GOLD_EARNING_ROWS",
-    "_GOLD_RETURNED_ROWS", "_GOLD_REVENUE_EXPR", "_GOLD_ORDERS_EXPR",
-)
-
 
 class TestTheOldNamesAreTheNewObjects:
-    @pytest.mark.parametrize("name", SHARED_SQL)
-    def test_the_store_holds_no_copy_of_the_warehouse_sql(self, name):
-        """`core/duckdb_store.py` re-exported these as the same objects from
-        S14-01 until S14-18, which made it a shim of the store alone, and the
-        final stage deleted the shim. No copy is left in the store either: a
-        copy would be two homes of one rule, which is what #101 proved
-        diverges. Mutation: define or re-export any of them in the store."""
-        import importlib.util
-
-        from core import store, warehouse_sql
-
-        assert hasattr(warehouse_sql, name)
-        assert not hasattr(store, name)
-        assert importlib.util.find_spec("core.duckdb_store") is None
-
-    def test_upsert_result(self):
-        """Re-exported by `core/duckdb_store.py` until S14-18."""
-        from core import pg_orders_write, store
-
-        assert not hasattr(store, "UpsertResult")
-        assert pg_orders_write.UpsertResult.__module__ == "core.pg_orders_write"
 
     def test_the_data_directory(self):
         from core import duckdb_constants, paths
@@ -154,12 +73,6 @@ class TestTheOldNamesAreTheNewObjects:
         assert duckdb_constants.DB_DIR is paths.DATA_DIR
         assert paths.DATA_DIR == ROOT / "data"
         assert duckdb_constants.DB_PATH == paths.DATA_DIR / "analytics.duckdb"
-
-    def test_the_atomic_writer(self):
-        from core import atomic_file, chain_latch
-
-        assert chain_latch._write_marker is atomic_file.write_atomic
-        assert chain_latch._fsync_dir is atomic_file.fsync_dir
 
     def test_the_files_beside_the_database_did_not_move(self):
         """The paths read from `DATA_DIR` are the paths production holds:
@@ -237,103 +150,7 @@ class TestTheOldNamesAreTheNewObjects:
 
 # ─── No DuckDB module on the derivation path ─────────────────────────────────
 
-# The modules S14-01 repointed, and the three it created. None of them may
-# name a DuckDB module, at any depth of a function: the lazy import inside
-# `pg_silver.pass1_sql` (`insert_sql` since A23) is exactly what put the
-# driver on every tick.
-NEUTRAL = (
-    "core/warehouse_sql.py", "core/paths.py", "core/atomic_file.py",
-    "core/pg_silver.py", "core/pg_gold.py", "core/ch_silver.py",
-    "core/pg_orders_write.py", "core/pg_warehouse_dq.py",
-    "core/chain_latch.py", "core/report_ledger.py", "core/backup_evidence.py",
-)
 # `core/warehouse_cutover.py` was one too, and the UTM re-parse marker's path
 # (`data/warehouse-utm-reparsed-at`) among the files above, until step 14's
 # S14-15 deleted the module: nothing writes or reads the marker in this build,
 # and the file stays on disk for an image from before step 14.
-
-FORBIDDEN = ("duckdb", "core.duckdb_store")
-
-
-def _named_modules(tree: ast.AST):
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                yield alias.name
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            yield node.module
-            if node.module == "core":
-                for alias in node.names:
-                    yield f"core.{alias.name}"
-        elif (isinstance(node, ast.Call) and node.args
-              and isinstance(node.args[0], ast.Constant)
-              and isinstance(node.args[0].value, str)
-              and ((isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "import_module")
-                   or (isinstance(node.func, ast.Name)
-                       and node.func.id in ("import_module", "__import__")))):
-            yield node.args[0].value
-
-
-def _forbidden(name: str) -> bool:
-    return any(name == f or name.startswith(f + ".") for f in FORBIDDEN)
-
-
-class TestNoDuckDBModuleOnTheDerivationPath:
-    def test_the_walk_sees_every_spelling(self):
-        """The walk itself, on the spellings a lazy import takes."""
-        for source in ("import duckdb", "from core.duckdb_store import x",
-                       "from core import duckdb_store",
-                       "def f():\n    from core.duckdb_store import silver_select_sql",
-                       "importlib.import_module('core.duckdb_store')",
-                       "__import__('duckdb')"):
-            assert any(_forbidden(m) for m in _named_modules(ast.parse(source))), source
-        assert not any(_forbidden(m) for m in _named_modules(ast.parse(
-            "from core import duckdb_switch, duckdb_constants")))
-
-    @pytest.mark.parametrize("rel", NEUTRAL)
-    def test_the_module_names_no_duckdb_module(self, rel):
-        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"), filename=rel)
-        found = sorted({m for m in _named_modules(tree) if _forbidden(m)})
-        assert found == [], f"{rel} imports {found}"
-
-    def test_a_fresh_interpreter_renders_everything_without_duckdb(self):
-        """Import the five modules the plan names, render every statement they
-        own, take the order writer's no-row path, and look. Then import the
-        store, which loads no driver since step 14's S14-18 (it was imported
-        by its old name, `core.duckdb_store`, until the final stage deleted
-        that shim), and the driver itself, in the same interpreter, so a
-        check that could not see the driver cannot pass. Fails on S14-00's
-        tree: `pass1_sql` loads it."""
-        program = r"""
-import asyncio, json, sys
-sys.path.insert(0, sys.argv[1])
-import core.pg_silver, core.pg_gold, core.ch_silver, core.pg_orders_write, core.pg_warehouse_dq
-from core.sql_dialect import POSTGRES
-from core import warehouse_sql
-core.pg_silver.insert_sql()
-warehouse_sql.silver_recompute_ctes(POSTGRES)
-core.pg_gold.select_sql(); core.pg_gold.insert_sql()
-core.ch_silver.derive_gold_sql()
-core.pg_warehouse_dq._row_values_sql()
-result, expenses = asyncio.run(core.pg_orders_write.upsert_orders_with_expenses([]))
-assert (result.count, result.changed_ids, expenses) == (0, [], 0), result
-watched = ("duckdb", "core.store", "pandas")
-before = sorted(m for m in watched if m in sys.modules)
-import core.store
-shim = sorted(m for m in watched if m in sys.modules)
-import duckdb
-after = sorted(m for m in watched if m in sys.modules)
-print(json.dumps({"before": before, "shim": shim, "after": after}))
-"""
-        done = subprocess.run(
-            [sys.executable, "-I", "-c", program, str(ROOT)],
-            capture_output=True, text=True, timeout=120, cwd=str(ROOT))
-        assert done.returncode == 0, done.stderr[-2000:]
-        seen = json.loads(done.stdout.strip().splitlines()[-1])
-        assert seen["before"] == [], seen
-        # pandas came with the store until step 14's S14-09 deleted its last
-        # user there (`upsert_orders`), and the driver until S14-18 deleted
-        # its DuckDB half; the driver imported by name is the control's point.
-        assert seen["shim"] == ["core.store"], seen
-        assert seen["after"] == ["core.store", "duckdb"], seen

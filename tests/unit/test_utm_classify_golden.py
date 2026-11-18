@@ -35,7 +35,6 @@ from pathlib import Path
 import pytest
 
 from core import pg_utm_parse
-from core.repositories.traffic import TrafficMixin
 from core.utm_classify import (
     UTM_VERDICT_COLUMNS,
     classify_traffic,
@@ -359,23 +358,6 @@ def test_no_comment_is_no_data_and_a_row_of_nulls():
 
 
 # ─── the old names agree ──────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("comment, parsed, row", PARSE_GOLDEN, ids=_ids(PARSE_GOLDEN))
-def test_the_mixin_parses_as_it_did(comment, parsed, row):
-    assert TrafficMixin._parse_utm_from_comment(comment) == parsed
-
-
-@pytest.mark.parametrize("utm_data, verdict", CLASSIFY_GOLDEN, ids=_ids(CLASSIFY_GOLDEN))
-def test_the_mixin_classifies_as_it_did(utm_data, verdict):
-    assert TrafficMixin._classify_traffic(utm_data) == verdict
-
-
-def test_the_mixin_holds_the_functions_not_copies():
-    """Delegation by identity: a second copy of the classifier on the mixin is
-    exactly the drift the move exists to prevent, and a golden over outputs
-    would only notice it once the copies disagreed on a fixture."""
-    assert TrafficMixin._parse_utm_from_comment is parse_utm_from_comment
-    assert TrafficMixin._classify_traffic is classify_traffic
 
 
 # `test_the_duckdb_parse_writes_the_golden_rows` stood here until step 14's

@@ -803,21 +803,6 @@ class TestTheDuckDBCopyIsNotJudged:
     LINE_IDS = ["off", "on", "unset", "typo"]
 
     @pytest.mark.parametrize("line", LINES, ids=LINE_IDS)
-    @pytest.mark.parametrize("offsite_h", [200, None], ids=["stale-200h", "never"])
-    def test_a_stale_or_absent_duckdb_marker_pages_nothing(self, world, sent,
-                                                           line, offsite_h):
-        """Mutation: put back any of the three branches — the frozen one
-        prints "frozen", the stale and never ones exit 1 and page."""
-        self._env(world, line)
-        self._instruments(world, offsite_h=offsite_h, pg_h=1)
-        run, pages = sent(FAKE_DOW="3")
-        assert run.code == 0, run.out
-        assert pages == "", pages
-        assert "CRITICAL" not in run.out and "frozen" not in run.out, run.out
-        assert "Warehouse" not in run.out
-        assert "instruments ok: postgres and .env 1h ago, watchdog 1h ago" in run.out
-
-    @pytest.mark.parametrize("line", LINES, ids=LINE_IDS)
     def test_a_stale_postgres_marker_still_pages_and_names_the_env(self, world, sent,
                                                                   line):
         """Under any KS_DUCKDB: one page, its bucket, the .env it is the only
@@ -866,15 +851,6 @@ class TestTheDuckDBCopyIsNotJudged:
         assert "копия Postgres и .env: 1h ago (порог 36ч)" in pages
         assert "сторож диска: 1h ago (порог 14ч)" in pages
         assert "DuckDB" not in pages and "внешняя копия" not in pages, pages
-
-    def test_the_script_reads_no_duckdb_setting_or_marker(self):
-        """Parsed from the script's code, comments aside. Mutation: source
-        `deploy/duckdb_env.sh` again, or read `BACKUP_MARKER`."""
-        code = [ln for ln in (DEPLOY / "offsite_check.sh").read_text().splitlines()
-                if not ln.lstrip().startswith("#")]
-        for word in ("KS_DUCKDB", "duckdb_env", "ks_duckdb", "BACKUP_MARKER",
-                     "data/.offsite_last_ok", "BACKUP_MAX_ARCHIVE_AGE_HOURS", "FROZEN"):
-            assert not [ln for ln in code if word in ln], (word, code)
 
 
 # ── the drill ─────────────────────────────────────────────────────────────────

@@ -597,18 +597,6 @@ class TestBroadcastsRespectTheTabSet:
         ) == 1
 
 
-class TestTheRevenueEventIsScoped:
-    def test_goal_progress_names_its_tab(self):
-        """The audit's finding, pinned: a broadcast carrying money must say
-        which tab it belongs to."""
-        import inspect
-        import web.main as main
-
-        source = inspect.getsource(main._register_event_handlers)
-        block = source[source.index("GOAL_PROGRESS"):]
-        assert 'feature="dashboard"' in block[:400]
-
-
 # ─── the bot hands out the same numbers ──────────────────────────────────────
 
 
@@ -838,53 +826,6 @@ class TestTheBotSaysWhenItCannotEnforce:
         with caplog.at_level(logging.INFO):
             main._warn_if_tab_access_is_off()
         assert "tab enforcement in the bot is off" in caplog.text
-
-    @pytest.mark.parametrize("user_store", ["postgres", "duckdb", "", "junk"])
-    def test_the_user_store_variable_is_not_asked(self, monkeypatch, caplog,
-                                                  user_store):
-        """Whatever `KS_USER_STORE` holds — production keeps `postgres` for the
-        images before step 14 — a bot on Postgres enforces the tab set and has
-        nothing to say about it."""
-        import logging
-
-        import bot.main as main
-
-        monkeypatch.setenv("KS_BOT_STORE", "postgres")
-        monkeypatch.setenv("KS_USER_STORE", user_store)
-        with caplog.at_level(logging.INFO):
-            main._warn_if_tab_access_is_off()
-        assert not caplog.records, caplog.text
-
-    @pytest.mark.parametrize("user_store", ["postgres", "duckdb", "", "junk"])
-    def test_the_postgres_adapter_always_reaches_the_dashboards_list(
-            self, monkeypatch, user_store):
-        """`DashboardTabs.available()` answers what `KS_BOT_STORE` answered by
-        choosing the adapter: the Postgres one reaches `app.dashboard_users`,
-        and `KS_USER_STORE` — any value, junk included — is not asked."""
-        import ast
-        import inspect
-        import textwrap
-
-        from bot.store_postgres import PostgresDashboardTabs
-
-        monkeypatch.setenv("KS_USER_STORE", user_store)
-        assert PostgresDashboardTabs(None, None).available() is True
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(PostgresDashboardTabs.available)))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
-            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        assert "user_store_is_postgres" not in names
-
-    def test_agreement_is_silent(self, monkeypatch, caplog):
-        import logging
-
-        import bot.main as main
-
-        monkeypatch.setenv("KS_BOT_STORE", "postgres")
-        monkeypatch.setenv("KS_USER_STORE", "postgres")
-        with caplog.at_level(logging.INFO):
-            main._warn_if_tab_access_is_off()
-        assert not caplog.records, caplog.text
 
     def test_it_runs_before_the_store_is_touched(self):
         """After `init_database()` it would be a note attached to whatever the

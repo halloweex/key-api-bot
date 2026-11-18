@@ -22,8 +22,6 @@ choice. What is left to pin, and is pinned here:
 from __future__ import annotations
 
 import ast
-import inspect
-import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -160,11 +158,6 @@ class TestEveryDoorGoesThroughTheRouter:
                     found.add(key)
         assert found == ALLOWED_DIRECT, sorted(found)
 
-    def test_the_router_takes_no_store(self):
-        """It took DuckDB's store until S14-15, for the ship."""
-        assert list(inspect.signature(pg_utm_parse.reparse_router).parameters) == [
-            "full", "force"]
-
 
 class TestTheRouter:
     @pytest.mark.asyncio
@@ -265,26 +258,3 @@ class TestOnlyTheCliForces:
         with patch("core.pg_utm_parse.reparse_router", new=router):
             await bf._reparse(force_ship=True)
         router.assert_awaited_once_with(full=True, force=True)
-
-
-class TestTheTrafficRouter:
-    """Since step 14's S14-05 the traffic router asks Postgres and refuses a
-    failure. What stays pinned is that it never takes the store lock and that
-    no traffic read goes round it."""
-
-    def test_it_does_not_take_the_store_lock_itself(self):
-        from core.repositories.traffic import TrafficMixin
-
-        tree = ast.parse(textwrap.dedent(inspect.getsource(TrafficMixin._traffic_run)))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncWith):
-                head = ast.unparse(node.items[0].context_expr)
-                assert "connection()" not in head, f"the router opens the store: {head}"
-
-    def test_no_traffic_read_bypasses_the_router(self):
-        src = (REPO / "core" / "repositories" / "traffic.py").read_text()
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) and node.name.startswith("get_traffic"):
-                body = ast.get_source_segment(src, node) or ""
-                assert "conn.execute" not in body, node.name

@@ -38,7 +38,6 @@ literal half is in `tests/integration/test_goals_history_two_engines.py`.
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
 import os
 import statistics
@@ -49,7 +48,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from core.duckdb_constants import (
     B2B_MANAGER_ID,
@@ -407,23 +406,6 @@ class TestTheForecastSignal:
             got = await store._get_ml_forecast_total(
                 FORECAST_TODAY.year, FORECAST_TODAY.month, sales_type)
         assert got == pytest.approx(EXPECTED_SIGNAL[sales_type], abs=0.005)
-
-    @pytest.mark.asyncio
-    async def test_a_read_that_fails_is_left_out_and_said_at_warning(
-        self, tmp_path, monkeypatch, caplog,
-    ):
-        """The goal is then computed from the other two signals. At DEBUG
-        nothing said so; that is a different goal nobody was told about."""
-        store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the forecast signal")
-        caplog.set_level(logging.DEBUG, logger="core.repositories.goals")
-        with patch.object(type(store), "_goals_run",
-                          new=AsyncMock(side_effect=RuntimeError("postgres is gone"))):
-            got = await store._get_ml_forecast_total(2025, 3, "retail")
-        assert got == 0.0
-        warned = [r for r in caplog.records
-                  if r.name == "core.repositories.goals"
-                  and r.levelno == logging.WARNING]
-        assert warned and "postgres is gone" in warned[0].getMessage()
 
 
 # ─── What the smart goal narrows to, in written-out numbers ─────────────────

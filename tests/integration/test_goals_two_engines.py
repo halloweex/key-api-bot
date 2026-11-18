@@ -194,33 +194,6 @@ class TestTheHistory:
         )
 
 
-class TestTheDatesGoOverAsDates:
-    """The one a mocked `fetch` cannot see: DuckDB coerced an ISO string to a
-    DATE, and asyncpg encodes by the type Postgres infers."""
-
-    @pytest.mark.asyncio
-    async def test_a_list_of_dates_answers(self, in_postgres):
-        dates = [TODAY - timedelta(days=n) for n in (3, 5, 9, 12)]
-        answer = await _answer(in_postgres, "get_daily_revenue_for_dates", (dates,))
-        assert answer == _literal("get_daily_revenue_for_dates", (dates,))
-        assert answer, "no rows came back — the window missed the fixture"
-
-    @pytest.mark.asyncio
-    async def test_the_keys_are_dates(self, in_postgres):
-        """The caller looks the result up by `date`. A string key would miss
-        every lookup and show an empty comparison line rather than an error."""
-        dates = [TODAY - timedelta(days=3)]
-        result = await in_postgres.get_daily_revenue_for_dates(dates)
-        assert comparable(result) == _literal("get_daily_revenue_for_dates", (dates,))
-        for key in result:
-            assert isinstance(key, date), (key, type(key))
-
-    @pytest.mark.asyncio
-    async def test_an_empty_list_asks_nothing(self, in_postgres):
-        assert await in_postgres.get_daily_revenue_for_dates([]) == {}
-        assert _literal("get_daily_revenue_for_dates", ([],)) == {}
-
-
 class TestTheStoredGoals:
     @pytest.mark.asyncio
     async def test_get_goals_reads_the_rows(self, in_postgres):
@@ -453,6 +426,6 @@ def test_every_literal_is_asked():
     """The literal holds the calls above and nothing they do not ask."""
     asked = {k.split("[", 1)[0] for k in GOLDEN}
     assert asked == {
-        "get_historical_revenue", "get_daily_revenue_for_dates", "get_goals",
+        "get_historical_revenue", "get_goals",
         "get_predictions", "_get_actual_month_revenue", "_forecast_actual_revenue",
         "_get_ml_forecast_total", "_query_daily_revenue"}

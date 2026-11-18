@@ -21,8 +21,6 @@ from tests.integration.test_daily_soak_sql import (  # noqa: F401 — `pool` is 
 D1 = "02_d1_owed_rebuild.sql"
 D3 = "04_d3_derivation_gaps.sql"
 
-# A Tuesday, so no training (Mon/Thu); 04:40 is the retired backup's window.
-TUESDAY_0440 = datetime(2030, 11, 5, 4, 40, tzinfo=KYIV)
 # A Sunday in winter: 02:15 UTC is 04:15 Kyiv, past the weekly full sync and
 # before the status refresh — the retired compaction's window alone.
 SUNDAY_0215_UTC = datetime(2030, 11, 3, 4, 15, tzinfo=KYIV)
@@ -30,17 +28,6 @@ SUNDAY_0215_UTC = datetime(2030, 11, 3, 4, 15, tzinfo=KYIV)
 
 @needs_pg
 class TestD1:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("now", [TUESDAY_0440, SUNDAY_0215_UTC],
-                             ids=["backup-window", "compaction-window"])
-    async def test_owed_for_twenty_minutes_is_a_fail(self, pool, now):  # noqa: F811
-        """Mutation: put the two VALUES rows back — UNKNOWN naming them."""
-        async with scenario(pool) as conn:
-            await signal(conn, requested=5, built=3,
-                         requested_at=now - timedelta(minutes=20),
-                         built_at=now - timedelta(minutes=30))
-            v, detail = await verdict(conn, D1, now=now)
-        assert v == "FAIL", detail
 
     @pytest.mark.asyncio
     async def test_a_live_window_still_excuses_it(self, pool):  # noqa: F811

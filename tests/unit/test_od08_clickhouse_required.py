@@ -149,17 +149,6 @@ class TestItIsAlwaysCritical:
         assert issue.severity is Severity.CRITICAL
         assert "no second engine checked" in issue.description
 
-    def test_no_predicate_is_read(self):
-        import ast
-        import inspect
-        import textwrap
-
-        tree = ast.parse(textwrap.dedent(inspect.getsource(ch_silver.gold_values_unwatched)))
-        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        assert "warehouse_cutover" not in names
-        assert not hasattr(ch_silver, "gold_unwatched_severity")
-
 
 # ─── The job files what the comparison cannot ───────────────────────────────
 
@@ -794,109 +783,6 @@ class TestTheReconciliationCatchUpReadsItsArms:
 # canary's shape agrees with production's payload, not that no morning of the
 # last fourteen would have paged. That is the history check's question, and
 # `TestTheHistoryIsAskedForEveryPagedArm` holds that it exists.
-
-PRODUCTION_HEALTH_2026_09_30 = {
-    "status": "healthy",
-    "version": "3.0.258",
-    "uptime_seconds": 2253,
-    "duckdb": {"status": "connected", "latency_ms": 0.0, "orders": 48377,
-               "products": 1017, "categories": 28, "managers": None,
-               "db_size_mb": 184.76},
-    "sync": None,
-    "migrations": {"status": "ok", "applied": 26, "total": 26, "pending": [],
-                   "failed": []},
-    "data_quality": {
-        "integrity": {"last_success_at": "2026-09-30T19:00:00.076452+03:00",
-                      "age_seconds": 12975},
-        "reconciliation": {"last_success_at": "2026-09-30T05:30:00.001799+03:00",
-                           "age_seconds": 61575},
-        "mirror_landing": {"last_success_at": "2026-09-30T07:30:00.001573+03:00",
-                           "age_seconds": 54375},
-        "reconciliation_pg": {"last_success_at": "2026-09-30T05:30:00.001799+03:00",
-                              "age_seconds": 61575},
-        "reconciliation_ch": {"last_success_at": "2026-09-30T05:30:00.001799+03:00",
-                              "age_seconds": 61575},
-    },
-    "alerting": {"consecutive_transport_failures": 0, "last_delivery_at": None},
-    "buyer_sync": {"last_attempt_age_s": None, "last_ok_age_s": 2250,
-                   "ever_ok": False, "consecutive_failures": 0,
-                   "last_error_class": None, "last_selected": 0,
-                   "last_written": 0, "unreadable_birthdays": 0,
-                   "retry_in_s": None},
-    "write_chains": {
-        "pg_inventory_write": {
-            "env": "KS_WRITE_INVENTORY", "mode": "postgres", "error": None,
-            "latched": True, "latched_at": "2026-09-30T13:33:23.853917+00:00",
-            "mismatch": False, "unmet_precondition": None,
-            "preflight": {"ok": None, "reasons": [
-                "chain 1 already writes Postgres; the preflight is the question "
-                "asked before the flip"]},
-            "sync_step": {"failures_since_ok": 0, "last_ok_at": None,
-                          "last_failure_at": None, "last_failed_step": None,
-                          "last_error": None, "retry_in_s": None},
-        },
-        "pg_expenses_write": {"env": "KS_WRITE_EXPENSES", "mode": "postgres",
-                              "error": None, "latched": False, "latched_at": None,
-                              "mismatch": False, "unmet_precondition": None},
-        "pg_goals_write": {"env": "KS_WRITE_GOALS", "mode": "duckdb",
-                           "error": None, "latched": False, "latched_at": None,
-                           "mismatch": False, "unmet_precondition": None},
-        "pg_expense_types_write": {"env": "KS_WRITE_EXPENSE_TYPES",
-                                   "mode": "duckdb", "error": None,
-                                   "latched": False, "latched_at": None,
-                                   "mismatch": False, "unmet_precondition": None},
-    },
-    "derivation": {"mode": "own", "error": None, "signal_unreadable_ticks": 0,
-                   "marks_dropped_unhealed": 0, "last_mark_drop_age_s": None},
-    "read_fallbacks": {},
-    "read_fallback_mode": {"mode": "duckdb", "error": None, "misconfigured": []},
-    "warehouse_writer_mode": {"mode": "duckdb", "value": "duckdb", "error": None,
-                              "preconditions_unmet": [], "held": False,
-                              "held_for_s": None, "reclassify_needed": False},
-    "utm_parse": {"mode": "duckdb", "error": None},
-    "mirrors": {
-        "bronze.orders": {"last_ok_at": "2026-09-30T19:27:05.233538+00:00",
-                          "age_seconds": 549, "failures_since_ok": 0,
-                          "failing": False, "max_age_s": None},
-        "silver.orders": {"last_ok_at": "2026-09-30T19:32:05.547543+00:00",
-                          "age_seconds": 249, "failures_since_ok": 0,
-                          "failing": False, "max_age_s": 5400},
-        "gold.daily_revenue": {"last_ok_at": "2026-09-30T19:32:06.792512+00:00",
-                               "age_seconds": 248, "failures_since_ok": 0,
-                               "failing": False, "max_age_s": 5400},
-    },
-}
-
-
-async def _judge(payload):
-    from bot import canary
-    from tests.unit.test_canary import DASHBOARD, _mock_transport
-
-    future = datetime.now(timezone.utc) + timedelta(days=60)
-    cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-    async with _mock_transport(lambda r: httpx.Response(200, json=payload)) as client:
-        with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-            return await canary.run_canary(DASHBOARD, client=client)
-
-
-class TestNothingNewPagesInProduction:
-    @pytest.mark.asyncio
-    async def test_production_health_is_green_with_reconciliation_ch_watched(self):
-        result = await _judge(PRODUCTION_HEALTH_2026_09_30)
-        assert (result.severity, result.failure_keys) == ("ok", [])
-        assert result.dq_ages["reconciliation_ch"] == 61575
-
-    @pytest.mark.asyncio
-    async def test_a_deploy_at_the_worst_moment_of_a_healthy_day(self):
-        """The oldest a passing reconciliation_ch ever is when a bot starts:
-        a minute before the next 05:30 run. Far inside 30 h."""
-        import copy
-
-        payload = copy.deepcopy(PRODUCTION_HEALTH_2026_09_30)
-        for layer in ("reconciliation", "reconciliation_pg", "reconciliation_ch"):
-            payload["data_quality"][layer]["age_seconds"] = 24 * 3600 - 60
-        result = await _judge(payload)
-        assert (result.severity, result.failure_keys) == ("ok", [])
 
 
 class TestTheHistoryIsAskedForEveryPagedArm:

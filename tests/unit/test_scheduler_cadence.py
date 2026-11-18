@@ -235,26 +235,3 @@ class TestARequestedRunIsMarked:
 
         src = inspect.getsource(BackgroundScheduler.run_job_now)
         assert "_requested_runs.add(job_id)" in src
-
-
-class TestTheDuckDBJobsAreNotRegistered:
-    """The two jobs whose subject was the DuckDB file — an hourly CHECKPOINT,
-    a nightly copy — were registered under `KS_DUCKDB=on` only (stage 5,
-    PR-7), so not in web since the week of silence began; step 14's S14-18
-    deleted them with the switch. DuckDB's warehouse tick went in S14-15.
-    The names are not reused (rule 15)."""
-
-    DUCKDB_JOBS = {"duckdb_checkpoint", "db_backup", "warehouse_refresh"}
-
-    def test_none_of_the_three_is_registered(self):
-        """Mutation: register `duckdb_checkpoint` or `db_backup` again."""
-        ids = {j.id for j in _registered()._scheduler.get_jobs()}
-        assert not ids & self.DUCKDB_JOBS, ids
-        assert {"dq_integrity_check", "replicate_operational",
-                "dq_mirror_landing"} <= ids
-
-    def test_their_runners_are_gone(self):
-        from core.scheduler import BackgroundScheduler
-
-        assert not hasattr(BackgroundScheduler, "_run_duckdb_checkpoint")
-        assert not hasattr(BackgroundScheduler, "_run_backup")

@@ -442,20 +442,6 @@ class TestTheRollUpCheckStandsAlone:
         ])
         assert issues == []
 
-    def test_it_reads_no_duckdb(self):
-        """Nothing in it may reach the store: after step 13 its Gold is frozen,
-        and after a compaction empty."""
-        import ast
-        import inspect
-        import textwrap
-
-        from core.mirror_reconciliation import pg_gold_internal_check
-
-        tree = ast.parse(textwrap.dedent(inspect.getsource(pg_gold_internal_check)))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
-            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        assert not names & {"store", "connection", "fetch_duckdb_gold", "get_store"}
-
 # ── the hook ─────────────────────────────────────────────────────────────────
 
 

@@ -25,7 +25,6 @@ What is held here, each with the mutation it must kill:
 from __future__ import annotations
 
 import ast
-import importlib
 import re
 from pathlib import Path
 
@@ -35,10 +34,6 @@ from core.rollback_lever import ROLLBACK_LEVER, ROLLBACK_RUNBOOK
 from tests.repo_tree import needs_checkout
 
 ROOT = Path(__file__).resolve().parents[2]
-
-DELETED_MODULES = ("core.chain_transfer", "core.lever_journal")
-DELETED_FILES = ("core/chain_transfer.py", "core/lever_journal.py",
-                 "scripts/chain_copy_back.py")
 
 # What a person may no longer be told to run. `handover` alone is a word the
 # soak uses for the flip's moment and stays; `--handover` is the script's flag.
@@ -90,11 +85,6 @@ NEGATION = re.compile(r"\b(?:nothing|never|no)\b", re.I)
 LINE_MAX = 150
 
 
-def _py_files(*tops):
-    for top in tops:
-        yield from sorted((ROOT / top).rglob("*.py"))
-
-
 def _docstring_nodes(tree) -> set:
     out = set()
     for node in ast.walk(tree):
@@ -124,62 +114,7 @@ def _says_handed_back(text: str) -> list:
             if not NEGATION.search(re.split(r"[.;:]", text[:m.start()])[-1])]
 
 
-def _uncommented(text: str, marker: str) -> str:
-    return "\n".join(line.split(marker, 1)[0] if line.lstrip().startswith(marker)
-                     else line for line in text.splitlines())
-
-
 # ─── gone, and nobody asks for it ────────────────────────────────────────────
-
-
-class TestTheWayBackIsGone:
-    @pytest.mark.parametrize("path", DELETED_FILES)
-    def test_the_file_is_gone(self, path):
-        assert not (ROOT / path).exists(), path
-
-    @pytest.mark.parametrize("module", DELETED_MODULES)
-    def test_the_module_cannot_be_imported(self, module):
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module(module)
-
-    def test_nothing_imports_them(self):
-        """Mutation: put `from core import chain_transfer` back anywhere,
-        lazily inside a function included."""
-        found = []
-        for path in _py_files("core", "web", "bot", "scripts", "deploy", "tests"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                names = []
-                if isinstance(node, ast.ImportFrom) and node.module:
-                    names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
-                elif isinstance(node, ast.Import):
-                    names = [a.name for a in node.names]
-                if any(n in DELETED_MODULES for n in names):
-                    found.append(f"{path.relative_to(ROOT)}:{node.lineno}")
-        assert not found, found
-
-    def test_the_names_that_existed_only_for_it_are_gone(self):
-        """`land_pending` was the copy-back's first write, `land_in_duckdb`
-        the `duckdb` gate's landing of a spool for it, the rest declarations
-        only the copy-back read. Mutation: leave one behind."""
-        from core import (
-            mirror_reconciliation, pg_catalogue_write, pg_managers_write,
-            pg_traffic_ledger_write, pg_weekly_ledger_write, report_ledger,
-        )
-
-        leftovers = [
-            (module.__name__, name) for module, name in (
-                (pg_weekly_ledger_write, "land_pending"),
-                (pg_traffic_ledger_write, "land_pending"),
-                (report_ledger, "land_in_duckdb"),
-                (pg_catalogue_write, "CHAIN_RELEASED_KEYS"),
-                (pg_managers_write, "CHAIN_COPY_BACK_OWES_FULL_REBUILD"),
-                (mirror_reconciliation, "MIRRORED_LANDING_TABLES"),
-                (mirror_reconciliation, "REPLICATED_TABLES"),
-                (mirror_reconciliation, "ORDERS_SPEC"),
-                (mirror_reconciliation, "ORDER_PRODUCTS_SPEC"),
-            ) if hasattr(module, name)]
-        assert not leftovers, leftovers
 
     # `test_a_spooled_week_still_counts_as_sent_without_the_landing` read the
     # gate's `duckdb` branch for its spool check after S14-04 took the
@@ -192,28 +127,6 @@ class TestTheWayBackIsGone:
 
 
 class TestNoTextNamesTheCopyBack:
-    def test_no_python_text_names_it(self):
-        """Every string `core/`, `web/`, `bot/`, `scripts/` and `deploy/` can
-        say — a page, a finding, a log line, a 409, a health description.
-        Docstrings may tell the history. Mutation: put back
-        "else scripts/chain_copy_back.py" in any lever."""
-        found = [f"{path.relative_to(ROOT)}:{line}: {text[:80]!r}"
-                 for path in _py_files("core", "web", "bot", "scripts", "deploy")
-                 for line, text in _texts(path) if GONE.search(text)]
-        assert not found, found
-
-    def test_no_soak_detail_or_note_names_it(self):
-        """The SQL's details and the shell's notes, comments aside. P2 reads
-        the lever journal's rows as history and names no script. Mutation:
-        put back "Restore the marker, else scripts/chain_copy_back.py X"."""
-        found = []
-        for path in sorted((ROOT / "deploy").rglob("*.sql")):
-            code = _uncommented(path.read_text(encoding="utf-8"), "--")
-            found += [f"{path.name}: {m.group(0)}" for m in GONE.finditer(code)]
-        for path in sorted((ROOT / "deploy").rglob("*.sh")):
-            code = _uncommented(path.read_text(encoding="utf-8"), "#")
-            found += [f"{path.name}: {m.group(0)}" for m in GONE.finditer(code)]
-        assert not found, found
 
     def test_the_guard_sees_what_it_forbids(self, tmp_path):
         """A lever split over two literals is one string to the parser, and
@@ -225,25 +138,6 @@ class TestNoTextNamesTheCopyBack:
         assert [t for _, t in _texts(path) if GONE.search(t)] == [
             "Restore the marker, else scripts/chain_copy_back.py orders"]
         assert GONE.search("--handover") and not GONE.search("since the handover")
-
-    def test_no_lever_says_a_chain_is_handed_back(self):
-        """Every `clears` in the alert registry, every canary action and
-        title, every REMEDIATION line: none says a chain is copied or handed
-        back to DuckDB, which nothing in this build does — unless it says
-        that nothing does. Mutation: put back "web restarts with the named
-        write chains copied back to DuckDB" as `warehouse_way_back_refused`'s
-        `clears`."""
-        from bot import canary
-        from core.alerting import REGISTRY
-        from core.data_quality import REMEDIATION
-
-        texts = ([(f"clears:{k}", v.clears) for k, v in REGISTRY.items()]
-                 + [(f"canary:{k}", a) for k, a in canary._ACTIONS]
-                 + [(f"title:{k}", a) for k, a in canary._CRITICAL_TITLES]
-                 + [(f"remediation:{k}", a) for k, a in REMEDIATION])
-        found = [(where, _says_handed_back(text)) for where, text in texts
-                 if _says_handed_back(text or "")]
-        assert not found, found
 
     @pytest.mark.parametrize("text,said", [
         # The texts the S14-04 review found, as they stood.

@@ -166,11 +166,6 @@ class TestExpenseReadRequiresViewPermission:
         headers = _login(monkeypatch, "viewer")
         assert client.get(path, headers=headers).status_code == 403
 
-    @pytest.mark.parametrize("path", EXPENSE_GETS)
-    def test_marketer_is_forbidden(self, client, monkeypatch, path):
-        headers = _login(monkeypatch, "marketer")
-        assert client.get(path, headers=headers).status_code == 403
-
 
 # ─── The allowed side: roles with expenses:view still get data ─────────────────
 

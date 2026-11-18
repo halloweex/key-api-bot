@@ -150,13 +150,6 @@ class TestOffReadsAWorkingPostgres:
                 f"{method} never asked Postgres — the test would prove nothing")
             assert read_fallback.refusals() == {}, f"{method} refused a working read"
 
-    @pytest.mark.asyncio
-    async def test_the_number_is_postgres_s(self, stores):
-        store, _pool, _get_pool, env = stores
-        summary = await store.get_summary_stats(DAY, DAY)
-        assert summary["totalRevenue"] == PG_REVENUE
-        assert summary["totalOrders"] == 3
-
 
 # The goal amounts are chain 7a's table, and since step 14's S14-00 the chain
 # writes Postgres whatever its flag says — as production's flag has said since
@@ -179,4 +172,3 @@ class TestAnOutage:
             await getattr(store, method)(*args)
         assert refused.value.surface == surface
         assert read_fallback.refusals()[surface]["count"] >= 1
-

@@ -90,14 +90,6 @@ class TestWhatMovedFromTheScan:
         assert {name: hashlib.sha256(getattr(twins, name).encode()).hexdigest()
                 for name in ['_ATTRIBUTION_SQL', '_HEADERS_SQL', '_JOURNAL_SQL', '_LINE_ITEMS_SQL', '_MISSING_SQL', '_ORPHAN_ITEMS_SQL', '_ORPHAN_SQL', '_STATUS_GROUP_SQL', '_WATERMARK_SQL', '_WITHOUT_ITEMS_SQL']} == {'_WATERMARK_SQL': 'cd8f2d71adf21772800f97b245d093cfdf6d2328f1ead06877cd1c765f7a5127', '_MISSING_SQL': '862849ffecc029a736957b1c2913721254f6204b0b6bb31c3a160b590a5c525b', '_ORPHAN_SQL': '81219f8e958028c273e112c29731a9e484ab71ed43e3a409ffde276ac6fdee1f', '_ATTRIBUTION_SQL': '7deeead8c05b11452b806a1334b23c176649fc894c5a42a419555c97f06d2797', '_LINE_ITEMS_SQL': 'db37046a8bdff79e345f4aef85671007096552d673f4c1a94eb02ddae60c5beb', '_WITHOUT_ITEMS_SQL': '7802387b06c77df69f8c042e9b05d759991c41fcd04fa8783dd5f54e47df3a56', '_ORPHAN_ITEMS_SQL': 'ece2ec904b132fa6f9c2964afa2ea94fc1a316dd9425a03d21c326a77484a26e', '_HEADERS_SQL': '4d305a09201bcfc59d37a7757eeb1d70e96879dda250f352cb8f8924fb24de4c', '_STATUS_GROUP_SQL': 'efb9bb6e39f528b49ca20f4b3f2894c764ef2cd840b5c771cf8061ff92080091', '_JOURNAL_SQL': 'a015f77b56b73bad9248f1a4077b5575f15b8bbc1b22bafc6d2218765b2f182b'}
 
-    def test_nothing_is_left_behind_in_the_scan(self):
-        from core import data_quality as dq
-
-        for name in ("KNOWN_STATUS_IDS", "KNOWN_SOURCE_IDS", "_SILVER_ROW_COLUMNS",
-                     "_silver_row_differs", "_attribution_coverage_check",
-                     "_orders_without_line_items_check"):
-            assert not hasattr(dq, name), name
-
 
 class TestTheWindows:
     def test_default_floor(self, monkeypatch):
@@ -517,38 +509,6 @@ class TestResolveOnlyAPrefix:
         assert set(gate._delivered) == {"silver_missing_rows"}
 
 
-class TestTheJobWiring:
-    def _tree(self):
-        from core.scheduler import BackgroundScheduler
-
-        return ast.parse(textwrap.dedent(inspect.getsource(BackgroundScheduler._run_dq_integrity)))
-
-    def test_facts_are_read_on_every_run(self):
-        """No flag since step 14's S14-14: `read_facts` is called outside any
-        `if`, and its findings are judged with no DuckDB scan beside them."""
-        tree = self._tree()
-        conditional = {id(m) for n in ast.walk(tree) if isinstance(n, ast.If)
-                       for m in ast.walk(n)}
-        reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
-                 and n.attr == "read_facts"]
-        assert reads and not {id(n) for n in reads} & conditional
-        judged = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                  and isinstance(n.func, ast.Attribute) and n.func.attr == "check_pg_warehouse"]
-        (call,) = judged
-        assert {k.arg for k in call.keywords} == {"held_out"}
-
-    def test_the_twins_conditions_reach_the_resolution(self):
-        calls = [n for n in ast.walk(self._tree()) if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Attribute) and n.func.attr == "_resolve_dq_layer"]
-        assert calls
-        assert "pg_unverified" in ast.unparse(calls[0])
-
-    def test_a_postgres_critical_pages_when_the_duckdb_half_failed(self):
-        ifs = [n for n in ast.walk(self._tree()) if isinstance(n, ast.If)
-               and "Severity.CRITICAL" in ast.unparse(n.test)]
-        assert any("pg_critical" in ast.unparse(n.test) for n in ifs)
-
-
 class TestKyivsToday:
     def test_today_is_computed_in_kyiv_never_current_date(self):
         """Structural on purpose: a two-engine test of the date passes whenever
@@ -834,49 +794,3 @@ class TestTheLandingLevers:
         # Its own line: the lever names the copy it read.
         (pg,) = remediation_for(["pg_fk_orphan_order_products_order_id"])
         assert "bronze.orders" in pg
-
-
-class TestTheJobFilesTheTwins:
-    """The integrity job end to end, the twins' facts handed in: they file on
-    their own, with no DuckDB scan beside them since step 14's S14-14 (until
-    then the scan stood the Silver checks down and the twins stood in). The
-    run it journals goes through chain 9's door into a list
-    (`tests/journal_fake.py`) — a DuckDB journal until step 14's S14-10."""
-
-    LI = LineItems(5, 500.0, (1,), 7, 700.0, (2,))
-
-    @pytest.fixture
-    def job(self, tmp_path, monkeypatch):
-        from unittest.mock import AsyncMock, patch
-
-        from core.store import AnalyticsStore
-        from core.scheduler import BackgroundScheduler
-
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
-            monkeypatch.delenv(env, raising=False)
-        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
-        from tests.journal_fake import install_journal
-
-        journal = install_journal(monkeypatch)
-        store = AnalyticsStore()
-        scheduler = BackgroundScheduler()
-        monkeypatch.setattr(scheduler, "_send_dq_alert_throttled",
-                            AsyncMock(return_value=True))
-        facts = _facts(line_items=self.LI)
-        with patch("core.store.get_store", new=AsyncMock(return_value=store)), \
-             patch("core.alerting.resolve_group", AsyncMock(return_value=0)), \
-             patch.object(twins, "read_facts", AsyncMock(return_value=facts)):
-            yield scheduler, journal
-
-    def _run(self, scheduler, journal):
-        import asyncio
-
-        result = asyncio.run(scheduler._run_dq_integrity())
-        return {r["check_name"]: r for r in journal.issues(result["run_id"])}
-
-    def test_the_twins_file_on_their_own(self, job):
-        persisted = self._run(*job)
-        assert persisted["pg_headline_vs_line_items"]["count"] == 5
-        assert persisted["pg_goods_shipped_without_sale"]["count"] == 7
-        assert "integrity_check_raised" not in persisted
-        assert "pg_twin_pairing" not in persisted
