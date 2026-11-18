@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.353
+
+- fix(forecast): the Black Friday line counts the days still ahead
+- feat(forecast): the month badge says its 80% range and a Black Friday line
+
+
 ## 3.0.352
 
 - forecast: train the revenue LightGBM with the fixed procedure
