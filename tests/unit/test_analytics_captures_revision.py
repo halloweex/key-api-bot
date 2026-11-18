@@ -40,15 +40,16 @@ def _up():
 
 
 class TestTheRevision:
-    def test_it_follows_0035_and_is_the_head_the_code_requires(self):
-        """Kills: 0036 hung off anything but the batch-E lock, or the pin left
-        at 0035 — web would refuse a database at 0036."""
+    def test_it_follows_0035_and_is_in_the_chain_the_code_requires(self):
+        """Kills: 0036 hung off anything but the batch-E lock, or dropped from
+        the line the code requires. It was the head until 0037 (the frozen
+        month goals) descended from it; `test_pg_plumbing` owns the head pin."""
         from core import pg
 
         rev = _module()
         assert rev.revision == REV_ID
         assert rev.down_revision == "0035_batch_e_chains"
-        assert pg.REQUIRED_REVISION == REV_ID
+        assert REV_ID in [m.revision for m in replay.lineage(pg.REQUIRED_REVISION)]
 
     def test_it_creates_exactly_the_eleven_tables_and_two_indexes(self):
         """Kills: a table left out or added, or one created outside `app`."""

@@ -911,6 +911,34 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: freeze the month's automatic goal (daily 00:30 Kyiv, and a few
+        # minutes after a start), revision 0037.
+        #
+        # The smart goal moved inside its month as its ML term drifted toward
+        # the actual (a median 4-6 %, ₴0.5M in July 2026), so the owner froze
+        # it on the 1st (2026-11-18). This keeps the month's answer for every
+        # sales type once, and `/goals/smart` reads it (`core/goal_freeze.py`).
+        # Daily so a 1st the process missed is frozen on the next day it runs;
+        # on every other day a run is one SELECT and stops. It has earned
+        # `first_run_delay_s`: idempotent and that cheap, and the start is
+        # what freezes the month in progress on the day this ships and on the
+        # day a 1st spent down comes back. Never before 00:30 on the 1st,
+        # which the module enforces: a start at 00:05 leaves it to 00:30. No
+        # heavy lock: it reads Postgres and writes one small table.
+        from core.goal_freeze import FIRST_RUN_DELAY_S as GOAL_FREEZE_DELAY_S
+        from core.goal_freeze import FREEZE_AT as GOAL_FREEZE_AT
+
+        self._add_job(
+            job_id="month_goal_freeze",
+            name="Month goal freeze",
+            description="Freeze this month's automatic goal for every sales type, once",
+            func=self._run_month_goal_freeze,
+            trigger=CronTrigger(hour=GOAL_FREEZE_AT.hour, minute=GOAL_FREEZE_AT.minute),
+            max_instances=1,
+            coalesce=True,
+            first_run_delay_s=GOAL_FREEZE_DELAY_S,
+        )
+
         # Job: Memory monitor (every 30 minutes)
         # Reads cgroup memory stats and alerts admin via Telegram
         # when usage crosses warning/critical thresholds
@@ -1195,6 +1223,29 @@ class BackgroundScheduler:
 
         with correlation_context():
             return await run_capture()
+
+    async def _run_month_goal_freeze(self) -> Dict[str, Any]:
+        """Freeze the Kyiv month's automatic goal, once per sales type
+        (revision 0037, `core/goal_freeze.py`).
+
+        A refused read — `generate_smart_goals` reads through `/goals`'
+        router — defers the whole month with nothing written (DN-20c): the
+        month is read live until a run freezes it, and tomorrow's run, or
+        the next start, asks again. Any other failure raises into the job's
+        history, with nothing written either.
+        """
+        with correlation_context():
+            from core import goal_freeze, read_fallback
+            from core.store import get_store
+
+            store = await get_store()
+            try:
+                return await goal_freeze.freeze_month(store)
+            except read_fallback.ReadUnavailable as exc:
+                return {"skipped": True, **read_fallback.answered(
+                    "month_goal_freeze", exc,
+                    "nothing frozen; the month's goal is computed live "
+                    "until a run freezes it")}
 
     async def _run_manager_stats(self) -> Dict[str, Any]:
         """Run manager stats update job."""

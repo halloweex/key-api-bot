@@ -79,7 +79,14 @@ VERSION_TABLE = "alembic_version"
 # `alembic downgrade 0035_batch_e_chains` with the 0036 migrate image first.
 # That downgrade moves the stamp and nothing else; the tables and their rows
 # stay, and the next `upgrade head` is a no-op.
-REQUIRED_REVISION = "0036_analytics_captures"
+#
+# 0037 is the month's automatic goal, frozen on the 1st (the owner's decision
+# of 2026-11-18): one table, `app.frozen_month_goals`. Its downgrade is the
+# same stamp-only step — `alembic downgrade 0036_analytics_captures` with the
+# 0037 migrate image, before the retag — for an image at 0036, and the same
+# `downgrade 0035_batch_e_chains` as before for one at 0035; the frozen goals
+# stay, and an older image computes every goal live while it runs.
+REQUIRED_REVISION = "0037_frozen_month_goals"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()

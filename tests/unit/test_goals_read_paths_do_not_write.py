@@ -72,9 +72,10 @@ REPO = Path(__file__).resolve().parents[2]
 KYIV = ZoneInfo("Europe/Kyiv")
 DSN = os.getenv("KS_PG_DSN")
 
-# Every table a goal computation stores, or a goal read reads back.
+# Every table a goal computation stores, or a goal read reads back — the
+# frozen month goals (revision 0037) among them, which only the job writes.
 GOAL_TABLES = ("app.seasonal_indices", "app.growth_metrics", "app.weekly_patterns",
-               "app.revenue_predictions", "app.revenue_goals")
+               "app.revenue_predictions", "app.revenue_goals", "app.frozen_month_goals")
 
 
 class _ConnectPerAcquire:
@@ -172,9 +173,10 @@ def _switched_on(endpoint) -> dict:
 # ─── The sweep ────────────────────────────────────────────────────────────
 
 def _writers_recorded(monkeypatch) -> list:
-    """Chain 7b-3's two Postgres writers, and chain 7a's, replaced by
-    recorders that raise: a GET that reached one is named."""
-    from core import pg_forecast_write, pg_goals_write
+    """Chain 7b-3's two Postgres writers, chain 7a's, and the month goal
+    freeze's (revision 0037), replaced by recorders that raise: a GET that
+    reached one is named. A month a GET reads unfrozen stays unfrozen."""
+    from core import goal_freeze, pg_forecast_write, pg_goals_write
 
     reached = []
 
@@ -186,7 +188,9 @@ def _writers_recorded(monkeypatch) -> list:
 
     for module, name in ((pg_forecast_write, "persist_goal_tables"),
                          (pg_forecast_write, "store_predictions"),
-                         (pg_goals_write, "set_goal")):
+                         (pg_goals_write, "set_goal"),
+                         (goal_freeze, "freeze_month"),
+                         (goal_freeze, "_keep")):
         monkeypatch.setattr(module, name, recorder(f"{module.__name__}.{name}"))
     return reached
 
