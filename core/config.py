@@ -109,6 +109,7 @@ class SourceConfig:
         3: "Opencart",
         4: "Shopify",
         5: "Виставка",
+        7: "Офлайн-магазин",
     })
 
     def get_name(self, source_id: int, default: str = "Unknown") -> str:

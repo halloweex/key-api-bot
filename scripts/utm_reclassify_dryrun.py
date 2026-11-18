@@ -400,8 +400,9 @@ def fallback_verdict(source_id: Optional[int]) -> Tuple[str, str]:
     `_PLATFORM_EXPR` with the row's two columns NULL. A test evaluates those
     two SQL expressions and holds this to them.
     """
-    platform = {1: "instagram", 2: "telegram"}.get(source_id, "unattributed")
-    traffic_type = "organic" if source_id in (1, 2) else "unknown"
+    named = {1: "instagram", 2: "telegram", 7: "offline_store"}
+    platform = "unattributed" if source_id is None else named.get(source_id, "unattributed")
+    traffic_type = "organic" if source_id in (1, 2, 7) else "unknown"
     return traffic_type, platform
 
 

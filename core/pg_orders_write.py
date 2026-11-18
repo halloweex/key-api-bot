@@ -422,7 +422,7 @@ def _row_refusal(row, ints, not_null, text, money, *, bounds=None) -> Optional[s
 
 def _discount_refusal(row, numerics: Mapping[str, Tuple[int, int]]) -> Optional[str]:
     """Why Postgres would refuse one of the row's discount columns (revision
-    0037), or None. The parse already lands what its column cannot hold as
+    0038), or None. The parse already lands what its column cannot hold as
     NULL (`landing_rows._discount`), so from a KeyCRM payload this never
     fires; it is here so that this module's answer to "would Postgres refuse
     the row" stays complete for a row built any other way."""
@@ -1081,9 +1081,9 @@ async def restore_manager_comments(comments: Mapping[int, str]) -> List[int]:
     return [int(r[0]) for r in rows]
 
 
-# ─── The discount backfill (revision 0037) ───────────────────────────────────
+# ─── The discount backfill (revision 0038) ───────────────────────────────────
 #
-# Revision 0037 lands KeyCRM's discount figures with every order the sync
+# Revision 0038 lands KeyCRM's discount figures with every order the sync
 # writes from then on. The ~50 000 orders written before it hold NULL there,
 # and KeyCRM's list is the only place their figures are: one walk of it,
 # 50 orders a page, lands them (`scripts/backfill_discounts.py`).
@@ -1099,7 +1099,7 @@ async def restore_manager_comments(comments: Mapping[int, str]) -> List[int]:
 # stored lines are KeyCRM's lines (`LINE_DISCOUNT_COLUMNS`, below). Through
 # `pg_landing._write_order_rows`, the one writer of the order tables, as
 # `kind='backfill'`; `app.order_versions` compares none of these columns, so
-# no version is written (revision 0037's docstring).
+# no version is written (revision 0038's docstring).
 #
 # SAFE BESIDE THE RUNNING SYNC, WITHOUT THE HEAVY-JOB LOCK
 #

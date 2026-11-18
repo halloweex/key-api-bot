@@ -30,8 +30,8 @@ from typing import TYPE_CHECKING, Dict
 
 from core import duckdb_constants
 from core.duckdb_constants import (
-    B2B_MANAGER_ID, EXHIBITION_SOURCE_ID, RETAIL_MANAGER_IDS, REVENUE_SOURCE_IDS,
-    not_own_entity,
+    B2B_MANAGER_ID, EXHIBITION_SOURCE_ID, OFFLINE_STORE_SOURCE_ID,
+    RETAIL_MANAGER_IDS, REVENUE_SOURCE_IDS, not_own_entity,
 )
 from core.models import LOST_STATUS_GROUP_ID, OrderStatus
 
@@ -60,6 +60,14 @@ def silver_sales_type_case(dialect: "Dialect") -> str:
     retail manager, so a manager-based rule would quietly pull a one-off
     channel into the retail trend it would distort.
 
+    The offline store's branch is second, for the same reason turned round
+    (the owner's decision of 2026-11-15: retail, but offline, and a category
+    of its own). Its seller is not on the retail list, so the manager rule
+    would make the store `internal`, admin-only; on the list, the store would
+    move the online retail trend. Source first, so a new seller there never
+    changes where the store's sales land. Both branches name a source, so
+    their order between themselves decides nothing.
+
     **Retail is resolved as of the order's own date**, from
     `manager_classifications`, not from the manager's classification today.
     Reclassifying somebody used to rewrite their whole history on the next
@@ -74,6 +82,7 @@ def silver_sales_type_case(dialect: "Dialect") -> str:
     order_date = dialect.kyiv_date("o.ordered_at")
     return f"""CASE
             WHEN o.source_id = {EXHIBITION_SOURCE_ID} THEN 'exhibition'
+            WHEN o.source_id = {OFFLINE_STORE_SOURCE_ID} THEN 'offline'
             WHEN o.manager_id IS NULL THEN 'retail'
             WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
             WHEN EXISTS (
@@ -136,6 +145,7 @@ def silver_select_sql(dialect: "Dialect") -> str:
                 WHEN 2 THEN 'Telegram'
                 WHEN 4 THEN 'Shopify'
                 WHEN {EXHIBITION_SOURCE_ID} THEN 'Виставка'
+                WHEN {OFFLINE_STORE_SOURCE_ID} THEN 'Офлайн-магазин'
                 ELSE 'Other'
             END AS source_name,
             FALSE AS is_new_customer,

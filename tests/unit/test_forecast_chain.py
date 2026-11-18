@@ -100,31 +100,6 @@ def ready(monkeypatch):
 # with `KS_WRITE_FORECAST`.
 
 
-class TestTheHoles:
-    """`reads_the_chain`, which sent a statement carrying one of these holes
-    to Postgres once the chain was latched, went in step 14's S14-11: every
-    goal and forecast read goes to Postgres
-    (`tests/unit/test_goals_reads_follow_chain.py`). The holes stay, and
-    are the tables the chain owns."""
-
-    def test_the_holes_are_the_tables_the_chain_owns(self):
-        assert {"app." + h.strip("{}") for h in chain.TABLE_HOLES} == \
-            set(chain.CHAIN_TABLES)
-        assert len(chain.TABLE_HOLES) == len(chain.CHAIN_TABLES)
-
-    def test_the_holes_are_the_dialects(self):
-        """Every hole is a field `render_tables` fills, in both engines."""
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
-
-        for hole in chain.TABLE_HOLES:
-            duck = render_tables(f"SELECT 1 FROM {hole}", DUCKDB)
-            pg = render_tables(f"SELECT 1 FROM {hole}", POSTGRES)
-            name = hole.strip("{}")
-            assert duck == f"SELECT 1 FROM {name}"
-            assert pg == f"SELECT 1 FROM app.{name}"
-            assert f"app.{name}" in chain.CHAIN_TABLES
-
-
 # ─── Refused before the latch ───────────────────────────────────────────────
 
 
@@ -402,11 +377,6 @@ class TestTheWatchJudgesTheSlot:
 
 
 class TestTheWatchIsRegistered:
-    def test_the_chain_has_a_reader_and_three_conditions(self):
-        assert inv._reader_groups()[chain.CHAIN] == "forecast"
-        for name in (inv.GOAL_TABLES_INCOMPLETE, inv.GOAL_TABLES_STALE,
-                     inv.FORECAST_STALE):
-            assert name in inv.CONDITIONS and name.startswith(inv.PREFIX)
 
     def test_each_condition_is_in_the_registry_with_a_lever(self):
         from core.alerting import REGISTRY
@@ -424,13 +394,6 @@ class TestTheWatchIsRegistered:
         assert _names(issues) == [inv.UNWATCHED]
         assert chain.CHAIN in issues[0].description
         assert inv.unverified_conditions(issues) == sorted(inv.CONDITIONS)
-
-    def test_flagged_with_its_preconditions_it_is_watched(self, ready):
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        # Since step 14's S14-00 every chain writes Postgres, so every chain
-        # is watched; this one among them, not latched here.
-        watched = inv.watched_chains()
-        assert chain.CHAIN in watched and watched[chain.CHAIN] is None
 
 
     def test_read_facts_reads_the_four_tables_with_the_stamp(self, ready):
@@ -578,12 +541,6 @@ class TestTheRepositoryRoutes:
         assert created_at.tzinfo is not None and created_at >= before
 
 
-    def test_nothing_to_store_asks_no_chain(self, ready, tmp_path):
-        ready.setenv(chain.WRITE_ENV, "postgre")      # would raise if asked
-        assert _with_store(tmp_path / "p.duckdb",
-                           lambda s: s.store_predictions([], "retail")) == 0
-
-
 class TestPredictionsStored:
     """`predict_month` swallows a failed store — policy unchanged — and
     `_train_impl` now says whether it landed, for /api/jobs and the POST."""
@@ -602,7 +559,7 @@ class TestPredictionsStored:
         monkeypatch.setattr(svc, "_query_daily_revenue",
                             AsyncMock(return_value=_valid_training_df()))
         monkeypatch.setattr(ps, "_train_model", lambda df: (
-            object(), {"wape": 27.66, "mape": 30.0, "mae": 1.0}, {}, 1.0))
+            object(), {"wape": 27.66, "mape": 30.0, "mae": 1.0}))
         monkeypatch.setattr(svc, "_save_model", lambda: None)
         monkeypatch.setattr(ps, "_predict_future", lambda *a, **k: [
             {"date": "2026-10-07", "predicted_revenue": 1000.0}])

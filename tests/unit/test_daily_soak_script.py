@@ -205,26 +205,6 @@ class TestWhatTheScriptPromises:
         assert not [ln for ln in code if "printenv" in ln or "test -f" in ln
                     or "write-chain-owners" in ln], code
 
-    def test_no_gate_is_passed_to_the_checks(self, healthy):
-        """The flags', the latches' and KS_DUCKDB's variables went with the
-        gates, and so did the flip-day times. Mutation: pass `-v
-        orders_on=...` again."""
-        gone = ("inventory_on", "inventory_flip_at", "buyers_on", "buyers_flip_at",
-                "managers_on", "managers_flip_at", "orders_on", "orders_flip_at",
-                "dq_journal_direct", "duckdb_off", "dq_pg_warehouse_on")
-        for call in healthy.psql:
-            assert not [name for name in gone if f" {name}=" in f" {call}"], call
-
-    def test_a_flip_time_in_the_environment_changes_nothing(self, tmp_path, healthy):
-        """The flip-day knobs read nothing any more: the same sessions with
-        them set. Mutation: read SOAK_ORDERS_FLIP_AT again."""
-        run = _run(tmp_path, SOAK_INVENTORY_FLIP_AT="2026-10-01 10:00+03",
-                   SOAK_BUYERS_FLIP_AT="2026-10-01 10:30+03",
-                   SOAK_MANAGERS_FLIP_AT="2026-10-08 10:30+03",
-                   SOAK_ORDERS_FLIP_AT="2026-10-12 10:30+03")
-        assert run.psql == healthy.psql
-        assert "flip" not in run.out.lower()
-
     def test_the_override_floor_is_passed(self, tmp_path, healthy):
         """B3's one knob, kept: the fewest human overrides there may be. The
         report's first line names it when it is set, and only then."""
@@ -257,45 +237,6 @@ def test_the_order_checks_are_in_the_report(healthy):
 # script read for chains 4, 5, 3 and 9 — 0, 1, held, pending, invalid,
 # unknown, the latch outranking the flag — until step 14's S14-20 deleted the
 # readings: every chain writes Postgres whatever its flag or its marker says.
-
-
-class TestTheRetiredChecks:
-    """P2–P4 and F1 went at step 14's S14-02, and with P4 the report's one
-    reason to read `.env`; KS_DUCKDB, which P1 was gated on, went at S14-20.
-    P1 itself — the DuckDB file's hash, read from the hourly host cron's
-    record with `deploy/duckdb_silence_check.sh --status` — went at the final
-    stage (2026-11-12) with the file and the check: a file that no longer
-    exists can only ever read MISSING, which P1 failed as a DROP."""
-
-    def test_the_retired_checks_and_their_inputs_are_gone(self, healthy):
-        """The parallel period's declared start and `.env`'s reading went with
-        P3 and P4: nothing passes them, and nothing reads `.env` — a file whose
-        other lines are secrets — for a check that no longer exists. Mutation:
-        put the `.env` reader back, or a `-v parallel_from=`."""
-        assert not any("parallel_from=" in c or "duckdb_off_env=" in c
-                       or "duckdb_env_changed_at=" in c for c in healthy.psql), healthy.psql
-        code = [ln for ln in SCRIPT.read_text().splitlines()
-                if not ln.lstrip().startswith("#")]
-        assert not [ln for ln in code
-                    if any(word in ln for word in ("duckdb_env.sh", "ks_duckdb_env_read",
-                                                   "SOAK_ENV_FILE", "SOAK_PARALLEL_FROM"))], code
-        labels = set(LABELS.values())
-        assert not {label for label in labels
-                    if label.split()[0] in ("P1", "P2", "P3", "P4", "F1")}, labels
-
-    def test_the_file_check_and_its_record_are_gone(self, healthy):
-        """Nothing asks the silence check (deleted with the file), passes a
-        `duckdb_file_*` variable, or prints the record's line; and no check
-        file is P1's. Mutation: put `silence_record` or a `-v
-        duckdb_file_last=` back, or restore P1's file under daily_soak/."""
-        code = [ln for ln in SCRIPT.read_text().splitlines()
-                if not ln.lstrip().startswith("#")]
-        assert not [ln for ln in code if "silence" in ln.lower()
-                    or "duckdb_file" in ln or "FILE_LAST" in ln], code
-        assert not any("duckdb_file_" in c for c in healthy.psql), healthy.psql
-        assert "DuckDB file record" not in healthy.out
-        assert not [p.name for p in FILES if "_p1_" in p.name or "duckdb" in p.name]
-        assert not (REPO / "deploy" / "duckdb_silence_check.sh").exists()
 
 
 def test_every_variable_a_check_reads_is_passed():

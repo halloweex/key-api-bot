@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import type { ReportSourceRow } from '../types/api'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import { DataTable, Tr, Th, Td } from './DataTable'
+import { sourceName } from '../utils/sources'
 
 export const SourceTable = memo(function SourceTable({ sources }: { sources: ReportSourceRow[] }) {
   const { t } = useTranslation()
@@ -27,7 +28,7 @@ export const SourceTable = memo(function SourceTable({ sources }: { sources: Rep
       <tbody>
         {sources.map((s) => (
           <Tr key={s.source_id}>
-            <Td bold>{s.source_name}</Td>
+            <Td bold>{sourceName(s.source_id, s.source_name, t)}</Td>
             <Td align="right" tabular>{formatNumber(s.orders_count)}</Td>
             <Td align="right" tabular hideBelow="sm">{formatNumber(s.products_sold)}</Td>
             <Td align="right" tabular bold>{formatCurrency(s.revenue)}</Td>

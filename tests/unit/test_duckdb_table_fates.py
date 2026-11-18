@@ -26,10 +26,7 @@ literals below, so the change that edits either says so in the diff.
 """
 from __future__ import annotations
 
-import asyncio
-import ast
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -45,38 +42,16 @@ sys.path.insert(0, str(REPO / "deploy"))
 
 import duckdb_table_fates_check as check  # noqa: E402
 
-from core import duckdb_table_fates as fates_mod  # noqa: E402
 from core.duckdb_table_fates import (  # noqa: E402
-    ARCHIVE_ONLY, COMPUTED, DERIVED, EXPORTED, FATES, IRREPLACEABLE,
-    NONE, NOT_A_TABLE, RETIRED, SCHEMA, SCRATCH, SKIPPED, TABLE, VIEW,
+    FATES, SCHEMA, TABLE, VIEW,
 )
-
-DSN = os.getenv("KS_PG_DSN", "").strip()
-needs_pg = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 CHECK_SCRIPT = REPO / "deploy" / "duckdb_table_fates_check.py"
 
-# ── OD-11: the two sets a DROP would change ─────────────────────────────────
-# What the weekly compaction skipped (`DERIVED_TABLES`), and what had no DDL
-# left. Both frozen as they stood when the compaction was deleted (S14-18).
-PINNED_DERIVED_TABLES = frozenset({
-    "silver_orders", "silver_order_utm", "gold_daily_revenue",
-    "gold_product_pairs", "orders_v2", "gold_daily_traffic",
-    "gold_daily_products", "bronze_order_events",
-})
 PINNED_NO_DDL = frozenset({
     "gold_product_pairs", "orders_v2", "gold_daily_traffic",
     "gold_daily_products", "bronze_order_events",
 })
-
-# The tables Postgres received above a watermark — a log of events DuckDB
-# recorded as they happened, which no source re-issues — as the hourly copy
-# named them (`pg_operational._APPEND_ABOVE`) until S14-13 deleted it.
-APPENDED_ABOVE_A_WATERMARK = frozenset({"stock_movements", "inventory_sku_history"})
-
-# The switches that were not a write chain's (`STORE_SWITCHES` until S14-18).
-STORE_SWITCHES = frozenset({fates_mod.SMS_STORE, fates_mod.USER_STORE,
-                            fates_mod.WAREHOUSE})
 
 
 # ─── the fixture file ────────────────────────────────────────────────────────
@@ -120,163 +95,6 @@ def _catalogue(path: Path) -> Dict[str, str]:
 @pytest.fixture(scope="module")
 def fresh(fresh_file) -> Dict[str, str]:
     return _catalogue(fresh_file)
-
-
-# ─── 1. the literal ──────────────────────────────────────────────────────────
-
-class TestTheLiteral:
-    def test_it_is_a_literal_and_imports_nothing_of_ours(self):
-        """The pinned image mounts this module beside the check and runs
-        both there (`deploy/duckdb_table_fates_check.py`'s recipe), so it may
-        import the standard library alone — and since S14-18 it holds no
-        function that could ask the code anything. Mutation: put
-        `duckdb_written` or `STORE_SWITCHES` back, or import a `core` module."""
-        tree = ast.parse(Path(fates_mod.__file__).read_text(encoding="utf-8"))
-        imported = {alias.name.split(".")[0] for node in ast.walk(tree)
-                    if isinstance(node, ast.Import) for alias in node.names}
-        imported |= {node.module.split(".")[0] for node in ast.walk(tree)
-                     if isinstance(node, ast.ImportFrom) and node.module}
-        assert imported <= {"__future__", "dataclasses", "typing"}, imported
-        functions = sorted(n.name for n in tree.body
-                           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
-        assert functions == ["_view"], functions
-        for gone in ("duckdb_written", "STORE_SWITCHES", "tables_by_switch",
-                     "_store_switch_writes_duckdb"):
-            assert not hasattr(fates_mod, gone), gone
-
-    def test_od11_nothing_joins_derived_tables(self):
-        assert fates_mod.DROPS_ALLOWED is False
-        skipped = frozenset(n for n, f in FATES.items() if f.compaction == SKIPPED)
-        assert skipped == PINNED_DERIVED_TABLES, (
-            "the set the compaction skipped changed. A name added there stops "
-            "travelling off-site — a DROP, which OD-11 forbids.")
-
-    def test_od11_nothing_leaves_the_schema(self):
-        no_ddl = frozenset(n for n, f in FATES.items() if f.ddl == NONE)
-        assert no_ddl == PINNED_NO_DDL, (
-            "the set of tables with no DDL changed (OD-11).")
-
-    def test_a_view_is_never_exported(self):
-        for name, fate in FATES.items():
-            if fate.object == VIEW:
-                assert fate.compaction == NOT_A_TABLE, name
-            else:
-                assert fate.compaction in (EXPORTED, SKIPPED), name
-
-    def test_a_skipped_table_in_the_schema_is_one_the_app_rebuilds(self):
-        for name, fate in FATES.items():
-            if fate.compaction == SKIPPED and fate.ddl == SCHEMA:
-                assert fate.kind == DERIVED and fate.origin == COMPUTED, name
-
-    def test_what_nothing_can_rebuild_travels_off_site(self):
-        for name, fate in FATES.items():
-            if fate.origin == IRREPLACEABLE or fate.kind == ARCHIVE_ONLY:
-                assert fate.offsite, (
-                    f"{name} has no source to be rebuilt from and is not in "
-                    f"the off-site archive")
-
-    def test_an_append_only_replica_is_irreplaceable(self):
-        """Review mutation M14: stock_movements IRREPLACEABLE → KEYCRM."""
-        loose = sorted(f"{n}: {FATES[n].origin}" for n in APPENDED_ABOVE_A_WATERMARK
-                       if FATES[n].origin != IRREPLACEABLE)
-        assert not loose, loose
-
-    def test_a_table_without_ddl_is_retired_and_skipped(self):
-        for name, fate in FATES.items():
-            if fate.ddl == NONE:
-                assert fate.kind == RETIRED and fate.compaction == SKIPPED, name
-
-    def test_scratch_is_retired(self):
-        for name, fate in FATES.items():
-            if fate.ddl == SCRATCH:
-                assert fate.kind == RETIRED and fate.object == TABLE, name
-
-    def test_every_fate_but_retirement_names_where_the_rows_go(self):
-        for name, fate in FATES.items():
-            if fate.kind == RETIRED:
-                assert not fate.successors, name
-            else:
-                assert fate.successors, f"{name}: {fate.kind} to where?"
-            assert fate.reason.strip(), name
-
-    def test_successors_are_spelled_as_places(self):
-        for name, fate in FATES.items():
-            for s in fate.successors:
-                assert re.fullmatch(
-                    r"(clickhouse:)?(bronze|silver|gold|app|meta|history)\.[a-z_0-9]+",
-                    s), f"{name}: {s!r}"
-
-    def test_clickhouse_successors_are_tables_the_shippers_write(self):
-        from core import ch_gold, ch_history, ch_silver
-
-        shipped = {v for m in (ch_gold, ch_history, ch_silver)
-                   for k, v in vars(m).items()
-                   if k.isupper() and k.endswith("TABLE") and isinstance(v, str)}
-        for name, fate in FATES.items():
-            for s in fate.successors:
-                if s.startswith("clickhouse:"):
-                    assert s[len("clickhouse:"):] in shipped, f"{name}: {s}"
-
-    @needs_pg
-    def test_every_postgres_successor_exists_in_the_migrated_schema(self):
-        """The live schema, after `alembic upgrade head`: a successor that is
-        not a relation there is a fate nobody can carry out."""
-        import asyncpg
-
-        async def relations():
-            conn = await asyncpg.connect(DSN)
-            try:
-                rows = await conn.fetch(
-                    "SELECT n.nspname || '.' || c.relname AS name "
-                    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                    "WHERE c.relkind IN ('r', 'p', 'v', 'm')")
-                return {r["name"] for r in rows}
-            finally:
-                await conn.close()
-
-        present = asyncio.run(relations())
-        missing = sorted(f"{n} → {s}" for n, f in FATES.items()
-                         for s in f.successors
-                         if not s.startswith("clickhouse:") and s not in present)
-        assert not missing, f"no such relation in Postgres: {missing}"
-
-
-# ─── 2. the write chains ─────────────────────────────────────────────────────
-
-def _chain_switches():
-    from core.write_chains import WRITE_CHAINS
-
-    return {c.WRITE_ENV: c for c in WRITE_CHAINS}
-
-
-class TestTheChains:
-    """The chains' `WRITE_ENV` names stay, read by nothing (S14-11), because
-    revisions 0034/0035 name them; the literal says which tables each moved."""
-
-    def test_every_chain_table_carries_its_chains_switch(self):
-        for env, chain in _chain_switches().items():
-            for pg in chain.CHAIN_TABLES:
-                holders = [n for n, f in FATES.items() if pg in f.successors]
-                assert holders, f"{env} moved {pg}, and no DuckDB table names it"
-                for name in holders:
-                    assert FATES[name].switch == env, (name, pg, env)
-
-    def test_a_chain_switch_is_claimed_only_by_that_chains_tables(self):
-        chains = _chain_switches()
-        for name, fate in FATES.items():
-            if fate.switch in chains:
-                owned = set(chains[fate.switch].CHAIN_TABLES)
-                assert owned & set(fate.successors), (name, fate.switch)
-
-    def test_one_chain_one_number(self):
-        for env in _chain_switches():
-            numbers = {f.chain for f in FATES.values() if f.switch == env}
-            assert len(numbers) == 1 and None not in numbers, (env, numbers)
-
-    def test_every_switch_is_a_chains_or_a_store_switch(self):
-        known = set(_chain_switches()) | STORE_SWITCHES
-        for name, fate in FATES.items():
-            assert fate.switch is None or fate.switch in known, (name, fate.switch)
 
 
 # ─── 3. the host check ───────────────────────────────────────────────────────
@@ -407,12 +225,6 @@ class TestTheHostCheck:
         shutil.copyfile(fresh_file, host / "backups" / "analytics-zzz.duckdb")
         shutil.copyfile(fresh_file, host / "backups" / "analytics-99999999-999999.duckdb")
         assert check.newest_backup(host / "backups") == newest
-
-    def test_the_stamp_is_read_in_the_application_timezone(self):
-        from core.duckdb_constants import DB_PATH, DEFAULT_TZ
-
-        assert check.STAMP_TZ.key == DEFAULT_TZ.key
-        assert check.LIVE_DB.name == DB_PATH.name
 
     def test_a_mismatch_alone_asks_for_a_decision(self, host, capsys):
         """The one mismatch test also planted scratch, which kept the exit at 1

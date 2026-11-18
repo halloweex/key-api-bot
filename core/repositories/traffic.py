@@ -58,14 +58,26 @@ class TrafficMixin:
         return (rows[0] if rows else None) if mode == "one" else rows
 
     # The two expressions that decide what a chart calls an order, repeated
-    # verbatim in five places below because a GROUP BY cannot name the alias
-    # (see `refresh_traffic_gold_layer` for what happens when it tries). They
-    # are the fallback for an order the parser never classified: no UTM row at
-    # all, which the LEFT JOIN renders as NULL.
+    # in every query below that groups or filters by them, because a GROUP BY
+    # cannot name the alias (see `refresh_traffic_gold_layer` for what happens
+    # when it tries). They are the fallback for an order the parser never
+    # classified: no UTM row at all, which the LEFT JOIN renders as NULL, or a
+    # row of NULLs for a comment with no tracking data.
+    #
+    # The offline store (source 7, the owner's decision of 2026-11-15) is the
+    # third source a fallback names: a sale over the counter carries no tag,
+    # and without a branch of its own it would read as the website's
+    # "source not identified" — the pixels' absence — on every chart. It is
+    # organic, as a manager's untagged Instagram or Telegram order is, and
+    # `organic_channel` gives it a channel of its own.
+    #
+    # Every query here reads these two attributes rather than restating them:
+    # the transactions and the campaigns once carried copies of their own, and
+    # a copy is where the next source would be forgotten.
     _PLATFORM_EXPR = """COALESCE(u.platform,
-        CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END)"""
+        CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' WHEN 7 THEN 'offline_store' ELSE 'unattributed' END)"""
     _TRAFFIC_TYPE_EXPR = """COALESCE(u.traffic_type,
-        CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
+        CASE WHEN s.source_id IN (1, 2, 7) THEN 'organic' ELSE 'unknown' END)"""
 
     # The parser and the classifier live in `core.utm_classify` since DN-15:
     # they are pure, and the reclassify dry run and the Postgres parse need them
@@ -637,17 +649,11 @@ class TrafficMixin:
             params.append(sales_type)
 
         if traffic_type:
-            filters.append("""
-                COALESCE(u.traffic_type,
-                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
-                ) = ?""")
+            filters.append(f"{self._TRAFFIC_TYPE_EXPR} = ?")
             params.append(traffic_type)
 
         if platform:
-            filters.append("""
-                COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
-                ) = ?""")
+            filters.append(f"{self._PLATFORM_EXPR} = ?")
             params.append(platform)
 
         where_clause = " AND ".join(filters)
@@ -666,12 +672,8 @@ class TrafficMixin:
         data_query = f"""
             SELECT
                 s.id, s.order_date, s.grand_total, s.source_name,
-                COALESCE(u.traffic_type,
-                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
-                ) AS traffic_type,
-                COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
-                ) AS platform,
+                {self._TRAFFIC_TYPE_EXPR} AS traffic_type,
+                {self._PLATFORM_EXPR} AS platform,
                 u.utm_source, u.utm_medium, u.utm_campaign, u.utm_content,
                 u.fbp, u.fbc, u.ttp, u.fbclid
             FROM {{silver_orders}} s
@@ -802,27 +804,19 @@ class TrafficMixin:
             params.append(sales_type)
 
         if traffic_type:
-            filters.append("""
-                COALESCE(u.traffic_type,
-                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
-                ) = ?""")
+            filters.append(f"{self._TRAFFIC_TYPE_EXPR} = ?")
             params.append(traffic_type)
 
         if platform:
-            filters.append("""
-                COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
-                ) = ?""")
+            filters.append(f"{self._PLATFORM_EXPR} = ?")
             params.append(platform)
 
         where_clause = " AND ".join(filters)
 
         # GROUP BY must repeat the COALESCE expressions (see refresh_traffic_gold_layer)
         campaign_expr = "COALESCE(u.utm_campaign, '')"
-        platform_expr = """COALESCE(u.platform,
-            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END)"""
-        traffic_type_expr = """COALESCE(u.traffic_type,
-            CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
+        platform_expr = self._PLATFORM_EXPR
+        traffic_type_expr = self._TRAFFIC_TYPE_EXPR
 
         # `AS groups` is not decoration: PostgreSQL requires a derived table to
         # be named, and DuckDB accepts the alias, so naming it is what makes

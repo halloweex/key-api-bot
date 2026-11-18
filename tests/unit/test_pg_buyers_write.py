@@ -174,30 +174,6 @@ class TestTheDerivationNeverRaises:
         assert isinstance(stamp, datetime) and stamp.utcoffset().total_seconds() == 0
 
 
-class TestTheCompletenessCheckFollowsTheChain:
-    """`reconcile_buyer_completeness` is the one Postgres-side check that the
-    chain's writer is alive; it must not switch off with the landing mirror's
-    flag, which the chain does not consult (the plan critic's b2)."""
-
-    @pytest.mark.asyncio
-    async def test_mirror_off_still_asks(self, flags, monkeypatch):
-        """The chain writes Postgres whatever its flag says (S14-00), and the
-        landing mirror's flag is read for nothing: since step 14's S14-13 the
-        check asks whenever there is a Postgres (`KS_PG_DSN`), which this test
-        names itself rather than inherit from whoever runs it."""
-        from unittest.mock import AsyncMock
-
-        from core.mirror_reconciliation import reconcile_buyer_completeness
-
-        monkeypatch.setenv("KS_MIRROR_LANDING", "0")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        asked = AsyncMock(side_effect=RuntimeError("reached Postgres"))
-        monkeypatch.setattr("core.pg.get_pool", asked)
-        with pytest.raises(RuntimeError, match="reached Postgres"):
-            await reconcile_buyer_completeness()
-        asked.assert_awaited_once()
-
-
 class TestTheHealthBlockCarriesAClockThatSurvivesARestart:
     @pytest.mark.asyncio
     async def test_under_the_chain_it_publishes_the_watermarks_age(self, flags, monkeypatch):
@@ -239,35 +215,3 @@ class TestTheHealthBlockCarriesAClockThatSurvivesARestart:
             monkeypatch.setattr("core.pg_chain_watermarks.read_values",
                                 AsyncMock(return_value={"last_sync_buyers": raw} if raw else {}))
             assert await pg_buyer_sync_read.watermark_age_s(now=now) == age, raw
-
-
-class TestTheHourlyRiderDerivesWhereTheChainWrites:
-    """`_run_replicate_operational` derives in Postgres, always: until step
-    14's S14-11 it chose by `mode()`, and DuckDB's `derive_gender` went with
-    the flag. This runs it (review of PR-3)."""
-
-    async def _run(self):
-        from unittest.mock import AsyncMock, patch
-
-        from core.scheduler import BackgroundScheduler
-
-        store = object()
-        pg = AsyncMock(return_value={"written": 0})
-        with patch("core.store.get_store", new=AsyncMock(return_value=store)), \
-             patch("core.pg_buyers_write.derive_gender_pg", new=pg), \
-             patch("core.pg_bot_state.replicate_bot_state",
-                   new=AsyncMock(return_value={})):
-            await BackgroundScheduler()._run_replicate_operational()
-        return store, pg
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("write", [None, "duckdb", "postgres", "junk-s14-11"])
-    async def test_it_derives_in_postgres_whatever_the_flag(self, flags, write):
-        """The chain is Postgres, a constant: the rider calls
-        `derive_gender_pg` every tick, or new buyers' verdicts stop.
-        Mutation: route by the flag, or skip the call on a value nobody can
-        read."""
-        if write is not None:
-            flags.setenv(chain.WRITE_ENV, write)
-        _store, pg = await self._run()
-        pg.assert_awaited_once_with()

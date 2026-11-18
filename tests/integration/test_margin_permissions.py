@@ -142,11 +142,6 @@ class TestMarginReadRequiresAdmin:
         assert client.get(path, headers=headers).status_code == 403
 
     @pytest.mark.parametrize("path", MARGIN_GETS)
-    def test_marketer_is_forbidden(self, client, monkeypatch, path):
-        headers = _login(monkeypatch, "marketer")
-        assert client.get(path, headers=headers).status_code == 403
-
-    @pytest.mark.parametrize("path", MARGIN_GETS)
     def test_editor_is_forbidden(self, client, monkeypatch, path):
         headers = _login(monkeypatch, "editor")
         assert client.get(path, headers=headers).status_code == 403

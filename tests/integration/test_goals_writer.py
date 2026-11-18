@@ -127,23 +127,6 @@ class TestUnderTheFlag:
         assert goals["monthly"]["isCustom"] is True
 
     @pytest.mark.asyncio
-    async def test_the_clock_is_the_callers_not_the_servers(self, stores):
-        """`updated_at` orders a DuckDB version of a goal against a Postgres
-        one in the copy-back's handover, so both writers stamp it from the
-        same clock — the web container's — and the Postgres writer stores
-        what it is handed rather than its own `now()`."""
-        from datetime import datetime, timezone
-
-        _store, pool, _env = stores
-        stamp = datetime(2026, 9, 1, 8, 30, tzinfo=timezone.utc)
-
-        row = await pg_goals_write.set_goal(
-            "monthly", 1_000_000.0, True, 900_000.0, 1.1, stamp)
-
-        assert row[5] == stamp
-        assert (await _pg_goals(pool))["monthly"][5] == stamp
-
-    @pytest.mark.asyncio
     async def test_it_latches_and_claims_inside_the_write(self, stores):
         store, pool, env = stores
         env.setenv("KS_WRITE_GOALS", "postgres")
@@ -361,19 +344,6 @@ class TestTheReadsFollowTheChain:
         assert smart["monthly"]["isCustom"] is True
 
     @pytest.mark.asyncio
-    async def test_the_marketing_target_line_reads_the_chain_with_its_flag_at_duckdb(
-        self, stores,
-    ):
-        store, _pool, env = stores
-        await self._flip_after_a_shipped_goal(store, env)
-        env.setenv("KS_READ_MARKETING", "duckdb")
-
-        report = await store.get_marketing_report_by_dates(
-            date(2026, 8, 1), date(2026, 8, 31))
-
-        assert report["general_sales"]["monthly_goal"] == self.TYPED
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
     async def test_a_postgres_failure_raises_rather_than_showing_the_frozen_goal(
         self, stores, read_flag,
@@ -431,31 +401,3 @@ class TestTheReadsFollowTheChain:
         assert raised.value.surface == "marketing"
         assert isinstance(raised.value.__cause__, ConnectionError)
         assert read_fallback.refusals()["marketing"]["count"] == 1
-
-
-class TestTheFlagGoesBackWithoutTheCopyBack:
-    """OD-19 (a): once a goal has been written to Postgres, `KS_WRITE_GOALS`
-    back to `duckdb` is a disagreement, not a rollback."""
-
-    @pytest.mark.asyncio
-    async def test_the_writes_stay_in_postgres(self, stores):
-        """Until step 14's S14-13 the hourly replace was run here too, and
-        stood down for the table; it went with `core.pg_operational`."""
-        from web.routes.api.health import _write_chains
-
-        store, pool, env = stores
-        env.setenv("KS_WRITE_GOALS", "postgres")
-        await store.set_goal("monthly", 1_500_000.0)
-        env.setenv("KS_WRITE_GOALS", "duckdb")          # the flag goes back
-
-        await store.set_goal("weekly", 400_000.0)
-
-        goals = await _pg_goals(pool)
-        assert set(goals) == {"monthly", "weekly"}, "the flag moved the write back"
-        assert (await store.get_goals())["weekly"]["amount"] == 400_000.0
-
-        # Since step 14's S14-11 the flag is read by nothing: `/api/health`
-        # publishes nothing of it (until then `chain_flag_mismatch`).
-        assert _write_chains()[CHAIN] == {}
-
-

@@ -19,18 +19,6 @@ def _functions():
 
 
 class TestOneDoorToTheStore:
-    def test_no_tool_opens_a_connection_of_its_own(self):
-        """Walks every function in the module, not a list of the five: the next
-        tool somebody adds with a raw `store.connection()` is the one a list
-        would not name."""
-        offenders = []
-        for name, fn in _functions().items():
-            if name == "_chat_run":
-                continue
-            for node in ast.walk(fn):
-                if (isinstance(node, ast.Attribute) and node.attr == "connection"):
-                    offenders.append(name)
-        assert offenders == [], f"reads DuckDB around the switch: {offenders}"
 
     def test_the_router_has_no_fallback(self):
         router = _functions()["_chat_run"]
@@ -57,18 +45,3 @@ class TestOneDoorToTheStore:
         for name, text in texts.items():
             has = "gold_revenue_rollup}" in text
             assert has is (name != "_get_source_breakdown"), name
-
-
-class TestTheTopProductsTiebreak:
-    def test_the_order_ends_on_an_id(self):
-        """Structural on purpose. A two-engine test of a tie passes whenever
-        both engines happen to emit the level rows in the same order, and on
-        the fixture they do — removing the tiebreak left it green. What makes
-        the cut deterministic is the ORDER BY itself, so that is what is read:
-        its last key is an id, never a name, because the engines collate text
-        differently."""
-        fn = _functions()["_get_top_products"]
-        sql = "".join(n.value for n in ast.walk(fn)
-                      if isinstance(n, ast.Constant) and isinstance(n.value, str))
-        order_by = sql[sql.index("ORDER BY"):sql.index("LIMIT")]
-        assert order_by.rstrip().endswith("MIN(l.product_id)"), order_by

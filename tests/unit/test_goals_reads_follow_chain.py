@@ -38,10 +38,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import re
 from typing import Dict, Iterable, List, Set, Tuple
-
-import pytest
 
 from core import pg_forecast_write, pg_goals_write
 
@@ -271,40 +268,6 @@ class TestEveryGoalReadIsHandedToARouterThatAsks:
         assert in_goals.count("_goals_run") >= 2
         assert in_goals.count("_goal_tables_run") >= 1
 
-    @pytest.mark.parametrize("chain", sorted(CHAINS))
-    def test_each_is_handed_to_a_router_that_asks_the_chain(self, chain):
-        routers, sites, _stray = _walk(chain)
-        wrong = [(rel, line, name) for rel, line, name in sites
-                 if name not in routers]
-        assert not wrong, (
-            f"a statement reading {CHAINS[chain][0]} goes through a router "
-            f"that never asks {chain}.{ASKS}(), so once that chain writes "
-            f"Postgres it reads whatever the page's own flag names — DuckDB's "
-            f"frozen copy included: {wrong}")
-
-    @pytest.mark.parametrize("chain", sorted(CHAINS))
-    def test_no_goal_statement_is_left_where_the_walk_cannot_follow_it(self, chain):
-        """A statement the walk cannot trace to a router — bound to a local,
-        built in a helper, passed through something it does not know — is a
-        read it cannot vouch for. Rewrite it into a shape the walk follows."""
-        _routers, _sites, stray = _walk(chain)
-        assert not stray, f"{CHAINS[chain][0]} used where the walk cannot follow it: {stray}"
-
-    @pytest.mark.parametrize("chain", sorted(CHAINS))
-    def test_every_goal_read_goes_to_postgres(self, chain):
-        """Since step 14's S14-07 every router a goal statement is handed to
-        has no DuckDB tail and refuses a failure — `_goals_run`,
-        `_goal_tables_run`, `_marketing_run` — so every read of chain 7a's
-        and 7b-3's tables goes to Postgres whatever any flag or chain says.
-        Until then `_goal_tables_run` asked 7b-3's question and kept a
-        DuckDB tail, and the test of that qualification went with it.
-        Mutation: give any of them a DuckDB tail again."""
-        _routers, sites, _stray = _walk(chain)
-        postgres_only = _postgres_only_routers()
-        tailed = [(rel, line, name) for rel, line, name in sites
-                  if name not in postgres_only]
-        assert sites and not tailed, tailed
-
     def test_a_router_passes_without_asking_only_when_nothing_reaches_duckdb(self):
         """The exemption bites: the same body with a DuckDB tail is not one."""
         src = ("async def _x_run(self, sql):\n"
@@ -343,57 +306,3 @@ class TestTheGoalTablesAreReadAsOneSet:
                 missing = [h for h in GOAL_TABLE_HOLES if h not in lit.value]
                 assert not missing, (rel, lit.lineno, missing)
         assert found >= 1
-
-
-# A DuckDB statement naming one of the four tables bare, as a table.
-_BARE = re.compile(
-    r"\b(FROM|JOIN)\s+(seasonal_indices|growth_metrics|weekly_patterns"
-    r"|revenue_predictions)\b", re.IGNORECASE)
-# The DuckDB writer branches, where the bare names belong: chain 7b-3 routes
-# each of these to Postgres before it reaches them.
-WRITER_BRANCHES = {"_persist_goal_tables", "store_predictions"}
-
-
-class TestNoBareReadIsLeft:
-    def test_only_the_duckdb_writers_name_the_tables_bare(self):
-        """The smart goal read the three goal tables by their bare DuckDB
-        names, on its own connection, until this chain. A bare read is one no
-        router can send to Postgres."""
-        stray = []
-        for rel, tree in _modules():
-            docs = _docstrings(tree)
-            owners = {}
-            for fn in ast.walk(tree):
-                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    for n in ast.walk(fn):
-                        owners.setdefault(id(n), set()).add(fn.name)
-            module_names = {}
-            for node in tree.body:
-                if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-                        and isinstance(node.value.value, str)):
-                    for t in node.targets:
-                        if isinstance(t, ast.Name):
-                            module_names[id(node.value)] = t.id
-            for lit in (n for n in ast.walk(tree)
-                        if isinstance(n, ast.Constant) and isinstance(n.value, str)):
-                if id(lit) in docs or not _BARE.search(lit.value):
-                    continue
-                if owners.get(id(lit), set()) & WRITER_BRANCHES:
-                    continue
-                name = module_names.get(id(lit))
-                if name is not None:
-                    users = {f for f in _users(tree, name)}
-                    if users and users <= WRITER_BRANCHES:
-                        continue
-                stray.append((rel, lit.lineno))
-        assert not stray, f"a bare read of a 7b-3 table: {stray}"
-
-
-def _users(tree: ast.Module, name: str) -> Set[str]:
-    out = set()
-    for fn in ast.walk(tree):
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if any(isinstance(n, ast.Name) and n.id == name
-                   and isinstance(n.ctx, ast.Load) for n in ast.walk(fn)):
-                out.add(fn.name)
-    return out

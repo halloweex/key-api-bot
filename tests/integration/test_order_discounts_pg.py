@@ -1,12 +1,12 @@
-"""The discount columns on a real Postgres (revision 0037).
+"""The discount columns on a real Postgres (revision 0038).
 
 What only a server can say: the sync's writer lands every figure with the
 order and its lines, the JSONB included; rewriting an order whose discount
-alone moved archives no version; the statement an image at 0036 sends still
-runs against the wider table and leaves the discount as it was; and the
-backfill (`pg_orders_write.restore_discounts`) fills an order landed before
-0037 without moving anything else, leaves an order in another version or
-whose lines differ to the sync, and writes nothing the second time.
+alone moved archives no version; the statement an image at 0037 or below
+sends still runs against the wider table and leaves the discount as it was;
+and the backfill (`pg_orders_write.restore_discounts`) fills an order landed
+before 0038 without moving anything else, leaves an order in another version
+or whose lines differ to the sync, and writes nothing the second time.
 
 Synthetic orders only, in an id range of their own.
 """
@@ -30,10 +30,11 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 BASE = 990_700
 T0 = datetime(2026, 11, 16, 10, 0, tzinfo=timezone.utc)
 
-# The header statement every image at 0036 sends — `pg_landing._ORDER_UPSERT`
-# before this revision, frozen: what a rollback below 0037 runs against the
-# wider table.
-UPSERT_AT_0036 = """
+# The header statement every image below this revision sends, at 0037 as at
+# 0036 (it did not change between them) — `pg_landing._ORDER_UPSERT` before
+# this revision, frozen: what a rollback below 0038 runs against the wider
+# table.
+UPSERT_BEFORE_0038 = """
 INSERT INTO bronze.orders
        (id, source_id, status_id, status_group_id, grand_total,
         ordered_at, created_at, updated_at, buyer_id, manager_id,
@@ -154,16 +155,16 @@ async def test_a_discount_that_alone_moved_archives_no_version(pool):
 
 
 @pytest.mark.asyncio
-async def test_an_image_at_0036_still_writes_and_leaves_the_discount(pool):
-    """A rollback below 0037 keeps the columns (the downgrade drops nothing),
+async def test_an_image_at_0037_still_writes_and_leaves_the_discount(pool):
+    """A rollback below 0038 keeps the columns (the downgrade drops nothing),
     and the older writer names its columns one by one. Kills: a column made
     NOT NULL or given a default, which the older INSERT would trip over."""
     oid = BASE + 3
     await chain.upsert_orders_with_expenses([_payload(oid)])
     async with pool.acquire() as conn:
-        await conn.execute(UPSERT_AT_0036, oid, 4, 12, 4, Decimal("3676.00"),
+        await conn.execute(UPSERT_BEFORE_0038, oid, 4, 12, 4, Decimal("3676.00"),
                            T0, T0, T0 + timedelta(hours=1), 5401, 4, None, None)
-        await conn.execute(UPSERT_AT_0036, oid + 1, 4, 1, 1, Decimal("10.00"),
+        await conn.execute(UPSERT_BEFORE_0038, oid + 1, 4, 1, 1, Decimal("10.00"),
                            T0, T0, T0, None, None, None, None)
     head = await _header(pool, oid)
     assert head["status_id"] == 12 and head["total_discount"] == Decimal("409.00")
@@ -171,7 +172,7 @@ async def test_an_image_at_0036_still_writes_and_leaves_the_discount(pool):
     assert all(fresh[c] is None for c in ORDER_DISCOUNT)
 
 
-async def _landed_before_0037(oid, **kw):
+async def _landed_before_0038(oid, **kw):
     """An order as the sync landed it before this revision: no figures."""
     await chain.upsert_orders_with_expenses([_payload(oid, discount=False, **kw)])
 
@@ -179,7 +180,7 @@ async def _landed_before_0037(oid, **kw):
 @pytest.mark.asyncio
 async def test_the_backfill_fills_an_order_landed_before_and_nothing_else(pool):
     oid = BASE + 10
-    await _landed_before_0037(oid)
+    await _landed_before_0038(oid)
     before = await _header(pool, oid)
     assert all(before[c] is None for c in ORDER_DISCOUNT)
     # KeyCRM moved the status without moving `updated_at` — the backfill must
@@ -203,8 +204,8 @@ async def test_the_backfill_fills_an_order_landed_before_and_nothing_else(pool):
 @pytest.mark.asyncio
 async def test_the_backfill_leaves_another_version_and_other_lines(pool):
     moved, absent, other_lines = BASE + 20, BASE + 21, BASE + 22
-    await _landed_before_0037(moved, updated=T0 + timedelta(minutes=1))
-    await _landed_before_0037(other_lines, lines=1)
+    await _landed_before_0038(moved, updated=T0 + timedelta(minutes=1))
+    await _landed_before_0038(other_lines, lines=1)
     result = await chain.restore_discounts(
         [_payload(moved), _payload(absent), _payload(other_lines, lines=2)])
     assert result.moved == (moved,) and result.absent == (absent,)
@@ -224,7 +225,7 @@ async def test_the_backfill_waits_for_the_sync_s_lock_and_then_steps_aside(pool)
     import asyncio
 
     oid = BASE + 30
-    await _landed_before_0037(oid)
+    await _landed_before_0038(oid)
     async with pool.acquire() as conn:
         tx = conn.transaction()
         await tx.start()
@@ -242,19 +243,19 @@ async def test_the_backfill_waits_for_the_sync_s_lock_and_then_steps_aside(pool)
 
 
 class TestTheRevisionOnAServer:
-    """0037 as Alembic renders it and the server runs it, inside a transaction
+    """0038 as Alembic renders it and the server runs it, inside a transaction
     that is always rolled back."""
 
     @pytest.mark.asyncio
     async def test_the_downgrade_keeps_the_columns_and_the_upgrade_is_a_no_op(self):
-        """Down to 0036: the stamp moves, `require_revision` at 0036 passes, the
-        eleven columns and their values stay. Up again: the stamp is 0037 and
+        """Down to 0037: the stamp moves, `require_revision` at 0037 passes, the
+        eleven columns and their values stay. Up again: the stamp is 0038 and
         nothing moved. Kills: a DROP in the downgrade, an IF NOT EXISTS
         missing from the upgrade."""
         from core import pg
         from tests.integration.test_analytics_captures_pg import _alembic_sql
 
-        down_to, here = "0036_analytics_captures", "0037_order_discounts"
+        down_to, here = "0037_frozen_month_goals", "0038_order_discounts"
         conn = await asyncpg.connect(DSN)
         tx = conn.transaction()
         await tx.start()

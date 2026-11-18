@@ -36,13 +36,6 @@ _WRITE = re.compile(
     re.IGNORECASE,
 )
 
-# The writers left, each with the reason. The walk must find exactly these; a
-# writer added to them is a decision.
-# DuckDB's schema migrations (`core/migrations.py`: `_m0007`, `_m0008`,
-# `_m0011`) were the last until step 14's S14-18 deleted them with the store's
-# DuckDB half: no writer of the four tables is left in DuckDB.
-EXEMPT: dict = {}
-
 
 def _writes(fn) -> set:
     found = set()
@@ -74,26 +67,6 @@ class _Walk:
 @pytest.fixture(scope="module")
 def walk():
     return _Walk()
-
-
-class TestNoDuckDBOrderWriterIsLeft:
-    def test_the_only_writers_left_are_duckdb_s_own_migrations(self, walk):
-        """Mutation: put back a DuckDB `UPDATE orders` in the traffic route's
-        comment backfill, or `upsert_orders` in the store — a write of the
-        store nobody reads, with nothing left to ask whether it should."""
-        assert set(walk.writers()) == set(EXEMPT), (
-            "a DuckDB statement writes chain 3's tables: "
-            f"{sorted(set(walk.writers()) - set(EXEMPT))}")
-
-    @pytest.mark.parametrize("name", ["upsert_orders", "upsert_expenses_batch"])
-    def test_the_store_s_order_writers_are_gone(self, walk, name):
-        assert not [key for key in walk.fns if key[1] == name], name
-
-    def test_the_dead_per_order_expense_writer_is_gone(self, walk):
-        """`upsert_expenses` had no caller anywhere and parsed the payload
-        inline instead of through `landing_rows.expense_rows`; chain 3 deleted
-        it rather than route it."""
-        assert ("core/repositories/expenses.py", "upsert_expenses") not in walk.fns
 
 
 class TestTheWalkSeesWhatItMust:

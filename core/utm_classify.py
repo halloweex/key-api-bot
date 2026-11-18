@@ -48,7 +48,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 # hash of `tests/unit/test_utm_classify_golden.py`'s frozen tuples, so a rule
 # change that edits a tuple fails there until this names a new version
 # ("r2", …) and its hash is added beside the old ones.
-RULE_VERSION = "r1"
+#
+# r1: the rules as revision 0036 found them.
+# r2 (2026-11-12): the labels `fbp:` and `fbc:` read as the cookies `_fbp` and
+#     `_fbc` (`_KEY_ALIASES` below); the classifier is unchanged.
+RULE_VERSION = "r2"
 
 
 # A pair value runs until a semicolon, newline, or the next ", key:" pair
@@ -56,9 +60,29 @@ RULE_VERSION = "r1"
 # remaining pairs into a single corrupted value.
 _UTM_PAIR_RE = re.compile(r'(\w+):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
 # Query-string style (utm_source=fbads&fbclid=... — raw or inside a URL)
-_UTM_QS_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_fbp|_fbc)=([^&\s;]+)')
+_UTM_QS_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_?fbp|_?fbc)=([^&\s;]+)')
 # "key: value" pairs without any "UTM:" prefix (tracking keys only)
-_UTM_BARE_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_fbp|_fbc):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
+_UTM_BARE_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_?fbp|_?fbc):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
+
+# The Meta pixel's two cookies are `_fbp` and `_fbc`, and those are the keys
+# every reader of a parse asks for (`classify_traffic`, `utm_columns`). Since
+# late September 2026 the shop's comment template writes one field per line
+# and labels them `fbp:` and `fbc:`, without the underscore, and the parse
+# stopped seeing either. Nothing failed: `silver.order_utm` held 594 `fbp`
+# and 295 `fbc` for September's orders and none for October's or November's
+# (measured on production 2026-11-12). `_fbc` without a source or medium is
+# what rule 12 below calls a likely ad click, and `_fbp` alone is what makes
+# an order pixel-only, so in the 90 days to 2026-11-12, 83 retail website
+# orders (₴180K) that carry `fbc` and no source or medium were filed as
+# pixel-only or unknown.
+#
+# So a label without the underscore is read as the cookie it names, wherever
+# the cookie itself is read: inside the "UTM:" block, as a query-string pair
+# and as a bare pair. When a comment holds both spellings, the first one met
+# wins, as for any key a comment repeats. Reading a comment differently moves
+# stored verdicts, so this is a reclassify decision (DN-15), not a refactor;
+# `tests/unit/test_utm_classify_golden.py` freezes what it changed.
+_KEY_ALIASES: Dict[str, str] = {'fbp': '_fbp', 'fbc': '_fbc'}
 
 
 def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
@@ -70,7 +94,8 @@ def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
     Also tolerates real-world deviations: lowercase "utm:", pairs
     separated by newlines/commas, query-string form (utm_source=x&...)
     including UTM parameters inside URLs, and pairs without the
-    "UTM:" prefix. Extracts pixel IDs like _fbp, _fbc, ttp, fbclid.
+    "UTM:" prefix. Extracts pixel IDs like _fbp, _fbc, ttp, fbclid, and
+    reads the labels `fbp` and `fbc` as `_fbp` and `_fbc` (`_KEY_ALIASES`).
     """
     if not comment:
         return {}
@@ -79,6 +104,7 @@ def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
 
     def take(key: str, value: str) -> None:
         key = key.strip().lower()
+        key = _KEY_ALIASES.get(key, key)
         value = value.strip().rstrip('.,')
         if value and key not in utm_data:
             utm_data[key] = value
@@ -87,9 +113,11 @@ def parse_utm_from_comment(comment: str) -> Dict[str, Any]:
     #    NOT a global IGNORECASE — that would make the [A-Z] terminator
     #    class match lowercase and cut the block at any newline. The block
     #    ends at a blank line or a line starting with a capital letter
-    #    (next comment section), unless that line is itself a UTM key.
+    #    (next comment section), unless that line is itself a UTM key —
+    #    `Fbp:` and `Fbc:` among them, which stay in the block as `_Fbp:`
+    #    does, since an underscore is no capital letter.
     utm_match = re.search(
-        r'(?i:UTM):\s*(.+?)(?:\n\s*\n|\n(?!(?i:utm_|_fb|ttp|fbclid))[A-ZА-ЯІЇЄ]|$)',
+        r'(?i:UTM):\s*(.+?)(?:\n\s*\n|\n(?!(?i:utm_|_fb|ttp|fbclid|fbp|fbc))[A-ZА-ЯІЇЄ]|$)',
         comment, re.DOTALL,
     )
     if utm_match:
@@ -340,11 +368,22 @@ def tab_platform(platform: str, traffic_type: str) -> str:
 # listing. Measured on production 2026-10-19, 180 days of retail: Direct is
 # ₴9.0M of the ₴14.1M, the profile link ₴3.1M, email ₴0.9M (automated letters
 # more than two thirds of it), Telegram ₴0.7M, Google's free listings ₴0.3M.
+#
+# `offline_store` is a sale in the offline store (source 7, the owner's
+# decision of 2026-11-15), which no tag reaches: like Direct, a sale with no
+# visit to the website, and its own channel, never the website's.
 ORGANIC_CHANNELS: Tuple[str, ...] = (
     "instagram_direct", "instagram_site", "instagram_stories", "telegram",
+    "offline_store",
     "email_campaigns", "email_flows", "google_organic", "ai",
     "facebook", "tiktok", "other",
 )
+
+# The source whose untagged orders are the offline store's channel. A literal
+# here as in `TrafficMixin._PLATFORM_EXPR`, because this module imports `re`
+# and nothing else; a test holds both to
+# `core.duckdb_constants.OFFLINE_STORE_SOURCE_ID`.
+_OFFLINE_STORE_SOURCE_ID = 7
 
 # Klaviyo tags a campaign `utm_medium=klaviyo` and names it
 # "[MM/DD/YY] Campaign #N: …"; its flows (welcome, abandoned cart, post
@@ -368,13 +407,16 @@ def organic_channel(
     `tagged` is whether the parser gave the order a verdict at all. An order
     without one is organic only through the readers' COALESCE — source 1 or 2,
     taken by a manager in Instagram or Telegram with nothing in the comment —
-    and that is the whole of what "Instagram Direct" means here.
+    and that is the whole of what "Instagram Direct" means here; or source 7,
+    a sale in the offline store, which is its own channel.
 
     Read at query time from the stored tags, never stored, so changing this
     rule needs no reclassify: unlike `classify_traffic`, nothing materialises
     what it returns.
     """
     if not tagged:
+        if source_id == _OFFLINE_STORE_SOURCE_ID:
+            return "offline_store"
         return "telegram" if source_id == 2 else "instagram_direct"
     medium = (utm_medium or "").strip().lower()
     if platform == "instagram":

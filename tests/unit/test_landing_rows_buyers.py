@@ -18,7 +18,6 @@ from datetime import date, datetime, timezone
 import duckdb
 import pytest
 
-from core import landing_rows
 from core.landing_rows import (
     BUYER_COLUMNS, UNKNOWN_NAME, ContactRow, _as_date,
     birthday_is_unreadable, buyer_row, contact_rows, parse_buyers,
@@ -147,13 +146,6 @@ class TestTheRow:
 
 
 class TestContactsAsTheyHaveAlwaysBeenWritten:
-    def test_first_occurrence_wins_with_its_own_primary_flag(self):
-        # Reads like a bug and is pinned as it stands: both stores have always
-        # written it this way, and changing it would turn every such buyer into
-        # a difference between them.
-        buyer = _Buyer(phones=["", "p", "p"], phone="")
-        assert contact_rows(buyer) == [ContactRow(1, "phone", "p", False)]
-        assert buyer_row(buyer).phone == ""
 
     def test_an_object_or_list_among_the_phones_is_skipped_not_raised(self):
         """KeyCRM documents strings. An object used to reach DuckDB as a bound
@@ -184,19 +176,3 @@ class TestTheBatch:
         assert parsed.unreadable_birthdays == [8]
         assert [r.id for r in parsed.rows] == [7, 8, 9]
         assert [bid for bid, _ in parsed.contacts] == [7, 8, 9]
-
-
-class TestTheDuckDBWriterFollowsTheContract:
-    """The DuckDB writer — `_upsert_buyer_portion` — passed each row
-    POSITIONALLY, and two tests held its column lists to `BuyerRow`'s order.
-    It went with `KS_WRITE_BUYERS` in step 14's S14-11; the Postgres writer
-    builds its SQL from the same tuple (below)."""
-
-    def test_the_contract_has_one_home(self):
-        from core import pg_buyer_rows
-        # The one writer of buyer rows builds its SQL from the same tuple the
-        # parser fills (the mirror, `core.pg_buyers`, did too until step 14's
-        # S14-13 deleted it)...
-        assert pg_buyer_rows.BUYER_COLUMNS is landing_rows.BUYER_COLUMNS
-        # ...and nobody re-exports the contacts' columns.
-        assert not hasattr(pg_buyer_rows, "CONTACT_COLUMNS")

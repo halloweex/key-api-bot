@@ -432,7 +432,7 @@ LINE_ITEM_ID_STRIDE = 1000
 class OrderRow(NamedTuple):
     """An order header as KeyCRM describes it. Column order is the write order.
 
-    The five after `promocode` are the discount (revision 0037), appended so
+    The five after `promocode` are the discount (revision 0038), appended so
     that every position before them keeps its meaning (`pg_landing` reads
     `grand_total` as `row[4]`)."""
     id: Optional[int]
@@ -457,7 +457,7 @@ class OrderRow(NamedTuple):
 
 class OrderProductRow(NamedTuple):
     """One line item. Column order is the write order; the six after
-    `price_sold` are the discount (revision 0037), appended like the
+    `price_sold` are the discount (revision 0038), appended like the
     header's. `total_discount` is per UNIT, as KeyCRM serves it."""
     id: int
     order_id: int
@@ -476,7 +476,7 @@ class OrderProductRow(NamedTuple):
 ORDER_COLUMNS = OrderRow._fields
 ORDER_PRODUCT_COLUMNS = OrderProductRow._fields
 
-# ─── The discount columns (revision 0037) ────────────────────────────────────
+# ─── The discount columns (revision 0038) ────────────────────────────────────
 #
 # Until 2026-11-16 the parse kept `promocode` and nothing else of KeyCRM's
 # discount, so "how many orders were bought at a discount" could be answered

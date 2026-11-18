@@ -15,7 +15,7 @@ from typing import Optional, List, Dict, Any
 def optional_decimal(value: Any) -> Optional[Decimal]:
     """A KeyCRM number as a Decimal, or None when it is not one.
 
-    For the discount figures (revision 0037), which are facts beside the
+    For the discount figures (revision 0038), which are facts beside the
     order, never the order itself: a value that cannot be read costs that
     value and nothing else, where `float(grand_total)` raises and refuses the
     order. A number arrives as a JSON number or as text ("409.00"); `str`
@@ -46,6 +46,8 @@ class SourceId(IntEnum):
     TELEGRAM = 2
     OPENCART = 3  # Deprecated, not used
     SHOPIFY = 4
+    # The offline store, since 2026-11 (`core.duckdb_constants.OFFLINE_STORE_SOURCE_ID`).
+    OFFLINE_STORE = 7
 
 
 # KeyCRM groups every order status. Group 6 is the lost/cancel group, and it
@@ -285,7 +287,7 @@ class OrderProduct:
     quantity: int
     price_sold: float
     offer: Optional[ProductOffer] = None
-    # The line's discount, as KeyCRM serves it (revision 0037). `price` is the
+    # The line's discount, as KeyCRM serves it (revision 0038). `price` is the
     # price before any discount and `price_sold` the price after it, both per
     # unit; `total_discount` is the discount PER UNIT too (980 → 591 is 389),
     # so a line's discount in money is `total_discount * quantity`.
@@ -345,7 +347,7 @@ class Order:
     products: List[OrderProduct] = field(default_factory=list)
     manager_comment: Optional[str] = None  # Contains UTM data for Shopify orders
     promocode: Optional[str] = None  # Discount promo code applied to order
-    # The order's discount, as KeyCRM serves it (revision 0037).
+    # The order's discount, as KeyCRM serves it (revision 0038).
     # `products_total` is the lines' sum before the order-level discount and
     # `total_discount` that discount in money (4085 with −10 % is 409, and
     # `grand_total` 3676); `discount_percent`/`discount_amount` are the

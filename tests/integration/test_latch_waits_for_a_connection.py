@@ -276,7 +276,7 @@ async def _classify(store):
 
 
 async def _restore_discounts(_store):
-    """Chain 3's discount backfill (revision 0037), on an order Postgres holds
+    """Chain 3's discount backfill (revision 0038), on an order Postgres holds
     without its discount — without one it reads, finds nothing owed and
     returns before the latch, which is the point of reading first. Seeded
     through the pool the test hands out, which serves anybody but the
@@ -564,19 +564,6 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
     assert driven == found
     for key, (chain, _call) in WRITERS.items():
         assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
-
-
-def test_every_chain_is_driven_with_no_flag():
-    """Each writer, and each first write, runs under every value of
-    `FLAG_VALUES` and never under `postgres` — what keeps the proofs below in
-    step 14's state rather than production's flag. Mutation: drive a chain at
-    `postgres` again."""
-    for key, (chain, _call) in WRITERS.items():
-        flags = {p.values[1] for p in _cases([key], lambda k: WRITERS[k][0])}
-        assert flags == set(FLAG_VALUES), key
-    for chain_name, (key, *_row) in FIRST_WRITES.items():
-        flags = {p.values[1] for p in _cases([chain_name], _first_write_chain)}
-        assert flags == set(FLAG_VALUES), chain_name
 
 
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:

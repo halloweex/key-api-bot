@@ -72,9 +72,10 @@ REPO = Path(__file__).resolve().parents[2]
 KYIV = ZoneInfo("Europe/Kyiv")
 DSN = os.getenv("KS_PG_DSN")
 
-# Every table a goal computation stores, or a goal read reads back.
+# Every table a goal computation stores, or a goal read reads back — the
+# frozen month goals (revision 0037) among them, which only the job writes.
 GOAL_TABLES = ("app.seasonal_indices", "app.growth_metrics", "app.weekly_patterns",
-               "app.revenue_predictions", "app.revenue_goals")
+               "app.revenue_predictions", "app.revenue_goals", "app.frozen_month_goals")
 
 
 class _ConnectPerAcquire:
@@ -172,9 +173,10 @@ def _switched_on(endpoint) -> dict:
 # ─── The sweep ────────────────────────────────────────────────────────────
 
 def _writers_recorded(monkeypatch) -> list:
-    """Chain 7b-3's two Postgres writers, and chain 7a's, replaced by
-    recorders that raise: a GET that reached one is named."""
-    from core import pg_forecast_write, pg_goals_write
+    """Chain 7b-3's two Postgres writers, chain 7a's, and the month goal
+    freeze's (revision 0037), replaced by recorders that raise: a GET that
+    reached one is named. A month a GET reads unfrozen stays unfrozen."""
+    from core import goal_freeze, pg_forecast_write, pg_goals_write
 
     reached = []
 
@@ -186,7 +188,9 @@ def _writers_recorded(monkeypatch) -> list:
 
     for module, name in ((pg_forecast_write, "persist_goal_tables"),
                          (pg_forecast_write, "store_predictions"),
-                         (pg_goals_write, "set_goal")):
+                         (pg_goals_write, "set_goal"),
+                         (goal_freeze, "freeze_month"),
+                         (goal_freeze, "_keep")):
         monkeypatch.setattr(module, name, recorder(f"{module.__name__}.{name}"))
     return reached
 
@@ -522,15 +526,9 @@ class TestTheMondayJobStoresRetail:
 # ─── Unchanged neighbours, kept pinned ────────────────────────────────────
 
 class TestPredictionsAndModelFilesLandWhole:
-    def test_json_files_are_replaced_not_truncated(self, tmp_path):
-        from core.prediction_service import _write_json_atomically
-
-        target = tmp_path / "params.json"
-        target.write_text("{\"old\": true}")
-        _write_json_atomically(target, {"new": 1})
-        assert target.read_text().strip().startswith("{")
-        assert "new" in target.read_text()
-        assert [p.name for p in tmp_path.iterdir()] == ["params.json"], "no temp file left behind"
+    # The JSON half went on 2026-11-18: the weekday corrections, the clip
+    # ratio and the tuned parameters are written no more, and the helper
+    # that wrote them whole went with them.
 
     def test_the_model_writer_uses_replace(self):
         from core.prediction_service import PredictionService
@@ -538,4 +536,3 @@ class TestPredictionsAndModelFilesLandWhole:
 
         src = inspect.getsource(PredictionService._save_model)
         assert "os.replace(tmp, MODEL_PATH)" in src
-        assert "_write_json_atomically" in src

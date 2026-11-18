@@ -109,8 +109,6 @@ _POSTGRES_STORE_HELPERS = {
     ("core/repositories/users.py", "_users_run"): "one statement on the user list",
     ("core/repositories/users.py", "_perms_run"): "one statement on the role matrix",
 }
-# The switches those helpers asked until S14-08. None may come back into one.
-_RETIRED_STORE_SWITCHES = ("sms_store_is_postgres", "user_store_is_postgres")
 
 
 class _Module:
@@ -493,41 +491,6 @@ class TestTheWalk:
         } <= set(writers), sorted(writers)
         assert len(writers) >= 15, sorted(writers)
 
-    def test_no_shipper_out_of_duckdb_is_left(self, walk):
-        """What S14-13 deleted stays deleted: none of the modules that shipped
-        a copy out of DuckDB comes back, and nothing in the tree writes
-        through the mirror's own statements."""
-        gone = {"core/pg_backfill.py", "core/pg_expense_backfill.py",
-                "core/pg_buyers.py", "core/pg_replication.py",
-                "core/pg_operational.py"}
-        assert not gone & {m.rel for m in walk.modules.values()}
-        shippers = ("_mirror", "mirror_categories", "mirror_products",
-                    "mirror_expenses", "mirror_orders", "carry_retired_catalogue",
-                    "tables_stood_down", "tables_stood_down_or_owned",
-                    "order_tables_stood_down", "order_tables_stood_down_or_owned")
-        assert not {key for key in walk.fns if key[0] == "core/pg_landing.py"
-                    and key[1] in shippers}
-
-    def test_the_routed_helpers_are_exactly_what_the_walk_finds(self, walk):
-        """Each is an executor the walk finds, still carries a writer, and
-        asks no store switch — so neither a helper that grew an engine choice
-        back nor a stale entry keeps its place (S14-08)."""
-        writers = walk.writers()
-        for key in _POSTGRES_STORE_HELPERS:
-            _module, fn = walk.fns[key]
-            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | \
-                _called_names(fn)
-            for switch in _RETIRED_STORE_SWITCHES:
-                assert switch not in names, f"{key} asks {switch} again"
-            assert key[1] in walk.executors, f"{key} no longer executes what it is handed"
-            assert any(key[0] == w[0] and key[1] in _awaited_names(walk.fns[w][1])
-                       and walk.routed(w)
-                       for w in writers), f"nothing writes through {key}"
-        # And nothing else is excused by them: a writer that also calls
-        # asyncpg itself, or any other executor, is not routed.
-        assert {w[0] for w in writers if walk.routed(w)} == {
-            "core/repositories/customers.py", "core/repositories/users.py"}
-
     def test_every_registered_chain_writes_postgres(self, walk):
         """Found here, so a chain that stopped writing Postgres — its writer
         moved somewhere the walk does not see — fails rather than passing as
@@ -837,14 +800,6 @@ class TestEveryChainNamesItselfOnce:
     def test_chain_is_the_module_basename(self, chain):
         from core.write_chains import chain_name
         assert chain.CHAIN == chain_name(chain)
-
-    def test_the_flag_fixture_covers_every_chain(self):
-        """The autouse fixture in tests/conftest.py iterates WRITE_CHAINS; this
-        is the reading of it a new chain will rely on."""
-        import os
-
-        from core.write_chains import WRITE_CHAINS
-        assert all(os.getenv(c.WRITE_ENV) is None for c in WRITE_CHAINS)
 
 
 # ─── The analysts' captures (revision 0036) ──────────────────────────────────

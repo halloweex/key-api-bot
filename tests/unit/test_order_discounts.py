@@ -1,4 +1,4 @@
-"""The discount on an order and its lines, landed beside the order (revision 0037).
+"""The discount on an order and its lines, landed beside the order (revision 0038).
 
 What is held here: the parse lands each figure KeyCRM serves, rounded as its
 column rounds it, and never refuses an order over one; the write statements
@@ -28,7 +28,7 @@ from core.landing_rows import (
 from tests import migration_replay as replay
 
 T0 = datetime(2026, 11, 16, 10, 0, tzinfo=timezone.utc)
-REV_ID = "0037_order_discounts"
+REV_ID = "0038_order_discounts"
 
 
 def _payload(oid=7, *, updated=T0, status=1, lines=1, **order):
@@ -227,14 +227,16 @@ class TestTheRevision:
     def _module(self):
         return replay.load(replay.VERSIONS / f"{REV_ID}.py")
 
-    def test_it_follows_0036_and_is_the_head_the_code_requires(self):
-        """Kills: 0037 hung off anything but 0036, or the pin left at 0036 —
-        web would write columns a database at 0036 does not have."""
+    def test_it_follows_0037_and_is_the_head_the_code_requires(self):
+        """Kills: 0038 hung off anything but 0037 (the frozen month goals,
+        which took the number first by the owner's decision of 2026-11-18),
+        or the pin left at 0037 — web would write columns a database at 0037
+        does not have."""
         from core import pg
 
         rev = self._module()
         assert rev.revision == REV_ID
-        assert rev.down_revision == "0036_analytics_captures"
+        assert rev.down_revision == "0037_frozen_month_goals"
         assert pg.REQUIRED_REVISION == REV_ID
 
     def _added(self):
@@ -322,7 +324,7 @@ NULLS_LINE = {c: None for c in LINE_DISCOUNT_COLUMNS}
 
 
 class TestTheBackfillPlan:
-    def test_an_order_landed_before_0037_gets_header_and_lines(self):
+    def test_an_order_landed_before_0038_gets_header_and_lines(self):
         row, lines = _one(_payload())
         headers, with_lines, current, moved, absent, differ = _plan(
             _payload(), _stored(row, **NULLS_ORDER), _stored_lines(lines, **NULLS_LINE))

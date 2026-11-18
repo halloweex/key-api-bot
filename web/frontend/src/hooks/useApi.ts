@@ -99,6 +99,7 @@ export const queryKeys = {
   summary: (params: string) => ['summary', params] as const,
   returns: (params: string) => ['returns', params] as const,
   revenueTrend: (params: string) => ['revenueTrend', params] as const,
+  revenueForecast: (salesType: string) => ['revenueForecast', salesType] as const,
   salesBySource: (params: string) => ['salesBySource', params] as const,
   topProducts: (params: string) => ['topProducts', params] as const,
   productPerformance: (params: string) => ['productPerformance', params] as const,
@@ -227,16 +228,39 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
 
 // ─── Forecast ──────────────────────────────────────────────────────────────
 
+// `/api/revenue/forecast` is one query under one key: the date picker reads
+// how far the forecast reaches, the month's badge its range and Black Friday
+// line, and a page that shows both asks once.
+
 export function useMaxForecastDate() {
   const salesType = useFilterStore(selectSalesType)
 
   const { data } = useQuery({
-    queryKey: ['maxForecastDate', salesType],
+    queryKey: queryKeys.revenueForecast(salesType),
     queryFn: () => api.getRevenueForecast(salesType),
     staleTime: CACHE_TTL.STATIC,
   })
 
   return data?.forecast_end ?? data?.month_end ?? null
+}
+
+/** The month badge's 80% range and Black Friday line (2026-11-18). The
+ * server computes them once a day, so the realtime cache is only how soon a
+ * new day's are seen. */
+export function useMonthForecastOutlook(enabled: boolean) {
+  const salesType = useFilterStore(selectSalesType)
+
+  const { data } = useQuery({
+    queryKey: queryKeys.revenueForecast(salesType),
+    queryFn: () => api.getRevenueForecast(salesType),
+    staleTime: CACHE_TTL.REALTIME,
+    enabled,
+  })
+
+  return {
+    monthRange: data?.month_range ?? null,
+    blackFriday: data?.black_friday ?? null,
+  }
 }
 
 // ─── Sales ──────────────────────────────────────────────────────────────────

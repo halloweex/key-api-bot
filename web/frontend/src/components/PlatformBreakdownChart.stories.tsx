@@ -40,13 +40,15 @@ const ANALYTICS = {
 
 // The chart reads its analytics itself, so the story seeds the cache under the
 // key the hook will ask for — the filter store's own query string.
-function Seeded({ children }: { children: ReactNode }) {
+function Seeded({
+  children, data = ANALYTICS,
+}: { children: ReactNode; data?: TrafficAnalyticsResponse }) {
   const params = useQueryParams()
   const [client] = useState(() => {
     const c = new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: Infinity } },
     })
-    c.setQueryData(queryKeys.trafficAnalytics(params), ANALYTICS)
+    c.setQueryData(queryKeys.trafficAnalytics(params), data)
     return c
   })
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -64,6 +66,25 @@ type Story = StoryObj<typeof meta>
 export const Default: Story = {
   render: () => (
     <Seeded>
+      <PlatformBreakdownChart />
+    </Seeded>
+  ),
+}
+
+/** "All sales": the offline store's counter sales are a platform of their own,
+ *  never the website's "source not identified". */
+export const WithTheOfflineStore: Story = {
+  render: () => (
+    <Seeded data={{
+      ...ANALYTICS,
+      totals: { orders: 2_111, revenue: 4_312_730 },
+      by_platform: { ...BY_PLATFORM, offline_store: { orders: 28, revenue: 41_000 } },
+      new_customers: {
+        ...ANALYTICS.new_customers,
+        total: 664,
+        by_platform: { ...NEW_BY_PLATFORM, offline_store: 19 },
+      },
+    }}>
       <PlatformBreakdownChart />
     </Seeded>
   ),

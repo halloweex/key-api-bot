@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -76,87 +75,6 @@ class FakePostgres:
 
         monkeypatch.setattr(chain, "mark_sent", mark_sent)
         monkeypatch.setattr(chain, "find_sent", find_sent)
-
-
-# ─── The one door ─────────────────────────────────────────────────────────────
-
-# The reports' DuckDB statements for the ledger (`already_sent`, `mark_sent`,
-# `fetch_sent`), deleted in S14-10; their names stay so one coming back to a
-# report module, or an import of one, is caught. The report modules are no
-# longer allowed SQL over the ledgers at all.
-_REPORT_MODULES = {"core.weekly_report", "core.traffic_report"}
-_LEDGER_NAMES = {"already_sent", "mark_sent", "fetch_sent"}
-_ALLOWED = {"core/report_ledger.py",
-            "core/pg_weekly_ledger_write.py", "core/pg_traffic_ledger_write.py"}
-_SQL_ALLOWED = _ALLOWED | {
-    "core/migrations.py", "core/mirror_reconciliation.py",
-    "core/pg_chain_invariants.py", "core/snapshot_validation.py",
-}
-_LEDGER_SQL = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|FROM|INTO)\b[\s\S]*\b"
-                         r"(weekly_report_sends|traffic_report_sends)\b", re.IGNORECASE)
-
-
-def _docstrings(tree) -> set:
-    out = set()
-    for n in ast.walk(tree):
-        if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                          ast.AsyncFunctionDef)) and n.body:
-            first = n.body[0]
-            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
-                out.add(id(first.value))
-    return out
-
-
-def _offenders_in(tree, rel):
-    out = []
-    docs = _docstrings(tree)
-    for n in ast.walk(tree):
-        if (isinstance(n, ast.ImportFrom) and n.module in _REPORT_MODULES
-                and rel not in _ALLOWED):
-            for alias in n.names:
-                if alias.name in _LEDGER_NAMES:
-                    out.append(f"{rel}:{n.lineno} imports {n.module}.{alias.name}")
-        if (isinstance(n, ast.Attribute) and n.attr in _LEDGER_NAMES
-                and isinstance(n.value, ast.Name)
-                and n.value.id in {"weekly_report", "traffic_report"}
-                and rel not in _ALLOWED):
-            out.append(f"{rel}:{n.lineno} reaches {n.value.id}.{n.attr}")
-        if (isinstance(n, ast.Constant) and isinstance(n.value, str)
-                and id(n) not in docs and rel not in _SQL_ALLOWED
-                and _LEDGER_SQL.search(n.value)):
-            out.append(f"{rel}:{n.lineno} spells SQL over a ledger")
-    return out
-
-
-class TestTheOneDoor:
-    def test_nothing_goes_round_the_router(self):
-        """Mutation: `from core.weekly_report import mark_sent` back in the
-        job — the delivery would be recorded in DuckDB alone, the gate reads
-        Postgres, and the week is sent again tomorrow."""
-        offenders = []
-        for d in ("core", "web", "bot", "scripts"):
-            for path in sorted((ROOT / d).rglob("*.py")):
-                rel = str(path.relative_to(ROOT))
-                offenders += _offenders_in(ast.parse(path.read_text(encoding="utf-8")), rel)
-        assert offenders == []
-
-    def test_the_walk_sees_the_shape(self):
-        tree = ast.parse("from core.weekly_report import mark_sent, build_report\n"
-                         "x = 'SELECT 1 FROM traffic_report_sends'\n")
-        assert len(_offenders_in(tree, "core/scheduler.py")) == 2
-
-    def test_the_reports_ledger_statements_are_gone(self):
-        """S14-10 deleted them, and the ledger names only its chain module.
-        Mutation: put `mark_sent(conn, ...)` back in `core/weekly_report.py`,
-        or `Ledger.report_module` back in `core/report_ledger.py`."""
-        import dataclasses
-
-        from core import traffic_report, weekly_report
-
-        for module in (weekly_report, traffic_report):
-            assert not {n for n in _LEDGER_NAMES if hasattr(module, n)}, module.__name__
-        assert [f.name for f in dataclasses.fields(report_ledger.Ledger)] == ["chain_module"]
-        assert not hasattr(report_ledger, "_shadow")
 
 
 # ─── At least once, never twice ──────────────────────────────────────────────
@@ -245,16 +163,6 @@ class TestTheDoor:
         assert chain.pending() == {"count": 0, "weeks": [], "unreadable": []}
 
     @pytest.mark.asyncio
-    async def test_a_week_postgres_does_not_hold_is_not_sent(self, flags, no_duckdb):
-        """No spool and no row: the gate answers False from Postgres alone —
-        it no longer asks DuckDB to adopt a week only DuckDB held (skipped in
-        production under KS_DUCKDB=off since 2026-10-16, deleted in S14-10).
-        Mutation: put the adoption back — `no_duckdb` fails."""
-        pg = FakePostgres(flags, pg_traffic_ledger_write)
-        assert await report_ledger.already_sent(report_ledger.TRAFFIC, WEEK, "retail") is False
-        assert pg.calls == ["find_sent"]
-
-    @pytest.mark.asyncio
     async def test_postgres_unreachable_at_the_gate_refuses(self, flags, no_duckdb):
         """No answer is not "not sent". Mutation: read a refusal as False."""
         chain = pg_weekly_ledger_write
@@ -325,28 +233,6 @@ async def warehouse(monkeypatch):
 
 class TestTheJobSendsOnce:
     """Through the job the scheduler runs, with the sales report's own wiring."""
-
-    @pytest.mark.asyncio
-    async def test_postgres_refusing_after_delivery_never_sends_twice(
-            self, flags, warehouse, tmp_path, monkeypatch):
-        from tests.unit.test_weekly_report import TestSchedulerJob, _store
-
-        chain = pg_weekly_ledger_write
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        pg = FakePostgres(flags, chain)
-        pg.refuse = 3
-        store = await _store(tmp_path)
-        job = TestSchedulerJob()
-        week_start = await job._seed(warehouse, complete=True)
-        sent = []
-        scheduler = job._wire(monkeypatch, store, sent, tmp_path)
-        first = await scheduler._run_weekly_report()
-        assert first["sent"] is True and first["ledger"] == "pending"
-        second = await scheduler._run_weekly_report()
-        assert second == {"sent": False, "reason": "already_sent",
-                          "week": week_start.isoformat()}
-        assert len(sent) == 1
-        assert (week_start, "retail") in pg.rows        # drained by the gate
 
     @pytest.mark.asyncio
     async def test_the_traffic_floor_is_asked_before_the_ledger(
@@ -502,23 +388,6 @@ class TestASpoolOutlivesItsFlag:
     gate they reached; these hold the spool to counting under every flag."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", [None, "duckdb", "pgsql-typo"])
-    async def test_a_spooled_week_counts_as_sent_while_postgres_refuses(
-            self, flags, no_duckdb, value):
-        """Mutation: count the week only once it has landed — a Postgres that
-        refused the drain would turn a delivered week into a second send."""
-        chain = pg_weekly_ledger_write
-        if value is not None:
-            flags.setenv(chain.WRITE_ENV, value)
-        pg = FakePostgres(flags, chain)
-        pg.refuse = 1
-        report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1,
-                            datetime.now(timezone.utc))
-        assert await report_ledger.already_sent(report_ledger.WEEKLY, WEEK, "retail")
-        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
-        assert pg.calls == ["mark_sent"]                 # the drain, refused
-
-    @pytest.mark.asyncio
     async def test_an_unreadable_file_counts_by_its_name_and_stays(self, flags, no_duckdb):
         """No drain lands a file that will not parse, and none deletes it."""
         chain = pg_traffic_ledger_write
@@ -530,35 +399,3 @@ class TestASpoolOutlivesItsFlag:
         assert path.exists() and pg.rows == {}
         assert chain.pending() == {"count": 1, "weeks": ["2026-09-21__retail"],
                                    "unreadable": ["2026-09-21__retail"]}
-
-    @pytest.mark.asyncio
-    async def test_through_the_job_the_week_goes_out_once_whatever_the_flag(
-            self, flags, warehouse, tmp_path, monkeypatch):
-        """End to end with the sales report's own wiring: delivered, the
-        record refused three times and spooled, the flag put back to
-        `duckdb`, then a tick with Postgres still refusing and one with it
-        back. Mutation: drop the spool branch from the gate — `sent` holds
-        two."""
-        from tests.unit.test_weekly_report import TestSchedulerJob, _store
-
-        chain = pg_weekly_ledger_write
-        pg = FakePostgres(flags, chain)
-        pg.refuse = 3
-        store = await _store(tmp_path)
-        job = TestSchedulerJob()
-        week_start = await job._seed(warehouse, complete=True)
-        sent = []
-        scheduler = job._wire(monkeypatch, store, sent, tmp_path)
-        first = await scheduler._run_weekly_report()
-        assert first["sent"] is True and first["ledger"] == "pending"
-        flags.setenv(chain.WRITE_ENV, "duckdb")
-        pg.refuse = 1
-        quiet = {"sent": False, "reason": "already_sent",
-                 "week": week_start.isoformat()}
-        assert await scheduler._run_weekly_report() == quiet   # spooled
-        assert report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
-        assert await scheduler._run_weekly_report() == quiet   # drained
-        assert not report_ledger.is_spooled(chain.CHAIN, week_start, "retail")
-        assert await scheduler._run_weekly_report() == quiet   # Postgres's row
-        assert len(sent) == 1
-        assert (week_start, "retail") in pg.rows

@@ -36,12 +36,19 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tupl
 from zoneinfo import ZoneInfo
 
 from core.data_quality import Discrepancy, Rollup, classify_order_discrepancies
+from core.duckdb_constants import SYNCED_SOURCE_IDS
 from core.models import OrderStatus
 
 logger = logging.getLogger(__name__)
 
 KYIV = ZoneInfo("Europe/Kyiv")
-ACTIVE_SOURCES = (1, 2, 3, 4, 5)
+# Every source we sync, on all three arms — the KeyCRM snapshot, Postgres and
+# ClickHouse. It was a literal `(1, 2, 3, 4, 5)` of its own until the offline
+# store (source 7, the owner's decision of 2026-11-15), so the store's orders
+# were compared by no arm and re-fetched by no repair; and an order KeyCRM moved
+# into an unlisted source while Postgres still held the old one would have
+# dropped out of the KeyCRM side only, a MISSING_IN_KC nothing repairs.
+ACTIVE_SOURCES = SYNCED_SOURCE_IDS
 RETURN_STATUS_IDS = tuple(int(s) for s in OrderStatus.return_statuses())
 
 

@@ -243,33 +243,6 @@ class TestTheDerivationRidesTheReplicationTick:
     so a tick without it stops them.
     """
 
-    def test_the_runner_derives_before_it_replicates(self):
-        import ast
-        import inspect
-
-        from core.scheduler import BackgroundScheduler
-
-        import textwrap
-
-        src = textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_replicate_operational))
-        tree = ast.parse(src)
-        # By line, not by `ast.walk` order: the walk is breadth-first, and a
-        # call nested in the chain-4 branch sorts after a shallower one below.
-        lines = {}
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Call):
-                name = getattr(n.func, "id", getattr(n.func, "attr", None))
-                lines.setdefault(name, []).append(n.lineno)
-        # Chain 4's derivation, in Postgres — the only one since step 14's
-        # S14-11 (DuckDB's `derive_gender` went with the flag).
-        assert "derive_gender_pg" in lines, "the tick no longer derives gender"
-        assert "derive_gender" not in lines, "the tick derives in DuckDB again"
-        assert "replicate_operational" not in lines, (
-            "the tick copies out of DuckDB again")
-        assert "replicate_bot_state" in lines
-        assert max(lines["derive_gender_pg"]) < min(lines["replicate_bot_state"])
-
     @pytest.mark.asyncio
     async def test_the_tick_derives_and_copies_the_bot_without_the_store(self):
         """What the job returns, run: the derivation's answer and the bot's

@@ -177,7 +177,7 @@ ORDERS_TABLE = "bronze.orders"
 ORDER_PRODUCTS_TABLE = "bronze.order_products"
 # Every column except `manager_comment`, which has the COALESCE above. The
 # five after `promocode` and the six after `price_sold` below are the discount
-# (revision 0037), in `landing_rows.OrderRow`'s and `OrderProductRow`'s order;
+# (revision 0038), in `landing_rows.OrderRow`'s and `OrderProductRow`'s order;
 # plain overwrites, as KeyCRM serves them. `discount_data` arrives as JSON text
 # and is cast here: asyncpg registers no JSONB codec in this codebase.
 _ORDER_UPSERT = """

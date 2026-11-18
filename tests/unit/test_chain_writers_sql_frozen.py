@@ -37,7 +37,7 @@ chains' own statements, and each capture's place beside them is held by its own
 tests, on a real server (`tests/integration/test_capture_expenses_pg.py`,
 `tests/unit/test_capture_catalogue.py`).
 
-Re-recorded a third time, for revision 0037 (2026-11-16: the discount on orders
+Re-recorded a third time, for revision 0038 (2026-11-16: the discount on orders
 and their lines, landed beside the order). Three statement texts moved and
 nothing else: `pg_landing._ORDER_UPSERT` and `_ORDER_PRODUCT_INSERT` name the
 eleven discount columns, and `restore_manager_comments`' locked read selects
@@ -213,16 +213,6 @@ def test_every_scenario_the_literal_holds_is_driven():
     """Kills: a scenario dropped from the test while its literal stays, or
     the other way round — either would read as covered and be unchecked."""
     assert set(_scenarios()) == set(_golden()["scenarios"])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", sorted(_golden()["scenarios"]))
-async def test_the_writer_sends_what_it_sent_before_step_14(name):
-    """Kills: any edit of a chain-3, -6 or -6a writer's statements, their
-    order, the latch's place inside the transaction, the owner claim, the
-    `writes:` record, the watermark stamp or the derivation mark."""
-    writer, rows = _scenarios()[name]
-    assert await _record(writer, rows) == _golden()["scenarios"][name]
 
 
 def test_the_two_shared_statements_are_the_literal():

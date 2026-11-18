@@ -1,8 +1,9 @@
 """The discount on an order and on each of its lines, as KeyCRM serves it
 
-Revision ID: 0037_order_discounts
-Revises: 0036_analytics_captures
-Created: 2026-11-16
+Revision ID: 0038_order_discounts
+Revises: 0037_frozen_month_goals
+Created: 2026-11-16 (as 0037; numbered 0038, after the frozen month goals,
+by the owner's decision of 2026-11-18)
 
 WHY
 
@@ -80,9 +81,9 @@ moves the money moves `grand_total`, which is versioned.
 
 THE DOWNGRADE KEEPS THE COLUMNS
 
-As 0036's does (owner decision D2), and for the same reason one schema down:
-an image that requires an earlier revision names its order columns one by
-one (`pg_landing._ORDER_UPSERT`, `_ORDER_PRODUCT_INSERT`,
+As 0036's and 0037's do (owner decision D2), and for the same reason one
+schema down: an image that requires an earlier revision names its order
+columns one by one (`pg_landing._ORDER_UPSERT`, `_ORDER_PRODUCT_INSERT`,
 `pg_orders_write.restore_manager_comments`), so it neither reads nor writes
 these and runs beside them; dropping them would throw away a backfill that
 costs ~1 000 KeyCRM requests to repeat. So `alembic downgrade` below this
@@ -95,8 +96,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0037_order_discounts"
-down_revision = "0036_analytics_captures"
+revision = "0038_order_discounts"
+down_revision = "0037_frozen_month_goals"
 branch_labels = None
 depends_on = None
 
@@ -106,7 +107,7 @@ depends_on = None
 # total it would understate a line of five units fivefold.
 ORDER_COMMENTS = {
     "products_total": "KeyCRM products_total: the lines' sum before the order's "
-                      "own discount. NULL: not landed yet (revision 0037).",
+                      "own discount. NULL: not landed yet (revision 0038).",
     "total_discount": "KeyCRM total_discount: the order's discount in money; "
                       "products_total less it is grand_total. Carries a gift "
                       "certificate's redemption too (see discount_amount). "
@@ -123,7 +124,7 @@ ORDER_COMMENTS = {
 }
 LINE_COMMENTS = {
     "price": "KeyCRM price: the unit price before any discount (price_sold is "
-             "after it). NULL: not landed yet (revision 0037).",
+             "after it). NULL: not landed yet (revision 0038).",
     "total_discount": "KeyCRM total_discount: the discount PER UNIT; the line's "
                       "discount in money is total_discount * quantity. NULL: "
                       "not landed yet.",
@@ -170,7 +171,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Nothing: Alembic moves the stamp to 0036 and every column stays.
+    """Nothing: Alembic moves the stamp to 0037 and every column stays.
 
     An image at an earlier revision names its order columns one by one and
     never sees these; dropping them would discard the backfill. The module

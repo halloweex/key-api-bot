@@ -1,13 +1,35 @@
 """
 LightGBM-based revenue prediction service.
 
-Trains on historical daily revenue data and predicts remaining days of the current month.
-Runs nightly via scheduler, stores predictions in DuckDB.
+Trains on historical daily revenue data and predicts the days ahead, up to
+FORECAST_HORIZON_DAYS. Runs Mon/Thu via the scheduler and at a start with no
+usable model; stores predictions in `app.revenue_predictions`.
+
+THE TRAINING PROCEDURE (2026-11-18)
+
+Huber loss, 300 trees on every row, revenue-only features, no winsorising, no
+weekday correction, no early stopping. This is the "fixed" configuration a
+replay of the production model chose before any result was seen, and the one
+the owner picked after a team analysis of month-total accuracy. Mean absolute
+error of the month total over 2026, held out, on the Mon/Thu/1st/15th origins
+the old procedure trained on: 6.7% against 8.4% for the old procedure and 7.0%
+for an 8-week weekday mean (2025: 8.0 / 8.5 / 8.6). Against the weekday mean
+the difference is within noise; against the old procedure it is the absence
+of its failures. What it replaced, and why each part went:
+
+- early stopping on the last 60 days, never refit: the model never saw the
+  most recent 60 days, its level was pulled toward the two-year mean, and in
+  Aug–Sep 2026 and on 2026-11-12 it stopped at one tree (a constant forecast);
+- a weekday "correction" fitted on the same rows: it patched the level by
+  +5–8% of the month, not a weekday effect;
+- winsorising at P95 and multiplying back: it erased Black Friday;
+- six order and customer features: unknown for future days, they were NaN→0
+  inside the recursive forecast.
 """
 import asyncio
-import json
 import os
 import logging
+import time
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
@@ -20,28 +42,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-
-def _write_json_atomically(path, payload) -> None:
-    """Write `payload` to `path` whole or not at all.
-
-    A sibling temp file plus `os.replace`, which is atomic on the same
-    filesystem. Readers only ever see the previous file or the new one.
-    """
-    import tempfile
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".")
-    try:
-        with os.fdopen(fd, "w") as handle:
-            json.dump(payload, handle, indent=2)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+# `_write_json_atomically` lived here until 2026-11-18. It wrote the weekday
+# corrections, the clip ratio and the tuned parameters whole or not at all;
+# none of the three is written any more.
 
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
@@ -49,6 +52,12 @@ _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 def _today_kyiv() -> date:
     """Get today's date in Kyiv timezone (matches Gold layer dates)."""
     return datetime.now(_KYIV_TZ).date()
+
+
+def _monotonic() -> float:
+    """The clock `OUTLOOK_TTL_S` is measured by; a name of its own so a
+    test can move it without moving the event loop's."""
+    return time.monotonic()
 
 
 def _trained_on(stamp: Optional[datetime]) -> Optional[str]:
@@ -77,15 +86,30 @@ def _stored_metrics(predictions: List[Dict[str, Any]]) -> Dict[str, Any]:
 # Model storage
 MODEL_DIR = Path(__file__).parent.parent / "data"
 MODEL_PATH = MODEL_DIR / "revenue_model.joblib"
-TUNED_PARAMS_PATH = MODEL_DIR / "lgbm_best_params.json"
-DOW_CORRECTIONS_PATH = MODEL_DIR / "dow_corrections.json"
-CLIP_RATIO_PATH = MODEL_DIR / "clip_ratio.json"
+# `dow_corrections.json`, `clip_ratio.json` and `lgbm_best_params.json` may
+# still sit in MODEL_DIR from before 2026-11-18. Nothing reads them: the first
+# two would scale the current model's forecast by factors fitted to another
+# one, and the parameters are pinned in PRODUCTION_LGB_PARAMS.
+
+# Training (see the module docstring)
+HUBER_DELTA = 60000.0      # UAH, about the daily MAE: squared loss inside, L1 beyond
+NUM_BOOST_ROUND = 300      # fixed; no early stopping
+VALIDATION_DAYS = 60       # held out only to measure the model the gate judges
 
 # Thread pool for CPU-bound training
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
 
 # How far ahead to predict (days)
 FORECAST_HORIZON_DAYS = 60
+
+# The month's 80% range and Black Friday line beside the forecast
+# (`core/forecast_range.py`, 2026-11-18). One computation per Kyiv day, sales
+# type and stored forecast, kept an hour at most so a read just after
+# midnight, before yesterday's last orders are derived, is not the whole
+# day's; a computation waiting longer than the timeout for the one ML thread
+# (a training on it) is dropped from the queue and the keys are null.
+OUTLOOK_TTL_S = 3600.0
+OUTLOOK_TIMEOUT_S = 10.0
 
 # A11-6 model-validation gate: reject a freshly trained model whose holdout
 # WAPE is implausibly bad rather than let it overwrite a working model and feed
@@ -374,182 +398,125 @@ FEATURE_COLUMNS = [
     'days_to_payday',
     # DOW-specific (2) — addresses Thu/Fri bimodal distribution
     'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
-    # AOV (1)
-    'rolling_mean_7d_aov',
-    # Orders (2)
-    'lag_7d_orders', 'rolling_mean_7d_orders',
-    # Customer mix (3)
-    'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio', 'rolling_mean_7d_return_rate',
 ]
+# Revenue only, since 2026-11-18. `_build_features` still computes the AOV,
+# order and customer-mix columns, but the model does not read them: a future
+# day has no orders or customers, so inside the recursive forecast they turned
+# NaN → 0 within a week of the horizon, a value the model never trained on.
 
-# Default LightGBM hyperparameters (tuned for small datasets ~125-185 rows)
-DEFAULT_LGB_PARAMS = {
-    'num_leaves': 15,
-    'learning_rate': 0.05,
+# Columns that can legitimately be NaN early in the dataset: kept rather than
+# dropped when the training rows are chosen.
+_NAN_SAFE_COLS = {
+    'yoy_ratio', 'lag_365d', 'momentum_7d_28d', 'revenue_growth_7d',
+    'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
+}
+
+# The hyperparameters the month-total check validated (2026-11-18): the values
+# `data/lgbm_best_params.json` held in production, pinned here. That file is
+# no longer read, and `_tune_hyperparameters` no longer writes it, so the model
+# that runs is the one that was measured. `subsample` has no effect without
+# `bagging_freq`; it stays because it was part of what was measured.
+PRODUCTION_LGB_PARAMS = {
+    'num_leaves': 31,
+    'learning_rate': 0.01,
     'min_child_samples': 5,
     'reg_alpha': 0.1,
     'subsample': 0.8,
 }
 
 
-def _load_tuned_params() -> Dict[str, Any]:
-    """Load tuned hyperparameters from disk, or return defaults."""
-    if TUNED_PARAMS_PATH.exists():
-        try:
-            with open(TUNED_PARAMS_PATH) as f:
-                params = json.load(f)
-            logger.info(f"Loaded tuned params from {TUNED_PARAMS_PATH}: {params}")
-            return params
-        except Exception as e:
-            logger.warning(f"Failed to load tuned params: {e}")
-    return DEFAULT_LGB_PARAMS.copy()
-
-
 def _build_lgb_params(tuned: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Build full LightGBM params dict from tuned hyperparameters."""
-    hp = tuned or _load_tuned_params()
+    """The full LightGBM params dict: PRODUCTION_LGB_PARAMS, or a candidate
+    set when the tuning grid asks.
+
+    Huber loss: squared within HUBER_DELTA of the prediction, linear beyond,
+    so a promotion day pulls the fit like a large error and not like a
+    squared one. It replaced winsorising, which cut the promotions out of
+    the data altogether."""
+    hp = tuned or PRODUCTION_LGB_PARAMS
     return {
-        'objective': 'regression',
+        'objective': 'huber',
+        'alpha': HUBER_DELTA,
         'metric': 'mae',
-        'num_leaves': hp.get('num_leaves', 15),
-        'learning_rate': hp.get('learning_rate', 0.05),
-        'min_child_samples': hp.get('min_child_samples', 5),
-        'reg_alpha': hp.get('reg_alpha', 0.1),
-        'subsample': hp.get('subsample', 0.8),
+        'num_leaves': hp['num_leaves'],
+        'learning_rate': hp['learning_rate'],
+        'min_child_samples': hp['min_child_samples'],
+        'reg_alpha': hp['reg_alpha'],
+        'subsample': hp['subsample'],
         'n_jobs': 1,
         'verbose': -1,
         'seed': 42,
     }
 
 
-def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float], float]:
-    """Train LightGBM model on historical data. Returns (model, metrics, dow_corrections, clip_ratio).
-
-    Winsorizes training revenue at P95 to reduce promo spike distortion.
-    Computes day-of-week residual corrections on the validation set to
-    adjust for systematic DOW bias.
-    Runs in a thread pool to avoid blocking the event loop.
-    """
-    import lightgbm as lgb
-    from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
-
-    # Winsorize: clip training revenue at P95 to reduce promo spike distortion
-    # Save original revenue keyed by date for validation metrics on original scale
-    df = df.copy()
-    df['date'] = pd.to_datetime(df['date'])
-    original_rev_by_date = dict(zip(df['date'], df['revenue']))
-    p95 = df['revenue'].quantile(0.95)
-    df['revenue'] = df['revenue'].clip(upper=p95)
-    clip_ratio = float(
-        np.mean(list(original_rev_by_date.values())) / df['revenue'].mean()
-    )
-    logger.info(f"Winsorization: P95={p95:.0f}, clip_ratio={clip_ratio:.4f}")
-
+def _training_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """The rows a model trains on: features built, the early rows that lack
+    the core lags dropped, the remaining gaps filled."""
     featured = _build_features(df)
-
-    # Columns that can legitimately be NaN early in the dataset — skip in dropna
-    _NAN_SAFE_COLS = {
-        'yoy_ratio', 'lag_365d',
-        'momentum_7d_28d', 'revenue_growth_7d',
-        'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
-        'rolling_mean_7d_return_rate',
-        'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
-    }
-
-    # Drop rows with NaN in core features (due to lags)
     nan_check_cols = [c for c in FEATURE_COLUMNS if c not in _NAN_SAFE_COLS]
-    train_data = featured.dropna(subset=nan_check_cols)
-    # Fill remaining NaN in features
-    train_data = train_data.copy()
-    train_data['yoy_ratio'] = train_data['yoy_ratio'].fillna(1.0)
-    train_data['lag_365d'] = train_data['lag_365d'].fillna(0)
+    rows = featured.dropna(subset=nan_check_cols).copy()
+    rows['yoy_ratio'] = rows['yoy_ratio'].fillna(1.0)
+    rows['lag_365d'] = rows['lag_365d'].fillna(0)
     for col in FEATURE_COLUMNS:
         if col not in ('yoy_ratio', 'lag_365d'):
-            train_data[col] = train_data[col].fillna(0)
+            rows[col] = rows[col].fillna(0)
+    return rows
 
-    if len(train_data) < 60:
-        raise ValueError(f"Not enough training data: {len(train_data)} rows (need >= 60)")
 
-    X = train_data[FEATURE_COLUMNS].values
-    y = train_data['revenue'].values
+def _fit_booster(X: np.ndarray, y: np.ndarray,
+                 params: Optional[Dict[str, Any]] = None) -> Any:
+    """One LightGBM fit of the production procedure: NUM_BOOST_ROUND trees on
+    every row given, no validation set, no early stopping."""
+    import lightgbm as lgb
+    return lgb.train(params or _build_lgb_params(),
+                     lgb.Dataset(X, label=y, feature_name=FEATURE_COLUMNS),
+                     num_boost_round=NUM_BOOST_ROUND)
+
+
+def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any]]:
+    """Train the model on historical data. Returns (model, metrics).
+
+    The model trains on every row, the most recent days included; until
+    2026-11-18 the last 60 were only ever used to stop training early, so the
+    model never saw them. The metrics come from a twin fitted without the last
+    VALIDATION_DAYS rows and scored on them one day ahead: that is what the
+    WAPE gate in `_train_impl` judges, and what is stored beside the forecast.
+    Runs in a thread pool to avoid blocking the event loop.
+    """
+    from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
+
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    train_data = _training_rows(df)
+
+    if len(train_data) < VALIDATION_DAYS + 30:
+        raise ValueError(f"Not enough training data: {len(train_data)} rows "
+                         f"(need >= {VALIDATION_DAYS + 30})")
+
+    X = train_data[FEATURE_COLUMNS].to_numpy()
+    y = train_data['revenue'].to_numpy()
     dates = train_data['date'].values
-
-    # Time-series split: last 60 days for validation
-    split_idx = len(X) - 60
-    X_train, X_val = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
-    dates_val = dates[split_idx:]
-
-    train_set = lgb.Dataset(X_train, label=y_train, feature_name=FEATURE_COLUMNS)
-    val_set = lgb.Dataset(X_val, label=y_val, reference=train_set)
-
     params = _build_lgb_params()
 
-    model = lgb.train(
-        params,
-        train_set,
-        num_boost_round=500,
-        valid_sets=[val_set],
-        callbacks=[lgb.early_stopping(50, verbose=False)],
-    )
+    split_idx = len(X) - VALIDATION_DAYS
+    twin = _fit_booster(X[:split_idx], y[:split_idx], params)
+    y_val = y[split_idx:]
+    dates_val = dates[split_idx:]
+    val_pred = np.maximum(twin.predict(X[split_idx:]), 0)
 
-    val_pred = model.predict(X_val)
-    val_pred = np.maximum(val_pred, 0)
-    val_pred *= clip_ratio  # Scale back from winsorized training
+    model = _fit_booster(X, y, params)
 
-    # DOW residual correction: use last 180 days of data for more robust estimates
-    # (60-day val set only gives ~8 samples per DOW; 180 days gives ~26)
-    # DOW corrections computed in clipped space (clip_ratio cancels in ratio)
-    dow_window = min(180, len(X))
-    dow_X = X[-dow_window:]
-    dow_y = y[-dow_window:]
-    dow_dates = dates[-dow_window:]
-    dow_pred = model.predict(dow_X)
-    dow_pred = np.maximum(dow_pred, 0)
-
-    dow_corrections: Dict[int, float] = {}
-    dow_dows = np.array([pd.Timestamp(d).dayofweek for d in dow_dates])
-    for dow in range(7):
-        mask = dow_dows == dow
-        if mask.sum() > 0:
-            mean_actual = float(np.mean(dow_y[mask]))
-            mean_pred = float(np.mean(dow_pred[mask]))
-            if mean_pred > 0:
-                correction = mean_actual / mean_pred
-                # Clamp to avoid overfitting
-                correction = max(0.70, min(1.30, correction))
-            else:
-                correction = 1.0
-            dow_corrections[dow] = round(correction, 4)
-        else:
-            dow_corrections[dow] = 1.0
-
-    logger.info(f"DOW corrections (180d window): {dow_corrections}")
-
-    # Apply DOW corrections to validation predictions for metrics
-    val_pred_corrected = val_pred.copy()
-    val_dows = np.array([pd.Timestamp(d).dayofweek for d in dates_val])
-    for i, dow in enumerate(val_dows):
-        val_pred_corrected[i] *= dow_corrections[int(dow)]
-
-    # Recover original (unclipped) actuals for validation metrics
-    y_val_original = np.array([
-        original_rev_by_date.get(pd.Timestamp(d), y_val[i])
-        for i, d in enumerate(dates_val)
-    ])
-
-    # Calculate metrics on original scale (with DOW correction)
-    mae = float(mean_absolute_error(y_val_original, val_pred_corrected))
-    mape = float(mean_absolute_percentage_error(y_val_original, val_pred_corrected)) * 100
+    mae = float(mean_absolute_error(y_val, val_pred))
+    mape = float(mean_absolute_percentage_error(y_val, val_pred)) * 100
     # WAPE: sum(|actual - predicted|) / sum(actual) — robust to low-revenue days
-    wape = float(np.sum(np.abs(y_val_original - val_pred_corrected)) / np.sum(y_val_original)) * 100 if np.sum(y_val_original) > 0 else 0.0
+    wape = float(np.sum(np.abs(y_val - val_pred)) / np.sum(y_val)) * 100 if np.sum(y_val) > 0 else 0.0
 
     # Per-day validation breakdown
     days_of_week = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     daily_breakdown = []
-    for i in range(len(y_val_original)):
-        actual = float(y_val_original[i])
-        pred = float(val_pred_corrected[i])
+    for i in range(len(y_val)):
+        actual = float(y_val[i])
+        pred = float(val_pred[i])
         error = abs(actual - pred)
         ape = (error / actual * 100) if actual > 0 else 0
         dt = pd.Timestamp(dates_val[i])
@@ -568,23 +535,22 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
         'wape': round(wape, 2),
         'validation_days': daily_breakdown,
     }
-    logger.info(f"Model trained: MAE={mae:.0f}, MAPE={mape:.1f}%, WAPE={wape:.1f}%, "
-                f"rows={len(train_data)}, best_iter={model.best_iteration}")
+    logger.info(f"Model trained: validation MAE={mae:.0f}, MAPE={mape:.1f}%, WAPE={wape:.1f}%, "
+                f"rows={len(train_data)}, trees={model.num_trees()}")
 
-    return model, metrics, dow_corrections, clip_ratio
+    return model, metrics
 
 
 def _predict_future(
     model: Any,
     historical_df: pd.DataFrame,
     future_dates: List[date],
-    dow_corrections: Optional[Dict[int, float]] = None,
-    clip_ratio: float = 1.0,
 ) -> List[Dict[str, Any]]:
     """Generate predictions for future dates using trained model.
 
     Uses actual historical data for lag features, then iteratively fills in
-    predictions as we go forward, adjusted by DOW corrections.
+    predictions as we go forward. The prediction is the model's output,
+    floored at zero; no multiplier is applied since 2026-11-18.
     """
     if not future_dates:
         return []
@@ -629,12 +595,6 @@ def _predict_future(
 
         pred = float(model.predict(row_features)[0])
         pred = max(pred, 0)  # Revenue can't be negative
-        pred *= clip_ratio  # Scale back from winsorized training
-
-        # Apply DOW correction
-        if dow_corrections:
-            dow = row_date.dayofweek
-            pred *= dow_corrections.get(dow, 1.0)
 
         # Store prediction back so next iteration can use it as a lag
         combined.loc[idx, 'revenue'] = pred
@@ -744,8 +704,6 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
     Excludes today's (potentially incomplete) row.
     Uses last 6 complete calendar months as test folds.
     """
-    import lightgbm as lgb
-
     df = df.copy()
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date').reset_index(drop=True)
@@ -800,52 +758,12 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
         if len(train_df) < 60 or len(test_df) < 20:
             continue
 
-        # Columns that can legitimately be NaN early — skip in dropna
-        _nan_safe = {
-            'yoy_ratio', 'lag_365d',
-            'momentum_7d_28d', 'revenue_growth_7d',
-            'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
-            'rolling_mean_7d_return_rate',
-            'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
-        }
-
-        # Winsorize training revenue at P95
-        p95 = train_df['revenue'].quantile(0.95)
-        original_mean = train_df['revenue'].mean()
-        train_df['revenue'] = train_df['revenue'].clip(upper=p95)
-        fold_clip_ratio = original_mean / train_df['revenue'].mean()
-
-        # Build features for train set
-        featured_train = _build_features(train_df)
-        featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c not in _nan_safe])
-        featured_train = featured_train.copy()
-        featured_train['yoy_ratio'] = featured_train['yoy_ratio'].fillna(1.0)
-        featured_train['lag_365d'] = featured_train['lag_365d'].fillna(0)
-        for col in FEATURE_COLUMNS:
-            if col not in ('yoy_ratio', 'lag_365d'):
-                featured_train[col] = featured_train[col].fillna(0)
-
+        # The production procedure on the rows before the fold
+        featured_train = _training_rows(train_df)
         if len(featured_train) < 60:
             continue
-
-        X_full_train = featured_train[FEATURE_COLUMNS].values
-        y_full_train = featured_train['revenue'].values
-
-        # Internal early-stopping split: last 30 days of training data
-        es_split = max(len(X_full_train) - 30, int(len(X_full_train) * 0.8))
-        X_tr, X_es = X_full_train[:es_split], X_full_train[es_split:]
-        y_tr, y_es = y_full_train[:es_split], y_full_train[es_split:]
-
-        train_set = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_COLUMNS)
-        es_set = lgb.Dataset(X_es, label=y_es, reference=train_set)
-
-        model = lgb.train(
-            lgb_params,
-            train_set,
-            num_boost_round=500,
-            valid_sets=[es_set],
-            callbacks=[lgb.early_stopping(50, verbose=False)],
-        )
+        model = _fit_booster(featured_train[FEATURE_COLUMNS].to_numpy(),
+                             featured_train['revenue'].to_numpy(), lgb_params)
 
         # Accumulate feature importance (gain-based)
         importance = model.feature_importance(importance_type='gain')
@@ -866,7 +784,6 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
 
         lgbm_preds = model.predict(X_test)
         lgbm_preds = np.maximum(lgbm_preds, 0)
-        lgbm_preds *= fold_clip_ratio  # Scale back from winsorized training
 
         # LightGBM metrics for this fold
         lgbm_metrics = _compute_metrics(y_test, lgbm_preds)
@@ -1015,12 +932,14 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
-    """Grid search over walk-forward CV folds to find best LightGBM hyperparameters.
+    """Grid search over walk-forward CV folds, with the production procedure
+    (`_fit_booster`), for a report on which hyperparameters score best.
 
     Reuses the same fold logic as _run_evaluation. Returns dict with best params,
-    WAPE comparison, and search metadata.
+    WAPE comparison against PRODUCTION_LGB_PARAMS, and search metadata. It
+    changes nothing: applying other parameters is a code change, after the
+    month-total check.
     """
-    import lightgbm as lgb
     from itertools import product as iterproduct
 
     df = df.copy()
@@ -1066,36 +985,11 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
         if len(train_df) < 60 or len(test_df) < 20:
             continue
 
-        _nan_safe = {
-            'yoy_ratio', 'lag_365d',
-            'momentum_7d_28d', 'revenue_growth_7d',
-            'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
-            'rolling_mean_7d_return_rate',
-            'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
-        }
-
-        # Winsorize training revenue at P95
-        p95 = train_df['revenue'].quantile(0.95)
-        original_mean = train_df['revenue'].mean()
-        train_df['revenue'] = train_df['revenue'].clip(upper=p95)
-        fold_clip_ratio = original_mean / train_df['revenue'].mean()
-
-        featured_train = _build_features(train_df)
-        featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c not in _nan_safe])
-        featured_train = featured_train.copy()
-        featured_train['yoy_ratio'] = featured_train['yoy_ratio'].fillna(1.0)
-        featured_train['lag_365d'] = featured_train['lag_365d'].fillna(0)
-
+        featured_train = _training_rows(train_df)
         if len(featured_train) < 60:
             continue
-
-        X_full_train = featured_train[FEATURE_COLUMNS].fillna(0).values
-        y_full_train = featured_train['revenue'].values
-
-        # Early-stopping split
-        es_split = max(len(X_full_train) - 30, int(len(X_full_train) * 0.8))
-        X_tr, X_es = X_full_train[:es_split], X_full_train[es_split:]
-        y_tr, y_es = y_full_train[:es_split], y_full_train[es_split:]
+        X_tr = featured_train[FEATURE_COLUMNS].to_numpy()
+        y_tr = featured_train['revenue'].to_numpy()
 
         # Test features
         combined = pd.concat([train_df, test_df], ignore_index=True).sort_values('date').reset_index(drop=True)
@@ -1106,10 +1000,21 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
         X_test = test_featured[FEATURE_COLUMNS].fillna(0).values
         y_test = test_featured['revenue'].values
 
-        fold_data.append((X_tr, y_tr, X_es, y_es, X_test, y_test, fold_clip_ratio))
+        fold_data.append((X_tr, y_tr, X_test, y_test))
 
     if not fold_data:
         raise ValueError("No valid folds could be prepared for tuning")
+
+    def fold_wape(params: Dict[str, Any]) -> float:
+        actuals: List[float] = []
+        preds: List[float] = []
+        for X_tr, y_tr, X_test, y_test in fold_data:
+            model = _fit_booster(X_tr, y_tr, params)
+            actuals.extend(y_test.tolist())
+            preds.extend(np.maximum(model.predict(X_test), 0).tolist())
+        a, p = np.array(actuals), np.array(preds)
+        total = float(np.sum(a))
+        return float(np.sum(np.abs(a - p)) / total * 100) if total > 0 else float('inf')
 
     # Parameter grid
     grid = {
@@ -1128,83 +1033,14 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
 
     for combo_vals in combos:
         hp = dict(zip(keys, combo_vals))
-        params = {
-            'objective': 'regression',
-            'metric': 'mae',
-            'num_leaves': hp['num_leaves'],
-            'learning_rate': hp['learning_rate'],
-            'min_child_samples': hp['min_child_samples'],
-            'reg_alpha': hp['reg_alpha'],
-            'subsample': hp['subsample'],
-            'n_jobs': 1,
-            'verbose': -1,
-            'seed': 42,
-        }
-
-        all_actuals = []
-        all_preds = []
-
-        for X_tr, y_tr, X_es, y_es, X_test, y_test, fold_clip_ratio in fold_data:
-            train_set = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_COLUMNS)
-            es_set = lgb.Dataset(X_es, label=y_es, reference=train_set)
-
-            model = lgb.train(
-                params,
-                train_set,
-                num_boost_round=500,
-                valid_sets=[es_set],
-                callbacks=[lgb.early_stopping(50, verbose=False)],
-            )
-
-            preds = np.maximum(model.predict(X_test), 0)
-            preds *= fold_clip_ratio  # Scale back from winsorized training
-            all_actuals.extend(y_test.tolist())
-            all_preds.extend(preds.tolist())
-
-        actuals_arr = np.array(all_actuals)
-        preds_arr = np.array(all_preds)
-        total_actual = float(np.sum(actuals_arr))
-        wape = float(np.sum(np.abs(actuals_arr - preds_arr)) / total_actual * 100) if total_actual > 0 else float('inf')
-
+        wape = fold_wape(_build_lgb_params(hp))
         if wape < best_wape:
             best_wape = wape
             best_combo = hp
 
-    # Compute default WAPE for comparison
-    default_params = {
-        'objective': 'regression',
-        'metric': 'mae',
-        **{k: DEFAULT_LGB_PARAMS[k] for k in keys},
-        'n_jobs': 1,
-        'verbose': -1,
-        'seed': 42,
-    }
-
-    all_actuals = []
-    all_preds = []
-    for X_tr, y_tr, X_es, y_es, X_test, y_test, fold_clip_ratio in fold_data:
-        train_set = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_COLUMNS)
-        es_set = lgb.Dataset(X_es, label=y_es, reference=train_set)
-        model = lgb.train(
-            default_params,
-            train_set,
-            num_boost_round=500,
-            valid_sets=[es_set],
-            callbacks=[lgb.early_stopping(50, verbose=False)],
-        )
-        preds = np.maximum(model.predict(X_test), 0)
-        preds *= fold_clip_ratio  # Scale back from winsorized training
-        all_actuals.extend(y_test.tolist())
-        all_preds.extend(preds.tolist())
-
-    actuals_arr = np.array(all_actuals)
-    preds_arr = np.array(all_preds)
-    total_actual = float(np.sum(actuals_arr))
-    default_wape = float(np.sum(np.abs(actuals_arr - preds_arr)) / total_actual * 100) if total_actual > 0 else 0.0
-
-    # Save best params
-    _write_json_atomically(TUNED_PARAMS_PATH, best_combo)
-    logger.info(f"Saved tuned params to {TUNED_PARAMS_PATH}: {best_combo} (WAPE={best_wape:.2f}%)")
+    default_wape = fold_wape(_build_lgb_params())
+    logger.info(f"Tuning: best {best_combo} (WAPE={best_wape:.2f}%), "
+                f"production params WAPE={default_wape:.2f}%. Nothing applied.")
 
     return {
         "status": "success",
@@ -1214,6 +1050,10 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
         "improvement": round(default_wape - best_wape, 2),
         "combos_tested": len(combos),
         "folds": len(fold_data),
+        # Reported, never saved (2026-11-18). This grid scores one-step-ahead
+        # daily WAPE; the badge is a month total, and a configuration the
+        # month-total check has not seen must not reach the forecast on its own.
+        "applied": False,
     }
 
 
@@ -1223,8 +1063,6 @@ class PredictionService:
     def __init__(self):
         self._model = None
         self._metrics: Dict[str, float] = {}
-        self._dow_corrections: Dict[int, float] = {}
-        self._clip_ratio: float = 1.0
         self._training_lock = asyncio.Lock()
         # Whether the last `predict_month` stored its forecast: True, False, or
         # None before any. `predict_month` swallows a failed store (the model
@@ -1232,6 +1070,11 @@ class PredictionService:
         # refused by Postgres under chain 7b-3 — or by DuckDB — showed nowhere
         # but the log. `_train_impl` publishes it as `predictions_stored`.
         self._last_store_ok: Optional[bool] = None
+        # `get_forecast`'s range and Black Friday line: one entry, keyed by
+        # (Kyiv day, sales type, the forecast's `created_at`), with the
+        # monotonic time it was computed (`OUTLOOK_TTL_S`).
+        self._outlook_cache: Dict[Tuple[date, str, Optional[datetime]],
+                                  Tuple[float, Dict[str, Any]]] = {}
 
     @property
     def is_ready(self) -> bool:
@@ -1265,7 +1108,7 @@ class PredictionService:
     async def tune(self, sales_type: str = "retail") -> Dict[str, Any]:
         """Run hyperparameter grid search using walk-forward CV.
 
-        Saves best params to data/lgbm_best_params.json for use by train/evaluate.
+        Reports the best parameters; saves nothing (see `_tune_hyperparameters`).
         """
         from core.store import get_store
         store = await get_store()
@@ -1363,9 +1206,7 @@ class PredictionService:
 
             # Train in thread pool (CPU-bound)
             loop = asyncio.get_running_loop()
-            model, metrics, dow_corrections, clip_ratio = await loop.run_in_executor(
-                _executor, _train_model, df
-            )
+            model, metrics = await loop.run_in_executor(_executor, _train_model, df)
 
             # ── A11-6: model-validation gate ──
             # Reject an implausible model BEFORE it overwrites the working model,
@@ -1396,8 +1237,6 @@ class PredictionService:
 
             self._model = model
             self._metrics = metrics
-            self._dow_corrections = dow_corrections
-            self._clip_ratio = clip_ratio
 
             # Save model to disk
             await loop.run_in_executor(_executor, self._save_model)
@@ -1477,11 +1316,9 @@ class PredictionService:
             return []
 
         # Run prediction in thread pool
-        dow_corrections = self._dow_corrections
-        clip_ratio = self._clip_ratio
         loop = asyncio.get_running_loop()
         predictions = await loop.run_in_executor(
-            _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections, clip_ratio
+            _executor, _predict_future, self._model, historical_df, future_dates
         )
 
         # ── A11-6: prediction-sanity gate ──
@@ -1527,6 +1364,12 @@ class PredictionService:
         every restart, the full in-memory dict — sixty validation days with
         it — after a training in the same process. One answer now, and one
         any process can give.
+
+        `month_range` and `black_friday` (2026-11-18) are what the month's
+        badge says beside its point: the 80% range of the month total and
+        what last year's Black Friday would add (`core/forecast_range.py`,
+        `_month_outlook`). Retail only, and null whenever they cannot be
+        said — never a reason for this answer to fail.
         """
         from core.store import get_store
         store = await get_store()
@@ -1554,6 +1397,7 @@ class PredictionService:
 
         predicted_remaining = sum(p['predicted_revenue'] for p in predictions)
         predicted_total = actual_to_date + predicted_remaining
+        outlook = await self._month_outlook(sales_type, today, predictions, trained_at)
 
         return {
             "actual_to_date": round(actual_to_date, 2),
@@ -1565,7 +1409,65 @@ class PredictionService:
             "month_start": month_start.isoformat(),
             "month_end": month_end.isoformat(),
             "forecast_end": forecast_end.isoformat(),
+            "month_range": outlook["month_range"],
+            "black_friday": outlook["black_friday"],
         }
+
+    async def _month_outlook(
+        self,
+        sales_type: str,
+        today: date,
+        predictions: List[Dict[str, Any]],
+        trained_at: Optional[datetime],
+    ) -> Dict[str, Any]:
+        """The month's 80% range and Black Friday line, or nulls.
+
+        The range is K + F × [q10, q90]: K the month's actual through
+        yesterday, F the stored forecast from today to the month's end, and
+        the two ratios simulated from the days before today. Both are read
+        here — 900 days of Gold through yesterday, the history the
+        simulation needs, by the training frame's own reader — and computed
+        on the ML thread, then kept for the day, the sales type and the
+        training that made `predictions` (at most `OUTLOOK_TTL_S`).
+
+        Retail only: it is the one sales type trained. Any failure is logged
+        and answered with nulls, and not kept, so the next request tries
+        again; the forecast itself is answered all the same.
+        """
+        empty: Dict[str, Any] = {"month_range": None, "black_friday": None}
+        if sales_type != "retail":
+            return empty
+        key = (today, sales_type, trained_at)
+        cached = self._outlook_cache.get(key)
+        now = _monotonic()
+        if cached is not None and now - cached[0] < OUTLOOK_TTL_S:
+            return cached[1]
+
+        try:
+            from core import forecast_range, pg_forecast_read
+
+            left = forecast_range.forecast_left(predictions, today)
+            if left is None:
+                outlook = empty
+            else:
+                frame = await pg_forecast_read.fetch_frame(
+                    today - timedelta(days=forecast_range.HISTORY_DAYS), today,
+                    sales_type, exclude_today=True)
+                rows = list(zip(frame["date"].dt.date,
+                                frame["revenue"].astype(float)))
+                loop = asyncio.get_running_loop()
+                outlook = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _executor, forecast_range.month_outlook, rows, today, left),
+                    OUTLOOK_TIMEOUT_S)
+        except Exception as e:
+            logger.warning(
+                f"The month's range and Black Friday line are unavailable "
+                f"({sales_type}): {e!r}", exc_info=True)
+            return empty
+
+        self._outlook_cache = {key: (now, outlook)}
+        return outlook
 
     async def _query_daily_revenue(
         self, store: Any, sales_type: str, days_back: int,
@@ -1624,12 +1526,11 @@ class PredictionService:
         return float(rows[0][0]) if rows else 0.0
 
     def _save_model(self) -> None:
-        """Save model, DOW corrections, and clip_ratio to disk.
+        """Save the model to disk.
 
-        Each file lands whole or not at all (`os.replace` of a sibling temp
+        The file lands whole or not at all (`os.replace` of a sibling temp
         file). A plain `open('w')` truncates first, and a kill mid-write left
-        a half file that the next boot read as "no corrections" or "default
-        hyperparameters" — silently, because loading degrades gracefully.
+        a half file that the next boot would have read.
         """
         import joblib
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -1638,23 +1539,13 @@ class PredictionService:
         os.replace(tmp, MODEL_PATH)
         logger.info(f"Model saved to {MODEL_PATH}")
 
-        # Save DOW corrections
-        if self._dow_corrections:
-            # JSON keys must be strings
-            corrections_str_keys = {str(k): v for k, v in self._dow_corrections.items()}
-            _write_json_atomically(DOW_CORRECTIONS_PATH, corrections_str_keys)
-            logger.info(f"DOW corrections saved to {DOW_CORRECTIONS_PATH}")
-
-        # Save clip_ratio
-        _write_json_atomically(CLIP_RATIO_PATH, {"clip_ratio": self._clip_ratio})
-        logger.info(f"Clip ratio saved to {CLIP_RATIO_PATH}: {self._clip_ratio:.4f}")
-
     def _load_model(self) -> bool:
-        """Load model and DOW corrections from disk if available.
+        """Load the model from disk if available.
 
         Validates that the loaded model has the expected number of features.
-        If mismatched (e.g., old 24-feature model), sets model to None so
-        the nightly scheduler will retrain with the current feature set.
+        If mismatched (the 31-feature model of the procedure before
+        2026-11-18, say), sets model to None: web's startup then trains the
+        current one in the background (`web/main.py`).
         """
         import joblib
         if MODEL_PATH.exists():
@@ -1675,32 +1566,6 @@ class PredictionService:
                 return False
         else:
             return False
-
-        # Load DOW corrections
-        if DOW_CORRECTIONS_PATH.exists():
-            try:
-                with open(DOW_CORRECTIONS_PATH) as f:
-                    corrections_str_keys = json.load(f)
-                # Convert string keys back to int
-                self._dow_corrections = {int(k): v for k, v in corrections_str_keys.items()}
-                logger.info(f"DOW corrections loaded from {DOW_CORRECTIONS_PATH}")
-            except Exception as e:
-                logger.warning(f"Failed to load DOW corrections: {e}")
-                self._dow_corrections = {}
-
-        # Load clip_ratio
-        if CLIP_RATIO_PATH.exists():
-            try:
-                with open(CLIP_RATIO_PATH) as f:
-                    data = json.load(f)
-                self._clip_ratio = float(data.get("clip_ratio", 1.0))
-                logger.info(f"Clip ratio loaded from {CLIP_RATIO_PATH}: {self._clip_ratio:.4f}")
-            except Exception as e:
-                logger.warning(f"Failed to load clip ratio: {e}")
-                self._clip_ratio = 1.0
-        else:
-            self._clip_ratio = 1.0
-
         return True
 
 

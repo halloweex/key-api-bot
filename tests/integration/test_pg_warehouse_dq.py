@@ -462,6 +462,9 @@ class TestTheRowValues:
             await _landed(conn, r[15], buyer=97106,                              # a Kyiv midnight
                           at=kyiv_midnight.astimezone(timezone.utc))
             await _landed(conn, r[16], buyer=97106, days_ago=2)
+            # The offline store, sold by a manager on no retail list: its own
+            # sales type (the owner's decision of 2026-11-15), and revenue.
+            await _landed(conn, r[17], source=7, manager=UNCLASSIFIED, buyer=97107, days_ago=5)
         await rebuild_silver(rv)
 
         # The verdict first: a rebuild that drifts from the rule is what this
@@ -473,8 +476,8 @@ class TestTheRowValues:
 
         async with rv.acquire() as conn:
             s = {row["id"]: row for row in await conn.fetch(
-                f"SELECT {SILVER_COLS} FROM silver.orders WHERE id = ANY($1::int[])", r[:17])}
-        assert len(s) == 17
+                f"SELECT {SILVER_COLS} FROM silver.orders WHERE id = ANY($1::int[])", r[:18])}
+        assert len(s) == 18
         assert {row["sales_type"] for row in s.values()} == set(KNOWN_SALES_TYPES)
         assert (s[r[10]]["sales_type"], s[r[11]]["sales_type"]) == ("retail", "internal")
         assert (s[r[12]]["sales_type"], s[r[13]]["sales_type"]) == ("retail", "internal")
@@ -496,6 +499,8 @@ class TestTheRowValues:
         assert s[r[15]]["order_date"] != s[r[15]]["ordered_at"].astimezone(timezone.utc).date()
         assert s[r[16]]["buyer_first_order_date"] == kyiv_midnight.date()
         assert s[r[15]]["is_new_customer"] and not s[r[16]]["is_new_customer"]
+        assert (s[r[17]]["sales_type"], s[r[17]]["is_active_source"],
+                s[r[17]]["is_new_customer"]) == ("offline", True, True)
 
     @pytest.mark.asyncio
     async def test_an_old_rows_grand_total_changed_under_a_later_rebuild_is_critical_with_the_id(self, rv):
@@ -1378,41 +1383,6 @@ class TestTheLandingBlindness:
         facts = await read_facts(pool=landing)
         assert isinstance(facts.order_landing, Unwatched)
         assert "backfilled" in facts.order_landing.reason
-
-
-class TestTheLandingThroughTheJob:
-    """The integrity job with the twins on, against an empty DuckDB: DuckDB
-    looks and finds nothing, so a Postgres defect is a disagreement, not a
-    second finding — and when DuckDB's half fails, the twin stands in and a
-    CRITICAL of its own pages."""
-
-    job = TestTheJobEndToEnd.job
-    _issues = TestTheJobEndToEnd._issues
-
-    async def _orphans(self, pool, n):
-        async with pool.acquire() as conn:
-            for position in range(1, n + 1):
-                await conn.execute(
-                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
-                    " price_sold) VALUES ($1, $2, NULL, 'dn23', 1, 10)",
-                    LANDING[20] * 1000 + position, LANDING[20])
-
-    @pytest.mark.asyncio
-    async def test_duckdb_failing_the_twin_stands_in_and_pages(self, landing, job, monkeypatch):
-        scheduler, store, sent = job
-        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
-        await self._orphans(landing, 1)
-        resolve = AsyncMock(return_value=0)
-        with patch("core.data_quality.check_internal_integrity", side_effect=RuntimeError("duckdb")), \
-             patch("core.alerting.resolve_group", resolve):
-            result = await scheduler._run_dq_integrity()
-
-        issues = await self._issues(store, result["run_id"])
-        assert issues["pg_fk_orphan_order_products_order_id"]["severity"] == "CRITICAL"
-        assert "pg_order_landing_disagree" not in issues
-        assert "pg_fk_orphan_order_products_order_id" in sent.await_args.kwargs["conditions"]
-        (call,) = resolve.await_args_list
-        assert "pg_fk_orphan_order_products_order_id" in call.kwargs["still_firing"]
 
 # ─── DN-23: the same rows, both engines ───────────────────────────────────────
 #

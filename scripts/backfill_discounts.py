@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Land KeyCRM's discount figures on the orders Postgres held before revision 0037.
+"""Land KeyCRM's discount figures on the orders Postgres held before revision 0038.
 
-Revision 0037 adds the discount columns to `bronze.orders` and
+Revision 0038 adds the discount columns to `bronze.orders` and
 `bronze.order_products`, and chain 3 writes them for every order the sync
 lands from then on. Every order landed before holds NULL there. This walks
 KeyCRM's order list once, oldest id first, 50 orders a page with their line

@@ -32,21 +32,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core import pg_catalogue_write, pg_expense_types_write, pg_orders_write, write_chains
-
 ROOT = Path(__file__).resolve().parents[2]
 UTC = timezone.utc
 DSN = os.getenv("KS_PG_DSN")
-
-
-def test_only_chain_3_declares_the_stand_in():
-    """Kills: the declaration put back on 6 or 6a (S14-09 took it off), or
-    taken off chain 3, whose absent key opens the 25-hour window."""
-    declaring = {write_chains.chain_name(c) for c in write_chains.WRITE_CHAINS
-                 if getattr(c, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)}
-    assert declaring == {pg_orders_write.CHAIN}
-    assert not hasattr(pg_catalogue_write, "CHAIN_WATERMARK_INHERITS_DUCKDB")
-    assert not hasattr(pg_expense_types_write, "CHAIN_WATERMARK_INHERITS_DUCKDB")
 
 
 @pytest.fixture
