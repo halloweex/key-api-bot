@@ -602,7 +602,7 @@ class TestPredictionsStored:
         monkeypatch.setattr(svc, "_query_daily_revenue",
                             AsyncMock(return_value=_valid_training_df()))
         monkeypatch.setattr(ps, "_train_model", lambda df: (
-            object(), {"wape": 27.66, "mape": 30.0, "mae": 1.0}, {}, 1.0))
+            object(), {"wape": 27.66, "mape": 30.0, "mae": 1.0}))
         monkeypatch.setattr(svc, "_save_model", lambda: None)
         monkeypatch.setattr(ps, "_predict_future", lambda *a, **k: [
             {"date": "2026-10-07", "predicted_revenue": 1000.0}])
