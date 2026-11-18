@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.352
+
+- forecast: train the revenue LightGBM with the fixed procedure
+
+
 ## 3.0.351
 
 - docs(traffic): what the r2 reclassify would move, measured on production
