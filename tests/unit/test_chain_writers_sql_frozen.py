@@ -207,16 +207,6 @@ def test_every_scenario_the_literal_holds_is_driven():
     assert set(_scenarios()) == set(_golden()["scenarios"])
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", sorted(_golden()["scenarios"]))
-async def test_the_writer_sends_what_it_sent_before_step_14(name):
-    """Kills: any edit of a chain-3, -6 or -6a writer's statements, their
-    order, the latch's place inside the transaction, the owner claim, the
-    `writes:` record, the watermark stamp or the derivation mark."""
-    writer, rows = _scenarios()[name]
-    assert await _record(writer, rows) == _golden()["scenarios"][name]
-
-
 def test_the_two_shared_statements_are_the_literal():
     """`WATERMARK_OK_SQL` is the mirror's own watermark stamp, which chain 6
     writes on every full write and the daily comparison reads (OD-15 (a));

@@ -53,19 +53,6 @@ def trained():
 # ---------------------------------------------------------------------------
 
 class TestBuildFeatures:
-    def test_no_is_weekend_column(self):
-        """is_weekend was removed as a dead feature."""
-        from core.prediction_service import _build_features
-        df = _make_daily_df(n_days=60, spike_days=0)
-        result = _build_features(df)
-        assert "is_weekend" not in result.columns
-
-    def test_no_log_trend_index_column(self):
-        """log_trend_index was removed as a dead feature."""
-        from core.prediction_service import _build_features
-        df = _make_daily_df(n_days=60, spike_days=0)
-        result = _build_features(df)
-        assert "log_trend_index" not in result.columns
 
     def test_feature_columns_present(self):
         """Every FEATURE_COLUMNS entry is in the built frame."""

@@ -222,13 +222,6 @@ class TestChain8Expenses:
         assert facts.expenses.latched_at is None
 
     @pytest.mark.asyncio
-    async def test_the_first_expense_brings_its_stamp_to_the_verdict(self, production):
-        _latch("pg_expenses_write")
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(_Recorder()))
-        assert facts.expenses.latched_at == UTC_NOW
-
-    @pytest.mark.asyncio
     async def test_an_unreachable_postgres_is_one_warn(self, production):
         from core.data_quality import Severity
 
@@ -411,22 +404,6 @@ class TestChain7aGoals:
         (issue,) = inv.check_chain_invariants(facts)
         assert "pg_goals_write is not supplying one" in issue.description
         assert "since before the handover" not in issue.description
-
-    @pytest.mark.asyncio
-    async def test_read_facts_carries_the_latch_stamp_to_the_verdict(self, flagged):
-        """The wording turns on `latched_at`, so the reader must bring it."""
-        _latch("pg_goals_write")
-        conn = _Recorder()
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(conn))
-        assert facts.goals.latched_at == UTC_NOW
-
-    @pytest.mark.asyncio
-    async def test_read_facts_carries_no_stamp_for_a_flag_alone(self, flagged):
-        conn = _Recorder()
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(conn))
-        assert facts.goals.latched_at is None
 
     def test_an_unreadable_goals_table_is_blindness_not_silence(self):
         facts = inv.Facts(watched=("pg_goals_write",), now=UTC_NOW,
@@ -624,29 +601,6 @@ class TestChain3Orders:
 
 
 class TestWhoIsWatched:
-    @pytest.mark.parametrize("flag", [None, "duckdb", "postgres", "postgre"])
-    def test_every_chain_is_watched_whatever_its_flag(self, monkeypatch, flag):
-        """Since S14-00 every chain writes Postgres, so every chain's tables
-        are watched — a flag set back, or one nobody can read, unwatches
-        none. Mutation: read the flag here again."""
-        from core.write_chains import WRITE_CHAINS, chain_name
-
-        for chain in WRITE_CHAINS:
-            if flag is None:
-                monkeypatch.delenv(chain.WRITE_ENV, raising=False)
-            else:
-                monkeypatch.setenv(chain.WRITE_ENV, flag)
-        assert inv.watched_chains() == {chain_name(c): None for c in WRITE_CHAINS}
-
-    def test_the_local_marker_dates_nothing(self, monkeypatch):
-        """Since step 14's S14-11 the handover is dated by the owner rows
-        (below), not the local marker: a lost `./data` must not make every
-        "since the handover" invariant forget it. Mutation: read the marker's
-        stamp here again."""
-        _latch("pg_inventory_write")
-        watched = inv.watched_chains()
-        assert watched["pg_inventory_write"] is None
-        assert watched["pg_expenses_write"] is None
 
     @pytest.mark.asyncio
     async def test_the_handover_is_the_chains_earliest_owner_row(self, monkeypatch):
@@ -666,15 +620,6 @@ class TestWhoIsWatched:
         with patch("core.pg.require_revision", new=AsyncMock()):
             facts = await inv.read_facts(pool=_Pool(_Owners()))
         assert facts.expenses.latched_at == datetime.fromisoformat(stamp)
-
-    def test_every_chain_is_watched_asking_no_flag(self):
-        """Read off the registry, never off the environment or a chain's
-        answer (`chain_modes`, gone with the flags)."""
-        source = textwrap.dedent(inspect.getsource(inv.watched_chains))
-        calls = {n.func.id for n in ast.walk(ast.parse(source))
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "chain_modes" not in calls
-        assert "getenv" not in source and "WRITE_CHAINS" in source
 
 
 class TestBlindnessIsReported:
@@ -1039,15 +984,6 @@ class TestTheJobWhenTheDuckDBHalfFails:
         assert set(inv.CONDITIONS) <= set(call.kwargs["still_firing"])
 
     @pytest.mark.asyncio
-    async def test_with_no_chain_watched_nothing_of_theirs_is_announced(self, job):
-        """Nothing looked at the chains this run; a page left over from one that
-        has stood down clears on the next run whose DuckDB half finishes."""
-        scheduler, _journal, sent, resolve = job
-        await self._run(scheduler, inv.Facts(), duckdb_raises=True)
-        assert sent.await_count == 0
-        assert not self._chain_resolves(resolve)
-
-    @pytest.mark.asyncio
     async def test_with_the_duckdb_half_healthy_the_chain_critical_pages_and_is_not_held(
         self, job,
     ):
@@ -1226,11 +1162,3 @@ class TestTheLatchsTwoCopies:
 
         monkeypatch.setattr(chain_latch, "_stamp_of", vanished)
         assert set(chain_latch.markers_on_disk()) == {"pg_orders_write"}
-
-    def test_the_job_that_judged_it_no_longer_does(self):
-        """It left `dq_mirror_landing` with `reconcile_operational`; nothing
-        there files it."""
-        from core import mirror_reconciliation
-
-        assert not hasattr(mirror_reconciliation, "reconcile_operational")
-        assert not hasattr(mirror_reconciliation, "_chain_latch_findings")

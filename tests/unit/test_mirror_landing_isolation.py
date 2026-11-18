@@ -67,19 +67,6 @@ class TestEveryCheckIsIsolated:
         assert check_order() == ALL_CHECKS
         assert len(check_order()) == len(set(check_order())) == 7
 
-    def test_nothing_reads_duckdb(self):
-        """The comparisons against DuckDB went in step 14's S14-12; the job
-        asks the store for nothing."""
-        from core.scheduler import BackgroundScheduler
-
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        names |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        modules = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
-        assert not {"get_store", "store"} & names
-        assert not {m for m in modules if m and "duckdb" in m}
-
 
 def _critical(name):
     return IntegrityIssue(

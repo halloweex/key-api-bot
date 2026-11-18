@@ -118,19 +118,6 @@ def health():
     return module, []
 
 
-class TestHealthPublishesNoPreflight:
-    @pytest.mark.asyncio
-    async def test_no_entry_carries_one(self, health, monkeypatch):
-        """S14-11: the preflight went with the flag. Mutation: put it back
-        under chain 1's (or chain 5's) entry."""
-        module, _ = health
-        monkeypatch.setattr(sync_mod, "get_sync_service",
-                            AsyncMock(side_effect=RuntimeError("no store")))
-        block = await module._write_chains_block()
-        assert not [name for name, entry in block.items() if "preflight" in entry]
-        assert not hasattr(pg_inventory_write, "preflight")
-
-
 # ─── The stock step cannot take the tick down (on the Postgres path) ─────────
 
 STALE, FRESH = timedelta(hours=2), timedelta(minutes=1)

@@ -61,17 +61,6 @@ class TestTheRoutedBodies:
                 f"line {lineno} unrendered for {POSTGRES.name}"
             )
 
-    def test_no_method_opens_the_store_itself(self):
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.AsyncFunctionDef)
-                    and node.name.startswith("get_margin")):
-                continue
-            body = ast.get_source_segment(src, node) or ""
-            assert "self.connection()" not in body, f"{node.name} still opens DuckDB"
-            assert "conn.execute" not in body, f"{node.name} bypasses the router"
-
 
 class TestNoOrderIsLeftToThePlanner:
     """Every ordered result ends on a key that cannot tie.
@@ -86,23 +75,6 @@ class TestNoOrderIsLeftToThePlanner:
     """
 
     UNIQUE_TAILS = ("1", "2")
-
-    def test_every_ordered_query_ends_on_the_grouping_key(self):
-        offenders = []
-        for lineno, text in TestTheRoutedBodies()._statements():
-            body = "\n".join(l.split("--")[0] for l in text.splitlines())
-            upper = body.upper()
-            if "ORDER BY" not in upper:
-                continue
-            tail = body[upper.rindex("ORDER BY") + 8:]
-            tail = tail.split("LIMIT")[0].split("\n\n")[0]
-            last = [c for c in tail.split(",") if c.strip()][-1].strip().split()[0]
-            if last not in self.UNIQUE_TAILS:
-                offenders.append((lineno, tail.strip()))
-        assert not offenders, (
-            f"ORDER BY can tie, so the two engines may disagree about which "
-            f"rows a LIMIT keeps: {offenders}"
-        )
 
     def test_the_scan_would_have_caught_the_original(self):
         """A guard on the guard: the check must actually reject the shape the

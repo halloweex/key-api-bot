@@ -72,31 +72,6 @@ def test_it_reads_the_column_silver_materialised(name):
 
 
 @pytest.mark.parametrize("name", FIVE)
-def test_it_no_longer_re_derives_the_rule(name):
-    code = _statements(name)
-    for stale in ("RETAIL_MANAGER_IDS", "B2B_MANAGER_ID", "manager_id IN"):
-        assert stale not in code, (
-            f"{name} still carries a second home for the sales_type rule: {stale}"
-        )
-
-
-def test_the_constants_are_no_longer_imported_here():
-    """They belong to the warehouse projection and to manager seeding, not to
-    a read path. Leaving the import invites the next copy."""
-    src = inspect.getsource(module)
-    assert "RETAIL_MANAGER_IDS" not in src.split("\n\n")[0]
-    tree = ast.parse(src)
-    imported = {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for alias in node.names
-    }
-    assert "RETAIL_MANAGER_IDS" not in imported
-    assert "B2B_MANAGER_ID" not in imported
-
-
-@pytest.mark.parametrize("name", FIVE)
 def test_all_still_means_no_filter(name):
     """`sales_type=all` spans every category, including `internal`, and must
     not quietly become a predicate."""
@@ -132,44 +107,6 @@ class TestTheOneSpellingThatCannotBeShared:
     `DATEDIFF`, `median`, `FILTER (WHERE …)`, CTEs, `COUNT(DISTINCT …)` and
     `ROUND` were each run on both engines and agree.
     """
-
-    @pytest.mark.parametrize("fn_name", BODIES)
-    def test_the_extracted_body_renders_each_engine_its_own_today(self, fn_name):
-        """All five queries left their methods, so the check follows them: the
-        dialect fills exactly two holes, the table name and today's date, and
-        nothing else may differ — that is what would catch a third divergence
-        sneaking in. Until step 14's S14-07 this compared ClickHouse's
-        rendering with DuckDB's; DuckDB's analytics dialect went with the
-        cohorts' fallback, so ClickHouse's is compared with a stand-in that
-        marks the two holes."""
-        import core.sql_dialect as dialects
-
-        render = getattr(dialects, fn_name)
-        kw = dict(sales_type_filter="AND o.sales_type = 'retail'", months_back=12)
-        clickhouse = render(dialects.CLICKHOUSE_ANALYTICS, **kw)
-        marked = render(dialects.AnalyticsDialect(
-            name="marked", silver_orders="<<SILVER>>", today="<<TODAY>>"), **kw)
-
-        assert clickhouse != marked, f"{fn_name}: the dialect does nothing"
-        assert "<<SILVER>>" in marked and "<<TODAY>>" in marked, fn_name
-        undone = clickhouse.replace("silver.orders", "<<SILVER>>").replace(
-            dialects.CLICKHOUSE_ANALYTICS.today, "<<TODAY>>")
-        assert undone == marked, (
-            f"{fn_name} differs from its body somewhere other than the table "
-            f"name and today's date"
-        )
-
-    @pytest.mark.parametrize("fn_name", BODIES)
-    def test_no_body_carries_a_duckdb_only_spelling(self, fn_name):
-        import core.sql_dialect as dialects
-
-        sql = getattr(dialects, fn_name)(
-            dialects.CLICKHOUSE_ANALYTICS,
-            sales_type_filter="", months_back=12,
-        )
-        code = "\n".join(line.split("--")[0] for line in sql.splitlines())
-        for banned in ("strftime", "QUALIFY", "list_slice", "GROUP BY ALL"):
-            assert banned not in code, f"{fn_name} still speaks DuckDB only"
 
     @pytest.mark.parametrize("fn_name", BODIES)
     def test_neither_rendering_inherits_a_timezone(self, fn_name):

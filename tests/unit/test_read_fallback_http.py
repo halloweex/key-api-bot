@@ -274,25 +274,6 @@ class TestOffRefuses:
         assert "forecast" not in response.json()
         assert read_fallback.refusals()["goals"]["count"] >= 1
 
-    @pytest.mark.parametrize("value", [None, "duckdb", "junk-s14-05"],
-                             ids=["unset", "duckdb", "junk"])
-    @pytest.mark.parametrize("case", UNSWITCHED, ids=repr)
-    def test_a_switch_it_no_longer_reads_still_asks_postgres(
-        self, case, value, admin_client, stores, monkeypatch,
-    ):
-        """Step 14's S14-05: the six read Postgres whatever their switch
-        says, so here — where the pool raises — every value is the same 503
-        naming the surface, never DuckDB's answer and never a 500."""
-        (switch, _on), = case.env.items()
-        if value is None:
-            monkeypatch.delenv(switch, raising=False)
-        else:
-            monkeypatch.setenv(switch, value)
-        response = admin_client.get(case.path, params=case.params)
-        assert response.status_code == 503, response.text
-        assert response.json()["surface"] == case.surface
-        assert read_fallback.refusals()[case.surface]["count"] >= 1
-
 
 # ─── No address: the same refusal ──────────────────────────────────────────
 

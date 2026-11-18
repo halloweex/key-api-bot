@@ -12,58 +12,12 @@ hide indefinitely.
 """
 from __future__ import annotations
 
-import re
-
 from core.sql_dialect import (
     DUCKDB,
     DISPLAY_TIMEZONE,
     POSTGRES,
     sku_status_rebuild_select,
 )
-
-
-class TestOneBodyTwoEngines:
-    def test_the_renderings_differ_only_in_names_and_the_date(self):
-        duck = sku_status_rebuild_select(DUCKDB)
-        postgres = sku_status_rebuild_select(POSTGRES)
-        assert duck != postgres, "the two engines cannot render identically"
-
-        # Undo the table names.
-        for pg_name, dk_name in (
-            ("app.sku_inventory_status", "sku_inventory_status"),
-            ("bronze.offer_stocks", "offer_stocks"),
-            ("bronze.offers", "offers"),
-            ("bronze.products", "products"),
-            ("bronze.order_products", "order_products"),
-            ("bronze.orders", "orders"),
-            ("app.stock_movements", "stock_movements"),
-        ):
-            postgres = postgres.replace(pg_name, dk_name)
-
-        # Undo the one expression that is genuinely two dialects.
-        def _flatten(sql: str) -> str:
-            sql = re.sub(
-                r"DATE\(timezone\('[^']+', ([^)]+)\)\)", r"KYIVDATE(\1)", sql)
-            sql = re.sub(
-                r"\(timezone\('[^']+', ([^)]+)\)\)::date", r"KYIVDATE(\1)", sql)
-            sql = re.sub(
-                r"\(now\(\) AT TIME ZONE '[^']+'\)::date", "KYIVTODAY", sql)
-            return sql
-
-        assert _flatten(duck) == _flatten(postgres), (
-            "a third divergence has appeared between the two renderings — "
-            "only table names and the Kyiv date may differ"
-        )
-
-    def test_both_name_their_own_tables(self):
-        duck = sku_status_rebuild_select(DUCKDB)
-        postgres = sku_status_rebuild_select(POSTGRES)
-        assert "INSERT INTO sku_inventory_status" in duck
-        assert "INSERT INTO app.sku_inventory_status" in postgres
-        assert "FROM bronze.offer_stocks" in postgres
-        assert "FROM app.stock_movements" in postgres
-        # …and neither leaks the other's.
-        assert "bronze." not in duck and "app." not in duck
 
 
 class TestTheRulesInsideItAreNotAccidents:

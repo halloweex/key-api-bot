@@ -30,8 +30,7 @@ import pytest
 
 from core import gender_backfill
 from core.gender import RULES_VERSION, classify
-from core.gender_backfill import stored_sql, summarise
-from core.sql_dialect import DUCKDB, POSTGRES
+from core.gender_backfill import summarise
 
 ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -103,31 +102,6 @@ class TestSummarise:
             assert token not in text
 
 
-class TestOneBodyTwoEngines:
-    def test_the_renderings_differ_only_in_table_names(self):
-        duck = stored_sql(DUCKDB.buyers, DUCKDB.buyer_gender)
-        pg = stored_sql(POSTGRES.buyers, POSTGRES.buyer_gender)
-        assert duck != pg
-        undone = (pg.replace(POSTGRES.buyer_gender, DUCKDB.buyer_gender)
-                    .replace(POSTGRES.buyers, DUCKDB.buyers))
-        assert undone == duck
-
-    @pytest.mark.parametrize("rebuild_all", [False, True])
-    def test_the_pending_question_too(self, rebuild_all):
-        """Chain 4's derivation asks it of Postgres (`pg_buyers_write._pending`)
-        — one body, so the two engines cannot come to select different
-        buyers."""
-        duck, duck_params = gender_backfill.pending_sql(
-            DUCKDB.buyers, DUCKDB.buyer_gender, rebuild_all=rebuild_all)
-        pg, pg_params = gender_backfill.pending_sql(
-            POSTGRES.buyers, POSTGRES.buyer_gender, rebuild_all=rebuild_all)
-        assert duck_params == pg_params == ([] if rebuild_all else [RULES_VERSION])
-        undone = (pg.replace(POSTGRES.buyer_gender, DUCKDB.buyer_gender)
-                    .replace(POSTGRES.buyers, DUCKDB.buyers))
-        assert duck != pg and undone == duck
-        assert "override_by_human = FALSE" in duck
-
-
 class TestThePreviewIsReadOnly:
     def test_the_postgres_read_opens_a_read_only_transaction(self):
         """Structure, not prose: the call itself must carry readonly=True."""
@@ -181,17 +155,6 @@ class TestTheWritePathIsPostgres:
         _env, derive = pg
         derive.return_value = {**derive.return_value, "error": "OSError: down"}
         assert await script.main(rebuild_all=False, dry_run=False) == script.EXIT_FAILED
-
-    def test_the_script_never_imports_duckdb(self):
-        """Structure: no `import duckdb` and no `--duckdb` left in it."""
-        tree = ast.parse((ROOT / "scripts" / "backfill_gender.py").read_text())
-        names = {alias.name for node in ast.walk(tree)
-                 if isinstance(node, (ast.Import, ast.ImportFrom))
-                 for alias in node.names}
-        modules = {node.module for node in ast.walk(tree)
-                   if isinstance(node, ast.ImportFrom)}
-        assert "duckdb" not in names and "duckdb" not in modules
-        assert '"--duckdb"' not in (ROOT / "scripts" / "backfill_gender.py").read_text()
 
 
 @needs_pg

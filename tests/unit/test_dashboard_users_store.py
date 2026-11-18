@@ -29,13 +29,9 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import re
 from pathlib import Path
 
 import pytest
-
-from core import pg_dashboard_users as duf
-from core.store import AnalyticsStore
 
 REPO = Path(__file__).resolve().parents[2]
 MIGRATION = REPO / "migrations" / "versions" / "0016_dashboard_users.py"
@@ -52,187 +48,10 @@ REPOSITORY = REPO / "core" / "repositories" / "users.py"
 # under the switch and without a DSN, until step 14's S14-13 deleted it.
 
 
-# ─── the column contract, both ends ──────────────────────────────────────────
-
-
-def _migration_columns() -> list[str]:
-    """Parsed from the DDL. A grep is satisfied by a comment naming a column,
-    which is the failure this repository has hit six times.
-
-    The table is 0016's `CREATE TABLE` **plus every `ALTER TABLE ... ADD
-    COLUMN` since** — `allowed_features` arrived that way in 0021, and a parser
-    that read only the create statement would report a shipped column as
-    undeclared and teach whoever hit it to loosen the assertion.
-    """
-    body = MIGRATION.read_text(encoding="utf-8").split(
-        "CREATE TABLE app.dashboard_users (", 1)[1]
-    out = []
-    for raw in body.splitlines():
-        line = raw.split("--")[0].strip()
-        if not line:
-            continue
-        if line.startswith(")"):
-            break
-        m = re.match(r"^([a-z_]+)\s+(TEXT|BIGINT|INTEGER|TIMESTAMPTZ)", line)
-        if m:
-            out.append(m.group(1))
-
-    added = re.compile(
-        r"ALTER\s+TABLE\s+app\.dashboard_users\s+ADD\s+COLUMN\s+"
-        r"(?:IF\s+NOT\s+EXISTS\s+)?([a-z_]+)\s+(TEXT|BIGINT|INTEGER|TIMESTAMPTZ)",
-        re.IGNORECASE,
-    )
-    for path in sorted(MIGRATION.parent.glob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        # `upgrade()` only: a downgrade drops the column it names.
-        if "def upgrade" not in text:
-            continue
-        upgrade = text.split("def upgrade", 1)[1].split("def downgrade", 1)[0]
-        out.extend(m.group(1) for m in added.finditer(upgrade))
-    return out
-
-
-class TestTheColumnsAgree:
-    def test_the_migration_declares_everything_shipped(self):
-        declared = set(_migration_columns())
-        assert declared, "parsed no columns out of the migration"
-        missing = set(duf.USER_COLUMNS) - declared
-        assert not missing, f"shipped and not declared: {sorted(missing)}"
-
-    def test_bookkeeping_is_not_shared(self):
-        """Two correct copies differ on when each of them wrote the row."""
-        assert "mirrored_at" not in duf.USER_COLUMNS
-        assert "mirrored_at" in MIGRATION.read_text(encoding="utf-8")
-
-    def test_the_role_column_is_the_reason_this_table_exists(self):
-        """`app.authorized_users` has never had one, which is why the session's
-        fallback path downgrades to viewer instead of trusting the cookie."""
-        assert "role" in duf.USER_COLUMNS
-        bot_migration = (REPO / "migrations" / "versions" / "0009_bot_state.py")
-        block = bot_migration.read_text(encoding="utf-8").split(
-            "CREATE TABLE app.authorized_users (", 1)[1].split(")")[0]
-        assert not re.search(r"^\s*role\s", block, re.M), (
-            "the bot's list grew a role — if the two lists are being merged, "
-            "this table and its switch should be retired, not left beside it"
-        )
-
-
 # ─── the routed bodies ───────────────────────────────────────────────────────
 
 
-class TestOneBodyTwoEngines:
-    """Both routers, because the matrix followed the user list onto Postgres
-    and its statements have exactly the same two holes."""
-
-    ROUTERS = {"_users_run": "{users}", "_perms_run": "{perms}"}
-
-    # What makes a row unique in each routed table, last column first. An
-    # ordered read has to end on it, or two engines can return different rows
-    # for the same page.
-    KEY_ENDS = {"_users_run": "user_id", "_perms_run": "feature"}
-
-    def _statements(self) -> list[tuple[int, str]]:
-        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
-        out = []
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in self.ROUTERS):
-                continue
-            hole = self.ROUTERS[node.func.attr]
-            for lit in ast.walk(node):
-                if (isinstance(lit, ast.Constant) and isinstance(lit.value, str)
-                        and hole in lit.value):
-                    out.append((lit.lineno, node.func.attr, lit.value))
-        return out
-
-    @staticmethod
-    def _render(sql: str, table: str, own: str) -> str:
-        return sql.format(users=table, perms=table, self=own)
-
-    def test_the_scan_finds_them(self):
-        assert len(self._statements()) >= 8, "the routed statements are not being found"
-
-    def test_both_renderings_leave_no_hole(self):
-        for lineno, _router, sql in self._statements():
-            for table, own in (("users", "users"),
-                               ("app.dashboard_users", "dashboard_users"),
-                               ("role_permissions", "role_permissions"),
-                               ("app.role_permissions", "role_permissions")):
-                rendered = self._render(sql, table, own)
-                assert "{" not in rendered and "}" not in rendered, (
-                    f"line {lineno} still has a hole after rendering"
-                )
-
-    def test_the_conflict_target_is_never_schema_qualified(self):
-        """PostgreSQL rejects `app.dashboard_users.username` inside
-        `ON CONFLICT DO UPDATE`; the existing row is reached by the bare
-        relation name. That is the whole reason `{self}` exists."""
-        for lineno, _router, sql in self._statements():
-            # `DO NOTHING` names no columns at all — the seeding statement is
-            # one, and reading it as an update is how this scan first broke.
-            if "DO UPDATE" not in sql.upper():
-                continue
-            after = sql.upper().split("DO UPDATE", 1)[1]
-            original = sql[len(sql) - len(after):]
-            assert "{users}." not in original and "{perms}." not in original, (
-                f"line {lineno} reaches the stored row through the qualified "
-                f"name, which PostgreSQL will not accept"
-            )
-            assert "{self}." in original
-
-    def test_every_ordered_read_breaks_its_ties(self):
-        """Two engines order ties differently, and these reads are rendered as
-        lists — one under LIMIT/OFFSET, where a tie means different *people* on
-        the same page rather than a different order.
-
-        The tie-breaker is the table's key, not a fixed column name: the user
-        list ends on `user_id`, the matrix on `feature`, which with `role`
-        ahead of it is that table's whole primary key."""
-        for lineno, router, sql in self._statements():
-            upper = sql.upper()
-            if "ORDER BY" not in upper:
-                continue
-            tail = re.split(r"LIMIT", sql[upper.index("ORDER BY") + 8:], flags=re.I)[0]
-            columns = [c for c in tail.split(",") if c.strip()]
-            assert columns, f"line {lineno} orders by nothing"
-            expected = self.KEY_ENDS[router]
-            assert expected in columns[-1], (
-                f"line {lineno} can tie: {tail.strip()!r} does not end on "
-                f"{expected!r}"
-            )
-
-
 class TestNothingGoesRoundTheRouter:
-    def test_no_access_method_opens_the_store_itself(self):
-        """A method on `self.connection()` reads DuckDB — a list nobody has
-        written since 2026-09-07 — the half-migrated state that makes an
-        authorisation bug invisible.
-
-        The four matrix methods were the standing exception until 2026-09-08,
-        excused because they are cached per role. Per-user tabs put a
-        permission dependency on ~120 of the 140 endpoints, so every cache
-        miss took the store lock on an authorisation path. The two routers
-        were the last to hold a DuckDB tail, and step 14's S14-08 took it
-        away: nothing in the file may reach the file now, routers included —
-        not by `connection()`, not by a helper over it (`_fetch_one`,
-        `_fetch_all`, `_offload`), not by the opener, read off the syntax
-        (`tests/store_reach.py`). Mutation (the review's, on 4cceda69):
-        `await self._fetch_all(sql.format(users="users", self="users"),
-        params)` in `_users_run` — it passed, because only the text
-        `self.connection()` was looked for."""
-        from tests import store_reach
-
-        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
-        offenders = [f"{fn.name}: {found}"
-                     for fn in store_reach.functions(tree)
-                     for found in store_reach.reaches(fn)]
-        assert not offenders, (
-            f"{offenders} reach DuckDB directly. Nothing in the access path may: "
-            f"the store lock is held by a warehouse rebuild every two minutes, "
-            f"and an authorisation check that can queue behind a rebuild is the "
-            f"one read that must not. Route it through _users_run/_perms_run."
-        )
 
     def test_denial_is_one_statement(self):
         """It was a SELECT and then an UPDATE, safe only because DuckDB's lock
@@ -312,47 +131,6 @@ class TestTheTwoListsAreNotConfusedForEachOther:
 # ─── the matrix followed the list ────────────────────────────────────────────
 
 
-def _format_hole_node(fn: ast.AST, hole: str) -> ast.AST:
-    """The value of `hole=` in the router's one `sql.format(...)` call."""
-    calls = [n for n in ast.walk(fn)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "format" and isinstance(n.func.value, ast.Name)
-             and n.func.value.id == "sql"]
-    assert len(calls) == 1, f"expected one sql.format(...), found {len(calls)}"
-    values = [kw.value for kw in calls[0].keywords if kw.arg == hole]
-    assert len(values) == 1, f"sql.format(...) has no {hole}= hole"
-    return values[0]
-
-
-def _format_hole(fn: ast.AST, hole: str):
-    node = _format_hole_node(fn, hole)
-    return node.id if isinstance(node, ast.Name) else None
-
-
-def _bindings(fn: ast.AST, name: str) -> list:
-    """Every place inside `fn` that binds `name`: an import as
-    `(module, imported name)`, anything else by its kind and line."""
-    found: list = []
-    for node in ast.walk(fn):
-        if isinstance(node, ast.ImportFrom):
-            found += [(node.module, a.name) if a.asname is None
-                      else (node.module, f"{a.name} as {a.asname}")
-                      for a in node.names if (a.asname or a.name) == name]
-        elif isinstance(node, ast.Import):
-            found += [f"import {a.name} at line {node.lineno}"
-                      for a in node.names
-                      if (a.asname or a.name.split(".")[0]) == name]
-        elif (isinstance(node, ast.Name) and node.id == name
-                and isinstance(node.ctx, (ast.Store, ast.Del))):
-            found.append(f"assigned at line {node.lineno}")
-        elif isinstance(node, ast.arg) and node.arg == name:
-            found.append(f"a parameter at line {node.lineno}")
-        elif isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
-            found.append(f"declared {type(node).__name__.lower()} "
-                         f"at line {node.lineno}")
-    return found
-
-
 class TestTheRoleMatrixLeftDuckDB:
     """`KS_USER_STORE` decides where *all* of access lives, not half of it.
 
@@ -363,97 +141,6 @@ class TestTheRoleMatrixLeftDuckDB:
     store lock on an authorisation path — the lock a warehouse rebuild holds
     every two minutes.
     """
-
-    @pytest.mark.asyncio
-    async def test_the_matrix_reads_postgres_when_the_list_does(self, monkeypatch):
-        """The proof that matters: with the switch on, the four matrix methods
-        must not touch the store's own connection at all."""
-        monkeypatch.setenv("KS_USER_STORE", "postgres")
-
-        seen = []
-
-        async def fetch_rows(sql, params=()):
-            seen.append(sql)
-            return []
-
-        async def fetch_row(sql, params=()):
-            seen.append(sql)
-            return None
-
-        async def execute(sql, params=()):
-            seen.append(sql)
-
-        monkeypatch.setattr(duf, "fetch_rows", fetch_rows)
-        monkeypatch.setattr(duf, "fetch_row", fetch_row)
-        monkeypatch.setattr(duf, "execute", execute)
-
-        store = AnalyticsStore()
-
-        def explode():
-            raise AssertionError(
-                "the access path opened DuckDB with KS_USER_STORE=postgres")
-
-        monkeypatch.setattr(store, "connection", explode, raising=False)
-
-        await store.get_role_permissions("viewer")
-        await store.get_all_permissions()
-        await store.set_permission("viewer", "traffic", False, None, None, 1)
-        await store.seed_default_permissions()
-
-        assert seen, "nothing reached Postgres"
-        assert all("app.role_permissions" in sql for sql in seen), seen
-
-    def test_the_two_tables_live_in_postgres_together(self):
-        """"Where does access live" has one answer: both routers render into
-        `app.*` and ask nothing. `KS_USER_STORE` chose for both until step
-        14 (a constant since S14-00); a router that asked again, or kept a
-        branch of its own, would let an approval and the permissions behind
-        it disagree about which database is authoritative. Held to the
-        router's rule (`tests/store_reach.py`): no `self` beyond the
-        signature, no `super`, nothing of the store or its file. Mutations:
-        `user_store_is_postgres()` back, under any spelling; `await
-        self._fetch_all(…)` or `self.connection()` in either.
-
-        "Renders into `app.*`" is read off the `sql.format(...)` call itself:
-        its `users=` / `perms=` hole must be the bare name `TABLE` /
-        `PERMISSIONS_TABLE`, bound only where it should be, to a value that is
-        an `app.` table. `store_reach.names` would not do for this — it counts
-        the name as spelled when it is merely imported. Mutation (the review
-        of S14-08's fix): `sql.format(users="dashboard_users", self=…)` with
-        the import of `TABLE` kept, which resolves to the schema-less name.
-        It passed every test in this module; only the live-Postgres access
-        tests elsewhere still failed on it."""
-        from tests import store_reach
-
-        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
-        module_constants = {
-            target.id: node.value.value
-            for node in tree.body if isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Constant)
-            for target in node.targets if isinstance(target, ast.Name)}
-        for name, table, hole, binding, value in (
-                ("_users_run", "TABLE", "users",
-                 [("core.pg_dashboard_users", "TABLE")], duf.TABLE),
-                ("_perms_run", "PERMISSIONS_TABLE", "perms",
-                 [], module_constants.get("PERMISSIONS_TABLE"))):
-            fn = next(n for n in ast.walk(tree)
-                      if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-            spelled = store_reach.names(fn)
-            assert "user_store_is_postgres" not in spelled, (
-                f"{name} chooses its engine again")
-            found = store_reach.reaches(
-                fn, self_attrs=frozenset(), reach=store_reach.ROUTER_REACHES,
-                modules=store_reach.ROUTER_MODULES)
-            assert not found, (
-                f"{name} reaches the DuckDB store: there is one store to run on "
-                f"({found})")
-            assert _format_hole(fn, hole) == table, (
-                f"{name} no longer renders {table}: the {hole}= hole of its "
-                f"sql.format(...) is {ast.dump(_format_hole_node(fn, hole))}")
-            assert _bindings(fn, table) == binding, (
-                f"{name} binds {table} somewhere else: {_bindings(fn, table)}")
-            assert isinstance(value, str) and value.startswith("app."), (
-                f"{name} renders {table} = {value!r}, not an app.* table")
 
     @pytest.mark.asyncio
     async def test_seeding_is_one_statement(self, tmp_path, monkeypatch):

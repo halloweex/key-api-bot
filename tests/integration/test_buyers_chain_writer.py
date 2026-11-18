@@ -341,17 +341,3 @@ class TestTheStandingWatchReadsRealRows:
             watched=(chain.CHAIN,), now=stamp, buyers=facts))}
         assert set(issues) == {inv.BUYER_ORPHANS, inv.CONTACT_MISSING, inv.COLUMN_NULL}
         assert issues[inv.BUYER_ORPHANS].count == 3
-
-    @pytest.mark.asyncio
-    async def test_before_the_handover_orphans_are_not_read(self, stores):
-        from core import pg_chain_invariants as inv
-
-        _store, pool, _env = stores
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO app.buyer_gender (buyer_id, gender, method, "
-                "rules_version) VALUES (98, 'm', 'given', 1)")
-            facts = await inv._read_buyers(conn, None)
-        assert (facts.orphan_contacts, facts.orphan_verdicts) == (0, 0)
-        assert inv.check_chain_invariants(inv.Facts(
-            watched=(chain.CHAIN,), buyers=facts)) == []

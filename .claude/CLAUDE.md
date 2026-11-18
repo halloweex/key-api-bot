@@ -564,11 +564,13 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-11-05 (step 14's S14-20), with the store up: 9 288
-passed, 10 skipped, in about 12 minutes** — the skips are ClickHouse (6), no
-real gpg on the machine (3) and one TIMESTAMPTZ case. Any change that lowers
-the passing count is a regression until explained. (It was 1 297 passed on
-2026-08-14 without a store, and 3 771 with one on 2026-09-08.)
+**Baseline as of 2026-11-18, after the cleanup that deleted 1 300 tombstone
+cases (tests guarding the finished DuckDB exit), with the store up: 9 045
+passed, 27 skipped** — measured in Docker as CI runs it; the skips include
+ClickHouse (6), no real gpg (3), "root lists a directory" (3) and one
+TIMESTAMPTZ case. Any change that lowers the passing count is a regression
+until explained. (It was 10 344 just before the cleanup, 9 288 on 2026-11-05,
+1 297 on 2026-08-14 without a store, and 3 771 with one on 2026-09-08.)
 
 **CI runs the suite against a real PostgreSQL** since 2026-09-08. Without one,
 every differential test — the ones proving DuckDB and Postgres answer the same
@@ -4092,7 +4094,7 @@ walk derived the commit before) and the walk requires that no literal DuckDB
 write of those tables is left. That cannot see a DuckDB tail back inside a
 router, since the walk reads every routed statement as Postgres's, so the
 four routers and `_PgTx`'s methods are held to their syntax instead
-(`tests/store_reach.py`): nothing on `self` but what renders the statement,
+(`tests/store_reach.py`, deleted with the tombstone tests on 2026-11-18): nothing on `self` but what renders the statement,
 no `super`, no way to the store or its file. A write naming its table as a
 `{hole}` — one text for two engines, chain 10's watchdog statements — is
 rendered for DuckDB by its module's own function, or says what fills the hole

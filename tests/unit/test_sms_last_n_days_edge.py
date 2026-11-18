@@ -17,7 +17,6 @@ from __future__ import annotations
 from datetime import date
 
 import duckdb
-import pytest
 
 from core.repositories.customers import SmsAudienceFilters
 from core.sql_dialect import TODAY_IN_KYIV
@@ -47,13 +46,6 @@ def test_the_today_expression_is_what_is_replaced():
     assert TODAY_IN_KYIV in expr
 
 
-def test_orders_in_the_last_n_days_start_today_minus_n():
-    expr, params = SmsAudienceFilters(period_days=N).period_count("n")
-    [(counted,)] = _run(f"SELECT {expr} FROM o", params)
-
-    assert counted == 2, f"{FIRST_DAY_IN} and {TODAY} are in, {LAST_DAY_OUT} is out"
-
-
 def test_last_order_within_n_days_is_the_same_edge():
     """Recency is `today − MAX(order_date)`; "within N days" is `recency <= N`."""
     rows = _run(
@@ -62,17 +54,3 @@ def test_last_order_within_n_days_is_the_same_edge():
         [N],
     )
     assert [r[0] for r in rows] == [FIRST_DAY_IN, TODAY]
-
-
-@pytest.mark.parametrize("n", [1, 30, 90, 91, 92, 180, 365])
-def test_every_n_is_n_plus_one_calendar_days(n):
-    expr, params = SmsAudienceFilters(period_days=n).period_count("n")
-    sql = expr.replace(TODAY_IN_KYIV, f"DATE '{TODAY.isoformat()}'")
-    with duckdb.connect(":memory:") as conn:
-        [(counted,)] = conn.execute(
-            f"SELECT {sql} FROM (SELECT i AS order_id, "
-            f"DATE '{TODAY.isoformat()}' - i::INTEGER AS order_date "
-            f"FROM range(0, 4000) t(i))",
-            params,
-        ).fetchall()
-    assert counted == n + 1

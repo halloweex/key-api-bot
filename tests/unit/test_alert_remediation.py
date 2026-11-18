@@ -88,14 +88,6 @@ class TestRemediationLookup:
             assert "\n" not in line, prefix
             assert len(line) <= self.ARROW_LINE_MAX, (prefix, len(line))
 
-    def test_the_utm_line_is_the_postgres_parsers(self):
-        """One line since step 14's S14-15, which removed the `KS_UTM_PARSE`
-        swap (`REMEDIATION_UTM_PARSED_IN_POSTGRES`): the line production
-        published under `postgres`, byte for byte."""
-        assert remediation_for(["pg_order_utm_missing"]) == [
-            "Read meta.mirror_state for silver.order_utm: the parse writes its "
-            "error there. Then POST /api/traffic/refresh or /api/warehouse/refresh"]
-
 
 class TestMachineAttemptsNote:
     """One ledger since step 14's S14-13: the ClickHouse archive's. The

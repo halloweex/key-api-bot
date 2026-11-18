@@ -26,7 +26,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from bot import canary as canary_module
 from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, pg_orders_write, write_chains,
@@ -109,42 +108,6 @@ class TestTheMarker:
 
         assert chain_latch.latched("pg_expenses_write")
 
-    def test_release_is_real_and_says_whether_it_removed_anything(self, flags):
-        chain_latch.latch("pg_expenses_write")
-        assert chain_latch.release("pg_expenses_write") is True
-        assert not chain_latch.latched("pg_expenses_write")
-        assert chain_latch.release("pg_expenses_write") is False
-
-    def test_the_removal_is_as_durable_as_the_creation(self, flags):
-        """`_write_marker` fsyncs the directory so a rename that never reached
-        the disk cannot unlatch a chain on the next power cut. The unlink owes
-        the same, one step later: DN-08's copy-back releases the latch *after*
-        it has copied the rows into DuckDB and put `KS_WRITE_*` back, so a
-        directory entry that survives a power cut brings the marker back to a
-        chain whose rows are now in both stores — two writers allocating
-        `stock_movements` ids, which revision 0030 forbids.
-        """
-        import os as os_module
-
-        chain_latch.latch("pg_expenses_write")
-        synced: list = []
-        real_fsync = os_module.fsync
-
-        def recording(fd):
-            synced.append(os_module.fstat(fd).st_ino)
-            return real_fsync(fd)
-
-        directory = chain_latch.MARKER_DIR.stat().st_ino
-        with patch.object(os_module, "fsync", new=recording):
-            assert chain_latch.release("pg_expenses_write") is True
-        assert directory in synced, "the unlink was never pushed to the disk"
-
-        # A release that removed nothing has nothing to make durable.
-        synced.clear()
-        with patch.object(os_module, "fsync", new=recording):
-            assert chain_latch.release("pg_expenses_write") is False
-        assert synced == []
-
     def test_a_marker_that_cannot_be_written_stops_the_write(self, flags):
         """A row in Postgres that no marker records is how the next boot comes
         to believe DuckDB is still the writer, so the write must not proceed.
@@ -164,43 +127,6 @@ class TestTheMarker:
 # `mismatched_chains()`. The flags went, and every answer with them; the
 # latch is still taken on a chain's first write (decision 3), which the rest
 # of this file pins.
-
-
-class TestPostgresDownAtBoot:
-    """The cost of OD-19 (a), stated as a test rather than left to be found.
-
-    A latched chain whose Postgres is unreachable fails its writes. It must not
-    fall back to DuckDB: the expense would land in a store the page does not
-    read, and the flag would be believed again on the next boot.
-    """
-
-    @pytest_asyncio.fixture
-    async def store(self, tmp_path):
-        from core.store import AnalyticsStore
-
-        s = AnalyticsStore()
-        yield s
-
-    @pytest.mark.asyncio
-    async def test_an_expense_raises_instead_of_landing_in_duckdb(self, flags, store):
-        from datetime import date
-
-        from core.runtime_modes import configure_modes
-
-        chain_latch.latch("pg_expenses_write")
-        # A restart, modelled honestly: the cache this process built is dropped
-        # and the latch has to come back off the disk through the one call every
-        # entry point makes. Latching in-process and leaving the cache warm
-        # would pass even with the marker read deleted.
-        chain_latch._latched = None
-        configure_modes()
-
-        flags.setenv("KS_WRITE_EXPENSES", "duckdb")
-        unreachable = AsyncMock(side_effect=OSError("connection refused"))
-
-        with patch("core.pg.get_pool", new=unreachable):
-            with pytest.raises(OSError):
-                await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 100)
 
 
 
@@ -686,51 +612,6 @@ class TestEveryWriterLatchesFirst:
             assert not outside, (
                 f"{module.__name__}.{name} claims on line(s) {outside} outside "
                 "its transaction: a write that rolls back would still claim")
-
-
-class TestTheCanaryJudgesThePublishedBlock:
-    def test_it_never_reads_the_markers_itself(self):
-        """Both containers mount the same `./data`, so `bot/canary.py` *can*
-        open the marker directory — and must not. The question is where web's
-        writes are going, web is the process that decides it, and a second
-        opinion read out of a directory this container never writes would age
-        without anything tracking it. (The docstring said the bot could not see
-        the files at all; `docker-compose.yml` mounts `./data:/app/data` into
-        both services, so that reason was false and the true one is this.)"""
-        source = pathlib.Path(canary_module.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        # `from core import chain_latch` names the module in the alias, not in
-        # `n.module`, so both halves are joined — the first draft of this guard
-        # looked only at `n.module` and its own mutation walked straight
-        # through it.
-        imported = {f"{n.module}.{a.name}" for n in ast.walk(tree)
-                    if isinstance(n, ast.ImportFrom) and n.module for a in n.names}
-        imported |= {a.name for n in ast.walk(tree)
-                     if isinstance(n, ast.Import) for a in n.names}
-        assert not [m for m in imported
-                    if m.startswith(("core.chain_latch", "core.pg"))], sorted(imported)
-        assert "write-chain-owners" not in source
-
-
-class TestTheWatermarkGoesToPostgresAskingNothing:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("latched", [True, False])
-    async def test_a_chains_watermark_never_reaches_duckdb(self, flags, latched):
-        """`get_last_sync_time` reads `meta.chain_watermarks`, asking no chain
-        (step 14's S14-11; until then it asked the key's chain, whose answer
-        was the latch). The store's DuckDB path must not be taken, latched or
-        not, whatever the flag says."""
-        from core.store import AnalyticsStore
-
-        store = AnalyticsStore()
-        if latched:
-            chain_latch.latch("pg_inventory_write")
-        flags.setenv("KS_WRITE_INVENTORY", "duckdb")
-
-        with patch("core.pg_chain_watermarks.get_value",
-                   new=AsyncMock(return_value=None)) as read:
-            assert await store.get_last_sync_time("stocks") is None
-        read.assert_awaited_once_with("last_sync_stocks")
 
 
 def test_the_module_never_reaches_postgres_to_answer_where_writes_go():

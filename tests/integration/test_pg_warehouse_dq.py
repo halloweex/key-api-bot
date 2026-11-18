@@ -1384,41 +1384,6 @@ class TestTheLandingBlindness:
         assert isinstance(facts.order_landing, Unwatched)
         assert "backfilled" in facts.order_landing.reason
 
-
-class TestTheLandingThroughTheJob:
-    """The integrity job with the twins on, against an empty DuckDB: DuckDB
-    looks and finds nothing, so a Postgres defect is a disagreement, not a
-    second finding — and when DuckDB's half fails, the twin stands in and a
-    CRITICAL of its own pages."""
-
-    job = TestTheJobEndToEnd.job
-    _issues = TestTheJobEndToEnd._issues
-
-    async def _orphans(self, pool, n):
-        async with pool.acquire() as conn:
-            for position in range(1, n + 1):
-                await conn.execute(
-                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
-                    " price_sold) VALUES ($1, $2, NULL, 'dn23', 1, 10)",
-                    LANDING[20] * 1000 + position, LANDING[20])
-
-    @pytest.mark.asyncio
-    async def test_duckdb_failing_the_twin_stands_in_and_pages(self, landing, job, monkeypatch):
-        scheduler, store, sent = job
-        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
-        await self._orphans(landing, 1)
-        resolve = AsyncMock(return_value=0)
-        with patch("core.data_quality.check_internal_integrity", side_effect=RuntimeError("duckdb")), \
-             patch("core.alerting.resolve_group", resolve):
-            result = await scheduler._run_dq_integrity()
-
-        issues = await self._issues(store, result["run_id"])
-        assert issues["pg_fk_orphan_order_products_order_id"]["severity"] == "CRITICAL"
-        assert "pg_order_landing_disagree" not in issues
-        assert "pg_fk_orphan_order_products_order_id" in sent.await_args.kwargs["conditions"]
-        (call,) = resolve.await_args_list
-        assert "pg_fk_orphan_order_products_order_id" in call.kwargs["still_firing"]
-
 # ─── DN-23: the same rows, both engines ───────────────────────────────────────
 #
 # In production DuckDB looks, so the landing twins compare, and a difference

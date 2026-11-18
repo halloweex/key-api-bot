@@ -25,48 +25,7 @@ to discover as a number that is merely wrong.
 """
 from __future__ import annotations
 
-import ast
 import re
-from datetime import date, timedelta
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
-import pytest
-
-from core.store import AnalyticsStore
-
-
-REPO = Path(__file__).resolve().parents[2]
-REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
-
-TODAY = date.today()
-WINDOW = (TODAY - timedelta(days=30), TODAY)
-
-# The routed methods that live in `revenue.py` — the file the structural tests
-# below parse. `get_customer_insights` rides the same router but lives in the
-# customers mixin, so it is checked by `TestTheCustomerBlock`, against its own
-# file. Adding it here instead made two tests raise `StopIteration` looking for
-# it in the wrong tree. The last three are the Gold and Silver readers' (step
-# 14, S14-06), which had a DuckDB tail of their own until then.
-METHODS = ("get_return_orders", "get_sales_by_source", "get_subcategory_breakdown",
-           "get_top_products", "get_product_performance", "get_brand_analytics",
-           "get_summary_stats", "get_revenue_trend", "get_manager_sales_365d")
-
-CALLS = (
-    ("get_return_orders", {}),
-    ("get_return_orders", {"sales_type": "all"}),
-    ("get_sales_by_source", {}),                       # the Gold branch
-    ("get_sales_by_source", {"brand": "BrandA"}),      # the line-level branch
-    ("get_sales_by_source", {"category_id": 1}),       # …and the category walk
-    ("get_subcategory_breakdown", {"parent_category_name": "Care"}),
-    ("get_subcategory_breakdown", {"parent_category_name": "Care", "brand": "BrandA"}),
-    ("get_top_products", {}),
-    ("get_top_products", {"category_id": 1}),          # …and the category walk
-    ("get_product_performance", {}),                   # two statements, one call
-    ("get_brand_analytics", {}),
-    ("get_customer_insights", {}),             # five statements, one call
-    ("get_customer_insights", {"sales_type": "all"}),
-)
 
 BODIES = (
     "_RETURN_ORDERS_SQL",
@@ -93,43 +52,6 @@ INSIGHT_BODIES = (
 CALLER_HOLES = ("{where}", "{brand_filter}", "{promocode_filter}")
 
 
-def _call(store, name, kwargs):
-    if name == "get_subcategory_breakdown":
-        return getattr(store, name)(*WINDOW, **kwargs)
-    return getattr(store, name)(*WINDOW, **kwargs)
-
-
-class TestItDoesNotTakeTheDuckDbLock:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "name,kwargs", CALLS,
-        ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
-    )
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
-        self, tmp_path, monkeypatch, name, kwargs,
-    ):
-        # The category walk is filter chrome, so it belongs to the filter
-        # bar's router and not to whichever tab is asking (it rode
-        # `KS_READ_REPORTS` until this test caught it reaching for DuckDB
-        # with this tab's flag on). Both routers read Postgres whatever any
-        # switch says (step 14, S14-05 and S14-06); their fetches are stubbed
-        # below.
-        # A store never connected, as web's is under `KS_DUCKDB=off`.
-        store = AnalyticsStore()
-
-        def boom(*_a, **_k):
-            raise AssertionError(f"{name} reached for DuckDB")
-
-        with patch.object(type(store), "connection", boom, create=True), \
-             patch("core.pg_lookups_read.fetch",
-                   new=AsyncMock(return_value=[])), \
-             patch("core.pg_dashboard_read.fetch",
-                   new=AsyncMock(return_value=[])) as fetch:
-            await _call(store, name, kwargs)
-        assert fetch.await_count >= 1
-        assert not (tmp_path / f"d-{name}-{len(kwargs)}.duckdb").exists()
-
-
 class TestTheRoutedBodies:
     def test_the_postgres_rendering_leaves_no_hole(self):
         from core.sql_dialect import POSTGRES
@@ -144,39 +66,6 @@ class TestTheRoutedBodies:
             assert "{" not in rendered and "}" not in rendered, (
                 f"{name} still has a hole for Postgres: {rendered}"
             )
-
-    def test_no_dashboard_method_opens_the_store_itself(self):
-        """Walked as calls in the tree, never as a substring of the source:
-        the comment beside the fix names the helper it replaced, and a grep
-        finds the comment. That mistake has been made three times here."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for name in METHODS:
-            node = next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-            calls = {c.func.attr for c in ast.walk(node)
-                     if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
-            assert "connection" not in calls, f"{name} still opens DuckDB"
-            assert "_get_category_with_children" not in calls, (
-                f"{name} calls the connection-taking helper — that is the "
-                f"deadlock, and it does not raise"
-            )
-
-    def test_the_file_never_takes_the_store_lock(self):
-        """Was "the router is never called under the lock": a router called
-        inside `self.connection()` held the lock DuckDB's single writer
-        queues on across a network round trip. Since step 14's S14-06 the
-        file has no DuckDB tail to take the lock for — no `connection()`,
-        no `_fetch_*`, no `nullcontext` standing in for it — so the question
-        is answered for every method at once, read off the tree."""
-        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
-        reached = sorted(
-            (n.lineno, n.func.attr) for n in ast.walk(tree)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-            and n.func.attr in ("connection", "_fetch_one", "_fetch_all"))
-        assert not reached, reached
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        assert "nullcontext" not in names and "duckdb_switch" not in names
 
     def test_every_ordered_body_ends_on_a_key_that_cannot_tie(self):
         """Two engines break a tie differently. `_RETURN_ORDERS_SQL` carries a
@@ -245,35 +134,6 @@ class TestNothingHereReadsTheDeadGold:
     last readers on this tab. A body that reached for it again would render a
     name Postgres does not have and fall back for ever, silently."""
 
-    def test_no_routed_body_names_it(self):
-        from core.repositories import revenue
-
-        for name in BODIES:
-            assert "gold_daily_products" not in getattr(revenue, name), name
-
-    def test_no_dashboard_method_names_it_either(self):
-        """Asserted on the tree, and with the docstring taken out of it.
-
-        The first version of this walked every string constant in the method,
-        and the methods *explain* why they left that table — so it failed on
-        its own prose. That is the fourth time in this file's history the
-        difference between structure and prose has had to be paid for; the
-        docstring is a `Constant` like any other, and it is the one that has
-        to be excluded by name."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for name in METHODS:
-            node = next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-            doc = ast.get_docstring(node, clean=False)
-            strings = [n.value for n in ast.walk(node)
-                       if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                       and n.value != doc]
-            for text in strings:
-                assert "gold_daily_products" not in text, (
-                    f"{name} still names the DuckDB-only Gold"
-                )
-
     def test_the_product_grouping_is_by_id_not_by_the_sold_name(self):
         """Grouping on the sold name split 193 of 268 production products."""
         from core.repositories import revenue
@@ -322,13 +182,6 @@ class TestTheCustomerBlock:
         for name in ("_INSIGHTS_GOLD_SQL", "_INSIGHTS_AOV_SQL"):
             assert "{gold_revenue_rollup}" in bodies[name], name
 
-    def test_no_body_uses_the_duckdb_only_date_function(self):
-        """`DATE_DIFF` does not exist in PostgreSQL. Subtracting the dates is
-        the portable spelling and the same answer — measured over all 6,822
-        retail buyers with more than one order: zero differing."""
-        for name, sql in self._bodies().items():
-            assert "DATE_DIFF" not in sql.upper(), name
-
     def test_the_gold_statement_asks_only_for_what_survives(self):
         """It selected the three customer counts as well, and every one was
         overwritten a few lines later by a count over Silver — Gold sums
@@ -337,17 +190,3 @@ class TestTheCustomerBlock:
         sql = self._bodies()["_INSIGHTS_GOLD_SQL"].lower()
         for dead in ("unique_customers", "new_customers", "returning_customers"):
             assert dead not in sql, dead
-
-    def test_it_does_not_open_the_store_itself(self):
-        import ast as _ast
-        from pathlib import Path as _Path
-
-        source = (_Path(__file__).resolve().parents[2]
-                  / "core" / "repositories" / "customers.py").read_text(encoding="utf-8")
-        node = next(n for n in _ast.walk(_ast.parse(source))
-                    if isinstance(n, _ast.AsyncFunctionDef)
-                    and n.name == "get_customer_insights")
-        calls = {c.func.attr for c in _ast.walk(node)
-                 if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Attribute)}
-        assert "connection" not in calls
-        assert "_dashboard_run" in calls

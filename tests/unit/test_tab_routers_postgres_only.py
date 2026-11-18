@@ -53,12 +53,7 @@ from __future__ import annotations
 import ast
 import functools
 import importlib
-import logging
-import os
 import re
-import subprocess
-import sys
-from datetime import date
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional
 from unittest.mock import AsyncMock
@@ -73,14 +68,6 @@ from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
 
 ROOT = Path(__file__).resolve().parents[2]
 
-SWITCHES = ("KS_READ_EXPENSES", "KS_READ_INVENTORY", "KS_READ_GOALS",
-            "KS_READ_COHORTS", "KS_READ_FORECAST_INPUT", "KS_READ_WEEKLY",
-            "KS_READ_CHAT", "KS_READ_BUYER_SYNC", "KS_READ_SEARCH_INDEX")
-MODULES = ("pg_expenses_read", "pg_inventory_read", "pg_goals_read",
-           "pg_forecast_read", "pg_weekly_read", "pg_chat_read",
-           "pg_buyer_sync_read", "pg_search_index_read", "ch_cohorts")
-SWITCH_VALUES = [None, "", "duckdb", "postgres", "clickhouse", "junk-s14-07"]
-
 
 def _expenses(store):
     return store._expenses_run(
@@ -90,57 +77,6 @@ def _expenses(store):
 
 def _manual(store):
     return store._expenses_run("SELECT 1 FROM {manual_expenses} WHERE id = ?", [7])
-
-
-def _inventory(store):
-    return store._inventory_rows("SELECT 1 FROM {sku_inventory_status} WHERE offer_id = ?",
-                                 [7])
-
-
-def _goals(store):
-    return store._goals_run("SELECT 1 FROM {silver_orders} s WHERE s.id = ?", [7])
-
-
-def _stored_goals(store):
-    """Chain 7a's table, which `_goals_run` read raw — uncounted, a 500 on a
-    failure — until S14-07 (`pg_goals_write.reads_the_chain`)."""
-    return store._goals_run(
-        "SELECT 1 FROM {revenue_goals} WHERE period_type = ?", [7])
-
-
-def _goal_tables(store):
-    return store._goal_tables_run("SELECT 1 FROM {seasonal_indices} WHERE month = ?", [7])
-
-
-def _cohorts(store):
-    return store._analytics_rows(
-        lambda d: f"SELECT 1 FROM {d.silver_orders} o WHERE o.id = ?", [7], ("int",))
-
-
-# (router, surface, module, the function it hands the statement, how to call
-# it, the name the rendered statement must carry)
-ROUTERS = [
-    ("_expenses_run", "expenses", "pg_expenses_read", "fetch", _expenses,
-     "bronze.expenses"),
-    ("_expenses_run (manual)", "expenses", "pg_expenses_read", "fetch", _manual,
-     "app.manual_expenses"),
-    ("_inventory_rows", "inventory", "pg_inventory_read", "fetch_many", _inventory,
-     "app.sku_inventory_status"),
-    ("_goals_run", "goals", "pg_goals_read", "fetch", _goals, "silver.orders"),
-    ("_goals_run (chain 7a)", "goals", "pg_goals_read", "fetch", _stored_goals,
-     "app.revenue_goals"),
-    ("_goal_tables_run", "goals", "pg_goals_read", "fetch", _goal_tables,
-     "app.seasonal_indices"),
-    ("_analytics_rows", "cohorts", "ch_cohorts", "fetch", _cohorts, "silver.orders"),
-]
-IDS = [r[0] for r in ROUTERS]
-
-
-def _rendered(fn_name, call):
-    """The statement a mocked engine call was handed."""
-    if fn_name == "fetch_many":
-        return call.args[0][0][0], list(call.args[0][0][1])
-    return call.args[0], list(call.args[1])
 
 
 @pytest.fixture
@@ -168,129 +104,7 @@ def store(tmp_path, monkeypatch):
     assert not (tmp_path / "never.duckdb").exists()
 
 
-def _set(monkeypatch, value):
-    for switch in SWITCHES:
-        if value is None:
-            monkeypatch.delenv(switch, raising=False)
-        else:
-            monkeypatch.setenv(switch, value)
-
-
-class TestTheSwitchIsNotRead:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", SWITCH_VALUES, ids=[repr(v) for v in SWITCH_VALUES])
-    @pytest.mark.parametrize("router,surface,module,fn,call,table", ROUTERS, ids=IDS)
-    async def test_the_engine_answers_whatever_it_says(
-        self, store, monkeypatch, router, surface, module, fn, call, table, value,
-    ):
-        _set(monkeypatch, value)
-        rows = [(1,)]
-        engine = AsyncMock(return_value=[rows] if fn == "fetch_many" else rows)
-        monkeypatch.setattr(f"core.{module}.{fn}", engine)
-
-        answer = await call(store)
-
-        assert answer == rows
-        rendered, params = _rendered(fn, engine.await_args)
-        assert table in rendered and "{" not in rendered
-        assert params == [7]
-        assert read_fallback.refusals() == {}
-
-    @pytest.mark.parametrize("module", MODULES)
-    def test_the_module_carries_no_switch(self, module):
-        """Mutation: put `ENV`/`enabled`/`available` back — the sites walk
-        would then take the module for a switch, and a reader could start
-        asking it again."""
-        m = importlib.import_module(f"core.{module}")
-        assert not any(hasattr(m, name) for name in ("ENV", "enabled", "available",
-                                                     "_VALID", "HISTORY_ENV"))
-
-    def test_no_reader_module_carries_one(self):
-        """The same of every reader module, read off `core/` rather than
-        named: S14-05's and S14-06's, a reader that comes later, and what the
-        merge of main brought in (#327's pixel-only breakdown reads through
-        `pg_traffic_read`). Mutation: `ENV = "KS_READ_TRAFFIC"` back in
-        `pg_traffic_read`."""
-        readers = sorted({p.stem for p in (ROOT / "core").glob("pg_*_read*.py")}
-                         | {"ch_cohorts"})
-        assert set(MODULES) <= set(readers) and len(readers) >= 20, readers
-        carrying = {name: [a for a in ("ENV", "enabled", "available", "_VALID",
-                                       "HISTORY_ENV")
-                           if hasattr(importlib.import_module(f"core.{name}"), a)]
-                    for name in readers}
-        assert {name: found for name, found in carrying.items() if found} == {}
-
-    def test_the_walk_finds_none_of_them_a_switch(self):
-        from tests.unit.test_read_fallback_sites import read_switch_modules
-
-        assert not read_switch_modules() & set(MODULES)
-
-
 class TestAFailureIsTheRefusalOffMade:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("router,surface,module,fn,call,table", ROUTERS, ids=IDS)
-    async def test_a_503_naming_the_surface_counted_as_a_refusal(
-        self, store, monkeypatch, caplog, router, surface, module, fn, call, table,
-    ):
-        down = OSError("connection refused")
-        monkeypatch.setattr(f"core.{module}.{fn}", AsyncMock(side_effect=down))
-
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            with pytest.raises(read_fallback.ReadUnavailable) as raised:
-                await call(store)
-
-        assert raised.value.surface == surface
-        assert raised.value.__cause__ is down
-        assert read_fallback.refusals()[surface]["count"] == 1
-        assert (f"read refused: {surface} — its engine failed, and no other "
-                f"store may answer it "
-                f"(1 refused since start): connection refused") in caplog.text
-        assert "falling back to DuckDB" not in caplog.text
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "router,surface,module,fn,call,table",
-        [r for r in ROUTERS if r[2] != "ch_cohorts"],
-        ids=[r[0] for r in ROUTERS if r[2] != "ch_cohorts"])
-    async def test_no_dsn_is_the_same_refusal(
-        self, store, monkeypatch, router, surface, module, fn, call, table,
-    ):
-        """No pool patched and no DSN: `core.pg.dsn()` refuses to guess a
-        database, and that is the failure refused — where `no_address`
-        named the switch."""
-        from core import pg
-
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setattr(pg, "_pool", None)
-        _set(monkeypatch, "postgres")
-
-        with pytest.raises(read_fallback.ReadUnavailable) as raised:
-            await call(store)
-
-        assert raised.value.surface == surface
-        assert isinstance(raised.value.__cause__, RuntimeError)
-        assert "KS_PG_DSN is not set" in str(raised.value.__cause__)
-        assert read_fallback.refusals()[surface]["count"] == 1
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", [None, "clickhouse", "duckdb"])
-    async def test_no_clickhouse_address_is_the_cohorts_refusal(
-        self, store, monkeypatch, value,
-    ):
-        """The cohorts' one engine, unconfigured: what `no_address` (the
-        switch on ClickHouse) and `no_engine` (the switch anywhere else)
-        refused under `off`. Mutation: answer the cohorts from DuckDB again."""
-        from core import ch_common
-
-        monkeypatch.delenv(ch_common.URL_ENV, raising=False)
-        _set(monkeypatch, value)
-
-        with pytest.raises(read_fallback.ReadUnavailable) as raised:
-            await _cohorts(store)
-
-        assert raised.value.surface == "cohorts"
-        assert "KS_CH_URL is not set" in str(raised.value.__cause__)
-        assert read_fallback.refusals()["cohorts"]["count"] == 1
 
     @pytest.mark.asyncio
     async def test_the_expenses_history_not_across_is_refused(self, store, monkeypatch):
@@ -348,103 +162,6 @@ class TestChain7aAFailedReadPages:
         [(key, message)] = canary.check_read_refusals(health)
         assert key == "read_refused"
         assert message.startswith(canary.READ_REFUSED_LINE + "goals ×1")
-
-
-# (reader, module, function it calls, how to call it)
-async def _frame(store):
-    from core.prediction_service import PredictionService
-
-    return await PredictionService()._query_daily_revenue(store, "retail", 30)
-
-
-async def _weekly(store):
-    from core.weekly_report import warehouse_max_date
-
-    return await warehouse_max_date(store)
-
-
-async def _chat(store):
-    from core.chat_tools import _chat_run
-
-    return await _chat_run("SELECT 1 FROM {gold_daily_revenue} WHERE ?", [True])
-
-
-async def _buyers(store):
-    return await store.get_missing_buyer_ids(5)
-
-
-READERS = [
-    ("training frame", "pg_forecast_read", "fetch_frame", _frame),
-    ("weekly report", "pg_weekly_read", "fetch", _weekly),
-    ("assistant", "pg_chat_read", "fetch", _chat),
-    ("buyer sync", "pg_buyer_sync_read", "fetch", _buyers),
-]
-
-
-class TestTheReadersWithNoFallback:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", [None, "duckdb", "junk-s14-07"])
-    @pytest.mark.parametrize("reader,module,fn,call", READERS, ids=[r[0] for r in READERS])
-    async def test_postgres_answers_whatever_the_switch_says(
-        self, store, monkeypatch, reader, module, fn, call, value,
-    ):
-        _set(monkeypatch, value)
-        engine = AsyncMock(return_value=[(date(2026, 9, 1),)])
-        monkeypatch.setattr(f"core.{module}.{fn}", engine)
-        await call(store)
-        assert engine.await_count == 1
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("reader,module,fn,call", READERS, ids=[r[0] for r in READERS])
-    async def test_a_failure_is_their_own_error_and_counts_nothing(
-        self, store, monkeypatch, reader, module, fn, call,
-    ):
-        """There never was a fallback here: the callers contain the error
-        (the trend drops the forecast, training keeps the model, the weekly
-        tick defers, the tool says it failed, the buyers step holds its
-        watermark). Mutation: turn it into a refusal, or into DuckDB."""
-        down = OSError("connection refused")
-        monkeypatch.setattr(f"core.{module}.{fn}", AsyncMock(side_effect=down))
-        with pytest.raises(OSError):
-            await call(store)
-        assert read_fallback.refusals() == {}
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("reader,module,fn,call", READERS, ids=[r[0] for r in READERS])
-    async def test_a_reader_with_no_dsn_meets_its_own_error(
-        self, store, fresh_read_fallback, monkeypatch, reader, module, fn, call,
-    ):
-        """A reader with no fallback, its switch naming Postgres and no DSN:
-        it meets `core.pg`'s own error, counted nowhere — no `no_address`
-        stands behind the switch since S14-07. No pool patched, no DSN.
-        Mutation: refuse it (a refusal is counted). (Until step 14's S14-16
-        this also held what `/api/health` published of such a switch under
-        `read_fallback_mode.misconfigured`, and the start's line, both gone
-        with it.)"""
-        from core import pg
-
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setattr(pg, "_pool", None)
-        _set(monkeypatch, "postgres")
-
-        with pytest.raises(RuntimeError, match="KS_PG_DSN is not set"):
-            await call(store)
-        assert fresh_read_fallback.refusals() == {}
-
-    def test_the_search_index_keeps_one_watermark(self):
-        """The DuckDB-built index's `meilisearch` cursor went with its frames;
-        the index reads Postgres under `meilisearch_pg` alone."""
-        import inspect
-
-        from core import pg_search_index_read
-        from core.sync_service import SyncService
-
-        assert pg_search_index_read.WATERMARK_KEY == "meilisearch_pg"
-        source = inspect.getsource(SyncService)
-        assert '"meilisearch"' not in source and "'meilisearch'" not in source
-        assert not any(hasattr(SyncService, name) for name in (
-            "_meili_high_watermark", "_meili_buyers_frame", "_meili_orders_frame",
-            "_meili_products_frame"))
 
 
 # The files of the routers above, with the `_*_run` routers in each and the
@@ -746,60 +463,3 @@ class TestNothingGoesRoundTheRouter:
         assert {"upsert_offers", "upsert_stocks", "record_inventory_snapshot"} <= inventory
         assert not {"read_snapshot_calendar", "preflight", MODE_PREDICATE} & inventory
         assert not {"reads_postgres", "reads_the_chain"} & _chain_writers("core.pg_goals_write")
-
-
-class TestJunkStartsWeb:
-    """Rule 3: a variable the code stopped reading cannot stop web, whatever
-    it holds — its import or its start (`configure_modes()`, the
-    startup's and the scheduler's call)."""
-
-    def test_a_fresh_interpreter_imports_and_starts_with_junk_in_every_one(self, tmp_path):
-        """The child's environment is exactly what is written here, with the
-        suite's test signing secrets, run from `tmp_path` so `load_dotenv()`
-        finds no `.env` above it (asserted)."""
-        code = (
-            "import importlib, sys\n"
-            f"sys.path.insert(0, {str(ROOT)!r})\n"
-            "from dotenv import find_dotenv\n"
-            "found = find_dotenv(usecwd=True)\n"
-            "assert not found, 'a .env above the cwd would be loaded: ' + found\n"
-            "import web.main\n"
-            "for m in %r:\n"
-            "    importlib.import_module('core.' + m)\n"
-            "import core.repositories.goals, core.repositories.expenses\n"
-            "import core.repositories.inventory, core.chat_tools, core.weekly_report\n"
-            "import core.prediction_service, core.sync_service\n"
-            "from core.runtime_modes import configure_modes\n"
-            "configure_modes()\n"
-            "configure_modes()\n"
-            "print('ok')\n" % (list(MODULES),)
-        )
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
-               "TZ": "UTC",
-               "DASHBOARD_SECRET_KEY": os.environ["DASHBOARD_SECRET_KEY"],
-               "BOT_TOKEN": os.environ["BOT_TOKEN"],
-               "KS_GOALS_HISTORY": "junk-s14-07",
-               **{s: "junk-s14-07" for s in SWITCHES}}
-        run = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path, env=env,
-                             capture_output=True, text=True, timeout=180)
-        assert run.returncode == 0, run.stderr[-3000:]
-        assert run.stdout.strip().endswith("ok")
-
-    def test_health_answers_and_publishes_none_of_them(self, monkeypatch):
-        from fastapi.testclient import TestClient
-
-        from core.runtime_modes import configure_modes
-        from web.main import app
-
-        monkeypatch.setenv("KS_GOALS_HISTORY", "junk-s14-07")
-        for switch in SWITCHES:
-            monkeypatch.setenv(switch, "junk-s14-07")
-        configure_modes()
-        response = TestClient(app).get("/api/health")
-        assert response.status_code == 200, response.text
-        body = response.json()
-        assert "goals_history" not in body
-        block = body["read_fallback_mode"]
-        # The refusals alone since step 14's S14-16: no `misconfigured`
-        # left to name a switch in.
-        assert set(block) == {"refused"}

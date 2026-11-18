@@ -166,14 +166,3 @@ class TestReconciliationNoLongerCarriesIt:
 
         assert "halfwritten_repair" in added
         assert added["halfwritten_repair"]["max_instances"] == 1
-
-    def test_reconciliation_no_longer_scans_for_them(self):
-        """The scan owes nothing to the comparison; it must not share its fate."""
-        import inspect
-        from core.scheduler import BackgroundScheduler as BS
-
-        source = inspect.getsource(BS._run_dq_reconciliation)
-        assert "order_products" not in source, (
-            "the half-written scan is back inside the reconciliation job"
-        )
-        assert "REPAIR_BATCH_LIMIT" not in source

@@ -32,8 +32,6 @@ from decimal import Decimal
 from core import pg_landing
 from core.landing_rows import (
     LINE_ITEM_ID_STRIDE,
-    ORDER_COLUMNS,
-    ORDER_PRODUCT_COLUMNS,
     landed_orders,
     order_product_rows,
     order_row,
@@ -67,21 +65,6 @@ def _payload(order_id, *, ordered_at=WHEN, total="100.00", products=2,
 
 
 class TestTheSharedRow:
-    def test_a_header_carries_exactly_the_columns_both_stores_write(self):
-        assert ORDER_COLUMNS == (
-            "id", "source_id", "status_id", "status_group_id", "grand_total",
-            "ordered_at", "created_at", "updated_at", "buyer_id", "manager_id",
-            "manager_comment", "promocode",
-        )
-        assert ORDER_PRODUCT_COLUMNS == (
-            "id", "order_id", "product_id", "name", "quantity", "price_sold",
-        )
-
-    def test_no_bookkeeping_column_is_shared(self):
-        """Two correct copies differ on these by construction."""
-        for column in ("synced_at", "first_seen_at", "update_count", "mirrored_at"):
-            assert column not in ORDER_COLUMNS
-            assert column not in ORDER_PRODUCT_COLUMNS
 
     def test_a_missing_buyer_or_manager_is_a_null_not_a_crash(self):
         payload = _payload(1)

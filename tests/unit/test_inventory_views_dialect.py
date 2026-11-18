@@ -16,49 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from core.sql_dialect import DUCKDB, POSTGRES, inventory_view_selects
+from core.sql_dialect import DUCKDB, inventory_view_selects
 from tests.sql_helper import strip_comments_and_literals as _strip_comments_and_literals
-
-# The names the two dialects put in front of the same body. Table names remain
-# the only difference — `TODAY_IN_KYIV` is one text for both engines, which is
-# what keeps that claim true after the timezone fix.
-_SUBSTITUTIONS = (
-    ("app.sku_inventory_status", "sku_inventory_status"),
-    ("bronze.categories", "categories"),
-    ("bronze.offer_stocks", "offer_stocks"),
-    ("silver.order_lines", "silver_order_lines"),
-    ("gold.v_", "v_"),
-)
-
-
-def _undo_postgres_names(sql: str) -> str:
-    for pg_name, duckdb_name in _SUBSTITUTIONS:
-        sql = sql.replace(pg_name, duckdb_name)
-    return sql
-
-
-
-
-class TestOneBodyTwoEngines:
-    def test_the_two_renderings_differ_only_in_table_names(self):
-        duckdb_views = inventory_view_selects(DUCKDB)
-        postgres_views = inventory_view_selects(POSTGRES)
-
-        assert [n for n, _ in duckdb_views] == [
-            _undo_postgres_names(n) for n, _ in postgres_views
-        ]
-        for (dk_name, dk_sql), (_, pg_sql) in zip(duckdb_views, postgres_views):
-            assert _undo_postgres_names(pg_sql) == dk_sql, dk_name
-
-    def test_duckdb_renders_no_schema_prefix(self):
-        assert DUCKDB.inventory_views == ""
-        assert all(n.startswith("v_") for n, _ in inventory_view_selects(DUCKDB))
-
-    def test_postgres_puts_them_in_gold(self):
-        # `app` is for what nothing can decide again; every one of these is
-        # derived and a migration puts them all back.
-        assert POSTGRES.inventory_views == "gold."
-        assert all(n.startswith("gold.v_") for n, _ in inventory_view_selects(POSTGRES))
 
 
 class TestCreationOrder:
@@ -78,40 +37,6 @@ class TestCreationOrder:
         assert names[0] == "v_sku_analysis"
         assert names.index("v_category_velocity") < names.index("v_sku_status")
         assert names.index("v_abc_classification") < names.index("v_sku_dead_stock_v2")
-
-
-class TestTheGoldProductsDependencyIsGone:
-    """`gold_daily_products` has no Postgres counterpart, and the views no
-    longer need one: they asked it for a per-product rollup the order-lines
-    level carries in both engines. Measured on the production backup, the two
-    formulations return identical rows for all eleven views."""
-
-    def test_no_view_reads_gold_daily_products(self):
-        for name, sql in inventory_view_selects(DUCKDB):
-            assert "gold_daily_products" not in _strip_comments_and_literals(sql), name
-
-    def test_the_rollups_reapply_golds_own_predicate(self):
-        # Gold materialised those rows under `NOT is_return AND
-        # is_active_source`. Reading the line level without re-applying it
-        # would silently add returns and Opencart back into every velocity
-        # figure on the tab.
-        for name, sql in inventory_view_selects(DUCKDB):
-            body = _strip_comments_and_literals(sql)
-            for match in re.finditer(r"FROM silver_order_lines\b(.*?)GROUP BY", body, re.S):
-                assert "NOT is_return" in match.group(1), name
-                assert "is_active_source" in match.group(1), name
-
-    def test_every_rollup_reads_the_line_level_and_nothing_else(self):
-        sources = set()
-        for _, sql in inventory_view_selects(DUCKDB):
-            body = _strip_comments_and_literals(sql)
-            sources |= set(re.findall(r"(?:FROM|JOIN)\s+(?!\()([a-z_][a-z0-9_]*)", body))
-        cte_names = {"base", "cost_ratio", "product_revenue", "ranked",
-                     "sales_30", "sales_90"}
-        view_names = {n for n, _ in inventory_view_selects(DUCKDB)}
-        assert sources - cte_names - view_names == {
-            "sku_inventory_status", "categories", "offer_stocks", "silver_order_lines",
-        }
 
 
 # `TestTheStoreDoesNotKeepItsOwnCopy` stood here until step 14's S14-18: the
@@ -141,110 +66,6 @@ class TestTheConsumersAreCovered:
     ])
     def test_the_eleven_are_all_present(self, view):
         assert view in {n for n, _ in inventory_view_selects(DUCKDB)}
-
-
-class TestTheNewestMigrationFrozeExactlyThisRendering:
-    """Revision 0011's contract, applied to the eleven: the migration holds a
-    copy of the rendered text, so the copy has to be proven equal to what the
-    body renders today. Without this the two drift the first time somebody
-    edits the body and the database keeps yesterday's view.
-
-    Pinned to the *newest* migration that carries these views rather than to a
-    fixed filename: 0014 froze them, 0015 re-froze them when `today` became a
-    hole, and a test still reading 0014 would have passed against a copy the
-    database no longer has.
-    """
-
-    MIGRATION = Path("migrations/versions/0015_inventory_views_today.py")
-
-    def test_it_is_the_newest_migration_that_carries_them(self):
-        carriers = sorted(
-            path.name for path in Path("migrations/versions").glob("0*.py")
-            if "CREATE VIEW gold.v_" in path.read_text(encoding="utf-8")
-        )
-        assert carriers[-1] == self.MIGRATION.name, (
-            f"a newer migration touches these views: {carriers}"
-        )
-
-    def _frozen(self) -> list[tuple[str, str]]:
-        text = self.MIGRATION.read_text(encoding="utf-8")
-        text = text[:text.index("def downgrade()")]
-        return [
-            (m.group(1), " ".join(m.group(2).split()))
-            for m in re.finditer(
-                r'CREATE VIEW (gold\.v_[a-z0-9_]+) AS\n(.*?)\n\s*"""', text, re.S
-            )
-        ]
-
-    def test_it_creates_all_eleven_in_the_bodys_order(self):
-        assert [n for n, _ in self._frozen()] == [
-            n for n, _ in inventory_view_selects(POSTGRES)
-        ]
-
-    def test_each_frozen_body_is_what_the_shared_text_renders(self):
-        rendered = {
-            name: " ".join(sql.split())
-            for name, sql in inventory_view_selects(POSTGRES)
-        }
-        for name, frozen in self._frozen():
-            assert frozen == rendered[name], name
-
-    def test_it_drops_them_in_reverse_before_recreating(self):
-        text = self.MIGRATION.read_text(encoding="utf-8")
-        order = re.findall(r'^    "(gold\.v_[a-z0-9_]+)",$', text, re.M)
-        assert order == [n for n, _ in inventory_view_selects(POSTGRES)]
-        assert "for name in reversed(_VIEWS_IN_DEPENDENCY_ORDER)" in text
-
-    def test_it_follows_the_revision_that_created_them(self):
-        text = self.MIGRATION.read_text(encoding="utf-8")
-        assert 'revision = "0015_inventory_views_today"' in text
-        assert 'down_revision = "0014_inventory_views"' in text
-
-    def test_today_is_not_a_dialect_difference(self):
-        """Both engines accept the same expression and mean the same day by
-        it, so the timezone fix cost no hole. If it ever becomes one, the undo
-        test above stops proving that table names are the only difference."""
-        from core.sql_dialect import TODAY_IN_KYIV
-
-        for _name, sql in inventory_view_selects(DUCKDB):
-            assert "CURRENT_DATE" not in _strip_comments_and_literals(sql)
-        duckdb_sql = "\n".join(s for _, s in inventory_view_selects(DUCKDB))
-        postgres_sql = "\n".join(s for _, s in inventory_view_selects(POSTGRES))
-        assert TODAY_IN_KYIV in duckdb_sql
-        assert duckdb_sql.count(TODAY_IN_KYIV) == postgres_sql.count(TODAY_IN_KYIV)
-
-    def test_the_downgrade_restores_what_0014_froze(self):
-        """A downgrade has to leave the schema matching the revision it lands
-        on, and 0014 claims eleven views exist. Its bodies are this body with
-        the bare keyword back, so the restoring copy is proven rather than
-        transcribed."""
-        text = self.MIGRATION.read_text(encoding="utf-8")
-        down = text[text.index("def downgrade()"):]
-        restored = {
-            m.group(1): " ".join(m.group(2).split())
-            for m in re.finditer(
-                r'CREATE VIEW (gold\.v_[a-z0-9_]+) AS\n(.*?)\n\s*"""', down, re.S
-            )
-        }
-        from core.sql_dialect import TODAY_IN_KYIV
-
-        as_0014 = {
-            name: " ".join(sql.replace(TODAY_IN_KYIV, "CURRENT_DATE").split())
-            for name, sql in inventory_view_selects(POSTGRES)
-        }
-        assert restored == as_0014
-
-        original = Path("migrations/versions/0014_inventory_views.py").read_text(
-            encoding="utf-8")
-        frozen_0014 = {
-            m.group(1): " ".join(m.group(2).split())
-            for m in re.finditer(
-                r'CREATE VIEW (gold\.v_[a-z0-9_]+) AS\n(.*?)\n\s*"""', original, re.S
-            )
-        }
-        assert restored == frozen_0014, (
-            "the downgrade does not restore what 0014 actually created"
-        )
 
     # `core.pg.REQUIRED_REVISION` pins the head migration, and the assertion
     # that it moved lives in `tests/unit/test_order_versions.py` — one home,

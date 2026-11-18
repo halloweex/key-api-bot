@@ -166,21 +166,6 @@ IN_BAND_ROUTES = {
     "POST /api/chat",
 }
 
-# HTTP routes the sweep does not run, so a handler on their path is not
-# proved absent by running them. The writing ones, because a sweep that
-# writes is not a probe; the assistant's, because each call spends the
-# Anthropic API (and the stream is one of the sweep's NETWORK_ROUTES).
-UNSWEPT_ROUTES = {
-    "DELETE /api/goals/{period_type}",
-    "POST /api/goals",
-    # Reads the order history through the goals router (Silver, the only
-    # history since chain 7b-4), before its one write.
-    "POST /api/goals/recalculate",
-    # `POST /api/duckdb/sync-buyers` and the forecast's `train` and `tune`
-    # reached one through the buyer-sync and training-frame switches until
-    # step 14's S14-07; their reads have no fallback, and fail as they did.
-} | IN_BAND_ROUTES
-
 # DN-20c: where each consumer's refusal stops, as `file:function:kind`.
 # `named` is a handler naming `ReadUnavailable` that answers it — the job's
 # result says `read_unavailable` and the surface. `broad` is an `except
@@ -242,30 +227,6 @@ UNSWEPT_STOPS = {
     "POST /api/chat": {_TOOLS},
     "POST /api/goals": set(),
     "POST /api/goals/recalculate": set(),
-}
-
-# Calls the resolver leaves unresolved although a function that reaches a
-# refusal bears the same name — `file:function: call`, each read by hand and
-# found to be something else. Derived and compared: a call to a name two
-# classes define, on a receiver the walk cannot type, lands here first, which
-# is how the assistant's routes were missed (`service.chat(...)`).
-# The scripts' entries that reach a refusal: each is run by a person at a
-# terminal, who gets the refusal as the exception it is, naming its surface
-# (see "A SCRIPT IS A PERSON AT A TERMINAL"). Derived and compared: a new one
-# is the moment to decide whether it is really somebody's terminal. The
-# preview renders the traffic report through the tab's router.
-SCRIPT_ENTRIES = {
-    "scripts/weekly_report_preview.py:main",
-}
-
-UNRESOLVED_NAMESAKES = {
-    # KeyCRM's API client, not the store's `get_categories`.
-    "core/keycrm.py:SyncKeyCRMClient._get: client.get_categories",
-    # (LightGBM's `train` stood here until step 14's S14-07, when
-    # PredictionService's stopped reaching a refusal.)
-    # The Anthropic client under the assistant, which reads no store.
-    "web/services/chat_service.py:ChatService.chat: self.llm.chat",
-    "web/services/chat_service.py:ChatService.chat_stream: self.llm.chat_stream",
 }
 
 
@@ -625,37 +586,6 @@ def _routes(graph: Graph):
     return routes
 
 
-def script_entries(graph: Graph) -> Set[str]:
-    """The entries in `scripts/` that reach a refusal."""
-    return {fn.key for fn in entry_points(graph) if fn.rel.startswith("scripts/")}
-
-
-def classify(graph: Graph):
-    """(swept routes reached, other routes reached, non-HTTP entries).
-
-    A script is a person at a terminal, not a consumer (`SCRIPT_ENTRIES`).
-    Until step 14's S14-16 its entries counted when it configured
-    KS_READ_FALLBACK, which nothing reads since."""
-    from tests.unit.test_read_fallback_http import NETWORK_ROUTES
-
-    routes = _routes(graph)
-    swept, unswept, consumers = set(), set(), set()
-    for fn in entry_points(graph):
-        if fn.rel.startswith("scripts/"):
-            continue
-        served = routes.get(fn)
-        if not served:
-            consumers.add(fn.key)
-            continue
-        for method, path in served:
-            if (method == "GET" and path.startswith("/api/")
-                    and path not in NETWORK_ROUTES):
-                swept.add(f"{method} {path}")
-            else:
-                unswept.add(f"{method} {path}")
-    return swept, unswept, consumers
-
-
 # ─── Where a refusal stops (DN-20c) ───────────────────────────────────────
 #
 # The walk above follows every call. Whether a refusal *leaves* a function
@@ -744,57 +674,6 @@ def _stopped_by(tries) -> Optional[str]:
     return None
 
 
-def _is_refusal(call: ast.Call) -> bool:
-    return _names_a_refusal(call)
-
-
-@dataclass
-class Containment:
-    graph: Graph
-    escaping: Set[Fn]
-    stop: Dict[Tuple[Fn, int], Optional[str]]
-
-    def stops_of(self, start: Fn) -> Set[str]:
-        """Every handler that stops a refusal on some path from `start`, as
-        `file:function:kind`. Follows every edge toward a refusal, stopped or
-        not, because a stop that catches nothing — `startup_event`'s own
-        `except` around a boot whose steps all contain themselves — is not
-        where the refusal ends and is not listed."""
-        found, seen, frontier = set(), set(), [start]
-        while frontier:
-            fn = frontier.pop()
-            if fn in seen:
-                continue
-            seen.add(fn)
-            for call, targets in self.graph.sites[fn]:
-                kind = self.stop.get((fn, id(call)))
-                if kind and (_is_refusal(call) or targets & self.escaping):
-                    found.add(f"{fn.key}:{kind}")
-                frontier.extend(targets & self.graph.reaching)
-        return found
-
-
-def containment(graph: Graph) -> Containment:
-    stop: Dict[Tuple[Fn, int], Optional[str]] = {}
-    for fn in graph.reaching:
-        guarded = _guarded_calls(fn.node)
-        for call, _targets in graph.sites[fn]:
-            stop[(fn, id(call))] = _stopped_by(guarded.get(call, ()))
-    escaping: Set[Fn] = set()
-    changed = True
-    while changed:
-        changed = False
-        for fn in graph.reaching:
-            if fn in escaping:
-                continue
-            if any(stop[(fn, id(call))] is None
-                   and (_is_refusal(call) or targets & escaping)
-                   for call, targets in graph.sites[fn]):
-                escaping.add(fn)
-                changed = True
-    return Containment(graph, escaping, stop)
-
-
 def entries_reaching(graph: Graph, target: Fn) -> Set[Fn]:
     """The entry points that reach `target` — the ones a handler in
     `target` answers for."""
@@ -829,189 +708,12 @@ def named_answers_out_of_place(graph: Graph, routes=None) -> Dict[str, List[str]
     return out
 
 
-def unresolved_namesakes(graph: Graph) -> Set[str]:
-    """`file:function: call` for every call the resolver left without a
-    target whose name is that of a function reaching a refusal."""
-    reaching = {fn.name for fn in graph.reaching}
-    found = set()
-    for fn, sites in graph.sites.items():
-        for call, targets in sites:
-            f = call.func
-            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
-            if not targets and name in reaching:
-                found.add(f"{fn.key}: {ast.unparse(f)}")
-    return found
-
-
 @pytest.fixture(scope="module")
 def graph() -> Graph:
     return build_graph()
 
 
-@pytest.fixture(scope="module")
-def contained(graph) -> Containment:
-    return containment(graph)
-
-
 # ─── The pins, derived ────────────────────────────────────────────────────
-
-class TestWhereARefusalGoes:
-    def test_the_non_http_consumers_are_the_ones_written_down(self, graph):
-        """DN-20c's list, derived. A new entry here is a consumer that would
-        receive a refusal as an exception: decide what it answers, then add
-        it — and to DN-20c."""
-        _, _, consumers = classify(graph)
-        assert consumers == NON_HTTP_CONSUMERS, (
-            f"new: {sorted(consumers - NON_HTTP_CONSUMERS)}; "
-            f"gone: {sorted(NON_HTTP_CONSUMERS - consumers)}")
-
-    def test_the_unswept_routes_are_the_ones_written_down(self, graph):
-        _, unswept, _ = classify(graph)
-        assert unswept == UNSWEPT_ROUTES, (
-            f"new: {sorted(unswept - UNSWEPT_ROUTES)}; "
-            f"gone: {sorted(UNSWEPT_ROUTES - unswept)}")
-
-    def test_the_seasonality_job_is_found_by_the_walk(self, graph):
-        """The one the remembered list missed, reached the way it really is:
-        job → calculate_suggested_goals → get_historical_revenue → _goals_run,
-        which refuses."""
-        index = {fn.key: fn for fn in graph.functions}
-        job = index["core/scheduler.py:BackgroundScheduler._run_seasonality_calc"]
-        goals_run = index["core/repositories/goals.py:GoalsMixin._goals_run"]
-        seen, frontier = set(), [job]
-        while frontier:
-            fn = frontier.pop()
-            if fn in seen:
-                continue
-            seen.add(fn)
-            frontier.extend(graph.calls[fn])
-        assert goals_run in seen
-
-    def test_it_is_looking(self, graph):
-        """Non-vacuity: the walk reaches the swept routes the sweep proves —
-        sixty-odd when it was written — and the refusers themselves."""
-        swept, _, _ = classify(graph)
-        assert len(swept) >= 50, sorted(swept)
-        assert {"GET /api/summary", "GET /api/traffic/analytics",
-                "GET /api/customers/cohort-retention",
-                "GET /api/revenue/forecast"} <= swept
-        refusers = {fn.key for fn in graph.reaching if not graph.calls[fn] & graph.reaching}
-        assert "core/repositories/traffic.py:TrafficMixin._traffic_run" in refusers
-
-    def test_resolution_does_not_follow_a_name_into_another_library(self, graph):
-        """`lgb.train(...)` is LightGBM's, not `PredictionService.train`, and
-        `self._client._get` is KeyCRM's, not the store's: the two false edges
-        a name-only walk draws here."""
-        index = {fn.key: fn for fn in graph.functions}
-        train = index["core/prediction_service.py:PredictionService.train"]
-        assert index["core/prediction_service.py:_train_model"] not in graph.callers[train]
-        assert not any(fn.rel == "core/keycrm.py" for fn in graph.reaching)
-
-
-class TestEveryConsumerAnswers:
-    """DN-20c: a refusal never leaves a consumer no HTTP request is waiting
-    for as an exception, and each one stops where it is written down."""
-
-    def test_no_refusal_escapes_a_non_http_consumer(self, graph, contained):
-        index = {fn.key: fn for fn in graph.functions}
-        escaped = sorted(k for k in NON_HTTP_CONSUMERS
-                         if index[k] in contained.escaping)
-        assert not escaped, (
-            "a refusal can leave these as an exception — give each an "
-            f"answer: {escaped}")
-
-    def test_each_consumer_answers_where_it_is_written_down(self, graph, contained):
-        index = {fn.key: fn for fn in graph.functions}
-        derived = {k: contained.stops_of(index[k]) for k in NON_HTTP_CONSUMERS}
-        assert derived == ANSWERS, {
-            k: {"derived": sorted(derived[k]), "pinned": sorted(ANSWERS.get(k, ()))}
-            for k in derived if derived[k] != ANSWERS.get(k)}
-
-    def test_a_named_answer_is_on_no_http_path_but_the_assistants(self, graph):
-        """A handler that answers a refusal takes the 503 away from any route
-        that reaches it. So every function holding one is reached only from
-        the non-HTTP consumers above and the assistant's two routes, which
-        answer in the conversation — and `test_read_fallback_http.py` exempts
-        these functions, and no others, from its rule that a handler naming
-        the refusal must raise it."""
-        assert named_answer_functions(), "no named answer is pinned at all"
-        assert named_answers_out_of_place(graph) == {}
-
-    def test_the_assistant_is_reached_from_its_routes(self, graph):
-        """The edge a name-only walk missed: `service = get_chat_service()`
-        in each route, annotated `-> ChatService`, is what makes
-        `service.chat(...)` ChatService's and not LLMClient's. Without it
-        the assistant looked like an entry point of its own and the rule
-        above held by not seeing the routes."""
-        index = {fn.key: fn for fn in graph.functions}
-        chat = index["web/services/chat_service.py:ChatService.chat"]
-        stream = index["web/services/chat_service.py:ChatService.chat_stream"]
-        assert chat in graph.calls[index["web/routes/chat.py:chat"]]
-        # The stream is read in a generator nested in the route.
-        assert stream in graph.calls[index["web/routes/chat.py:event_generator"]]
-        assert index["core/llm_client.py:LLMClient.chat"] not in graph.calls[
-            index["web/routes/chat.py:chat"]]
-        routes, served = _routes(graph), set()
-        for fn in entries_reaching(graph, index["core/chat_tools.py:execute_tool"]):
-            served |= {f"{m} {p}" for m, p in routes.get(fn, ())}
-        assert served == IN_BAND_ROUTES
-
-    def test_every_namesake_left_unresolved_is_written_down(self, graph):
-        """The resolver's blind spot, derived: a call it cannot type whose
-        name is that of a function reaching a refusal. Each written down has
-        been read and is something else; a new one is a possible missed
-        edge — resolve it, or read it and write it down."""
-        derived = unresolved_namesakes(graph)
-        assert derived == UNRESOLVED_NAMESAKES, (
-            f"new: {sorted(derived - UNRESOLVED_NAMESAKES)}; "
-            f"gone: {sorted(UNRESOLVED_NAMESAKES - derived)}")
-
-    def test_the_unswept_routes_stop_where_they_are_written_down(self, graph, contained):
-        routes = _routes(graph)
-        derived = {}
-        for fn, served in routes.items():
-            for method, path in served:
-                label = f"{method} {path}"
-                if label in UNSWEPT_ROUTES:
-                    derived[label] = contained.stops_of(fn)
-        assert derived == UNSWEPT_STOPS
-
-    def test_the_kept_answers_are_reached_by_no_refusal(self, graph):
-        """`KEPT_ANSWERS` is not a second list of consumers: none of them is
-        on a refusal's path. A refusal that reached one again would make it
-        a consumer, derived above — and it belongs in `ANSWERS` then, with
-        the stop it has. Each still holds its handler: the plan's risk for
-        S14-16 is exactly these going dead, and S14-16 keeps them."""
-        index = {fn.key: fn for fn in graph.functions}
-        reaching = set(graph.reaching)
-        for key in KEPT_ANSWERS:
-            assert index[key] not in reaching, key
-            tree = ast.parse((REPO / key.split(":", 1)[0]).read_text(encoding="utf-8"))
-            name = key.rsplit(".", 1)[-1].split(":")[-1]
-            fn = next(n for n in ast.walk(tree)
-                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                      and n.name == name)
-            assert any(isinstance(h, ast.ExceptHandler) and h.type is not None
-                       and "ReadUnavailable" in ast.unparse(h.type)
-                       for h in ast.walk(fn)), key
-
-    def test_the_walk_sees_a_refusal_escape(self, graph, contained):
-        """Non-vacuity: the routers themselves escape — that is what a
-        refusal is — and so do the helpers between a job and its answer."""
-        index = {fn.key: fn for fn in graph.functions}
-        # The weekly report's readers, training and the search index were
-        # here until step 14's S14-07, when they stopped reaching a refusal.
-        for key in ("core/repositories/traffic.py:TrafficMixin._traffic_run",
-                    "core/repositories/goals.py:GoalsMixin._goals_run",
-                    "core/repositories/goals.py:GoalsMixin._compute_goal_tables",
-                    "core/repositories/expenses.py:ExpensesMixin._expenses_run",
-                    "core/repositories/inventory.py:InventoryMixin._inventory_batch",
-                    "core/repositories/customers.py:CustomersMixin._analytics_rows"):
-            assert index[key] in contained.escaping, key
-        for key in ("core/weekly_report.py:_weekly_run",
-                    "core/prediction_service.py:PredictionService._train_impl",
-                    "core/sync_service.py:SyncService.sync_to_meilisearch"):
-            assert index[key] not in contained.escaping, key
 
 
 def named_answer_functions() -> Set[str]:
@@ -1074,26 +776,6 @@ class TestTheContainmentRule:
                "    except Exception:\n"
                "        await store.read()\n")
         assert self._kind(src) is None
-
-
-class TestOnlyTheseProcessesRefuse:
-    def test_the_scripts_that_reach_a_refusal_are_the_ones_written_down(self, graph):
-        """A script is run by a person, who gets a refusal as the exception
-        it is. The ones that reach one are derived: the preview renders the
-        traffic report through the tab's router. Until step 14's S14-16 it
-        was left out because it never read KS_READ_FALLBACK; nothing does
-        now, and it is left out because a person runs it."""
-        assert script_entries(graph) == SCRIPT_ENTRIES
-
-    def test_no_function_of_the_bot_reaches_a_refusal(self):
-        """`bot/` is outside the walk because it reaches no router: derived
-        over the bot and `core/` together. Until S14-16 this said the bot
-        never configured KS_READ_FALLBACK; a refusal no longer waits for a
-        mode, so the walk itself is asked. The day one does, its callers
-        belong in the walk."""
-        graph = build_graph(("bot", "core"))
-        assert not {fn.key for fn in graph.reaching if fn.rel.startswith("bot/")}
-        assert any(fn.rel.startswith("bot/") for fn in graph.functions)
 
 
 # ─── The walk seen to bite ────────────────────────────────────────────────

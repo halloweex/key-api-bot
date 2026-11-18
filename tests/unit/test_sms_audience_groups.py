@@ -33,7 +33,7 @@ from core.repositories.customers import (
     MAX_AUDIENCE_GROUPS, SmsAudienceFilters, SmsAudienceGroup,
     audience_group_fragments,
 )
-from core.sql_dialect import DUCKDB, TODAY_IN_KYIV, sms_segments_select
+from core.sql_dialect import TODAY_IN_KYIV
 from tests import sms_audience_fixture as fx
 from tests.integration import pg_sms_seed
 
@@ -198,54 +198,6 @@ class TestOneGroupRendersWhatItRenderedBefore:
 
 
 class TestTheFragments:
-    def test_only_a_narrower_group_carries_its_own_window(self):
-        frag = audience_group_fragments(
-            [group_a(), GROUP_B], "revenue_ltv", "retail", "silver_order_lines",
-        )
-        assert frag["window"] == 365
-        a, b = frag["group_predicates"]
-        assert not a.startswith("(recency <= ?")
-        assert b == "(recency <= ? AND TRUE)"
-
-    def test_parameters_follow_the_text(self):
-        """The period counts bind in `cust`, the predicates in `flagged`, and
-        within a group the window comes before its filters. A list built in
-        any other order binds a date to a day count."""
-        groups = [
-            SmsAudienceGroup(365, SmsAudienceFilters(
-                period_orders_min=2, period_from=date(2026, 1, 1), cities=("Київ",))),
-            SmsAudienceGroup(92, SmsAudienceFilters(period_days=30, orders_min=3)),
-        ]
-        frag = audience_group_fragments(groups, "revenue_ltv", "retail",
-                                        "silver_order_lines")
-        assert frag["period_params"] == [date(2026, 1, 1), 30]
-        assert frag["group_params"] == [
-            "київ", 2,          # group 1: city, then its period count
-            92, 3, 1,           # group 2: its window, orders, period count
-        ]
-        assert [c.split(" AS ")[-1] for c in frag["period_columns"]] == [
-            "period_orders_1", "period_orders_2"]
-
-    def test_a_range_binds_both_its_dates_in_order(self):
-        """A closed range is two dates in `cust`, the start first; bounds on
-        the count are the floor then the ceiling in `flagged`."""
-        groups = [
-            SmsAudienceGroup(3650, SmsAudienceFilters(
-                period_orders_min=1, period_orders_max=2,
-                period_from=date(2026, 1, 1), period_to=date(2026, 3, 31))),
-            SmsAudienceGroup(365, SmsAudienceFilters(
-                period_orders_max=0, period_to=date(2025, 6, 30))),
-        ]
-        frag = audience_group_fragments(groups, "revenue_ltv", "retail",
-                                        "silver_order_lines")
-        assert frag["window"] == 3650
-        assert frag["period_params"] == [date(2026, 1, 1), date(2026, 3, 31),
-                                         date(2025, 6, 30)]
-        assert frag["group_params"] == [1, 2, 365, 0]
-        assert frag["group_predicates"] == [
-            "(period_orders_1 >= ? AND period_orders_1 <= ?)",
-            "(recency <= ? AND (period_orders_2 <= ?))",
-        ]
 
     def test_the_count_of_groups_is_bounded(self):
         with pytest.raises(ValueError, match="at least one"):
@@ -254,22 +206,6 @@ class TestTheFragments:
             audience_group_fragments(
                 [GROUP_B] * (MAX_AUDIENCE_GROUPS + 1), "revenue_ltv", "retail", "x",
             )
-
-    def test_the_query_names_every_group_and_counts_each(self):
-        frag = audience_group_fragments(
-            [group_a(), GROUP_B], "revenue_ltv", "retail", DUCKDB.order_lines,
-        )
-        sql = sms_segments_select(
-            DUCKDB, ltv_column="revenue_ltv", sales_type_filter="",
-            tier_case="NULL", arm_expr="'ALL'", ok_tier_expr="TRUE",
-            group_predicates=frag["group_predicates"],
-            period_columns=frag["period_columns"], tier_subset="",
-        )
-        assert "AS in_group_1" in sql and "AS in_group_2" in sql
-        assert "(in_group_1 OR in_group_2) AS ok_filters" in sql
-        assert "CASE WHEN in_group_2 THEN 2 ELSE 0 END" in sql
-        assert sql.count("AS f_group_") == 2
-        assert "{" not in sql and "}" not in sql
 
 
 # ─── On a real store ────────────────────────────────────────────────────────

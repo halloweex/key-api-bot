@@ -148,15 +148,6 @@ class TestDeliveredMapDurability:
         taken = g2.take_resolved("disk", now=2000.0)
         assert taken == {"disk:WARN": 1000.0}
 
-    def test_the_step03_file_format_still_loads(self, tmp_path):
-        path = tmp_path / "gate.json"
-        path.write_text(
-            '{"b": {"first_seen": 1.0, "last_attempt": 1.0,'
-            ' "last_sent": 1.0, "suppressed": 0}}'
-        )
-        g = AlertGate(state_path=path)
-        assert g.decide("b", has_condition=True, now=10.0)[0] is False
-
     def test_refiring_keeps_the_original_first_delivered(self):
         """'stood 26h' must measure from the first heard firing, not the
         latest reminder."""

@@ -186,21 +186,6 @@ class TestTheFiles:
         block = re.search(r"blind_checks AS \((.*?)\n\),", sql, flags=re.S).group(1)
         assert set(re.findall(r"'(\w+)'", block)) == warns | {ch_silver.GOLD_UNWATCHED}
 
-    def test_d8s_named_checks_are_filed_by_the_code_that_stays(self):
-        """Step 14's S14-12 deleted the comparisons against DuckDB, and with
-        them the names D8 listed for them (`mirror_buckets_disagree`,
-        `gold_missing_cells`, `gold_orphan_cells`). Every name D8 still lists
-        by name is a registered condition. Mutation: list one with no
-        emitter."""
-        from core.alerting import REGISTRY
-
-        sql = _uncommented((SQL_DIR / "09_d8_mirror_landing.sql").read_text(encoding="utf-8"))
-        block = re.search(r"derived AS \((.*?)\n\),", sql, flags=re.S).group(1)
-        named = set(re.findall(r"'(\w+)'", block.split("i.check_name IN", 1)[1]))
-        # `customer_profile_mismatch` went with the check that filed it (O6).
-        assert named == {"gold_rollup_mismatch"}
-        assert named <= set(REGISTRY)
-
     def test_d9s_watched_series_are_registered_conditions(self):
         """D9 reads `app.alert_series` by condition key, so a key nothing can
         fire any more reads "nothing firing" for ever. `mirror_buckets_disagree`
@@ -642,74 +627,6 @@ class TestD8JudgesTheRun:
                            table="silver.order_utm", severity="WARN")
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "FAIL" and "pg_order_utm_in_flight" in detail, detail
-
-@needs_pg
-class TestNoCopyGatesTheJournal:
-    """The journal is read, not a copy of it: a `meta.mirror_state` row for
-    `app.data_quality_runs` left frozen, or failing, by the hourly copy that
-    S14-13 deleted changes no verdict. Mutation: put the copy's gate back in
-    D8 or in either history — its case below reads UNKNOWN."""
-
-    TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
-    FROZEN = (dict(ok_at=datetime(2030, 6, 1, 3, 0, tzinfo=KYIV)),
-              dict(ok_at=datetime(2030, 6, 1, 3, 0, tzinfo=KYIV),
-                   attempted_at=datetime(2030, 6, 5, 11, 50, tzinfo=KYIV),
-                   failures=3, error="boom"))
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("frozen", FROZEN)
-    async def test_d8_judges_the_run(self, pool, frozen):
-        async with scenario(pool) as conn:
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
-                         started_at=self.TODAY_0730)
-            await mirror_state(conn, "app.data_quality_runs", **frozen)
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
-        assert v == "PASS", detail
-
-    @pytest.mark.asyncio
-    async def test_d8_judges_the_run_with_no_copy_row_at_all(self, pool):
-        async with scenario(pool) as conn:
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
-                         started_at=self.TODAY_0730)
-            await conn.execute(
-                "DELETE FROM meta.mirror_state WHERE table_name = 'app.data_quality_runs'")
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
-        assert v == "PASS", detail
-
-    @pytest.mark.asyncio
-    async def test_d8_still_fails_a_finding(self, pool):
-        async with scenario(pool) as conn:
-            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
-                         started_at=self.TODAY_0730)
-            await dq_issue(conn, DQ_RUN_IDS[0], "gold_cell_values", table="gold.daily_revenue")
-            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN[0])
-            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
-        assert v == "FAIL" and "gold_cell_values" in detail, detail
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
-    @pytest.mark.parametrize("frozen", FROZEN)
-    async def test_the_histories_judge_the_runs(self, pool, name, layer, frozen):
-        history = TestReconciliationPgHistory()
-        history.LAYER = layer
-        async with scenario(pool) as conn:
-            await history.seed(conn, history.every_morning())
-            await mirror_state(conn, "app.data_quality_runs", **frozen)
-            v, detail = await verdict(conn, name)
-        assert v == "PASS", detail
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
-    async def test_a_silence_now_is_a_fail_not_an_unknown(self, pool, name, layer):
-        """There is no copy to wait for: a silence past the limit at the read
-        is one that happened."""
-        history = TestReconciliationPgHistory()
-        history.LAYER = layer
-        async with scenario(pool) as conn:
-            await history.seed(conn, history.every_morning(last=2))
-            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN[0])
-            v, detail = await verdict(conn, name)
-        assert v == "FAIL", detail
 
 
 @needs_pg

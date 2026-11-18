@@ -18,16 +18,13 @@ naming the divergence.
 """
 from __future__ import annotations
 
-import re
 from datetime import date, datetime, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core import pg_gold_read
 from core.landing_rows import buyer_row, contact_rows
-from core.sql_dialect import DUCKDB, POSTGRES, order_lines_select
 
 
 class _Buyer:
@@ -123,92 +120,3 @@ class TestTheBuyerConversions:
         assert (1, "phone", "+380671234567", False) in rows
         assert (1, "email", "a@b.ua", True) in rows
         assert len(rows) == 3
-
-
-class TestOneBodyTwoEngines:
-    """The order-lines view: migration 0011 froze the Postgres rendering."""
-
-    def test_the_two_renderings_differ_only_in_table_names(self):
-        dk = order_lines_select(DUCKDB)
-        pg = order_lines_select(POSTGRES)
-        undone = (
-            pg.replace("bronze.order_products", "order_products")
-            .replace("silver.orders", "silver_orders")
-            .replace("bronze.products", "products")
-            .replace("bronze.categories", "categories")
-        )
-        assert undone == dk
-
-    def test_migration_0011_froze_exactly_the_postgres_rendering(self):
-        migration = Path("migrations/versions/0011_buyers_lines_vitrina.py")
-        text = migration.read_text(encoding="utf-8")
-        # The frozen view body, whitespace-normalised — structure, not prose.
-        frozen = re.search(
-            r"CREATE VIEW silver\.order_lines AS\n(.*?)\n\s*\"\"\"",
-            text, re.S,
-        )
-        assert frozen, "migration no longer creates the view"
-        normal = " ".join(frozen.group(1).split())
-        rendered = " ".join(order_lines_select(POSTGRES).split())
-        assert normal == rendered
-
-
-class TestTheLockIsNeverHeldAcrossTheNetwork:
-    """The review's sharpest live finding: the Postgres read used to happen
-    inside `self.connection()` — the asyncio lock that serialises every DuckDB
-    access — so a hung Postgres would have held the whole dashboard. Since
-    step 14's S14-06 the dashboard has no DuckDB tail at all, and neither the
-    summary nor the trend may touch the store."""
-
-    @pytest.mark.asyncio
-    async def test_summary_from_pg_never_touches_the_store(self, monkeypatch):
-        from core import pg_gold_read
-        from core.store import AnalyticsStore
-
-        monkeypatch.setattr(
-            pg_gold_read, "fetch_summary",
-            AsyncMock(return_value=(10, 1000.0, 1, 50.0)),
-        )
-
-        store = AnalyticsStore.__new__(AnalyticsStore)
-
-        def forbidden():
-            raise AssertionError("store lock was taken for a PG-answered read")
-
-        store.connection = forbidden  # type: ignore[method-assign]
-
-        out = await store.get_summary_stats(date(2026, 8, 1), date(2026, 8, 27))
-        assert out["totalOrders"] == 10
-        assert out["totalRevenue"] == 1000.0
-        assert set(out) == {
-            "totalOrders", "totalRevenue", "avgCheck", "totalReturns",
-            "returnsRevenue", "startDate", "endDate",
-        }
-
-    @pytest.mark.asyncio
-    async def test_trend_prefetch_happens_before_the_lock(self, monkeypatch):
-        # Both series — current and comparison — must be awaited before
-        # connection() is entered; the fake lock records the ordering.
-        from core import pg_gold_read
-        from core.store import AnalyticsStore
-
-        calls: list = []
-
-        async def fake_series(lo, hi, st, src):
-            calls.append(("pg", lo, hi))
-            return [(lo, 1.0, 1)]
-
-        monkeypatch.setattr(pg_gold_read, "fetch_series", fake_series)
-
-        store = AnalyticsStore.__new__(AnalyticsStore)
-
-        def forbidden():
-            raise AssertionError("store lock was taken for a PG-answered trend")
-
-        store.connection = forbidden  # type: ignore[method-assign]
-
-        out = await store.get_revenue_trend(
-            date(2026, 8, 20), date(2026, 8, 21), include_comparison=True,
-        )
-        assert [c[0] for c in calls] == ["pg", "pg"]
-        assert out["labels"]

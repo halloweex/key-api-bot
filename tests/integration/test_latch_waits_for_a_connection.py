@@ -542,19 +542,6 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
         assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
 
 
-def test_every_chain_is_driven_with_no_flag():
-    """Each writer, and each first write, runs under every value of
-    `FLAG_VALUES` and never under `postgres` — what keeps the proofs below in
-    step 14's state rather than production's flag. Mutation: drive a chain at
-    `postgres` again."""
-    for key, (chain, _call) in WRITERS.items():
-        flags = {p.values[1] for p in _cases([key], lambda k: WRITERS[k][0])}
-        assert flags == set(FLAG_VALUES), key
-    for chain_name, (key, *_row) in FIRST_WRITES.items():
-        flags = {p.values[1] for p in _cases([chain_name], _first_write_chain)}
-        assert flags == set(FLAG_VALUES), chain_name
-
-
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
     @pytest.mark.parametrize("writer, flag", _cases(WRITERS, lambda k: WRITERS[k][0]))
     @pytest.mark.asyncio

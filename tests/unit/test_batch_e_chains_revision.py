@@ -49,14 +49,6 @@ TABLES = {
     "app.traffic_report_sends": ("chain 11b", "KS_WRITE_TRAFFIC_LEDGER", "pg_traffic_ledger_write"),
 }
 
-# Created by 0025, 0026 and 0028 with no comment; 0035's downgrade clears them.
-NEVER_COMMENTED = {
-    "app.seasonal_indices", "app.growth_metrics", "app.weekly_patterns",
-    "app.revenue_predictions", "app.data_quality_runs", "app.data_quality_issues",
-    "app.data_quality_diffs", "app.disk_samples", "app.data_dir_samples",
-    "app.memory_samples", "app.weekly_report_sends", "app.traffic_report_sends",
-}
-
 
 def _module():
     return replay.load(REV)
@@ -102,19 +94,6 @@ class TestTheLock:
             assert f"({chain})" in text, table
             assert f"{flag}=postgres" in text, table
             assert f"core/{module}.py" in text, table
-
-    def test_the_downgrade_puts_back_exactly_what_0034_left(self):
-        """Every table's comment, not only the twenty: at 0034, then up, then
-        down, the state is 0034's again. Kills: a restored text that drifted
-        from 0002/0003/0005/0008/0020's by a character (0008's is rendered by
-        an f-string loop), NULL where a comment stood, or a comment invented
-        for one of the twelve tables that never had one."""
-        at_0034 = replay.comments_at("0034_buyer_chain")
-        rev = _module()
-        up = replay.apply(at_0034, replay.statements(rev, "upgrade"))
-        down = replay.apply(up, replay.statements(rev, "downgrade"))
-        assert down == at_0034
-        assert {t for t in TABLES if at_0034[t] is None} == NEVER_COMMENTED
 
     def test_the_upgrade_changes_every_one_of_them(self):
         """Kills: a table listed with the text it already had — counted as

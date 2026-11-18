@@ -18,7 +18,6 @@ import pytest
 from core import chain_latch, pg_chain_invariants as inv, pg_expense_types_write as chain
 from core import sync_service as sync_module
 from core import write_chains
-from core.landing_rows import expense_type_rows
 
 PAYLOAD = [
     {"id": 1, "name": "Доставка", "alias": "delivery", "is_active": True},
@@ -39,29 +38,7 @@ def flags(monkeypatch):
     return monkeypatch
 
 
-class _NoDuckDB:
-    """A store whose DuckDB must not be reached."""
-
-    def connection(self):
-        raise AssertionError("the dictionary reached DuckDB under KS_WRITE_EXPENSE_TYPES=postgres")
-
-
 class TestTheRepositoryRoutes:
-    @pytest.mark.asyncio
-    async def test_under_the_flag_the_writer_gets_the_parsed_rows_and_duckdb_nothing(self, flags):
-        from core.repositories.expenses import ExpensesMixin
-
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        writer = AsyncMock(return_value=3)
-        with patch.object(chain, "upsert_expense_types", new=writer):
-            written = await ExpensesMixin.upsert_expense_types(_NoDuckDB(), PAYLOAD)
-
-        assert written == 3
-        (rows,), _ = writer.await_args
-        # The names the shared parse resolves, never the payload's keys: the
-        # routing is AFTER `expense_type_rows`, so both stores get these.
-        assert rows == expense_type_rows(PAYLOAD)
-        assert [r.name for r in rows] == ["Доставка", "Bank Commission", "Packing Materials"]
 
 
     @pytest.mark.asyncio
@@ -154,20 +131,6 @@ class TestFullSyncContainsThisChainOnly:
         assert "ConnectionRefusedError" in stats["expense_types_error"]
         assert "expense_types" not in store.stamped, "the watermark moved over nothing"
         # Products and orders still synced: one dictionary did not cost them.
-        assert store.stamped == ["categories", "products", "orders"]
-
-    @pytest.mark.asyncio
-    async def test_a_flag_nobody_can_read_is_contained_the_same_way(self, flags):
-        """DN-01's rule on the one path the registry does not cover: a typo in
-        KS_WRITE_EXPENSE_TYPES raises inside the repository, and must not stop
-        the orders of a full sync — or, on an empty DuckDB, the boot sync."""
-        flags.setenv(chain.WRITE_ENV, "postgrse")
-        store = _SyncStore(RuntimeError(
-            "KS_WRITE_EXPENSE_TYPES='postgrse' is not understood"))
-
-        stats = await _full_sync(store)
-
-        assert "postgrse" in stats["expense_types_error"]
         assert store.stamped == ["categories", "products", "orders"]
 
 
@@ -301,20 +264,6 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
                 for i in _freshness_check(self.NOW, frozen_rows=rows,
                                           chain_watermarks={**others, **marks})]
 
-    def test_neither_this_chain_nor_chain_1_declares_it(self):
-        from core import pg_inventory_write
-
-        assert not hasattr(chain, "CHAIN_WATERMARK_INHERITS_DUCKDB")
-        assert not getattr(pg_inventory_write, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
-
-    def test_an_absent_key_is_never_synced_whatever_duckdb_holds(self, flags):
-        """Kills: the stand-in put back — a DuckDB stamp 103 h old would then
-        answer for a key Postgres does not hold, and the run would be quiet."""
-        (issue,) = self._judge(flags, self._duckdb(103), {})
-        name, severity, _count, description = issue
-        assert (name, severity) == ("freshness_expense_types", "WARN")
-        assert "never synced" in description
-
     def test_once_postgres_holds_the_key_it_wins(self, flags):
         """Postgres's stamp is the one judged: a stale Postgres stamp beside a
         fresh DuckDB one is a stall."""
@@ -325,11 +274,6 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
                                {"last_sync_expense_types": stale})
         assert issue[0] == "freshness_expense_types" and issue[2] == 200
         assert "before the switch" not in issue[3]
-
-    def test_with_no_stamp_anywhere_it_is_still_never_synced(self, flags):
-        (issue,) = self._judge(flags, self._duckdb(None), {})
-        assert issue[0] == "freshness_expense_types"
-        assert "never synced" in issue[3]
 
 
 # `TestTheCanaryWarnsOnIt` stood here until step 14's S14-11: the canary
