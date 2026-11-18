@@ -41,12 +41,28 @@ RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]
 # manager, so a manager-based rule would silently pull it into retail.
 EXHIBITION_SOURCE_ID = 5
 
+# Офлайн-магазин (KeyCRM source 7, «Офлайн Магазин», created 2026-11-02) — the
+# shop's own physical store, opened in November 2026. The owner's decision of
+# 2026-11-15: it is retail, but offline, and goes as a category of its own —
+# sales_type `offline`, and revenue. Source wins over manager here as it does
+# for the exhibition, for two reasons: the store's seller is not on the retail
+# list, so the manager rule would file the store as `internal` (admin-only, out
+# of sight of everyone else); and putting the seller on the list would mix
+# counter sales into the online retail trend, the forecast and the weekly
+# report, which are about the online shop. Whoever sells there, it is `offline`.
+OFFLINE_STORE_SOURCE_ID = 7
+
 # Two different questions, and conflating them cost ₴266 059 of September 2025
 # revenue that sat in the warehouse and appeared in no dashboard figure.
 #
 # SYNCED_SOURCE_IDS — everything we pull from KeyCRM and reconcile against it.
 # Includes Opencart (3), retired in 2024: its orders are history we still hold,
 # and the comparator must see them on both sides or it reports a phantom drift.
+# It is also every source the integrity layer knows
+# (`core.pg_warehouse_dq.KNOWN_SOURCE_IDS`) and the reconciliation against
+# KeyCRM compares (`core.reconciliation_io.ACTIVE_SOURCES`). Both read it from
+# here since the offline store arrived, so a new KeyCRM source is registered
+# once; until then each was a literal of its own.
 #
 # REVENUE_SOURCE_IDS — what counts as revenue on the dashboard. Opencart is
 # excluded deliberately; it was decommissioned and its takings are not part of
@@ -54,8 +70,8 @@ EXHIBITION_SOURCE_ID = 5
 #
 # The invariant is REVENUE_SOURCE_IDS <= SYNCED_SOURCE_IDS, pinned by a test.
 # Revenue can never come from a source we do not sync.
-SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)
-REVENUE_SOURCE_IDS = (1, 2, 4, 5)
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5, OFFLINE_STORE_SOURCE_ID)
+REVENUE_SOURCE_IDS = (1, 2, 4, 5, OFFLINE_STORE_SOURCE_ID)
 
 # The company's own second legal entity, as KeyCRM's buyer cards name it.
 # An order whose buyer is one of these is a sale to ourselves — goods moved
@@ -106,7 +122,10 @@ def not_own_entity(alias: str, ids=None) -> str:
     return f"({alias}.buyer_id IS NULL OR {alias}.buyer_id NOT IN ({listed}))"
 
 
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
+# `offline` is the offline store (`OFFLINE_STORE_SOURCE_ID`, the owner's
+# decision of 2026-11-15): retail goods at retail prices, sold over a counter,
+# and a category of its own. Every viewer may select it, as the exhibition.
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 
 # Timezone for date extraction - KeyCRM stores timestamps in +04:00 (server time)
 # but UI displays in Kyiv timezone, so we convert for consistency

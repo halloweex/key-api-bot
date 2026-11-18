@@ -1,9 +1,8 @@
-"""Tests for winsorized LightGBM revenue prediction."""
-import json
+"""Tests for the LightGBM revenue prediction: the training procedure of
+2026-11-18 (Huber loss, NUM_BOOST_ROUND trees on every row, revenue-only
+features, no winsorising, no weekday correction, no early stopping)."""
 import pathlib
-import tempfile
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -40,14 +39,23 @@ def _make_daily_df(n_days: int = 400, base_revenue: float = 100_000,
     return df
 
 
+@pytest.fixture(scope="module")
+def trained():
+    """One training shared by the tests that only read its result."""
+    from core.prediction_service import _train_model
+    df = _make_daily_df(n_days=400, spike_days=15, spike_factor=4.0)
+    model, metrics = _train_model(df)
+    return model, metrics, df
+
+
 # ---------------------------------------------------------------------------
-# Tests for _build_features
+# Features
 # ---------------------------------------------------------------------------
 
 class TestBuildFeatures:
 
     def test_feature_columns_present(self):
-        """All 31 FEATURE_COLUMNS should be present in output."""
+        """Every FEATURE_COLUMNS entry is in the built frame."""
         from core.prediction_service import _build_features, FEATURE_COLUMNS
         df = _make_daily_df(n_days=400, spike_days=0)
         result = _build_features(df)
@@ -56,249 +64,250 @@ class TestBuildFeatures:
 
     def test_feature_columns_count(self):
         from core.prediction_service import FEATURE_COLUMNS
-        assert len(FEATURE_COLUMNS) == 31
+        assert len(FEATURE_COLUMNS) == 25
+
+    def test_order_and_customer_columns_are_not_features(self):
+        """A future day has no orders or customers: inside the recursive
+        forecast these turned NaN → 0 within a week, a value the model never
+        trained on. They are still built, and never read by the model."""
+        from core.prediction_service import _build_features, FEATURE_COLUMNS
+        exogenous = ["rolling_mean_7d_aov", "lag_7d_orders", "rolling_mean_7d_orders",
+                     "rolling_mean_7d_new_cust_ratio", "rolling_mean_7d_returning_ratio",
+                     "rolling_mean_7d_return_rate"]
+        built = _build_features(_make_daily_df(n_days=60, spike_days=0))
+        for col in exogenous:
+            assert col in built.columns
+            assert col not in FEATURE_COLUMNS
 
 
 # ---------------------------------------------------------------------------
-# Tests for winsorized _train_model
+# The training procedure
 # ---------------------------------------------------------------------------
 
-class TestTrainModelWinsorized:
-    @pytest.fixture
-    def training_df(self):
-        return _make_daily_df(n_days=400, spike_days=15, spike_factor=4.0)
+class TestTheParameters:
+    def test_huber_loss_at_the_pinned_delta(self):
+        from core.prediction_service import _build_lgb_params, HUBER_DELTA
+        p = _build_lgb_params()
+        assert p["objective"] == "huber"
+        assert p["alpha"] == HUBER_DELTA == 60000.0
 
-    def test_returns_four_elements(self, training_df):
-        """_train_model should return (model, metrics, dow_corrections, clip_ratio)."""
-        from core.prediction_service import _train_model
-        result = _train_model(training_df)
-        assert len(result) == 4, f"Expected 4-tuple, got {len(result)}-tuple"
+    def test_the_validated_hyperparameters_are_pinned(self):
+        """The values the month-total check measured, independent of any file."""
+        from core.prediction_service import _build_lgb_params
+        p = _build_lgb_params()
+        assert (p["num_leaves"], p["learning_rate"], p["min_child_samples"],
+                p["reg_alpha"], p["subsample"]) == (31, 0.01, 5, 0.1, 0.8)
 
-    def test_clip_ratio_gt_one(self, training_df):
-        """With spikes, clip_ratio should be > 1 (original mean > clipped mean)."""
-        from core.prediction_service import _train_model
-        _, _, _, clip_ratio = _train_model(training_df)
-        assert clip_ratio > 1.0, f"clip_ratio should be > 1 with spikes, got {clip_ratio}"
-        assert clip_ratio < 2.0, f"clip_ratio unreasonably high: {clip_ratio}"
+    def test_a_stale_params_file_is_not_read(self, tmp_path, monkeypatch):
+        """`lgbm_best_params.json` set the hyperparameters until 2026-11-18;
+        one left on disk must not move the model away from the measured one."""
+        import core.prediction_service as ps
+        (tmp_path / "lgbm_best_params.json").write_text(
+            '{"num_leaves": 63, "learning_rate": 0.1, "min_child_samples": 20,'
+            ' "reg_alpha": 0, "subsample": 1.0}')
+        monkeypatch.setattr(ps, "MODEL_DIR", tmp_path)
+        assert ps._build_lgb_params()["num_leaves"] == 31
+        assert not hasattr(ps, "TUNED_PARAMS_PATH")
 
-    def test_clip_ratio_near_one_without_spikes(self):
-        """Without spikes, clip_ratio should be very close to 1."""
-        from core.prediction_service import _train_model
-        df = _make_daily_df(n_days=400, spike_days=0)
-        _, _, _, clip_ratio = _train_model(df)
-        assert 0.99 <= clip_ratio <= 1.10, f"clip_ratio={clip_ratio}, expected ~1.0 without spikes"
+    def test_a_candidate_set_is_used_when_given(self):
+        from core.prediction_service import _build_lgb_params
+        hp = {"num_leaves": 15, "learning_rate": 0.05, "min_child_samples": 20,
+              "reg_alpha": 0, "subsample": 1.0}
+        p = _build_lgb_params(hp)
+        assert p["num_leaves"] == 15 and p["learning_rate"] == 0.05
+        assert p["objective"] == "huber"
 
-    def test_metrics_contain_expected_keys(self, training_df):
-        """Metrics dict should have mae, mape, wape, validation_days."""
-        from core.prediction_service import _train_model
-        _, metrics, _, _ = _train_model(training_df)
-        assert "mae" in metrics
-        assert "mape" in metrics
-        assert "wape" in metrics
-        assert "validation_days" in metrics
-        assert len(metrics["validation_days"]) == 60  # last 60 days
 
-    def test_dow_corrections_all_present(self, training_df):
-        """DOW corrections should have entries for all 7 days."""
-        from core.prediction_service import _train_model
-        _, _, dow_corrections, _ = _train_model(training_df)
-        for d in range(7):
-            assert d in dow_corrections
-            assert 0.70 <= dow_corrections[d] <= 1.30
+class TestTrainModel:
+    def test_returns_model_and_metrics(self, trained):
+        model, metrics, _df = trained
+        assert hasattr(model, "predict")
+        assert isinstance(metrics, dict)
 
-    def test_model_has_correct_feature_count(self, training_df):
-        """Trained model should have 31 features."""
-        from core.prediction_service import _train_model, FEATURE_COLUMNS
-        model, _, _, _ = _train_model(training_df)
+    def test_fixed_number_of_trees(self, trained):
+        """No early stopping: the model can no longer stop at one tree."""
+        from core.prediction_service import NUM_BOOST_ROUND
+        model, _metrics, _df = trained
+        assert model.num_trees() == NUM_BOOST_ROUND == 300
+
+    def test_metrics_contain_expected_keys(self, trained):
+        from core.prediction_service import VALIDATION_DAYS
+        _model, metrics, _df = trained
+        for key in ("mae", "mape", "wape", "validation_days"):
+            assert key in metrics
+        assert len(metrics["validation_days"]) == VALIDATION_DAYS
+        assert 0 < metrics["wape"] < 100
+
+    def test_model_has_correct_feature_count(self, trained):
+        from core.prediction_service import FEATURE_COLUMNS
+        model, _metrics, _df = trained
         assert model.num_feature() == len(FEATURE_COLUMNS)
 
-    def test_does_not_mutate_input_df(self, training_df):
-        """_train_model should not mutate the input DataFrame."""
+    def test_the_model_trains_on_every_row_and_the_twin_without_the_last_days(self, monkeypatch):
+        """The forecast model sees the most recent days; the twin that the
+        WAPE gate judges is fitted without the last VALIDATION_DAYS rows.
+        Until 2026-11-18 the model never saw them at all."""
+        import core.prediction_service as ps
+        sizes = []
+        real = ps._fit_booster
+
+        def recording(X, y, params=None):
+            sizes.append(len(X))
+            return real(X, y, params)
+
+        monkeypatch.setattr(ps, "_fit_booster", recording)
+        monkeypatch.setattr(ps, "NUM_BOOST_ROUND", 10)
+        df = _make_daily_df(n_days=200, spike_days=5)
+        ps._train_model(df)
+        n = len(ps._training_rows(df.assign(date=pd.to_datetime(df["date"]))))
+        assert sizes == [n - ps.VALIDATION_DAYS, n]
+
+    def test_promotions_are_not_winsorised(self):
+        """Huber loss replaced the P95 clip, which erased Black Friday."""
+        from core.prediction_service import _training_rows
+        df = _make_daily_df(n_days=200, spike_days=10, spike_factor=4.0)
+        rows = _training_rows(df.assign(date=pd.to_datetime(df["date"])))
+        original = dict(zip(pd.to_datetime(df["date"]), df["revenue"]))
+        assert all(v == original[d] for d, v in zip(rows["date"], rows["revenue"]))
+        assert rows["revenue"].max() > df["revenue"].quantile(0.95)
+
+    def test_not_enough_rows_raises(self):
         from core.prediction_service import _train_model
-        original_revenue = training_df["revenue"].copy()
-        _train_model(training_df)
-        pd.testing.assert_series_equal(training_df["revenue"], original_revenue)
+        with pytest.raises(ValueError, match="Not enough training data"):
+            _train_model(_make_daily_df(n_days=100, spike_days=0))
+
+    def test_does_not_mutate_input_df(self):
+        from core.prediction_service import _train_model
+        df = _make_daily_df(n_days=200, spike_days=5)
+        original_revenue = df["revenue"].copy()
+        with patch("core.prediction_service.NUM_BOOST_ROUND", 10):
+            _train_model(df)
+        pd.testing.assert_series_equal(df["revenue"], original_revenue)
 
 
 # ---------------------------------------------------------------------------
-# Tests for _predict_future with clip_ratio
+# The forecast applies no multiplier
 # ---------------------------------------------------------------------------
 
-class TestPredictFutureClipRatio:
-    @pytest.fixture
-    def trained_artifacts(self):
-        from core.prediction_service import _train_model
-        df = _make_daily_df(n_days=400, spike_days=10)
-        model, _, dow_corrections, clip_ratio = _train_model(df)
-        return model, df, dow_corrections, clip_ratio
-
-    def test_clip_ratio_affects_predictions(self, trained_artifacts):
-        """Predictions with clip_ratio > 1 should be higher than with clip_ratio=1."""
-        from core.prediction_service import _predict_future
-        model, df, dow_corrections, clip_ratio = trained_artifacts
-
-        future_dates = [date(2025, 2, 15) + timedelta(days=i) for i in range(5)]
-
-        preds_with_ratio = _predict_future(model, df, future_dates, dow_corrections, clip_ratio)
-        preds_without_ratio = _predict_future(model, df, future_dates, dow_corrections, 1.0)
-
-        for p_with, p_without in zip(preds_with_ratio, preds_without_ratio):
-            if clip_ratio > 1.0:
-                assert p_with["predicted_revenue"] > p_without["predicted_revenue"], \
-                    f"With clip_ratio={clip_ratio}, prediction should be higher"
-
-    def test_predictions_positive(self, trained_artifacts):
-        """All predictions should be non-negative."""
-        from core.prediction_service import _predict_future
-        model, df, dow_corrections, clip_ratio = trained_artifacts
-
-        future_dates = [date(2025, 2, 15) + timedelta(days=i) for i in range(10)]
-        preds = _predict_future(model, df, future_dates, dow_corrections, clip_ratio)
-
-        for p in preds:
-            assert p["predicted_revenue"] >= 0
-
-    def test_default_clip_ratio_is_one(self):
-        """Without clip_ratio param, default should be 1.0 (backward compat)."""
-        from core.prediction_service import _predict_future
+class TestPredictFuture:
+    def test_signature_has_no_multiplier(self):
+        """The weekday correction and the clip ratio are gone, so nothing can
+        pass a stale one in."""
         import inspect
-        sig = inspect.signature(_predict_future)
-        assert sig.parameters["clip_ratio"].default == 1.0
+        from core.prediction_service import _predict_future
+        assert list(inspect.signature(_predict_future).parameters) == [
+            "model", "historical_df", "future_dates"]
+
+    def test_the_forecast_is_the_model_output(self):
+        from core.prediction_service import _predict_future
+        model = MagicMock()
+        model.predict.return_value = np.array([1234.5])
+        df = _make_daily_df(n_days=120, spike_days=0)
+        days = [date(2024, 4, 30) + timedelta(days=i) for i in range(7)]
+        preds = _predict_future(model, df, days)
+        assert [p["predicted_revenue"] for p in preds] == [1234.5] * 7
+
+    def test_predictions_non_negative(self, trained):
+        from core.prediction_service import _predict_future
+        model, _metrics, df = trained
+        days = [date(2025, 2, 4) + timedelta(days=i) for i in range(10)]
+        preds = _predict_future(model, df, days)
+        assert len(preds) == 10
+        assert all(p["predicted_revenue"] >= 0 for p in preds)
 
 
 # ---------------------------------------------------------------------------
-# Tests for save/load clip_ratio
+# Save and load
 # ---------------------------------------------------------------------------
 
-class TestSaveLoadClipRatio:
-    def test_save_and_load_clip_ratio(self, tmp_path):
-        """clip_ratio should round-trip through save/load."""
-        from core.prediction_service import PredictionService
+class TestSaveLoad:
+    def _paths(self, monkeypatch, tmp_path):
+        import core.prediction_service as ps
+        monkeypatch.setattr(ps, "MODEL_DIR", tmp_path)
+        monkeypatch.setattr(ps, "MODEL_PATH", tmp_path / "revenue_model.joblib")
+        return ps
 
-        service = PredictionService()
-        service._clip_ratio = 1.0732
+    def test_save_writes_the_model_and_nothing_else(self, tmp_path, monkeypatch):
+        ps = self._paths(monkeypatch, tmp_path)
+        svc = ps.PredictionService()
+        svc._model = MagicMock()
+        # Skip the actual pickle, but leave a file: the writer dumps to a
+        # sibling temp path and os.replace()s it over MODEL_PATH.
+        with patch("joblib.dump", side_effect=lambda obj, path: pathlib.Path(path).touch()):
+            svc._save_model()
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["revenue_model.joblib"]
 
-        clip_path = tmp_path / "clip_ratio.json"
-        model_path = tmp_path / "revenue_model.joblib"
-        dow_path = tmp_path / "dow_corrections.json"
+    def test_load_round_trip_ignores_stale_multiplier_files(self, tmp_path, monkeypatch):
+        """`dow_corrections.json` and `clip_ratio.json` from the procedure
+        before 2026-11-18 stay on the server; read with the current model they
+        would scale its forecast by factors fitted to another one."""
+        ps = self._paths(monkeypatch, tmp_path)
+        (tmp_path / "revenue_model.joblib").touch()
+        (tmp_path / "dow_corrections.json").write_text('{"0": 1.3, "1": 0.7}')
+        (tmp_path / "clip_ratio.json").write_text('{"clip_ratio": 1.9}')
+        model = MagicMock()
+        model.num_feature.return_value = len(ps.FEATURE_COLUMNS)
+        svc = ps.PredictionService()
+        with patch("joblib.load", return_value=model):
+            assert svc._load_model() is True
+        assert svc._model is model
+        assert not hasattr(svc, "_dow_corrections") and not hasattr(svc, "_clip_ratio")
 
-        mock_model = MagicMock()
-        mock_model.num_feature.return_value = 31
-        service._model = mock_model
-        service._dow_corrections = {i: 1.0 for i in range(7)}
-
-        with patch("core.prediction_service.CLIP_RATIO_PATH", clip_path), \
-             patch("core.prediction_service.MODEL_PATH", model_path), \
-             patch("core.prediction_service.MODEL_DIR", tmp_path), \
-             patch("core.prediction_service.DOW_CORRECTIONS_PATH", dow_path), \
-             patch("joblib.dump",   # Skip the actual pickle, but leave a file:
-                   # the writer dumps to a sibling temp path and os.replace()s
-                   # it over MODEL_PATH, so the stub has to produce something.
-                   side_effect=lambda obj, path: pathlib.Path(path).touch()):
-            service._save_model()
-
-        # Verify clip_ratio file content
-        assert clip_path.exists()
-        data = json.loads(clip_path.read_text())
-        assert abs(data["clip_ratio"] - 1.0732) < 1e-6
-
-        # Create a fake model file so MODEL_PATH.exists() returns True
-        model_path.touch()
-
-        # Load into new service
-        service2 = PredictionService()
-        with patch("core.prediction_service.MODEL_PATH", model_path), \
-             patch("core.prediction_service.DOW_CORRECTIONS_PATH", dow_path), \
-             patch("core.prediction_service.CLIP_RATIO_PATH", clip_path), \
-             patch("joblib.load", return_value=mock_model):
-            service2._load_model()
-
-        assert abs(service2._clip_ratio - 1.0732) < 1e-6
-
-    def test_load_missing_clip_ratio_defaults_to_one(self, tmp_path):
-        """When clip_ratio.json doesn't exist, should default to 1.0."""
-        from core.prediction_service import PredictionService
-
-        service = PredictionService()
-        clip_path = tmp_path / "clip_ratio.json"
-        model_path = tmp_path / "revenue_model.joblib"
-        dow_path = tmp_path / "dow_corrections.json"
-
-        mock_model = MagicMock()
-        mock_model.num_feature.return_value = 31
-
-        with patch("core.prediction_service.MODEL_PATH", model_path), \
-             patch("core.prediction_service.DOW_CORRECTIONS_PATH", dow_path), \
-             patch("core.prediction_service.CLIP_RATIO_PATH", clip_path), \
-             patch("joblib.load", return_value=mock_model):
-            service._load_model()
-
-        assert service._clip_ratio == 1.0
+    def test_the_old_31_feature_model_is_rejected(self, tmp_path, monkeypatch):
+        """So web's startup trains the current one (`web/main.py`)."""
+        ps = self._paths(monkeypatch, tmp_path)
+        (tmp_path / "revenue_model.joblib").touch()
+        old = MagicMock()
+        old.num_feature.return_value = 31
+        svc = ps.PredictionService()
+        with patch("joblib.load", return_value=old):
+            assert svc._load_model() is False
+        assert not svc.is_ready
 
 
 # ---------------------------------------------------------------------------
-# Tests for _run_evaluation with winsorization
+# Evaluation and tuning use the same procedure
 # ---------------------------------------------------------------------------
 
-class TestEvaluationWinsorized:
-    def test_evaluation_runs_with_winsorization(self):
-        """_run_evaluation should complete without errors using winsorized folds."""
+class TestEvaluation:
+    def test_evaluation_runs(self):
         from core.prediction_service import _run_evaluation
-
         # Need enough data for 6 monthly folds + training
         df = _make_daily_df(n_days=600, spike_days=25, start_date="2023-06-01")
-        result = _run_evaluation(df)
-
+        with patch("core.prediction_service.NUM_BOOST_ROUND", 30):
+            result = _run_evaluation(df)
         assert "summary" in result
         assert "cross_validation" in result
         assert result["summary"]["num_folds"] >= 3
         assert result["summary"]["lgbm_wape"] > 0
-
-    def test_evaluation_baselines_present(self):
-        """Evaluation should include baseline comparisons."""
-        from core.prediction_service import _run_evaluation
-
-        df = _make_daily_df(n_days=600, spike_days=25, start_date="2023-06-01")
-        result = _run_evaluation(df)
-
-        folds = result["cross_validation"]["folds"]
-        for fold in folds:
-            assert "baselines" in fold
+        for fold in result["cross_validation"]["folds"]:
             assert "naive_7d" in fold["baselines"]
             assert "weekday_avg_12w" in fold["baselines"]
 
 
-# ---------------------------------------------------------------------------
-# Tests for _tune_hyperparameters with winsorization
-# ---------------------------------------------------------------------------
-
-class TestTuneWinsorized:
-    def test_tuning_runs_with_winsorization(self, tmp_path):
-        """_tune_hyperparameters should complete with winsorized fold data."""
-        from core.prediction_service import _tune_hyperparameters
-
+class TestTune:
+    def test_tuning_reports_and_changes_nothing(self, tmp_path, monkeypatch):
+        """The grid scores one-step-ahead daily WAPE; the badge is a month
+        total. Its best set is reported, never applied."""
+        import core.prediction_service as ps
+        monkeypatch.setattr(ps, "MODEL_DIR", tmp_path)
+        monkeypatch.setattr(ps, "NUM_BOOST_ROUND", 10)
+        before = dict(ps.PRODUCTION_LGB_PARAMS)
         df = _make_daily_df(n_days=600, spike_days=25, start_date="2023-06-01")
-
-        with patch("core.prediction_service.TUNED_PARAMS_PATH", tmp_path / "params.json"), \
-             patch("core.prediction_service.MODEL_DIR", tmp_path):
-            result = _tune_hyperparameters(df)
-
+        result = ps._tune_hyperparameters(df)
         assert result["status"] == "success"
-        assert "best_params" in result
-        assert "best_wape" in result
-        assert result["best_wape"] > 0
-        assert result["folds"] >= 3
+        assert result["applied"] is False
+        assert result["best_wape"] > 0 and result["folds"] >= 3
+        assert ps.PRODUCTION_LGB_PARAMS == before
+        assert list(tmp_path.iterdir()) == []
 
-
-# ---------------------------------------------------------------------------
-# Tests for PredictionService class integration
-# ---------------------------------------------------------------------------
 
 class TestPredictionServiceInit:
-    def test_clip_ratio_initialized(self):
+    def test_no_multiplier_state(self):
         from core.prediction_service import PredictionService
         svc = PredictionService()
-        assert svc._clip_ratio == 1.0
+        assert not svc.is_ready
+        assert not hasattr(svc, "_clip_ratio") and not hasattr(svc, "_dow_corrections")
 
 
 # ---------------------------------------------------------------------------

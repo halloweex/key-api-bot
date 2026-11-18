@@ -56,7 +56,9 @@ class TestWhatMovedFromTheScan:
 
     def test_the_known_ids(self):
         assert sorted(twins.KNOWN_STATUS_IDS) == [1, 2, 3, 4, 8, 9, 10, 11, 12, 15, 18, 19, 20, 21, 22, 23, 24]
-        assert sorted(twins.KNOWN_SOURCE_IDS) == [1, 2, 3, 4, 5]
+        # 7, the offline store, since the owner's decision of 2026-11-15;
+        # read from `SYNCED_SOURCE_IDS` since then, a literal before.
+        assert sorted(twins.KNOWN_SOURCE_IDS) == [1, 2, 3, 4, 5, 7]
 
     def test_the_silver_row_comparison(self):
         assert [list(c) for c in twins._SILVER_ROW_COLUMNS] == [['source_id', 0], ['status_id', 0], ['grand_total', 0.01], ['ordered_at', 0], ['buyer_id', 0], ['manager_id', 0], ['order_date', 0], ['is_return', 0], ['sales_type', 0], ['is_active_source', 0], ['source_name', 0], ['is_new_customer', 0], ['buyer_first_order_date', 0], ['promocode', 0]]
@@ -69,12 +71,19 @@ class TestWhatMovedFromTheScan:
         Silver's rule, and `is_active_source` gained its buyer half — the 70
         characters of `\\n` + 16 spaces + `AND (o.buyer_id IS NULL OR
         o.buyer_id NOT IN (17358))` and nothing else; it was 8703,
-        da06407885f9234570f2654aac326bb1fa558e9e7c0dc509f71cc47300fef2c2."""
+        da06407885f9234570f2654aac326bb1fa558e9e7c0dc509f71cc47300fef2c2.
+
+        Re-recorded again under the owner's decision of 2026-11-15 (the
+        offline store is a category of its own): 96 characters, the CASE's
+        `WHEN o.source_id = 7 THEN 'offline'` line (48), `, 7` in the
+        revenue list (3) and `source_name`'s `WHEN 7 THEN 'Офлайн-магазин'`
+        line (45), and nothing else; it was 8773,
+        c5ab88916e93b71c7d20835d7dc72a1031878bfed9d47e39682a5b92bb17bf64."""
         import hashlib
 
         sql = twins._row_values_sql()
         assert (len(sql), hashlib.sha256(sql.encode()).hexdigest()) == (
-            8773, "c5ab88916e93b71c7d20835d7dc72a1031878bfed9d47e39682a5b92bb17bf64")
+            8869, "e9e3f8e3ee7a717e1ae48f07dd5fac6f84e6e16ff3604e9af055f1767a892643")
 
     def test_the_thresholds(self):
         """The attribution check's defaults and the landing check's

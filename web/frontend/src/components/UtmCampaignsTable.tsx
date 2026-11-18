@@ -33,6 +33,7 @@ const PLATFORMS = [
   { value: 'manager', labelKey: 'traffic.manager' },
   { value: 'other', labelKey: 'traffic.otherPlatform' },
   { value: 'unattributed', labelKey: 'traffic.unattributedPlatform' },
+  { value: 'offline_store', labelKey: 'source.offlineStore' },
 ] as const
 
 // ─── Traffic Type Badges ─────────────────────────────────────────────────────
@@ -57,9 +58,10 @@ const TrafficBadge = memo(function TrafficBadge({ type }: { type: string }) {
 const formatPlatformName = (
   platform: string, trafficType: string, t: (key: string) => string,
 ): string => {
-  // The one key here that is not a proper noun: it names an absence, so it
-  // has to be said in the reader's language.
+  // The two keys here that are not proper nouns — an absence, and the offline
+  // store's untagged sales — are said in the reader's language.
   if (platform === 'unattributed') return t('traffic.unattributedPlatform')
+  if (platform === 'offline_store') return t('source.offlineStore')
   if (platform === 'google') {
     return trafficType === 'paid_confirmed' || trafficType === 'paid_likely'
       ? 'Google Ads'

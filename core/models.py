@@ -21,6 +21,8 @@ class SourceId(IntEnum):
     TELEGRAM = 2
     OPENCART = 3  # Deprecated, not used
     SHOPIFY = 4
+    # The offline store, since 2026-11 (`core.duckdb_constants.OFFLINE_STORE_SOURCE_ID`).
+    OFFLINE_STORE = 7
 
 
 # KeyCRM groups every order status. Group 6 is the lost/cancel group, and it

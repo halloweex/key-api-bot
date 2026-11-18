@@ -1,6 +1,6 @@
 export type Period = 'today' | 'yesterday' | 'week' | 'last_week' | 'month' | 'last_month' | 'last_7_days' | 'last_28_days' | 'all_time' | 'custom'
 
-export type SalesType = 'retail' | 'b2b' | 'exhibition' | 'internal' | 'all'
+export type SalesType = 'retail' | 'offline' | 'b2b' | 'exhibition' | 'internal' | 'all'
 
 /** Whose visits the site funnel counts: Ukraine with the visitors GA4 could
  *  not place, or every country, bots included (`/api/traffic/funnel?country=`). */

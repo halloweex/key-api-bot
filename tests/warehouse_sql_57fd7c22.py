@@ -44,6 +44,17 @@ Every Gold key — `pg_gold.*`, `ch_silver.derive_gold_sql()` and
 `GOLD_MEASURES` — is byte for byte what it was, which is the proof that Gold's
 text did not move: it reads the column, not the rule.
 
+**Re-recorded a third time, under the owner's decision of 2026-11-15**: the
+offline store (KeyCRM source 7) is retail, but offline, and a category of its
+own. Silver's CASE gained `WHEN o.source_id = 7 THEN 'offline'` right after
+the exhibition's branch, `is_active_source` reads `o.source_id IN (1, 2, 4, 5,
+7)`, and `source_name` names 7 `'Офлайн-магазин'`. The keys that carry those
+lines moved with them, by those lines and nothing else:
+`silver_sales_type_case(POSTGRES)`, `silver_select_sql(POSTGRES)`,
+`pg_silver.insert_sql()`, `silver_recompute_ctes(POSTGRES)` and
+`pg_warehouse_dq._row_values_sql()`. Every Gold key is byte for byte what it
+was again.
+
 POSTGRES renderings of the Silver rebuild and the recompute (the only ones
 production runs), and the Gold projections for Postgres and ClickHouse. The
 DuckDB renderings are left out on purpose: DuckDB derives nothing in
@@ -103,6 +114,7 @@ RENDERINGS: Dict[str, object] = {
     'silver_sales_type_case(POSTGRES)': (
         'CASE\n'
         "            WHEN o.source_id = 5 THEN 'exhibition'\n"
+        "            WHEN o.source_id = 7 THEN 'offline'\n"
         "            WHEN o.manager_id IS NULL THEN 'retail'\n"
         "            WHEN o.manager_id = 15 THEN 'b2b'\n"
         '            WHEN EXISTS (\n'
@@ -133,6 +145,7 @@ RENDERINGS: Dict[str, object] = {
         '            END AS is_return,\n'
         '            CASE\n'
         "            WHEN o.source_id = 5 THEN 'exhibition'\n"
+        "            WHEN o.source_id = 7 THEN 'offline'\n"
         "            WHEN o.manager_id IS NULL THEN 'retail'\n"
         "            WHEN o.manager_id = 15 THEN 'b2b'\n"
         '            WHEN EXISTS (\n'
@@ -150,13 +163,14 @@ RENDERINGS: Dict[str, object] = {
         "                 AND o.manager_id IN (4,8,11,16,17,19,22) THEN 'retail'\n"
         "            ELSE 'internal'\n"
         '        END AS sales_type,\n'
-        '            o.source_id IN (1, 2, 4, 5)\n'
+        '            o.source_id IN (1, 2, 4, 5, 7)\n'
         '                AND (o.buyer_id IS NULL OR o.buyer_id NOT IN (17358)) AS is_active_source,\n'
         '            CASE o.source_id\n'
         "                WHEN 1 THEN 'Instagram'\n"
         "                WHEN 2 THEN 'Telegram'\n"
         "                WHEN 4 THEN 'Shopify'\n"
         "                WHEN 5 THEN 'Виставка'\n"
+        "                WHEN 7 THEN 'Офлайн-магазин'\n"
         "                ELSE 'Other'\n"
         '            END AS source_name,\n'
         '            FALSE AS is_new_customer,\n'
@@ -178,6 +192,7 @@ RENDERINGS: Dict[str, object] = {
         '            END AS is_return,\n'
         '            CASE\n'
         "            WHEN o.source_id = 5 THEN 'exhibition'\n"
+        "            WHEN o.source_id = 7 THEN 'offline'\n"
         "            WHEN o.manager_id IS NULL THEN 'retail'\n"
         "            WHEN o.manager_id = 15 THEN 'b2b'\n"
         '            WHEN EXISTS (\n'
@@ -195,13 +210,14 @@ RENDERINGS: Dict[str, object] = {
         "                 AND o.manager_id IN (4,8,11,16,17,19,22) THEN 'retail'\n"
         "            ELSE 'internal'\n"
         '        END AS sales_type,\n'
-        '            o.source_id IN (1, 2, 4, 5)\n'
+        '            o.source_id IN (1, 2, 4, 5, 7)\n'
         '                AND (o.buyer_id IS NULL OR o.buyer_id NOT IN (17358)) AS is_active_source,\n'
         '            CASE o.source_id\n'
         "                WHEN 1 THEN 'Instagram'\n"
         "                WHEN 2 THEN 'Telegram'\n"
         "                WHEN 4 THEN 'Shopify'\n"
         "                WHEN 5 THEN 'Виставка'\n"
+        "                WHEN 7 THEN 'Офлайн-магазин'\n"
         "                ELSE 'Other'\n"
         '            END AS source_name,\n'
         '            FALSE AS is_new_customer,\n'
@@ -249,6 +265,7 @@ RENDERINGS: Dict[str, object] = {
         '            END AS is_return,\n'
         '            CASE\n'
         "            WHEN o.source_id = 5 THEN 'exhibition'\n"
+        "            WHEN o.source_id = 7 THEN 'offline'\n"
         "            WHEN o.manager_id IS NULL THEN 'retail'\n"
         "            WHEN o.manager_id = 15 THEN 'b2b'\n"
         '            WHEN EXISTS (\n'
@@ -266,13 +283,14 @@ RENDERINGS: Dict[str, object] = {
         "                 AND o.manager_id IN (4,8,11,16,17,19,22) THEN 'retail'\n"
         "            ELSE 'internal'\n"
         '        END AS sales_type,\n'
-        '            o.source_id IN (1, 2, 4, 5)\n'
+        '            o.source_id IN (1, 2, 4, 5, 7)\n'
         '                AND (o.buyer_id IS NULL OR o.buyer_id NOT IN (17358)) AS is_active_source,\n'
         '            CASE o.source_id\n'
         "                WHEN 1 THEN 'Instagram'\n"
         "                WHEN 2 THEN 'Telegram'\n"
         "                WHEN 4 THEN 'Shopify'\n"
         "                WHEN 5 THEN 'Виставка'\n"
+        "                WHEN 7 THEN 'Офлайн-магазин'\n"
         "                ELSE 'Other'\n"
         '            END AS source_name,\n'
         '            FALSE AS is_new_customer,\n'
@@ -319,6 +337,7 @@ RENDERINGS: Dict[str, object] = {
         '            END AS is_return,\n'
         '            CASE\n'
         "            WHEN o.source_id = 5 THEN 'exhibition'\n"
+        "            WHEN o.source_id = 7 THEN 'offline'\n"
         "            WHEN o.manager_id IS NULL THEN 'retail'\n"
         "            WHEN o.manager_id = 15 THEN 'b2b'\n"
         '            WHEN EXISTS (\n'
@@ -336,13 +355,14 @@ RENDERINGS: Dict[str, object] = {
         "                 AND o.manager_id IN (4,8,11,16,17,19,22) THEN 'retail'\n"
         "            ELSE 'internal'\n"
         '        END AS sales_type,\n'
-        '            o.source_id IN (1, 2, 4, 5)\n'
+        '            o.source_id IN (1, 2, 4, 5, 7)\n'
         '                AND (o.buyer_id IS NULL OR o.buyer_id NOT IN (17358)) AS is_active_source,\n'
         '            CASE o.source_id\n'
         "                WHEN 1 THEN 'Instagram'\n"
         "                WHEN 2 THEN 'Telegram'\n"
         "                WHEN 4 THEN 'Shopify'\n"
         "                WHEN 5 THEN 'Виставка'\n"
+        "                WHEN 7 THEN 'Офлайн-магазин'\n"
         "                ELSE 'Other'\n"
         '            END AS source_name,\n'
         '            FALSE AS is_new_customer,\n'

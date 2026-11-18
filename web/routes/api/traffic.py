@@ -20,6 +20,14 @@ from ._deps import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# The platforms the transactions and the campaigns may be filtered by: every
+# value the classifier writes and `TrafficMixin._PLATFORM_EXPR` falls back to.
+# `offline_store` is the offline store's untagged orders (source 7, the
+# owner's decision of 2026-11-15). One tuple for both routes, where each kept
+# a copy of its own.
+_VALID_PLATFORMS = ("facebook", "instagram", "google", "tiktok", "email", "telegram",
+                    "ai", "manager", "other", "unattributed", "offline_store")
+
 
 @router.get("/traffic/analytics")
 @limiter.limit("30/minute")
@@ -198,9 +206,7 @@ async def get_traffic_transactions(
     ):
         raise HTTPException(status_code=400, detail=f"Invalid traffic_type: {traffic_type}")
 
-    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram",
-                       "ai", "manager", "other", "unattributed")
-    if platform and platform not in valid_platforms:
+    if platform and platform not in _VALID_PLATFORMS:
         raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
 
     try:
@@ -248,9 +254,7 @@ async def get_traffic_utm_campaigns(
     ):
         raise HTTPException(status_code=400, detail=f"Invalid traffic_type: {traffic_type}")
 
-    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram",
-                       "ai", "manager", "other", "unattributed")
-    if platform and platform not in valid_platforms:
+    if platform and platform not in _VALID_PLATFORMS:
         raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
 
     if sort_by not in ("campaign", "utm_source", "platform", "traffic_type", "orders", "revenue"):

@@ -18,9 +18,10 @@ AND THE HOLE THAT IS NOT A NAME
 
 `{channel_measures}` renders the one place the two Golds differ in *shape* —
 DuckDB spells a channel as a column, Postgres as a dimension. The order of the
-six items is the contract, because the caller unpacks positionally, so it is
-asserted here rather than left to the differential test to discover as a
-number that is merely wrong.
+items — six, and eight since the offline store got a slice (the owner's
+decision of 2026-11-15) — is the contract, because the caller unpacks
+positionally, so it is asserted here rather than left to the differential test
+to discover as a number that is merely wrong.
 """
 from __future__ import annotations
 
@@ -87,18 +88,21 @@ class TestTheRoutedBodies:
 class TestTheChannelShapeHasOneHome:
     """`{channel_measures}` is the only hole here that is not a table name."""
 
-    def test_the_six_items_are_orders_then_revenue_per_channel(self):
+    def test_the_items_are_orders_then_revenue_per_source(self):
         """The caller unpacks positionally: ig_orders, ig_rev, tg_orders,
-        tg_rev, sh_orders, sh_rev. Getting the pairs the wrong way round
-        produces numbers that are merely wrong, on a chart nobody would
-        immediately disbelieve."""
-        from core.sql_dialect import POSTGRES, channel_measures
+        tg_rev, sh_orders, sh_rev, store_orders, store_rev. Getting the pairs
+        the wrong way round produces numbers that are merely wrong, on a chart
+        nobody would immediately disbelieve."""
+        from core.duckdb_constants import OFFLINE_STORE_SOURCE_ID
+        from core.sql_dialect import DOUGHNUT_SOURCE_IDS, POSTGRES, channel_measures
 
         # DuckDB's rendering, a column per channel, went with step 14's
-        # S14-07; Postgres' is the one shape.
+        # S14-07; Postgres' is the one shape. The offline store is the
+        # doughnut's fourth slice since the owner's decision of 2026-11-15.
+        assert DOUGHNUT_SOURCE_IDS == (1, 2, 4, OFFLINE_STORE_SOURCE_ID)
         pg = [i.strip() for i in channel_measures(POSTGRES).split(",\n")]
-        assert len(pg) == 6
-        for i, sid in enumerate((1, 2, 4)):
+        assert len(pg) == 8
+        for i, sid in enumerate(DOUGHNUT_SOURCE_IDS):
             assert "orders_count" in pg[i * 2] and f"source_id = {sid}" in pg[i * 2]
             assert "SUM(revenue)" in pg[i * 2 + 1] and f"source_id = {sid}" in pg[i * 2 + 1]
 
