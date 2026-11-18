@@ -6,6 +6,7 @@ export {
   useReturns,
   useRevenueTrend,
   useMaxForecastDate,
+  useMonthForecastOutlook,
   // Sales
   useSalesBySource,
   // Products

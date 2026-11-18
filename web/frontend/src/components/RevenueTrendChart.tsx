@@ -15,7 +15,7 @@ import {
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
 import { CHART_THEME, GRID_PROPS, X_AXIS_PROPS, Y_AXIS_PROPS } from './chartConfig'
-import { useRevenueTrend } from '../hooks'
+import { useMonthForecastOutlook, useRevenueTrend } from '../hooks'
 import { useFilterStore } from '../store/filterStore'
 import { getComparisonLabel, getPeriodLabels } from './revenueTrendHelpers'
 import { PREV_MONTH_BAR_COLOR, type CompareType } from './revenueTrendTypes'
@@ -46,6 +46,11 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   const growthData = data?.comparison?.totals
   const forecast = data?.forecast
+  // The month's badge says its 80% range and, in a month whose last year had
+  // Black Friday ahead, what that would add (`/api/revenue/forecast`). The
+  // week and a custom range show the point alone.
+  const isMonth = period === 'month'
+  const { monthRange, blackFriday } = useMonthForecastOutlook(isMonth)
 
   const { chartData, hasComparison, hasPrevMonthDays, hasForecast } = useChartData(data, period)
 
@@ -79,6 +84,8 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       action={
         <RevenueTrendActions
           forecast={forecast}
+          monthRange={isMonth ? monthRange : null}
+          blackFriday={isMonth ? blackFriday : null}
           growthData={growthData}
           isLoading={isLoading}
           compareType={compareType}
