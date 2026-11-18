@@ -147,6 +147,20 @@ export const AChannelThatStopped: Story = {
   ),
 }
 
+/** "All sales": the offline store's counter sales are a channel of their own —
+ *  no tags, and off the website, so GA4 never sees them. Under retail, the
+ *  page's default, it is absent: the store is its own sales type. */
+export const WithTheOfflineStore: Story = {
+  render: () => (
+    <Seeded data={organic([
+      ...CHANNELS,
+      channel('offline_store', 28, 41_000, 19, [0, 0], [UNTAGGED(28, 41_000)]),
+    ])}>
+      <OrganicBreakdown />
+    </Seeded>
+  ),
+}
+
 export const Empty: Story = {
   render: () => (
     <Seeded data={organic([])}>

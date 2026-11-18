@@ -30,6 +30,7 @@ const PLATFORM_COLORS: Record<string, string> = {
   telegram: '#0EA5E9',  // sky blue
   ai: '#A855F7',        // violet
   manager: '#14B8A6',   // teal
+  offline_store: '#B45309', // amber, the offline store's colour everywhere
   other: '#6B7280',     // gray
   // Deliberately the flattest colour on the wheel: this slice is an absence,
   // and giving it a channel's colour would make it read as one.
@@ -41,10 +42,12 @@ const getPlatformColor = (platform: string): string => {
 }
 
 // Channel names are proper nouns and need no translation. `unattributed` is
-// not a channel — it is the absence of one — so it is the single key here
-// that has to be said in the reader's language.
+// not a channel — it is the absence of one — and `offline_store` is a phrase
+// (the offline store's untagged sales, source 7), so those two are said in
+// the reader's language.
 const formatPlatformName = (platform: string, t: (key: string) => string): string => {
   if (platform.toLowerCase() === 'unattributed') return t('traffic.unattributedPlatform')
+  if (platform.toLowerCase() === 'offline_store') return t('source.offlineStore')
   const names: Record<string, string> = {
     facebook: 'Facebook',
     tiktok: 'TikTok',

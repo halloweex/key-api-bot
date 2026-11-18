@@ -43,6 +43,7 @@ const PLATFORMS = [
   { value: 'manager', labelKey: 'traffic.manager' },
   { value: 'other', labelKey: 'traffic.otherPlatform' },
   { value: 'unattributed', labelKey: 'traffic.unattributedPlatform' },
+  { value: 'offline_store', labelKey: 'source.offlineStore' },
 ] as const
 
 const PAGE_SIZE = 50
@@ -241,7 +242,8 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
                   {tx.source}
                 </td>
                 <td className="py-3 px-4 text-slate-600 capitalize hidden md:table-cell">
-                  {tx.platform}
+                  {/* The offline store's key is a phrase, not a name: said in the reader's words. */}
+                  {tx.platform === 'offline_store' ? t('source.offlineStore') : tx.platform}
                 </td>
                 <td className="py-3 px-4">
                   <TrafficBadge type={tx.traffic_type} />

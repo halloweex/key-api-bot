@@ -1,6 +1,8 @@
 import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useSalesBySource } from './useApi'
 import { SOURCE_COLORS } from '../utils/colors'
+import { sourceLabel } from '../utils/sources'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -32,6 +34,7 @@ export interface SourceChartData {
  * Extracts common logic from SalesBySourceChart, OrdersBySourceChart, and RevenueBySourceChart.
  */
 export function useSourceChartData(): SourceChartData {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useSalesBySource()
 
   const result = useMemo(() => {
@@ -55,7 +58,8 @@ export function useSourceChartData(): SourceChartData {
       const ordersPercent = totalOrders > 0 ? (orders / totalOrders) * 100 : 0
 
       return {
-        name: label,
+        // The offline store comes named in Ukrainian; said in the reader's words.
+        name: sourceLabel(label, t),
         revenue,
         orders,
         color,
@@ -65,7 +69,7 @@ export function useSourceChartData(): SourceChartData {
     })
 
     return { chartData, totalRevenue, totalOrders }
-  }, [data])
+  }, [data, t])
 
   const isEmpty = !isLoading && result.chartData.length === 0
 

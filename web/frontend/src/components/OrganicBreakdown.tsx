@@ -21,6 +21,7 @@ import type { OrganicChannel, OrganicChannelDetail, OrganicChannelKey } from '..
 
 const CHANNELS: OrganicChannelKey[] = [
   'instagram_direct', 'instagram_site', 'instagram_stories', 'telegram',
+  'offline_store',
   'email_campaigns', 'email_flows', 'google_organic', 'ai',
   'facebook', 'tiktok', 'other',
 ]
@@ -30,6 +31,7 @@ const CHANNEL_COLORS: Record<OrganicChannelKey, string> = {
   instagram_site: '#EC4899',
   instagram_stories: '#F9A8D4',
   telegram: '#0EA5E9',
+  offline_store: '#B45309',
   email_campaigns: '#059669',
   email_flows: '#34D399',
   google_organic: '#93C5FD',
@@ -44,9 +46,9 @@ const colorOf = (channel: string): string =>
 
 // The group each channel sits in, named in GA4's own vocabulary — the words a
 // marketer already reads in "Traffic acquisition". `null` is a sale with no
-// visit to the website at all, a manager's order in Direct or Telegram: GA4
-// never sees it, and saying so is half of what makes Direct legible. Telegram
-// holds both kinds. A name, not a promise: GA4 files raw tags by its own rules
+// visit to the website at all, a manager's order in Direct or Telegram or a
+// sale in the offline store: GA4 never sees it, and saying so is half of what
+// makes Direct legible. Telegram holds both kinds. A name, not a promise: GA4 files raw tags by its own rules
 // and puts some elsewhere (`klaviyo / klaviyo` lands in Unassigned there),
 // which the explanation says in so many words.
 const GA4_GROUPS: Record<OrganicChannelKey, Array<string | null>> = {
@@ -54,6 +56,7 @@ const GA4_GROUPS: Record<OrganicChannelKey, Array<string | null>> = {
   instagram_site: ['Organic Social'],
   instagram_stories: ['Organic Social'],
   telegram: [null, 'Organic Social'],
+  offline_store: [null],
   email_campaigns: ['Email'],
   email_flows: ['Email'],
   google_organic: ['Organic Shopping'],

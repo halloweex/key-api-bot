@@ -8,12 +8,18 @@ import re
 from datetime import date, datetime
 from typing import Optional, Tuple
 
-from core.duckdb_constants import KNOWN_SALES_TYPES
+from core.duckdb_constants import KNOWN_SALES_TYPES, OFFLINE_STORE_SOURCE_ID
 from core.exceptions import ValidationError
 
 
-# Valid source IDs in KeyCRM
-VALID_SOURCE_IDS = {1, 2, 3, 4}  # Instagram, Telegram, Opencart, Shopify
+# The source ids a dashboard filter accepts: Instagram, Telegram, Opencart,
+# Shopify, and the offline store (the owner's decision of 2026-11-15), which
+# every route that takes `source_id` answers with real numbers — the summary
+# and the trend from Gold's fine rows (`RevenueMixin._GOLD_SOURCE_IDS`), the
+# rest from Silver. The exhibition (5) is still refused and Opencart still
+# answers zeros on `/api/summary`: both are the owner's decision 5 for step 14,
+# which this did not move.
+VALID_SOURCE_IDS = {1, 2, 3, 4, OFFLINE_STORE_SOURCE_ID}
 
 # Maximum allowed values
 MAX_LIMIT = 100

@@ -65,6 +65,14 @@ class TestTheRule:
                 utm_medium=None, utm_campaign=None,
             ) == expected
 
+    def test_an_untagged_offline_store_order_is_its_own_channel(self):
+        """Source 7, the offline store (the owner's decision of 2026-11-15):
+        a sale over the counter carries no tag, and is not Direct."""
+        assert organic_channel(
+            source_id=7, tagged=False, platform="offline_store",
+            utm_medium=None, utm_campaign=None,
+        ) == "offline_store"
+
     @pytest.mark.parametrize("utm,expected", [
         ({"utm_source": "ig", "utm_medium": "social",
           "utm_content": "link_in_bio"}, "instagram_site"),
@@ -114,9 +122,9 @@ class TestTheRule:
         returned = {
             organic_channel(source_id=s, tagged=t, platform=p,
                             utm_medium=m, utm_campaign=c)
-            for s in (1, 2, 4) for t in (True, False)
+            for s in (1, 2, 4, 7) for t in (True, False)
             for p in ("instagram", "email", "google", "telegram", "ai",
-                      "facebook", "tiktok", "other", "unattributed")
+                      "facebook", "tiktok", "other", "unattributed", "offline_store")
             for m in ("", "stories_x", "klaviyo", "email")
             for c in ("", "Campaign #1")
         }

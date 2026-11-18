@@ -187,6 +187,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union, cast
 
+from core.duckdb_constants import SYNCED_SOURCE_IDS
+
 logger = logging.getLogger(__name__)
 
 # How long to wait for PG_LAYER_LOCK — a derivation or a ClickHouse ship holds
@@ -265,8 +267,12 @@ KNOWN_STATUS_IDS = frozenset({
 })
 
 # Known sources (active + deprecated). New source IDs from KeyCRM should
-# fire an integrity warning so we route them explicitly.
-KNOWN_SOURCE_IDS = frozenset({1, 2, 3, 4, 5})
+# fire an integrity warning so we route them explicitly — and routing one is
+# adding it to `SYNCED_SOURCE_IDS`, which this reads, as the reconciliation's
+# `ACTIVE_SOURCES` does. A literal of its own until the offline store (7, the
+# owner's decision of 2026-11-15): `pg_value_domain_orders_source_id` stood as
+# a WARN from its first order until a second list was edited by hand.
+KNOWN_SOURCE_IDS = frozenset(SYNCED_SOURCE_IDS)
 
 
 # Every column a Silver row carries, and how closely a recomputed value has to

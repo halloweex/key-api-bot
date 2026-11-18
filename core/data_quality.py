@@ -1292,7 +1292,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "halfwritten_repair re-fetches within 2h; one cycle is fine. Longer: compare order_products for the ids"),
     ("pg_fk_orphan_", "Re-ship the parent orders to bronze.orders first; never delete the line items"),
     ("pg_not_null_", "Find the writer that sent bronze.orders a row with no ordered_at, then re-fetch the ids"),
-    ("pg_value_domain_", "A new KeyCRM id: check its status group, then register it in KNOWN_STATUS_IDS/KNOWN_SOURCE_IDS"),
+    # A source is registered once, in core.duckdb_constants (KNOWN_SOURCE_IDS
+    # reads it since the offline store, 2026-11-15); whether it is revenue and
+    # which sales type it is are decisions, not a registration.
+    ("pg_value_domain_", "A new status: check its group, add to KNOWN_STATUS_IDS. A new source: add to SYNCED_SOURCE_IDS; decide REVENUE_SOURCE_IDS and its sales_type"),
     ("pg_status_group_vs_return_list", "The source's status group wins over the legacy list"),
     ("pg_order_landing_unwatched",
      "The Postgres twins did not read bronze.orders: read the reason in the finding"),

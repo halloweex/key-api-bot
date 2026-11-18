@@ -46,7 +46,7 @@ const families = (taken: string[] = []): ConditionMenuFamily[] => {
       title: 'What they bought',
       items: [
         item('bought', Tag, 'Bought a brand, category or code', 'Anua, a category, or code KS-AUG'),
-        item('source', Store, 'Ordering channel', 'Instagram, Telegram, the website, the exhibition'),
+        item('source', Store, 'Ordering channel', 'Instagram, Telegram, the website, the exhibition, the offline store'),
       ],
     },
     {
