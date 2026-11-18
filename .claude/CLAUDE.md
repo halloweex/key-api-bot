@@ -1598,8 +1598,8 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants, the analysts' capture stamps (WARN at most) |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses included (Postgres only, O3 (a)) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
-| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
-| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
+| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
+| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts); the id is kept, the operational copy out of DuckDB went in step 14's S14-13, and the copy of `data/bot.db`, standing down under `KS_BOT_STORE=postgres`, on 2026-11-19 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `ga4_capture` | daily 02:40 | keep each closed GA4 day, ISO week and month in `app.ga4_funnel` before the 14-month horizon drops it, oldest first, at most 24 periods a run and an hour; stands down without a GA4 key or under `KS_ANALYTICS_CAPTURES=off` (revision 0036) |
 | `month_goal_freeze` | hourly at :30 outside the windows kept clear (`goal_freeze.RUN_HOURS`, 00:30 first), and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st, one SELECT once the month is frozen, a refused read defers the whole month to the next run, an answer whose ML signal rests on part of a forecast waits (`waiting`) and is read live; stands down without `KS_PG_DSN` |
@@ -2300,7 +2300,8 @@ closed, not silently — but you find out the next morning, not at deploy.
 SMS state's copy (`replicate_sms`) and the dashboard users' copy
 (`replicate_dashboard_users`). The hourly job keeps its id,
 `replicate_operational` — `/api/jobs`' history and the catch-up read it — and
-runs `derive_gender_pg` and `replicate_bot_state`. `app.sync_metadata`,
+runs `derive_gender_pg` (and `replicate_bot_state`, the copy of `data/bot.db`,
+until 2026-11-19). `app.sync_metadata`,
 `app.warehouse_refreshes` and `app.reconciliation_log` are history (OD-S5-4).
 History below.
 
@@ -2821,7 +2822,8 @@ cannot tell the two apart.
 the switch it would roll back every approval, once an hour, looking fine in
 between. It refuses under `KS_BOT_STORE=postgres`, and `reconcile_bot_state`
 stands down with it — `bot.db` becomes a frozen artefact, so every change since
-the switch would read as a discrepancy the check itself created.
+the switch would read as a discrepancy the check itself created. Both were
+deleted on 2026-11-19 with the copy (see the next section).
 
 **The cache stays local under both engines** (revision 0009 left it out of
 Postgres). `initialise()` therefore still creates the SQLite cache table — found
@@ -2831,10 +2833,27 @@ on a real database, where a missing `data/bot.db` made `cache_set` raise
 **To switch**: `KS_BOT_STORE=postgres` on the bot **and** the web container —
 `web/services/auth_service.py` reads the same store. Both need `KS_PG_DSN`; the
 bot has none today. Roll back by removing the variable, but note that anything
-written to Postgres in between does not come back to SQLite: the copy is
-one-way and it was standing down the whole time.
+written to Postgres in between does not come back to SQLite: the copy was
+one-way and it was standing down the whole time. Since 2026-11-19 there is no
+copy at all, so after such a rollback `bot.db` would again be in no backup.
 
 ### The bot's own state, and the only store with no backup
+
+**Deleted on 2026-11-19, dead in production**: the copy (`core/pg_bot_state.py`,
+`replicate_bot_state`) and its comparison (`reconcile_bot_state`, with
+`compare_table` and `MirroredTable`, whose last caller it was). Both stood down
+under `KS_BOT_STORE=postgres`, which web and the bot have run since
+2026-08-27. The bot writes the four `app.*` tables itself through
+`bot/store_postgres.py`, and they ride the nightly Postgres dump; revision
+0009 and the tables stay. `compare_table`'s seven conditions
+(`mirror_missing_rows`, `mirror_orphan_rows`, `mirror_row_values`,
+`mirror_retired_rows`, `mirror_pruned_rows`, `mirror_never_shipped` and the
+bare `mirror_failing`) left REGISTRY, REMEDIATION and the human names with it
+and are never reused; the canary's `mirror_failing:<table>` is untouched.
+`dq_mirror_landing` runs six checks, and `replicate_operational` the gender
+derivation alone. The rule that no module under `bot/` but the adapter
+imports `core.pg*` stays, now in `tests/unit/test_store_postgres.py`. History
+below.
 
 `data/bot.db` is the third store in this system. Measured 2026-08-27: it is in
 **no backup at all** — `data/backups/` held `analytics-*.duckdb`,

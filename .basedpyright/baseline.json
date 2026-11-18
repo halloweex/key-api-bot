@@ -3682,16 +3682,6 @@
                 }
             }
         ],
-        "./core/mirror_reconciliation.py": [
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 52,
-                    "endColumn": 65,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./core/observability.py": [
             {
                 "code": "reportArgumentType",
