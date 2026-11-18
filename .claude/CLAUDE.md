@@ -3963,7 +3963,10 @@ a warehouse rebuilt from the second Ark (`deploy/restore_from_export.py`).
 The archives are read by DuckDB 1.5.5, the version that wrote every one, in
 the image pinned as `keycrm-web:rollback-step14` — never `:latest`, which
 carries no `duckdb` since S14-19. The second Ark is self-describing: the
-schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`. The restore
+schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`, which is what
+verifies it — the tools that froze and shipped it, `deploy/ark_freeze.py` and
+`deploy/ark_ship.sh`, ran once at the start of the week of silence and were
+deleted on 2026-11-19 with `tests/unit/test_ark_ship_script.py`. The restore
 drill (`deploy/restore-test.sh`) pulls the newest off-site archive and
 rebuilds a validated warehouse in a throwaway container of that image;
 `deploy/restore_from_export.py` is the one restore path and is never deleted;
@@ -3980,7 +3983,7 @@ bot's carries the driver. `tests/unit/test_images_carry_no_duckdb.py` holds
 it: an AST walk of `core/`, `web/`, `bot/`, `scripts/`, `deploy/` and
 `migrations/` finds no import of the driver in any form (aliased, inside a
 function, `import_module`, `sys.modules`, a `python -c` program in a
-string) but in the three host tools that run on the pinned image, and every
+string) but in the two host tools that run on the pinned image, and every
 module under `core/`, `web/`, `bot/` and `scripts/` imports in a fresh
 interpreter in which `duckdb` cannot be found. `requirements-dev.txt` names
 `duckdb==1.5.5` on its own line, for those tools' tests and a few that
@@ -3996,29 +3999,29 @@ any rollback to an image from before step 14"). A tag is never removed by the
 deploy's `docker image prune -f`; `:latest` moves with every deploy and
 carries no DuckDB since S14-19.
 
-So `deploy/restore-test.sh` and `deploy/ark_ship.sh` — and
-`deploy/daily_offsite.sh`, the nightly snapshot, until S14-18 deleted it —
-no longer default to `:latest`. They take their image
-from `BACKUP_RESTORE_IMAGE` (the Ark: `BACKUP_ARK_IMAGE`, else the same) in
-`deploy/backup.env`, and ask it before anything is fetched, linked or frozen
+So `deploy/restore-test.sh` — like `deploy/daily_offsite.sh`, the nightly
+snapshot, until S14-18 deleted it, and `deploy/ark_ship.sh`, the second Ark's
+one-off shipment, until 2026-11-19 — no longer defaults to `:latest`. It takes
+its image from `BACKUP_RESTORE_IMAGE` in `deploy/backup.env` (the Ark's was
+`BACKUP_ARK_IMAGE`), and asks it before anything is fetched or linked
 (`deploy/archive_image.sh`): a tag that does not move (not `:latest`, not
 untagged), present on the host (nothing pulls it, and `rollback-step14` is on
 no registry), and `import duckdb` inside it saying 1.5.5. Any of them false is
 exit 2 with a line naming `rollback-step14`; the nightly snapshot, which only
 runs on the way back, pages it as a failed night, which is why the way back's
 step 3 sets the variable before it puts the snapshot's cron line back. Every
-container they start carries `--pull never`.
+container it starts carries `--pull never`.
 
 **What is mounted into it imports only what it carries.** The drill mounts
-`restore_from_export.py`, the Ark `ark_freeze.py`, and the table-fate
-check's recipe the check and `core/duckdb_table_fates.py` — files from the
-checkout, run inside that pinned image (the snapshot mounted
-`snapshot_export.py` and `core/snapshot_validation.py` until S14-18 deleted
-all three). A name main gains after it is a name
+`restore_from_export.py`, and the table-fate check's recipe the check and
+`core/duckdb_table_fates.py` — files from the checkout, run inside that
+pinned image (the snapshot mounted `snapshot_export.py` and
+`core/snapshot_validation.py` until S14-18 deleted all three, and the Ark
+`ark_freeze.py` until 2026-11-19). A name main gains after it is a name
 the container does not have. `tests/unit/test_archive_image.py` derives the
 mounts from the scripts and their headers' recipes, read as the shell reads
-them (`${PWD}`, `$(pwd)`, variables, function arguments, the `DOCKER_RUN`
-array; a checkout directory mounted whole is refused, and a source it cannot
+them (`${PWD}`, `$(pwd)`, variables, function arguments, an array; a
+checkout directory mounted whole is refused, and a source it cannot
 resolve must be listed with a reason), and holds every import in them to a
 frozen list of what the pinned image carries: the standard library, `duckdb`,
 `compact_duckdb`'s eight names and the `core` modules they reach today —
@@ -4147,4 +4150,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-18 (revision 0037: the month's goal is frozen on the 1st)*
+*Last updated: 2026-11-19 (dead code deleted with its tests: the paginator, two date checks, the copy of bot.db and `compare_table`, the Ark's shipment)*
