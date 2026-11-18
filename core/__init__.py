@@ -18,7 +18,6 @@ from core.exceptions import (
 
 from core.validators import (
     validate_date_string,
-    validate_date_range,
     validate_source_id,
     validate_limit,
     validate_brand_name,
@@ -37,7 +36,6 @@ __all__ = [
     "ValidationError",
     # Validators
     "validate_date_string",
-    "validate_date_range",
     "validate_source_id",
     "validate_limit",
     "validate_brand_name",
