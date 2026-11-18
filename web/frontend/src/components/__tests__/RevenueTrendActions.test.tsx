@@ -28,7 +28,7 @@ const FORECAST: RevenueForecast = {
 const RANGE: RevenueForecastRange = { lo: 2_940_000, hi: 3_610_000, coverage: 0.8, days_left: 13 }
 const BLACK_FRIDAY: RevenueForecastBlackFriday = {
   extra: 1_250_000, total: 4_500_000, size_days: 11.9, normal_day: 105_000,
-  last_year_start: '2025-11-27', last_year_end: '2025-11-29',
+  last_year_start: '2025-11-27', last_year_end: '2025-11-29', kind: 'black_friday',
 }
 
 function badge(props: {
@@ -64,7 +64,7 @@ describe('the month forecast badge', () => {
     const container = badge({ forecast: FORECAST, monthRange: RANGE })
     expect(container.textContent).toContain('скорее всего ₴2.9–3.6M')
     expect(container.querySelector('[title]')?.getAttribute('title')).toBe(
-      'Итог месяца попадает в такой диапазон 8 раз из 10.')
+      'Без большой акции итог месяца попадает в такой диапазон 8 раз из 10.')
   })
 
   it('does not say a range the point has left', () => {
@@ -72,18 +72,34 @@ describe('the month forecast badge', () => {
     expect(badge({ forecast: past, monthRange: RANGE }).textContent).not.toContain('скорее всего')
   })
 
-  it('says Black Friday on its own line, added to the point it stands beside', () => {
+  it('says Black Friday on its own line, beside the point and not in it', () => {
     const container = badge({ forecast: FORECAST, monthRange: RANGE, blackFriday: BLACK_FRIDAY })
     const line = container.querySelector('p')
     expect(plain(line?.textContent)).toBe('Если Чёрная пятница как в прошлом году: +₴1.3M (≈ ₴4.5M)')
     expect(line?.textContent).toContain('(≈\u00a0₴4.5M)')
     expect(line?.getAttribute('title')).toContain('27.11–29.11.2025')
     // The point and the range are what they were without it.
+    expect(container.textContent).toContain('₴3.3M')
     expect(container.textContent).toContain('скорее всего ₴2.9–3.6M')
   })
 
+  it("keeps the morning's total while today's sales move the point", () => {
+    // On a day of the event the point counts its sales as they come, and
+    // last year's day is in `extra`: the point plus `extra` would count them twice.
+    const later = { ...FORECAST, predicted_total: 3_450_000 }
+    expect(plain(badge({ forecast: later, blackFriday: BLACK_FRIDAY }).querySelector('p')?.textContent))
+      .toBe('Если Чёрная пятница как в прошлом году: +₴1.3M (≈ ₴4.5M)')
+  })
+
+  it('says no line the point has reached', () => {
+    const past = { ...FORECAST, predicted_total: 4_500_000 }
+    expect(badge({ forecast: past, blackFriday: BLACK_FRIDAY }).querySelector('p')).toBeNull()
+  })
+
   it('names a big promotion of another month for what it is', () => {
-    const march = { ...BLACK_FRIDAY, last_year_start: '2026-03-07', last_year_end: '2026-03-08' }
+    const march: RevenueForecastBlackFriday = {
+      ...BLACK_FRIDAY, last_year_start: '2026-03-07', last_year_end: '2026-03-08', kind: 'big_promotion',
+    }
     expect(plain(badge({ forecast: FORECAST, blackFriday: march }, 'uk').querySelector('p')?.textContent))
       .toBe('Якщо велика акція як торік: +₴1.3M (≈ ₴4.5M)')
   })

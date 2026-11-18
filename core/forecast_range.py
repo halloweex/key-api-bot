@@ -49,7 +49,12 @@ moves with it:
 - at T, last year's events of T's month that peaked at 4× or more and have
   not passed — their end + 364 days, the same weekday, is T or later — add
   their size × today's normal day (the median of each day left's weekday
-  over its 8 most recent open days, averaged over the days left).
+  over its 8 most recent open days, averaged over the days left);
+- only the days still ahead count: a day of the event whose same weekday a
+  year on is before T is in the month's actual already. The study counted
+  the whole event while any of it was ahead, so on the morning of its second
+  day the line added the first day a second time; the two differ on those
+  mornings only.
 
 In 2024–2026 only Black Friday reached 4×. The threshold was set on one
 November, which is why the line stands beside the range and never inside it.
@@ -60,7 +65,8 @@ A value for origin T reads the days before T and nothing else: the series
 handed in ends the day before the origin, and its index `len(series)` is the
 origin. Indices count from the series' first open day, as the study's
 counted from its data's, so on the study's series this reproduced its
-numbers to the bit, at every origin of 2025-03..2026-10 and at 2026-11-18;
+numbers to the bit, at every origin of 2025-03..2026-10 and at 2026-11-18,
+the mornings inside an event aside (above);
 `tests/unit/test_forecast_range.py` holds it to a transcription of the
 study's code. Production reads `HISTORY_DAYS`, which puts every window it
 uses 24 weeks past the series' start, where the weekday tables no longer
@@ -317,8 +323,9 @@ def black_friday(
     tables: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Optional[BlackFriday]:
     """What last year's events of `origin`'s month at `BF_MIN_PEAK` × or
-    more, not yet passed, add at today's normal day; None when nothing does
-    or last year's month is not in the series."""
+    more add at today's normal day, counting their days still ahead — a day
+    whose same weekday a year on is `origin` or later; None when nothing
+    does or last year's month is not in the series."""
     if (origin - first).days != len(revenue):
         raise ValueError("the series must end the day before the origin")
     year, month = origin.year - 1, origin.month
@@ -333,7 +340,13 @@ def black_friday(
                if (e.start.year, e.start.month) == (year, month)
                and e.peak >= BF_MIN_PEAK
                and e.end + timedelta(days=SAME_WEEKDAY_YEAR) >= origin]
-    size = float(sum(e.excess / level for e in counted))
+    # Each event's days still ahead; never empty, its last day is. Before
+    # the event that is every day, summed in the study's order, so the size
+    # is the study's to the bit.
+    ahead = [[j for j in range((e.start - first).days, (e.end - first).days + 1)
+              if first + timedelta(days=j + SAME_WEEKDAY_YEAR) >= origin]
+             for e in counted]
+    size = float(sum(sum(revenue[j] - norms[j] for j in days) / level for days in ahead))
     if not counted or not np.isfinite(size) or size <= 0:
         return None
     _mean, median = tables if tables is not None else weekday_tables(revenue, first.weekday())
@@ -342,8 +355,9 @@ def black_friday(
     extra = size * normal
     if not np.isfinite(extra) or extra <= 0:
         return None
+    days = [j for part in ahead for j in part]
     return BlackFriday(extra, size, normal,
-                       min(e.start for e in counted), max(e.end for e in counted))
+                       first + timedelta(days=min(days)), first + timedelta(days=max(days)))
 
 
 # ── What the forecast route answers ─────────────────────────────────────────
@@ -399,5 +413,8 @@ def month_outlook(
             "normal_day": round(bf.normal_day, 2),
             "last_year_start": bf.last_year_start.isoformat(),
             "last_year_end": bf.last_year_end.isoformat(),
+            # Counted events start in the origin's month: November's is
+            # Black Friday, any other a big promotion.
+            "kind": "black_friday" if origin.month == 11 else "big_promotion",
         },
     }

@@ -40,6 +40,7 @@ const BLACK_FRIDAY: RevenueForecastBlackFriday = {
   normal_day: 105_000,
   last_year_start: '2025-11-27',
   last_year_end: '2025-11-29',
+  kind: 'black_friday',
 }
 
 const GROWTH = { current: 1_850_000, previous: 1_700_000, growth_percent: 8.8 }
@@ -106,7 +107,12 @@ export const BigPromotionInAnotherMonth: Story = {
   args: {
     forecast: { ...FORECAST, month_start: '2027-03-01', month_end: '2027-03-31' },
     monthRange: RANGE,
-    blackFriday: { ...BLACK_FRIDAY, last_year_start: '2026-03-07', last_year_end: '2026-03-08' },
+    blackFriday: {
+      ...BLACK_FRIDAY,
+      last_year_start: '2026-03-07',
+      last_year_end: '2026-03-08',
+      kind: 'big_promotion',
+    },
   },
 }
 

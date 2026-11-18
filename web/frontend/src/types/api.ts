@@ -53,19 +53,23 @@ export interface RevenueForecastRange {
 }
 
 /**
- * What last year's big promotions of this month, still ahead, would add at
- * today's ordinary day — in 2024–2026, Black Friday alone. Never inside the
- * forecast or the range.
+ * What last year's big promotions of this month would add, their days still
+ * ahead, at today's ordinary day — in 2024–2026, Black Friday alone. Never
+ * inside the forecast or the range.
  */
 export interface RevenueForecastBlackFriday {
   extra: number
-  /** The month's forecast (actual through yesterday + the days left) plus `extra`. */
+  /** The morning's month: actual through yesterday + the days left's
+   *  forecast + `extra`. Today's sales do not move it, as they do not the range. */
   total: number
-  /** Last year's events, in ordinary days of that month. */
+  /** Last year's days still ahead, in ordinary days of that month. */
   size_days: number
   normal_day: number
+  /** The first and last of last year's days counted. */
   last_year_start: string
   last_year_end: string
+  /** November's is Black Friday; any other month's, a big promotion. */
+  kind: 'black_friday' | 'big_promotion'
 }
 
 export interface RevenueForecast {

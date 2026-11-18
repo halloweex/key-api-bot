@@ -68,7 +68,7 @@
   "chart.predictedLabel": "(прогноз)",
   "chart.predictedTotal": "Прогнозований підсумок",
   "chart.forecastRange": "найімовірніше {{range}}",
-  "chart.forecastRangeHint": "Підсумок місяця потрапляє в такий діапазон 8 разів із 10.",
+  "chart.forecastRangeHint": "Без великої акції підсумок місяця потрапляє в такий діапазон 8 разів із 10.",
   "chart.blackFridayLine": "Якщо Чорна п'ятниця як торік: +{{extra}} (≈\u00a0{{total}})",
   "chart.bigPromoLine": "Якщо велика акція як торік: +{{extra}} (≈\u00a0{{total}})",
   "chart.blackFridayHint": "{{dates}}: продажі понад звичайні дорівнювали {{days}} × звичайний день; звичайний день зараз — {{normal}}. У прогноз і діапазон не входить.",

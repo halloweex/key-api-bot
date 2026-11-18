@@ -68,7 +68,7 @@
   "chart.predictedLabel": "(predicted)",
   "chart.predictedTotal": "Predicted total",
   "chart.forecastRange": "likely {{range}}",
-  "chart.forecastRangeHint": "The month's total lands in a range like this 8 times out of 10.",
+  "chart.forecastRangeHint": "Without a big promotion, the month's total lands in a range like this 8 times out of 10.",
   "chart.blackFridayLine": "If Black Friday is like last year's: +{{extra}} (≈\u00a0{{total}})",
   "chart.bigPromoLine": "If last year's big promotion repeats: +{{extra}} (≈\u00a0{{total}})",
   "chart.blackFridayHint": "{{dates}}: sales above the usual came to {{days}} × an ordinary day; an ordinary day now is {{normal}}. Not in the forecast or the range.",

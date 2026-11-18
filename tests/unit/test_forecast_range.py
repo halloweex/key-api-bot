@@ -11,6 +11,7 @@ must answer what it answers, draw for draw.
 """
 from __future__ import annotations
 
+import functools
 from datetime import date, timedelta
 
 import numpy as np
@@ -53,12 +54,15 @@ def _rows(before: date):
     return [(d, v) for d, v in sorted(REVENUE.items()) if d < before]
 
 
+@functools.lru_cache(maxsize=None)
 def _study(origin: date, B: int = 4000, seed: int = 0, lvl_scale: float = 1.0,
-           pool: int = 365, lwin: int = 730, positive: bool = False):
+           pool: int = 365, lwin: int = 730, positive: bool = False,
+           ahead_only: bool = False):
     """The study's `sim_at` and `allowance_bf` at `origin`, transcribed
     (`fc/ml/uncertainty/{core,ivlib,events,regime,today}.py`). `positive`
     takes the level term's variance over the positive draws, as its
-    backtest (`simlib.m_sim`) did."""
+    backtest (`simlib.m_sim`) did; `ahead_only` sizes an event by its days
+    still ahead, the port's one change to the line."""
     DATES = [FIRST + D(days=i) for i in range((origin - FIRST).days)]
     IDX = {d: i for i, d in enumerate(DATES)}
     R = np.array([REVENUE.get(d, 0.0) for d in DATES])
@@ -147,7 +151,14 @@ def _study(origin: date, B: int = 4000, seed: int = 0, lvl_scale: float = 1.0,
     y, m = T.year - 1, T.month
     lvl = np.mean([NORM[d] for d in DATES if d.year == y and d.month == m
                    and NORM[d] == NORM[d]] or [np.nan])
-    u = sum(e_["excess"] / lvl for e_ in EV
+
+    def excess(e_):
+        if not ahead_only:
+            return e_["excess"]
+        span = [e_["start"] + D(days=j) for j in range((e_["end"] - e_["start"]).days + 1)]
+        return sum(R[IDX[d]] - NORM[d] for d in span if d + D(days=364) >= T)
+
+    u = sum(excess(e_) / lvl for e_ in EV
             if e_["start"].year == y and e_["start"].month == m
             and e_["peak"] >= 4.0 and e_["end"] + D(days=364) >= T)
     normal = np.mean(base_vec(days, stat="median"))
@@ -164,12 +175,18 @@ class TestTheStudysProcedure:
         series = fr.daily_series(_rows(origin), FIRST, origin - D(days=1))
         band = fr.simulate_band(series, FIRST, origin)
         bf = fr.black_friday(series, FIRST, origin)
-        lo, hi, allowance, sigma, _f = _study(origin)
+        lo, hi, allowance, sigma, _f = _study(origin, ahead_only=True)
 
         assert band is not None
         assert (band.q_lo, band.q_hi, band.sigma_level) == (lo, hi, sigma)
         assert (0.0 if bf is None else bf.extra) == allowance
         assert band.days_left == (fr.month_end(origin) - origin).days + 1
+
+    @pytest.mark.parametrize("origin", [o for o in ORIGINS if o != date(2025, 11, 30)], ids=str)
+    def test_outside_an_event_its_days_ahead_are_the_whole_of_it(self, origin):
+        """The port's one change to the line: on a morning outside an event,
+        the study's own allowance."""
+        assert _study(origin)[2] == _study(origin, ahead_only=True)[2]
 
     def test_a_draw_of_closed_days_takes_the_backtests_variance(self):
         """On 31 December one day is left, a Wednesday, and 2025-01-01 was
@@ -236,6 +253,31 @@ class TestTheBlackFridayLine:
         # The run started in November: December's line does not count it.
         assert self._at(date(2025, 12, 1)) is None
 
+    def test_inside_the_event_only_its_days_ahead_count(self):
+        """2024-11-29..12-01 is 2025-11-28..30 a year on. On the morning of
+        the 29th the 28th is in the month's actual already: the line counts
+        the two days left, and on the 30th the last. The study counted all
+        three on each of those mornings."""
+        first_day = self._at(date(2025, 11, 28))
+        second = self._at(date(2025, 11, 29))
+        third = self._at(date(2025, 11, 30))
+        assert first_day is not None and second is not None and third is not None
+        assert (first_day.last_year_start, first_day.last_year_end) == (date(2024, 11, 29), date(2024, 12, 1))
+        assert (second.last_year_start, second.last_year_end) == (date(2024, 11, 30), date(2024, 12, 1))
+        assert (third.last_year_start, third.last_year_end) == (date(2024, 12, 1), date(2024, 12, 1))
+
+        # Each day's excess over its norm, in normal days of November 2024.
+        series = fr.daily_series(_rows(date(2025, 11, 30)), FIRST, date(2025, 11, 29))
+        norms = fr.weekday_norms(series)
+        november = [norms[(date(2024, 11, 1) - FIRST).days + k] for k in range(30)]
+        level = np.mean([v for v in november if np.isfinite(v)])
+        i = (date(2024, 11, 29) - FIRST).days
+        days = [(series[i + k] - norms[i + k]) / level for k in range(3)]
+        assert first_day.size_days == pytest.approx(sum(days))
+        assert second.size_days == pytest.approx(days[1] + days[2])
+        assert third.size_days == pytest.approx(days[2])
+        assert _study(date(2025, 11, 29))[2] > second.extra
+
     def test_a_big_promotion_that_has_passed_is_not(self):
         """The ×5 of 2024-03-08 is ahead on 2025-03-05 and gone on the 15th."""
         assert self._at(date(2025, 3, 5)) is not None
@@ -300,8 +342,17 @@ class TestWhatTheRouteAnswers:
         assert bf is not None
         assert bf["total"] == pytest.approx(known + left + bf["extra"], abs=0.02)
         assert (bf["last_year_start"], bf["last_year_end"]) == ("2024-11-29", "2024-12-01")
+        assert bf["kind"] == "black_friday"
         # The range is the same with or without the line.
         assert out["month_range"]["hi"] < known + left + bf["extra"]
+
+    def test_a_big_promotion_of_another_month_is_named_so(self):
+        """The ×5 of 2024-03-08, still ahead on 2025-03-05."""
+        origin = date(2025, 3, 5)
+        out = fr.month_outlook(_rows(origin), origin, 27 * 125_000.0)
+        assert out["black_friday"] is not None
+        assert out["black_friday"]["kind"] == "big_promotion"
+        assert out["black_friday"]["last_year_start"] == "2024-03-08"
 
     def test_nothing_on_or_after_the_origin_is_read(self):
         rows = _rows(self.TODAY)

@@ -45,15 +45,18 @@ export function RevenueTrendActions({
   t,
 }: ActionsProps) {
   const point = forecast?.predicted_total
-  // The range is the morning's (data through yesterday) and the point counts
-  // today's sales as they come: once a big day has carried the point past an
-  // end, the range is not said beside it.
+  // The range and the line are the morning's (data through yesterday) and
+  // the point counts today's sales as they come. The line's total is the
+  // server's, not the point plus `extra`: on a day of the event its sales
+  // would be counted twice, in the point and in last year's day. Once a big
+  // day has carried the point past an end of the range, or to the line's
+  // total, neither is said beside it.
   const range =
     point !== undefined && monthRange && monthRange.lo <= point && point <= monthRange.hi
       ? monthRange
       : null
-  const promo = point !== undefined && blackFriday ? blackFriday : null
-  const isBlackFriday = promo?.last_year_start.slice(5, 7) === '11'
+  const promo = point !== undefined && blackFriday && point < blackFriday.total ? blackFriday : null
+  const isBlackFriday = promo?.kind === 'black_friday'
 
   // The line about Black Friday sits under the row, not in it: a row that
   // wraps counts every item's width in its own, and would squeeze the title.
@@ -103,7 +106,7 @@ export function RevenueTrendActions({
         )}
       </div>
 
-      {promo && point !== undefined && !isLoading && (
+      {promo && !isLoading && (
         <p
           className="text-right text-[10px] sm:text-xs text-slate-500"
           title={t('chart.blackFridayHint', {
@@ -114,7 +117,7 @@ export function RevenueTrendActions({
         >
           {t(isBlackFriday ? 'chart.blackFridayLine' : 'chart.bigPromoLine', {
             extra: formatShortCurrency(promo.extra),
-            total: formatShortCurrency(point + promo.extra),
+            total: formatShortCurrency(promo.total),
           })}
         </p>
       )}
