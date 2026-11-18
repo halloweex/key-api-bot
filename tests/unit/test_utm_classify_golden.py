@@ -25,7 +25,9 @@ Changing what the parser says about a comment is a reclassify decision
 (OD-06): stored verdicts keep the old answer until one is run. So a tuple
 here changes in the same commit as the rule, deliberately, and the commit says
 which stored verdicts it moves — `scripts/utm_reclassify_dryrun.py` counts
-them.
+them. The first such change, 2026-11-12, reads the Meta cookies' labels
+without the underscore; it added `PARSE_GOLDEN_FB_LABELS` and changed no tuple
+that was here before it.
 """
 from __future__ import annotations
 
@@ -329,6 +331,93 @@ CLASSIFY_GOLDEN = [
     ({'utm_source': 'ig', 'fbclid': 'IwAR'}, ('organic', 'instagram')),
 ]
 
+# ─── frozen 2026-11-12: the Meta cookies' labels without the underscore ──────
+#
+# Not what the mixin answered at 8cf727a, like the two lists above: the rule
+# change that reads the labels `fbp:` and `fbc:` as the cookies `_fbp` and
+# `_fbc` (`_KEY_ALIASES` in `core/utm_classify.py`), frozen when it was made,
+# with what the parser answered the day before written above each one. Every
+# comment is made up. They have the shape the shop's template has written
+# since late September 2026, one field per line; a real one opens with the
+# buyer's name, phone and e-mail, and nothing of a real one belongs in this
+# public file.
+#
+# A list of its own rather than more of `PARSE_GOLDEN`:
+# `tests/integration/test_pg_utm_parse.py` holds the Postgres parse, by
+# position, to what DuckDB's parse stored for exactly those fixtures, and that
+# parse no longer exists to be asked about these. The Postgres parse writes
+# `utm_columns(comment)`, which the row test below holds to these rows.
+PARSE_GOLDEN_FB_LABELS = [
+    # The commonest: a pixel order with both Meta cookies and TikTok's and no
+    # tags. Was {'ttp'}: pixel_only/unattributed, the click cookie unread.
+    ('Доставка: Нова пошта\n'
+     'landing_page: https://koreanstory.com/products/test-cream\n'
+     'referrer: https://l.instagram.com/\n'
+     'fbp: fb.1.1761900000000.1111111111\n'
+     'fbc: fb.1.1761900000000.IwAR0madeUpClickId\n'
+     'ttp: madeUpTikTokCookie01',
+     {'_fbp': 'fb.1.1761900000000.1111111111',
+      '_fbc': 'fb.1.1761900000000.IwAR0madeUpClickId', 'ttp': 'madeUpTikTokCookie01'},
+     (None, None, None, None, None, None, 'fb.1.1761900000000.1111111111',
+      'fb.1.1761900000000.IwAR0madeUpClickId', 'madeUpTikTokCookie01', None,
+      'paid_likely', 'facebook')),
+    # The browser cookie alone. Was {}: a row of NULLs, which the tab places
+    # by the source, unknown/unattributed for the website.
+    ('landing_page: https://koreanstory.com/\n'
+     'fbp: fb.1.1761900000000.2222222222',
+     {'_fbp': 'fb.1.1761900000000.2222222222'},
+     (None, None, None, None, None, None, 'fb.1.1761900000000.2222222222', None, None,
+      None, 'pixel_only', 'unattributed')),
+    # Tags as bare lines with the cookies beside them: the verdict is the
+    # tags', and only the two cookie columns fill. Was the same without them.
+    ('utm_source: fbads\nutm_medium: cpc\nutm_campaign: madeup_spring\n'
+     'fbp: fb.1.1761900000000.3333333333\nfbc: fb.1.1761900000000.IwAR0paid\n'
+     'ttp: madeUpTikTok02',
+     {'utm_source': 'fbads', 'utm_medium': 'cpc', 'utm_campaign': 'madeup_spring',
+      '_fbp': 'fb.1.1761900000000.3333333333', '_fbc': 'fb.1.1761900000000.IwAR0paid',
+      'ttp': 'madeUpTikTok02'},
+     ('fbads', 'cpc', 'madeup_spring', None, None, None, 'fb.1.1761900000000.3333333333',
+      'fb.1.1761900000000.IwAR0paid', 'madeUpTikTok02', None, 'paid_confirmed', 'facebook')),
+    # Tags in the landing URL: read from the URL, and the bare lines not at
+    # all, since bare pairs are a fallback for a comment nothing else named.
+    # So the cookie lines stay unread, as `_fbp:` lines would. Unchanged.
+    ('landing_page: https://koreanstory.com/?utm_source=fbads&utm_medium=cpc'
+     '&utm_campaign=madeup\n'
+     'fbp: fb.1.1761900000000.4444444444\nfbc: fb.1.1761900000000.IwAR0url',
+     {'utm_source': 'fbads', 'utm_medium': 'cpc', 'utm_campaign': 'madeup'},
+     ('fbads', 'cpc', 'madeup', None, None, None, None, None, None, None,
+      'paid_confirmed', 'facebook')),
+    # Query-string pairs. Was {}: a row of NULLs.
+    ('landing_page: https://koreanstory.com/?fbp=fb.1.1761900000000.5555555555'
+     '&fbc=fb.1.1761900000000.IwAR0qs',
+     {'_fbp': 'fb.1.1761900000000.5555555555', '_fbc': 'fb.1.1761900000000.IwAR0qs'},
+     (None, None, None, None, None, None, 'fb.1.1761900000000.5555555555',
+      'fb.1.1761900000000.IwAR0qs', None, None, 'paid_likely', 'facebook')),
+    # Inside a "UTM:" block, which reads every key. Was {'fbp', 'fbc'} beside
+    # the campaign, keys no reader asks for: unknown/unattributed.
+    ('UTM:\nutm_campaign: madeup_launch\n'
+     'fbp: fb.1.1761900000000.6666666666\nfbc: fb.1.1761900000000.IwAR0block',
+     {'utm_campaign': 'madeup_launch', '_fbp': 'fb.1.1761900000000.6666666666',
+      '_fbc': 'fb.1.1761900000000.IwAR0block'},
+     (None, None, 'madeup_launch', None, None, None, 'fb.1.1761900000000.6666666666',
+      'fb.1.1761900000000.IwAR0block', None, None, 'paid_likely', 'facebook')),
+    # Capitalised, they stay in the block as `Ttp:` does. Was cut off at
+    # `Fbp:`: {'utm_term'}, unknown/unattributed.
+    ('UTM: utm_term: madeup\nFbp: fb.1.1761900000000.7777777777\n'
+     'Fbc: fb.1.1761900000000.IwAR0caps\nДоставка: Нова пошта',
+     {'utm_term': 'madeup', '_fbp': 'fb.1.1761900000000.7777777777',
+      '_fbc': 'fb.1.1761900000000.IwAR0caps'},
+     (None, None, None, None, 'madeup', None, 'fb.1.1761900000000.7777777777',
+      'fb.1.1761900000000.IwAR0caps', None, None, 'paid_likely', 'facebook')),
+    # Both spellings in one comment: the first met wins, either way round.
+    # Was the underscored one each time, wherever it stood.
+    ('_fbp: fb.1.1761900000000.8888888881\nfbp: fb.1.1761900000000.8888888882\n'
+     'fbc: fb.1.1761900000000.IwAR0first\n_fbc: fb.1.1761900000000.IwAR0second',
+     {'_fbp': 'fb.1.1761900000000.8888888881', '_fbc': 'fb.1.1761900000000.IwAR0first'},
+     (None, None, None, None, None, None, 'fb.1.1761900000000.8888888881',
+      'fb.1.1761900000000.IwAR0first', None, None, 'paid_likely', 'facebook')),
+]
+
 
 def _ids(fixtures):
     return [f"{i:02d}" for i in range(len(fixtures))]
@@ -356,6 +445,20 @@ def test_no_comment_is_no_data_and_a_row_of_nulls():
     hands it an order with no comment, and it must read as nothing."""
     assert parse_utm_from_comment(None) == {}
     assert utm_columns(None) == (None,) * len(UTM_VERDICT_COLUMNS)
+
+
+# ─── the cookies' labels without the underscore (2026-11-12) ──────────────────
+
+@pytest.mark.parametrize("comment, parsed, row", PARSE_GOLDEN_FB_LABELS,
+                         ids=_ids(PARSE_GOLDEN_FB_LABELS))
+def test_the_labels_parse_as_the_cookies(comment, parsed, row):
+    assert parse_utm_from_comment(comment) == parsed
+
+
+@pytest.mark.parametrize("comment, parsed, row", PARSE_GOLDEN_FB_LABELS,
+                         ids=_ids(PARSE_GOLDEN_FB_LABELS))
+def test_the_labels_row_matches_the_golden(comment, parsed, row):
+    assert utm_columns(comment) == row
 
 
 # ─── the old names agree ──────────────────────────────────────────────────────
