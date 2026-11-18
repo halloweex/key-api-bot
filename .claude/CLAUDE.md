@@ -142,7 +142,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/revenue/forecast` | ML revenue forecast for current month |
 | `/api/revenue/forecast/train` | Manually trigger model training (POST) |
 | `/api/revenue/forecast/evaluate` | Walk-forward CV evaluation with baselines (GET) |
-| `/api/revenue/forecast/tune` | Hyperparameter grid search (POST) |
+| `/api/revenue/forecast/tune` | Hyperparameter grid search, reported and never applied (POST) |
 | `/api/sales/by-source` | Sales breakdown by source |
 | `/api/products/top` | Top 10 products by quantity |
 | `/api/products/performance` | Top by revenue, category breakdown |
@@ -701,7 +701,7 @@ What does exist:
 
 ### Revenue Prediction (LightGBM)
 - Trains on ~780 days of historical daily revenue data from `gold_daily_revenue`
-- **31 engineered features** across 10 groups:
+- **25 features, revenue only**:
   - Calendar (4): day_of_week, month, day_of_month, week_of_year
   - Cyclical (4): month_sin/cos, dow_sin/cos
   - Lags (5): 1d, 7d, 14d, 28d, 365d
@@ -710,21 +710,19 @@ What does exist:
   - Events (1): days_to_nearest_event (holidays, promos, Black Friday)
   - Payday (1): days_to_payday (distance to nearest 1st/15th, capped at 7)
   - DOW-specific (2): rolling_mean_4w_same_dow, rolling_std_4w_same_dow
-  - AOV + Orders (3): rolling_mean_7d_aov, lag_7d_orders, rolling_mean_7d_orders
-  - Customer mix (3): new_cust_ratio, returning_ratio, return_rate (all 7d rolling)
-- **Tuned hyperparameters** (saved to `data/lgbm_best_params.json`): num_leaves=31, learning_rate=0.01, min_child_samples=5, reg_alpha=0.1, subsample=0.8
-- **DOW residual corrections**: computed on last 180 days, clamped [0.70, 1.30], saved to `data/dow_corrections.json`
-- LightGBM with 500 rounds, early stopping (patience=50), time-series validation (last 60 days)
-- **Performance** (6-fold walk-forward CV): WAPE=27.66%, R²=0.066, beats best baseline by 1.53%
-- Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no model artefact on disk
+- **The training procedure since 2026-11-18** (owner's choice after a team analysis of month-total accuracy; the analysis' report is the artifact "Разбор прогноза выручки"): Huber loss with δ ₴60K (`HUBER_DELTA`), 300 trees on every row (`NUM_BOOST_ROUND`), no early stopping, no winsorising, no weekday correction. The validation metrics stored beside the forecast and judged by the WAPE gate come from a twin fitted without the last 60 days (`VALIDATION_DAYS`) and scored one day ahead
+- Hyperparameters are pinned in `PRODUCTION_LGB_PARAMS` (num_leaves=31, learning_rate=0.01, min_child_samples=5, reg_alpha=0.1, subsample=0.8 — the values the check measured). `data/lgbm_best_params.json` is not read any more, and `POST /api/revenue/forecast/tune` reports a grid's best set without applying it: it scores one-step-ahead daily WAPE, the badge is a month total
+- **What the procedure replaced, and why**: early stopping on the last 60 days with no refit (the model never saw those days, its level was pulled toward the two-year mean, and in Aug–Sep 2026 and on 2026-11-12 it stopped at one tree — a constant forecast); a weekday "correction" fitted on the same rows (a +5–8% level patch); winsorising at P95 and multiplying back (it erased Black Friday); six order and customer features (NaN → 0 for future days inside the recursion). `data/dow_corrections.json` and `data/clip_ratio.json` may remain on disk and are not read
+- **Performance**, mean absolute error of the month total over 2026 held out, on the Mon/Thu/1st/15th origins: 6.7%, against 8.4% for the replaced procedure and 7.0% for an 8-week weekday mean (2025: 8.0 / 8.5 / 8.6). Against the weekday mean the difference is within noise; from the 1st of the month the error is 10–15% for every method tried. Prophet, five variants on the same harness, scored 7.8% at best over every 2026 origin, against 6.6% for the weekday mean, and its 80% interval held the actual 42–56% of the time
+- Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no usable model on disk
 - Predictions stored in Postgres `app.revenue_predictions`, written by chain 7b-3 (DuckDB's `revenue_predictions` until it latched). The rows each training replaces are kept in `app.revenue_prediction_vintages` (revision 0036), inside the training's transaction under a savepoint that never fails it; the forecast a past day was shown last is never replaced and stays in `app.revenue_predictions`, so the history of forecasts shown is both (see "The analysts' captures")
 - Frontend shows forecast bars (lighter opacity) on Revenue Trend chart for the month, the week and a custom range with future days
 - **Every forecast a page shows is read from `revenue_predictions`; no request runs the model** (owner's decision, 2026-11-04 — the Rust council's decision 6). It is as of the last training (Mon/Thu), retail only — b2b and the other sales types show none — and `last_trained` (the Kyiv day of the rows' `created_at`) and `model_metrics` come from the same rows, so any process, the Rust read API included, can answer it. Until then the week and a custom range ran the model on the request over 780 days of Gold, and `last_trained` came from web's memory — null after every restart, until the next training
 - "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
 - **The comparison under the chart is the whole period's** (owner's decision, 2026-11-12). The month and the week end today (`parse_period`) and are drawn to their last day (`dashboard_service.last_day_of_period`). Their comparison is the window before the whole period, day by day: `previous_period` sets November beside 2–31 October, and a week beside the week before, Monday beside Monday. The dashed line therefore runs under the forecast days too. The growth badge adds up the days through today on both sides, so 1–12 November is set beside 2–13 October. A range reaching into the future counts only its days behind it, where it used to set its days so far beside the whole window. The store's trend takes `period_end` and `through`, and `dashboard_service.fit_trend` lays the window under the days drawn, by date. Until then the month compared its days so far with as many days before them, and set each forecast day beside the day as many days back as there were forecast days, read from Silver: under 19–30 November the line drew 1–12 November. `year_ago`, the chart's default, already went day by day
 - Graceful degradation: chart works normally if model unavailable
-- Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches
-- **Known limitation**: Thu/Fri have ~₴30K underprediction bias due to bimodal distribution (promo spike days ₴300-600K are unpredictable from lagged features)
+- Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches; the 31-feature model of the replaced procedure is rejected that way, and web's startup then trains the current one in the background (`web/main.py`)
+- **Known limitations**: a shift of the month's level (July 2026, ₴4.33M → ₴3.25M, was an acquisition drop) is not visible on the 1st in any data the shop records; promotions are not known in advance, and Black Friday has one past instance to learn from
 
 ### Telegram Bot
 - Sales summary reports by source

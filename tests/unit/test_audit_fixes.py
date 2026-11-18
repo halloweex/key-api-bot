@@ -126,7 +126,7 @@ class TestModelValidationGate:
                             AsyncMock(return_value=_valid_training_df()))
         # Garbage model: WAPE far above the reject threshold.
         monkeypatch.setattr(ps, "_train_model",
-                            lambda df: (object(), {"wape": 252.88, "mape": 252.0, "mae": 1.0}, {}, 1.0))
+                            lambda df: (object(), {"wape": 252.88, "mape": 252.0, "mae": 1.0}))
         monkeypatch.setattr(svc, "_alert_model_rejected", AsyncMock())
 
         res = await svc._train_impl("retail")
@@ -148,7 +148,7 @@ class TestModelValidationGate:
                             AsyncMock(return_value=_valid_training_df()))
         sentinel_model = object()
         monkeypatch.setattr(ps, "_train_model",
-                            lambda df: (sentinel_model, {"wape": 27.66, "mape": 30.0, "mae": 1.0}, {}, 1.0))
+                            lambda df: (sentinel_model, {"wape": 27.66, "mape": 30.0, "mae": 1.0}))
         monkeypatch.setattr(svc, "_save_model", lambda: None)
         monkeypatch.setattr(svc, "predict_month", AsyncMock(return_value=[]))
 
