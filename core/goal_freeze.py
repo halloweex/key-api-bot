@@ -33,11 +33,14 @@ manual trigger or two runs at once cannot move a goal that is frozen.
 
 WHEN
 
-Daily at `FREEZE_AT` (00:30 Kyiv), and once `FIRST_RUN_DELAY_S` after a
-start. The start is what freezes the month in progress on the day this ships
-— November 2026's goal is the deploy day's, not the 1st's — and what freezes
-a month whose 1st the process was down for, on the day it comes back. On the
-other days a run reads which sales types are frozen and stops: one SELECT.
+At half past the hours of `RUN_HOURS`, 00:30 Kyiv (`FREEZE_AT`) the first
+of them, and once `FIRST_RUN_DELAY_S` after a start. The start is what
+freezes the month in progress on the day this ships — November 2026's goal
+is the deploy day's, not the 1st's — and what freezes a month whose 1st the
+process was down for, on the day it comes back. Hourly, so that a run
+turned away — a refused read, a forecast short of the month (below) — is
+asked again within the hour, not the next night; once the month is frozen a
+run reads which sales types are and stops: one SELECT.
 
 Never before `FREEZE_AT` on the 1st. "The last three complete months" counts
 the month that has just ended, and its last orders reach Silver a few minutes
@@ -50,6 +53,21 @@ in one transaction, so the sales types of one month are frozen from one
 moment's inputs. A refused read (`read_fallback.ReadUnavailable`, which the
 job answers) leaves the month unfrozen and read live, and the next run asks
 again; so does any other failure, which goes to the job's history.
+
+A GOAL RESTING ON PART OF A FORECAST WAITS
+
+The ML signal is the month's actual so far plus the stored forecast of the
+rest, summed over whatever rows there are (`_get_ml_forecast_total`). Each
+training stores 60 days ahead, so on a 1st with no training for 30 days and
+more the forecast stops short of the month's end, and the signal, and the
+goal, come out too low — 4.0M where it was 4.2M with 24 days of 31 on the
+review's fixture. Live, the next training corrected it; frozen, it would
+stand all month. So an answer whose ML signal rests on fewer days than are
+left (`_short_forecast`) is not kept: that sales type is read live, the
+result names it under `waiting`, and the first run after a training that
+reaches the month's end freezes it, from that run's inputs. A forecast with
+no row at all is absent, not short — the blend gives its weight to the
+other signals — and is kept, as is every answer without the ML signal.
 
 THE SHAPE IS THE CODE'S THAT FROZE IT
 
@@ -70,10 +88,11 @@ deletes one.
 """
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import os
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from core.duckdb_constants import DEFAULT_TZ, KNOWN_SALES_TYPES
@@ -91,10 +110,16 @@ TABLE = "app.frozen_month_goals"
 # would be the inconsistency this exists to remove.
 SALES_TYPES: Tuple[str, ...] = (*KNOWN_SALES_TYPES, "all")
 
-# When the daily run fires, in Kyiv — and the earliest a month is frozen on
-# its 1st (see "WHEN" above). Clear of the 01/07/13/19 checks, the 02:40 GA4
-# capture and the 03:00-04:59 clock-change hours.
+# The first run of the day, in Kyiv — and the earliest a month is frozen on
+# its 1st (see "WHEN" above).
 FREEZE_AT = time(0, 30)
+
+# The hours whose half past the job fires at, `FREEZE_AT` the first. Left
+# out, so that no run lands in a window the schedule keeps clear: 02:30-02:50
+# (the GA4 capture), 03:00-04:59 (a clock change can skip or repeat them),
+# 05:00-05:50, 07:20-07:45 and 08:55-09:55; every :30 kept is also clear of
+# the 01/07/13/19 checks.
+RUN_HOURS: Tuple[int, ...] = (0, 1, 6, 8, *range(10, 24))
 
 # The first run after a start. A few minutes, out of the startup rush (the
 # catch-ups go at 120-420 s, the operational job at 90 s): a deploy on a 1st
@@ -152,6 +177,23 @@ def too_early(at: datetime) -> bool:
     return local.day == 1 and local.time() < FREEZE_AT
 
 
+async def _short_forecast(store, sales_type: str, smart: Dict[str, Any], at: datetime) -> Optional[str]:
+    """Why `smart` may not be kept yet — its ML signal summed a forecast of
+    fewer days than the month has left — or None (see "A GOAL RESTING ON
+    PART OF A FORECAST WAITS" above). Asked only of an answer that carries
+    the signal; the days are counted from `at`'s Kyiv day, the day
+    `_get_ml_forecast_total` predicts from."""
+    if not (smart.get("monthly") or {}).get("mlForecastGoal"):
+        return None
+    today = at.astimezone(DEFAULT_TZ).date()
+    last = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+    days = (last - today).days + 1
+    held = await store.forecast_days_stored(sales_type, today, last)
+    if held >= days:
+        return None
+    return f"the stored forecast holds {held} of the {days} days to the month's end"
+
+
 async def _pool():
     from core.pg import get_pool, require_revision
 
@@ -184,11 +226,14 @@ async def _keep(
 async def freeze_month(store, *, now: Optional[datetime] = None) -> Dict[str, Any]:
     """Freeze the Kyiv month in progress for every sales type not frozen yet.
 
-    `store` is the repository (`generate_smart_goals`); `now` is the clock
-    that chooses the month and stamps `frozen_at` — the wall clock when left
-    out. Returns what it did, for the job's history. A refused read raises
-    `read_fallback.ReadUnavailable` with nothing written (the job answers
-    it); any other failure raises with nothing written either.
+    `store` is the repository (`generate_smart_goals`, `forecast_days_stored`);
+    `now` is the clock that chooses the month and stamps `frozen_at` — the
+    wall clock when left out. Returns what it did, for the job's history: the
+    sales types `frozen` and those frozen `already`, and, when there are any,
+    those `waiting` — an answer resting on part of a forecast, not kept, with
+    the reason. A refused read raises `read_fallback.ReadUnavailable` with
+    nothing written (the job answers it); any other failure raises with
+    nothing written either.
     """
     if not os.getenv("KS_PG_DSN", "").strip():
         return {"skipped": "KS_PG_DSN is not set"}
@@ -204,16 +249,27 @@ async def freeze_month(store, *, now: Optional[datetime] = None) -> Dict[str, An
     pool = await _pool()
     held = await _held(pool, year, month)
     due = [sales_type for sales_type in SALES_TYPES if sales_type not in held]
+    answers: List[Tuple[str, str]] = []
+    waiting: Dict[str, str] = {}
     if due:
         # Every answer before any row: a refusal at any read leaves the month
         # as it was, read live, and the next run asks again.
-        answers = [(sales_type, encode(await store.generate_smart_goals(year, month, sales_type)))
-                   for sales_type in due]
-        frozen = await _keep(pool, year, month, answers, at)
-    else:
-        frozen = []
+        computed = [(sales_type, await store.generate_smart_goals(year, month, sales_type))
+                    for sales_type in due]
+        encoded = [(sales_type, encode(smart)) for sales_type, smart in computed]
+        for (sales_type, smart), kept in zip(computed, encoded):
+            why = await _short_forecast(store, sales_type, smart, at)
+            if why is None:
+                answers.append(kept)
+            else:
+                waiting[sales_type] = why
+    frozen = await _keep(pool, year, month, answers, at) if answers else []
     result["frozen"] = frozen
-    result["already"] = sorted(held | (set(due) - set(frozen)))
-    if frozen:
+    result["already"] = sorted(held | ({s for s, _ in answers} - set(frozen)))
+    if waiting:
+        result["waiting"] = waiting
+        logger.warning("Month goal freeze: %s waits, read live meanwhile — %s",
+                       ", ".join(waiting), result)
+    elif frozen:
         logger.info("Month goal freeze: %s", result)
     return result

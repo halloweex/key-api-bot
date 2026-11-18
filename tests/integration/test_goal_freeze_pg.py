@@ -360,6 +360,53 @@ class TestTheFrozenAnswerIsServed:
         assert not await _rows(pool, 2026, 9)
 
 
+class TestAShortForecastWaits:
+    @pytest.mark.asyncio
+    async def test_on_the_1st_it_waits_for_a_forecast_that_reaches_the_months_end(
+        self, history, monkeypatch,
+    ):
+        """1 December 2026, 00:30, and the stored retail forecast holds 28 of
+        December's 31 days, as after a month without a training: the ML
+        signal summed 28 days, and kept, the goal would stand too low all
+        month. Retail is read live and named under `waiting`, the others
+        freeze; the run after the missing days are stored freezes retail
+        with the whole month's forecast in its signal. The signal's clock is
+        the freeze's, the 1st's. Kills: the freeze keeping a short answer, or
+        holding back a sales type whose answer carries no signal."""
+        store, pool = history
+        at = datetime(2026, 12, 1, 0, 30, tzinfo=KYIV)
+
+        class _OnThe1st(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return at.astimezone(tz) if tz else at.replace(tzinfo=None)
+
+        monkeypatch.setattr("core.repositories.goals.datetime", _OnThe1st)
+        december = [date(2026, 12, d) for d in range(1, 32)]
+        insert = ("INSERT INTO app.revenue_predictions (prediction_date, sales_type, "
+                  "predicted_revenue, model_mae, model_mape, model_wape, created_at) "
+                  "VALUES ($1, 'retail', $2, 1, 1, 1, now())")
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.revenue_predictions WHERE sales_type = 'retail'")
+            await conn.executemany(insert, [(d, 10_000.0) for d in december[:28]])
+
+        first = await goal_freeze.freeze_month(store, now=at)
+        assert first["waiting"] == {
+            "retail": "the stored forecast holds 28 of the 31 days to the month's end"}
+        assert first["frozen"] == [s for s in goal_freeze.SALES_TYPES if s != "retail"]
+        assert (2026, 12, "retail") not in await _rows(pool, 2026, 12)
+        live = await store.get_smart_goals("retail", year=2026, month=12)
+        assert live["monthly"]["frozenAt"] is None
+        assert live["monthly"]["mlForecastGoal"] == pytest.approx(28 * 10_000.0)
+
+        async with pool.acquire() as conn:
+            await conn.executemany(insert, [(d, 10_000.0) for d in december[28:]])
+        second = await goal_freeze.freeze_month(store, now=at + timedelta(hours=6))
+        assert second["frozen"] == ["retail"] and "waiting" not in second
+        kept = json.loads((await _rows(pool, 2026, 12))[(2026, 12, "retail")][0])
+        assert kept["monthly"]["mlForecastGoal"] == pytest.approx(31 * 10_000.0)
+
+
 class TestNoGetWrites:
     @pytest.mark.asyncio
     async def test_the_two_gets_through_the_app_write_nothing(

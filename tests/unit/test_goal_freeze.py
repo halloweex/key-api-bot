@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
@@ -280,19 +280,27 @@ class TestTheReader:
 
 class _Store:
     """The repository as the freeze sees it: answers counted, one refusal
-    where asked."""
+    where asked, and a stored forecast that reaches the month's end unless
+    `short` says how many days it holds for a sales type."""
 
-    def __init__(self, refuse_at=None):
+    def __init__(self, refuse_at=None, short=None, ml=4_180_250.5):
         self.asked = []
         self.refuse_at = refuse_at
+        self.short = dict(short or {})
+        self.ml = ml
+        self.days_asked = []
 
     async def generate_smart_goals(self, year, month, sales_type):
         self.asked.append((year, month, sales_type))
         if sales_type == self.refuse_at:
             raise read_fallback.refuse("goals", OSError("postgres is gone"))
-        answer = await _Answers().generate_smart_goals(year, month, sales_type)
+        answer = await _Answers(ml=self.ml).generate_smart_goals(year, month, sales_type)
         answer["monthly"]["goal"] = 1_000_000 + 100_000 * len(self.asked)
         return answer
+
+    async def forecast_days_stored(self, sales_type, start, end):
+        self.days_asked.append((sales_type, start, end))
+        return self.short.get(sales_type, (end - start).days + 1)
 
 
 @pytest.fixture
@@ -403,6 +411,50 @@ class TestTheFreeze:
         assert "skipped" in early and early["month"] == "2026-12"
 
     @pytest.mark.asyncio
+    async def test_an_answer_on_part_of_a_forecast_waits(self, ledger):
+        """No training for 30 days and more: on the 1st the stored forecast
+        holds 24 of December's 31 days, and the ML signal summed them alone.
+        Kept, that goal would stand too low all month; it is read live
+        instead, named under `waiting`, and the others are frozen. Kills:
+        the freeze keeping whatever `generate_smart_goals` returned."""
+        store = _Store(short={"retail": 24})
+        at = _at(2026, 12, 1, 0, 30)
+        result = await goal_freeze.freeze_month(store, now=at)
+
+        rest = [s for s in goal_freeze.SALES_TYPES if s != "retail"]
+        assert result["frozen"] == rest
+        assert result["waiting"] == {
+            "retail": "the stored forecast holds 24 of the 31 days to the month's end"}
+        assert result["already"] == []
+        ((_year, _month, answers, _stamp),) = ledger["kept"]
+        assert [s for s, _ in answers] == rest
+        # Counted from the freeze's Kyiv day to the month's last.
+        assert ("retail", date(2026, 12, 1), date(2026, 12, 31)) in store.days_asked
+
+    @pytest.mark.asyncio
+    async def test_it_freezes_once_a_training_reaches_the_months_end(self, ledger):
+        """The run after the training: only what the month lacks is computed,
+        and frozen from that run's inputs."""
+        ledger["held"] = {s for s in goal_freeze.SALES_TYPES if s != "retail"}
+        store = _Store()
+        result = await goal_freeze.freeze_month(store, now=_at(2026, 12, 3, 6, 30))
+
+        assert store.asked == [(2026, 12, "retail")]
+        assert store.days_asked == [("retail", date(2026, 12, 3), date(2026, 12, 31))]
+        assert result["frozen"] == ["retail"] and "waiting" not in result
+
+    @pytest.mark.asyncio
+    async def test_an_answer_without_the_ml_signal_is_kept_and_asks_nothing(self, ledger):
+        """No row at all in the window: the signal is absent, not short, and
+        the blend gave its weight to the other two. Kills: a month that waits
+        for good while no forecast exists."""
+        store = _Store(ml=0.0, short={"retail": 0})
+        result = await goal_freeze.freeze_month(store, now=_at(2026, 12, 1, 0, 30))
+
+        assert result["frozen"] == list(goal_freeze.SALES_TYPES)
+        assert "waiting" not in result and store.days_asked == []
+
+    @pytest.mark.asyncio
     async def test_without_postgres_it_stands_down(self, ledger, monkeypatch):
         """A dev host with no DSN: no read, no refusal counted, no page."""
         monkeypatch.delenv("KS_PG_DSN")
@@ -445,16 +497,16 @@ BUSY = [(300, 350), (440, 465), (535, 595), (180, 299), (150, 170)] + [
 
 
 class TestTheJob:
-    def test_it_is_registered_daily_at_0030_and_a_few_minutes_after_a_start(self):
+    def test_it_is_registered_at_half_past_its_hours_and_a_few_minutes_after_a_start(self):
         before = datetime.now(timezone.utc)
         job = _registered()._scheduler.get_job("month_goal_freeze")
         assert job is not None
         assert isinstance(job.trigger, CronTrigger)
         fields = {f.name: str(f) for f in job.trigger.fields}
         assert (fields["hour"], fields["minute"], fields["day"], fields["day_of_week"]) == (
-            "0", "30", "*", "*")
-        assert (int(fields["hour"]), int(fields["minute"])) == (
-            goal_freeze.FREEZE_AT.hour, goal_freeze.FREEZE_AT.minute)
+            ",".join(str(h) for h in goal_freeze.RUN_HOURS), "30", "*", "*")
+        assert goal_freeze.RUN_HOURS[0] == goal_freeze.FREEZE_AT.hour
+        assert int(fields["minute"]) == goal_freeze.FREEZE_AT.minute
         delay = timedelta(seconds=goal_freeze.FIRST_RUN_DELAY_S)
         assert before + delay - timedelta(seconds=5) < job.next_run_time \
             < before + delay + timedelta(seconds=30)
@@ -462,12 +514,15 @@ class TestTheJob:
 
     def test_after_the_first_run_it_follows_the_cron(self):
         """The first run is the start's, off the grid; the next is the next
-        00:30, and so is the one after a start between midnight and 00:30 on
-        a 1st, which `freeze_month` turns away. Kills: a first run that
-        replaced the daily one, or a trigger that fires once."""
+        half past one of its hours, and after a start between midnight and
+        00:30 on a 1st, which `freeze_month` turns away, it is 00:30. Kills: a
+        first run that replaced the hourly ones, or a trigger that fires once."""
         first = datetime(2026, 11, 18, 14, 7, tzinfo=KYIV)
         trigger = _in_kyiv()
         assert trigger.get_next_fire_time(first, first) == datetime(
+            2026, 11, 18, 14, 30, tzinfo=KYIV)
+        late = datetime(2026, 11, 18, 23, 31, tzinfo=KYIV)
+        assert trigger.get_next_fire_time(late, late) == datetime(
             2026, 11, 19, 0, 30, tzinfo=KYIV)
         early = datetime(2026, 12, 1, 0, 9, tzinfo=KYIV)
         assert goal_freeze.too_early(early)
@@ -483,13 +538,20 @@ class TestTheJob:
         trigger = _in_kyiv()
         at = datetime(2026, 3, 1, tzinfo=SCHEDULER_TIMEZONE)
         fired = []
-        for _ in range(400):
+        while at < datetime(2027, 3, 1, tzinfo=SCHEDULER_TIMEZONE):
             at = trigger.get_next_fire_time(None, at + timedelta(minutes=1))
             fired.append(at.astimezone(SCHEDULER_TIMEZONE))
         starts = {t.hour * 60 + t.minute for t in fired}
-        assert starts == {30}
+        assert starts == {h * 60 + 30 for h in goal_freeze.RUN_HOURS}
         assert not [w for w in BUSY for m in starts if w[0] <= m <= w[1]]
-        assert len({t.date() for t in fired}) == 400
+        by_day: dict = {}
+        for t in fired:
+            by_day.setdefault(t.date(), []).append(t)
+        # Every day of the year, both clock changes' included, runs every
+        # hour of the list, 00:30 first.
+        assert len(by_day) >= 365
+        assert {len(v) for d, v in by_day.items() if d < at.date()} == {len(goal_freeze.RUN_HOURS)}
+        assert {(v[0].hour, v[0].minute) for v in by_day.values()} == {(0, 30)}
 
     @pytest.mark.asyncio
     async def test_a_refusal_defers_the_month_with_nothing_written(

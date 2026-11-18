@@ -911,15 +911,20 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: freeze the month's automatic goal (daily 00:30 Kyiv, and a few
-        # minutes after a start), revision 0037.
+        # Job: freeze the month's automatic goal (at half past the hours of
+        # `RUN_HOURS`, 00:30 Kyiv the first, and a few minutes after a
+        # start), revision 0037.
         #
         # The smart goal moved inside its month as its ML term drifted toward
         # the actual (a median 4-6 %, ₴0.5M in July 2026), so the owner froze
         # it on the 1st (2026-11-18). This keeps the month's answer for every
         # sales type once, and `/goals/smart` reads it (`core/goal_freeze.py`).
-        # Daily so a 1st the process missed is frozen on the next day it runs;
-        # on every other day a run is one SELECT and stops. It has earned
+        # Hourly so a run turned away — a refused read, or an answer whose ML
+        # signal rests on part of a forecast, which waits for the next
+        # training — is asked again within the hour, and a 1st the process
+        # missed is frozen on the day it runs; once the month is frozen a run
+        # is one SELECT and stops. The hours skip the windows the schedule
+        # keeps clear (`goal_freeze.RUN_HOURS`). It has earned
         # `first_run_delay_s`: idempotent and that cheap, and the start is
         # what freezes the month in progress on the day this ships and on the
         # day a 1st spent down comes back. Never before 00:30 on the 1st,
@@ -927,13 +932,15 @@ class BackgroundScheduler:
         # heavy lock: it reads Postgres and writes one small table.
         from core.goal_freeze import FIRST_RUN_DELAY_S as GOAL_FREEZE_DELAY_S
         from core.goal_freeze import FREEZE_AT as GOAL_FREEZE_AT
+        from core.goal_freeze import RUN_HOURS as GOAL_FREEZE_HOURS
 
         self._add_job(
             job_id="month_goal_freeze",
             name="Month goal freeze",
             description="Freeze this month's automatic goal for every sales type, once",
             func=self._run_month_goal_freeze,
-            trigger=CronTrigger(hour=GOAL_FREEZE_AT.hour, minute=GOAL_FREEZE_AT.minute),
+            trigger=CronTrigger(hour=",".join(str(h) for h in GOAL_FREEZE_HOURS),
+                                minute=GOAL_FREEZE_AT.minute),
             max_instances=1,
             coalesce=True,
             first_run_delay_s=GOAL_FREEZE_DELAY_S,
@@ -1230,8 +1237,8 @@ class BackgroundScheduler:
 
         A refused read — `generate_smart_goals` reads through `/goals`'
         router — defers the whole month with nothing written (DN-20c): the
-        month is read live until a run freezes it, and tomorrow's run, or
-        the next start, asks again. Any other failure raises into the job's
+        month is read live until a run freezes it, and the next run, within
+        the hour, or the next start, asks again. Any other failure raises into the job's
         history, with nothing written either.
         """
         with correlation_context():

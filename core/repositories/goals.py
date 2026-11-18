@@ -121,6 +121,17 @@ _FORECAST_PREDICTED_SQL = """
       AND prediction_date <= ?
 """
 
+# How many days of a window the stored forecast holds: the month goal freeze
+# keeps no answer whose ML signal summed fewer days than the month has left
+# (`core/goal_freeze.py`). The same table, filter and window as the signal.
+_FORECAST_DAYS_SQL = """
+    SELECT COUNT(DISTINCT prediction_date)
+    FROM {revenue_predictions}
+    WHERE sales_type = ?
+      AND prediction_date >= ?
+      AND prediction_date <= ?
+"""
+
 # The month's automatic goal as it was frozen (revision 0037,
 # `core/goal_freeze.py`): `generate_smart_goals`' answer, whole, and when. One
 # row or none — the key is (year, month, sales_type). No table hole: DuckDB
@@ -1037,6 +1048,16 @@ class GoalsMixin:
         rows = await self._goals_run(
             _FORECAST_ACTUAL_SQL.replace("{sales_filter}", sales_filter), params)
         return float(rows[0][0]) if rows and rows[0][0] is not None else 0.0
+
+    async def forecast_days_stored(self, sales_type: str, start: date, end: date) -> int:
+        """How many days of `start`..`end` the stored forecast holds for
+        `sales_type`. The month goal freeze asks it of an answer whose ML
+        signal is not 0 before keeping it (`core/goal_freeze.py`): the signal
+        sums whatever rows there are, so a forecast that stops short of the
+        month's end makes it, and the goal, too low. Read as the signal is,
+        through `_goals_run`; a refusal passes through."""
+        rows = await self._goals_run(_FORECAST_DAYS_SQL, [sales_type, start, end])
+        return int(rows[0][0] or 0) if rows else 0
 
     async def _get_ml_forecast_total(
         self, target_year: int, target_month: int, sales_type: str = "retail"

@@ -757,7 +757,9 @@ of 2026-11-18: the month's automatic goal is frozen on the 1st** (revision
   `KNOWN_SALES_TYPES` and `all`, six today), so ~72 rows a year of ~1.5 KB.
   Append-only, and the bound is that arithmetic: no code deletes a row.
 - **One writer**, `core/goal_freeze.py`, reached from the job
-  `month_goal_freeze` alone (daily 00:30 Kyiv, and 4 min after a start).
+  `month_goal_freeze` alone (at half past the hours of `goal_freeze.RUN_HOURS`,
+  00:30 Kyiv the first, clear of the windows the schedule keeps, and 4 min
+  after a start; a frozen month costs a run one SELECT).
   `ON CONFLICT DO NOTHING`: the first freeze of a month wins, so a second run,
   a manual trigger or two at once cannot move a frozen goal. Every sales
   type's answer is computed before any row is written, and the month's rows
@@ -777,6 +779,17 @@ of 2026-11-18: the month's automatic goal is frozen on the 1st** (revision
   unfrozen. The GET sweep (`tests/unit/test_goals_read_paths_do_not_write.py`)
   replaces the writer with a recorder that raises, and
   `tests/unit/test_goal_freeze.py` walks the repository for the one writer.
+- **A goal resting on part of a forecast waits.** The ML signal sums whatever
+  rows of the stored forecast there are, and each training stores 60 days
+  ahead, so on a 1st with no training for 30 days and more the signal, and
+  the goal, come out too low — 4.0M where it was 4.2M with 24 days of 31 on
+  the review's fixture. Live, the next training corrected it; frozen, it
+  would stand all month. An answer whose signal rests on fewer days than are
+  left (`GoalsMixin.forecast_days_stored`, the signal's own table, filter and
+  window) is not kept: that sales type is read live, the job's result names
+  it under `waiting`, and the first run after a training that reaches the
+  month's end freezes it. A forecast with no row at all is absent, not short
+  — the blend gives its weight to the other signals — and is kept.
 - **November 2026 is the deploy day's**, not the 1st's: the start after the
   deploy froze the month in progress; months before it stay live. A month
   whose 1st the process was down for is frozen on the day it runs again, its
@@ -1587,7 +1600,7 @@ whole reason the group is read from the source now.
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `ga4_capture` | daily 02:40 | keep each closed GA4 day, ISO week and month in `app.ga4_funnel` before the 14-month horizon drops it, oldest first, at most 24 periods a run and an hour; stands down without a GA4 key or under `KS_ANALYTICS_CAPTURES=off` (revision 0036) |
-| `month_goal_freeze` | daily 00:30, and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st, one SELECT on the other days, a refused read defers the whole month to the next run; stands down without `KS_PG_DSN` |
+| `month_goal_freeze` | hourly at :30 outside the windows kept clear (`goal_freeze.RUN_HOURS`, 00:30 first), and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st, one SELECT once the month is frozen, a refused read defers the whole month to the next run, an answer whose ML signal rests on part of a forecast waits (`waiting`) and is read live; stands down without `KS_PG_DSN` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
@@ -2500,7 +2513,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0036_analytics_captures` today, and every
+mismatch, ahead or behind. It is `0037_frozen_month_goals` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
