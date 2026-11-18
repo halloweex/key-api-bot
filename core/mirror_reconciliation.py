@@ -18,11 +18,11 @@ that still has a copy:
   buyer an order names exists;
 * `reconcile_order_versions` — the order archive is still being written.
 
-`reconcile_bot_state` — `data/bot.db` against its copy in `app.*` — and
-`compare_table`, the comparison it was the last caller of, were deleted on
-2026-11-19 with the copy itself (`core/pg_bot_state.py`): both stood down
-under `KS_BOT_STORE=postgres`, which web and the bot have run since
-2026-08-27, so neither ran in production.
+`reconcile_bot_state` — `data/bot.db` against its copy in `app.*` — was
+deleted on 2026-11-19 with the copy itself (`core/pg_bot_state.py`): both
+stood down under `KS_BOT_STORE=postgres`, which web and the bot have run
+since 2026-08-27. `compare_table`, whose last caller it had been since
+S14-12, went with it.
 
 The job adds the ClickHouse comparisons (`core.ch_silver`,
 `core.ch_history`). Report only: nothing here repairs anything. (It added
