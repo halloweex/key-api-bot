@@ -110,6 +110,11 @@ async def get_smart_goals(
 
     Optionally pass year/month to get goals for a specific month
     (e.g. for 'last_month' period). Defaults to current month.
+
+    A month's automatic goal is frozen on its 1st (revision 0037, job
+    `month_goal_freeze`); a frozen month answers its frozen goal and
+    `monthly.frozenAt`, any other is computed now with `frozenAt` null. A
+    goal typed on /goals overrides either. Reading never freezes.
     """
     try:
         sales_type = validate_sales_type(sales_type)
@@ -244,6 +249,12 @@ async def get_goal_forecast(
 ):
     """Generate smart goals for a specific future month. Reads only.
 
+    A month that is frozen (revision 0037: the current month from its 1st,
+    and every month frozen since) answers its frozen goal, as `/goals/smart`
+    does, with `monthly.frozenAt` saying when; any other month is computed
+    now, with `frozenAt` null. One door for both routes
+    (`smart_goals_of_month`), so one month cannot have two goals.
+
     `recalculate=true` used to rewrite the shared seasonality tables from a
     GET (OD-14 (i): a GET never writes). It is refused, for an admin too, and
     the answer names the route that does it.
@@ -260,4 +271,4 @@ async def get_goal_forecast(
                     "seasonality tables (admin)"))
 
     store = await get_store()
-    return await store.generate_smart_goals(year, month, sales_type)
+    return await store.get_month_goal(year, month, sales_type)

@@ -42,9 +42,11 @@ DERIVED = ("gold.daily_revenue", "silver.order_utm", "silver.orders")
 LANDED = ("bronze.order_products", "bronze.orders", "bronze.products",
           "bronze.categories", "bronze.offer_stocks", "bronze.buyers",
           "bronze.managers", "bronze.expenses", "bronze.expense_types")
+# `app.frozen_month_goals` (revision 0037) among them: a month frozen by one
+# test would otherwise answer every later test's smart goal for that month.
 APP = ("app.manual_expenses", "app.revenue_goals", "app.revenue_predictions",
        "app.manager_classifications", "app.seasonal_indices",
-       "app.growth_metrics", "app.weekly_patterns")
+       "app.growth_metrics", "app.weekly_patterns", "app.frozen_month_goals")
 TABLES = DERIVED + LANDED + APP
 WATERMARKS = ("silver.orders", "gold.daily_revenue")
 

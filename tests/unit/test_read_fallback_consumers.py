@@ -147,6 +147,9 @@ NON_HTTP_CONSUMERS = {
     "core/scheduler.py:BackgroundScheduler._run_seasonality_calc",
     # The weekly traffic message, through the tab's router.
     "core/scheduler.py:BackgroundScheduler._run_traffic_report",
+    # The month's goal freeze (revision 0037): `generate_smart_goals` reads
+    # through `/goals`' router, every sales type's answer before any row.
+    "core/scheduler.py:BackgroundScheduler._run_month_goal_freeze",
     # Gone with step 14's S14-07: the sync and its buyers step, the search
     # index, training, the weekly sales report and the boot reached a
     # refusal only through `no_address` on a switch, and no reader asks it.
@@ -201,6 +204,8 @@ ANSWERS = {
         "core/scheduler.py:BackgroundScheduler._run_seasonality_calc:named"},
     "core/scheduler.py:BackgroundScheduler._run_traffic_report": {
         "core/scheduler.py:BackgroundScheduler._run_traffic_report:named"},
+    "core/scheduler.py:BackgroundScheduler._run_month_goal_freeze": {
+        "core/scheduler.py:BackgroundScheduler._run_month_goal_freeze:named"},
 }
 
 # The named answers step 14's S14-07 left with no refusal to answer: the

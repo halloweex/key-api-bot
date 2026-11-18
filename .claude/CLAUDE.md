@@ -151,6 +151,8 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
+| `/api/goals/smart` | The month's goals — monthly, weekly, daily — for `year`/`month` (default: this Kyiv month). The automatic goal is the one frozen on the 1st once the month is frozen, else computed now; `monthly.frozenAt` says which; a goal typed on /goals overrides either — see "Revenue goals: the month's goal is frozen on the 1st" |
+| `/api/goals/forecast` | `generate_smart_goals`' whole answer for any month, through the same door: the frozen one for a frozen month (`monthly.frozenAt`), else computed now |
 | `/api/customers/sms-segments` | Campaign audience — one arm or one per value level, one or more groups ORed (`or_groups`) (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
 | `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit); `follow_up_of=X` freezes a follow-up |
@@ -295,6 +297,7 @@ meta ──── the store's own bookkeeping
 - `app.stock_movements`, `app.inventory_sku_history`, `app.sku_inventory_status`, `app.inventory_history` - The stock history KeyCRM does not keep
 - `app.manager_classifications` - Who sells retail, wholesale or internally, as of when; only a human knows
 - `app.revenue_predictions`, `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`, `app.revenue_goals` - The forecast and the goals
+- `app.frozen_month_goals` - Each month's automatic goal per sales type, frozen once on its 1st (revision 0037): what `/api/goals/smart` and `/api/goals/forecast` answer for that month. One writer, the job `month_goal_freeze`; insert-only, ~72 rows a year (see "Revenue goals: the month's goal is frozen on the 1st")
 - `app.data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
 - `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items, so a repair job cannot loop on them forever. The two kinds are skipped differently (`core/pg_orders_read.py`): an id the gap scan found absent upstream is never asked for again (`order_id_gaps` excludes every ledgered id, whatever its age), while an order KeyCRM served without line items is re-fetched by the half-written repair once its `checked_at` is 30 days old (`MISS_RETRY_DAYS`), and each such re-fetch that comes back empty restamps it
 - `app.weekly_report_sends` / `app.traffic_report_sends` - one row per week delivered; what keeps a daily job to one message a week and makes a missed Monday recoverable
@@ -430,34 +433,39 @@ first and the revert after, for the record (below).
 
 From revision 0036 on, a rollback to any image that requires an earlier
 revision than the database is at — `rollback-step14`, an `:s14-NN`, the
-image just before 0036's own PR, any earlier version by number —
+image just before 0036's or 0037's own PR, any earlier version by number —
 moves `meta.alembic_version` down first, with a migrate image that knows the
 revision the database is at. Alembic steps down from a revision only through
 that revision's own module, and an older migrate image has none.
 
 1. **The stamp, while `keycrm-migrate:latest` is still the image at the
-   database's revision** — before any retag or pull:
-   `docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains`.
-   It moves the stamp and executes nothing else: the eleven tables of the
-   analysts' captures and their rows stay (owner decision D2), and the
-   captures stop while the older image runs.
+   database's revision** — before any retag or pull, down to the revision
+   the target requires:
+   `docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains`
+   for `rollback-step14` and every image before 0036,
+   `… alembic downgrade 0036_analytics_captures` for an image between 0036's
+   PR and 0037's. Both move the stamp and execute nothing else: the eleven
+   tables of the analysts' captures (owner decision D2), the frozen month
+   goals (0037) and their rows stay; the captures and the goal freeze stop
+   while the older image runs, and it computes every month's goal live.
 2. **The images, at once**: tag the target as `latest` for web, bot and
    migrate — `…:rollback-step14`, or `docker pull …/keycrm-<image>:<VERSION>`
    for an earlier version by number, which every deploy pushes beside
    `latest` — and `docker compose up -d` without `pull`. The older migrate's
    `upgrade head` is then a no-op, and web and bot start.
 3. **A `git revert` only after**, if one is wanted for the record: its deploy
-   meets a database at 0035, and its migrate is a no-op.
+   meets a database at the revision it requires, and its migrate is a no-op.
 
 **Skipped, the stamp move stops the running web and bot — they do not merely
 stay old.** A retag's `up -d`, or a revert's deploy, recreates them, and they
 wait for `migrate` to complete successfully; the older migrate image's own
-`alembic upgrade head` exits 255 ("Can't locate revision identified by
-'0036_analytics_captures'"), so web and bot are left `Created`, not running
+`alembic upgrade head` exits 255 ("Can't locate revision identified by" the
+database's revision, `'0036_analytics_captures'` or `'0037_frozen_month_goals'`),
+so web and bot are left `Created`, not running
 (measured with Compose 2.23). A revert deployed first is the same outage for
 the whole CI build and deploy, and by then `latest` is the older migrate
 image, which cannot step down. The other order costs seconds: between steps
-1 and 2 the running 0036 web refuses every Postgres read (`require_revision`
+1 and 2 the running web refuses every Postgres read (`require_revision`
 asks the stamp on each, uncached: a 401 for every session but a hardcoded
 admin's, a 503 on every tab), so the two go together, in one sitting.
 
@@ -467,9 +475,9 @@ Docker Hub under its version (`deploy.yml` pushes `:<VERSION>` beside
 Bring it back as `latest` for migrate alone, step down, and go on with step 2:
 
 ```bash
-docker pull …/keycrm-migrate:<the version at 0036>
-docker tag …/keycrm-migrate:<the version at 0036> …/keycrm-migrate:latest
-docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains
+docker pull …/keycrm-migrate:<the version at the database's revision>
+docker tag …/keycrm-migrate:<that version> …/keycrm-migrate:latest
+docker compose run --rm --no-deps migrate alembic downgrade <the target's revision>
 # then step 2: tag the target as latest for web, bot and migrate; up -d
 ```
 
@@ -728,6 +736,81 @@ What does exist:
 - Graceful degradation: chart works normally if model unavailable
 - Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches; the 31-feature model of the replaced procedure is rejected that way, and web's startup then trains the current one in the background (`web/main.py`)
 - **Known limitations**: a shift of the month's level (July 2026, ₴4.33M → ₴3.25M, was an acquisition drop) is not visible on the 1st in any data the shop records; promotions are not known in advance, and Black Friday has one past instance to learn from
+
+### Revenue goals: the month's goal is frozen on the 1st
+
+The dashboard's monthly goal (`MilestoneProgress`, `GET /api/goals/smart`) is
+the smart goal, `GoalsMixin.generate_smart_goals`: a blend of last year's
+month times growth, the last three complete months times seasonality, and the
+ML term — the month's actual revenue so far plus the stored forecast of the
+rest. It was computed on every request, and the ML term (30–40 % of the
+blend) drifts toward the actual as the month goes: the goal moved within a
+month by a median 4–6 %, ₴0.5M in July 2026. A past month's goal moved after
+the fact as well, because "the last three complete months" are counted from
+today and the ML term is 0 for a month that has ended. **The owner's decision
+of 2026-11-18: the month's automatic goal is frozen on the 1st** (revision
+0037).
+
+- **What is kept**: `app.frozen_month_goals`, a row per (year, month,
+  sales_type) — `generate_smart_goals`' answer whole, as JSONB, and
+  `frozen_at`. Every sales type the routes accept (`core.goal_freeze.SALES_TYPES`:
+  `KNOWN_SALES_TYPES` and `all`, six today), so ~72 rows a year of ~1.5 KB.
+  Append-only, and the bound is that arithmetic: no code deletes a row.
+- **One writer**, `core/goal_freeze.py`, reached from the job
+  `month_goal_freeze` alone (at half past the hours of `goal_freeze.RUN_HOURS`,
+  00:30 Kyiv the first, clear of the windows the schedule keeps, and 4 min
+  after a start; a frozen month costs a run one SELECT).
+  `ON CONFLICT DO NOTHING`: the first freeze of a month wins, so a second run,
+  a manual trigger or two at once cannot move a frozen goal. Every sales
+  type's answer is computed before any row is written, and the month's rows
+  are written in one transaction; a refused read defers the whole month (DN-20c:
+  `skipped`, `read_unavailable` in `/api/jobs`), and the next run asks again.
+  Never before 00:30 on the 1st: the month that has just ended is one of "the
+  last three complete months", and its last orders reach Silver minutes after
+  midnight.
+- **The reader** is `GoalsMixin.smart_goals_of_month`, one door for
+  `/api/goals/smart` and `/api/goals/forecast`, so a month cannot have two
+  goals: the frozen answer for a frozen month, `generate_smart_goals` computed
+  now for any other — a month before the deploy, a future month, one whose
+  freeze has not run. `monthly.frozenAt` says which (ISO in Kyiv, null when
+  live); daily and weekly come from the same answer. A goal typed on /goals
+  (`app.revenue_goals.is_custom`) overrides either, as before. **A GET never
+  freezes** (OD-14 (i)): a month nobody froze is read live and stays
+  unfrozen. The GET sweep (`tests/unit/test_goals_read_paths_do_not_write.py`)
+  replaces the writer with a recorder that raises, and
+  `tests/unit/test_goal_freeze.py` walks the repository for the one writer.
+- **A goal resting on part of a forecast waits.** The ML signal sums whatever
+  rows of the stored forecast there are, and each training stores 60 days
+  ahead, so on a 1st with no training for 30 days and more the signal, and
+  the goal, come out too low — 4.0M where it was 4.2M with 24 days of 31 on
+  the review's fixture. Live, the next training corrected it; frozen, it
+  would stand all month. An answer whose signal rests on fewer days than are
+  left (`GoalsMixin.forecast_days_stored`, the signal's own table, filter and
+  window) is not kept: that sales type is read live, the job's result names
+  it under `waiting`, and the first run after a training that reaches the
+  month's end freezes it. A forecast with no row at all is absent, not short
+  — the blend gives its weight to the other signals — and is kept.
+- **November 2026 is the deploy day's**, not the 1st's: the start after the
+  deploy froze the month in progress; months before it stay live. A month
+  whose 1st the process was down for is frozen on the day it runs again, its
+  ML term that day's.
+- **A row keeps the shape of the code that froze it.** A reader that needs a
+  key added to `generate_smart_goals` later must default it for older rows:
+  `tests/unit/test_goal_freeze.py` reads a row frozen by revision 0037's code,
+  a literal that is never edited. JSON has no integer keys, so the week maps
+  come back keyed by integers (`goal_freeze.decode`).
+- **Not watched**: a month never frozen — the job failing every day — is read
+  live, which is the behaviour before 0037, and nothing files it; the job's
+  failures are in `/api/jobs` and the web log. No code deletes a row:
+  re-freezing a month after a data incident on its 1st is a person's
+  `DELETE` of that month's rows (as `ks_app`) and a trigger of the job
+  (`POST /api/jobs/month_goal_freeze/trigger`), which freezes that day's
+  answer.
+- **Rolling back below 0037** moves the stamp first (`alembic downgrade
+  0036_analytics_captures` with the 0037 migrate image, "Rolling back below a
+  revision"). The table and its rows stay; an image at 0036 computes every
+  goal live while it runs, and the roll forward serves the frozen months
+  again.
 
 ### Telegram Bot
 - Sales summary reports by source
@@ -1517,6 +1600,7 @@ whole reason the group is read from the source now.
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `ga4_capture` | daily 02:40 | keep each closed GA4 day, ISO week and month in `app.ga4_funnel` before the 14-month horizon drops it, oldest first, at most 24 periods a run and an hour; stands down without a GA4 key or under `KS_ANALYTICS_CAPTURES=off` (revision 0036) |
+| `month_goal_freeze` | hourly at :30 outside the windows kept clear (`goal_freeze.RUN_HOURS`, 00:30 first), and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st, one SELECT once the month is frozen, a refused read defers the whole month to the next run, an answer whose ML signal rests on part of a forecast waits (`waiting`) and is read live; stands down without `KS_PG_DSN` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
@@ -2429,7 +2513,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0036_analytics_captures` today, and every
+mismatch, ahead or behind. It is `0037_frozen_month_goals` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
@@ -4042,4 +4126,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-15 (the offline store, source 7: its own sales type)*
+*Last updated: 2026-11-18 (revision 0037: the month's goal is frozen on the 1st)*
