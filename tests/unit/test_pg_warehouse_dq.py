@@ -56,7 +56,9 @@ class TestWhatMovedFromTheScan:
 
     def test_the_known_ids(self):
         assert sorted(twins.KNOWN_STATUS_IDS) == [1, 2, 3, 4, 8, 9, 10, 11, 12, 15, 18, 19, 20, 21, 22, 23, 24]
-        assert sorted(twins.KNOWN_SOURCE_IDS) == [1, 2, 3, 4, 5]
+        # 7, the offline store, since the owner's decision of 2026-11-15;
+        # read from `SYNCED_SOURCE_IDS` since then, a literal before.
+        assert sorted(twins.KNOWN_SOURCE_IDS) == [1, 2, 3, 4, 5, 7]
 
     def test_the_silver_row_comparison(self):
         assert [list(c) for c in twins._SILVER_ROW_COLUMNS] == [['source_id', 0], ['status_id', 0], ['grand_total', 0.01], ['ordered_at', 0], ['buyer_id', 0], ['manager_id', 0], ['order_date', 0], ['is_return', 0], ['sales_type', 0], ['is_active_source', 0], ['source_name', 0], ['is_new_customer', 0], ['buyer_first_order_date', 0], ['promocode', 0]]
@@ -64,11 +66,24 @@ class TestWhatMovedFromTheScan:
                 for c, t in twins._SILVER_ROW_COLUMNS} == {'source_id': 'r.source_id IS DISTINCT FROM s.source_id', 'status_id': 'r.status_id IS DISTINCT FROM s.status_id', 'grand_total': 'ABS(COALESCE(r.grand_total, 0) - COALESCE(s.grand_total, 0)) > 0.01', 'ordered_at': 'r.ordered_at IS DISTINCT FROM s.ordered_at', 'buyer_id': 'r.buyer_id IS DISTINCT FROM s.buyer_id', 'manager_id': 'r.manager_id IS DISTINCT FROM s.manager_id', 'order_date': 'r.order_date IS DISTINCT FROM s.order_date', 'is_return': 'r.is_return IS DISTINCT FROM s.is_return', 'sales_type': 'r.sales_type IS DISTINCT FROM s.sales_type', 'is_active_source': 'r.is_active_source IS DISTINCT FROM s.is_active_source', 'source_name': 'r.source_name IS DISTINCT FROM s.source_name', 'is_new_customer': 'r.is_new_customer IS DISTINCT FROM s.is_new_customer', 'buyer_first_order_date': 'r.buyer_first_order_date IS DISTINCT FROM s.buyer_first_order_date', 'promocode': 'r.promocode IS DISTINCT FROM s.promocode'}
 
     def test_the_row_values_statement_renders_as_before(self):
+        """Re-recorded under the owner's decision of 2026-11-14 (a sale to
+        the company's own legal entity is not revenue): the recompute carries
+        Silver's rule, and `is_active_source` gained its buyer half — the 70
+        characters of `\\n` + 16 spaces + `AND (o.buyer_id IS NULL OR
+        o.buyer_id NOT IN (17358))` and nothing else; it was 8703,
+        da06407885f9234570f2654aac326bb1fa558e9e7c0dc509f71cc47300fef2c2.
+
+        Re-recorded again under the owner's decision of 2026-11-15 (the
+        offline store is a category of its own): 96 characters, the CASE's
+        `WHEN o.source_id = 7 THEN 'offline'` line (48), `, 7` in the
+        revenue list (3) and `source_name`'s `WHEN 7 THEN 'Офлайн-магазин'`
+        line (45), and nothing else; it was 8773,
+        c5ab88916e93b71c7d20835d7dc72a1031878bfed9d47e39682a5b92bb17bf64."""
         import hashlib
 
         sql = twins._row_values_sql()
         assert (len(sql), hashlib.sha256(sql.encode()).hexdigest()) == (
-            8703, "da06407885f9234570f2654aac326bb1fa558e9e7c0dc509f71cc47300fef2c2")
+            8869, "e9e3f8e3ee7a717e1ae48f07dd5fac6f84e6e16ff3604e9af055f1767a892643")
 
     def test_the_thresholds(self):
         """The attribution check's defaults and the landing check's
@@ -82,7 +97,7 @@ class TestWhatMovedFromTheScan:
         import hashlib
 
         assert {name: hashlib.sha256(getattr(twins, name).encode()).hexdigest()
-                for name in ['_ATTRIBUTION_SQL', '_HEADERS_SQL', '_JOURNAL_SQL', '_LINE_ITEMS_SQL', '_MISSING_SQL', '_ORPHAN_ITEMS_SQL', '_ORPHAN_SQL', '_STATUS_GROUP_SQL', '_WATERMARK_SQL', '_WITHOUT_ITEMS_SQL']} == {'_WATERMARK_SQL': 'cd8f2d71adf21772800f97b245d093cfdf6d2328f1ead06877cd1c765f7a5127', '_MISSING_SQL': '862849ffecc029a736957b1c2913721254f6204b0b6bb31c3a160b590a5c525b', '_ORPHAN_SQL': '81219f8e958028c273e112c29731a9e484ab71ed43e3a409ffde276ac6fdee1f', '_ATTRIBUTION_SQL': '7deeead8c05b11452b806a1334b23c176649fc894c5a42a419555c97f06d2797', '_LINE_ITEMS_SQL': 'b577ed2aa5d626d9c8ecc2c3908f77f9aa10680bdeef3c23eae1f16d069caf8f', '_WITHOUT_ITEMS_SQL': '7802387b06c77df69f8c042e9b05d759991c41fcd04fa8783dd5f54e47df3a56', '_ORPHAN_ITEMS_SQL': 'ece2ec904b132fa6f9c2964afa2ea94fc1a316dd9425a03d21c326a77484a26e', '_HEADERS_SQL': '4d305a09201bcfc59d37a7757eeb1d70e96879dda250f352cb8f8924fb24de4c', '_STATUS_GROUP_SQL': 'efb9bb6e39f528b49ca20f4b3f2894c764ef2cd840b5c771cf8061ff92080091', '_JOURNAL_SQL': 'a015f77b56b73bad9248f1a4077b5575f15b8bbc1b22bafc6d2218765b2f182b'}
+                for name in ['_ATTRIBUTION_SQL', '_HEADERS_SQL', '_JOURNAL_SQL', '_LINE_ITEMS_SQL', '_MISSING_SQL', '_ORPHAN_ITEMS_SQL', '_ORPHAN_SQL', '_STATUS_GROUP_SQL', '_WATERMARK_SQL', '_WITHOUT_ITEMS_SQL']} == {'_WATERMARK_SQL': 'cd8f2d71adf21772800f97b245d093cfdf6d2328f1ead06877cd1c765f7a5127', '_MISSING_SQL': '862849ffecc029a736957b1c2913721254f6204b0b6bb31c3a160b590a5c525b', '_ORPHAN_SQL': '81219f8e958028c273e112c29731a9e484ab71ed43e3a409ffde276ac6fdee1f', '_ATTRIBUTION_SQL': '7deeead8c05b11452b806a1334b23c176649fc894c5a42a419555c97f06d2797', '_LINE_ITEMS_SQL': 'db37046a8bdff79e345f4aef85671007096552d673f4c1a94eb02ddae60c5beb', '_WITHOUT_ITEMS_SQL': '7802387b06c77df69f8c042e9b05d759991c41fcd04fa8783dd5f54e47df3a56', '_ORPHAN_ITEMS_SQL': 'ece2ec904b132fa6f9c2964afa2ea94fc1a316dd9425a03d21c326a77484a26e', '_HEADERS_SQL': '4d305a09201bcfc59d37a7757eeb1d70e96879dda250f352cb8f8924fb24de4c', '_STATUS_GROUP_SQL': 'efb9bb6e39f528b49ca20f4b3f2894c764ef2cd840b5c771cf8061ff92080091', '_JOURNAL_SQL': 'a015f77b56b73bad9248f1a4077b5575f15b8bbc1b22bafc6d2218765b2f182b'}
 
     def test_nothing_is_left_behind_in_the_scan(self):
         from core import data_quality as dq
@@ -159,19 +174,87 @@ class TestAttribution:
 
 class TestLineItems:
     LI = LineItems(5, 500.0, (1,), 7, 700.0, (2,))
+    # 2026-11-14 on production, by sales type (the retail and exhibition
+    # amounts are this test's: production measured their sum).
+    NOV_14 = LineItems(
+        461, 1_023_472.67, (9, 8), 0, 0.0, (),
+        headline_by_type=(("b2b", 350, 809_553.00), ("exhibition", 5, 12_000.00),
+                          ("retail", 106, 201_919.67)))
 
     def test_the_twins_file_both(self):
         issues = twins._line_items_check(self.LI)
         by = {i.check_name: i for i in issues}
         assert set(by) == {"pg_headline_vs_line_items", "pg_goods_shipped_without_sale"}
-        assert by["pg_headline_vs_line_items"].severity == Severity.WARN
+        assert by["pg_headline_vs_line_items"].severity == Severity.INFO
         assert by["pg_goods_shipped_without_sale"].severity == Severity.INFO
+
+    def test_the_headline_is_info_under_its_own_name(self):
+        """The owner's decision of 2026-11-14 explains every one of these
+        orders, so it is content in the digest, never a reason to send one.
+        Kills: the WARN back (a month of digests sent for nothing), or the
+        name changed — rule 15, and the Gate and the ledger key on it."""
+        (issue,) = twins._line_items_check(self.NOV_14)
+        assert (issue.check_name, issue.severity, issue.count) == (
+            "pg_headline_vs_line_items", Severity.INFO, 461)
+
+    def test_the_description_says_what_each_part_is(self):
+        """Certificate redemptions (retail and exhibition) and test shipments
+        to b2b partners, each with its count and amount, and the decision
+        that says so. Kills: a finding that states a disagreement and not
+        what it is — which is what kept it a WARN nobody could act on."""
+        (issue,) = twins._line_items_check(self.NOV_14)
+        text = issue.description
+        assert "461 order(s) have grand_total = 0 but 1,023,472.67" in text
+        assert "owner's decision of 2026-11-14" in text
+        assert ("111 worth 213,919.67 (exhibition 5, retail 106) are certificate "
+                "redemptions") in text
+        assert "350 worth 809,553.00 (b2b) are test shipments to b2b partners" in text
+        assert "VALUE_MISMATCH" in text
+
+    def test_a_sales_type_no_decision_covers_is_named(self):
+        """Silver's CASE yields none today; if it ever does, the finding says
+        so instead of filing it under certificates. Kills: an unknown type
+        folded silently into an explained part."""
+        li = LineItems(3, 30.0, (), 0, 0.0, (),
+                       headline_by_type=(("retail", 2, 20.0), ("wholesale2", 1, 10.0)))
+        (issue,) = twins._line_items_check(li)
+        assert "1 worth 10.00 (wholesale2) are of a sales type no decision covers" in (
+            issue.description)
+        assert "2 worth 20.00 (retail) are certificate redemptions" in issue.description
+
+    def test_the_kinds_are_the_decisions(self):
+        assert twins.ZERO_TOTAL_KINDS == {
+            "retail": twins.CERTIFICATE_REDEMPTION,
+            "exhibition": twins.CERTIFICATE_REDEMPTION,
+            "b2b": twins.PARTNER_TEST_SHIPMENT,
+        }
+
+    def test_the_rows_fold_into_the_two_findings(self):
+        """One row per sales type out of `_LINE_ITEMS_SQL`: internal is the
+        goods finding, the rest the headline, whose sample is the ten largest
+        across its types in the statement's own order. Kills: a type's rows
+        lost, internal counted in the headline, or the sample taken per type."""
+        rows = [
+            {"sales_type": "internal", "n": 7, "amount": 700.0,
+             "sample": [2], "sample_amounts": [700.0]},
+            {"sales_type": "retail", "n": 4, "amount": 40.0,
+             "sample": [11, 10] + list(range(100, 108)),
+             "sample_amounts": [9.0, 9.0] + [1.0] * 8},
+            {"sales_type": "b2b", "n": 2, "amount": 60.0,
+             "sample": [5, 12], "sample_amounts": [50.0, 9.0]},
+        ]
+        li = twins.line_items_from_rows(rows)
+        assert (li.headline, li.headline_amount, li.goods, li.goods_amount,
+                li.goods_sample) == (6, 100.0, 7, 700.0, (2,))
+        assert li.headline_sample == (5, 12, 11, 10, 107, 106, 105, 104, 103, 102)
+        assert li.headline_by_type == (("b2b", 2, 60.0), ("retail", 4, 40.0))
+        assert twins.line_items_from_rows([]) == LineItems(0, 0.0, (), 0, 0.0, ())
 
 
 def _facts(**groups):
     base = dict(silver_arc=ARC_CLEAN, attribution=ATT_OK, line_items=LI_NONE,
                 derivation_signal=JOURNAL_QUIET, order_landing=OrderLanding(),
-                silver_row_values=RV_CLEAN)
+                own_entity=twins.OwnEntity(), silver_row_values=RV_CLEAN)
     base.update(groups)
     return Facts(whole=None, watermark=WM, **base)
 

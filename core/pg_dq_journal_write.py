@@ -367,6 +367,18 @@ async def last_success_ages(conn, layers: Sequence[str]) -> Dict[str, Dict[str, 
     return success_ages([_local(r) for r in rows], layers)
 
 
+async def findings_since(conn, layer: str, names: Sequence[str],
+                         lookback_s: float) -> List[Tuple[datetime, Tuple[str, ...]]]:
+    """`layer`'s successful runs started in the last `lookback_s` seconds,
+    newest first, each with which of `names` it filed. The start is aware and
+    left in UTC: it is measured against the server's `now()`, not printed."""
+    from core.data_quality import RECENT_FINDINGS_SQL, journal_sql
+
+    rows = await conn.fetch(journal_sql(RECENT_FINDINGS_SQL, "postgres"),
+                            list(names), layer, float(lookback_s))
+    return [(r["started_at"], tuple(r["names"] or ())) for r in rows]
+
+
 async def digest_marker(conn) -> Optional[str]:
     """The beat as Postgres holds it, or None while the key is absent."""
     return await conn.fetchval(

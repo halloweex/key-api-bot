@@ -25,10 +25,17 @@ export function FilterBar() {
         <PeriodFilter />
       </div>
 
-      {/* Other filters - 2-column grid on mobile, flex on larger screens */}
+      {/* Other filters - 2-column grid on mobile, flex on larger screens.
+          The sales types take a row of their own on a phone: six of them do
+          not fit half of one (408 px against 168 in Ukrainian at 375 px), and
+          a cell that small let them run over the source select beside it. */}
       {others && (
         <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
-          {applies.has('salesType') && <SalesTypeFilter />}
+          {applies.has('salesType') && (
+            <div className="col-span-2 min-w-0 sm:col-auto">
+              <SalesTypeFilter />
+            </div>
+          )}
           {applies.has('sourceId') && <SourceFilter />}
           {applies.has('categoryId') && <CategoryFilter />}
           {applies.has('brand') && <BrandFilter />}

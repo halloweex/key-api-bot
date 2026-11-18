@@ -22,7 +22,7 @@ Postgres keys on (date, sales_type, source_id) with `source_id IS NULL` as
 the all-channels roll-up. So:
 
     all sources               → roll-up rows (source_id IS NULL)
-    source_id in {1, 2, 4}    → the fine rows — including per-source returns,
+    source_id in {1, 2, 4, 7} → the fine rows — including per-source returns,
                                 which DuckDB had to fetch from Silver because
                                 its Gold never grew return columns per channel
 
@@ -30,7 +30,9 @@ The callers' routing still mirrors DuckDB's own: sources DuckDB's Gold could
 not answer (3, 5) never reach these readers. Postgres *could* answer them
 from its fine rows — deliberately not done: parity first (`/api/summary`
 answers those two with zeros, the owner's decision 5 for step 14), better
-answers as their own change with their own verification.
+answers as their own change with their own verification. The offline store
+(7, the owner's decision of 2026-11-15) had no DuckDB answer to keep, and is
+read from the fine rows from its first day.
 """
 from __future__ import annotations
 

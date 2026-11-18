@@ -126,7 +126,7 @@ class TestTheFallbackIsTheTabs:
         ).fetchone()
         return tuple(row)
 
-    @pytest.mark.parametrize("source_id", [1, 2, 3, 4, 5, None])
+    @pytest.mark.parametrize("source_id", [1, 2, 3, 4, 5, 7, None])
     def test_no_row_is_placed_where_the_tab_places_it(self, source_id):
         assert fallback_verdict(source_id) == self._sql(source_id)
         assert shown_verdict(None, source_id) == self._sql(source_id)

@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.352
+
+- forecast: train the revenue LightGBM with the fixed procedure
+
+
+## 3.0.351
+
+- docs(traffic): what the r2 reclassify would move, measured on production
+- fix(traffic): the Meta cookies' labels are rule version r2
+- fix(traffic): read the Meta cookies' labels without the underscore
+
+
+## 3.0.350
+
+- fix(offline): the doughnut by source draws the store a slice; review follow-ups
+- feat(offline): the offline store is a category of its own (source 7, sales type offline)
+
+
+## 3.0.349
+
+- docs: the zero-total split after the own entity left revenue (458 orders, 347 b2b)
+- fix(own-entity): the review's findings — invisible spaces, a locale guard, a hermetic ClickHouse test
+- feat(revenue): a sale to our own legal entity is revenue nowhere
+
+
+## 3.0.348
+
+- docs(dq): name ga4_backlog_at_risk among the capture WARNs; weeks and months can move a late day's turn
+- fix(dq): the digest stops being news for three findings that ask nothing of anyone
+
+
 ## 3.0.347
 
 - feat(captures): revision 0036 keeps seven histories Postgres overwrites (analysts' warehouse, phase 1)

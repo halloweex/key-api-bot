@@ -12,12 +12,14 @@ import { useReportTopProducts, useReportAllProducts } from '../hooks/useApi'
 import type { ReportTopProductsResponse } from '../types/api'
 import { ProductsTable } from './ProductsTable'
 import { useDownloadCsv } from './useDownloadCsv'
+import { OFFLINE_STORE_SOURCE_ID, sourceName } from '../utils/sources'
 
 const SOURCE_FILTERS = [
   { id: null, label: 'All' },
   { id: 1, label: 'Instagram' },
   { id: 4, label: 'Shopify' },
   { id: 2, label: 'Telegram' },
+  { id: OFFLINE_STORE_SOURCE_ID, label: 'Офлайн-магазин' },
 ] as const
 
 const LIMIT_OPTIONS = [10, 25, 50, 0] as const
@@ -75,7 +77,7 @@ export const TopProductsTab = memo(function TopProductsTab() {
                     active={sourceFilter === sf.id}
                     onClick={() => setSourceFilter(sf.id)}
                   >
-                    {sf.label}
+                    {sf.id === null ? sf.label : sourceName(sf.id, sf.label, t)}
                   </FilterChip>
                 ))}
               </Wrapper>

@@ -29,7 +29,7 @@ ONE STORE SINCE STEP 14'S S14-10
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,16 @@ async def digest_inputs(
     async with chain.reading() as conn:
         sections = await _sections(_PgReader(conn), layers, now, last_sent_at)
     return last_sent_at, sections
+
+
+async def recent_findings(conn, *, layer: str, names: Sequence[str],
+                          lookback: timedelta) -> List[Tuple[datetime, Tuple[str, ...]]]:
+    """`layer`'s successful runs started inside `lookback`, newest first, each
+    with which of `names` it filed — read on the caller's `conn`, inside its
+    transaction (`analytics_captures.read_facts` reads it beside the stamps).
+    A Postgres error raises into the caller."""
+    return await _chain().findings_since(conn, layer, tuple(names),
+                                         lookback.total_seconds())
 
 
 # Which layers `/api/health/data-quality` shows their diffs for, not their

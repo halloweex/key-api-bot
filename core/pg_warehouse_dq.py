@@ -151,6 +151,30 @@ in which every group here and the chain invariants could look at nothing is
 journalled failed, so the layer's age stops and the canary pages
 (`looked_at_nothing`; the owner's decision O10 (a)+(c), 2026-11-11 — OD-05
 had deferred it).
+
+The seventh group, **`own_entity`**, watches the owner's decision of
+2026-11-14: a sale to the company's own legal entity is revenue nowhere
+(`core.duckdb_constants.OWN_ENTITY_BUYER_IDS`, carried by Silver's
+`is_active_source`). Two findings, neither a page:
+
+- **`pg_own_entity_orders`, INFO** — the orders the rule keeps out of
+  revenue, with what they were billed and the goods they carried, by sales
+  type: a number rather than a silence, as `pg_goods_shipped_without_sale`
+  is. Leaving them out also takes them out of the line-item twins, which
+  read `is_active_source` too; this is where they are counted instead. Stored
+  Silver still counting one of them is said here and judged by
+  `pg_silver_row_values`, which holds it until this process has rebuilt.
+- **`pg_own_entity_unlisted`, WARN** — a buyer card whose name reads like
+  the entity's and whose id is in neither `OWN_ENTITY_BUYER_IDS` nor
+  `NOT_OWN_ENTITY_BUYER_IDS`. The rule knows ids, so a second card for the
+  entity — KeyCRM can open one with a new order — would make its orders
+  revenue again with nothing else to say so. The name
+  is matched inside Postgres and never leaves it: the finding names card ids
+  and their money, no name. The database's `LOWER` and `~*` do not fold
+  Cyrillic here, so the name is folded by `translate()` over an explicit
+  table (`OWN_ENTITY_FOLD_*`), which `own_entity_name_matches` applies in
+  Python too, and a test holds the two to the same answer over every
+  spelling the patterns claim.
 """
 from __future__ import annotations
 
@@ -162,6 +186,8 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union, cast
+
+from core.duckdb_constants import SYNCED_SOURCE_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -241,8 +267,12 @@ KNOWN_STATUS_IDS = frozenset({
 })
 
 # Known sources (active + deprecated). New source IDs from KeyCRM should
-# fire an integrity warning so we route them explicitly.
-KNOWN_SOURCE_IDS = frozenset({1, 2, 3, 4, 5})
+# fire an integrity warning so we route them explicitly — and routing one is
+# adding it to `SYNCED_SOURCE_IDS`, which this reads, as the reconciliation's
+# `ACTIVE_SOURCES` does. A literal of its own until the offline store (7, the
+# owner's decision of 2026-11-15): `pg_value_domain_orders_source_id` stood as
+# a WARN from its first order until a second list was edited by hand.
+KNOWN_SOURCE_IDS = frozenset(SYNCED_SOURCE_IDS)
 
 
 # Every column a Silver row carries, and how closely a recomputed value has to
@@ -399,6 +429,9 @@ class LineItems:
     goods: int
     goods_amount: float
     goods_sample: Tuple[int, ...]
+    # The headline's orders by sales type, `(sales_type, orders, amount)`,
+    # sorted by sales type: what `_line_items_check` explains them by.
+    headline_by_type: Tuple[Tuple[str, int, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -483,8 +516,24 @@ class OrderLanding:
     status_groups: Tuple[Tuple[int, int, int, float], ...] = ()
 
 
+@dataclass(frozen=True)
+class OwnEntity:
+    """What the `own_entity` group reads (the owner's decision of 2026-11-14).
+
+    `orders` is one `(order_id, sales_type, grand_total, goods, counted)` per
+    order of a listed card that would be revenue but for the rule — not a
+    return, on a revenue source — where `goods` is its line items' value and
+    `counted` says stored Silver still counts it (a rebuild under the rule is
+    owed). `unlisted` is one `(buyer_id, orders, revenue)` per card whose
+    name reads like the entity's and whose id neither list holds, with what
+    of it Silver counts as revenue, largest first.
+    """
+    orders: Tuple[Tuple[int, str, float, float, bool], ...] = ()
+    unlisted: Tuple[Tuple[int, int, float], ...] = ()
+
+
 Group = Union[SilverArc, Attribution, LineItems, RowValues, DerivationJournal,
-              OrderLanding, Unwatched, None]
+              OrderLanding, OwnEntity, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -496,6 +545,7 @@ class Facts:
     line_items: Group = None
     derivation_signal: Group = None
     order_landing: Group = None
+    own_entity: Group = None
     silver_row_values: Group = None
 
     @classmethod
@@ -507,7 +557,7 @@ class Facts:
 # enough to spend the hold budget, and a budget spent on it should blind it
 # alone rather than the cheap groups queued behind it.
 GROUPS = ("silver_arc", "attribution", "line_items", "derivation_signal",
-          "order_landing", "silver_row_values")
+          "order_landing", "own_entity", "silver_row_values")
 
 # The order-landing twins (DN-23), in the order they file. Until step 14's
 # S14-14 each was paired with the DuckDB finding it stood in for, and
@@ -530,6 +580,7 @@ GUARD_CONDITIONS: Dict[str, Tuple[str, ...]] = {
     "line_items": ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale"),
     "derivation_signal": ("pg_signal_missed",),
     "order_landing": LANDING_TWINS,
+    "own_entity": ("pg_own_entity_orders", "pg_own_entity_unlisted"),
     "silver_row_values": ("pg_silver_row_values",),
 }
 UNWATCHED_NAMES: Dict[str, str] = {
@@ -538,6 +589,7 @@ UNWATCHED_NAMES: Dict[str, str] = {
     "line_items": "pg_line_items_unwatched",
     "derivation_signal": "pg_derivation_signal_unwatched",
     "order_landing": "pg_order_landing_unwatched",
+    "own_entity": "pg_own_entity_unwatched",
     "silver_row_values": "pg_silver_row_values_unwatched",
 }
 WHOLE_UNWATCHED = "pg_warehouse_unwatched"
@@ -593,15 +645,20 @@ WHERE s.source_id = $4 AND NOT s.is_return AND s.is_active_source
   AND s.order_date >= $1::date - $3::int AND s.order_date < $1::date
 """
 
+# By sales type, because the owner's decision of 2026-11-14 explains the
+# headline's orders by it (`_line_items_check`). The sample's amounts come back
+# beside its ids so the reader can merge the types' samples in the order each
+# was taken in: the largest first, the newest id on a tie.
 _LINE_ITEMS_SQL = """
 WITH li AS (
     SELECT order_id, SUM(price_sold * quantity) AS amount
     FROM bronze.order_products GROUP BY order_id
 )
-SELECT (s.sales_type = 'internal') AS internal,
+SELECT s.sales_type,
        count(*) AS n,
        COALESCE(SUM(li.amount), 0) AS amount,
-       (array_agg(s.id ORDER BY li.amount DESC, s.id DESC))[1:10] AS sample
+       (array_agg(s.id ORDER BY li.amount DESC, s.id DESC))[1:10] AS sample,
+       (array_agg(li.amount ORDER BY li.amount DESC, s.id DESC))[1:10] AS sample_amounts
 FROM silver.orders s
 JOIN li ON li.order_id = s.id
 WHERE NOT s.is_return AND s.is_active_source
@@ -684,6 +741,86 @@ WHERE layer = $1 AND error IS NULL
                        WHERE layer = $1 AND error IS NULL AND started_at < $2), 0)
 ORDER BY id
 """
+
+
+# ── The company's own legal entity (the owner's decision of 2026-11-14) ──
+#
+# Every order of a listed card that would be revenue but for the rule — not
+# a return, on a revenue source — with its goods and whether stored Silver
+# still counts it. $1 the listed ids, $2 the revenue sources.
+_OWN_ENTITY_ORDERS_SQL = """
+SELECT s.id, s.sales_type, s.grand_total, s.is_active_source AS counted,
+       (SELECT COALESCE(SUM(p.price_sold * p.quantity), 0)
+          FROM bronze.order_products p WHERE p.order_id = s.id) AS goods
+FROM silver.orders s
+WHERE s.buyer_id = ANY($1::int[])
+  AND NOT s.is_return
+  AND s.source_id = ANY($2::int[])
+ORDER BY s.grand_total DESC, s.id DESC
+"""
+
+# Cards whose name, folded, matches the entity's, and what of them Silver
+# counts as revenue. $1 every id either list holds, $2 and $3 the fold
+# (`translate`'s from and to: what is longer in from is deleted), $4 the
+# pattern. The name is read here and nowhere else: only ids and money leave.
+_OWN_ENTITY_LOOKALIKES_SQL = """
+WITH alike AS (
+    SELECT b.id FROM bronze.buyers b
+    WHERE b.id <> ALL($1::int[])
+      AND (translate(COALESCE(b.full_name, ''), $2, $3) ~ $4
+           OR translate(COALESCE(b.company_name, ''), $2, $3) ~ $4)
+)
+SELECT a.id,
+       count(s.id) FILTER (WHERE NOT s.is_return AND s.is_active_source) AS orders,
+       COALESCE(SUM(s.grand_total) FILTER (WHERE NOT s.is_return AND s.is_active_source), 0)
+           AS revenue
+FROM alike a
+LEFT JOIN silver.orders s ON s.buyer_id = a.id
+GROUP BY a.id
+ORDER BY revenue DESC, a.id
+"""
+
+# How a card's name is read before it is matched: upper case folded to
+# lower, Cyrillic and Latin alike, and the characters a name is spelled
+# apart with dropped — so "ТОВ «Коріан Сторі»" is read "товкоріансторі" and
+# "KOREAN-STORY" "koreanstory". Character for character, by `translate()`,
+# because this database's LOWER and ~* do not fold Cyrillic (measured on
+# production, 2026-11-14); Python's `str.lower` builds the lower half, so the
+# table cannot hold a wrong pair. The characters dropped include the ones a
+# pasted name carries unseen — the typographic spaces, thin and narrow
+# no-break spaces, the zero-width characters, the byte-order mark and the
+# soft hyphen — or a second card spelled with one would read as nobody's.
+OWN_ENTITY_FOLD_UPPER = ("АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯЁЫЭЪ"
+                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+OWN_ENTITY_FOLD_LOWER = OWN_ENTITY_FOLD_UPPER.lower()
+OWN_ENTITY_FOLD_DROP = (" \t\r\n\u00a0\"'`\u00ab\u00bb\u201e\u201c\u201d\u2018\u2019\u02bc"
+                        "-\u2010\u2011\u2013\u2014\u2212_.,()/\\"
+                        "\u00ad\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+                        "\u2009\u200a\u200b\u200c\u200d\u202f\u205f\u2060\u3000\ufeff")
+
+# The entity's name, folded, in the spellings a card is written with: the
+# Ukrainian one and its Russian renderings, with the Latin letters that look
+# like Cyrillic ones typed in their place («Корiан Сторi»), and the Latin
+# one with the converse. Searched, not anchored: a legal form before or after
+# the name («ТОВ», «LLC») changes nothing.
+OWN_ENTITY_NAME_PATTERNS: Tuple[str, ...] = (
+    "[кk][оo][рp][іiїиеe][аa][нh][сc][тt][оo][рp][іiїиыy]",
+    "[kк][oо]r[eеiі][aа]ns[tт][oо]r[yуiі]",
+)
+OWN_ENTITY_NAME_PATTERN = "|".join(OWN_ENTITY_NAME_PATTERNS)
+_OWN_ENTITY_FOLD = str.maketrans(OWN_ENTITY_FOLD_UPPER, OWN_ENTITY_FOLD_LOWER,
+                                 OWN_ENTITY_FOLD_DROP)
+
+
+def own_entity_name_matches(name: Optional[str]) -> bool:
+    """Whether a card's name reads like the company's own legal entity —
+    in Python, the same fold and pattern `_OWN_ENTITY_LOOKALIKES_SQL` applies
+    in Postgres. Nothing in production calls it; it is what the patterns are
+    tested against, and what a person can ask of a name by hand."""
+    import re
+
+    folded = (name or "").translate(_OWN_ENTITY_FOLD)
+    return re.search(OWN_ENTITY_NAME_PATTERN, folded) is not None
 
 
 def _row_values_sql() -> str:
@@ -861,16 +998,31 @@ async def _read_attribution(conn, watermark: Watermark) -> Union[Attribution, Un
 async def _read_line_items(conn, watermark: Watermark) -> Union[LineItems, Unwatched]:
     if not watermark.backfilled:
         return Unwatched("bronze.orders history is not backfilled (meta.mirror_state.backfilled_at)")
-    by = {bool(r["internal"]): r for r in await conn.fetch(_LINE_ITEMS_SQL)}
+    return line_items_from_rows(await conn.fetch(_LINE_ITEMS_SQL))
 
-    def part(internal):
-        r = by.get(internal)
-        if r is None:
-            return 0, 0.0, ()
-        return int(r["n"]), float(r["amount"]), _ids(r["sample"])
 
-    h, g = part(False), part(True)
-    return LineItems(h[0], h[1], h[2], g[0], g[1], g[2])
+def line_items_from_rows(rows) -> LineItems:
+    """`_LINE_ITEMS_SQL`'s rows, one per sales type, as the two findings read
+    them: `internal` is the goods shipped without a sale, every other type the
+    headline. The headline's sample is the ten largest across its types, in
+    the order the statement takes each type's (amount, then id, descending)."""
+    goods = next((r for r in rows if r["sales_type"] == "internal"), None)
+    headline = sorted((r for r in rows if r["sales_type"] != "internal"),
+                      key=lambda r: str(r["sales_type"]))
+    pairs = sorted(
+        ((float(a), int(i)) for r in headline
+         for a, i in zip(r["sample_amounts"] or (), r["sample"] or ())),
+        reverse=True)
+    return LineItems(
+        headline=sum(int(r["n"]) for r in headline),
+        headline_amount=sum(float(r["amount"]) for r in headline),
+        headline_sample=tuple(i for _, i in pairs[:10]),
+        goods=0 if goods is None else int(goods["n"]),
+        goods_amount=0.0 if goods is None else float(goods["amount"]),
+        goods_sample=() if goods is None else _ids(goods["sample"]),
+        headline_by_type=tuple((str(r["sales_type"]), int(r["n"]), float(r["amount"]))
+                               for r in headline),
+    )
 
 
 async def _read_journal(conn) -> DerivationJournal:
@@ -920,6 +1072,29 @@ async def _read_order_landing(conn, watermark: Watermark, grace: int) -> Union[O
         unknown_source_sample=_ids(h["source_sample"]),
         status_groups=tuple((int(r["status_id"]), int(r["status_group_id"]), int(r["n"]),
                              float(r["amount"])) for r in groups),
+    )
+
+
+async def _read_own_entity(conn) -> OwnEntity:
+    """The `own_entity` group's facts. Not gated on a backfill: Silver is
+    derived from whatever bronze holds, and a buyers table still filling can
+    only find fewer cards, never one that is not there. The lists are read
+    at call time, so a patched constant is what is asked about."""
+    from core import duckdb_constants as constants
+
+    listed = [int(i) for i in constants.OWN_ENTITY_BUYER_IDS]
+    known = listed + [int(i) for i in constants.NOT_OWN_ENTITY_BUYER_IDS]
+    orders = await conn.fetch(_OWN_ENTITY_ORDERS_SQL, listed,
+                              [int(s) for s in constants.REVENUE_SOURCE_IDS])
+    alike = await conn.fetch(
+        _OWN_ENTITY_LOOKALIKES_SQL, known,
+        OWN_ENTITY_FOLD_UPPER + OWN_ENTITY_FOLD_DROP, OWN_ENTITY_FOLD_LOWER,
+        OWN_ENTITY_NAME_PATTERN)
+    return OwnEntity(
+        orders=tuple((int(r["id"]), str(r["sales_type"]), float(r["grand_total"] or 0),
+                      float(r["goods"] or 0), bool(r["counted"])) for r in orders),
+        unlisted=tuple((int(r["id"]), int(r["orders"]), float(r["revenue"]))
+                       for r in alike),
     )
 
 
@@ -983,7 +1158,7 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
     except Exception as e:  # noqa: BLE001 — e.g. a KS_PG_SILVER_INTERVAL_S that is not a number
         return Facts.blind(f"the windows could not be computed: {type(e).__name__}: {e}")
     state: Dict[str, object] = {}
-    groups: Dict[str, object] = {}
+    groups: Dict[str, Group] = {}
 
     # The wait and the hold are two limits, not one: waiting holds nothing, and
     # the hold is what stalls the sync behind the heavy lock.
@@ -1025,6 +1200,7 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
                         ("derivation_signal", _read_journal),
                         ("order_landing",
                          lambda c: _read_order_landing(c, watermark, grace)),
+                        ("own_entity", _read_own_entity),
                         ("silver_row_values",
                          lambda c: _read_row_values(c, grace, page_after)),
                     )
@@ -1264,6 +1440,58 @@ def _attribution_check(att: Attribution, watermark: Watermark) -> list:
                      "are not."))]
 
 
+# What an order billed at zero with goods in it is, by its sales type — the
+# owner's decision of 2026-11-14. A retail one is a certificate redeemed: the
+# certificate was sold first, as a sale of its own, and its money counted
+# then; the order that later exchanges it for goods carries none (one with a
+# top-up carries the top-up, and is not billed at zero). The exhibition's are
+# the same: the fair was staffed by retail managers and took certificates. A
+# b2b one is a test shipment to a partner, so a client can try the goods and
+# decide whether to buy. A type not here is named as such in the finding.
+CERTIFICATE_REDEMPTION = "certificate"
+PARTNER_TEST_SHIPMENT = "partner_test"
+ZERO_TOTAL_KINDS: Dict[str, str] = {
+    "retail": CERTIFICATE_REDEMPTION,
+    "exhibition": CERTIFICATE_REDEMPTION,
+    "b2b": PARTNER_TEST_SHIPMENT,
+}
+_KIND_WORDS = (
+    (CERTIFICATE_REDEMPTION,
+     "are certificate redemptions: the certificate was sold first and its money "
+     "counted then, and the order exchanging it for goods carries none"),
+    (PARTNER_TEST_SHIPMENT,
+     "are test shipments to b2b partners, so a client can try the goods and "
+     "decide whether to buy"),
+    (None, "are of a sales type no decision covers"),
+)
+
+
+def _headline_description(li: LineItems) -> str:
+    """The headline finding's sentence: the orders, then what each part of
+    them is, with its count and amount."""
+    head = (f"In Postgres, {li.headline:,} order(s) have grand_total = 0 but "
+            f"{li.headline_amount:,.2f} in line items.")
+    parts: Dict[Optional[str], List[Tuple[str, int, float]]] = {}
+    for sales_type, n, amount in li.headline_by_type:
+        parts.setdefault(ZERO_TOTAL_KINDS.get(sales_type), []).append((sales_type, n, amount))
+    said = []
+    for kind, words in _KIND_WORDS:
+        rows = parts.get(kind)
+        if not rows:
+            continue
+        n = sum(r[1] for r in rows)
+        amount = sum(r[2] for r in rows)
+        types = (rows[0][0] if len(rows) == 1
+                 else ", ".join(f"{t} {k:,}" for t, k, _ in rows))
+        said.append(f"{n:,} worth {amount:,.2f} ({types}) {words}")
+    why = (" By the owner's decision of 2026-11-14, " + "; ".join(said) + "."
+           if said else "")
+    return (head + why + " Revenue figures read grand_total and product/brand/"
+            "category figures read line items, so the two differ by this amount "
+            "by design. Counted so it is a number rather than a silence; a "
+            "grand_total stored wrong is dq_reconciliation's VALUE_MISMATCH.")
+
+
 def _line_items_check(li: LineItems) -> list:
     """The line-item twins. Until step 14's S14-14 they compared with
     DuckDB's own checks while those looked, filing `pg_line_items_disagree`
@@ -1273,13 +1501,19 @@ def _line_items_check(li: LineItems) -> list:
 
     issues = []
     if li.headline:
+        # INFO since the owner's decision of 2026-11-14: nothing in it is
+        # unexplained (`ZERO_TOTAL_KINDS`). As a WARN it was the digest's only
+        # standing finding for a month, news every time a certificate was
+        # redeemed or a partner sent a test, and it kept the weekly
+        # restatement alive. What would make one of these orders a defect —
+        # a grand_total our sync stored differently from KeyCRM's — is not
+        # this check's to see: `dq_reconciliation` compares the grand_total of
+        # every order of the last 90 days with KeyCRM's each morning
+        # (VALUE_MISMATCH, `reconciliation_pg`) and re-fetches what differs.
         issues.append(_issue(
             check_name="pg_headline_vs_line_items", table_name="silver.orders",
-            severity=Severity.WARN, count=li.headline, sample_ids=li.headline_sample,
-            description=(f"In Postgres, {li.headline} order(s) have grand_total = 0 but "
-                         f"{li.headline_amount:,.2f} in line items. Revenue figures read "
-                         "grand_total and product/brand/category figures read line items, "
-                         "so the two disagree by this amount.")))
+            severity=Severity.INFO, count=li.headline, sample_ids=li.headline_sample,
+            description=_headline_description(li)))
     if li.goods:
         issues.append(_issue(
             check_name="pg_goods_shipped_without_sale", table_name="silver.orders",
@@ -1378,6 +1612,64 @@ def _order_landing_check(ol: OrderLanding) -> list:
     return [alone[twin] for twin in LANDING_TWINS if twin in alone]
 
 
+def _own_entity_check(oe: OwnEntity) -> list:
+    """The `own_entity` group's verdict (the owner's decision of 2026-11-14).
+
+    INFO for the orders the rule keeps out of revenue — never more: they are
+    the decision working, and a figure every digest restates is how it stays
+    visible. A listed card's order that stored Silver still counts is named
+    in the same finding, not filed again: `pg_silver_row_values` is what
+    judges a Silver row the rule no longer produces. WARN for an unlisted card
+    that reads like the entity, whose money is counted while nobody decides
+    which list it belongs on.
+    """
+    from core import duckdb_constants as constants
+    from core.data_quality import Severity
+
+    issues = []
+    if oe.orders:
+        kept = [o for o in oe.orders if not o[4]]
+        still = [o for o in oe.orders if o[4]]
+        by_type: Dict[str, Tuple[int, float, float]] = {}
+        for _id, sales_type, total, goods, _counted in kept:
+            n, billed, shipped = by_type.get(sales_type, (0, 0.0, 0.0))
+            by_type[sales_type] = (n + 1, billed + total, shipped + goods)
+        parts = "; ".join(f"{t} {n:,}: {billed:,.2f} billed, {shipped:,.2f} of goods"
+                          for t, (n, billed, shipped) in sorted(by_type.items()))
+        listed = ", ".join(str(i) for i in constants.OWN_ENTITY_BUYER_IDS)
+        owed = (f" {len(still):,} more still count as revenue in stored Silver, worth "
+                f"{sum(o[2] for o in still):,.2f}: a rebuild under the rule is owed "
+                "(pg_silver_row_values judges those rows)." if still else "")
+        issues.append(_issue(
+            check_name="pg_own_entity_orders", table_name="silver.orders",
+            severity=Severity.INFO, count=len(oe.orders),
+            sample_ids=tuple(o[0] for o in (kept + still)[:10]),
+            description=(
+                f"In Postgres, {len(kept):,} order(s) to the company's own legal entity "
+                f"(buyer {listed}) are kept out of revenue: "
+                f"{sum(o[2] for o in kept):,.2f} billed, "
+                f"{sum(o[3] for o in kept):,.2f} of goods"
+                + (f" ({parts})" if parts else "")
+                + ". A sale to ourselves is revenue nowhere, by the owner's decision "
+                "of 2026-11-14; counted so it is a number rather than a silence."
+                + owed)))
+    if oe.unlisted:
+        ids = ", ".join(str(u[0]) for u in oe.unlisted[:10])
+        more = f" and {len(oe.unlisted) - 10:,} more" if len(oe.unlisted) > 10 else ""
+        issues.append(_issue(
+            check_name="pg_own_entity_unlisted", table_name="bronze.buyers",
+            severity=Severity.WARN, count=len(oe.unlisted),
+            sample_ids=tuple(u[0] for u in oe.unlisted[:10]),
+            description=(
+                f"In Postgres, {len(oe.unlisted):,} buyer card(s) carry a name that reads "
+                "like the company's own legal entity and are in neither "
+                f"OWN_ENTITY_BUYER_IDS nor NOT_OWN_ENTITY_BUYER_IDS (cards {ids}{more}): "
+                f"{sum(u[1] for u in oe.unlisted):,} of their orders, "
+                f"{sum(u[2] for u in oe.unlisted):,.2f}, count as revenue. If a card is "
+                "the entity, those are sales to ourselves.")))
+    return issues
+
+
 def check_pg_warehouse(
     facts: Optional[Facts], *,
     raised_out: Optional[List[str]] = None,
@@ -1435,6 +1727,7 @@ def check_pg_warehouse(
         "line_items": lambda: _line_items_check(cast(LineItems, facts.line_items)),
         "derivation_signal": lambda: _signal_check(facts.derivation_signal),
         "order_landing": lambda: _order_landing_check(cast(OrderLanding, facts.order_landing)),
+        "own_entity": lambda: _own_entity_check(cast(OwnEntity, facts.own_entity)),
         "silver_row_values": lambda: _row_values_check(facts.silver_row_values),
     }
     for group, judge in judges.items():
@@ -1452,7 +1745,8 @@ def check_pg_warehouse(
         # Rows a previous process's rebuild had, and no rebuild of this one
         # since: the group looked, but could not judge them, so a page standing
         # for them is held rather than announced resolved after a restart.
-        if group == "silver_row_values" and facts.silver_row_values.held:
+        if (group == "silver_row_values" and isinstance(facts.silver_row_values, RowValues)
+                and facts.silver_row_values.held):
             hold(group)
     return issues
 

@@ -522,15 +522,9 @@ class TestTheMondayJobStoresRetail:
 # ─── Unchanged neighbours, kept pinned ────────────────────────────────────
 
 class TestPredictionsAndModelFilesLandWhole:
-    def test_json_files_are_replaced_not_truncated(self, tmp_path):
-        from core.prediction_service import _write_json_atomically
-
-        target = tmp_path / "params.json"
-        target.write_text("{\"old\": true}")
-        _write_json_atomically(target, {"new": 1})
-        assert target.read_text().strip().startswith("{")
-        assert "new" in target.read_text()
-        assert [p.name for p in tmp_path.iterdir()] == ["params.json"], "no temp file left behind"
+    # The JSON half went on 2026-11-18: the weekday corrections, the clip
+    # ratio and the tuned parameters are written no more, and the helper
+    # that wrote them whole went with them.
 
     def test_the_model_writer_uses_replace(self):
         from core.prediction_service import PredictionService
@@ -538,4 +532,3 @@ class TestPredictionsAndModelFilesLandWhole:
 
         src = inspect.getsource(PredictionService._save_model)
         assert "os.replace(tmp, MODEL_PATH)" in src
-        assert "_write_json_atomically" in src

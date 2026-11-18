@@ -53,6 +53,24 @@ from core.models import Order, SourceId
 SALES_CACHE_TTL = 5  # Cache sales data for 5 minutes
 
 
+def is_own_entity(order: Order) -> bool:
+    """Whether the order's buyer is the company's own legal entity
+    (`core.duckdb_constants.OWN_ENTITY_BUYER_IDS`). Needs the order fetched
+    with `include=buyer`: without it `order.buyer` is None and every order
+    reads as somebody else's.
+
+    Imported here, not at the top: `core.duckdb_constants` imports
+    `bot.config`, which loads this package and so this module while the
+    constants are still half-defined."""
+    from core.duckdb_constants import OWN_ENTITY_BUYER_IDS
+
+    buyer_id = order.buyer.id if order.buyer is not None else None
+    try:
+        return buyer_id is not None and int(buyer_id) in OWN_ENTITY_BUYER_IDS
+    except (TypeError, ValueError):   # an id KeyCRM never sends; not ours
+        return False
+
+
 class ReportService:
     """Service for generating sales reports."""
 
@@ -143,9 +161,12 @@ class ReportService:
         # Extend created_between to catch orders with delayed sync (see ORDER_SYNC_BUFFER_HOURS)
         utc_created_end = utc_period_end + timedelta(hours=ORDER_SYNC_BUFFER_HOURS)
 
-        # Single request params for entire period
+        # Single request params for entire period. `buyer` is asked for one
+        # reason: to know an order to the company's own legal entity, which
+        # is revenue nowhere (the owner's decision of 2026-11-14), by its
+        # buyer's id — what the sync lands as `buyer_id` from the same field.
         params = {
-            "include": "products,manager",
+            "include": "products,manager,buyer",
             "limit": API_PAGE_LIMIT,
             "filter[created_between]": f"{utc_period_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_created_end.strftime('%Y-%m-%d %H:%M:%S')}",
         }
@@ -176,6 +197,12 @@ class ReportService:
                     continue  # No ordered_at — skip
                 if not order.is_within_period(utc_period_start, utc_period_end):
                     continue  # Outside target period
+
+                # A sale to ourselves: neither a sale nor a return in any
+                # report here, as on the dashboard, where Silver's
+                # `is_active_source` keeps it out of every figure.
+                if is_own_entity(order):
+                    continue
 
                 # Track returned orders separately
                 if order.is_return:

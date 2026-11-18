@@ -391,6 +391,114 @@ class TestTheThrottle:
         assert gc.PERIODS_PER_RUN > 1 + 1 / 7 + 1 / 28
 
 
+# ─── The slack the watch judges the backlog by ────────────────────────────────
+
+
+def _day(d: date) -> gc.Period:
+    return gc.Period("day", d, d)
+
+
+class TestTheSlack:
+    """How many nights the capture could still fail and keep every period —
+    what `analytics_captures._judge_ga4` turns into INFO or WARN."""
+
+    def test_a_period_leaves_the_window_fourteen_months_on(self):
+        """2025-10-05 can be kept by the run of 2026-12-04 and by none after.
+        Kills: a leave day one off either way, which would move every slack."""
+        oldest = _day(date(2025, 10, 5))
+        assert gc.leaves_window_on(oldest) == date(2026, 12, 5)
+        assert oldest in gc.due_periods(date(2026, 12, 4))
+        assert oldest not in gc.due_periods(date(2026, 12, 5))
+
+    @pytest.mark.parametrize("start", [
+        date(2025, 12, 31), date(2025, 12, 29), date(2026, 1, 30), date(2026, 2, 28),
+        date(2027, 2, 28), date(2025, 10, 31), date(2026, 3, 1)])
+    def test_the_leave_day_is_where_the_horizon_passes_it(self, start):
+        """Across the short months `ga4.earliest_day` clamps to: the run of
+        the day before keeps the period, the run of the day does not."""
+        leaves = gc.leaves_window_on(_day(start))
+        assert gc.first_capturable_day(leaves - timedelta(days=1)) <= start
+        assert gc.first_capturable_day(leaves) > start
+
+    @pytest.mark.parametrize("utc, night", [
+        (datetime(2026, 11, 13, 23, 0, tzinfo=timezone.utc), date(2026, 11, 14)),  # 01:00
+        (datetime(2026, 11, 14, 0, 39, tzinfo=timezone.utc), date(2026, 11, 14)),  # 02:39
+        (datetime(2026, 11, 14, 0, 40, tzinfo=timezone.utc), date(2026, 11, 15)),  # 02:40
+        (datetime(2026, 11, 14, 5, 0, tzinfo=timezone.utc), date(2026, 11, 15)),   # 07:00
+        (datetime(2026, 7, 13, 22, 0, tzinfo=timezone.utc), date(2026, 7, 14)),    # 01:00 EEST
+        (datetime(2026, 7, 14, 4, 0, tzinfo=timezone.utc), date(2026, 7, 15)),     # 07:00 EEST
+    ])
+    def test_the_first_night_is_the_next_run_in_kyiv(self, utc, night):
+        """The 01:00 integrity run comes before that night's 02:40 run, the
+        07:00 one after it. Kills: counting from tomorrow always, which would
+        make the 01:00 run a night more pessimistic than the 19:00 before it,
+        and a backlog on the margin flap."""
+        assert gc.first_night(utc) == night
+
+    def test_the_run_time_is_the_jobs(self):
+        assert (gc.RUN_AT.hour, gc.RUN_AT.minute) == (2, 40)
+
+    def test_the_14_november_backlog_has_19_nights_to_spare(self):
+        """As production had it: 471 left after the first night, the oldest
+        2025-10-05, which the next run keeps and which 19 more runs could
+        miss. Its leave day moves ~20 days a night, so the slack grows."""
+        today = date(2026, 11, 14)
+        backlog = gc.Backlog(tuple(gc.overdue_periods(today)[gc.PERIODS_PER_RUN:]),
+                             gc.first_night(datetime(2026, 11, 14, 5, tzinfo=timezone.utc)))
+        assert (backlog.missing, backlog.oldest) == (471, _day(date(2025, 10, 5)))
+        slack = backlog.slack()
+        assert slack == gc.Slack(spare=19, period=_day(date(2025, 10, 5)),
+                                 leaves_on=date(2026, 12, 5), nights_left=20,
+                                 nights_needed=1)
+        tomorrow = date(2026, 11, 15)
+        kept_one_more_night = gc.Backlog(
+            tuple(gc.overdue_periods(tomorrow)[2 * gc.PERIODS_PER_RUN:]), tomorrow)
+        later = kept_one_more_night.slack()
+        assert later is not None and later.spare > slack.spare + 15
+
+    def test_the_tightest_period_need_not_be_the_oldest(self):
+        """Position, not age alone, sets a period's turn: the 25th waits for
+        the second run. Kills: a slack read off the oldest period only."""
+        start = date(2025, 10, 5)
+        first = date(2026, 11, 15)
+        slack = gc.nights_to_spare([_day(start)] * (gc.PERIODS_PER_RUN + 1), first)
+        assert slack is not None
+        assert (slack.spare, slack.nights_left, slack.nights_needed) == (18, 20, 2)
+
+    def test_the_spare_is_the_failures_it_survives(self):
+        """Fail `spare` runs, wherever they fall, and every period is still
+        kept; fail one more at the start, and the tightest is lost. Simulated
+        run by run against `due_periods`. Kills: a slack that promises nights
+        the arithmetic of the run does not give."""
+        today = date(2026, 11, 14)
+        missing = list(gc.overdue_periods(today)[gc.PERIODS_PER_RUN:])
+        first = date(2026, 11, 15)
+        slack = gc.nights_to_spare(missing, first)
+        assert slack is not None
+
+        def lost(failed_runs):
+            left, night, run = list(missing), first, 0
+            while left and night < first + timedelta(days=60):
+                due = set(gc.due_periods(night))
+                gone = [p for p in left if p not in due and p.start < night]
+                if gone:
+                    return True
+                run += 1
+                if run not in failed_runs:
+                    left = left[gc.PERIODS_PER_RUN:]
+                night += timedelta(days=1)
+            return False
+
+        assert not lost(set(range(1, slack.spare + 1)))
+        assert not lost(set(range(2, 2 * slack.spare + 2, 2)))
+        assert lost(set(range(1, slack.spare + 2)))
+
+    def test_nothing_missing_has_no_slack(self):
+        assert gc.nights_to_spare([], date(2026, 11, 15)) is None
+        assert gc.Backlog((), date(2026, 11, 15)).slack() is None
+        assert gc.Backlog((), date(2026, 11, 15)).oldest is None
+
+
 # ─── The job, with Postgres faked ─────────────────────────────────────────────
 
 
@@ -590,6 +698,8 @@ class TestTheSchedule:
         fields = {f.name: str(f) for f in job.trigger.fields}
         assert (fields["hour"], fields["minute"], fields["day_of_week"], fields["day"]) == (
             "2", "40", "*", "*")
+        # One time: the backlog's slack counts its runs from `RUN_AT`.
+        assert (fields["hour"], fields["minute"]) == (str(gc.RUN_AT.hour), str(gc.RUN_AT.minute))
         assert job.func.__wrapped__.__name__ == "_run_ga4_capture"
 
     def test_a_year_of_firings_misses_every_busy_window(self):

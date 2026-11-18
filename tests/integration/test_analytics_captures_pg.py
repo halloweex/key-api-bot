@@ -15,13 +15,18 @@ What is pinned, each named by the mutation it kills:
   (owner decision D2);
 - a capture that raises inside a writer's transaction rolls back alone: the
   writer's rows commit, the capture's do not, and the failure is stamped;
-- the watch reads those stamps back and files the finding.
+- the watch reads those stamps back and files the finding;
+- a never-stamped capture's grace is read off the journal's integrity runs,
+  in the stamps' transaction, so a restart moves nothing; a journal the read
+  is refused by costs that answer alone (a savepoint), and the capture is
+  filed stalled as before.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -349,9 +354,13 @@ class TestTheWatchReadsTheStamps:
         issues = {i.check_name: i for i in cap.judge(facts)}
         assert issues[f"capture_failed:{GOALS}"].severity.value == "WARN"
         # Nothing else stamped: every capture with a cadence reads as never
-        # stamped, and none of them is CRITICAL.
-        assert {f"capture_stalled:{t}" for t, s in cap.CAPTURES.items()
-                if s.max_age is not None} <= set(issues)
+        # stamped, found so for the first time (the journal holds no run that
+        # filed it), so inside its grace; and none of them is CRITICAL.
+        assert facts.journal_unread is None and facts.missing_since is not None
+        unstarted = {f"capture_unstarted:{t}" for t, s in cap.CAPTURES.items()
+                     if s.max_age is not None}
+        assert unstarted <= set(issues)
+        assert {issues[n].severity.value for n in unstarted} == {"INFO"}
         assert all(i.severity.value != "CRITICAL" for i in issues.values())
 
     @pytest.mark.asyncio
@@ -370,6 +379,133 @@ class TestTheWatchReadsTheStamps:
         (off,) = [i for i in cap.judge(facts) if i.check_name == cap.SWITCHED_OFF]
         assert off.severity.value == "WARN"
         assert f"capture_failed:{GOALS}" in off.unverified
+
+
+_JOURNAL = ("app.data_quality_issues", "app.data_quality_diffs", "app.data_quality_runs")
+
+
+@pytest_asyncio.fixture
+async def journal(pool):
+    """The journal emptied before and after, as the journal's own
+    integration tests leave it, and a writer of integrity runs into it."""
+    async def wipe():
+        async with pool.acquire() as conn:
+            for table in _JOURNAL:
+                await conn.execute(f"DELETE FROM {table}")
+    await wipe()
+
+    async def run(run_id, hours_ago, *names, error=None, layer="integrity"):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app.data_quality_runs (run_id, started_at, ended_at, as_of, "
+                "window_start, window_end, layer, status, error_message) "
+                "SELECT $1, now() - make_interval(secs => $2), now() - make_interval(secs => $2), "
+                "now(), current_date, current_date, $3, $4, $5",
+                run_id, hours_ago * 3600.0, layer, "FAILED" if error else "WARN", error)
+            for name in names:
+                await conn.execute(
+                    "INSERT INTO app.data_quality_issues (run_id, check_name, table_name, "
+                    "severity, count) VALUES ($1, $2, $3, 'WARN', 1)",
+                    run_id, name, name.split(":", 1)[-1])
+    yield run
+    await wipe()
+
+
+VINTAGES = "app.revenue_prediction_vintages"
+GA4 = "app.ga4_funnel"
+
+
+class TestTheGraceIsReadFromTheJournal:
+    """`read_facts` reads when each never-stamped capture was first found so
+    out of the journal, beside the stamps. Kills: a grace measured from the
+    process (a deploy would restart it), or a journal read whose failure
+    takes the stamps with it."""
+
+    @pytest.mark.asyncio
+    async def test_a_streak_filed_before_this_rule_is_past_its_grace(self, pool, journal):
+        """The runs since revision 0036 filed a never-stamped GA4 capture as
+        stalled; their streak began five days ago, past its 30 h."""
+        await journal(1, 120, f"capture_stalled:{GA4}")
+        await journal(2, 60, f"capture_stalled:{GA4}")
+        await journal(3, 6, f"capture_stalled:{GA4}")
+        facts = await cap.read_facts(pool=pool)
+        assert facts.journal_unread is None and facts.missing_since is not None
+        assert facts.now is not None
+        age = facts.now - facts.missing_since[GA4]
+        assert timedelta(hours=119) < age < timedelta(hours=121)
+        issues = {i.check_name: i for i in cap.judge(facts)}
+        assert issues[f"capture_stalled:{GA4}"].severity.value == "WARN"
+        assert f"capture_unstarted:{GA4}" not in issues
+
+    @pytest.mark.asyncio
+    async def test_inside_its_grace_it_is_info_and_another_process_agrees(self, pool, journal):
+        """The vintages found missing for 30 h of their 99: INFO, and a new
+        pool — a restart, a deploy — reads the same start."""
+        await journal(1, 30, f"capture_unstarted:{VINTAGES}")
+        await journal(2, 6, f"capture_unstarted:{VINTAGES}", f"capture_unstarted:{GA4}")
+        facts = await cap.read_facts(pool=pool)
+        assert facts.missing_since is not None and facts.now is not None
+        assert timedelta(hours=29) < facts.now - facts.missing_since[VINTAGES] < timedelta(hours=31)
+        issues = {i.check_name: i for i in cap.judge(facts)}
+        assert issues[f"capture_unstarted:{VINTAGES}"].severity.value == "INFO"
+        restarted = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
+        try:
+            again = await cap.read_facts(pool=restarted)
+        finally:
+            await restarted.close()
+        assert again.missing_since == facts.missing_since
+
+    @pytest.mark.asyncio
+    async def test_failed_runs_and_other_layers_are_not_read_and_a_gap_breaks(self, pool, journal):
+        """Successful integrity runs only. A failed run between two that
+        filed it neither breaks the streak nor extends it; a successful run
+        that did not file it does break it."""
+        await journal(1, 50, f"capture_unstarted:{VINTAGES}")
+        await journal(2, 40)                                        # broke it
+        await journal(3, 30, f"capture_unstarted:{VINTAGES}")
+        await journal(4, 20, error="RuntimeError: blind")           # not read
+        await journal(5, 10, f"capture_unstarted:{VINTAGES}")
+        await journal(6, 5, layer="mirror_landing")                 # not read
+        facts = await cap.read_facts(pool=pool)
+        assert facts.missing_since is not None and facts.now is not None
+        assert timedelta(hours=29) < facts.now - facts.missing_since[VINTAGES] < timedelta(hours=31)
+
+    @pytest.mark.asyncio
+    async def test_a_journal_refusing_the_read_is_no_grace(self, pool, journal, monkeypatch):
+        """Postgres refuses the journal's statement inside the stamps'
+        transaction: the savepoint takes the refusal, the stamps are still
+        read, and the never-stamped captures are WARN as before."""
+        from core import data_quality
+
+        monkeypatch.setattr(data_quality, "RECENT_FINDINGS_SQL",
+                            "SELECT started_at, names FROM app.no_such_journal")
+        facts = await cap.read_facts(pool=pool)
+        assert facts.unwatched is None and facts.now is not None
+        assert facts.missing_since is None
+        assert facts.journal_unread and "no_such_journal" in facts.journal_unread
+        issues = {i.check_name: i for i in cap.judge(facts)}
+        assert issues[f"capture_stalled:{VINTAGES}"].severity.value == "WARN"
+        assert "could not be read" in issues[f"capture_stalled:{VINTAGES}"].description
+
+    @pytest.mark.asyncio
+    async def test_with_every_capture_stamped_the_journal_is_not_asked(
+            self, pool, journal, monkeypatch):
+        from core import dq_journal
+
+        async with pool.acquire() as conn:
+            for table in cap.CAPTURES:
+                await conn.execute(
+                    "INSERT INTO meta.mirror_state (table_name, last_ok_at) VALUES ($1, now()) "
+                    "ON CONFLICT (table_name) DO UPDATE SET last_ok_at = now()",
+                    cap.state_row(table))
+
+        async def refuse(*a, **k):
+            raise AssertionError("the journal was asked with every capture stamped")
+
+        monkeypatch.setattr(dq_journal, "recent_findings", refuse)
+        facts = await cap.read_facts(pool=pool)
+        assert facts.missing_since == {} and facts.journal_unread is None
+        assert cap.judge(facts) == []
 
 
 class TestABlockedCaptureHoldsItsWriterBriefly:

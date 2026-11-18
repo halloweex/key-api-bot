@@ -8,6 +8,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from core import read_fallback
+from core.duckdb_constants import not_own_entity
 from core.store import get_store
 from core.meilisearch_client import MeiliUnavailable, get_meili_client
 from core.observability import get_logger
@@ -40,8 +41,10 @@ TOOLS = [
                 },
                 "sales_type": {
                     "type": "string",
-                    "enum": ["retail", "b2b", "all"],
-                    "description": "Type of sales to include",
+                    "enum": ["retail", "b2b", "offline", "all"],
+                    "description": "Type of sales to include: retail (the online shop), "
+                                   "b2b (wholesale), offline (the offline store, a "
+                                   "category of its own) or all",
                     "default": "retail"
                 }
             },
@@ -76,7 +79,7 @@ TOOLS = [
     },
     {
         "name": "get_source_breakdown",
-        "description": "Get sales breakdown by source (Instagram, Telegram, Shopify). Use for questions like 'Which channel sells the most?', 'Instagram vs Shopify sales?'",
+        "description": "Get sales breakdown by source (Instagram, Telegram, Shopify). Use for questions like 'Which channel sells the most?', 'Instagram vs Shopify sales?'. The offline store is not in it: it is its own sales type, asked with sales_type='offline' on the revenue tools.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -125,8 +128,10 @@ TOOLS = [
                 },
                 "sales_type": {
                     "type": "string",
-                    "enum": ["retail", "b2b", "all"],
-                    "description": "Type of sales to include",
+                    "enum": ["retail", "b2b", "offline", "all"],
+                    "description": "Type of sales to include: retail (the online shop), "
+                                   "b2b (wholesale), offline (the offline store, a "
+                                   "category of its own) or all",
                     "default": "retail"
                 }
             },
@@ -431,6 +436,10 @@ def _revenue_totals_sql(sales_type: str) -> str:
         sales_filter = "AND sales_type = 'retail'"
     elif sales_type == "b2b":
         sales_filter = "AND sales_type = 'b2b'"
+    elif sales_type == "offline":
+        # The offline store, its own sales type since the owner's decision of
+        # 2026-11-15; without this branch the tool would answer "all".
+        sales_filter = "AND sales_type = 'offline'"
     return f"""
             SELECT
                 COALESCE(SUM(revenue), 0) as total_revenue,
@@ -606,9 +615,12 @@ async def _get_top_products(period: str, by: str, limit: int) -> Dict[str, Any]:
             -- NOTE: no `is_active_source` here, unlike every dashboard page.
             -- Deliberately left as it was — this is a conversion, not a fix —
             -- but it means the assistant counts Opencart, which was retired,
-            -- and will not match the numbers on screen.
+            -- and will not match the numbers on screen. A sale to the
+            -- company's own legal entity is left out all the same (the
+            -- owner's decision of 2026-11-14): it is revenue nowhere.
             WHERE l.order_date BETWEEN ? AND ?
                 AND NOT l.is_return
+                AND {not_own_entity('l')}
                 AND l.sales_type = 'retail'
             GROUP BY COALESCE(l.catalog_product_name, l.product_name), l.brand
             ORDER BY {order_by}, MIN(l.product_id)

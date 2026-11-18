@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from typing import Optional, List, Dict, Any
 
 from core import read_fallback
+from core.duckdb_constants import not_own_entity
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,12 @@ class ExpensesMixin:
         # These three sum `e.amount` only, never a column of the order, so the
         # join fans out harmlessly here — unlike `get_profit_analysis`, where
         # it did not.
+        #
+        # Costs, not revenue: an order to the company's own legal entity
+        # keeps its costs here (a delivery to the other entity is paid for
+        # all the same), as returns and Opencart's do. The owner's decision
+        # of 2026-11-14 takes such an order out of revenue, and so out of
+        # `get_profit_analysis`, which sets revenue against costs.
         by_type_results = await self._expenses_run(f"""
             SELECT
                 COALESCE(et.name, 'Other') as type_name,
@@ -226,9 +233,17 @@ class ExpensesMixin:
         # `status_id NOT IN (15,18,19,21,22,23)` over the whole catalogue —
         # 47,338 orders, zero disagreements — so this is a rename, not a
         # redefinition.
+        #
+        # A sale to the company's own legal entity is not revenue (the
+        # owner's decision of 2026-11-14), so it is not profit either: its
+        # money and its costs both leave, because the costs are joined to
+        # the orders kept. Spelled out rather than read off
+        # `is_active_source`, which carries it, because this read has always
+        # counted Opencart too, and that is not what the decision moved.
         where_clauses = [
             "s.order_date BETWEEN ? AND ?",
             "NOT s.is_return",
+            not_own_entity("s"),
         ]
         if sales_type != "all":
             where_clauses.append("s.sales_type = ?")

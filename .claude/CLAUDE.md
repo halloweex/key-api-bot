@@ -122,15 +122,18 @@ the file.
 # bot/config.py
 DEFAULT_TIMEZONE = "Europe/Kyiv"
 RETURN_STATUS_IDS = [15, 18, 19, 21, 22, 23]   # KeyCRM lost/cancel group (6)
-SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify', 5: 'Виставка'}
+SOURCE_MAPPING = {1: 'Instagram', 2: 'Telegram', 3: 'Opencart', 4: 'Shopify', 5: 'Виставка',
+                  7: 'Офлайн-магазин'}
 
 # core/duckdb_constants.py
 B2B_MANAGER_ID = 15                             # the wholesale manager
 RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]  # seeds managers.is_retail for NEW rows only
 EXHIBITION_SOURCE_ID = 5                        # the fair: sales_type exhibition, whoever staffed it
-SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)             # what we pull from KeyCRM and reconcile
-REVENUE_SOURCE_IDS = (1, 2, 4, 5)               # what counts as revenue (is_active_source)
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
+OFFLINE_STORE_SOURCE_ID = 7                     # the offline store: sales_type offline, whoever sells (2026-11-15)
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5, 7)          # what we pull, reconcile and know (KNOWN_SOURCE_IDS, ACTIVE_SOURCES)
+REVENUE_SOURCE_IDS = (1, 2, 4, 5, 7)            # what counts as revenue (is_active_source)
+OWN_ENTITY_BUYER_IDS = (17358,)                 # our own second legal entity: revenue nowhere (2026-11-14)
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 ```
 
 ## API Endpoints
@@ -143,7 +146,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 | `/api/revenue/forecast` | ML revenue forecast for current month |
 | `/api/revenue/forecast/train` | Manually trigger model training (POST) |
 | `/api/revenue/forecast/evaluate` | Walk-forward CV evaluation with baselines (GET) |
-| `/api/revenue/forecast/tune` | Hyperparameter grid search (POST) |
+| `/api/revenue/forecast/tune` | Hyperparameter grid search, reported and never applied (POST) |
 | `/api/sales/by-source` | Sales breakdown by source |
 | `/api/products/top` | Top 10 products by quantity |
 | `/api/products/performance` | Top by revenue, category breakdown |
@@ -312,7 +315,22 @@ ClickHouse holds a second copy of Silver and derives its own Gold from it
 
 **Source filtering** (`REVENUE_SOURCE_IDS`, materialised as Silver's `is_active_source`):
 - Included: Instagram (1), Telegram (2), Shopify (4), Виставка (5) — the exhibition, its own `sales_type`
+- Included: Офлайн-магазин (7) — the offline store, opened 2026-11, its own
+  `sales_type` `offline` (owner's decision 2026-11-15); see "The offline
+  store" under "Retail / B2B / Internal"
 - Excluded: Opencart (3) - deprecated; still synced and reconciled (`SYNCED_SOURCE_IDS`), never revenue
+- A new KeyCRM source is registered once, in `SYNCED_SOURCE_IDS`: the
+  integrity layer's `KNOWN_SOURCE_IDS` (whose `pg_value_domain_orders_source_id`
+  WARN names an unregistered one, and whose lever line says so) and the
+  reconciliation's `ACTIVE_SOURCES` read it; `REVENUE_SOURCE_IDS` and a
+  branch in Silver's sales_type CASE are decisions beside it. They were
+  literals of their own until source 7, which stood as a WARN from its first
+  order and was compared by no reconciliation arm.
+- Excluded on every source and in every sales type: an order whose buyer is the
+  company's own second legal entity (`OWN_ENTITY_BUYER_IDS`, owner's decision
+  2026-11-14) — a sale to ourselves. So `is_active_source` means "counts as
+  revenue", not only "an active source"; see "A sale to ourselves" under
+  "Retail / B2B / Internal".
 
 ## Deployment
 
@@ -391,6 +409,20 @@ date outside 2000-01-01..2099-12-31 answered 400 and a marketing report on
    image before revision 0036). From `0036_analytics_captures` on it is not:
    "Rolling back below a revision", below, comes first, and its step 1 goes
    before the retag.
+
+Every image before the own-entity rule (2026-11-14), this target among them,
+counts the company's own legal entity's orders as revenue again from its
+first derivation tick (758 755.00 of 2026), and the roll forward takes them
+out again on its own; see "A sale to ourselves is revenue nowhere".
+
+Every image before the offline store (2026-11-15), this target among them,
+treats source 7 as unknown and not revenue from its first derivation tick:
+the store's orders leave revenue and fall back to the manager rule (its
+seller's are `internal`), `sales_type=offline` and `source_id=7` are a 400,
+the reconciliation compares none of them, and the integrity layer files
+`pg_value_domain_orders_source_id` (WARN) again. A page or a filter left on
+"Офлайн-магазин" answers 400 until the roll forward. Nothing to undo by
+hand either way: Silver is derived whole on the next tick.
 
 Fast: `docker tag …:rollback-step14 …:latest` for web, bot and migrate, then
 `docker compose up -d` without `pull` — after the stamp has moved, from 0036
@@ -673,7 +705,7 @@ What does exist:
 
 ### Revenue Prediction (LightGBM)
 - Trains on ~780 days of historical daily revenue data from `gold_daily_revenue`
-- **31 engineered features** across 10 groups:
+- **25 features, revenue only**:
   - Calendar (4): day_of_week, month, day_of_month, week_of_year
   - Cyclical (4): month_sin/cos, dow_sin/cos
   - Lags (5): 1d, 7d, 14d, 28d, 365d
@@ -682,21 +714,19 @@ What does exist:
   - Events (1): days_to_nearest_event (holidays, promos, Black Friday)
   - Payday (1): days_to_payday (distance to nearest 1st/15th, capped at 7)
   - DOW-specific (2): rolling_mean_4w_same_dow, rolling_std_4w_same_dow
-  - AOV + Orders (3): rolling_mean_7d_aov, lag_7d_orders, rolling_mean_7d_orders
-  - Customer mix (3): new_cust_ratio, returning_ratio, return_rate (all 7d rolling)
-- **Tuned hyperparameters** (saved to `data/lgbm_best_params.json`): num_leaves=31, learning_rate=0.01, min_child_samples=5, reg_alpha=0.1, subsample=0.8
-- **DOW residual corrections**: computed on last 180 days, clamped [0.70, 1.30], saved to `data/dow_corrections.json`
-- LightGBM with 500 rounds, early stopping (patience=50), time-series validation (last 60 days)
-- **Performance** (6-fold walk-forward CV): WAPE=27.66%, R²=0.066, beats best baseline by 1.53%
-- Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no model artefact on disk
+- **The training procedure since 2026-11-18** (owner's choice after a team analysis of month-total accuracy; the analysis' report is the artifact "Разбор прогноза выручки"): Huber loss with δ ₴60K (`HUBER_DELTA`), 300 trees on every row (`NUM_BOOST_ROUND`), no early stopping, no winsorising, no weekday correction. The validation metrics stored beside the forecast and judged by the WAPE gate come from a twin fitted without the last 60 days (`VALIDATION_DAYS`) and scored one day ahead
+- Hyperparameters are pinned in `PRODUCTION_LGB_PARAMS` (num_leaves=31, learning_rate=0.01, min_child_samples=5, reg_alpha=0.1, subsample=0.8 — the values the check measured). `data/lgbm_best_params.json` is not read any more, and `POST /api/revenue/forecast/tune` reports a grid's best set without applying it: it scores one-step-ahead daily WAPE, the badge is a month total
+- **What the procedure replaced, and why**: early stopping on the last 60 days with no refit (the model never saw those days, its level was pulled toward the two-year mean, and in Aug–Sep 2026 and on 2026-11-12 it stopped at one tree — a constant forecast); a weekday "correction" fitted on the same rows (a +5–8% level patch); winsorising at P95 and multiplying back (it erased Black Friday); six order and customer features (NaN → 0 for future days inside the recursion). `data/dow_corrections.json` and `data/clip_ratio.json` may remain on disk and are not read
+- **Performance**, mean absolute error of the month total over 2026 held out, on the Mon/Thu/1st/15th origins: 6.7%, against 8.4% for the replaced procedure and 7.0% for an 8-week weekday mean (2025: 8.0 / 8.5 / 8.6). Against the weekday mean the difference is within noise; from the 1st of the month the error is 10–15% for every method tried. Prophet, five variants on the same harness, scored 7.8% at best over every 2026 origin, against 6.6% for the weekday mean, and its 80% interval held the actual 42–56% of the time
+- Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no usable model on disk
 - Predictions stored in Postgres `app.revenue_predictions`, written by chain 7b-3 (DuckDB's `revenue_predictions` until it latched). The rows each training replaces are kept in `app.revenue_prediction_vintages` (revision 0036), inside the training's transaction under a savepoint that never fails it; the forecast a past day was shown last is never replaced and stays in `app.revenue_predictions`, so the history of forecasts shown is both (see "The analysts' captures")
 - Frontend shows forecast bars (lighter opacity) on Revenue Trend chart for the month, the week and a custom range with future days
 - **Every forecast a page shows is read from `revenue_predictions`; no request runs the model** (owner's decision, 2026-11-04 — the Rust council's decision 6). It is as of the last training (Mon/Thu), retail only — b2b and the other sales types show none — and `last_trained` (the Kyiv day of the rows' `created_at`) and `model_metrics` come from the same rows, so any process, the Rust read API included, can answer it. Until then the week and a custom range ran the model on the request over 780 days of Gold, and `last_trained` came from web's memory — null after every restart, until the next training
 - "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
 - **The comparison under the chart is the whole period's** (owner's decision, 2026-11-12). The month and the week end today (`parse_period`) and are drawn to their last day (`dashboard_service.last_day_of_period`). Their comparison is the window before the whole period, day by day: `previous_period` sets November beside 2–31 October, and a week beside the week before, Monday beside Monday. The dashed line therefore runs under the forecast days too. The growth badge adds up the days through today on both sides, so 1–12 November is set beside 2–13 October. A range reaching into the future counts only its days behind it, where it used to set its days so far beside the whole window. The store's trend takes `period_end` and `through`, and `dashboard_service.fit_trend` lays the window under the days drawn, by date. Until then the month compared its days so far with as many days before them, and set each forecast day beside the day as many days back as there were forecast days, read from Silver: under 19–30 November the line drew 1–12 November. `year_ago`, the chart's default, already went day by day
 - Graceful degradation: chart works normally if model unavailable
-- Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches
-- **Known limitation**: Thu/Fri have ~₴30K underprediction bias due to bimodal distribution (promo spike days ₴300-600K are unpredictable from lagged features)
+- Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches; the 31-feature model of the replaced procedure is rejected that way, and web's startup then trains the current one in the background (`web/main.py`)
+- **Known limitations**: a shift of the month's level (July 2026, ₴4.33M → ₴3.25M, was an acquisition drop) is not visible on the 1st in any data the shop records; promotions are not known in advance, and Black Friday has one past instance to learn from
 
 ### Telegram Bot
 - Sales summary reports by source
@@ -748,6 +778,7 @@ projection (`core.warehouse_sql.silver_select_sql`, derived by
 
 ```
 source_id = EXHIBITION_SOURCE_ID (5)      → exhibition (the fair, whoever staffed it)
+source_id = OFFLINE_STORE_SOURCE_ID (7)   → offline   (the offline store, whoever sells there)
 manager_id IS NULL                        → retail    (Shopify, no manager)
 manager_id = B2B_MANAGER_ID               → b2b       (the wholesale manager)
 manager_id in managers.is_retail = TRUE   → retail
@@ -758,6 +789,90 @@ The exhibition branch is first on purpose: the fair was staffed by a retail
 manager, so a manager-based rule would pull a one-off channel into the retail
 trend it would distort. It counts as revenue (source 5 is in
 `REVENUE_SOURCE_IDS`) and is not gated like `internal`.
+
+**The offline store is a category of its own** (owner's decision,
+2026-11-15: «да это розница но офлайн она должна идти отдельной
+категорией»). KeyCRM's source 7, «Офлайн Магазин», created 2026-11-02, is the
+shop's physical store: retail goods at retail prices over a counter. Its
+branch is second, before every manager branch, for the exhibition's reason
+turned round: its seller is a manager on no retail list, so the manager rule
+filed the store as `internal` (admin-only); putting the seller on the list
+would mix counter sales into the online retail trend, the forecast and the
+weekly report. Source 7 is in `REVENUE_SOURCE_IDS` and `SYNCED_SOURCE_IDS`,
+`offline` in `KNOWN_SALES_TYPES` (so the validators, the derivation's
+partition check and the frontend union follow), and every viewer may select
+it — `api_gate` gates only `internal`. Silver names it `Офлайн-магазин`.
+
+Every route that filters by `source_id` answers 7 with real numbers:
+`VALID_SOURCE_IDS` holds it, `/api/summary` and the trend read Gold's fine
+rows for it (`RevenueMixin._GOLD_SOURCE_IDS`), `/reports` lists it
+(`_REPORT_SOURCE_NAMES`) and the subcategory drill-down's source list carries
+it. Two routes take the parameter and are not that: `/api/sales/by-source`
+validates it and ignores it (a breakdown by source), and the SMS audience
+routes build retail audiences only (below). The exhibition (5) is still a 400
+there and Opencart (3) still zeros on the summary — decision 5, which this did
+not move. The header's source filter offers the store beside the sales-type
+pill, and the two are independent, as every pair of filters here is: source 7
+under any sales type but `offline` or `all` answers zeros. On /traffic a store
+order carries no tag, so the readers' fallback (`TrafficMixin._PLATFORM_EXPR` and
+`_TRAFFIC_TYPE_EXPR`, the one spelling every query reads since) places an
+untagged source-7 order on platform `offline_store`, traffic type `organic`,
+and `organic_channel` gives it the channel `offline_store` (under GA4's
+groups the page says "off-site", as for Direct: GA4 never sees it) — never
+the website's "source not identified". The bot's live
+reports name it from `SOURCE_MAPPING`, and the assistant's revenue tools take
+`sales_type='offline'`.
+
+**The doughnut by source draws the store a slice**: the dashboard's three
+charts by source (`/api/sales/by-source`) read
+`core.sql_dialect.DOUGHNUT_SOURCE_IDS` — the three channels, then 7 — through
+`channel_measures` on the Gold branch
+and by name on the line branch, coloured `#B45309` as `utils/colors` does.
+Without it `sales_type=offline` drew nothing beside a non-zero summary, and
+under `all` the store's money was in the card and in no slice, so every
+channel's share of the slices read high. The answer names its sources and
+carries no ids (its shape is pinned by `tests/integration/golden/dashboard.json`),
+so the page translates the store by the server's name
+(`utils/sources.sourceLabel`, held to `_REPORT_SOURCE_NAMES` by a test). The
+exhibition still has no slice, as it never had.
+
+**Retail-only, and kept so**: the Monday sales report, the traffic report
+and the forecast are about the online shop; the store is not retail and is
+in none of them.
+
+**Not widened, each its own decision**: the marketing report's channels
+(`core.sql_dialect._CHANNELS`, which `DOUGHNUT_SOURCE_IDS` extends rather than
+changes) and the bot's TOP-10 (`TOP10_SOURCES`) know only Instagram, Telegram
+and Shopify, as they never knew the exhibition. So /marketing and its CSV,
+which go to suppliers, list Сайт, Telegram and Instagram at 0 under
+`sales_type=offline`, beside a general-sales block carrying the store's
+revenue, and under `all` the three rows' shares fall short of 100 % with
+nothing naming the rest. The SMS wizard builds retail audiences only
+(`salesType: 'retail'`; the content filter asks the campaign's sales type of
+the same order line), so its source condition «Офлайн-магазин» matches nobody,
+as «Виставка» never has: a store buyer is reachable by no audience the page
+can build. Goals and milestones for `offline` show the fallback targets
+(₴50 000 a day, ₴1 000 000 a month, a "fallback" smart goal), as the
+exhibition's do. An offline-store order billed at zero with goods in it reads
+in `pg_headline_vs_line_items` (INFO) as "a sales type no decision covers":
+`ZERO_TOTAL_KINDS` waits for the owner to say whether the store redeems
+certificates as retail does.
+
+**What 7 joining `is_active_source` moves besides revenue**, as the
+exhibition's orders always have: the inventory velocity and stock-out views
+(revisions 0014 and 0015, `NOT is_return AND is_active_source`, no sales
+type) count counter sales as goods leaving, and an SMS campaign's conversion
+(`customers.py`'s `window_orders`, no sales type) counts a messaged buyer's
+purchase in the store.
+
+Measured on production on 2026-11-15: five store orders since 2026-11-12,
+single cosmetics at retail prices, all five cancelled (status 19, the lost
+group), so no revenue figure moves yet. After a deploy the derivation's first
+tick past the 600 s floor rebuilds Silver and Gold whole (`first_tick`);
+`POST /api/warehouse/refresh` skips the floor, ClickHouse follows at the next
+`ch_sync`. Until then `pg_silver_row_values` holds the store's rows as a rule
+change (INFO). The standing `pg_value_domain_orders_source_id` WARN clears at
+the next integrity run (01, 07, 13 or 19 Kyiv).
 
 **Retail is a fixed list of retail managers and b2b is the wholesale manager;
 nobody else is mixed into either.** `internal` is everyone else — staff whose
@@ -771,6 +886,59 @@ once `/api/dashboard/batch` was deleted — it was the only route that took
 reason. Any new POST accepting `sales_type` in a body reopens the hole and
 needs the same treatment.
 
+**A sale to ourselves is revenue nowhere** (owner's decision, 2026-11-14). The
+company's second legal entity buys under its own KeyCRM buyer card: goods moved
+between our two entities, not a sale. Its orders stay in Silver, under
+whatever `sales_type` the CASE above gives them (on production b2b, by the
+wholesale manager, and internal), and Silver's `is_active_source` is FALSE for
+them:
+`o.source_id IN (1, 2, 4, 5) AND (o.buyer_id IS NULL OR o.buyer_id NOT IN
+(17358))` (`core.warehouse_sql.silver_select_sql`; the buyer half is
+`core.duckdb_constants.not_own_entity`, NULL-safe, so an order with no buyer
+stays revenue and the NOT NULL column never meets a NULL). Every Gold measure
+in Postgres and ClickHouse, the line level, the inventory views and every
+dashboard, report, SMS, traffic and forecast reader read the column, not the
+rule — no revision. The readers that read around it leave the entity out
+too: the goals' growth history and the /expenses profit (both keep Opencart),
+the cohorts' membership (any source, O5) and the assistant's top products
+through `not_own_entity`; the subcategory drill-down by reading
+`is_active_source` beside its own source list. The bot's live KeyCRM reports
+ask for `include=buyer` and skip such an order, sale or return. The expense
+summary keeps its costs: costs, not revenue.
+
+Measured on production on 2026-11-14: one card, 35 orders, all in 2026. Out of
+revenue: b2b −179 065.00 of 12 786 199 (−1.4 %), internal −579 690.00, all
+sales types −758 755.00; retail unchanged. With it move the wholesale
+manager's 365-day figure on `/api/managers`, the b2b, internal and "all" brand
+tables, smart goals and cohorts; the three zero-total b2b test shipments leave
+`pg_headline_vs_line_items`, and the entity's shipments leave the inventory
+velocity, sell-through, ABC, restock quantities and days of supply (frozen
+views over the column; counting them there would take a revision) while
+`last_sale_date`, a stock fact read from bronze, keeps them. So a SKU moved
+mostly to the other entity reads recently sold with little velocity and a
+long days of supply. The decision named revenue only; whether goods sent to
+the other entity should drive restocking is the owner's open question. The
+integrity layer files `pg_own_entity_orders`
+(INFO: what is kept out, billed and in goods, by sales type) and
+`pg_own_entity_unlisted` (WARN: a card whose name reads like the entity's and
+whose id is in neither `OWN_ENTITY_BUYER_IDS` nor `NOT_OWN_ENTITY_BUYER_IDS` —
+a second card would silently be revenue; list it and deploy). The name is
+folded by `translate()` over an explicit table, because production's `LOWER`
+and `~*` do not fold Cyrillic, and never leaves Postgres: the finding carries
+card ids.
+
+After a deploy nothing is done by hand. Web restarts, and the first
+`pg_warehouse_derive` tick past the 600 s floor (measured from the last attempt
+journalled in Postgres) rebuilds Silver and Gold whole as `first_tick` —
+within about eleven minutes; `POST /api/warehouse/refresh` skips the floor.
+Until then `pg_silver_row_values` holds the entity's rows as a rule change
+(INFO), not a page. ClickHouse's Silver, its Gold and the cohorts follow at
+the next hourly `ch_sync`; the bot's five-minute cache expires on its own. A
+rollback to any image before this change — `rollback-step14`, an `:s14-NN`
+tag or an earlier 3.0.3xx — derives the old rule again: the entity's orders
+are revenue there from its first derivation tick, which rebuilds Silver and
+Gold whole.
+
 `managers.is_retail` is seeded from `RETAIL_MANAGER_IDS` for managers the
 warehouse has never seen and **never overwritten afterwards** — it used to be
 recomputed on every sync, which made a human's classification impossible to
@@ -781,7 +949,11 @@ on a rebuild.
 **"First purchase" has four definitions, kept on purpose** (owner's decision
 O7, 2026-11-11). Silver's (`silver_recompute_ctes`, which Gold's
 `new_customers` counts): the earliest non-return order on any source and of any
-sales type, and `is_new_customer` only on an active-source order of that day.
+sales type, and `is_new_customer` only on an active-source order of that day
+(so never on the own entity's, since 2026-11-14; and on an offline-store
+order since 2026-11-15, as on the exhibition's). The first order was read on
+every source before the store was revenue too, so a buyer whose first purchase
+was over the counter was never new on a later online order, and still is not.
 `app.customer_profile`'s: retail orders on active sources (frozen since O6).
 The SMS audience's: retail order lines on active sources, so an order without
 lines does not count. The cohorts' (`core/sql_dialect.py`): the earliest
@@ -1420,7 +1592,9 @@ week end, so no report is ever rendered mid-rebuild.
 switched `notifications_enabled` off — a toggle some messages ignore is worse
 than no toggle. The report is `retail` only, which is exactly what an approved
 user already sees on the dashboard, so the wider audience does not widen what
-is disclosed. An unreadable `bot.db` falls back to the admins alone.
+is disclosed. The offline store is not in it: it is its own sales type
+(owner's decision 2026-11-15), and the report is about the online shop. An
+unreadable `bot.db` falls back to the admins alone.
 
 **It sends the rich form** (Bot API 10.1, June 2026), which is a document
 rather than a run of text: `<h1>`, real `<table>`s, `<ul>`, `<details>`, a
@@ -1553,7 +1727,9 @@ attribution not being read.
 **It reads through the repository the tab reads**, `get_traffic_analytics`
 and `get_traffic_utm_campaigns`, with the tab's own `sales_type="retail"`.
 Same question, same answer: a message that disagreed with the screen would
-cost more trust than it delivers.
+cost more trust than it delivers. Retail leaves the offline store out (its
+own sales type since 2026-11-15), so the message never carries its
+`offline_store` platform.
 
 **No spend, no ROAS** (owner's call, 2026-09-08). The tab has a ROAS block,
 but ad spend is not in KeyCRM and is typed in by hand, so a weekly figure
@@ -1810,6 +1986,17 @@ Cap what rebounds; only delete what stays deleted.
   404 "identical" messages.
 - **Daily digest** (`dq_digest`) is the only route by which WARN findings reach
   anyone. INFO findings ride along but never summon a digest on their own.
+  **A finding that changes severity changes its name.** "News" is decided per
+  non-INFO finding by its count against the same name's in the last delivered
+  digest's run (`_delta_note`); severity is not compared, so a finding that
+  moved from INFO to WARN under one name with one count reads "=" and arrives
+  silently. Since 2026-11-14 three findings are INFO while they say nothing to
+  act on, each with its WARN under a name of its own:
+  `capture_unstarted:<table>` → `capture_stalled:<table>`,
+  `ga4_backfill_incomplete` → `ga4_backlog_at_risk` (see "The analysts'
+  captures"); and `pg_headline_vs_line_items`, INFO with no WARN, explained by
+  the owner's decision (see "What the warehouse validation can and cannot
+  see"). `tests/unit/test_dq_digest_owner_noise.py` replays that morning.
 - **Run-age watchdog**: `/api/health` publishes the age of the last successful
   run per layer, keyed on `error_message IS NULL` — a failed run writes a row
   too, so row-existence alone reads green. `bot/canary.py` judges it from the
@@ -2339,8 +2526,10 @@ and files, on layer `integrity`:
 |---|---|---|
 | `capture_failed:<table>` | WARN | a run failed since the capture's last success; all seven |
 | `capture_self_check_failed:<table>` | WARN | the catalogue's or the verdicts' self-check or guard refused; nothing was written |
-| `capture_stalled:<table>` | WARN | no success inside the writer's cadence plus grace, or none yet: cost 26 h, catalogue and verdicts 3 h, vintages 4 d 3 h, GA4 30 h. Goals and expense deletions run only when something moves them and are judged on failures alone |
-| `ga4_backfill_incomplete` | WARN | closed periods inside GA4's horizon, due since yesterday, not kept yet (`ga4_capture.backlog`); only where GA4 is configured |
+| `capture_stalled:<table>` | WARN | no success inside the writer's cadence plus grace: cost 26 h, catalogue and verdicts 3 h, vintages 4 d 3 h, GA4 30 h; or none yet, the same time after the first integrity run that found it so. Goals and expense deletions run only when something moves them and are judged on failures alone |
+| `capture_unstarted:<table>` | INFO | never stamped, and found so for less than that time (2026-11-14). Measured from the journal — the newest unbroken streak of successful integrity runs that filed this name or `capture_stalled` for the table (`analytics_captures.missing_since`), so a restart or a deploy moves nothing; a run that could not read the stamps is passed over, one with the switch off ends the streak. A journal that cannot be read gives no grace: `capture_stalled` at once, as before |
+| `ga4_backfill_incomplete` | INFO | closed periods inside GA4's horizon, due since yesterday, not kept yet (`ga4_capture.backlog`), with `GA4_MARGIN_NIGHTS` (7) or more nights to spare: the runs the capture could fail, wherever they fall, at 24 periods a night oldest first, and still keep every period before it leaves the window (`ga4_capture.nights_to_spare`). Only where GA4 is configured |
+| `ga4_backlog_at_risk` | WARN | the same backlog with fewer than 7 nights to spare (2026-11-14). Seven is a week before the first loss — the digest's restatement beat, a weekend and a deploy inside it; a night that fails or does not run is already `capture_failed` or `capture_stalled` that morning |
 | `captures_unwatched` | WARN | the stamps could not be read; holds every condition above, and is news in every digest (`blindness_names`) |
 | `captures_switched_off` | WARN | the switch is off: no stamp is judged and every stamp finding standing is held, not cleared; news in every digest (`blindness_names`), since every day it stands is a day missing from each history. The GA4 backlog is still read and judged |
 
@@ -2355,13 +2544,18 @@ runs cannot make a standing CRITICAL a new incident. What the watch cannot
 keep: a failure the capture's next run clears before the integrity job reads
 the row is in the web log only.
 
-**After the deploy, expect** `capture_stalled` ("never stamped") for each
-capture until its writer has run once — the cost at the first photograph after
-Kyiv midnight, the vintages at the next Monday or Thursday training, GA4 at
-02:40 — and `ga4_backfill_incomplete` for about three weeks while the backfill
-works through some 500 periods, 24 a night. A host with Postgres and no GA4
-key (a dev copy) keeps `capture_stalled:app.ga4_funnel`: the job stands down
-there and stamps nothing, so that a production key gone missing says so too.
+**After the deploy, expect** `capture_unstarted` (INFO) for each capture until
+its writer has run once — the cost at the first photograph after Kyiv
+midnight, the vintages at the next Monday or Thursday training, GA4 at 02:40 —
+and `ga4_backfill_incomplete` (INFO) for about three weeks while the backfill
+works through some 500 periods, 24 a night: on 2026-11-14, 471 left and 19
+nights to spare, the slack growing about 20 nights a night. Until 2026-11-14
+both were WARNs, and the second's count moved every night, so the digest was
+news every morning for nothing (owner: "why does this come regularly"). A
+host with Postgres and no GA4 key (a dev copy) turns
+`capture_stalled:app.ga4_funnel` 30 h after its first integrity run: the job
+stands down there and stamps nothing, so that a production key gone missing
+says so too.
 
 **The decisions worth knowing, per capture:**
 
@@ -2892,8 +3086,8 @@ appeared (`first`) or moved (`change`, or `reclassify` when a full parse moved
 it), with `rule_version` — `core.utm_classify.RULE_VERSION`, held to the
 goldens by `tests/unit/test_capture_verdicts.py` (`GOLDEN_SHA256`,
 append-only), or `pre-r1` on a `first` verdict today's rules do not make. A
-rule change therefore bumps the version in the same commit as the golden,
-and PR #380 must make it `r2`. **D12 is in the code**: a full parse first
+rule change therefore bumps the version in the same commit as the golden;
+`r2` (PR #380, the Meta cookies' labels below) was the first. **D12 is in the code**: a full parse first
 logs what the table holds (an incremental capture, so the seed if the log is
 empty), and is refused — the reclassify door's 409, `UNLOGGED_REFUSAL` —
 when that was not kept: the switch off, or the capture failing. Only the
@@ -2902,6 +3096,33 @@ CLI's `--force-ship` passes it. The full parse's log line carries
 `capture.app.order_channel_verdicts` in `meta.mirror_state` at
 `failures_since_ok = 0`, and the log's distinct orders at least
 `silver.order_utm`'s rows. See "The analysts' captures".
+
+**Куки Meta без подчёркивания** (12.11.2026, правила `r2`). С конца сентября
+2026 шаблон комментария пишет поле на строку и подписывает куки пикселя Meta
+`fbp:` и `fbc:`, а разбор искал только `_fbp`/`_fbc`: в `silver.order_utm` за
+сентябрь 594 `fbp` и 295 `fbc`, за октябрь и ноябрь ни одной. Ничего не упало,
+просто замолчали два правила: «`_fbc` без источника и канала → `paid_likely`,
+facebook» и «один `_fbp` → `pixel_only`». Теперь `fbp`/`fbc` читаются как
+`_fbp`/`_fbc` везде, где читалась сама кука (`_KEY_ALIASES` в
+`core/utm_classify.py`): в блоке `UTM:`, парой запроса и голой парой; при двух
+написаниях в одном комментарии выигрывает первое. Порядок разбора прежний:
+если метки есть в URL посадочной, остальные строки не читаются, как не
+читались и `_fbp:`. Это правка правила, а не рефакторинг: `RULE_VERSION`
+стал `r2`, а `PARSE_GOLDEN_FB_LABELS` держит новые ответы на выдуманных
+комментариях. Отдельный список, потому что `PARSE_GOLDEN` по позициям
+сверяется с записанными ответами DuckDB; хеш `GOLDEN_SHA256` поэтому обходит
+все списки голдена, а не два названных. Заказы, разобранные раньше, хранят
+вердикт `r1` до реклассификации. Её запуск — решение владельца, как и судьба
+самого правила: `fbc` ставит любой переход по ссылке с `fbclid`,
+органический тоже, так что «вероятно реклама» — утверждение правила, а не
+замер. Прогон вхолостую на проде 13.11.2026: с правилами `r1` расходится
+ноль строк; с `r2` реклассификация перепишет 1 150 из 35 054, вердикт
+сдвинется у 170, остальные только получат `fbp`/`fbc`. С сентября парсер
+читает каждую строку `fbp:` (1 149) и `fbc:` (587). За 12 недель
+17.08–08.11 62 розничных заказа на ₴131 029 уходят из «источник не
+определён» в facebook/`paid_likely` (55 из `pixel_only`, 7 из `unknown`), и
+ещё 41 на ₴94 814 — из `unknown` в `pixel_only`. Снимок до реклассификации —
+`/root/utm-snapshots/order_utm-20261113-175758.csv.gz`.
 
 **Три решения на карточке ROAS, каждое — утверждение, которого не считали.**
 
@@ -3067,11 +3288,13 @@ buyer_id)` и считается множествами в Python — свёрт
 проде 19.10.2026, 180 дней розницы, ₴14.1M органики — из них ₴9.0M заказы,
 принятые менеджером в Instagram Direct без единой метки, ₴3.1M переходы по
 ссылке в профиле, ₴0.9M email, ₴0.7M Telegram, ₴0.3M бесплатные объявления
-Google. Канал — `core.utm_classify.organic_channel`, одиннадцать ключей
+Google. Канал — `core.utm_classify.organic_channel`, двенадцать ключей
 `ORGANIC_CHANNELS`; **вычисляется при чтении из хранимых меток и нигде не
 хранится**, поэтому правка правила не требует реклассификации (в отличие от
 `classify_traffic`). Без вердикта (`traffic_type IS NULL`) органика возможна
-только через COALESCE на источниках 1 и 2 — это и есть Direct и Telegram. Email
+только через COALESCE на источниках 1 и 2 — это и есть Direct и Telegram.
+(And on source 7 since 2026-11-15: the offline store's counter sales, channel
+`offline_store`, platform `offline_store`, shown "off-site" like Direct.) Email
 делится на рассылки (Klaviyo: `utm_medium=klaviyo`/`campaign` или имя
 «Campaign #N») и автоматические письма (всё прочее, включая Rivo и Shopify Email
 — у последнего рассылку от цепочки по метке не отличить). Сторис —
@@ -3409,6 +3632,26 @@ The `sales_type` partition assertion (Gold known types == Silver total) is
 deliberately **not** part of `validation_passed`: no rebuild can invent a
 sales_type the code does not know, so it reports and stops rather than driving
 a rebuild every two minutes.
+
+**Orders billed at zero with goods in them are explained, not watched**
+(`pg_headline_vs_line_items`, INFO since the owner's decision of 2026-11-14).
+Revenue reads `grand_total` and the product, brand and category figures read
+line items, so these orders separate the two. A retail one — and the
+exhibition's, a fair staffed by retail managers — is a certificate redeemed:
+the certificate was sold first, as a sale of its own, and its money counted
+then. A b2b one is a test shipment to a partner, so a client can try the goods
+before deciding to buy. On 2026-11-14: 461 orders and 1 023 472.67 of goods,
+350 of them (809 553) b2b, 106 retail and 5 exhibition — 458 and 347 b2b once
+the own legal entity's three test shipments left revenue, and with it this
+check, which reads `is_active_source` (see "Retail / B2B / Internal"); the finding says the
+split every run (`pg_warehouse_dq.ZERO_TOTAL_KINDS`), and names a sales type
+no decision covers if one ever appears. It was a WARN until then — for a
+month the digest's only standing one, sent whenever a certificate or a test
+moved its count. What would make such an order a defect, a `grand_total`
+stored differently from KeyCRM's, is not this check's: `dq_reconciliation`
+compares the total of every order of the last 90 days with KeyCRM's each
+morning (VALUE_MISMATCH, `reconciliation_pg`) and re-fetches what differs. Internal orders with goods
+and no sale are `pg_goods_shipped_without_sale`, INFO, as before.
 
 ### The standing watch on a moved chain's tables
 
@@ -3798,4 +4041,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-13 (revision 0036, the analysts' captures)*
+*Last updated: 2026-11-15 (the offline store, source 7: its own sales type)*

@@ -303,11 +303,40 @@ def _names(facts):
     return sorted(i.check_name for i in cap.judge(facts))
 
 
-OLDEST = ga4_capture.Period("day", date(2025, 9, 14), date(2025, 9, 14))
+# The backlog as production had it on the morning of 2026-11-14: the first
+# night after revision 0036 kept the 24 oldest periods, 471 were left, the
+# oldest the day 2025-10-05, and the next run is the 15th's.
+GA4_TODAY = date(2026, 11, 14)
+NOV_14_BACKLOG = tuple(ga4_capture.overdue_periods(GA4_TODAY)[ga4_capture.PERIODS_PER_RUN:])
+NOV_15 = date(2026, 11, 15)
 
 
-def _behind(missing, **overrides):
-    return dataclasses.replace(_all_ok(**overrides), ga4_backlog=(missing, OLDEST))
+def _behind(missing=None, *, first_night=NOV_15, **overrides):
+    """The facts with that backlog, its oldest `missing` periods when given."""
+    periods = NOV_14_BACKLOG if missing is None else NOV_14_BACKLOG[:missing]
+    return dataclasses.replace(_all_ok(**overrides),
+                               ga4_backlog=ga4_capture.Backlog(periods, first_night))
+
+
+def _unread(**overrides):
+    """The facts with the journal read and no streak in it: every capture
+    with no stamp is found so for the first time by this run."""
+    return dataclasses.replace(_all_ok(**overrides), missing_since={})
+
+
+def _digest(today, before):
+    """The 09:00 digest over one integrity run's findings, the run of the
+    digest sent the morning before as its baseline."""
+    from core.data_quality import DigestSection, build_digest
+
+    def rows(issues):
+        return [{"check_name": i.check_name, "count": i.count,
+                 "severity": i.severity.value} for i in issues]
+
+    section = DigestSection(
+        layer="integrity", run={"started_at": NOW.isoformat(), "status": "WARN"},
+        issues=rows(today), previous_issues=rows(before), age_hours=2.0)
+    return build_digest([section], last_sent_at=NOW - timedelta(days=1), now=NOW)
 
 
 class TestTheWatch:
@@ -346,11 +375,89 @@ class TestTheWatch:
         assert _names(_all_ok(**{table: _ok(limit + timedelta(minutes=1))})) == [
             f"capture_stalled:{table}"]
 
-    def test_never_stamped_is_stalled(self):
-        """The first due period after the deploy says so too, by design: an
-        unstarted history is not started. Kills: a missing row read as
-        healthy."""
-        assert _names(_all_ok(**{"app.ga4_funnel": None})) == ["capture_stalled:app.ga4_funnel"]
+    def test_never_stamped_is_unstarted_until_its_grace_has_run(self):
+        """Found for the first time by this run: INFO, which rides in the
+        digest and never sends one. It was a WARN from the first run after
+        revision 0036, for a writer that had not had its turn (the vintages'
+        training, Monday or Thursday). Kills: a missing row read as healthy,
+        or as stalled before its writer could run."""
+        (issue,) = cap.judge(_unread(**{"app.revenue_prediction_vintages": None}))
+        assert (issue.check_name, issue.table_name, issue.severity, issue.count) == (
+            "capture_unstarted:app.revenue_prediction_vintages",
+            "app.revenue_prediction_vintages", Severity.INFO, 1)
+        assert "4 d 3 h" in issue.description
+        assert "2026-11-17 10:00 UTC, it is capture_stalled (WARN)" in issue.description
+
+    @pytest.mark.parametrize("table", sorted(t for t, s in cap.CAPTURES.items()
+                                              if s.max_age is not None))
+    def test_the_grace_is_its_cadence_from_the_first_run_that_found_it(self, table):
+        """Measured from when the journal's streak began, not from now and
+        not from a process start. Kills: a grace that restarts every run (it
+        would never turn), or one longer or shorter than `max_age`."""
+        limit = cap.CAPTURES[table].max_age
+        assert limit is not None
+
+        def since(age):
+            return dataclasses.replace(_all_ok(**{table: None}),
+                                       missing_since={table: NOW - age})
+
+        (inside,) = cap.judge(since(limit - timedelta(minutes=1)))
+        (past,) = cap.judge(since(limit + timedelta(minutes=1)))
+        assert (inside.check_name, inside.severity) == (
+            f"capture_unstarted:{table}", Severity.INFO)
+        assert (past.check_name, past.severity) == (
+            f"capture_stalled:{table}", Severity.WARN)
+        assert "past its" in past.description
+
+    def test_an_unread_journal_is_no_grace(self):
+        """When the journal cannot say how long a capture has been missing,
+        the watch files what it filed before: a WARN, never silence. Kills:
+        the fallback read as "first seen now", which would keep a capture
+        that never runs INFO for as long as the journal stays unreadable."""
+        facts = dataclasses.replace(_all_ok(**{"app.ga4_funnel": None}),
+                                    missing_since=None,
+                                    journal_unread="ConnectionResetError: gone")
+        (issue,) = cap.judge(facts)
+        assert (issue.check_name, issue.severity) == (
+            "capture_stalled:app.ga4_funnel", Severity.WARN)
+        assert "ConnectionResetError: gone" in issue.description
+
+    def test_a_capture_that_stamped_once_is_judged_by_its_stamp(self):
+        """The journal is asked about captures with no stamp only. Kills: a
+        stamped capture given a grace by an old streak, or stalled by one."""
+        table = "app.offer_cost_daily"
+        limit = cap.CAPTURES[table].max_age
+        assert limit is not None
+        long_ago = {table: NOW - timedelta(days=10)}
+        fresh = dataclasses.replace(_all_ok(), missing_since=long_ago)
+        assert cap.judge(fresh) == []
+        old = dataclasses.replace(_all_ok(**{table: _ok(limit + timedelta(hours=1))}),
+                                  missing_since={})
+        (issue,) = cap.judge(old)
+        assert (issue.check_name, issue.severity) == (
+            f"capture_stalled:{table}", Severity.WARN)
+        assert "last succeeded" in issue.description
+
+    def test_the_morning_it_turns_stalled_is_news(self):
+        """The digest compares a finding's count with the same name's in the
+        last digest's run: a WARN under the INFO's name, count 1 both days,
+        would read "=" and arrive silently. Kills: the stalled state filed
+        under `capture_unstarted`."""
+        table = "app.revenue_prediction_vintages"
+        limit = cap.CAPTURES[table].max_age
+        assert limit is not None
+        before = cap.judge(dataclasses.replace(
+            _all_ok(**{table: None}), missing_since={table: NOW - limit + timedelta(hours=1)}))
+        today = cap.judge(dataclasses.replace(
+            _all_ok(**{table: None}), missing_since={table: NOW - limit - timedelta(hours=1)}))
+        assert [i.severity for i in before] == [Severity.INFO]
+        assert [i.severity for i in today] == [Severity.WARN]
+        assert _digest(today, before) is not None
+        # The trap itself: the same WARN under the INFO's name is not news.
+        same_name = [dataclasses.replace(today[0], check_name=before[0].check_name)]
+        assert _digest(same_name, before) is None
+        # And an unstarted capture alone never sends one.
+        assert _digest(before, []) is None
 
     @pytest.mark.parametrize("table", sorted(t for t, s in cap.CAPTURES.items()
                                               if s.max_age is None))
@@ -360,17 +467,55 @@ class TestTheWatch:
         assert _names(_all_ok(**{table: None})) == []
         assert _names(_all_ok(**{table: _ok(timedelta(days=90))})) == []
 
-    def test_a_ga4_backlog_is_a_warn_that_names_the_next_to_go(self):
-        """Kills: periods inside GA4's horizon left unkept with nobody told —
-        each that ages out is gone for good (the design's §9)."""
-        (issue,) = cap.judge(_behind(3))
+    def test_a_ga4_backlog_with_nights_to_spare_is_info_and_says_them(self):
+        """The 14 November backlog: 471 periods, and the oldest, kept by the
+        next run, could wait 19 more. Its count moves every night, so as a
+        WARN it was news every morning for three weeks. Kills: the WARN back,
+        or a description that does not say how safe it is."""
+        (issue,) = cap.judge(_behind())
         assert (issue.check_name, issue.table_name, issue.severity, issue.count) == (
-            cap.GA4_BACKFILL, "app.ga4_funnel", Severity.WARN, 3)
+            cap.GA4_BACKFILL, "app.ga4_funnel", Severity.INFO, 471)
+        assert ("471 closed period(s) inside GA4's 14-month horizon are not kept in "
+                "app.ga4_funnel yet, with 19 nights to spare; the oldest unkept "
+                "period, the day from 2025-10-05, leaves GA4's window on "
+                "2026-12-05.") in issue.description
+
+    def test_under_the_margin_it_is_a_warn_of_its_own(self):
+        """Seven nights to spare is INFO, six is WARN, under its own name.
+        Kills: a margin other than `GA4_MARGIN_NIGHTS`, or the WARN filed
+        under the INFO's name."""
+        assert cap.GA4_MARGIN_NIGHTS == 7
+        # The run of 12-04 is the last that can keep the oldest, 2025-10-05.
+        at_seven = cap.judge(_behind(first_night=date(2026, 11, 27)))
+        at_six = cap.judge(_behind(first_night=date(2026, 11, 28)))
+        assert [(i.check_name, i.severity) for i in at_seven] == [
+            (cap.GA4_BACKFILL, Severity.INFO)]
+        assert [(i.check_name, i.severity, i.count) for i in at_six] == [
+            (cap.GA4_AT_RISK, Severity.WARN, 471)]
+        assert "only 6 night(s) to spare, under 7" in at_six[0].description
+
+    def test_a_backlog_that_loses_a_period_whatever_happens_says_so(self):
+        (issue,) = cap.judge(_behind(first_night=date(2026, 12, 5)))
+        assert (issue.check_name, issue.severity) == (cap.GA4_AT_RISK, Severity.WARN)
+        assert "Even with no run failing" in issue.description
+
+    def test_the_morning_the_backlog_turns_at_risk_is_news(self):
+        """Same count both mornings (no run kept anything): under the INFO's
+        name it would read "=" and arrive silently. Kills: the at-risk state
+        filed under `ga4_backfill_incomplete`."""
+        before = cap.judge(_behind(first_night=date(2026, 11, 27)))
+        today = cap.judge(_behind(first_night=date(2026, 11, 28)))
+        assert _digest(today, before) is not None
+        same_name = [dataclasses.replace(today[0], check_name=cap.GA4_BACKFILL)]
+        assert _digest(same_name, before) is None
+        # The INFO alone, its count moving every night, sends nothing.
+        assert _digest(cap.judge(_behind(400)), before) is None
 
     def test_no_backlog_and_no_ga4_are_quiet(self):
         """None is GA4 not configured: nothing is captured there, and its
         stamp already says so. Kills: a backlog filed with nothing missing."""
-        assert cap.judge(dataclasses.replace(_all_ok(), ga4_backlog=(0, None))) == []
+        empty = ga4_capture.Backlog((), NOV_15)
+        assert cap.judge(dataclasses.replace(_all_ok(), ga4_backlog=empty)) == []
         assert _all_ok().ga4_backlog is None and cap.judge(_all_ok()) == []
 
     def test_the_switch_off_is_said_once_and_stalls_nothing(self):
@@ -403,10 +548,13 @@ class TestTheWatch:
         names = _names(facts)
         assert names == sorted([cap.SWITCHED_OFF, cap.GA4_BACKFILL])
         off = next(i for i in cap.judge(facts) if i.check_name == cap.SWITCHED_OFF)
-        assert cap.GA4_BACKFILL not in off.unverified
+        assert not {cap.GA4_BACKFILL, cap.GA4_AT_RISK} & set(off.unverified)
+        at_risk = dataclasses.replace(_behind(first_night=date(2026, 11, 30)),
+                                      switched_off=True)
+        assert cap.GA4_AT_RISK in _names(at_risk)
         # Not read (GA4 not configured, or the read failed): held, not judged.
         off_blind = cap.judge(cap.Facts(switched_off=True))[0]
-        assert cap.GA4_BACKFILL in off_blind.unverified
+        assert {cap.GA4_BACKFILL, cap.GA4_AT_RISK} <= set(off_blind.unverified)
 
     def test_the_switch_off_with_the_stamps_unread_says_both(self):
         names = _names(cap.Facts(switched_off=True, unwatched="refused"))
@@ -425,7 +573,9 @@ class TestTheWatch:
         on CRITICAL alone."""
         scenarios = [_all_ok(**{t: cap.Stamp(None, 1, cap.SELF_CHECK_MARK)}) for t in cap.CAPTURES]
         scenarios += [_all_ok(**{t: None}) for t in cap.CAPTURES]
-        scenarios += [cap.Facts(switched_off=True), cap.Facts(unwatched="x"), _behind(500)]
+        scenarios += [_unread(**{t: None}) for t in cap.CAPTURES]
+        scenarios += [cap.Facts(switched_off=True), cap.Facts(unwatched="x"), _behind(),
+                      _behind(first_night=date(2026, 12, 5))]
         for facts in scenarios:
             assert all(i.severity != Severity.CRITICAL for i in cap.judge(facts))
 
@@ -437,10 +587,91 @@ class TestTheWatch:
             filed |= set(_names(_all_ok(**{t: cap.Stamp(None, 1, "boom")})))
             filed |= set(_names(_all_ok(**{t: cap.Stamp(None, 1, cap.SELF_CHECK_MARK)})))
             filed |= set(_names(_all_ok(**{t: None})))
+            filed |= set(_names(_unread(**{t: None})))
         filed |= set(_names(cap.Facts(switched_off=True)))
         filed |= set(_names(cap.Facts(unwatched="x")))
         filed |= set(_names(_behind(1)))
+        filed |= set(_names(_behind(first_night=date(2026, 12, 1))))
         assert filed == set(cap.conditions())
+
+
+class TestTheJournalStreak:
+    """`missing_since`: when the integrity runs began finding a capture with
+    no stamp, read off the journal so that a restart or a deploy moves
+    nothing. Runs newest first, as the reader returns them."""
+
+    V = "app.revenue_prediction_vintages"
+    G = "app.ga4_funnel"
+
+    def _at(self, hours_ago):
+        return NOW - timedelta(hours=hours_ago)
+
+    def u(self, table):
+        return cap.condition(cap.UNSTARTED, table)
+
+    def s(self, table):
+        return cap.condition(cap.STALLED, table)
+
+    def test_the_oldest_run_of_the_newest_unbroken_streak(self):
+        runs = [(self._at(1), {self.u(self.V)}), (self._at(7), {self.u(self.V)}),
+                (self._at(13), set()), (self._at(19), {self.u(self.V)})]
+        assert cap.missing_since(runs) == {self.V: self._at(7)}
+
+    def test_turning_stalled_does_not_restart_the_streak(self):
+        """The run that files `capture_stalled` is part of the streak. Kills:
+        a streak of `capture_unstarted` alone, which the first WARN would end,
+        so that the next run found it "missing for the first time" and the
+        capture flapped INFO, WARN, INFO every grace."""
+        runs = [(self._at(1), {self.s(self.V)}), (self._at(7), {self.s(self.V)}),
+                (self._at(100), {self.u(self.V)}), (self._at(106), {self.u(self.V)})]
+        assert cap.missing_since(runs) == {self.V: self._at(106)}
+
+    def test_runs_filed_before_this_rule_count(self):
+        """Until 2026-11-14 a never-stamped capture was filed `capture_stalled`
+        from its first run: the deploy of this rule inherits those runs."""
+        runs = [(self._at(6), {self.s(self.V)}), (self._at(12), {self.s(self.V)})]
+        assert cap.missing_since(runs) == {self.V: self._at(12)}
+
+    def test_a_run_that_could_not_read_the_stamps_is_passed_over(self):
+        runs = [(self._at(1), {self.u(self.V)}), (self._at(7), {cap.UNWATCHED}),
+                (self._at(13), {self.u(self.V)})]
+        assert cap.missing_since(runs) == {self.V: self._at(13)}
+
+    def test_the_switch_off_ends_every_streak(self):
+        """No writer could stamp while it was off, so the grace starts again
+        when it is back on. Kills: a capture filed stalled the morning the
+        switch returns, for time it had no chance to run in."""
+        runs = [(self._at(1), {self.u(self.V)}),
+                (self._at(7), {cap.SWITCHED_OFF, cap.UNWATCHED}),
+                (self._at(13), {self.u(self.V)})]
+        assert cap.missing_since(runs) == {self.V: self._at(1)}
+
+    def test_each_capture_has_its_own_streak(self):
+        runs = [(self._at(1), {self.u(self.V), self.u(self.G)}),
+                (self._at(7), {self.u(self.V)}),
+                (self._at(13), {self.u(self.V), self.u(self.G)})]
+        assert cap.missing_since(runs) == {self.V: self._at(13), self.G: self._at(1)}
+
+    def test_not_filed_by_the_newest_run_is_no_streak(self):
+        """It stamped, or it is new to `CAPTURES`: this run finds it first."""
+        runs = [(self._at(1), set()), (self._at(7), {self.u(self.V)})]
+        assert cap.missing_since(runs) == {}
+        assert cap.missing_since([]) == {}
+
+    def test_the_reader_is_asked_for_every_name_it_walks(self):
+        names = set(cap._streak_names())
+        assert {cap.UNWATCHED, cap.SWITCHED_OFF} <= names
+        for table, spec in cap.CAPTURES.items():
+            if spec.max_age is not None:
+                assert {self.u(table), self.s(table)} <= names
+
+    def test_the_window_reaches_past_every_grace(self):
+        """A streak older than the window reads from the window's first run,
+        which must already be past the grace. Kills: a window that would
+        keep a capture that never runs INFO for ever."""
+        longest = max(s.max_age for s in cap.CAPTURES.values() if s.max_age is not None)
+        assert cap.JOURNAL_LOOKBACK >= longest + timedelta(days=7)
+        assert cap.JOURNAL_LAYER == "integrity"
 
 
 class TestTheNamesAreRegisteredWithALever:

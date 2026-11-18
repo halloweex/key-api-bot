@@ -9,6 +9,7 @@ export const COLORS = {
   violet: '#8B5CF6',
   cyan: '#06B6D4',
   exhibition: '#0D9488', // Teal - Виставка
+  offlineStore: '#B45309', // Amber - Офлайн-магазин
 }
 
 // Source-specific colors
@@ -17,6 +18,7 @@ export const SOURCE_COLORS: Record<number, string> = {
   2: COLORS.primary,    // Telegram - blue
   4: COLORS.shopify,    // Shopify - orange-red
   5: COLORS.exhibition, // Виставка - teal
+  7: COLORS.offlineStore, // Офлайн-магазин - amber
 }
 
 // Category chart color palette

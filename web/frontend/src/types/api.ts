@@ -1065,6 +1065,7 @@ export type OrganicChannelKey =
   | 'instagram_site'
   | 'instagram_stories'
   | 'telegram'
+  | 'offline_store'
   | 'email_campaigns'
   | 'email_flows'
   | 'google_organic'

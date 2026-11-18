@@ -16,13 +16,15 @@ What is pinned, each named by the mutation it kills:
 - a GA4 error stops the run, keeps what was kept, and is stamped as the watch
   reads it (`capture_failed:app.ga4_funnel`, WARN); the next run resumes;
 - switched off or without a key, nothing is asked, written or stamped;
-- the integrity job counts the overdue periods not kept yet
-  (`ga4_backfill_incomplete`, WARN), and never the one that fell due today.
+- the integrity job counts the overdue periods not kept yet, and never the
+  one that fell due today, and judges them by their slack: INFO
+  `ga4_backfill_incomplete` with a week of nights to spare, WARN
+  `ga4_backlog_at_risk` below it.
 """
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -51,8 +53,10 @@ async def _clean(conn) -> None:
 async def pool(monkeypatch, ga4_key):  # noqa: F811 — the fixture imported above
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.delenv(cap.SWITCH_ENV, raising=False)
-    # The watch reads the backlog as of Kyiv's today; the runs here are TODAY's.
+    # The watch reads the backlog as of Kyiv's today; the runs here are TODAY's,
+    # and the next run the watch counts nights from is the night after.
     monkeypatch.setattr(gc, "kyiv_today", lambda now=None: TODAY)
+    monkeypatch.setattr(gc, "first_night", lambda now: TODAY + timedelta(days=1))
     created = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     async with created.acquire() as conn:
         await _clean(conn)
@@ -216,9 +220,12 @@ class TestFailure:
 
         found = cap.judge(await cap.read_facts(pool=pool))
         mine = [i for i in found if i.table_name == gc.TABLE]
+        # One period kept: the next oldest, the day 2025-09-15, leaves GA4's
+        # window on the 15th and only the next run can keep it.
         assert [(i.check_name, i.severity) for i in mine] == [
             (f"capture_failed:{gc.TABLE}", Severity.WARN),
-            (cap.GA4_BACKFILL, Severity.WARN)]
+            (cap.GA4_AT_RISK, Severity.WARN)]
+        assert "only 0 night(s) to spare" in mine[1].description
 
         await _an_hour_ago(pool)
         retry = FakeGA4()
@@ -227,9 +234,11 @@ class TestFailure:
         assert result["captured"] == 24 and "error" not in result
         stamp = await _stamp(pool)
         assert stamp["failures_since_ok"] == 0 and stamp["last_error"] is None
-        # The backfill has 25 of its periods; the backlog is the rest.
-        assert [i.check_name for i in cap.judge(await cap.read_facts(pool=pool))
-                if i.table_name == gc.TABLE] == [cap.GA4_BACKFILL]
+        # The backfill has 25 of its periods; the backlog is the rest, with
+        # twenty nights to spare.
+        assert [(i.check_name, i.severity)
+                for i in cap.judge(await cap.read_facts(pool=pool))
+                if i.table_name == gc.TABLE] == [(cap.GA4_BACKFILL, Severity.INFO)]
 
     @pytest.mark.asyncio
     async def test_a_period_ga4_answers_empty_is_kept_as_zeros(self, pool):
@@ -253,10 +262,14 @@ class TestTheBacklog:
         await _run(FakeGA4())
         overdue = gc.overdue_periods(TODAY)
         facts = await cap.read_facts(pool=pool)
-        assert facts.ga4_backlog == (len(overdue) - gc.PERIODS_PER_RUN,
-                                     overdue[gc.PERIODS_PER_RUN])
+        assert facts.ga4_backlog is not None
+        assert facts.ga4_backlog.periods == tuple(overdue[gc.PERIODS_PER_RUN:])
+        assert (facts.ga4_backlog.missing, facts.ga4_backlog.oldest) == (
+            len(overdue) - gc.PERIODS_PER_RUN, overdue[gc.PERIODS_PER_RUN])
+        assert facts.ga4_backlog.first_night == TODAY + timedelta(days=1)
         (issue,) = [i for i in cap.judge(facts) if i.check_name == cap.GA4_BACKFILL]
-        assert (issue.severity, issue.count) == (Severity.WARN, len(overdue) - gc.PERIODS_PER_RUN)
+        assert (issue.severity, issue.count) == (Severity.INFO, len(overdue) - gc.PERIODS_PER_RUN)
+        assert "19 nights to spare" in issue.description
 
     @pytest.mark.asyncio
     async def test_the_period_that_fell_due_today_is_not_counted(self, pool):
@@ -271,7 +284,8 @@ class TestTheBacklog:
         for period in overdue:
             assert await cap.run_own_transaction(gc.TABLE, gc._keeper(period, rows, [0]))
         facts = await cap.read_facts(pool=pool)
-        assert facts.ga4_backlog == (0, None)
+        assert facts.ga4_backlog is not None
+        assert (facts.ga4_backlog.missing, facts.ga4_backlog.oldest) == (0, None)
         assert not [i for i in cap.judge(facts) if i.table_name == gc.TABLE]
 
     @pytest.mark.asyncio

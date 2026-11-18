@@ -41,12 +41,28 @@ RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]
 # manager, so a manager-based rule would silently pull it into retail.
 EXHIBITION_SOURCE_ID = 5
 
+# Офлайн-магазин (KeyCRM source 7, «Офлайн Магазин», created 2026-11-02) — the
+# shop's own physical store, opened in November 2026. The owner's decision of
+# 2026-11-15: it is retail, but offline, and goes as a category of its own —
+# sales_type `offline`, and revenue. Source wins over manager here as it does
+# for the exhibition, for two reasons: the store's seller is not on the retail
+# list, so the manager rule would file the store as `internal` (admin-only, out
+# of sight of everyone else); and putting the seller on the list would mix
+# counter sales into the online retail trend, the forecast and the weekly
+# report, which are about the online shop. Whoever sells there, it is `offline`.
+OFFLINE_STORE_SOURCE_ID = 7
+
 # Two different questions, and conflating them cost ₴266 059 of September 2025
 # revenue that sat in the warehouse and appeared in no dashboard figure.
 #
 # SYNCED_SOURCE_IDS — everything we pull from KeyCRM and reconcile against it.
 # Includes Opencart (3), retired in 2024: its orders are history we still hold,
 # and the comparator must see them on both sides or it reports a phantom drift.
+# It is also every source the integrity layer knows
+# (`core.pg_warehouse_dq.KNOWN_SOURCE_IDS`) and the reconciliation against
+# KeyCRM compares (`core.reconciliation_io.ACTIVE_SOURCES`). Both read it from
+# here since the offline store arrived, so a new KeyCRM source is registered
+# once; until then each was a literal of its own.
 #
 # REVENUE_SOURCE_IDS — what counts as revenue on the dashboard. Opencart is
 # excluded deliberately; it was decommissioned and its takings are not part of
@@ -54,10 +70,62 @@ EXHIBITION_SOURCE_ID = 5
 #
 # The invariant is REVENUE_SOURCE_IDS <= SYNCED_SOURCE_IDS, pinned by a test.
 # Revenue can never come from a source we do not sync.
-SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)
-REVENUE_SOURCE_IDS = (1, 2, 4, 5)
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5, OFFLINE_STORE_SOURCE_ID)
+REVENUE_SOURCE_IDS = (1, 2, 4, 5, OFFLINE_STORE_SOURCE_ID)
 
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
+# The company's own second legal entity, as KeyCRM's buyer cards name it.
+# An order whose buyer is one of these is a sale to ourselves — goods moved
+# between the company's two entities — and counts as revenue nowhere: in no
+# sales type and not in "all" (owner's decision, 2026-11-14). The order stays
+# in Silver, because the shipment is real; only Silver's `is_active_source`
+# says "not revenue" for it (`core.warehouse_sql.silver_select_sql`), and
+# every Gold measure, in Postgres and ClickHouse, follows that column.
+#
+# Ids, never names: a buyer card's name is personal data in this public
+# repository. A second card for the entity would silently become revenue, so
+# the integrity layer files `pg_own_entity_unlisted` (WARN) for a card whose
+# name looks like the entity's and whose id is in neither list below
+# (`core.pg_warehouse_dq`).
+#
+# Measured on production on 2026-11-14: one card, 35 orders, all in 2026 —
+# 758 755.00 of what Gold counted (b2b 179 065.00, internal 579 690.00),
+# retail none.
+OWN_ENTITY_BUYER_IDS = (17358,)
+
+# Cards whose name looks like the entity's and that a person has checked and
+# found to be somebody else. Read only by `pg_own_entity_unlisted`, which
+# then stays quiet about them; nothing here changes revenue.
+NOT_OWN_ENTITY_BUYER_IDS: tuple = ()
+
+
+def not_own_entity(alias: str, ids=None) -> str:
+    """The predicate "this order's buyer is not the company's own entity",
+    over `<alias>.buyer_id`.
+
+    Silver's `is_active_source` carries it, and every reader that can read
+    that column should; this is for the few that cannot, because they
+    deliberately count a retired source too (the goals' growth history, the
+    /expenses profit) or decide on any source who is a customer (the cohorts).
+
+    NULL-safe on purpose: an order with no buyer is somebody else's, and
+    `buyer_id NOT IN (...)` alone is NULL for it — Silver's column is
+    `BOOLEAN NOT NULL` and ClickHouse's a plain `Bool`, so a bare `NOT IN`
+    would fail every rebuild. With no ids it is `TRUE`, never `NOT IN ()`,
+    which no engine here parses. `ids` defaults to `OWN_ENTITY_BUYER_IDS`,
+    read at call time, so a test that patches the constant patches every
+    reader at once.
+    """
+    ids = OWN_ENTITY_BUYER_IDS if ids is None else ids
+    listed = ", ".join(str(int(i)) for i in ids)
+    if not listed:
+        return "TRUE"
+    return f"({alias}.buyer_id IS NULL OR {alias}.buyer_id NOT IN ({listed}))"
+
+
+# `offline` is the offline store (`OFFLINE_STORE_SOURCE_ID`, the owner's
+# decision of 2026-11-15): retail goods at retail prices, sold over a counter,
+# and a category of its own. Every viewer may select it, as the exhibition.
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 
 # Timezone for date extraction - KeyCRM stores timestamps in +04:00 (server time)
 # but UI displays in Kyiv timezone, so we convert for consistency

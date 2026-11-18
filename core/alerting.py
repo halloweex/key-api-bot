@@ -365,7 +365,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_silver_missing_rows": _c("a Postgres derivation carries the rows"),
     "pg_silver_orphan_rows": _c("a Postgres derivation drops the orphans"),
     "pg_attribution_coverage_website": _c("website orders carry campaign tags again"),
-    "pg_headline_vs_line_items": _c("never fully — the standing ones are certificates"),
+    "pg_headline_vs_line_items": _c(
+        "never fully — certificate redemptions and b2b test shipments (INFO)"),
     "pg_goods_shipped_without_sale": _c("by design it never fully clears"),
     "pg_silver_arc_unwatched": _c("the twin reads Postgres Silver again"),
     "pg_attribution_coverage_unwatched": _c("the twin can tell a quiet week from a stopped mirror"),
@@ -388,6 +389,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_value_domain_orders_source_id": _c("the unknown source ids are registered or gone"),
     "pg_status_group_vs_return_list": _c("the stored group and the legacy list agree in bronze"),
     "pg_order_landing_unwatched": _c("the twins read bronze.orders and its line items again"),
+    # The company's own legal entity, kept out of revenue by the owner's
+    # decision of 2026-11-14. New names (rule 15): no image ever filed them.
+    "pg_own_entity_orders": _c("by design it never fully clears: the orders stay kept out"),
+    "pg_own_entity_unlisted": _c(
+        "each card is listed: in OWN_ENTITY_BUYER_IDS if it is the entity, "
+        "else in NOT_OWN_ENTITY_BUYER_IDS"),
+    "pg_own_entity_unwatched": _c("the twins read the own entity's orders and cards again"),
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
     # Every order the UTM parser reads has a current verdict in Postgres
     # (DN-16, mirror_landing). Read from Postgres alone, so it clears on
@@ -471,16 +479,19 @@ for _entity in ("orders", "products", "buyers", "offers", "stocks",
 # per capture table, a family over `core.analytics_captures.CAPTURES` as
 # `mirror_stale:{table}` is over its tables, plus the GA4 capture's backlog;
 # `conditions()` names exactly what `judge` can file. New names, none ever
-# used or retired (rule 15).
+# used or retired (rule 15); `capture_unstarted:{table}` and
+# `ga4_backlog_at_risk` joined them on 2026-11-14.
 from core import analytics_captures as _captures  # noqa: E402
 
 _CAPTURE_CLEARS = {
     _captures.FAILED: "the capture's next run succeeds",
     _captures.STALLED: "the capture stamps a success inside its cadence again",
+    _captures.UNSTARTED: "the capture stamps its first success (INFO until then)",
     _captures.SELF_CHECK_FAILED: "the capture's next run passes its self-check",
     _captures.UNWATCHED: "the integrity job reads the capture stamps again",
     _captures.SWITCHED_OFF: "KS_ANALYTICS_CAPTURES is unset or on again",
     _captures.GA4_BACKFILL: "every closed period inside GA4's horizon is kept",
+    _captures.GA4_AT_RISK: "the GA4 backlog has a week of nights to spare again, or is kept",
 }
 for _key in _captures.conditions():
     REGISTRY[_key] = _c(_CAPTURE_CLEARS[_key.split(":", 1)[0]])
