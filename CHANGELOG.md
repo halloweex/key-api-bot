@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.354
+
+- fix(goals): a goal resting on part of a forecast waits; the freeze runs hourly
+- feat(goals): freeze the month's automatic goal on the 1st (revision 0037)
+- docs: the test baseline after the tombstone cleanup
+- test: delete DuckDB-exit tombstone tests
+
+
 ## 3.0.353
 
 - fix(forecast): the Black Friday line counts the days still ahead
