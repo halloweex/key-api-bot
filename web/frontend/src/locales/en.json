@@ -278,6 +278,8 @@
   "goal.mlForecast": "ML Forecast",
   "goal.monthlyGoal": "Monthly Goal",
   "goal.monthlyRevenue": "{{amount}} Monthly Revenue!",
+  "goal.noHistory": "No goal: this channel has no sales history of its own yet.",
+  "goal.noHistoryHow": "A goal is built from the channel's own history: the same month a year ago, or a full month with sales on 25 days or more. This channel has neither yet.",
   "goal.prevMonthExcluded": "from previous month not included",
   "goal.recent3mo": "Recent 3mo avg:",
   "goal.remaining": "remaining to reach goal",

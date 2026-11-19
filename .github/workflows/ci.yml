@@ -256,3 +256,64 @@ jobs:
             git diff --stat -- .basedpyright/baseline.json
             exit 1
           fi
+
+  # The dashboard's frontend: its Vitest suite and the production build.
+  #
+  # Until this job nothing on a pull request ran npm. The tests ran on a
+  # laptop when somebody remembered, and the first build of a change was the
+  # one inside `Dockerfile.web` — after the merge, on the way to production.
+  # On 2026-09-12 a Storybook story that `tsc --noEmit` passed broke the image
+  # build of `main`. That one stopped the deploy, being a type error; a defect
+  # that only shows when the page runs builds fine and ships.
+  #
+  # WHY `npm run build` AND NOT `tsc --noEmit`
+  #
+  # The build is `tsc -b && vite build`. `tsconfig.json` lists no files and
+  # only references `tsconfig.app.json` and `tsconfig.node.json`, which only
+  # `tsc -b` follows: a bare `tsc --noEmit` in `web/frontend` checks zero
+  # files and exits 0. So this runs the command the image runs, not one
+  # beside it.
+  #
+  # WHY NODE 20
+  #
+  # `Dockerfile.web` builds the frontend on `node:20-alpine`, and a build
+  # passing on a Node the image does not build with is a green check about
+  # nothing — the suite's rule for Python, applied here. The major is pinned
+  # because that is what the image's tag names; its digest pins the rest.
+  #
+  # Beside the other two, not inside either: it needs no Python, no database
+  # and no secrets, and a red frontend must not cost a pull request its
+  # pytest verdict.
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web/frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      # `npm ci`, as the image runs it: exactly the lock, or a failure.
+      - name: Install dependencies
+        id: install
+        run: npm ci
+
+      # `vitest run` under `vitest.config.ts`, which owns what is collected —
+      # no filter here, for the suite's reason.
+      - name: Run the tests
+        run: npm test
+
+      # Runs whether or not the tests passed, as long as the install did: a
+      # red test would otherwise hide whether the change builds at all, and
+      # the build is what stops a deploy. Two verdicts from one install.
+      - name: Build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run build

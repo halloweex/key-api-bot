@@ -30,6 +30,7 @@ TRIGGERS = CI[True] if True in CI else CI["on"]
 
 STEPS = CI["jobs"]["tests"]["steps"]
 TYPECHECK = CI["jobs"]["typecheck"]["steps"]
+FRONTEND = CI["jobs"]["frontend"]
 
 # Everything in this repository that can start or stop a container. The
 # runbooks under deploy/agent/ are prose for the diagnostician, not scripts.
@@ -470,3 +471,31 @@ class TestTheTypeCheckersConfig:
         """In `standard` a warning is an import that resolves to stubs alone —
         an ImportError the day nothing guards it."""
         assert self._config()["failOnWarnings"] is True
+
+
+
+
+class TestTheFrontendIsCheckedToo:
+    """The `frontend` job: the Vitest suite and the production build.
+
+    Until it existed nothing on a pull request ran npm, so the first build of
+    a frontend change was the one inside `Dockerfile.web`, after the merge —
+    which is how a Storybook story broke `main` on 2026-09-12. The suite's
+    properties hold here for the suite's reasons: the lock, the runtime the
+    image builds with, and no narrowing of its own.
+    """
+
+    def test_it_runs_the_node_the_image_builds_with(self):
+        """A build passing on a Node `Dockerfile.web` does not build with is a
+        green check about nothing. The image's tag names a major
+        (`node:20-alpine`) and its digest pins the rest, so the major is what
+        must agree."""
+        setup = next(
+            s for s in FRONTEND["steps"]
+            if str(s.get("uses", "")).startswith("actions/setup-node")
+        )
+        declared = re.match(r"\d+", str(setup["with"]["node-version"]))
+        image = re.search(r"^FROM node:(\d+)-alpine",
+                          (REPO / "Dockerfile.web").read_text(), re.M)
+        assert image, "Dockerfile.web no longer builds the frontend on node:N-alpine"
+        assert declared and declared.group(0) == image.group(1)

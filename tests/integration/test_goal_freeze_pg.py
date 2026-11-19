@@ -285,6 +285,33 @@ class TestOnceAMonth:
         assert len({stamp for _, stamp in kept.values()}) == 1
 
 
+class TestNoHistoryOfItsOwn:
+    @pytest.mark.asyncio
+    async def test_it_is_frozen_with_no_goal_and_served_so(self, history):
+        """The owner's decision of 2026-11-19, over a real Postgres. The
+        fixture holds no offline-store order and no internal one: both are
+        frozen with no goal in any period, and served so. The exhibition, an
+        order every seventh day, has its own October a year earlier and keeps
+        a goal built from it. Kills: retail's month average, or the ₴3M
+        default, standing in for a history that is not there — what froze
+        ₴5.7M for the offline store and the exhibition in November 2026."""
+        store, pool = history
+        await goal_freeze.freeze_month(store, now=OCTOBER)
+        kept = await _rows(pool, 2026, 10)
+        for sales_type in ("offline", "internal"):
+            smart = json.loads(kept[(2026, 10, sales_type)][0])
+            assert smart["monthly"]["calculationMethod"] == "no_history", sales_type
+            assert smart["monthly"]["goal"] is None
+            assert smart["weekly"]["goal"] is None and smart["weekly"]["breakdown"] == {}
+            assert smart["daily"]["goal"] is None
+            served = await store.get_smart_goals(sales_type, year=2026, month=10)
+            assert [served[p]["amount"] for p in ("daily", "weekly", "monthly")] == [None] * 3
+            assert served["monthly"]["frozenAt"] == OCTOBER.isoformat()
+        exhibition = json.loads(kept[(2026, 10, "exhibition")][0])
+        assert exhibition["monthly"]["lastYearRevenue"] > 0
+        assert exhibition["monthly"]["calculationMethod"] == "yoy_growth"
+
+
 class TestTheFrozenAnswerIsServed:
     @pytest.mark.asyncio
     async def test_though_silver_moves_under_it(self, history):
