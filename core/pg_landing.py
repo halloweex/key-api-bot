@@ -175,13 +175,20 @@ async def _record_failure(table: str, error: str) -> bool:
 
 ORDERS_TABLE = "bronze.orders"
 ORDER_PRODUCTS_TABLE = "bronze.order_products"
-# Every column except `manager_comment`, which has the COALESCE above.
+# Every column except `manager_comment`, which has the COALESCE above. The
+# five after `promocode` and the six after `price_sold` below are the discount
+# (revision 0038), in `landing_rows.OrderRow`'s and `OrderProductRow`'s order;
+# plain overwrites, as KeyCRM serves them. `discount_data` arrives as JSON text
+# and is cast here: asyncpg registers no JSONB codec in this codebase.
 _ORDER_UPSERT = """
 INSERT INTO bronze.orders
        (id, source_id, status_id, status_group_id, grand_total,
         ordered_at, created_at, updated_at, buyer_id, manager_id,
-        manager_comment, promocode)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        manager_comment, promocode,
+        products_total, total_discount, discount_amount, discount_percent,
+        discount_data)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+        $13, $14, $15, $16, $17::jsonb)
 ON CONFLICT (id) DO UPDATE SET
     source_id       = EXCLUDED.source_id,
     status_id       = EXCLUDED.status_id,
@@ -194,19 +201,32 @@ ON CONFLICT (id) DO UPDATE SET
     manager_id      = EXCLUDED.manager_id,
     manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),
     promocode       = EXCLUDED.promocode,
+    products_total  = EXCLUDED.products_total,
+    total_discount  = EXCLUDED.total_discount,
+    discount_amount = EXCLUDED.discount_amount,
+    discount_percent = EXCLUDED.discount_percent,
+    discount_data   = EXCLUDED.discount_data,
     mirrored_at     = now()
 """
 
 _ORDER_PRODUCT_INSERT = """
 INSERT INTO bronze.order_products
-       (id, order_id, product_id, name, quantity, price_sold)
-VALUES ($1, $2, $3, $4, $5, $6)
+       (id, order_id, product_id, name, quantity, price_sold,
+        price, total_discount, discount_percent, discount_amount,
+        loyalty_discount, individual_discount)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (id) DO UPDATE SET
     order_id    = EXCLUDED.order_id,
     product_id  = EXCLUDED.product_id,
     name        = EXCLUDED.name,
     quantity    = EXCLUDED.quantity,
     price_sold  = EXCLUDED.price_sold,
+    price               = EXCLUDED.price,
+    total_discount      = EXCLUDED.total_discount,
+    discount_percent    = EXCLUDED.discount_percent,
+    discount_amount     = EXCLUDED.discount_amount,
+    loyalty_discount    = EXCLUDED.loyalty_discount,
+    individual_discount = EXCLUDED.individual_discount,
     mirrored_at = now()
 """
 

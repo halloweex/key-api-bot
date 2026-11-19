@@ -30,15 +30,17 @@ def _up():
 
 
 class TestTheRevision:
-    def test_it_follows_0036_and_is_the_head_the_code_requires(self):
-        """Kills: 0037 hung off anything but the analysts' captures, or the pin
-        left at 0036 — web would refuse a database at 0037."""
+    def test_it_follows_0036_and_is_in_the_chain_the_code_requires(self):
+        """Kills: 0037 hung off anything but the analysts' captures, or dropped
+        from the line the code requires. It was the head until 0038 (the
+        discount columns) descended from it; `test_pg_plumbing` owns the head
+        pin."""
         from core import pg
 
         rev = _module()
         assert rev.revision == REV_ID
         assert rev.down_revision == "0036_analytics_captures"
-        assert pg.REQUIRED_REVISION == REV_ID
+        assert REV_ID in [m.revision for m in replay.lineage(pg.REQUIRED_REVISION)]
 
     def test_it_creates_exactly_the_one_table(self):
         """Kills: a table left out or added, one created outside `app`, or an

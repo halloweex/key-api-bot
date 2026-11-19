@@ -287,8 +287,8 @@ meta ──── the store's own bookkeeping
 ```
 
 **Key tables:**
-- `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text)
-- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted
+- `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text), and since revision 0038 the discount: `products_total` (the lines before the order's discount), `total_discount` (that discount in money), `discount_amount`/`discount_percent` (as typed), `discount_data` (KeyCRM's object, JSONB: a `loyalty` key when a programme applied)
+- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted. Since revision 0038 also `price` (before any discount), `total_discount` — **per unit**, so a line's discount in money is `total_discount * quantity` — `discount_percent`, `discount_amount`, `loyalty_discount`, `individual_discount`. **A gift-certificate redemption is an order discount in KeyCRM** — its face value as `discount_amount`, so in `total_discount`, `discount_percent` 0, no promocode (measured on the 2026-08-22 certificate orders) — so `total_discount > 0` is not "bought at a discount"; revision 0038's docstring has the split. NULL on all eleven means not landed yet (before 0038, until `scripts/backfill_discounts.py` reached the order); a figure KeyCRM sends that its column cannot hold also lands NULL, never refusing the order (`core.landing_rows._discount`). Not versioned: `app.order_versions` compares none of them
 - `bronze.products` / `bronze.categories` - The catalogue (hierarchical categories by parent_id); a product KeyCRM retires stays, never deleted
 - `bronze.expenses` / `bronze.expense_types` - Order-level expenses (delivery, commission, etc.)
 - `silver.orders` - One row per order with `sales_type` materialised and the Kyiv `order_date`; what every tab reads
@@ -433,10 +433,10 @@ first and the revert after, for the record (below).
 
 From revision 0036 on, a rollback to any image that requires an earlier
 revision than the database is at — `rollback-step14`, an `:s14-NN`, the
-image just before 0036's or 0037's own PR, any earlier version by number —
-moves `meta.alembic_version` down first, with a migrate image that knows the
-revision the database is at. Alembic steps down from a revision only through
-that revision's own module, and an older migrate image has none.
+image just before 0036's, 0037's or 0038's own PR, any earlier version by
+number — moves `meta.alembic_version` down first, with a migrate image that
+knows the revision the database is at. Alembic steps down from a revision
+only through that revision's own module, and an older migrate image has none.
 
 1. **The stamp, while `keycrm-migrate:latest` is still the image at the
    database's revision** — before any retag or pull, down to the revision
@@ -444,10 +444,17 @@ that revision's own module, and an older migrate image has none.
    `docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains`
    for `rollback-step14` and every image before 0036,
    `… alembic downgrade 0036_analytics_captures` for an image between 0036's
-   PR and 0037's. Both move the stamp and execute nothing else: the eleven
-   tables of the analysts' captures (owner decision D2), the frozen month
-   goals (0037) and their rows stay; the captures and the goal freeze stop
-   while the older image runs, and it computes every month's goal live.
+   PR and 0037's, `… alembic downgrade 0037_frozen_month_goals` for one
+   between 0037's and 0038's. Each moves the stamp and executes nothing
+   else: the eleven tables of the analysts' captures (owner decision D2),
+   the frozen month goals (0037) and their rows stay; the captures and the
+   goal freeze stop while the older image runs, and it computes every
+   month's goal live. The eleven discount columns of `bronze.orders` and
+   `bronze.order_products` (0038) stay the same way: an image below 0038
+   names its order columns one by one and never sees them. The orders such
+   an image writes keep the discount they held; after the roll forward,
+   re-run `scripts/backfill_discounts.py` from the page holding the first
+   order it wrote.
 2. **The images, at once**: tag the target as `latest` for web, bot and
    migrate — `…:rollback-step14`, or `docker pull …/keycrm-<image>:<VERSION>`
    for an earlier version by number, which every deploy pushes beside
@@ -460,8 +467,8 @@ that revision's own module, and an older migrate image has none.
 stay old.** A retag's `up -d`, or a revert's deploy, recreates them, and they
 wait for `migrate` to complete successfully; the older migrate image's own
 `alembic upgrade head` exits 255 ("Can't locate revision identified by" the
-database's revision, `'0036_analytics_captures'` or `'0037_frozen_month_goals'`),
-so web and bot are left `Created`, not running
+database's revision, `'0036_analytics_captures'`, `'0037_frozen_month_goals'`
+or `'0038_order_discounts'`), so web and bot are left `Created`, not running
 (measured with Compose 2.23). A revert deployed first is the same outage for
 the whole CI build and deploy, and by then `latest` is the older migrate
 image, which cannot step down. The other order costs seconds: between steps
@@ -809,10 +816,10 @@ of 2026-11-18: the month's automatic goal is frozen on the 1st** (revision
   (`POST /api/jobs/month_goal_freeze/trigger`), which freezes that day's
   answer.
 - **Rolling back below 0037** moves the stamp first (`alembic downgrade
-  0036_analytics_captures` with the 0037 migrate image, "Rolling back below a
-  revision"). The table and its rows stay; an image at 0036 computes every
-  goal live while it runs, and the roll forward serves the frozen months
-  again.
+  0036_analytics_captures` with the migrate image at the database's
+  revision, 0037's or a later one, "Rolling back below a revision"). The
+  table and its rows stay; an image at 0036 computes every goal live while
+  it runs, and the roll forward serves the frozen months again.
 
 ### Telegram Bot
 - Sales summary reports by source
@@ -2516,7 +2523,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0037_frozen_month_goals` today, and every
+mismatch, ahead or behind. It is `0038_order_discounts` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
@@ -4150,4 +4157,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-19 (dead code deleted with its tests: the paginator, two date checks, the copy of bot.db and `compare_table`, the Ark's shipment)*
+*Last updated: 2026-11-19 (revision 0038: the discount on orders and their lines; dead code deleted with its tests: the paginator, two date checks, the copy of bot.db and `compare_table`, the Ark's shipment)*

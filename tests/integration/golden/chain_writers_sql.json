@@ -68,7 +68,7 @@
    ],
    [
     "fetch",
-    "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode FROM bronze.orders WHERE id = ANY($1::int[]) AND manager_comment IS NULL ORDER BY id FOR UPDATE",
+    "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, products_total, total_discount, discount_amount, discount_percent, discount_data FROM bronze.orders WHERE id = ANY($1::int[]) AND manager_comment IS NULL ORDER BY id FOR UPDATE",
     1
    ],
    [
@@ -92,12 +92,12 @@
    ],
    [
     "fetch",
-    "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode FROM bronze.orders WHERE id = ANY($1::int[]) AND manager_comment IS NULL ORDER BY id FOR UPDATE",
+    "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, products_total, total_discount, discount_amount, discount_percent, discount_data FROM bronze.orders WHERE id = ANY($1::int[]) AND manager_comment IS NULL ORDER BY id FOR UPDATE",
     1
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode,\n        products_total, total_discount, discount_amount, discount_percent,\n        discount_data)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,\n        $13, $14, $15, $16, $17::jsonb)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    products_total  = EXCLUDED.products_total,\n    total_discount  = EXCLUDED.total_discount,\n    discount_amount = EXCLUDED.discount_amount,\n    discount_percent = EXCLUDED.discount_percent,\n    discount_data   = EXCLUDED.discount_data,\n    mirrored_at     = now()\n",
     1
    ],
    [
@@ -235,7 +235,7 @@
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode,\n        products_total, total_discount, discount_amount, discount_percent,\n        discount_data)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,\n        $13, $14, $15, $16, $17::jsonb)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    products_total  = EXCLUDED.products_total,\n    total_discount  = EXCLUDED.total_discount,\n    discount_amount = EXCLUDED.discount_amount,\n    discount_percent = EXCLUDED.discount_percent,\n    discount_data   = EXCLUDED.discount_data,\n    mirrored_at     = now()\n",
     1
    ],
    [
@@ -318,7 +318,7 @@
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode,\n        products_total, total_discount, discount_amount, discount_percent,\n        discount_data)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,\n        $13, $14, $15, $16, $17::jsonb)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    products_total  = EXCLUDED.products_total,\n    total_discount  = EXCLUDED.total_discount,\n    discount_amount = EXCLUDED.discount_amount,\n    discount_percent = EXCLUDED.discount_percent,\n    discount_data   = EXCLUDED.discount_data,\n    mirrored_at     = now()\n",
     1
    ],
    [
@@ -333,7 +333,7 @@
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold)\nVALUES ($1, $2, $3, $4, $5, $6)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    mirrored_at = now()\n",
+    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold,\n        price, total_discount, discount_percent, discount_amount,\n        loyalty_discount, individual_discount)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    price               = EXCLUDED.price,\n    total_discount      = EXCLUDED.total_discount,\n    discount_percent    = EXCLUDED.discount_percent,\n    discount_amount     = EXCLUDED.discount_amount,\n    loyalty_discount    = EXCLUDED.loyalty_discount,\n    individual_discount = EXCLUDED.individual_discount,\n    mirrored_at = now()\n",
     2
    ],
    [
@@ -426,7 +426,7 @@
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode,\n        products_total, total_discount, discount_amount, discount_percent,\n        discount_data)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,\n        $13, $14, $15, $16, $17::jsonb)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    products_total  = EXCLUDED.products_total,\n    total_discount  = EXCLUDED.total_discount,\n    discount_amount = EXCLUDED.discount_amount,\n    discount_percent = EXCLUDED.discount_percent,\n    discount_data   = EXCLUDED.discount_data,\n    mirrored_at     = now()\n",
     2
    ],
    [
@@ -441,7 +441,7 @@
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold)\nVALUES ($1, $2, $3, $4, $5, $6)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    mirrored_at = now()\n",
+    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold,\n        price, total_discount, discount_percent, discount_amount,\n        loyalty_discount, individual_discount)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    price               = EXCLUDED.price,\n    total_discount      = EXCLUDED.total_discount,\n    discount_percent    = EXCLUDED.discount_percent,\n    discount_amount     = EXCLUDED.discount_amount,\n    loyalty_discount    = EXCLUDED.loyalty_discount,\n    individual_discount = EXCLUDED.individual_discount,\n    mirrored_at = now()\n",
     4
    ],
    [
@@ -583,7 +583,7 @@
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    mirrored_at     = now()\n",
+    "\nINSERT INTO bronze.orders\n       (id, source_id, status_id, status_group_id, grand_total,\n        ordered_at, created_at, updated_at, buyer_id, manager_id,\n        manager_comment, promocode,\n        products_total, total_discount, discount_amount, discount_percent,\n        discount_data)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,\n        $13, $14, $15, $16, $17::jsonb)\nON CONFLICT (id) DO UPDATE SET\n    source_id       = EXCLUDED.source_id,\n    status_id       = EXCLUDED.status_id,\n    status_group_id = EXCLUDED.status_group_id,\n    grand_total     = EXCLUDED.grand_total,\n    ordered_at      = EXCLUDED.ordered_at,\n    created_at      = EXCLUDED.created_at,\n    updated_at      = EXCLUDED.updated_at,\n    buyer_id        = EXCLUDED.buyer_id,\n    manager_id      = EXCLUDED.manager_id,\n    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),\n    promocode       = EXCLUDED.promocode,\n    products_total  = EXCLUDED.products_total,\n    total_discount  = EXCLUDED.total_discount,\n    discount_amount = EXCLUDED.discount_amount,\n    discount_percent = EXCLUDED.discount_percent,\n    discount_data   = EXCLUDED.discount_data,\n    mirrored_at     = now()\n",
     1
    ],
    [
@@ -598,7 +598,7 @@
    ],
    [
     "executemany",
-    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold)\nVALUES ($1, $2, $3, $4, $5, $6)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    mirrored_at = now()\n",
+    "\nINSERT INTO bronze.order_products\n       (id, order_id, product_id, name, quantity, price_sold,\n        price, total_discount, discount_percent, discount_amount,\n        loyalty_discount, individual_discount)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\nON CONFLICT (id) DO UPDATE SET\n    order_id    = EXCLUDED.order_id,\n    product_id  = EXCLUDED.product_id,\n    name        = EXCLUDED.name,\n    quantity    = EXCLUDED.quantity,\n    price_sold  = EXCLUDED.price_sold,\n    price               = EXCLUDED.price,\n    total_discount      = EXCLUDED.total_discount,\n    discount_percent    = EXCLUDED.discount_percent,\n    discount_amount     = EXCLUDED.discount_amount,\n    loyalty_discount    = EXCLUDED.loyalty_discount,\n    individual_discount = EXCLUDED.individual_discount,\n    mirrored_at = now()\n",
     2
    ],
    [
