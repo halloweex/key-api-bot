@@ -30,6 +30,9 @@ interface SelectProps extends NativeProps {
   allowEmpty?: boolean
   emptyLabel?: string
   variant?: Variant
+  /** Fill the parent's width on every screen, as a form's inputs do. The
+   *  framed select fills it on a phone and is as wide as its options above. */
+  fullWidth?: boolean
 }
 
 const CHEVRON_STYLE: CSSProperties = {
@@ -52,7 +55,7 @@ const variantClass: Record<Variant, string> = {
     'shadow-sm hover:border-slate-300 hover:shadow ' +
     'focus:outline-none focus:ring-2 focus:ring-purple-500/40 focus:border-purple-400 focus:ring-offset-1 ' +
     'transition-all duration-200 cursor-pointer appearance-none bg-no-repeat bg-right ' +
-    'min-w-0 w-full sm:w-auto sm:min-w-[120px] min-h-[44px] sm:min-h-[40px]',
+    'min-h-[44px] sm:min-h-[40px]',
   compact:
     'px-2 py-1 text-sm bg-white border border-slate-200 rounded-md text-slate-700 ' +
     'hover:border-slate-300 ' +
@@ -63,6 +66,15 @@ const variantClass: Record<Variant, string> = {
     'hover:bg-slate-200 ' +
     'focus:outline-none focus:ring-2 focus:ring-purple-500/40 ' +
     'cursor-pointer appearance-none transition-colors',
+}
+
+// The width, apart from the look so `fullWidth` replaces it rather than
+// competing with it: two width utilities on one element are decided by the
+// stylesheet's order, not the class list's.
+const variantWidth: Record<Variant, string> = {
+  framed: 'min-w-0 w-full sm:w-auto sm:min-w-[120px]',
+  compact: '',
+  pill: '',
 }
 
 const variantStyle: Record<Variant, CSSProperties> = {
@@ -79,6 +91,7 @@ export function Select({
   allowEmpty = true,
   emptyLabel = 'All',
   variant = 'framed',
+  fullWidth = false,
   ...rest
 }: SelectProps) {
   return (
@@ -86,7 +99,7 @@ export function Select({
       {...rest}
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value || null)}
-      className={variantClass[variant]}
+      className={`${variantClass[variant]} ${fullWidth ? 'min-w-0 w-full' : variantWidth[variant]}`}
       style={variantStyle[variant]}
     >
       {allowEmpty && (

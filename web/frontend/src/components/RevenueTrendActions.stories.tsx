@@ -1,10 +1,12 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { useState } from 'react'
+import { useLayoutEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { RevenueTrendActions } from './RevenueTrendActions'
 import type { CompareType } from './revenueTrendTypes'
+import { kyivToday } from '../utils/smsDates'
 import type {
+  PlannedPromotion,
   RevenueForecast,
   RevenueForecastBlackFriday,
   RevenueForecastRange,
@@ -45,10 +47,30 @@ const BLACK_FRIDAY: RevenueForecastBlackFriday = {
 
 const GROWTH = { current: 1_850_000, previous: 1_700_000, growth_percent: 8.8 }
 
+// This year's November, so the days are said without a year as on the page.
+const YEAR = kyivToday().slice(0, 4)
+const PLANNED: PlannedPromotion[] = [
+  { id: 12, name: 'Тиждень Anua', starts_on: `${YEAR}-11-24`, ends_on: `${YEAR}-11-26`, kind: 'other', extra: 463_000 },
+  { id: 13, name: 'Чорна п’ятниця', starts_on: `${YEAR}-11-27`, ends_on: `${YEAR}-11-30`, kind: 'black_friday', extra: null },
+]
+
+/** Renders in Ukrainian and puts the reader's language back when it unmounts. */
+function InUkrainian({ children }: { children: ReactNode }) {
+  const { i18n } = useTranslation()
+  useLayoutEffect(() => {
+    const before = i18n.language
+    void i18n.changeLanguage('uk')
+    return () => { void i18n.changeLanguage(before) }
+  }, [i18n])
+  return <>{children}</>
+}
+
 function Header(props: {
   forecast?: RevenueForecast
   monthRange?: RevenueForecastRange | null
   blackFriday?: RevenueForecastBlackFriday | null
+  plannedPromotions?: PlannedPromotion[] | null
+  canAddPromotion?: boolean
 }) {
   const { t } = useTranslation()
   const [compareType, setCompareType] = useState<CompareType>('year_ago')
@@ -62,6 +84,8 @@ function Header(props: {
           forecast={props.forecast}
           monthRange={props.monthRange}
           blackFriday={props.blackFriday}
+          plannedPromotions={props.plannedPromotions}
+          canAddPromotion={props.canAddPromotion}
           growthData={GROWTH}
           isLoading={false}
           compareType={compareType}
@@ -120,4 +144,30 @@ export const BigPromotionInAnotherMonth: Story = {
  *  not said beside it. */
 export const PointPastTheRange: Story = {
   args: { forecast: { ...FORECAST, predicted_total: 3_700_000 }, monthRange: RANGE },
+}
+
+/**
+ * Promotions planned for the rest of the month, a line each under the Black
+ * Friday line: what a typical past promotion of two days or more added (the
+ * hint says why it runs high), nothing for the Black Friday the line above
+ * already says. «+ акція» goes to the calendar, for `marketing` edit.
+ */
+export const WithPlannedPromotions: Story = {
+  args: {
+    forecast: FORECAST, monthRange: RANGE, blackFriday: BLACK_FRIDAY,
+    plannedPromotions: PLANNED, canAddPromotion: true,
+  },
+  render: (args) => <InUkrainian><Header {...args} /></InUkrainian>,
+}
+
+/** The same on a phone. */
+export const WithPlannedPromotionsOnAPhone: Story = {
+  ...WithPlannedPromotions,
+  globals: PHONE,
+}
+
+/** Nothing planned yet: the link alone, under the badge. */
+export const AddPromotionLinkOnly: Story = {
+  args: { forecast: FORECAST, monthRange: RANGE, plannedPromotions: [], canAddPromotion: true },
+  render: (args) => <InUkrainian><Header {...args} /></InUkrainian>,
 }

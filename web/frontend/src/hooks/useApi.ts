@@ -75,6 +75,10 @@ import type {
   SmsAudiencePresetsResponse,
   SmsCreateCampaignResponse,
   MarketingReportResponse,
+  Promotion,
+  PromotionIn,
+  PromotionsResponse,
+  PromotionVersionsResponse,
 } from '../types/api'
 
 export interface TurnoverParams {
@@ -160,6 +164,12 @@ export const queryKeys = {
   marginTrend: (params: string) => ['marginTrend', params] as const,
   marginBrandCategory: (params: string) => ['marginBrandCategory', params] as const,
   marginAlerts: (params: string) => ['marginAlerts', params] as const,
+  // Promotions calendar: the server's default window, cancelled ones included
+  // (the page filters them), and one promotion's versions.
+  promotions: () => ['promotions'] as const,
+  promotionVersions: (id: number) => ['promotions', id, 'versions'] as const,
+  /** Every sales type's forecast: a promotion moves the retail badge's lines. */
+  revenueForecastAll: () => ['revenueForecast'] as const,
 }
 
 // Cache TTL constants (in milliseconds)
@@ -244,9 +254,10 @@ export function useMaxForecastDate() {
   return data?.forecast_end ?? data?.month_end ?? null
 }
 
-/** The month badge's 80% range and Black Friday line (2026-11-18). The
- * server computes them once a day, so the realtime cache is only how soon a
- * new day's are seen. */
+/** The month badge's 80% range and Black Friday line (2026-11-18), and a line
+ * per promotion planned for the rest of the month (2026-11-19). The server
+ * computes the first two once a day, so the realtime cache is only how soon a
+ * new day's are seen; a saved promotion invalidates this query itself. */
 export function useMonthForecastOutlook(enabled: boolean) {
   const salesType = useFilterStore(selectSalesType)
 
@@ -260,6 +271,7 @@ export function useMonthForecastOutlook(enabled: boolean) {
   return {
     monthRange: data?.month_range ?? null,
     blackFriday: data?.black_friday ?? null,
+    plannedPromotions: data?.planned_promotions ?? null,
   }
 }
 
@@ -1245,5 +1257,72 @@ export function useSmsBalance() {
     staleTime: 0,
     refetchOnMount: 'always',
     retry: false,
+  })
+}
+
+// ─── Promotions calendar ─────────────────────────────────────────────────────
+//
+// One list query, cancelled ones included: the page filters them behind its
+// "show cancelled" toggle, so the toggle is instant and can say how many
+// there are. The server's default window is today − 90 .. today + 365, which
+// holds both of the page's lists.
+
+export function usePromotions(enabled = true) {
+  return useQuery<PromotionsResponse>({
+    queryKey: queryKeys.promotions(),
+    queryFn: () => api.getPromotions({ includeCancelled: true }),
+    staleTime: CACHE_TTL.STANDARD,
+    enabled,
+  })
+}
+
+/** A promotion's saved states, newest first: asked when its history opens. */
+export function usePromotionVersions(id: number, enabled: boolean) {
+  return useQuery<PromotionVersionsResponse>({
+    queryKey: queryKeys.promotionVersions(id),
+    queryFn: () => api.getPromotionVersions(id),
+    staleTime: CACHE_TTL.STANDARD,
+    enabled,
+  })
+}
+
+/**
+ * After any write: the list, every history under it (its keys start with the
+ * list's) and the forecast of every sales type, whose month badge says a line
+ * per planned promotion. A refusal invalidates too — a 409 means the
+ * promotion moved under the page (somebody cancelled it meanwhile), and the
+ * list on screen is the one to correct.
+ */
+function useInvalidatePromotions() {
+  const queryClient = useQueryClient()
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.promotions() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.revenueForecastAll() })
+  }
+}
+
+/** Create (no `id`) or save a new version of (`id`) a promotion. */
+export function useSavePromotion() {
+  const invalidate = useInvalidatePromotions()
+  return useMutation<Promotion, Error, { id?: number; body: PromotionIn }>({
+    mutationFn: ({ id, body }) =>
+      id === undefined ? api.createPromotion(body) : api.updatePromotion(id, body),
+    onSettled: invalidate,
+  })
+}
+
+export function useCancelPromotion() {
+  const invalidate = useInvalidatePromotions()
+  return useMutation<Promotion, Error, number>({
+    mutationFn: (id) => api.cancelPromotion(id),
+    onSettled: invalidate,
+  })
+}
+
+export function useRestorePromotion() {
+  const invalidate = useInvalidatePromotions()
+  return useMutation<Promotion, Error, number>({
+    mutationFn: (id) => api.restorePromotion(id),
+    onSettled: invalidate,
   })
 }

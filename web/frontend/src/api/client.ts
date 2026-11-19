@@ -88,6 +88,10 @@ import type {
   SmsAudiencePreset,
   SmsAudiencePresetsResponse,
   SmsCreateCampaignResponse,
+  Promotion,
+  PromotionIn,
+  PromotionsResponse,
+  PromotionVersionsResponse,
 } from '../types/api'
 
 // Column-level permission update: only the flags present are sent and written.
@@ -952,6 +956,36 @@ export const api = {
       // not milliseconds.
       { timeout: 120 * 1000 },
     ),
+
+  // Promotions calendar. Every write is a new version of the promotion on
+  // the server; nothing here edits one in place. A refusal is a 400 whose
+  // `detail` names the field ("name: …"), carried by `ApiError.message`.
+  getPromotions: (
+    window: { from?: string; to?: string; includeCancelled?: boolean } = {},
+    options?: FetchOptions,
+  ) => {
+    const params = new URLSearchParams()
+    if (window.from) params.set('from', window.from)
+    if (window.to) params.set('to', window.to)
+    if (window.includeCancelled) params.set('include_cancelled', 'true')
+    const query = params.toString()
+    return fetchApi<PromotionsResponse>('/promotions', query || undefined, options)
+  },
+
+  getPromotionVersions: (id: number, options?: FetchOptions) =>
+    fetchApi<PromotionVersionsResponse>(`/promotions/${id}/versions`, undefined, options),
+
+  createPromotion: (body: PromotionIn) =>
+    fetchApiMutationWithBody<Promotion>('/promotions', 'POST', body),
+
+  updatePromotion: (id: number, body: PromotionIn) =>
+    fetchApiMutationWithBody<Promotion>(`/promotions/${id}`, 'PUT', body),
+
+  cancelPromotion: (id: number) =>
+    fetchApiMutation<Promotion>(`/promotions/${id}/cancel`, 'POST'),
+
+  restorePromotion: (id: number) =>
+    fetchApiMutation<Promotion>(`/promotions/${id}/restore`, 'POST'),
 }
 
 /**

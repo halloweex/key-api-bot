@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render } from '@testing-library/react'
 import i18n from '../../lib/i18n'
 import { RevenueTrendActions } from '../RevenueTrendActions'
 import { formatDayRange, formatShortRange } from '../revenueTrendHelpers'
+import { kyivToday } from '../../utils/smsDates'
 import type {
+  PlannedPromotion,
   RevenueForecast,
   RevenueForecastBlackFriday,
   RevenueForecastRange,
@@ -13,7 +15,7 @@ import type {
 vi.unmock('react-i18next')
 
 // "(≈ ₴4.5M)" is held together by a no-break space.
-const plain = (s: string | null | undefined) => (s ?? '').replace(/\u00a0/g, ' ')
+const plain = (s: string | null | undefined) => (s ?? '').replace(/[\u00a0\u202f]/g, ' ')
 
 const FORECAST: RevenueForecast = {
   actual_to_date: 1_850_000,
@@ -126,5 +128,91 @@ describe('a range in the badge units', () => {
   it('writes days as the dashboard does', () => {
     expect(formatDayRange('2025-11-27', '2025-11-29')).toBe('27.11–29.11.2025')
     expect(formatDayRange('2025-11-28', '2025-11-28')).toBe('28.11.2025')
+  })
+})
+
+// ─── The promotions planned for the rest of the month ──────────────────────
+//
+// A line per planned promotion under the Black Friday line: what a typical
+// past promotion of two days or more added, which runs high, and nothing for
+// Black Friday, whose own line says it. «+ акція» goes to the calendar.
+
+describe('the promotions planned for the month', () => {
+  const year = kyivToday().slice(0, 4)
+  const SPRING: PlannedPromotion = {
+    id: 12, name: 'Весняний розпродаж', starts_on: `${year}-11-26`, ends_on: `${year}-11-28`,
+    kind: 'other', extra: 463_000,
+  }
+  const FRIDAY: PlannedPromotion = {
+    id: 13, name: 'Чорна п’ятниця', starts_on: `${year}-11-27`, ends_on: `${year}-11-30`,
+    kind: 'black_friday', extra: null,
+  }
+
+  afterEach(async () => {
+    await i18n.changeLanguage('en')
+    window.history.replaceState(null, '', '/')
+  })
+
+  async function month(props: {
+    forecast?: RevenueForecast
+    plannedPromotions?: PlannedPromotion[] | null
+    canAddPromotion?: boolean
+  }) {
+    // The dates are said by Intl in the global language, as on the page.
+    await i18n.changeLanguage('uk')
+    const t = i18n.getFixedT('uk') as (key: string, o?: Record<string, string | number>) => string
+    const { container } = render(
+      <RevenueTrendActions
+        forecast={props.forecast}
+        plannedPromotions={props.plannedPromotions}
+        canAddPromotion={props.canAddPromotion}
+        growthData={undefined}
+        isLoading={false}
+        compareType="year_ago"
+        canCompare={false}
+        onCompareTypeChange={() => {}}
+        t={t}
+      />,
+    )
+    return container
+  }
+
+  const lines = (c: HTMLElement) => [...c.querySelectorAll('p')].map((p) => plain(p.textContent))
+
+  it('says a line per planned promotion, with what a past one typically added', async () => {
+    const c = await month({ forecast: FORECAST, plannedPromotions: [SPRING, FRIDAY] })
+    expect(lines(c)).toEqual([
+      'Заплановано: «Весняний розпродаж», 26–28 листопада. Якщо як минулі помітні акції: +₴463K',
+      'Заплановано: «Чорна п’ятниця», 27–30 листопада',
+    ])
+  })
+
+  it('says why the figure runs high, and only beside a figure', async () => {
+    const [spring, friday] = (await month({ forecast: FORECAST, plannedPromotions: [SPRING, FRIDAY] }))
+      .querySelectorAll('p')
+    expect(spring.getAttribute('title')).toBe(
+      'Оцінка за минулими акціями на 2+ дні, які помітно підняли виручку. Акції без ефекту '
+      + 'в неї не потрапили, тож вона завищена. Основне число й діапазон акція не змінює.')
+    expect(friday.hasAttribute('title')).toBe(false)
+  })
+
+  it('leaves the point as it was', async () => {
+    expect((await month({ forecast: FORECAST, plannedPromotions: [SPRING] })).textContent).toContain('₴3.3M')
+  })
+
+  it('says nothing of them without a forecast, or with nothing planned', async () => {
+    expect((await month({ plannedPromotions: [SPRING], canAddPromotion: true })).textContent).toBe('')
+    expect(lines(await month({ forecast: FORECAST, plannedPromotions: [] }))).toEqual([])
+    expect(lines(await month({ forecast: FORECAST, plannedPromotions: null }))).toEqual([])
+  })
+
+  it('offers «+ акція» only to whoever may add, and it opens the calendar in the page', async () => {
+    expect((await month({ forecast: FORECAST })).querySelector('a')).toBeNull()
+    const link = (await month({ forecast: FORECAST, canAddPromotion: true })).querySelector('a')
+    expect(link?.textContent).toBe('+ акція')
+    expect(link?.getAttribute('href')).toBe('/marketing#promotions')
+    fireEvent.click(link!)
+    expect(window.location.pathname).toBe('/marketing')
+    expect(window.location.hash).toBe('#promotions')
   })
 })

@@ -131,4 +131,16 @@ describe('a period in words', () => {
     expect(formatSpan('2026-08-31', '2026-09-30')).toBe('August 31 – September 30, 2026')
     expect(formatSpan('2025-12-15', '2026-01-14')).toBe('December 15, 2025 – January 14, 2026')
   })
+
+  it('leaves the year out when asked, unless the ends are in two years', async () => {
+    await i18n.changeLanguage('ru')
+    expect(plain(formatSpan('2026-11-26', '2026-11-28', { withYear: false }))).toBe('26–28 ноября')
+    expect(plain(formatSpan('2026-11-30', '2026-12-02', { withYear: false }))).toBe('30 ноября – 2 декабря')
+    expect(plain(formatSpan('2026-11-28', '2026-11-28', { withYear: false }))).toBe('28 ноября')
+    expect(plain(formatSpan('2026-12-30', '2027-01-02', { withYear: false })))
+      .toBe('30 декабря 2026 – 2 января 2027')
+    await i18n.changeLanguage('en')
+    expect(formatSpan('2026-11-26', '2026-11-28', { withYear: false })).toBe('November 26–28')
+    expect(formatSpan('2026-11-30', '2026-12-02', { withYear: false })).toBe('November 30 – December 2')
+  })
 })
