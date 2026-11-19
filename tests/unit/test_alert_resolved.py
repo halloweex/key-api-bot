@@ -71,27 +71,30 @@ class TestTheDeliveryGate:
 
     @pytest.mark.asyncio
     async def test_still_firing_keys_stay_armed(self):
-        """The DQ shape: three findings announced, next run still has one."""
+        """The DQ shape: three findings announced, next run still has one.
+        (Three of `compare_table`'s conditions were the fixture until they
+        were retired with it on 2026-11-19; unregistered, a key never
+        resolves.)"""
         with _sent():
             await raise_alert(
                 "x",
-                conditions=["mirror_missing_rows", "mirror_orphan_rows",
-                            "mirror_failing"],
+                conditions=["order_versions_missing", "order_versions_flooding",
+                            "order_versions_stalled"],
                 bucket="dq:fp1", group="dq:mirror_landing",
             )
         with _sent() as send, _archived() as rec:
             await resolve_group("dq:mirror_landing",
-                                still_firing=["mirror_failing"])
+                                still_firing=["order_versions_stalled"])
             text = send.await_args.args[0]
-            assert "mirror_missing_rows" in text
-            assert "mirror_orphan_rows" in text
-            assert "mirror_failing" not in text
+            assert "order_versions_missing" in text
+            assert "order_versions_flooding" in text
+            assert "order_versions_stalled" not in text
             assert sorted(rec.call_args.args[0]) == [
-                "mirror_missing_rows", "mirror_orphan_rows"]
+                "order_versions_flooding", "order_versions_missing"]
         # The survivor clears on a later clean run.
         with _sent() as send2, _archived():
             await resolve_group("dq:mirror_landing")
-            assert "mirror_failing" in send2.await_args.args[0]
+            assert "order_versions_stalled" in send2.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_groups_do_not_cross(self):

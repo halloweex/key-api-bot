@@ -212,8 +212,8 @@ def test_gpg_runs_only_through_gpg_safe():
                 f"{path.relative_to(REPO)} calls gpg_safe without sourcing "
                 f"deploy/gpg_safe.sh"
             )
-    assert {"pg_offsite.sh", "pg_restore_drill.sh",
-            "ark_ship.sh"} <= set(callers), callers
+    # `ark_ship.sh` was the third until it was deleted on 2026-11-19.
+    assert {"pg_offsite.sh", "pg_restore_drill.sh"} <= set(callers), callers
 
     # The walk itself, on the shape a review found it missing: a call whose
     # options start on the continuation line.
@@ -330,15 +330,16 @@ _DOCKER_RUN = re.compile(r"(?:^\s*|\$\(|=\()docker run\b[^\n]*", re.M)
 
 
 def test_the_archive_tools_run_only_a_pinned_image():
-    """Step 14 takes DuckDB out of the images at S14-19, and these three read
+    """Step 14 takes DuckDB out of the images at S14-19, and these tools read
     archives DuckDB 1.5.5 wrote. Each takes its image from a variable with no
     default, sources deploy/archive_image.sh and asks the image before it
     uses it, names no image of its own in code, and never pulls. Mutation:
     put `:-halloweex/keycrm-web:latest` back on any of them, or drop a
     `--pull never`."""
     names = {p.name for p in ARCHIVE_TOOLS}
-    # `daily_offsite.sh` was the third until step 14's S14-18 deleted it.
-    assert names >= {"restore-test.sh", "ark_ship.sh"}, names
+    # `daily_offsite.sh` was the third until step 14's S14-18 deleted it, and
+    # `ark_ship.sh` the second until it was deleted on 2026-11-19.
+    assert names >= {"restore-test.sh"}, names
     for path in ARCHIVE_TOOLS:
         code = _calls(path.read_text())
         where = path.relative_to(REPO)

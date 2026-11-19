@@ -1631,8 +1631,8 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants, the analysts' capture stamps (WARN at most) |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses included (Postgres only, O3 (a)) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
-| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
-| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
+| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
+| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts); the id is kept, the operational copy out of DuckDB went in step 14's S14-13, and the copy of `data/bot.db`, standing down under `KS_BOT_STORE=postgres`, on 2026-11-19 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `ga4_capture` | daily 02:40 | keep each closed GA4 day, ISO week and month in `app.ga4_funnel` before the 14-month horizon drops it, oldest first, at most 24 periods a run and an hour; stands down without a GA4 key or under `KS_ANALYTICS_CAPTURES=off` (revision 0036) |
 | `month_goal_freeze` | hourly at :30 outside the windows kept clear (`goal_freeze.RUN_HOURS`, 00:30 first), and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st, one SELECT once the month is frozen, a refused read defers the whole month to the next run, an answer whose ML signal rests on part of a forecast waits (`waiting`) and is read live; stands down without `KS_PG_DSN` |
@@ -2333,7 +2333,8 @@ closed, not silently — but you find out the next morning, not at deploy.
 SMS state's copy (`replicate_sms`) and the dashboard users' copy
 (`replicate_dashboard_users`). The hourly job keeps its id,
 `replicate_operational` — `/api/jobs`' history and the catch-up read it — and
-runs `derive_gender_pg` and `replicate_bot_state`. `app.sync_metadata`,
+runs `derive_gender_pg` (and `replicate_bot_state`, the copy of `data/bot.db`,
+until 2026-11-19). `app.sync_metadata`,
 `app.warehouse_refreshes` and `app.reconciliation_log` are history (OD-S5-4).
 History below.
 
@@ -2854,7 +2855,8 @@ cannot tell the two apart.
 the switch it would roll back every approval, once an hour, looking fine in
 between. It refuses under `KS_BOT_STORE=postgres`, and `reconcile_bot_state`
 stands down with it — `bot.db` becomes a frozen artefact, so every change since
-the switch would read as a discrepancy the check itself created.
+the switch would read as a discrepancy the check itself created. Both were
+deleted on 2026-11-19 with the copy (see the next section).
 
 **The cache stays local under both engines** (revision 0009 left it out of
 Postgres). `initialise()` therefore still creates the SQLite cache table — found
@@ -2864,10 +2866,27 @@ on a real database, where a missing `data/bot.db` made `cache_set` raise
 **To switch**: `KS_BOT_STORE=postgres` on the bot **and** the web container —
 `web/services/auth_service.py` reads the same store. Both need `KS_PG_DSN`; the
 bot has none today. Roll back by removing the variable, but note that anything
-written to Postgres in between does not come back to SQLite: the copy is
-one-way and it was standing down the whole time.
+written to Postgres in between does not come back to SQLite: the copy was
+one-way and it was standing down the whole time. Since 2026-11-19 there is no
+copy at all, so after such a rollback `bot.db` would again be in no backup.
 
 ### The bot's own state, and the only store with no backup
+
+**Deleted on 2026-11-19, dead in production**: the copy (`core/pg_bot_state.py`,
+`replicate_bot_state`) and its comparison (`reconcile_bot_state`, with
+`compare_table` and `MirroredTable`, whose last caller it was). Both stood down
+under `KS_BOT_STORE=postgres`, which web and the bot have run since
+2026-08-27. The bot writes the four `app.*` tables itself through
+`bot/store_postgres.py`, and they ride the nightly Postgres dump; revision
+0009 and the tables stay. `compare_table`'s seven conditions
+(`mirror_missing_rows`, `mirror_orphan_rows`, `mirror_row_values`,
+`mirror_retired_rows`, `mirror_pruned_rows`, `mirror_never_shipped` and the
+bare `mirror_failing`) left REGISTRY, REMEDIATION and the human names with it
+and are never reused; the canary's `mirror_failing:<table>` is untouched.
+`dq_mirror_landing` runs six checks, and `replicate_operational` the gender
+derivation alone. The rule that no module under `bot/` but the adapter
+imports `core.pg*` stays, now in `tests/unit/test_store_postgres.py`. History
+below.
 
 `data/bot.db` is the third store in this system. Measured 2026-08-27: it is in
 **no backup at all** — `data/backups/` held `analytics-*.duckdb`,
@@ -3977,7 +3996,10 @@ a warehouse rebuilt from the second Ark (`deploy/restore_from_export.py`).
 The archives are read by DuckDB 1.5.5, the version that wrote every one, in
 the image pinned as `keycrm-web:rollback-step14` — never `:latest`, which
 carries no `duckdb` since S14-19. The second Ark is self-describing: the
-schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`. The restore
+schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`, which is what
+verifies it — the tools that froze and shipped it, `deploy/ark_freeze.py` and
+`deploy/ark_ship.sh`, ran once at the start of the week of silence and were
+deleted on 2026-11-19 with `tests/unit/test_ark_ship_script.py`. The restore
 drill (`deploy/restore-test.sh`) pulls the newest off-site archive and
 rebuilds a validated warehouse in a throwaway container of that image;
 `deploy/restore_from_export.py` is the one restore path and is never deleted;
@@ -3994,7 +4016,7 @@ bot's carries the driver. `tests/unit/test_images_carry_no_duckdb.py` holds
 it: an AST walk of `core/`, `web/`, `bot/`, `scripts/`, `deploy/` and
 `migrations/` finds no import of the driver in any form (aliased, inside a
 function, `import_module`, `sys.modules`, a `python -c` program in a
-string) but in the three host tools that run on the pinned image, and every
+string) but in the two host tools that run on the pinned image, and every
 module under `core/`, `web/`, `bot/` and `scripts/` imports in a fresh
 interpreter in which `duckdb` cannot be found. `requirements-dev.txt` names
 `duckdb==1.5.5` on its own line, for those tools' tests and a few that
@@ -4010,29 +4032,29 @@ any rollback to an image from before step 14"). A tag is never removed by the
 deploy's `docker image prune -f`; `:latest` moves with every deploy and
 carries no DuckDB since S14-19.
 
-So `deploy/restore-test.sh` and `deploy/ark_ship.sh` — and
-`deploy/daily_offsite.sh`, the nightly snapshot, until S14-18 deleted it —
-no longer default to `:latest`. They take their image
-from `BACKUP_RESTORE_IMAGE` (the Ark: `BACKUP_ARK_IMAGE`, else the same) in
-`deploy/backup.env`, and ask it before anything is fetched, linked or frozen
+So `deploy/restore-test.sh` — like `deploy/daily_offsite.sh`, the nightly
+snapshot, until S14-18 deleted it, and `deploy/ark_ship.sh`, the second Ark's
+one-off shipment, until 2026-11-19 — no longer defaults to `:latest`. It takes
+its image from `BACKUP_RESTORE_IMAGE` in `deploy/backup.env` (the Ark's was
+`BACKUP_ARK_IMAGE`), and asks it before anything is fetched or linked
 (`deploy/archive_image.sh`): a tag that does not move (not `:latest`, not
 untagged), present on the host (nothing pulls it, and `rollback-step14` is on
 no registry), and `import duckdb` inside it saying 1.5.5. Any of them false is
 exit 2 with a line naming `rollback-step14`; the nightly snapshot, which only
 runs on the way back, pages it as a failed night, which is why the way back's
 step 3 sets the variable before it puts the snapshot's cron line back. Every
-container they start carries `--pull never`.
+container it starts carries `--pull never`.
 
 **What is mounted into it imports only what it carries.** The drill mounts
-`restore_from_export.py`, the Ark `ark_freeze.py`, and the table-fate
-check's recipe the check and `core/duckdb_table_fates.py` — files from the
-checkout, run inside that pinned image (the snapshot mounted
-`snapshot_export.py` and `core/snapshot_validation.py` until S14-18 deleted
-all three). A name main gains after it is a name
+`restore_from_export.py`, and the table-fate check's recipe the check and
+`core/duckdb_table_fates.py` — files from the checkout, run inside that
+pinned image (the snapshot mounted `snapshot_export.py` and
+`core/snapshot_validation.py` until S14-18 deleted all three, and the Ark
+`ark_freeze.py` until 2026-11-19). A name main gains after it is a name
 the container does not have. `tests/unit/test_archive_image.py` derives the
 mounts from the scripts and their headers' recipes, read as the shell reads
-them (`${PWD}`, `$(pwd)`, variables, function arguments, the `DOCKER_RUN`
-array; a checkout directory mounted whole is refused, and a source it cannot
+them (`${PWD}`, `$(pwd)`, variables, function arguments, an array; a
+checkout directory mounted whole is refused, and a source it cannot
 resolve must be listed with a reason), and holds every import in them to a
 frozen list of what the pinned image carries: the standard library, `duckdb`,
 `compact_duckdb`'s eight names and the `core` modules they reach today —
@@ -4161,4 +4183,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-19 (revision 0038: the discount on orders and their lines; a sales type with no history of its own has no automatic goal)*
+*Last updated: 2026-11-19 (revision 0038: the discount on orders and their lines; dead code deleted with its tests: the paginator, two date checks, the copy of bot.db and `compare_table`, the Ark's shipment)*

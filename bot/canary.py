@@ -641,7 +641,7 @@ def check_orders_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
 # `core.pg_derivation.HEARTBEAT` (60 min) plus fifteen for the ten-minute floor,
 # the one-minute tick and the heal's own 30 s margin. Written out rather than
 # imported: nothing under `bot/` may import `core.pg*`
-# (`tests/unit/test_pg_bot_state.py`), and a test pins the two together.
+# (`tests/unit/test_store_postgres.py`), and a test pins the two together.
 DERIVATION_HEAL_WITHIN_S = 75 * 60
 
 # Marks failing this many times in a row page whatever their age. A mark that

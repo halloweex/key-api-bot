@@ -29,12 +29,14 @@ def _issue(check_name: str, count: int = 1) -> IntegrityIssue:
 
 class TestRemediationLookup:
     def test_longest_prefix_wins(self):
-        """`mirror_never_shipped` has its own answer — "wait for Sunday" —
-        which is the opposite of the generic mirror advice."""
-        generic = remediation_for(["mirror_missing_rows"])[0]
-        specific = remediation_for(["mirror_never_shipped"])[0]
+        """`ch_history_` has its own answer — a human decides — which is the
+        opposite of the generic ClickHouse advice to wait for the next sync.
+        (`mirror_never_shipped` against `mirror_` was the pair until both were
+        retired with `compare_table` on 2026-11-19.)"""
+        generic = remediation_for(["ch_silver_roundtrip"])[0]
+        specific = remediation_for(["ch_history_buckets"])[0]
         assert generic != specific
-        assert "Sunday" in specific
+        assert "a human decides" in specific
 
     def test_generated_check_names_are_matched_by_prefix(self):
         """Half the check names are built at runtime; an exact-name table
@@ -123,10 +125,10 @@ class TestMachineAttemptsNote:
 class TestTheAlertBody:
     def test_critical_carries_a_lever(self):
         msg = format_alert_message(
-            "mirror_landing", Severity.CRITICAL, [_issue("mirror_missing_rows")], [],
+            "mirror_landing", Severity.CRITICAL, [_issue("order_versions_stalled")], [],
         )
         assert "→ " in msg
-        assert "meta.mirror_state" in msg
+        assert "the archive is the only chronicle" in msg
 
     def test_the_lever_is_last_because_it_is_what_gets_acted_on(self):
         msg = format_alert_message(

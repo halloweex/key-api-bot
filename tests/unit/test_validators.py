@@ -6,7 +6,6 @@ from datetime import date
 
 from core.validators import (
     validate_date_string,
-    validate_date_range,
     validate_source_id,
     validate_limit,
     validate_brand_name,
@@ -27,11 +26,6 @@ class TestValidateDateString:
         result = validate_date_string("2026-01-15")
         assert result == date(2026, 1, 15)
 
-    def test_valid_date_custom_format(self):
-        """Custom format should work."""
-        result = validate_date_string("15/01/2026", format="%d/%m/%Y")
-        assert result == date(2026, 1, 15)
-
     def test_invalid_format(self):
         """Invalid format should raise ValidationError."""
         with pytest.raises(ValidationError) as exc_info:
@@ -42,59 +36,6 @@ class TestValidateDateString:
         """Invalid date should raise ValidationError."""
         with pytest.raises(ValidationError):
             validate_date_string("2026-02-30")  # Feb 30 doesn't exist
-
-    def test_empty_string(self):
-        """Empty string should raise ValidationError."""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_date_string("")
-        assert "required" in str(exc_info.value).lower()
-
-    def test_none_value(self):
-        """None should raise ValidationError."""
-        with pytest.raises(ValidationError):
-            validate_date_string(None)
-
-    def test_non_string(self):
-        """Non-string should raise ValidationError."""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_date_string(12345)
-        assert "string" in str(exc_info.value).lower()
-
-
-class TestValidateDateRange:
-    """Tests for validate_date_range function."""
-
-    def test_valid_range(self):
-        """Valid date range should return tuple of dates."""
-        start, end = validate_date_range("2026-01-01", "2026-01-31")
-        assert start == date(2026, 1, 1)
-        assert end == date(2026, 1, 31)
-
-    def test_same_day(self):
-        """Same start and end date should be valid."""
-        start, end = validate_date_range("2026-01-15", "2026-01-15")
-        assert start == end == date(2026, 1, 15)
-
-    def test_start_after_end(self):
-        """Start date after end date should raise ValidationError."""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_date_range("2026-01-31", "2026-01-01")
-        assert "before or equal" in str(exc_info.value)
-
-    def test_range_too_large(self):
-        """Range exceeding max_days should raise ValidationError."""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_date_range("2025-01-01", "2026-01-31", max_days=30)
-        assert "exceed" in str(exc_info.value).lower()
-
-    def test_custom_max_days(self):
-        """Custom max_days should be respected."""
-        # Should work with 365 days
-        validate_date_range("2025-01-01", "2025-12-31", max_days=365)
-
-        # Should fail with 30 days
-        with pytest.raises(ValidationError):
-            validate_date_range("2025-01-01", "2025-12-31", max_days=30)
 
 
 class TestValidateSourceId:

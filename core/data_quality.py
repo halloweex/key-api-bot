@@ -603,8 +603,8 @@ def _inventory_snapshot_continuity_check(
     # is async. `core.pg_inventory_write.read_snapshot_calendar` is the reader
     # and `_run_dq_integrity` is the caller that knows which engine to ask.
     # Below this line the check does not know or care which store answered —
-    # `compare_table`'s arrangement, and the reason there is one body and not
-    # two.
+    # the arrangement `compare_table` had until 2026-11-19, and the reason
+    # there is one body and not two.
     #
     # The guard stays, narrowed to what it now protects: a caller that
     # supplied nothing. That is a forgotten call site, not a
@@ -1136,8 +1136,9 @@ def issue_dicts(rows) -> List[Dict[str, Any]]:
 # (`fk_orphan_<child>_<fk>`, `freshness_<entity>`, `pk_uniqueness_<table>`) and
 # a table keyed on exact names would silently miss every one of them.
 REMEDIATION: Tuple[Tuple[str, str], ...] = (
-    ("mirror_", "Wait for the hourly re-ship; check meta.mirror_state. Never copy rows by hand"),
-    ("mirror_never_shipped", "Normal before Sunday (weekly sync writes it); after — a defect"),
+    # `mirror_` and `mirror_never_shipped` had their lines here, for
+    # `compare_table`'s findings, until it was deleted on 2026-11-19.
+    #
     # Two layers share this check name — orders and, since revision 0020,
     # expenses — and REMEDIATION keys on the name alone, so the lever has to
     # name the table it applies to rather than assume one of them.
@@ -1362,18 +1363,11 @@ DEFAULT_REMEDIATION = (
 # скобках остаётся ключом для поиска; без перевода алерт говорит на языке
 # кода, а страница, которую не понять за три секунды, — шум.
 HUMAN_CHECK_NAMES: Dict[str, str] = {
-    "mirror_missing_rows": "rows missing from the copy",
-    "mirror_orphan_rows": "extra rows in the copy",
-    "mirror_row_values": "rows differ between copies",
-    "mirror_retired_rows": "retired in KeyCRM, copy remembers",
-    "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
     "inventory_continuity_unwatched": "snapshot gaps no longer watched",
     "sync_watermarks_unwatched": "sync stalls no longer watched",
     "chain_latch_disagrees": "the two copies of a chain's latch disagree",
     "integrity_check_raised": "integrity checks crashed",
-    "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
-    "mirror_failing": "mirror failing",
     "pg_silver_missing_rows": "orders missing from Postgres Silver",
     "pg_silver_orphan_rows": "ghost rows in Postgres Silver",
     "pg_attribution_coverage_website": "website orders lost their tags (Postgres)",
@@ -1432,8 +1426,8 @@ def human_check_name(name: str) -> str:
 def remediation_for(check_names: Iterable[str]) -> List[str]:
     """The distinct "what to do" lines for a set of check names.
 
-    Longest prefix wins, so `mirror_never_shipped` gets its own sentence
-    rather than the generic `mirror_` one. Deduplicated and order-stable: an
+    Longest prefix wins, so `ch_history_buckets` gets its own sentence
+    rather than the generic `ch_` one. Deduplicated and order-stable: an
     alert naming eight `fk_orphan_*` checks should say the one useful thing
     once. Pure since step 14's S14-15, which removed the `KS_UTM_PARSE` mode
     it read to pick the `pg_order_utm_` line.

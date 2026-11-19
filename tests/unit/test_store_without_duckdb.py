@@ -119,28 +119,12 @@ ALLOWED_PY = {
         "lands a spooled week in Postgres, then removes that spooled file "
         "(OD-16 (a))"),
 }
-# The Ark's own shipping (stage 5's PR-11, before step 14) cleans up after
-# itself inside the Ark root: the work directory `.ship.*` it made, the copy
-# it fetched back, and an Ark this run froze and that failed. Never an Ark a
-# run did not make.
-_ARK = "deploy/ark_ship.sh"
-ALLOWED_SHELL = {
-    (_ARK, 'rm -rf "${OUT_ROOT:?}/$s"'): (
-        ("/root/ark",), "a freeze that failed: the stamps it made, never one in `$had`"),
-    (_ARK, 'rm -rf "$ARK_DIR"'): (
-        ("/root/ark", "BACKUP_ARK"),
-        "the Ark this run just froze, when the source moved under it"),
-    (_ARK, 'rm -f "$plain"'): (
-        ("/root/ark", "BACKUP_ARK"), "the plain tarball in the run's work directory"),
-    (_ARK, 'rm -f "$WORK/$enc"'): (
-        ("/root/ark", "BACKUP_ARK"), "the encrypted tarball in the work directory, shipped"),
-    (_ARK, 'rm -f "$back/$enc"'): (
-        ("/root/ark", "BACKUP_ARK"), "the copy fetched back to verify"),
-    (_ARK, 'rm -f "$back/ark.tar.gz"'): (
-        ("/root/ark",), "the copy fetched back, decrypted"),
-    (_ARK, 'rm -rf "$back"'): (
-        ("/root/ark",), "the fetched-back directory inside the work directory"),
-}
+# No shell deletion of those places is allowed. The Ark's own shipping
+# (stage 5's PR-11, `deploy/ark_ship.sh`) cleaned up after itself inside the
+# Ark root — its work directory, the copy it fetched back, a freeze of its own
+# that failed — and its seven `rm`s stood here until it was deleted on
+# 2026-11-19. The Arks themselves stay.
+ALLOWED_SHELL: dict = {}
 
 
 class TestNothingDeletesWhatRule5Keeps:

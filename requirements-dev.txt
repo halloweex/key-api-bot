@@ -10,8 +10,7 @@
 # requirements.txt and with it out of both images. It used to arrive here
 # through `-r requirements.txt`, so a lock regenerated without this line
 # would silently lose it. What needs it: the tests of the frozen host tools
-# that run on the pinned image (deploy/ark_freeze.py,
-# deploy/duckdb_table_fates_check.py — tests/unit/test_ark_ship_script.py,
+# that run on the pinned image (deploy/duckdb_table_fates_check.py —
 # test_archive_image.py, test_duckdb_table_fates.py), and the tests that
 # evaluate a SQL fragment on an in-memory DuckDB. Pinned to the version
 # that wrote every archive and that deploy/archive_image.sh requires of the

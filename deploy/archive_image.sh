@@ -1,10 +1,11 @@
 # shellcheck shell=bash
 # The image the DuckDB archive tools run in (step 14, S14-02).
 #
-# Sourced by deploy/restore-test.sh and deploy/ark_ship.sh — the host scripts
-# that start a container to read a DuckDB archive with code mounted from this
-# checkout (deploy/daily_offsite.sh, the nightly snapshot, was the third until
-# step 14's S14-18 deleted it). It defines and does not
+# Sourced by deploy/restore-test.sh — the host script that starts a container
+# to read a DuckDB archive with code mounted from this checkout
+# (deploy/daily_offsite.sh, the nightly snapshot, was the second until step
+# 14's S14-18 deleted it, and deploy/ark_ship.sh, the second Ark's one-off
+# shipment, the third until 2026-11-19). It defines and does not
 # act, and it sets no shell options: errexit is the caller's. Bash 3.2 and up,
 # because a laptop runs the tests.
 #
@@ -31,8 +32,8 @@
 # Any of them false is a refusal, exit 2 in every caller, before anything is
 # downloaded, linked, frozen or shipped, with a line naming the tag to use.
 #
-# The host files mounted into that image (restore_from_export.py,
-# ark_freeze.py, and the table-fate check's) import only what the image has;
+# The host files mounted into that image (restore_from_export.py and the
+# table-fate check's) import only what the image has;
 # tests/unit/test_archive_image.py holds them to it.
 
 ARCHIVE_DUCKDB_VERSION="1.5.5"

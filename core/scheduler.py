@@ -750,20 +750,20 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: the buyers' gender and the bot's state (hourly).
+        # Job: the buyers' gender (hourly).
         #
         # The id is the one this job has always had, so `/api/jobs`' history
         # and the catch-up do not break. Until step 14's S14-13 it copied the
         # operational history out of DuckDB (`core.pg_operational`), with the
         # three ids-diffs, the SMS state and the dashboard's user list riding
         # along; each had stood down since its chain or store moved, and they
-        # went with S14-13. What is left: `derive_gender_pg`, the one writer of
-        # new gender verdicts, and the copy of `data/bot.db`, which stands
-        # down under `KS_BOT_STORE=postgres`.
+        # went with S14-13. The copy of `data/bot.db`, standing down under
+        # `KS_BOT_STORE=postgres` since 2026-08-27, went on 2026-11-19. What
+        # is left: `derive_gender_pg`, the one writer of new gender verdicts.
         self._add_job(
             job_id="replicate_operational",
-            name="Gender derivation and bot state",
-            description="Derive new buyers' gender in Postgres and copy data/bot.db",
+            name="Gender derivation",
+            description="Derive new buyers' gender in Postgres",
             func=self._run_replicate_operational,
             trigger=IntervalTrigger(hours=1),
             max_instances=1,
@@ -1157,7 +1157,7 @@ class BackgroundScheduler:
             return result
 
     async def _run_replicate_operational(self) -> Dict[str, Any]:
-        """The hourly job that kept its id: the buyers' gender, then the bot.
+        """The hourly job that kept its id: the buyers' gender.
 
         The id `replicate_operational` stays — `/api/jobs`' history and the
         catch-up read it — but since step 14's S14-13 nothing here copies out
@@ -1165,15 +1165,15 @@ class BackgroundScheduler:
         (`core.pg_operational`), the three ids-diffs (`pg_buyers`,
         `pg_backfill`, `pg_expense_backfill`), the SMS state and the
         dashboard's user list; every one of them had stood down since its
-        write chain or store switch moved, and they went with S14-13.
+        write chain or store switch moved, and they went with S14-13. The
+        copy of `data/bot.db` (`core.pg_bot_state`) stood down under
+        `KS_BOT_STORE=postgres` from 2026-08-27 and went on 2026-11-19.
 
-        What is left is the one writer of new gender verdicts and the copy of
-        `data/bot.db`. Never raises: each returns its own error rather than
-        propagating, so a Postgres fault cannot take a scheduler job into the
-        failure history it shares with the sync.
+        What is left is the one writer of new gender verdicts. Never raises:
+        it returns its error rather than propagating, so a Postgres fault
+        cannot take a scheduler job into the failure history it shares with
+        the sync.
         """
-        from core.pg_bot_state import replicate_bot_state
-
         with correlation_context():
             # Chain 4 writes the verdicts in Postgres
             # (`core/pg_buyers_write.py`), so the derivation is Postgres's:
@@ -1182,8 +1182,7 @@ class BackgroundScheduler:
             # gender field for any of them. Until step 14's S14-11 it followed
             # the chain's `mode()` — DuckDB's `derive_gender`, or nothing for a
             # flag nobody could read. Its own `try`: the derivation never
-            # raises, and a fault in it must not cost the copy of the bot's
-            # state either.
+            # raises, and a fault in it must not become the job's.
             from core import pg_buyers_write
 
             result: Dict[str, Any] = {}
@@ -1194,10 +1193,6 @@ class BackgroundScheduler:
                              exc_info=True)
                 gender = {"error": f"{type(exc).__name__}: {exc}"}
             result["gender"] = gender
-            # `data/bot.db` rides the same job rather than getting one of its
-            # own: same cadence, same grace window, and one schedule to reason
-            # about. It stands down under `KS_BOT_STORE=postgres`.
-            result["bot_state"] = await replicate_bot_state()
             logger.info("Operational replication: %s", result)
             return result
 
@@ -2064,10 +2059,10 @@ class BackgroundScheduler:
 
     async def _run_dq_mirror_landing(self) -> Dict[str, Any]:
         """The `mirror_landing` layer: the Postgres-alone completeness and
-        liveness checks, `data/bot.db` against its copy, the витрина, and
-        ClickHouse against Postgres (`core/mirror_reconciliation.py`'s
-        docstring). Until step 14's S14-12 it was Reconciliation A, Postgres
-        against DuckDB, and the closing criterion of step 05.
+        liveness checks and ClickHouse against Postgres
+        (`core/mirror_reconciliation.py`'s docstring). Until step 14's S14-12
+        it was Reconciliation A, Postgres against DuckDB, and the closing
+        criterion of step 05.
 
         Its own layer with its own age rather than riding along with the
         integrity scan — one layer covering two jobs would make a stale check
@@ -2095,7 +2090,6 @@ class BackgroundScheduler:
             MIRROR_LAYER,
             configured,
             pg_gold_internal_check,
-            reconcile_bot_state,
             reconcile_buyer_completeness,
             reconcile_order_utm_completeness,
             reconcile_order_versions,
@@ -2179,10 +2173,9 @@ class BackgroundScheduler:
                 # Gold's two grains against each other (DN-28): Postgres
                 # alone, asked on every run since `reconcile_gold` went.
                 await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
-                # And the third store. `data/bot.db` is SQLite, not DuckDB, and
-                # it is the only one of the three that is in no backup — which
-                # is the whole reason its fifty rows are being copied at all.
-                await check("reconcile_bot_state", lambda: reconcile_bot_state())
+                # `reconcile_bot_state`, `data/bot.db` against its copy in
+                # `app.*`, ran here until 2026-11-19: it stood down under
+                # `KS_BOT_STORE=postgres`, and went with the copy.
                 # And the archive, which is none of the above: it has no
                 # counterpart to be compared against, so this asks whether it
                 # is still being written rather than whether it agrees with

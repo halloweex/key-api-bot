@@ -723,9 +723,10 @@ async def read_snapshot_calendar(
     **sync** function (`check_internal_integrity`) while Postgres reads are
     async. Rather than bridge a loop inside the check — which would put an
     event loop underneath twenty other checks that do not need one — the async
-    job reads the facts and hands them over, and the check stays pure. That is
-    `compare_table`'s arrangement exactly: it takes two already-read mappings
-    and does not care which engine either came out of.
+    job reads the facts and hands them over, and the check stays pure. That
+    was `compare_table`'s arrangement exactly (deleted on 2026-11-19): it took
+    two already-read mappings and did not care which engine either came out
+    of.
     """
     from core.pg import get_pool, require_revision
 

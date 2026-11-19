@@ -1,8 +1,8 @@
 """The bot's state in Postgres — the second adapter behind `core/bot_store.py`.
 
 `app.authorized_users` and its three neighbours have existed since revision
-0009 and have been receiving an hourly copy of `data/bot.db` ever since. This
-is what lets the bot read and write them instead.
+0009 and received an hourly copy of `data/bot.db` until this adapter took them
+over. This is what lets the bot read and write them instead.
 
 ONE DRIVER, ON A LOOP OF ITS OWN — MEASURED, NOT PREFERRED
 
@@ -48,11 +48,11 @@ include this one.
 
 WHAT IT DOES NOT DO
 
-It does not write `data/bot.db`, and nothing writes both. The hourly copy in
-`core/pg_bot_state.py` goes one way — SQLite to Postgres — so turning this
-adapter on means turning that copy off, or it will overwrite what the bot
-wrote. `KS_BOT_STORE=postgres` is therefore a switch, never a dual-write, and
-the guard for it lives in the copy rather than here.
+It does not write `data/bot.db`, and nothing writes both. `KS_BOT_STORE=postgres`
+is a switch, never a dual-write. The hourly copy in `core/pg_bot_state.py`
+went one way — SQLite to Postgres — and refused to run under this adapter,
+or it would have overwritten what the bot wrote; it stood down from the
+switch (2026-08-27) and was deleted on 2026-11-19.
 """
 from __future__ import annotations
 
