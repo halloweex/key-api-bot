@@ -1,10 +1,11 @@
-"""One check that raises must not silence the other six.
+"""One check that raises must not silence the other five.
 
-`dq_mirror_landing` runs seven checks in one job — the UTM verdicts'
-completeness, Gold's two grains, the bot's state, the order archive, the
-buyers' completeness, ClickHouse and its archive. (Seventeen until step 14's
-S14-12 deleted the comparisons against DuckDB; eight until the owner's
-decision O6 of 2026-11-11 stopped checking the vitrina.) It used to wrap all
+`dq_mirror_landing` runs six checks in one job — the UTM verdicts'
+completeness, Gold's two grains, the order archive, the buyers'
+completeness, ClickHouse and its archive. (Seventeen until step 14's S14-12
+deleted the comparisons against DuckDB; eight until the owner's decision O6
+of 2026-11-11 stopped checking the vitrina; seven until the bot's state, its
+copy and comparison deleted on 2026-11-19.) It used to wrap all
 of them in ONE try, so an exception anywhere skipped every check after it, and
 the alert gate's `and not error_message` then withheld the page for any
 CRITICAL already found above the failure.
@@ -33,7 +34,7 @@ from core.data_quality import IntegrityIssue, Severity
 CHECKS_BY_MODULE = {
     "core.mirror_reconciliation": [
         "reconcile_order_utm_completeness", "pg_gold_internal_check",
-        "reconcile_bot_state", "reconcile_order_versions",
+        "reconcile_order_versions",
         "reconcile_buyer_completeness",
     ],
     "core.ch_silver": ["reconcile_clickhouse"],
@@ -63,9 +64,9 @@ def check_order() -> list:
 
 
 class TestEveryCheckIsIsolated:
-    def test_all_seven_run_through_check_and_each_exactly_once(self):
+    def test_all_six_run_through_check_and_each_exactly_once(self):
         assert check_order() == ALL_CHECKS
-        assert len(check_order()) == len(set(check_order())) == 7
+        assert len(check_order()) == len(set(check_order())) == 6
 
 
 def _critical(name):
@@ -158,12 +159,12 @@ class TestOneRaisingCheckSilencesNothing:
     @pytest.mark.asyncio
     async def test_the_run_is_still_failed_and_names_every_check_that_raised(self):
         persisted, _, _ = await _run({
-            "reconcile_bot_state": RuntimeError("data/bot.db is gone"),
+            "reconcile_buyer_completeness": RuntimeError("bronze.buyers is gone"),
             "pg_gold_internal_check": ValueError("gold.daily_revenue is gone"),
         })
         message = persisted["error_message"]
         assert message and message.startswith("2 check(s) raised")
-        assert "reconcile_bot_state: RuntimeError" in message
+        assert "reconcile_buyer_completeness: RuntimeError" in message
         assert "pg_gold_internal_check: ValueError" in message
 
     @pytest.mark.asyncio

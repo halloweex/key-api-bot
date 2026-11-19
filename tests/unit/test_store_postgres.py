@@ -7,15 +7,17 @@ which is the only real proof that a caller cannot tell them apart. That needs
 1 skipped, the skip being a failure mode `TIMESTAMPTZ` makes impossible.
 
 What is here instead: the pure conversions, the command-tag parsing, the engine
-switch, and the two guards that stop the old copy overwriting the new writer.
-That last pair is the most dangerous code in this change — an hourly full
-replace pointed at a database the bot is now writing would roll back every
-approval, once an hour, and look fine in between.
+switch, and the rule that this adapter is the bot's one path to Postgres. The
+two guards that stopped the old copy of `data/bot.db` overwriting the new
+writer stood here too, until the copy and its comparison were deleted on
+2026-11-19 (`core/pg_bot_state.py`; both had stood down since the switch).
 """
 from __future__ import annotations
 
 import inspect
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -201,58 +203,26 @@ class TestChoosingTheEngine:
         assert source.index("engine ==") < source.index("PostgresBotStore")
 
 
-# ── the guards ───────────────────────────────────────────────────────────────
+# ── the boundary ─────────────────────────────────────────────────────────────
 
 
-class TestTheOldCopyStandsDownWhenTheBotTakesOver:
-    """The most dangerous code in this change.
+class TestTheBotHasOnePathToTheDatabase:
+    """Moved here from `tests/unit/test_pg_bot_state.py`, deleted on
+    2026-11-19 with the copy of `data/bot.db` it tested. The rule outlived
+    the copy: `core/bot_store.py` and `bot/canary.py` rely on it."""
 
-    `replicate_bot_state` is a full replace from `data/bot.db`. Once the bot
-    writes Postgres, running it would roll back every approval made since the
-    switch — and only once an hour, so it would look like the switch worked in
-    between.
-    """
-
-    @pytest.mark.asyncio
-    async def test_the_copy_refuses_under_the_postgres_engine(self, monkeypatch):
-        from core.pg_bot_state import replicate_bot_state
-
-        monkeypatch.setenv(ENGINE_ENV, "postgres")
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(
-                "core.mirror_reconciliation.configured", lambda: True,
-            )
-            result = await replicate_bot_state()
-        assert "skipped" in result
-        assert "the bot owns these tables" in result["skipped"]
-
-    @pytest.mark.asyncio
-    async def test_the_comparison_stands_down_too(self, monkeypatch):
-        """`bot.db` becomes a frozen artefact, so every approval since the
-        switch would read as a discrepancy — a check reporting a difference it
-        created is worse than no check."""
-        from core.mirror_reconciliation import reconcile_bot_state
-
-        monkeypatch.setenv(ENGINE_ENV, "postgres")
-        assert await reconcile_bot_state() == []
-
-    @pytest.mark.asyncio
-    async def test_both_still_run_under_sqlite(self, monkeypatch, tmp_path):
-        from core.pg_bot_state import replicate_bot_state
-
-        monkeypatch.setenv(ENGINE_ENV, "sqlite")
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(
-                "core.mirror_reconciliation.configured", lambda: True,
-            )
-            result = await replicate_bot_state(tmp_path / "absent.db")
-        # Skipped for the *file*, not for the engine — which is the point.
-        assert "does not exist" in result["skipped"]
-
-    def test_the_guard_names_the_same_variable_the_switch_reads(self):
-        """Two spellings of the environment variable would be a switch that
-        turns the bot over and leaves the copy running."""
-        from core import pg_bot_state
-
-        assert "ENGINE_ENV" in inspect.getsource(pg_bot_state.replicate_bot_state)
-        assert store_postgres.__doc__ is not None
+    def test_no_module_under_bot_but_this_adapter_imports_core_pg(self):
+        """`bot/store_postgres.py` is the adapter and must know the revision
+        it requires. That one module is the whole allowance: a second module
+        under `bot/` reaching for `core.pg` would mean the bot had grown a
+        second, unmanaged path to the database. Mutation: import `core.pg`
+        from any other module under `bot/`."""
+        adapter = Path(store_postgres.__file__)
+        offenders = []
+        for path in adapter.parent.rglob("*.py"):
+            if path.name == adapter.name:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if re.search(r"^\s*(from|import)\s+core\.pg", text, re.MULTILINE):
+                offenders.append(path.name)
+        assert offenders == [], offenders

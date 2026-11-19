@@ -297,13 +297,13 @@ services:
       - .env
     environment:
       - TZ=Europe/Kyiv
-      # Step 03: the bot's own state moves to Postgres. `app.*` has held
-      # an hourly copy of data/bot.db since revision 0009; this is what
-      # makes the bot read and write it instead.
+      # Step 03: the bot's own state moves to Postgres. `app.*` held an
+      # hourly copy of data/bot.db from revision 0009 until the switch;
+      # this is what makes the bot read and write it instead.
       #
       # Removing KS_BOT_STORE rolls back to SQLite, but anything written
-      # to Postgres in between does not come back: the copy is one-way and
-      # stands down while this is set.
+      # to Postgres in between does not come back: nothing copies between
+      # the two (the one-way copy out of SQLite was deleted on 2026-11-19).
       - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
       - KS_BOT_STORE=postgres
       # Who signs every outbound Telegram. Set here rather than left to the

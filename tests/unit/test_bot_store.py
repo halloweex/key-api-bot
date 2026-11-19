@@ -247,10 +247,11 @@ class TestEverythingGoesThroughTheStore:
 
 class TestNothingReachesRoundIt:
     def test_only_the_adapter_opens_sqlite_inside_bot(self):
-        """`core/bot_prefs.py` and `core/pg_bot_state.py` open the same file
-        read-only from the *web* container and are not going round anything —
-        they are separate readers by design. Inside `bot/`, the adapter is the
-        only place a connection is allowed."""
+        """Inside `bot/`, the adapter is the only place a connection is
+        allowed. (`core/bot_prefs.py` and the copy in `core/pg_bot_state.py`
+        opened the same file read-only from the *web* container, as separate
+        readers by design; the first reads through the port since 2026-09-06,
+        and the second was deleted on 2026-11-19.)"""
         offenders = [
             path.name for path in (REPO / "bot").rglob("*.py")
             if path.name != "store_sqlite.py"

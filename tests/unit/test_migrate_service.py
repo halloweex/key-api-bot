@@ -59,7 +59,7 @@ class TestAlembicStaysOutOfTheApplicationImages:
 
     def test_it_copies_pg_without_the_core_package_init(self):
         """`core/pg.py` alone makes `core` a namespace package, so importing
-        it does not drag in config, validators, pagination and httpx. Copying
+        it does not drag in config, validators and httpx. Copying
         `core/` wholesale would."""
         df = (REPO / "Dockerfile.migrate").read_text()
         assert "COPY core/pg.py" in df
