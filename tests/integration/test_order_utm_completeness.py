@@ -307,10 +307,10 @@ class TestTheGraceClockIsTheLastWrite:
 
         # The order exactly as it stands, written again by the mirror's own
         # writer: nothing about it changes but the stamp.
+        from core.landing_rows import ORDER_COLUMNS
+
         same = await conn.fetchrow(
-            "SELECT id, source_id, status_id, status_group_id, grand_total, "
-            "ordered_at, created_at, updated_at, buyer_id, manager_id, "
-            "manager_comment, promocode FROM bronze.orders WHERE id = 601")
+            f"SELECT {', '.join(ORDER_COLUMNS)} FROM bronze.orders WHERE id = 601")
         with patch("core.pg.get_pool",
                    new=AsyncMock(return_value=_OneConnectionPool(conn))):
             await pg_landing.write_orders([tuple(same)], [], replace_products=False)
