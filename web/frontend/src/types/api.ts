@@ -351,7 +351,17 @@ export interface SetGoalResponse {
 
 // ─── Smart Goal Types ─────────────────────────────────────────────────────────
 
-export interface SmartGoalData extends GoalData {
+/** How the month's automatic goal was built. `no_history`: the sales type
+ *  has no history of its own, so it has no automatic goal and every period's
+ *  amount is null (the owner's decision of 2026-11-19). `fallback` was a ₴3M
+ *  default the server no longer sets. */
+export type GoalCalculationMethod =
+  'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback' | 'no_history'
+
+export interface SmartGoalData extends Omit<GoalData, 'amount' | 'suggestedAmount'> {
+  /** Null when the period has no goal: no history of its own and none typed. */
+  amount: number | null
+  suggestedAmount: number | null
   weeklyBreakdown?: Record<number, number>  // week 1-5 -> goal amount
   lastYearRevenue?: number
   recent3MonthAvg?: number
@@ -360,8 +370,9 @@ export interface SmartGoalData extends GoalData {
   mlForecastGoal?: number
   growthRate?: number
   seasonalityIndex?: number
-  calculationMethod?: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
-  blendWeights?: Record<string, number>
+  calculationMethod?: GoalCalculationMethod
+  /** Null when no blend made the goal: the month average, or no goal. */
+  blendWeights?: Record<string, number> | null
 }
 
 export interface SmartGoalsResponse {
@@ -375,7 +386,7 @@ export interface SmartGoalsResponse {
     mlForecastGoal: number
     growthRate: number
     seasonalityIndex: number
-    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
+    calculationMethod: GoalCalculationMethod
     blendWeights: Record<string, number> | null
   }
   metadata: {
@@ -407,7 +418,8 @@ export interface GoalForecastResponse {
   targetYear: number
   targetMonth: number
   monthly: {
-    goal: number
+    /** Null: no history of its own (`calculationMethod` `no_history`). */
+    goal: number | null
     lastYearRevenue: number
     recent3MonthAvg: number
     historicalAvg: number
@@ -416,17 +428,17 @@ export interface GoalForecastResponse {
     growthRate: number
     seasonalityIndex: number
     confidence: 'high' | 'medium' | 'low'
-    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
+    calculationMethod: GoalCalculationMethod
     mlForecastGoal: number
     blendWeights: Record<string, number> | null
   }
   weekly: {
-    goal: number
+    goal: number | null
     breakdown: Record<number, number>
     weights: Record<number, number>
   }
   daily: {
-    goal: number
+    goal: number | null
     daysInMonth: number
   }
   metadata: {

@@ -734,7 +734,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         : periodType === 'monthly' ? goalsData.monthly
         : null
 
-      if (goalData && goalData.amount > 0) {
+      if (goalData && goalData.amount != null && goalData.amount > 0) {
         // For monthly view, get weekly breakdown from smart goals
         const weeklyBreakdown = periodType === 'monthly'
           ? goalsData.weekly?.weeklyBreakdown
@@ -748,12 +748,18 @@ export const MilestoneProgress = memo(function MilestoneProgress({
           goalAmount: goalData.amount,
           isCustom: goalData.isCustom,
           weeklyBreakdown,
-          weeklyGoalAmount,
+          weeklyGoalAmount: weeklyGoalAmount ?? undefined,
         }, t)
       }
+
+      // The server answered, and this period has no goal: a sales type with
+      // no history of its own (`no_history`), or a goal too small to reach
+      // the first rounding step. Nothing is drawn — the hardcoded targets
+      // below are retail's size, and stood in for the offline store's.
+      return null
     }
 
-    // Fallback to hardcoded values while loading or on error
+    // Fallback to hardcoded values when the request failed
     return getFallbackMilestones(t)[periodType] || null
   }, [periodType, goalsData, t])
 
@@ -903,14 +909,32 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     )
   }
 
+  const periodLabel = periodType === 'daily' ? t('goal.dailyGoal')
+    : periodType === 'weekly' ? t('goal.weeklyGoal')
+    : t('goal.monthlyGoal')
+
+  // No automatic goal: the sales type has no history of its own (the owner's
+  // decision of 2026-11-19), and nobody typed one. Said in a line rather
+  // than left as a gap, so the card reads as answered, not broken.
+  if (periodType && !milestones && goalsData?.monthly?.calculationMethod === 'no_history') {
+    return (
+      <div className="bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] p-5">
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full bg-slate-300" />
+          <span className="text-base font-semibold text-slate-800 tracking-tight">{periodLabel}</span>
+          <InfoPopover title={t('goal.calcTitle')}>
+            <p className="text-xs text-slate-300">{t('goal.noHistoryHow')}</p>
+          </InfoPopover>
+        </div>
+        <p className="mt-2 text-sm text-slate-500">{t('goal.noHistory')}</p>
+      </div>
+    )
+  }
+
   // Don't render for custom periods or if no milestones
   if (!periodType || !milestones || milestones.length === 0 || !metrics) {
     return null
   }
-
-  const periodLabel = periodType === 'daily' ? t('goal.dailyGoal')
-    : periodType === 'weekly' ? t('goal.weeklyGoal')
-    : t('goal.monthlyGoal')
 
   // Get goal details from smart goals data
   const currentGoalData = periodType === 'daily' ? goalsData?.daily
