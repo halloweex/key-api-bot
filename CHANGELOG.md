@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.358
+
+- ci: run the frontend's tests and build on every PR
+
+
 ## 3.0.357
 
 - fix(goals): a sales type with no history of its own has no automatic goal
