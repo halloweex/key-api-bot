@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.356
+
+- docs: say when compare_table last ran
+- chore: delete the second Ark's one-off shipment and its tests
+- chore: delete the copy of bot.db into Postgres, its comparison and compare_table
+- chore: delete validate_date_range and the date checks no caller reaches
+- chore: delete KeyCRMPaginator, which nothing called
+
+
 ## 3.0.355
 
 - feat(orders): land KeyCRM's discount with the order and its lines (revision 0037)
