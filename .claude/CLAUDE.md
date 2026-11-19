@@ -670,6 +670,17 @@ baseline in the same commit as any fix that removes a finding, or the job
 fails on the leftover. A basedpyright bump is a commit of its own, with the
 baseline rewritten beside it.
 
+### The frontend
+
+`frontend` is CI's third job: in `web/frontend` it runs `npm ci`, the Vitest
+suite (`npm test`) and the production build (`npm run build`, which is
+`tsc -b && vite build`), on Node 20 — the major `Dockerfile.web`'s
+`node:20-alpine` builds with, and `tests/unit/test_ci_workflow.py` holds the
+job to it. Until it existed nothing ran npm on a pull request, so a frontend
+change was first built by the image, after the merge. `tsc --noEmit` is no
+stand-in for the build: `tsconfig.json` lists no files of its own, so it
+checks none.
+
 ## Caching
 
 **There is no server-side response cache, and there never has been in
