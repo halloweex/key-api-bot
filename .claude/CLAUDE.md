@@ -151,7 +151,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
-| `/api/goals/smart` | The month's goals — monthly, weekly, daily — for `year`/`month` (default: this Kyiv month). The automatic goal is the one frozen on the 1st once the month is frozen, else computed now; `monthly.frozenAt` says which; a goal typed on /goals overrides either — see "Revenue goals: the month's goal is frozen on the 1st" |
+| `/api/goals/smart` | The month's goals — monthly, weekly, daily — for `year`/`month` (default: this Kyiv month). The automatic goal is the one frozen on the 1st once the month is frozen, else computed now; `monthly.frozenAt` says which; a goal typed on /goals overrides either; a sales type with no history of its own has none (`calculationMethod` `no_history`, every `amount` null) — see "Revenue goals: the month's goal is frozen on the 1st" |
 | `/api/goals/forecast` | `generate_smart_goals`' whole answer for any month, through the same door: the frozen one for a frozen month (`monthly.frozenAt`), else computed now |
 | `/api/customers/sms-segments` | Campaign audience — one arm or one per value level, one or more groups ORed (`or_groups`) (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
@@ -799,10 +799,35 @@ of 2026-11-18: the month's automatic goal is frozen on the 1st** (revision
   it under `waiting`, and the first run after a training that reaches the
   month's end freezes it. A forecast with no row at all is absent, not short
   — the blend gives its weight to the other signals — and is kept.
+- **A sales type with no history of its own has no goal** (owner's decision,
+  2026-11-19). The three signals are the sales type's own: the month a year
+  earlier, the last three complete months with 25 days of sales, the stored
+  forecast. With none of them `generate_smart_goals` used to fall back on the
+  month's average in the shared seasonality tables, which hold retail's
+  history (`GOAL_TABLES_SALES_TYPE`), times growth — whatever sales type was
+  asked — and on a ₴3M default under an empty table. Production froze
+  November 2026 so: the offline store (open since the 12th, ₴21 140 on three
+  days of sales by the 18th) and the exhibition (six days in September 2025)
+  at ₴5.7M each, retail's November average ₴4 399 005.46 × 1.2911, beside
+  retail's own ₴4.7M. Now such an answer carries `goal` null in every period,
+  no weekly breakdown and `calculationMethod` `no_history` (`NO_HISTORY`), is
+  frozen so, and the dashboard's goal card says in a line that there is no
+  goal (`MilestoneProgress`). Retail keeps its month-average fallback: the
+  shared tables are its own history. The store gets a goal from its first
+  complete month with 25 days of sales, or in its second year from the month
+  a year earlier; the exhibition only in a month that had a fair a year
+  before. A goal typed on /goals still fills its period — but
+  `app.revenue_goals` is one row per period for every sales type, so a goal
+  typed for the store is typed for retail too. The card no longer draws its
+  hardcoded ₴200K / ₴1M / ₴4M targets for a period the server answered with
+  no goal, or with one rounded to 0 (a day under ₴5 000, a week under
+  ₴25 000, a month under ₴50 000); a request that failed still gets them.
 - **November 2026 is the deploy day's**, not the 1st's: the start after the
   deploy froze the month in progress; months before it stay live. A month
   whose 1st the process was down for is frozen on the day it runs again, its
-  ML term that day's.
+  ML term that day's. Its offline and exhibition rows were frozen before the
+  no-history rule, at ₴5.7M; they move only by the re-freeze under **Not
+  watched**.
 - **A row keeps the shape of the code that froze it.** A reader that needs a
   key added to `generate_smart_goals` later must default it for older rows:
   `tests/unit/test_goal_freeze.py` reads a row frozen by revision 0037's code,
@@ -944,9 +969,10 @@ nothing naming the rest. The SMS wizard builds retail audiences only
 (`salesType: 'retail'`; the content filter asks the campaign's sales type of
 the same order line), so its source condition «Офлайн-магазин» matches nobody,
 as «Виставка» never has: a store buyer is reachable by no audience the page
-can build. Goals and milestones for `offline` show the fallback targets
-(₴50 000 a day, ₴1 000 000 a month, a "fallback" smart goal), as the
-exhibition's do. An offline-store order billed at zero with goods in it reads
+can build. The store has no automatic goal until it has a history of its
+own, and the exhibition has none either (owner's decision 2026-11-19; "A
+sales type with no history of its own has no goal", under "Revenue goals").
+An offline-store order billed at zero with goods in it reads
 in `pg_headline_vs_line_items` (INFO) as "a sales type no decision covers":
 `ZERO_TOTAL_KINDS` waits for the owner to say whether the store redeems
 certificates as retail does.
