@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.355
+
+- feat(orders): land KeyCRM's discount with the order and its lines (revision 0037)
+
+
 ## 3.0.354
 
 - fix(goals): a goal resting on part of a forecast waits; the freeze runs hourly
