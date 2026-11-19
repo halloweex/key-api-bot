@@ -72,6 +72,12 @@ export {
   useMarginTrend,
   useMarginBrandCategory,
   useMarginAlerts,
+  // Promotions calendar
+  usePromotions,
+  usePromotionVersions,
+  useSavePromotion,
+  useCancelPromotion,
+  useRestorePromotion,
 } from './useApi'
 
 // Shared chart hooks
