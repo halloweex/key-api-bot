@@ -55,7 +55,8 @@ REPO = Path(__file__).resolve().parents[2]
 REV = replay.load(replay.VERSIONS / "0037_frozen_month_goals.py")
 BEFORE = "0036_analytics_captures"
 REV_ID = "0037_frozen_month_goals"
-# The database's head: 0037 until a later revision descends from it.
+# The database's head, which 0038 (the discount columns) moved past 0037: the
+# steps below go from and to it, through 0037, as a rollback would.
 CURRENT = pg.REQUIRED_REVISION
 TABLE = "app.frozen_month_goals"
 KYIV = ZoneInfo("Europe/Kyiv")

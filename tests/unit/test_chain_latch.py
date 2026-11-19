@@ -498,10 +498,11 @@ class TestEveryWriterLatchesFirst:
         # pending before it latches.
         assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
         # Chain 3: the orders with their expenses, the backfill-miss ledger,
-        # and the comment restore. Each spells its claim in its own body.
+        # the comment restore and the discount backfill (revision 0038). Each
+        # spells its claim in its own body.
         assert set(_writers(pg_orders_write)) == {
             "upsert_orders_with_expenses", "record_backfill_misses",
-            "restore_manager_comments"}
+            "restore_manager_comments", "restore_discounts"}
         # Chain 5: the sync's managers, their stats, and an admin's
         # classification — three writers, one advisory lock.
         from core import pg_managers_write
