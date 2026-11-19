@@ -39,6 +39,7 @@ from .margin import router as margin_router
 from .me import router as me_router
 from .webhooks import router as webhooks_router
 from .tg_bot import router as tg_bot_router
+from .promotions import router as promotions_router
 
 router = APIRouter(tags=["api"])
 
@@ -75,5 +76,9 @@ router.include_router(me_router)
 router.include_router(
     tg_bot_router, dependencies=[Depends(require_permission("tgbot"))],
 )
+# The promotions calendar on /marketing (revision 0039). Its two levels
+# differ — `view` to read, `edit` to save — so each endpoint carries its own
+# `marketing` gate rather than one at the include.
+router.include_router(promotions_router)
 # Inbound machine callers: no session, each endpoint authenticates itself.
 router.include_router(webhooks_router)

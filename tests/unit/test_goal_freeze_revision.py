@@ -33,8 +33,8 @@ class TestTheRevision:
     def test_it_follows_0036_and_is_in_the_chain_the_code_requires(self):
         """Kills: 0037 hung off anything but the analysts' captures, or dropped
         from the line the code requires. It was the head until 0038 (the
-        discount columns) descended from it; `test_pg_plumbing` owns the head
-        pin."""
+        discount columns) descended from it, and 0039 (the promotions
+        calendar) from 0038; `test_pg_plumbing` owns the head pin."""
         from core import pg
 
         rev = _module()

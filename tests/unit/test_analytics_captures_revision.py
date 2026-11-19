@@ -43,8 +43,9 @@ class TestTheRevision:
     def test_it_follows_0035_and_is_in_the_chain_the_code_requires(self):
         """Kills: 0036 hung off anything but the batch-E lock, or dropped from
         the line the code requires. It was the head until 0037 (the frozen
-        month goals) descended from it, and 0038 (the discount columns) from
-        0037; `test_pg_plumbing` owns the head pin."""
+        month goals) descended from it, 0038 (the discount columns) from 0037
+        and 0039 (the promotions calendar) from 0038; `test_pg_plumbing` owns
+        the head pin."""
         from core import pg
 
         rev = _module()

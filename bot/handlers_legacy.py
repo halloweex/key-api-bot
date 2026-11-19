@@ -2393,3 +2393,75 @@ async def alert_action_callback(update, context) -> None:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception as exc:
         logger.debug("Could not clear the alert keyboard: %s", exc)
+
+
+# ── The Monday question about promotions ────────────────────────────────────
+#
+# `pask:none:<period_from>` (`core/promo_asks.py`): a recipient tapped
+# [Немає] — no promotion is planned in the two weeks from that Monday. "None"
+# is an answer, and it is stored. Like the alert button above, a standalone
+# handler rather than a conversation entry point, and it records rather than
+# runs: the answer is a row in `app.promotion_checkins`, written through the
+# store port. Approved (`@authorized`) and a recipient of the question — the
+# admins and `KS_PROMO_ASK_RECIPIENTS`, the list the job writes to — or it
+# records nothing.
+
+@authorized
+async def promo_ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A recipient answered the Monday question with [Немає]."""
+    import html as _html
+
+    from telegram import Message
+
+    from core.bot_store import get_bot_store
+    from core.promo_asks import audience, parse_callback, recorded_line
+
+    query = update.callback_query
+    if query is None:
+        return
+    lang = _lang(update)
+    user_id = query.from_user.id
+
+    if user_id not in audience(ADMIN_USER_IDS):
+        # Approved, but not somebody this was sent to: a forwarded message.
+        await query.answer(t("promo_ask.not_recipient", lang), show_alert=True)
+        return
+
+    period = parse_callback(query.data or "")
+    if period is None:
+        logger.warning("Unknown promotions answer %r from %s", query.data, user_id)
+        await query.answer(t("promo_ask.unknown", lang), show_alert=True)
+        return
+    period_from, period_to = period
+
+    asks = getattr(get_bot_store(), "promo_asks", None)
+    if asks is None or not asks.available():
+        await query.answer(t("promo_ask.unavailable", lang), show_alert=True)
+        return
+
+    try:
+        answer_id = asks.record_none(
+            period_from=period_from, period_to=period_to, by_user_id=user_id)
+    except Exception:
+        logger.exception("Could not record the promotions answer for %s", period_from)
+        await query.answer(t("promo_ask.failed", lang), show_alert=True)
+        return
+
+    logger.info("Promotions answer: none for %s..%s by %s as #%s",
+                period_from, period_to, user_id, answer_id)
+    line = recorded_line(lang, period_from, period_to)
+    await query.answer(line)
+
+    # The question stays in the chat with its answer under it, and the
+    # keyboard goes: a second tap would only record the same answer again.
+    try:
+        message = query.message
+        original = message.text_html if isinstance(message, Message) and message.text else None
+        text = f"{original}\n\n✅ {_html.escape(line)}" if original else f"✅ {_html.escape(line)}"
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=None)
+    except Exception as exc:
+        logger.debug("Could not edit the promotions question: %s", exc)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as inner:
+            logger.debug("Could not clear the promotions keyboard: %s", inner)
