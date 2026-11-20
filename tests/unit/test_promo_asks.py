@@ -221,7 +221,7 @@ class TestTheSchedule:
         GA4 capture and the goal freeze keep clear. Kills: a time moved into
         one of them, or into the DST hours."""
         from core.scheduler import SCHEDULER_TIMEZONE
-        from tests.unit.test_goal_freeze import BUSY
+        from tests.helpers.goal_freeze import BUSY
 
         trigger = _in_kyiv()
         at = datetime(2026, 3, 1, tzinfo=SCHEDULER_TIMEZONE)
@@ -544,7 +544,7 @@ class TestTheAdapters:
 
 @pytest.fixture(scope="module")
 def walk():
-    from tests.unit.test_write_chains import _CAPTURE_WALKED, _Walk
+    from tests.helpers.write_walk import _CAPTURE_WALKED, _Walk
 
     return _Walk(_CAPTURE_WALKED)
 

@@ -102,7 +102,7 @@ async def stores(tmp_path, monkeypatch):
     across. DuckDB is here for what must not reach it."""
     from core.store import AnalyticsStore
     from tests.integration.pg_tab_seed import tab_in_postgres
-    from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
+    from tests.helpers.goals_history import _seed_history_pg
 
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
     store = AnalyticsStore()

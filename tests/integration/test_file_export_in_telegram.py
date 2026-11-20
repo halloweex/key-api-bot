@@ -19,12 +19,8 @@ from web.routes.api._deps import limiter
 # The real sender, taken before `tests/conftest.py` stubs it for every test,
 # for the two tests about the sender itself.
 _REAL_SEND = telegram_user_files.send_user_document_http
-from tests.integration.test_tab_permissions import (
-    PLAIN_ID,
-    _cookie,
-    _install_store,
-    _FakeStore,
-    _fresh_permissions,  # noqa: F401  (autouse fixture)
+from tests.helpers.tab_permissions import (  # noqa: F401  (autouse fixture)
+    PLAIN_ID, _cookie, _install_store, _FakeStore, _fresh_permissions,
 )
 
 URL = "/api/me/send-file"

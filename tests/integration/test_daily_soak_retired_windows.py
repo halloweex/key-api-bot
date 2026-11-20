@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from tests.integration.test_daily_soak_sql import (  # noqa: F401 — `pool` is a fixture
+from tests.helpers.daily_soak import (  # noqa: F401 — `pool` is a fixture
     KYIV, needs_pg, no_runs, pool, run, scenario, signal, verdict,
 )
 

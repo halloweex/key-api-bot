@@ -160,7 +160,7 @@ class TestTheLayerIsGone:
         """Mutation: give the job back a layer of its own — absent, it would
         read as never succeeded, and every start would re-run the 05:30 job
         and spend a KeyCRM fetch."""
-        from tests.unit.test_scheduler_catchup import _scheduler_with
+        from tests.helpers.fake_scheduler import _scheduler_with
 
         def entry(age):
             return {"last_success_at": "2026-09-01T05:30:00+03:00", "age_seconds": age}
@@ -173,7 +173,7 @@ class TestTheLayerIsGone:
 
     @pytest.mark.asyncio
     async def test_a_stale_postgres_arm_is_still_caught_up(self, monkeypatch):
-        from tests.unit.test_scheduler_catchup import _scheduler_with
+        from tests.helpers.fake_scheduler import _scheduler_with
 
         def entry(age):
             return {"last_success_at": "2026-09-01T05:30:00+03:00", "age_seconds": age}
@@ -196,7 +196,7 @@ class TestTheLayerIsGone:
         from core import dq_journal
         from core.data_quality import WATCHED_LAYERS
         from tests.journal_fake import install_journal
-        from tests.unit.test_dq_digest_beat import _install_outbox
+        from tests.helpers.dq_outbox import _install_outbox
 
         install_journal(monkeypatch)
         outbox = _install_outbox(monkeypatch)

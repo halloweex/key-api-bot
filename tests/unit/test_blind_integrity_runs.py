@@ -33,7 +33,7 @@ from core import data_quality as dq
 from core import pg_chain_invariants as inv
 from core import pg_warehouse_dq as twins
 from core.data_quality import DigestSection, IntegrityIssue, Severity
-from tests.unit.test_pg_warehouse_dq import _facts
+from tests.helpers.warehouse_dq_facts import _facts
 
 ROOT = Path(__file__).resolve().parents[2]
 

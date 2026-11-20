@@ -7,7 +7,6 @@ that filters nothing reads as an answer. It is a 400 naming the field now.
 """
 from __future__ import annotations
 
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 
 def test_an_unknown_event_type_is_a_400_naming_the_field(admin_client):  # noqa: F811

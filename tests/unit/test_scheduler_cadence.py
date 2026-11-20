@@ -19,7 +19,6 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
 
 # The instants every cadence below is read at, never the wall clock.
 # `_trigger_cadence_s` takes the longest gap among a trigger's next twelve

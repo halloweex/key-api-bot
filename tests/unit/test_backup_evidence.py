@@ -252,7 +252,9 @@ async def test_the_probe_warns_on_it():
     import httpx
 
     from bot import canary
-    from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+    from tests.helpers.canary_payload import (
+        DASHBOARD, _healthy_payload, _mock_transport,
+    )
 
     payload = {**_healthy_payload(), **_block(pitr=9 * 24)}
     future = datetime.now(timezone.utc) + timedelta(days=60)

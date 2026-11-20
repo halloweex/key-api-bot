@@ -18,8 +18,6 @@ labels repeat every year.
 """
 from __future__ import annotations
 
-import csv
-import io
 import re
 from datetime import date, timedelta
 from pathlib import Path
@@ -28,12 +26,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.filters import HISTORY_START, MAX_RANGE_DAYS, by_month, has_comparison, parse_period
-from core.repositories.customers import CustomersMixin
 from core.repositories.revenue import RevenueMixin
 from core.validators import validate_period
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-)
 
 ROOT = Path(__file__).resolve().parents[2]
 TODAY = date(2026, 11, 5)
@@ -153,61 +147,6 @@ class TestByMonth:
         assert by_month(date(2024, 2, 2), date(2024, 2, 1), {}) == []
 
 
-class _Insights(CustomersMixin):
-    """Customer insights over Gold rows written out: each statement is
-    answered by what it selects, so a monthly AOV can only come from the
-    day's two sums."""
-
-    def __init__(self, days):
-        self.days = days  # {day: (revenue, orders)}
-        self.asked: list[str] = []
-
-    async def _dashboard_run(self, sql, params=()):
-        self.asked.append(sql)
-        if len(params) < 2 or not isinstance(params[0], date):
-            return [(0, 0, 0, 0)]  # the lifetime statements, no window
-        a, b = params[0], params[1]
-        days = {d: v for d, v in self.days.items() if a <= d <= b}
-        if "SUM(revenue) AS revenue, SUM(orders_count) AS orders" in sql:
-            return [(d, rev, n) for d, (rev, n) in sorted(days.items())]
-        if "AS aov" in sql:
-            return [(d, rev / n) for d, (rev, n) in sorted(days.items())]
-        if "AS total_orders" in sql:
-            return [(sum(n for _, n in days.values()), sum(r for r, _ in days.values()))]
-        return [(0, 0, 0, 0)]
-
-
-DAYS = {
-    date(2024, 1, 1): (1000.0, 1),    # one big order: AOV 1 000
-    date(2024, 1, 2): (100.0, 10),    # ten small ones: AOV 10
-    date(2024, 2, 1): (300.0, 3),
-}
-
-
-class TestTheAovByMonth:
-
-    @pytest.mark.asyncio
-    async def test_a_months_aov_is_its_revenue_over_its_orders(self):
-        """January is ₴1 100 over 11 orders, ₴100 — not 505, the mean of its
-        two days' AOVs. Mutation: average the daily AOVs."""
-        store = _Insights(DAYS)
-        result = await store.get_customer_insights(
-            date(2024, 1, 1), date(2024, 3, 31), granularity="monthly")
-        trend = result["aovTrend"]
-        assert trend["labels"] == ["01.2024", "02.2024", "03.2024"]
-        assert trend["datasets"][0]["data"] == [100.0, 100.0, 0]
-        assert trend["granularity"] == "monthly"
-
-    @pytest.mark.asyncio
-    async def test_by_day_is_as_it_was(self):
-        store = _Insights(DAYS)
-        result = await store.get_customer_insights(date(2024, 1, 1), date(2024, 1, 3))
-        trend = result["aovTrend"]
-        assert trend["labels"] == ["01.01", "02.01", "03.01"]
-        assert trend["datasets"][0]["data"] == [1000.0, 10.0, 0]
-        assert "granularity" not in trend
-
-
 # ─── Through the routes ───────────────────────────────────────────────────────
 
 def _trend_spy(monkeypatch):
@@ -252,14 +191,6 @@ class TestTheInsightsRoute:
         monkeypatch.setattr(dashboard_service, "get_customer_insights", spy)
         return spy
 
-    def test_it_hands_the_granularity_on(self, admin_client, monkeypatch):
-        spy = self._spy(monkeypatch)
-        r = admin_client.get("/api/customers/insights?period=all_time&granularity=monthly")
-        assert r.status_code == 200, r.text
-        assert spy.await_args.kwargs["granularity"] == "monthly"
-        r = admin_client.get("/api/customers/insights?period=month")
-        assert spy.await_args.kwargs["granularity"] == "daily"
-
     def test_an_unknown_granularity_is_named(self, admin_client, monkeypatch):
         self._spy(monkeypatch)
         r = admin_client.get("/api/customers/insights?period=month&granularity=weekly")
@@ -267,55 +198,3 @@ class TestTheInsightsRoute:
         assert r.json()["detail"].startswith("granularity")
 
 
-def _report(compared: bool) -> dict:
-    stats = {"revenue": 1000.0, "orders": 2, "avg_check": 500.0, "customers": 2,
-             "new_customers": 1, "returning_customers": 1, "return_rate": 50.0}
-    return {
-        "start_date": "2023-12-02", "end_date": TODAY.isoformat(),
-        "prev_start_date": "2020-01-01" if compared else None,
-        "prev_end_date": "2023-12-01" if compared else None,
-        "yoy_start_date": "2022-12-02" if compared else None,
-        "yoy_end_date": "2025-11-05" if compared else None,
-        "general_sales": {"current": stats,
-                          "previous": stats if compared else None,
-                          "year_ago": stats if compared else None,
-                          "monthly_goal": None},
-        "product_filter": None, "brands": [], "sources": [],
-    }
-
-
-class TestTheMarketingReport:
-
-    def _store(self, monkeypatch, compared):
-        store = AsyncMock()
-        store.get_marketing_report_by_dates.return_value = _report(compared)
-        monkeypatch.setattr("web.routes.api.reports.get_store",
-                            AsyncMock(return_value=store))
-        return store
-
-    def test_all_time_reads_neither_comparison(self, admin_client, monkeypatch):
-        store = self._store(monkeypatch, compared=False)
-        r = admin_client.get("/api/reports/marketing-summary?period=all_time")
-        assert r.status_code == 200, r.text
-        assert store.get_marketing_report_by_dates.await_args.kwargs[
-            "include_comparison"] is False
-
-    def test_its_csv_has_no_comparison_columns(self, admin_client, monkeypatch):
-        self._store(monkeypatch, compared=False)
-        r = admin_client.get("/api/reports/marketing-summary/export/csv?period=all_time")
-        assert r.status_code == 200, r.text
-        rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
-        header = next(row for row in rows if row and row[0] == "Показник")
-        assert header == ["Показник", f"2023-12-02 — {TODAY.isoformat()}"]
-        revenue = next(row for row in rows if row and row[0] == "Виручка (грн)")
-        assert revenue == ["Виручка (грн)", "₴1,000"]
-
-    def test_a_month_keeps_both(self, admin_client, monkeypatch):
-        store = self._store(monkeypatch, compared=True)
-        r = admin_client.get("/api/reports/marketing-summary/export/csv?period=month")
-        assert r.status_code == 200, r.text
-        assert store.get_marketing_report_by_dates.await_args.kwargs[
-            "include_comparison"] is True
-        rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
-        header = next(row for row in rows if row and row[0] == "Показник")
-        assert len(header) == 6

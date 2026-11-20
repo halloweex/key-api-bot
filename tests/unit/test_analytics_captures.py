@@ -720,7 +720,7 @@ class TestTheNamesAreRegisteredWithALever:
 
     def test_none_is_a_retired_name(self):
         """Rule 15: no name an image from before step 14 treats as retired."""
-        from tests.unit.test_rollback_condition_names import ALL_RETIRED
+        from tests.helpers.retired_conditions import ALL_RETIRED
 
         assert not set(cap.conditions()) & ALL_RETIRED
 

@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from core.filters import MAX_RANGE_DAYS
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 
 @pytest.mark.parametrize("path", ["/api/sync/resync"])

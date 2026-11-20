@@ -31,11 +31,7 @@ import pytest
 
 from bot import canary
 from core.alerting import Kind, spec_for
-from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-from tests.unit.test_read_fallback_sites import (  # noqa: F401  (fixtures)
-    admin_client,
-    fresh_read_fallback,
-)
+from tests.helpers.canary_payload import DASHBOARD, _healthy_payload, _mock_transport
 
 REPO = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)

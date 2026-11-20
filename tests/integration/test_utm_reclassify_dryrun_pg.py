@@ -50,10 +50,7 @@ asyncpg = pytest.importorskip("asyncpg")
 from core.repositories.traffic import TrafficMixin  # noqa: E402
 from core.utm_classify import UTM_VERDICT_COLUMNS, utm_columns  # noqa: E402
 from scripts import utm_reclassify_dryrun as script  # noqa: E402
-from tests.unit.test_utm_reclassify_dryrun import (  # noqa: E402
-    POISONED_PG_DSN,
-    UNSEEN_WRITERS,
-)
+from tests.helpers.dryrun_guards import POISONED_PG_DSN, UNSEEN_WRITERS  # noqa: E402
 from tests.write_audit import run_main_audited  # noqa: E402
 
 DSN = os.getenv("KS_PG_DSN")

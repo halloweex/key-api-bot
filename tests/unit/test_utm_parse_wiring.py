@@ -24,7 +24,7 @@ import pytest
 from core import pg_utm_parse
 # The derivation's own harness: one tick through `_run_pg_derivation` with
 # every Postgres step patched, and the fixtures it runs under.
-from tests.unit.test_pg_own_derivation import _derive, job, mode  # noqa: F401
+from tests.helpers.derivation import _derive, job, mode  # noqa: F401
 
 UTM = pg_utm_parse.UTM_TABLE
 

@@ -31,19 +31,11 @@ from core.weekly_report import (
     fetch_daily,
     format_report_rich,
 )
+from tests.helpers.rich_tags import SUPPORTED_TAGS
 
 _REAL_RICH = telegram_alerts.send_rich_message_http
 _CONFIG = importlib.import_module("core.config")
 
-# Every tag the Bot API lists under "Rich HTML style" that this report may
-# use. Anything outside the list is a 400 from Telegram, and the message
-# falls back to the caption form — so a new tag here needs the docs first.
-SUPPORTED_TAGS = {
-    "h1", "h2", "h3", "p", "b", "i", "u", "s", "br", "ul", "ol", "li",
-    "table", "tr", "th", "td", "figure", "img", "figcaption", "details",
-    "summary", "blockquote", "footer", "hr", "a", "code", "pre",
-    "tg-button", "tg-button-row", "tg-reference", "tg-math", "tg-math-block",
-}
 # <mark> is deliberately absent: its highlight does not show in the dark theme.
 
 

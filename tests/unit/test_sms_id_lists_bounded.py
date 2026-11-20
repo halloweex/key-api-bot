@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.validators import INT32_MAX
-from tests.integration.test_sms_audience_api import _FakeStore, _headers
+from tests.helpers.sms_api import _FakeStore, _headers
 from web.main import app
 from web.routes.api import customers as api
 
