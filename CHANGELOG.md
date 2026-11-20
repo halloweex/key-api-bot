@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.359
+
+- fix(auth): the sign-in returns to the page that asked for it
+- feat(promotions): the promotions calendar, phase 1 — backend and bot (revision 0039)
+- feat(marketing): the promotions calendar, phase 1 frontend
+
+
 ## 3.0.358
 
 - ci: run the frontend's tests and build on every PR
