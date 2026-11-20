@@ -366,6 +366,19 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(
         handlers.alert_action_callback, pattern=ALERT_ACTION_PATTERN))
 
+    # [Немає] on the Monday question about promotions (`core/promo_asks.py`).
+    # Standalone for the same reason: a recipient parked mid-report must
+    # still be able to answer. The cast is for the type checker alone:
+    # `authorized` returns a decorator or the wrapped handler, a union it
+    # cannot narrow — the finding baselined on every other `@authorized`
+    # registration in this function, which a new line must not add to.
+    from typing import Any, cast
+
+    from core.promo_asks import CALLBACK_PATTERN as PROMO_ASK_PATTERN
+
+    application.add_handler(CallbackQueryHandler(
+        cast(Any, handlers.promo_ask_callback), pattern=PROMO_ASK_PATTERN))
+
     application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_request_again, pattern=r"^auth_request_again$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_approve_user, pattern=r"^auth_approve_\d+$"))

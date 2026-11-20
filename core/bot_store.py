@@ -51,6 +51,7 @@ and counts as `int`.
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import (
     Any, Dict, List, Optional, Protocol, Sequence, Tuple, runtime_checkable,
 )
@@ -271,6 +272,30 @@ class AlertActions(Protocol):
     def request(self, *, action: str, subject: str, condition_key: str,
                 by_user_id: int) -> "Optional[int]":
         """Record the authorisation. Returns the request id, or None."""
+        ...
+
+
+@runtime_checkable
+class PromoAsks(Protocol):
+    """The answer to the Monday question about promotions (revision 0039).
+
+    In this port for `AlertActions`' reason: the bot writes it at exactly one
+    moment — a recipient taps [Немає] — and that write goes through the same
+    pool and loop thread as everything else the bot stores. The statement is
+    `core.promo_asks.RECORD_NONE_SQL`, one text for any adapter.
+
+    `available()` is false on SQLite, honestly: the forecast and the page read
+    the answers from `app.promotion_checkins`, and a file this process holds
+    is not that table.
+    """
+
+    def available(self) -> bool:
+        ...
+
+    def record_none(self, *, period_from: date, period_to: date,
+                    by_user_id: int) -> "Optional[int]":
+        """Record that no promotion is planned in the window. Returns the
+        answer's id, or None."""
         ...
 
 

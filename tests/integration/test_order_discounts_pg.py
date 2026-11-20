@@ -248,14 +248,15 @@ class TestTheRevisionOnAServer:
 
     @pytest.mark.asyncio
     async def test_the_downgrade_keeps_the_columns_and_the_upgrade_is_a_no_op(self):
-        """Down to 0037: the stamp moves, `require_revision` at 0037 passes, the
-        eleven columns and their values stay. Up again: the stamp is 0038 and
-        nothing moved. Kills: a DROP in the downgrade, an IF NOT EXISTS
-        missing from the upgrade."""
+        """Down to 0037 from the head, through 0038: the stamp moves,
+        `require_revision` at 0037 passes, the eleven columns and their values
+        stay. Up again: the stamp is the head and nothing moved. Kills: a DROP
+        in the downgrade, an IF NOT EXISTS missing from the upgrade. (The head
+        is 0039 since the promotions calendar descended from 0038.)"""
         from core import pg
         from tests.integration.test_analytics_captures_pg import _alembic_sql
 
-        down_to, here = "0037_frozen_month_goals", "0038_order_discounts"
+        down_to, here = "0037_frozen_month_goals", pg.REQUIRED_REVISION
         conn = await asyncpg.connect(DSN)
         tx = conn.transaction()
         await tx.start()

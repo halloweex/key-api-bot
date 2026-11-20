@@ -60,7 +60,7 @@ import asyncio
 import logging
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from bot.store_sqlite import (
@@ -757,6 +757,33 @@ class PostgresAlertActions:
             )
 
 
+class PostgresPromoAsks:
+    """`promo_asks` against `app.promotion_checkins` (revision 0039).
+
+    The statement is `core.promo_asks`', run on this adapter's pool and loop
+    thread: the answer to the Monday question lands where the web container
+    reads it, and the bot keeps one path to the database.
+    """
+
+    def __init__(self, run, pool):
+        self._run = run
+        self._pool = pool
+
+    def available(self) -> bool:
+        return True
+
+    def record_none(self, *, period_from: date, period_to: date,
+                    by_user_id: int) -> Optional[int]:
+        return self._run(self._record_none(period_from, period_to, by_user_id))
+
+    async def _record_none(self, period_from, period_to, by_user_id):
+        from core.promo_asks import write_none_answer
+
+        async with self._pool.acquire() as conn:
+            return await write_none_answer(conn, period_from=period_from,
+                                           period_to=period_to, by_user_id=by_user_id)
+
+
 class PostgresBotStore:
     """The three persistent aggregates against `app.*`; the cache stays local.
 
@@ -781,6 +808,7 @@ class PostgresBotStore:
         run, pool = self._loop.run, self._pool
         self.access = PostgresAccessControl(run, pool)
         self.alert_actions = PostgresAlertActions(run, pool)
+        self.promo_asks = PostgresPromoAsks(run, pool)
         self.preferences = PostgresPreferences(run, pool)
         self.milestones = PostgresMilestones(run, pool)
         self.cache = SqliteCache()

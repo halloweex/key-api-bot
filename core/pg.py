@@ -95,7 +95,14 @@ VERSION_TABLE = "alembic_version"
 # needs `alembic downgrade 0037_frozen_month_goals` (or further) with the 0038
 # migrate image first; the downgrade moves the stamp and keeps the columns,
 # which an older image never names.
-REQUIRED_REVISION = "0038_order_discounts"
+#
+# 0039 is the promotions calendar, phase 1 (the owner's approval of
+# 2026-11-19): `app.promotion_versions`, `app.promotion_checkins`,
+# `app.promotion_asks` and the sequence `app.promotion_ids`. Same shape again:
+# an image-only rollback below it needs `alembic downgrade 0038_order_discounts`
+# (or further) with the 0039 migrate image first; the downgrade moves the
+# stamp and keeps the tables, which an older image never names.
+REQUIRED_REVISION = "0039_promotions"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()

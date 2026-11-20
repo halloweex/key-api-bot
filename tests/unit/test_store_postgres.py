@@ -27,6 +27,7 @@ from bot.store_postgres import (
     PostgresBotStore,
     PostgresMilestones,
     PostgresPreferences,
+    PostgresPromoAsks,
     _as_sqlite_text,
     _row,
     _rowcount,
@@ -37,6 +38,7 @@ from core.bot_store import (
     ENGINE_ENV,
     Milestones,
     Preferences,
+    PromoAsks,
     get_bot_store,
     use_bot_store,
 )
@@ -132,6 +134,7 @@ class TestItImplementsThePort:
         (PostgresAccessControl, AccessControl),
         (PostgresPreferences, Preferences),
         (PostgresMilestones, Milestones),
+        (PostgresPromoAsks, PromoAsks),
     ])
     def test_every_method_matches_the_port_signature(self, implementation, protocol):
         for name, declared in inspect.getmembers(

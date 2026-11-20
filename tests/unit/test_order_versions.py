@@ -150,9 +150,11 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         """`REQUIRED_REVISION` is what makes deploying `web` before `migrate`
         fail closed instead of writing into a table that is not there.
 
-        The pin moves with the head migration — 0038 since the discount on
-        orders and their lines (eleven nullable columns, whose downgrade keeps
-        them), after 0037, the month's goal frozen on the 1st
+        The pin moves with the head migration — 0039 since the promotions
+        calendar (three tables and a sequence in `app`, whose downgrade keeps
+        them), after 0038, the discount on orders and their lines (eleven
+        nullable columns, whose downgrade keeps them), 0037, the month's goal
+        frozen on the 1st
         (`app.frozen_month_goals`, whose downgrade keeps it), and 0036, the
         analysts' captures (eleven tables in `app`, whose downgrade keeps
         them: owner decision D2) — and this assertion is the speed bump that
@@ -167,7 +169,7 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         Moving it obliges the deploy to run `migrate` before `web`, which
         `docker compose up -d` does and the workflow then checks with
         `docker wait ks-migrate`."""
-        assert pg.REQUIRED_REVISION == "0038_order_discounts"
+        assert pg.REQUIRED_REVISION == "0039_promotions"
 
     def test_money_keeps_the_scale_it_has_everywhere_else(self):
         """NUMERIC(12,2), as in `bronze.orders` and as DECIMAL(12,2) in DuckDB.

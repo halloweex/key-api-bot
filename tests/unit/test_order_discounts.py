@@ -227,17 +227,19 @@ class TestTheRevision:
     def _module(self):
         return replay.load(replay.VERSIONS / f"{REV_ID}.py")
 
-    def test_it_follows_0037_and_is_the_head_the_code_requires(self):
+    def test_it_follows_0037_and_is_in_the_chain_the_code_requires(self):
         """Kills: 0038 hung off anything but 0037 (the frozen month goals,
         which took the number first by the owner's decision of 2026-11-18),
-        or the pin left at 0037 — web would write columns a database at 0037
-        does not have."""
+        or dropped from the line the code requires — web would write columns
+        a database without it does not have. It was the head until 0039 (the
+        promotions calendar) descended from it; `test_pg_plumbing` owns the
+        head pin."""
         from core import pg
 
         rev = self._module()
         assert rev.revision == REV_ID
         assert rev.down_revision == "0037_frozen_month_goals"
-        assert pg.REQUIRED_REVISION == REV_ID
+        assert REV_ID in [m.revision for m in replay.lineage(pg.REQUIRED_REVISION)]
 
     def _added(self):
         added = {}

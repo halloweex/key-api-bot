@@ -2,9 +2,11 @@
 
 The recipient universe: ADMIN_USER_IDS gets alerts; approved users get
 exactly two business messages (the weekly report and the milestone
-broadcast), each documented and deliberate; individual users get replies to
-their own actions. Nothing else may widen an audience, and this test is what
-makes widening one a decision instead of an accident.
+broadcast), each documented and deliberate; the traffic report and the
+Monday question about promotions go to the admins and a list a human typed;
+individual users get replies to their own actions. Nothing else may widen an
+audience, and this test is what makes widening one a decision instead of an
+accident.
 """
 import ast
 from pathlib import Path
@@ -27,7 +29,7 @@ def _calls_with_chat_ids(path):
 
 
 class TestAlertsGoToAdminsOnly:
-    def test_the_only_recipient_override_is_the_weekly_report(self):
+    def test_the_only_recipient_overrides_are_the_reports_and_the_promotions_question(self):
         """chat_ids= re-aims the HTTP senders; the weekly report is the one
         legitimate user (admins + approved, business content, its own
         audience rules in CLAUDE.md). A second override site is somebody
@@ -52,27 +54,50 @@ class TestAlertsGoToAdminsOnly:
         behaviour; the audience decision itself is in CLAUDE.md.
 
         All of it landed here first, which is the guard working.
+
+        The sixth is the Monday question about promotions
+        (`core/promo_asks.py`, revision 0039), and it widens past the admins
+        the way the traffic report does and for its reason:
+        `KS_PROMO_ASK_RECIPIENTS` is an explicit list of Telegram ids typed
+        by a human, empty by default, applied by one function
+        (`core.promo_asks.audience`) that no alert path calls — never "who
+        holds the marketing tab". It carries a question and two buttons, no
+        figures, and an answer is accepted only from a recipient.
+        `tests/unit/test_promo_asks.py` pins its behaviour.
         """
         hits = []
         for path in ("core/scheduler.py", "core/store.py",
                      "core/alerting.py", "core/alert_escalator.py",
                      "core/alert_archive.py", "core/prediction_service.py",
+                     "core/promo_asks.py",
                      "bot/main.py", "bot/canary.py", "bot/memory_watch.py",
                      "web/routes/api/webhooks.py"):
             hits += [(path, *c) for c in _calls_with_chat_ids(path)]
-        assert len(hits) == 5, hits
+        assert len(hits) == 6, hits
         assert {name for _, name, _ in hits} == {
             "send_rich_message_http",
             "send_admin_photo_http",
             "send_admin_message_http",
         }, hits
-        assert all(p == "core/scheduler.py" for p, _, _ in hits), hits
+        reports = [hit for hit in hits if hit[0] == "core/scheduler.py"]
+        assert len(reports) == 5, hits
         src = (ROOT / "core/scheduler.py").read_text().splitlines()
-        for _, _, line in hits:
+        for _, _, line in reports:
             context = "\n".join(src[line - 40:line])
             assert "weekly" in context.lower() or "report" in context.lower(), (
                 f"chat_ids= at scheduler:{line} is not the weekly report"
             )
+
+        (question,) = [hit for hit in hits if hit[0] == "core/promo_asks.py"]
+        assert question[1] == "send_admin_message_http", question
+        tree = ast.parse((ROOT / "core/promo_asks.py").read_text())
+        (sender,) = [fn for fn in ast.walk(tree)
+                     if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and fn.lineno <= question[2] <= fn.end_lineno]
+        assert sender.name == "run_weekly_ask"
+        assert "readers = audience(ADMIN_USER_IDS)" in ast.unparse(sender), (
+            "the promotions question is written to someone other than its "
+            "audience: the admins and KS_PROMO_ASK_RECIPIENTS")
 
     def test_no_alert_module_reads_the_authorized_users_list(self):
         """The approved-users audience belongs to business messaging in the
