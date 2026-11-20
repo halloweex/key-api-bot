@@ -103,9 +103,25 @@ const API_BASE = '/api'
 const DEFAULT_TIMEOUT = 10000 // 10 seconds (reduced from 30s - faster failure detection)
 
 // ─── Request Deduplication ──────────────────────────────────────────────────
-// Prevents duplicate requests when users rapidly click filters
+// Prevents duplicate requests when users rapidly click filters.
+//
+// A GET joins the same GET in flight only when no write was sent or answered
+// since that one left. A refetch asked for after a save must see the save,
+// and the request it would join may have been read before the save
+// committed: its answer would stand on the page until the next refetch.
+// After two quick saves on /marketing the list stayed as it was before the
+// second one (2026-11-20).
 
-const pendingRequests = new Map<string, Promise<unknown>>()
+/** Moves on every write's request and again on its answer. */
+let writeEpoch = 0
+
+interface PendingRequest {
+  promise: Promise<unknown>
+  /** `writeEpoch` when it left. */
+  epoch: number
+}
+
+const pendingRequests = new Map<string, PendingRequest>()
 
 function dedupKey(endpoint: string, queryParams?: string): string {
   return queryParams ? `${endpoint}?${queryParams}` : endpoint
@@ -218,7 +234,10 @@ async function fetchWithTimeout(
     : controller.signal
 
   try {
-    const response = await fetch(url, { signal })
+    // Never from the browser's HTTP cache. TanStack Query decides what to
+    // reuse, and a refetch it asks for after a save must reach the server
+    // (nginx says `no-cache` for /api/ as well).
+    const response = await fetch(url, { signal, cache: 'no-store' })
     clearTimeout(timeoutId)
     return response
   } catch (error) {
@@ -282,11 +301,12 @@ async function fetchApi<T>(
     ? `${API_BASE}${endpoint}?${queryParams}`
     : `${API_BASE}${endpoint}`
 
-  // Request deduplication - prevent duplicate in-flight requests
+  // Request deduplication - prevent duplicate in-flight requests, unless a
+  // write came between them (see `writeEpoch`).
   const key = dedupKey(endpoint, queryParams)
   const pending = pendingRequests.get(key)
-  if (pending) {
-    return pending as Promise<T>
+  if (pending && pending.epoch === writeEpoch) {
+    return pending.promise as Promise<T>
   }
 
   const request = (async () => {
@@ -303,12 +323,15 @@ async function fetchApi<T>(
     }
   })()
 
-  pendingRequests.set(key, request)
+  // An older request still in flight under this key keeps running for
+  // whoever awaits it; later callers join this one.
+  const entry: PendingRequest = { promise: request, epoch: writeEpoch }
+  pendingRequests.set(key, entry)
 
   try {
     return await request
   } finally {
-    pendingRequests.delete(key)
+    if (pendingRequests.get(key) === entry) pendingRequests.delete(key)
   }
 }
 
@@ -326,6 +349,8 @@ async function fetchApiMutation<T>(
     ? combineSignals(externalSignal, controller.signal)
     : controller.signal
 
+  // A write: no GET that left before it is reused after it (`writeEpoch`).
+  writeEpoch += 1
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, { method, signal })
     clearTimeout(timeoutId)
@@ -357,6 +382,8 @@ async function fetchApiMutation<T>(
     }
 
     throw error
+  } finally {
+    writeEpoch += 1
   }
 }
 
@@ -375,6 +402,8 @@ async function fetchApiMutationWithBody<T>(
     ? combineSignals(externalSignal, controller.signal)
     : controller.signal
 
+  // A write: no GET that left before it is reused after it (`writeEpoch`).
+  writeEpoch += 1
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, {
       method,
@@ -411,6 +440,8 @@ async function fetchApiMutationWithBody<T>(
     }
 
     throw error
+  } finally {
+    writeEpoch += 1
   }
 }
 

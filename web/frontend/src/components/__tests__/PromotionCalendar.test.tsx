@@ -117,7 +117,7 @@ describe('the calendar for somebody with marketing edit', () => {
     expect(screen.getByLabelText('promo.field.name')).toHaveValue('Весна')
 
     await userEvent.click(within(spring).getByRole('button', { name: 'promo.cancel' }))
-    expect(store.cancel).toHaveBeenCalledWith(1, expect.anything())
+    expect(store.cancel).toHaveBeenCalledWith(1)
   })
 
   it('restores a cancelled one, and does not offer to change it', async () => {
@@ -127,7 +127,7 @@ describe('the calendar for somebody with marketing edit', () => {
     const cancelled = screen.getByText('Скасована').closest('li') as HTMLElement
     expect(within(cancelled).queryByRole('button', { name: 'promo.edit' })).not.toBeInTheDocument()
     await userEvent.click(within(cancelled).getByRole('button', { name: 'promo.restore' }))
-    expect(store.restore).toHaveBeenCalledWith(3, expect.anything())
+    expect(store.restore).toHaveBeenCalledWith(3)
   })
 
   it('saves a changed promotion as its next version, under its id', async () => {
@@ -138,7 +138,6 @@ describe('the calendar for somebody with marketing edit', () => {
     await userEvent.click(screen.getByRole('button', { name: 'promo.save' }))
     expect(store.save).toHaveBeenCalledWith(
       expect.objectContaining({ id: 1, body: expect.objectContaining({ name: 'Весна' }) }),
-      expect.anything(),
     )
   })
 

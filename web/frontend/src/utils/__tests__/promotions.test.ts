@@ -61,6 +61,24 @@ describe('validating a promotion before it is sent', () => {
     expect(validateDraft(draft({ endsOn: '2027-03-05' })).endsOn).toBeUndefined()
   })
 
+  it('takes a first day at most a year ahead of today in Kyiv, that day included', () => {
+    // The list reads today + 365 days; the API refuses a later first day.
+    const today = '2026-11-20'
+    expect(validateDraft(draft({ startsOn: '2027-11-20', endsOn: '2027-11-22' }), today).startsOn)
+      .toBeUndefined()
+    expect(validateDraft(draft({ startsOn: '2027-11-21', endsOn: '2027-11-22' }), today).startsOn)
+      .toEqual({ key: 'promo.error.startTooFar', params: { date: formatDay('2027-11-20') } })
+    // 365 days, as the server counts them, not the same date a year on: a
+    // year holding a 29 February ends a day short of it.
+    expect(validateDraft(draft({ startsOn: '2028-02-29', endsOn: '2028-02-29' }), '2027-03-01').startsOn)
+      .toBeUndefined()
+    expect(validateDraft(draft({ startsOn: '2028-03-01', endsOn: '2028-03-01' }), '2027-03-01').startsOn?.key)
+      .toBe('promo.error.startTooFar')
+    // A first day already past is not refused.
+    expect(validateDraft(draft({ startsOn: '2026-01-05', endsOn: '2026-01-06' }), today).startsOn)
+      .toBeUndefined()
+  })
+
   it('holds a promotion to 62 days, both ends counted', () => {
     // 1 March + 61 days is 1 May: 62 days in all.
     expect(validateDraft(draft({ startsOn: '2027-03-01', endsOn: '2027-05-01' })).endsOn).toBeUndefined()

@@ -141,8 +141,8 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/health` | Health check (status, version, uptime, the blocks the canary judges); `status` is `healthy` and `degraded_by` empty since step 14's S14-17 took DuckDB's block, its ledger and their three causes out |
 | `/api/summary` | Summary statistics |
 | `/api/revenue/trend` | Revenue time series (+ `include_forecast=true` for ML predictions) |
-| `/api/revenue/forecast` | ML revenue forecast for current month, with `month_range` (the month total's 80% range: `lo`, `hi`, `coverage`, `days_left`) and `black_friday` (what last year's Black Friday would add, its days still ahead: `extra`, `total`, `size_days`, `normal_day`, `last_year_start`, `last_year_end`, `kind`) and `planned_promotions` (the calendar's promotions planned for today..the month's end: `id`, `name`, `starts_on`, `ends_on`, `kind`, `extra` — what a past noticeable promotion added, null for `black_friday`; `[]` when nothing is planned), retail only, each null when it cannot be said — see "Revenue Prediction" and "Календарь акций". The trend's `forecast` carries none of them |
-| `/api/revenue/forecast/train` | Manually trigger model training (POST) |
+| `/api/revenue/forecast` | ML revenue forecast for current month, with `month_range` (the month total's 80% range: `lo`, `hi`, `coverage`, `days_left`) and `black_friday` (what last year's Black Friday would add, its days still ahead: `extra`, `total`, `size_days`, `normal_day`, `last_year_start`, `last_year_end`, `kind`) and `planned_promotions` (the calendar's promotions planned for today..the month's end: `id`, `name`, `starts_on`, `ends_on`, `kind`, `extra` — what a past noticeable promotion added, null for `black_friday`; `[]` when nothing is planned; null for a caller without `marketing` view, the calendar being that tab's), retail only, each null when it cannot be said — see "Revenue Prediction" and "Календарь акций". The trend's `forecast` carries none of them |
+| `/api/revenue/forecast/train` | Manually trigger model training (POST, admin). Retail only, as the scheduled training is: there is one model, in memory and in `data/revenue_model.joblib`, and its forecast in `app.revenue_predictions` is read as retail's. Any other `sales_type` is a 400 naming the field: `PredictionService.train` refuses it, for every caller. Until 2026-11-20 a b2b training replaced the retail model |
 | `/api/revenue/forecast/evaluate` | Walk-forward CV evaluation with baselines (GET) |
 | `/api/revenue/forecast/tune` | Hyperparameter grid search, reported and never applied (POST) |
 | `/api/sales/by-source` | Sales breakdown by source |
@@ -175,9 +175,9 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
 | `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation, the entry funnel and the press table (which button people leave after) — for page `/tg-bot` (tab `tgbot`: admins and the marketing presets). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
-| `/api/promotions` | The promotions calendar (tab `marketing`, view): each promotion's current state whose days overlap `from`..`to` (default today − 90 .. today + 365, Kyiv), by first day then id; `include_cancelled=true` adds the cancelled. A Postgres failure is a 503 naming `promotions`. POST (edit) saves a new one: 201 and the promotion — see "Календарь акций" |
+| `/api/promotions` | The promotions calendar (tab `marketing`, view): each promotion's current state whose days overlap `from`..`to` (default today − 90 .. today + 365, Kyiv), by first day then id; `include_cancelled=true` adds the cancelled. A Postgres failure is a 503 naming `promotions`. Every answer here carries `sms_campaign` only for a caller with `sms` view, null otherwise. POST (edit) saves a new one: 201 and the promotion; 400 for a first day past today + 365, 403 for an SMS link without `sms` view — see "Календарь акций" |
 | `/api/promotions/{id}/versions` | One promotion's versions, newest first, each with `recorded_at` and `recorded_by_me` — never the author's id (tab `marketing`, view). 404 for an unknown id |
-| `/api/promotions/{id}` | PUT (marketing edit): the body as a new version — none when nothing changed; 404 unknown, 409 when cancelled |
+| `/api/promotions/{id}` | PUT (marketing edit): the body as a new version — none when nothing changed, a reorder of `scope_items` included; 404 unknown, 409 when cancelled, 403 when it changes the SMS link without `sms` view |
 | `/api/promotions/{id}/cancel`, `/restore` | POST (marketing edit): a version with `status` `cancelled` / `planned`, the content kept; 409 when it already is / is not cancelled |
 
 **Retired by the owner's decision OD-10 (2026-09-30)**, and kept retired by
@@ -726,6 +726,18 @@ What does exist:
 - **Client-side caching** — TanStack Query, 2 min for realtime data
   (`web/frontend/src/hooks/useApi.ts`), which absorbs most repeats before the
   server sees them
+- **Nothing in the browser's own cache under `/api/`** (2026-11-20). nginx
+  answers both API locations with `expires -1` (`Cache-Control: no-cache`),
+  and the client's GETs ask with `cache: 'no-store'`. Under `expires 60s` the
+  browser answered the refetch after a save from its own copy for a minute:
+  a promotion just saved was missing from the list, and saving it again made
+  two. What to reuse is TanStack Query's call, which knows a save has made an
+  answer stale. `tests/unit/test_api_not_cached.py` holds both halves.
+- **A GET in flight is shared only while no write comes between**:
+  `fetchApi` hands a second caller the pending request only if no write was
+  sent or answered since it left (`writeEpoch`,
+  `web/frontend/src/api/client.ts`), so the refetch after a save never gets
+  an answer read before it
 - **Gzip compression** - ~70% smaller responses
 - **orjson** - Fast JSON serialization
 
@@ -764,10 +776,10 @@ What does exist:
 - "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
 - **The month's badge says its 80% range, and Black Friday on a line of its own** (owner's choice, 2026-11-18, after the team's analysis — the artifact "Разбор прогноза выручки"): «Прогноз: ₴3.2M · найімовірніше ₴2.9–3.6M» and, under it, «Якщо Чорна п'ятниця як торік: +₴1.3M (≈ ₴4.5M)». `core/forecast_range.py` is the uncertainty engineer's method ported as validated, and reproduces the study's `sim_at(T, lvl_scale=1.0)` and `allowance_bf` to the bit at every origin of 2025-03..2026-10 and at 2026-11-18, but for the line on the three mornings inside 2024's event (below) (on production's series, outside the repo; `tests/unit/test_forecast_range.py` holds it to a transcription of the study's code on a synthetic one):
   - **Range**: the days left are simulated from the 365 days before today — each day's one-step ratio (revenue over its weekday's mean of the 8 most recent open days) drawn in weekly blocks aligned on today's weekday, centred — times one lognormal level shift whose σ is matched to every n-day window of the 730 days before today (n = days left, scale 1.0); 4 000 draws, seed 0. lo/hi = K + F × [q10, q90]: K the month's actual through yesterday, F the stored LightGBM forecast from today to the month's end — null unless every one of those days is stored. On 2026 held out, with the LightGBM as it trains since 2026-11-18, it held the actual on 88% of mornings (±12.5%, interval score 0.273 against 0.320 for the model's own empirical band; 2025: 87%, 0.404 against 0.436). It does not hold Black Friday: November–December 2025 51%
-  - **Black Friday**: events are runs of days at ≥ 1.8× their weekday norm (the median of the same weekday over the 8 weeks before, open days only, ≥ 4 of them; one ordinary day between joins a run), sized in normal days of their month; last year's events of this month with a peak ≥ 4× whose end + 364 days is today or later add their size × today's normal day (the median-of-8-weeks weekday table, averaged over the days left). Only an event's days still ahead count — a day whose same weekday a year on is today or later — because the days before are in the month's actual already: the study counted the whole event while any of it was ahead, and on the morning of 2025-11-28 would have added ₴1.0M where two of 2024's four days had passed (₴0.44M). In the 900 days production reads (since June 2024, read on 2026-11-18) only Black Friday reached 4×; early 2024 reached 9.5×, but those runs are artefacts — Sundays reopened in February 2024 against the tiny norms of the weeks the shop was closed on them — and lie outside the read. The threshold was set on one November, so the line never moves the point or the range. `kind` is `black_friday` in November and `big_promotion` («велика акція») in any other month
-  - **Where it runs**: `PredictionService.get_forecast` (`/api/revenue/forecast`, never the trend, whose answer the Rust read API mirrors) reads 900 days of Gold through yesterday with `pg_forecast_read.fetch_frame` (a date with no row is a closed day, 0), computes on the ML thread pool, and keeps the answer per (Kyiv day, sales type, the forecast's `created_at`, the promotions' latest `recorded_at`) for at most an hour (`OUTLOOK_TTL_S`) — the last so a promotion saved shows on the next request. Retail only. Any failure — the read, a computation stuck behind a training past `OUTLOOK_TIMEOUT_S` — is logged and answered with nulls, not kept, and the forecast is answered all the same; a failure of the calendar's reads nulls `planned_promotions` alone
-  - **Planned promotions** (revision 0039): `planned_promotions` lists the calendar's promotions planned now whose days overlap today..the month's end. Each carries `extra`: for `kind = other`, `forecast_range.typical_promotion` — the runs above of 2 days and more that started in the 730 days before today, Black Friday's left out (a November run that peaked at ≥ 4×), each sized by its net effect over the run and 3 days either side in normal days of its month; their median × today's normal day, nothing from fewer than 5 runs; for `black_friday`, null — its line covers it; and null for all when the stored forecast does not cover the month (no history is read then). It is inflated by construction: a run is found only because it raised revenue, so a promotion that moved nothing never enters it, and the page says so in its tooltip. The point and the range never move with it. On production's series to 2026-11-17 the 13 multi-day runs since March 2024 have a median of 4.40 normal days (≈ ₴0.46M at ₴105 148 a day); the 730 days before 2026-11-18 hold 10 of them, median 4.58. A promotion already under way counts whole, as the method has no days-ahead rule
-  - **On the page** (`useMonthForecastOutlook`, one query with the date picker's `useMaxForecastDate`): the month only. The range is the morning's and the point counts today's sales as they come, so once a big day carries the point past an end the range is not shown beside it. The line's total is the server's, the morning's month (K + F + `extra`), not the point plus `extra`: on a day of the event the point counts its sales as they come while `extra` holds last year's same day, and the sum would count them twice. Once the point reaches that total the line is not shown either. The range's hint says it holds «без великої акції»: November–December 2025 it held 51%
+  - **Black Friday**: events are runs of days at ≥ 1.8× their weekday norm (the median of the same weekday over the 8 weeks before, open days only, ≥ 4 of them; one ordinary day between joins a run), sized in normal days of their month; last year's events of this month with a peak ≥ 4× land a year on by `forecast_range.year_shift` and add their size × today's normal day (the median-of-8-weeks weekday table, averaged over the days left). November's events move by Black Friday's own move, this year's last Friday of November less last year's (`core/black_friday.py`, shared with the model's calendar features): 364 days, and 371 in 2024 and next in 2029, 2035 and 2040, where a fixed 364 landed the run a week before Black Friday and the line was gone through the week of it (review of 2026-11-20). Any other month's events move 364 days, to the same weekday. Only the days that land from today to the month's end count, because the days before are in the month's actual already and a run into the next month is not this one's: the study counted the whole event while any of it was ahead, and on the morning of 2025-11-28 would have added ₴1.0M where two of 2024's four days had passed (₴0.44M). In the 900 days production reads (since June 2024, read on 2026-11-18) only Black Friday reached 4×; early 2024 reached 9.5×, but those runs are artefacts — Sundays reopened in February 2024 against the tiny norms of the weeks the shop was closed on them — and lie outside the read. The threshold was set on one November, so the line never moves the point or the range. `kind` is `black_friday` in November and `big_promotion` («велика акція») in any other month
+  - **Where it runs**: `PredictionService.get_forecast` (`/api/revenue/forecast`, never the trend, whose answer the Rust read API mirrors) reads 900 days of Gold through yesterday with `pg_forecast_read.fetch_frame` (a date with no row is a closed day, 0), computes on the ML thread pool the range, the line and the typical promotion from that one read and one set of weekday tables and norms (`forecast_range.outlook`), and keeps them per (Kyiv day, sales type, the forecast's `created_at`) for at most an hour (`OUTLOOK_TTL_S`). `planned_promotions` is read on every request, one small query, so a save shows on the next one and costs the range nothing; until 2026-11-20 the key held the promotions' latest `recorded_at` too, and every save, or a list read that failed, re-read Gold and simulated again on the one ML thread. Retail only. Any failure of the range — the read, a computation stuck behind a training past `OUTLOOK_TIMEOUT_S` — is logged and answered with nulls, not kept, and the forecast is answered all the same; the planned list is still shown then, each `extra` null. A failure of the list's read nulls `planned_promotions` alone
+  - **Planned promotions** (revision 0039): `planned_promotions` lists the calendar's promotions planned now whose days overlap today..the month's end. Each carries `extra`: for `kind = other`, `forecast_range.typical_promotion` — the runs above of 2 days and more that started in the 730 days before today, Black Friday's left out (a November run that peaked at ≥ 4×), each sized by its net effect over the run and 3 days either side in normal days of its month; their median × today's normal day, nothing from fewer than 5 runs; for `black_friday`, null — its line covers it; and null for all when the range could not be made, the stored forecast not covering the month (no history is read then) or a failure, the list itself shown all the same. It is inflated by construction: a run is found only because it raised revenue, so a promotion that moved nothing never enters it, and the page says so in its tooltip. The point and the range never move with it. On production's series to 2026-11-17 the 13 multi-day runs since March 2024 have a median of 4.40 normal days (≈ ₴0.46M at ₴105 148 a day); the 730 days before 2026-11-18 hold 10 of them, median 4.58. A promotion already under way counts whole, as the method has no days-ahead rule
+  - **On the page** (`useMonthForecastOutlook`, one query with the date picker's `useMaxForecastDate`): the month only. The range is the morning's and the point counts today's sales as they come, so once a big day carries the point past an end the range is not shown beside it. The line's total is the server's, the morning's month (K + F + `extra`), not the point plus `extra`: on a day of the event the point counts its sales as they come while `extra` holds last year's same day, and the sum would count them twice. Once the point reaches that total the line is not shown either. The range's hint says it holds «без великої акції»: November–December 2025 it held 51%. `orders_synced` invalidates the badge's query (`['revenueForecast']`) as it does the trend's (`hooks/useWebSocket.ts`, 2026-11-20), so across midnight or a month's end the range, the line and the planned promotions move with the trend's live point instead of standing beside it from the day before
 - **The comparison under the chart is the whole period's** (owner's decision, 2026-11-12). The month and the week end today (`parse_period`) and are drawn to their last day (`dashboard_service.last_day_of_period`). Their comparison is the window before the whole period, day by day: `previous_period` sets November beside 2–31 October, and a week beside the week before, Monday beside Monday. The dashed line therefore runs under the forecast days too. The growth badge adds up the days through today on both sides, so 1–12 November is set beside 2–13 October. A range reaching into the future counts only its days behind it, where it used to set its days so far beside the whole window. The store's trend takes `period_end` and `through`, and `dashboard_service.fit_trend` lays the window under the days drawn, by date. Until then the month compared its days so far with as many days before them, and set each forecast day beside the day as many days back as there were forecast days, read from Silver: under 19–30 November the line drew 1–12 November. `year_ago`, the chart's default, already went day by day
 - Graceful degradation: chart works normally if model unavailable
 - Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches; the 31-feature model of the replaced procedure is rejected that way, and web's startup then trains the current one in the background (`web/main.py`)
@@ -803,7 +815,10 @@ of 2026-11-18: the month's automatic goal is frozen on the 1st** (revision
   `skipped`, `read_unavailable` in `/api/jobs`), and the next run asks again.
   Never before 00:30 on the 1st: the month that has just ended is one of "the
   last three complete months", and its last orders reach Silver minutes after
-  midnight.
+  midnight. Nor before `meta.derivation_runs` holds a validated derivation
+  that started at 00:05 on the 1st (Kyiv) or later (`goal_freeze.DERIVED_AFTER`,
+  review of 2026-11-20): until then every sales type the month lacks is
+  `waiting`, with the reason, and nothing is computed.
 - **The reader** is `GoalsMixin.smart_goals_of_month`, one door for
   `/api/goals/smart` and `/api/goals/forecast`, so a month cannot have two
   goals: the frozen answer for a frozen month, `generate_smart_goals` computed
@@ -899,7 +914,9 @@ Instagram, Telegram, сайт). Каждая правка — отдельная
 N+1 на двоих; `recorded_at` — часы после лока, не раньше предыдущей версии.
 `tests/unit/test_promotions.py` обходит репозиторий за писателем.
 `recorded_by` — Telegram-id автора, наружу не отдаётся: история говорит
-только `recorded_by_me`.
+только `recorded_by_me`. `scope_items` сравниваются как множество
+(`same_content`, как и дифф страницы): сохранение, которое их только
+переставляет, версии не пишет, и хранимый порядок остаётся.
 
 **Как акции попадают в систему** — три пути:
 
@@ -908,34 +925,89 @@ N+1 на двоих; `recorded_at` — часы после лока, не ран
   читать, edit — сохранять (30 в минуту, как `/api/expenses`). Неверное
   поле — 400 `{"detail": "<поле>: <причина>"}`, неизвестный id — 404,
   правка или отмена отменённой и восстановление запланированной — 409,
-  упавшее чтение — 503 с `surface: promotions`;
+  упавшее чтение — 503 с `surface: promotions`. Первый день — не позже
+  сегодня + 365 (Киев), где кончается окно списка: акция дальше сохранялась
+  и не показывалась нигде, её нельзя было ни править, ни отменить (400
+  `starts_on: …`). С 20.11.2026 текст, который не
+  кодирует UTF-8 (одиночный суррогат `\ud800`), — 400 с именем поля, а тело
+  глубже, чем рекурсирует JSON-декодер, — 400 `body: Must be a JSON object`
+  (оба были 500); список длиннее 50 отклоняется до разбора элементов
+  (200 000 элементов держали цикл событий web две минуты: каждый
+  сравнивался с каждым);
 - бот спрашивает раз в неделю (`promo_weekly_ask`, тик ежедневно в 10:05,
   журнал `app.promotion_asks`): «Акції на 23.11 – 06.12.2026?» — две недели
   с понедельника текущей ISO-недели, что в них уже запланировано и какие
   SMS-кампании за последние 7 дней не названы ни одной акцией (`sms_campaign`
-  любой версии). [Немає] — тоже ответ: он пишется в `app.promotion_checkins`
-  через порт стора бота (`core.bot_store.PromoAsks`, оператор —
-  `core.promo_asks.RECORD_NONE_SQL`; на SQLite `available()` ложь, и бот так
-  и отвечает), принимается только от одобренного адресата, после ответа
+  любой версии). [Немає] — тоже ответ, а если вопрос перечислил уже
+  запланированные акции, кнопка — [Інших немає] (`pask:nomore:`), и
+  подтверждение — «інших акцій немає». Обе пишут `none` в
+  `app.promotion_checkins` через порт стора бота (`core.bot_store.PromoAsks`,
+  оператор — `core.promo_asks.RECORD_NONE_SQL`; на SQLite `available()` ложь,
+  и бот так и отвечает); после [Інших немає] `none` значит «ничего, кроме
+  перечисленных на момент `answered_at`», и их список даёт
+  `promotions.as_of(answered_at)`. Ответ пишется один раз на
+  (`period_from`, `answered_by`) — `INSERT … SELECT … WHERE NOT EXISTS`, без
+  UNIQUE и без ревизии: PTB обрабатывает обновления по одному; повторное
+  нажатие (вопрос пришёл дважды, двойной тап) отвечает «Вже записано» и
+  ничего не пишет. Принимается только от одобренного адресата, и одобрение
+  хендлер спрашивает сам, без `@authorized`: тот незнакомому или
+  отклонённому переписывал сам вопрос в приглашение запросить доступ, каждую
+  неделю. Неодобренному — алерт, вопрос остаётся как был. После ответа
   клавиатура убирается. [Додати] открывает дашборд как Web App (как кнопка
   меню бота) на `/marketing#promotions`; по http — обычной ссылкой. Даты
   числами, как везде в боте (`fmt_window`): в макете стояло «24 листопада –
   7 грудня», но месяц после числа склоняется;
 - ссылка «+ акція» у плашки прогноза месяца, для `marketing` edit.
 
-**Кому бот пишет**: админы плюс `KS_PROMO_ASK_RECIPIENTS` — Telegram-id через
-запятую, пустой по умолчанию, кривая запись выбрасывается с предупреждением
-(форма и причина `core.traffic_report.audience`: список пишет человек, а не
-выводит код из прав на вкладку). Язык — по системному правилу, один рендер на
+**Запись видна странице, которая её сделала** (20.11.2026, ревью #397).
+Список после сохранения перечитывается с сервера, а не из кэша браузера
+(см. «Caching»: `/api/` браузер не хранит, GET в полёте не переиспользуется
+через запись). Тосты записи, закрытие формы и «занятая» строка — колбэки
+самого `useMutation` (`PromotionWriteEffects` в `hooks/useApi.ts`):
+колбэки, переданные в `mutate`, TanStack вызывает только для последнего
+вызова, и вторая отмена, отправленная до ответа на первую, уносила тост
+ошибки и закрытие формы первой. Скидка — текстовое поле, запятая читается
+как точка: `type="number"` отдавал на «7,5» пустую строку, и акция молча
+сохранялась без скидки. Первый день форма ограничивает, как и API: не
+позже сегодня + 365 (Киев).
+
+**Связь с SMS — данные вкладки `sms`** (`core.promotions.sms_link`,
+20.11.2026). Какую SMS-кампанию называет акция (`sms_campaign`) и набрана ли
+версия из неё (`source = form_from_sms`), видит и меняет только тот, у кого
+есть view вкладки `sms` (правило `require_permission`, через `has_permission`).
+Остальным каждый ответ `/api/promotions*` отдаёт `sms_campaign: null`, а их
+сохранение, которое называет другую кампанию или впервые говорит
+`form_from_sms`, — 403 «No view access to sms», и ничего не пишется. Их
+`sms_campaign: null` — тот null, который им показали (страница отправляет
+акцию целиком): кампания переносится в новую версию, а не стирается. Решается
+под локом, по прочитанной там версии. До этого правило держала только
+страница — пикер кампаний она показывала лишь с `sms` view.
+
+**Кому бот пишет**: админы плюс те из `KS_PROMO_ASK_RECIPIENTS`, кого бот
+сейчас одобряет (`promo_asks.audience`, через порт стора бота). Список —
+Telegram-id через запятую, пустой по умолчанию, кривая запись выбрасывается с
+предупреждением (форма и причина `core.traffic_report.audience`: список пишет
+человек, а не выводит код из прав на вкладку); id из списка без одобрения в
+боте (не просил, отклонён, снят за неактивность) пропускается с WARNING — его
+ответ бот всё равно отклонил бы; стор не читается — пишут одним админам.
+Одобренные, которых нет в списке, не добавляются никогда:
+`tests/unit/test_alert_recipients.py` проверяет поток данных — `readers`
+связан один раз из `audience(...)`, каждый `chat_ids=` — переменная цикла по
+`group_by_language(readers, …)`. Язык — по системному правилу, один рендер на
 язык. `KS_ALERTS_DISABLED` глушит и его; прогон, никого не достигший, ничего
-не пишет в журнал, и назавтра вопрос уйдёт снова.
+не пишет в журнал, и назавтра вопрос уйдёт снова. Запись в журнал после
+доставки повторяется (0, 2 и 10 с, `MARK_RETRY_DELAYS`, как
+`core/report_ledger.py`); не удалась и третья — ERROR в логе и
+`recorded: false` в результате джоба, и назавтра вопрос уйдёт снова.
 
 **На плашке прогноза** — строка на каждую запланированную акцию месяца
 (`planned_promotions`, см. «Revenue Prediction»): «если как прошлые заметные
 акции: +₴X» — медиана чистого эффекта прошлых всплесков от 2 дней за 730 дней,
 по сегодняшнему обычному дню. Она завышена по построению — неудачная акция
 всплеском не становится и в медиану не попадает, — и подсказка это говорит.
-Точку и диапазон она не двигает.
+Точку и диапазон она не двигает. Календарь — вкладка `marketing`, поэтому
+`/api/revenue/forecast` отдаёт `planned_promotions` только тому, у кого есть
+её view, остальным — null (`web/routes/api/analytics.py`).
 
 **Фаза 2 — реклама** (расход из Meta по дням, план бюджета на месяц) не
 построена.
@@ -1353,6 +1425,39 @@ On production on 2026-10-17, the new code's own SQL beside plain SQL: «2+ с
   people's own requests, one rejection can be a temporary block, and the rule
   can change without a clean-up. On production on 2026-10-18 it removed 17 of
   18 104 people from "all buyers".
+
+### Where a sign-in returns (`next`)
+
+A page that sends an anonymous visitor to /login names itself in `?next=`
+(`require_auth`; the root needs none), and the sign-in returns there instead
+of to `/` (2026-11-19, so that the bot's «Додати» lands on the calendar after
+a session expired). The Telegram Mini App's sign-in reads it from the page
+(`data-next`, `login-webapp.js`) and keeps the `#fragment`. The Login
+Widget's reads the cookie `ks_login_next` (path `/auth/telegram`, ten
+minutes, HttpOnly), because the widget signs every query parameter of its
+callback, and on that path the `#fragment` is lost.
+
+`safe_next` is the one gate: one leading slash, no host, scheme, backslash or
+control character, at most 512 characters, never `/` or the sign-in's own
+pages, since an open redirect here would hand a signed-in visitor to any site
+a link names. Since 2026-11-20 also nothing but ASCII — the cookie is
+latin-1, and `/login?next=/тест` or an anonymous `/привіт` answered 500 — and
+never an asset (`auth.ASSET_EXTENSIONS`).
+
+- **An anonymous request for an asset is a 404**, answered before the
+  sign-in (`pages._serve_spa_route`). A browser on /login probes
+  `/favicon.ico` and the like by itself; redirected, the probe went through
+  /login, rewrote the cookie, and the widget's sign-in landed on the icon.
+- **A /login without a valid `next` clears the cookie**, every time: the
+  cookie's path keeps the browser from sending it to /login, so the page
+  cannot tell whether one is set. Without that, an abandoned
+  `/login?next=/sms` won a later plain sign-in for ten minutes. A refused
+  widget callback goes back to /login with the `next` it read, so one failed
+  try does not lose the way back.
+
+`tests/integration/test_unauthenticated_surface.py`
+(`TestTheSignInGoesBackToThePage`) holds all of it.
+
 ### Two axes: a level and an area
 
 Access is a **pair**, and conflating the two halves is the mistake this section
@@ -1733,7 +1838,7 @@ whole reason the group is read from the source now.
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts); the id is kept, the operational copy out of DuckDB went in step 14's S14-13, and the copy of `data/bot.db`, standing down under `KS_BOT_STORE=postgres`, on 2026-11-19 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `ga4_capture` | daily 02:40 | keep each closed GA4 day, ISO week and month in `app.ga4_funnel` before the 14-month horizon drops it, oldest first, at most 24 periods a run and an hour; stands down without a GA4 key or under `KS_ANALYTICS_CAPTURES=off` (revision 0036) |
-| `month_goal_freeze` | hourly at :30 outside the windows kept clear (`goal_freeze.RUN_HOURS`, 00:30 first), and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st, one SELECT once the month is frozen, a refused read defers the whole month to the next run, an answer whose ML signal rests on part of a forecast waits (`waiting`) and is read live; stands down without `KS_PG_DSN` |
+| `month_goal_freeze` | hourly at :30 outside the windows kept clear (`goal_freeze.RUN_HOURS`, 00:30 first), and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st nor before a validated derivation started at 00:05 on it or later (`waiting` until then), one SELECT once the month is frozen, a refused read defers the whole month to the next run, an answer whose ML signal rests on part of a forecast waits (`waiting`) and is read live; stands down without `KS_PG_DSN` |
 | `promo_weekly_ask` | daily 10:05 | ask the admins and `KS_PROMO_ASK_RECIPIENTS` which promotions the two weeks from this ISO week's Monday hold, once a week (`app.promotion_asks`, revision 0039); a run that reached nobody records nothing and the next day asks again; stands down without `KS_PG_DSN` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |

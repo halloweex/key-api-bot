@@ -62,7 +62,12 @@ def _study(origin: date, B: int = 4000, seed: int = 0, lvl_scale: float = 1.0,
     (`fc/ml/uncertainty/{core,ivlib,events,regime,today}.py`). `positive`
     takes the level term's variance over the positive draws, as its
     backtest (`simlib.m_sim`) did; `ahead_only` sizes an event by its days
-    still ahead, the port's one change to the line."""
+    still ahead, the port's first change to the line. Its other two — a
+    November event moved a year on by Black Friday's own move, and none of
+    its days counted past the month's end (the forecast review, 2026-11-20)
+    — change nothing here: Black Friday moved 364 days from 2024 to 2025,
+    and every day of this series' run lands inside November.
+    `TestALastYearsDayLandsAYearOn` holds them on series of their own."""
     DATES = [FIRST + D(days=i) for i in range((origin - FIRST).days)]
     IDX = {d: i for i, d in enumerate(DATES)}
     R = np.array([REVENUE.get(d, 0.0) for d in DATES])
@@ -184,7 +189,7 @@ class TestTheStudysProcedure:
 
     @pytest.mark.parametrize("origin", [o for o in ORIGINS if o != date(2025, 11, 30)], ids=str)
     def test_outside_an_event_its_days_ahead_are_the_whole_of_it(self, origin):
-        """The port's one change to the line: on a morning outside an event,
+        """The port's first change to the line: on a morning outside an event,
         the study's own allowance."""
         assert _study(origin)[2] == _study(origin, ahead_only=True)[2]
 
@@ -297,6 +302,203 @@ class TestTheBlackFridayLine:
         events = fr.spike_events(series, FIRST)
         bf = [e for e in events if e.start == date(2024, 11, 29)]
         assert len(bf) == 1 and bf[0].end == date(2024, 12, 1) and bf[0].peak >= 4.0
+
+
+# ── A year on (the forecast review, 2026-11-20) ─────────────────────────────
+
+WEEK = (1.0, 0.95, 0.9, 1.1, 1.2, 0.8, 0.7)
+
+
+def _last_friday_of_november(year: int) -> date:
+    """Black Friday, worked out here rather than read from the helper the
+    module uses."""
+    day = date(year, 11, 30)
+    while day.weekday() != 4:
+        day -= D(days=1)
+    return day
+
+
+def _shop(seed: int, first: date, last: date, runs) -> list:
+    """A weekday pattern and noise from `first` to `last`, then `runs`: a
+    {day: revenue} of promotion days written over it."""
+    rng = np.random.default_rng(seed)
+    rows, day = {}, first
+    while day <= last:
+        rows[day] = 100_000 * WEEK[day.weekday()] * rng.lognormal(0, 0.15)
+        day += D(days=1)
+    rows.update(runs)
+    return sorted(rows.items())
+
+
+@functools.lru_cache(maxsize=None)
+def _black_fridays() -> tuple:
+    """`review-forecast/scripts/bf_2029.py`: four years of a shop that sells
+    ×5 from the Thursday to the Saturday around each year's Black Friday."""
+    return tuple(_shop(3, date(2026, 1, 1), date(2029, 12, 31), {
+        _last_friday_of_november(y) + D(days=k): 520_000.0
+        for y in range(2026, 2030) for k in (-1, 0, 1)}))
+
+
+@functools.lru_cache(maxsize=None)
+def _spilt_into_december() -> tuple:
+    """`review-forecast/scripts/fr_edges.py`: a shop whose Black Friday 2025
+    ran seven days at ×5, 27 November to 3 December."""
+    return tuple(_shop(1, date(2023, 6, 1), date(2027, 3, 31), {
+        date(2025, 11, 27) + D(days=k): 500_000.0 for k in range(7)}))
+
+
+def _before(rows, origin: date) -> list:
+    return [(d, v) for d, v in rows if d < origin]
+
+
+def _size(rows, origin: date, days) -> float:
+    """`days` of last year sized as the line sizes them: their excess over
+    their weekday norm, in normal days of the month their event started in,
+    `origin`'s a year earlier."""
+    first, series = fr.history_before(_before(rows, origin), origin)
+    norms = fr.weekday_norms(series)
+    level = fr.month_level(norms, first, origin.year - 1, origin.month)
+    return sum(series[(d - first).days] - norms[(d - first).days] for d in days) / level
+
+
+class TestALastYearsDayLandsAYearOn:
+    @pytest.mark.parametrize("year", range(2024, 2041))
+    def test_november_moves_as_far_as_black_friday_did(self, year):
+        """364 days, or 371: 2024, 2029, 2035 and 2040 move a week further."""
+        shift = fr.year_shift(date(year, 11, 10))
+        assert _last_friday_of_november(year - 1) + shift == _last_friday_of_november(year)
+        assert shift.days == (371 if year in (2024, 2029, 2035, 2040) else 364)
+
+    @pytest.mark.parametrize("origin", [date(2029, 3, 5), date(2029, 12, 1), date(2026, 10, 30)],
+                             ids=str)
+    def test_any_other_month_moves_364_days_the_same_weekday(self, origin):
+        assert fr.year_shift(origin) == D(days=fr.SAME_WEEKDAY_YEAR) == D(days=364)
+
+    @pytest.mark.parametrize("origin", [date(2029, 11, d) for d in (20, 23, 24, 25, 27, 29)],
+                             ids=str)
+    def test_2028s_black_friday_is_counted_through_2029s_week(self, origin):
+        """2028's run, Thursday 23 to Saturday 25 November, lands on 29
+        November to 1 December 2029, Black Friday on the 30th. A fixed 364
+        days landed it on 22 to 24 November, and from the 25th — the whole
+        week of Black Friday — the line was gone. The Saturday lands in
+        December, which November's total does not hold. Kills: the move
+        fixed at 364 days."""
+        rows = _black_fridays()
+        bf = fr.month_outlook(_before(rows, origin), origin, 1_000_000.0)["black_friday"]
+        assert bf is not None
+        assert (bf["last_year_start"], bf["last_year_end"]) == ("2028-11-23", "2028-11-24")
+        assert bf["size_days"] == round(_size(rows, origin, [date(2028, 11, 23),
+                                                             date(2028, 11, 24)]), 2)
+
+    def test_on_black_friday_its_own_day_is_left(self):
+        """The Thursday has landed on the 29th, in the month's actual."""
+        origin = date(2029, 11, 30)
+        bf = fr.month_outlook(_before(_black_fridays(), origin), origin, 1e6)["black_friday"]
+        assert bf is not None
+        assert (bf["last_year_start"], bf["last_year_end"]) == ("2028-11-24", "2028-11-24")
+
+    def test_a_year_the_week_does_not_move_is_as_before(self):
+        """2026 to 2027 moves 364 days, the Thursday-to-Saturday run of 2026
+        lands on 2027's and is counted whole until it starts."""
+        origin = date(2027, 11, 20)
+        bf = fr.month_outlook(_before(_black_fridays(), origin), origin, 1e6)["black_friday"]
+        assert bf is not None
+        assert (bf["last_year_start"], bf["last_year_end"]) == ("2026-11-26", "2026-11-28")
+
+
+class TestOnlyTheDaysThatLandInTheMonth:
+    """Black Friday 2025 ran 27 November to 3 December, and a year on its
+    last two days land on 1 and 2 December 2026: next month's revenue,
+    which November's total never holds. They were counted until the review.
+    Kills: the line counting a day past the month's end."""
+
+    @pytest.mark.parametrize("origin,first_day", [
+        (date(2026, 11, 1), date(2025, 11, 27)),
+        (date(2026, 11, 25), date(2025, 11, 27)),
+        (date(2026, 11, 29), date(2025, 11, 30)),
+        (date(2026, 11, 30), date(2025, 12, 1)),
+    ], ids=str)
+    def test_a_run_into_december_counts_its_days_that_land_in_november(
+            self, origin, first_day):
+        rows = _spilt_into_december()
+        bf = fr.month_outlook(_before(rows, origin), origin, 3_000_000.0)["black_friday"]
+        assert bf is not None
+        assert (bf["last_year_start"], bf["last_year_end"]) == (
+            first_day.isoformat(), "2025-12-01")
+        days = [first_day + D(days=k) for k in range((date(2025, 12, 1) - first_day).days + 1)]
+        assert bf["size_days"] == round(_size(rows, origin, days), 2)
+
+    def test_december_counts_none_of_it(self):
+        """The run started in November: December's line is about December's
+        own events, and there were none."""
+        origin = date(2026, 12, 1)
+        assert fr.month_outlook(_before(_spilt_into_december(), origin), origin,
+                                3_000_000.0)["black_friday"] is None
+
+    @pytest.mark.parametrize("origin", [
+        date(2026, 11, 1), date(2026, 11, 30), date(2026, 12, 1), date(2026, 12, 31),
+        date(2027, 1, 1), date(2027, 2, 28), date(2027, 3, 1), date(2026, 3, 29),
+        date(2026, 10, 25)], ids=str)
+    def test_the_range_at_a_months_edges_counts_every_day_to_its_end(self, origin):
+        """The same script's other mornings: the first and last day of a
+        month, a February, the days of a clock change."""
+        out = fr.month_outlook(_before(_spilt_into_december(), origin), origin, 3_000_000.0)
+        month_range = out["month_range"]
+        assert month_range is not None
+        assert month_range["days_left"] == (fr.month_end(origin) - origin).days + 1
+        assert month_range["lo"] < month_range["hi"]
+
+
+class TestBothLinesFromOneRead:
+    """`outlook`, what the forecast route runs on its ML thread: the range,
+    the Black Friday line and a planned promotion's typical effect from one
+    read, its weekday tables and norms made once. The promotion's line made
+    them a second time after the range until the forecast review of
+    2026-11-20 — some 20 ms more on the one thread trainings wait for."""
+
+    ORIGIN = date(2025, 11, 20)
+
+    def _rows(self):
+        from tests.unit.test_typical_promotion import REVENUE as SHOP
+
+        return [(d, v) for d, v in sorted(SHOP.items()) if d < self.ORIGIN]
+
+    def test_it_answers_what_the_two_do(self):
+        rows = self._rows()
+        month, typical = fr.outlook(rows, self.ORIGIN, 1e6)
+        assert month == fr.month_outlook(rows, self.ORIGIN, 1e6)
+        assert typical is not None and typical == fr.promotion_outlook(rows, self.ORIGIN)
+        assert month["black_friday"] is not None and month["month_range"] is not None
+
+    def test_the_tables_and_the_norms_are_made_once(self, monkeypatch):
+        """Kills: `typical_promotion` or `black_friday` making their own."""
+        made = {"tables": 0, "norms": 0}
+        tables, norms = fr.weekday_tables, fr.weekday_norms
+
+        def counted_tables(*args, **kwargs):
+            made["tables"] += 1
+            return tables(*args, **kwargs)
+
+        def counted_norms(*args, **kwargs):
+            made["norms"] += 1
+            return norms(*args, **kwargs)
+
+        monkeypatch.setattr(fr, "weekday_tables", counted_tables)
+        monkeypatch.setattr(fr, "weekday_norms", counted_norms)
+        fr.outlook(self._rows(), self.ORIGIN, 1e6)
+        assert made == {"tables": 1, "norms": 1}
+
+    def test_without_a_forecast_of_the_month_the_effect_is_still_made(self):
+        """A forecast of nothing is no range, and the history read for the
+        effect is the same."""
+        rows = self._rows()
+        month, typical = fr.outlook(rows, self.ORIGIN, 0.0)
+        assert month == {"month_range": None, "black_friday": None}
+        assert typical == fr.promotion_outlook(rows, self.ORIGIN)
+
+    def test_no_history_says_nothing(self):
+        assert fr.outlook([], self.ORIGIN, 1e6) == (
+            {"month_range": None, "black_friday": None}, None)
 
 
 class TestWhatTheRouteAnswers:

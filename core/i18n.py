@@ -1178,11 +1178,26 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         RU: "«{name}» (промокод {code})",
     },
     "promo_ask.btn_none": {EN: "None", UK: "Немає", RU: "Нет"},
+    # Instead of `btn_none` when the question lists promotions already planned.
+    "promo_ask.btn_no_other": {EN: "No others", UK: "Інших немає", RU: "Других нет"},
     "promo_ask.btn_add": {EN: "Add", UK: "Додати", RU: "Добавить"},
     "promo_ask.recorded_none": {
         EN: "Recorded: no promotions for {window}",
         UK: "Записано: акцій на {window} немає",
         RU: "Записано: акций на {window} нет",
+    },
+    "promo_ask.recorded_no_other": {
+        EN: "Recorded: no other promotions for {window}",
+        UK: "Записано: інших акцій на {window} немає",
+        RU: "Записано: других акций на {window} нет",
+    },
+    "promo_ask.already_recorded": {
+        EN: "Already recorded", UK: "Вже записано", RU: "Уже записано",
+    },
+    "promo_ask.not_approved": {
+        EN: "Your access to the bot is not approved, so the answer is not recorded",
+        UK: "Ваш доступ до бота не схвалено, тож відповідь не записано",
+        RU: "Ваш доступ к боту не одобрен, поэтому ответ не записан",
     },
     "promo_ask.not_recipient": {
         EN: "Only the people this question was sent to can answer it",

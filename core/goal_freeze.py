@@ -46,13 +46,32 @@ Never before `FREEZE_AT` on the 1st. "The last three complete months" counts
 the month that has just ended, and its last orders reach Silver a few minutes
 after midnight — the sync every minute, the derivation on its ten-minute
 floor — so a freeze at 00:02 could miss them. A start in that half hour
-leaves it to the 00:30 run.
+leaves it to the 00:30 run, and the 00:30 run itself waits for the
+derivation (below).
 
 The month's answers are all computed before anything is written, and written
 in one transaction, so the sales types of one month are frozen from one
 moment's inputs. A refused read (`read_fallback.ReadUnavailable`, which the
 job answers) leaves the month unfrozen and read live, and the next run asks
 again; so does any other failure, which goes to the job's history.
+
+THE MONTH THAT HAS JUST ENDED IS DERIVED FIRST
+
+Every signal of the goal reads Silver, or Gold beside it, and "the last three
+complete months" count the month that has just ended. `FREEZE_AT` gave the
+derivation half an hour after midnight and nothing checked that it ran: a
+derivation stuck since the last day's evening would have frozen the month on
+a Silver short of that day's last hours, for the whole month (the forecast
+review, 2026-11-20). So a month is frozen only once the derivation's journal,
+`meta.derivation_runs`, holds a validated run — Silver and Gold rebuilt and
+their checks passed — that started `DERIVED_AFTER` or more past the month's
+first midnight in Kyiv. Each run rebuilds Silver and Gold whole from bronze
+as it stood when the run began, and a failed one leaves the previous build
+in place, so the Silver and Gold read after such a run hold the whole of the
+last day. Until
+then every sales type the month lacks is `waiting`, with the reason, nothing
+is computed or written, and the next run asks again. On a quiet night the
+derivation runs on its hourly heartbeat, so the month freezes by 01:30.
 
 A GOAL RESTING ON PART OF A FORECAST WAITS
 
@@ -103,7 +122,7 @@ import calendar
 import json
 import logging
 import os
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from core.duckdb_constants import DEFAULT_TZ, KNOWN_SALES_TYPES
@@ -138,11 +157,28 @@ RUN_HOURS: Tuple[int, ...] = (0, 1, 6, 8, *range(10, 24))
 # SELECT.
 FIRST_RUN_DELAY_S = 240
 
+# How long past the month's first midnight, in Kyiv, the derivation that a
+# freeze reads must have started (see "THE MONTH THAT HAS JUST ENDED IS
+# DERIVED FIRST" above). The sync asks KeyCRM every minute, so the last day's
+# last orders are in bronze a minute or two after midnight; five minutes
+# leave room for a slow fetch.
+DERIVED_AFTER = timedelta(minutes=5)
+
 # Which sales types the month already holds. The writer's own bookkeeping,
 # read on its own connection.
 _HELD_SQL = (
     "SELECT sales_type FROM app.frozen_month_goals "
     "WHERE year = $1 AND month = $2"
+)
+
+# When the last validated derivation of the warehouse started: Silver and
+# Gold rebuilt whole from bronze as it stood then, and their checks passed.
+# A run that raised has no verdict — `core.pg_derivation.record_run` writes
+# `validation_passed` only on a run that got through its validation, its
+# error NULL — so the verdict alone says both. $1 is `pg_derivation.LAYER`.
+_DERIVED_SQL = (
+    "SELECT max(started_at) FROM meta.derivation_runs "
+    "WHERE layer = $1 AND validation_passed"
 )
 
 # One month's answer for one sales type. The first freeze wins: a row a
@@ -188,6 +224,23 @@ def too_early(at: datetime) -> bool:
     return local.day == 1 and local.time() < FREEZE_AT
 
 
+def not_derived(derived_at: Optional[datetime], at: datetime) -> Optional[str]:
+    """Why `at`'s Kyiv month may not be frozen yet — the last validated
+    derivation, which started at `derived_at` (aware; None when the journal
+    holds none), started before `DERIVED_AFTER` past the month's first
+    midnight — or None (see "THE MONTH THAT HAS JUST ENDED IS DERIVED FIRST"
+    above)."""
+    began = datetime.combine(at.astimezone(DEFAULT_TZ).date().replace(day=1), time(0),
+                             tzinfo=DEFAULT_TZ)
+    needed = began + DERIVED_AFTER
+    if derived_at is not None and derived_at >= needed:
+        return None
+    last = ("none is journalled" if derived_at is None else
+            f"the last started {derived_at.astimezone(DEFAULT_TZ):%Y-%m-%d %H:%M}")
+    return (f"no validated derivation has started since {needed:%Y-%m-%d %H:%M} Kyiv "
+            f"({last}): the month that has just ended may not all be in Silver yet")
+
+
 async def _short_forecast(store, sales_type: str, smart: Dict[str, Any], at: datetime) -> Optional[str]:
     """Why `smart` may not be kept yet — its ML signal summed a forecast of
     fewer days than the month has left — or None (see "A GOAL RESTING ON
@@ -219,6 +272,14 @@ async def _held(pool, year: int, month: int) -> Set[str]:
         return {row[0] for row in await conn.fetch(_HELD_SQL, year, month)}
 
 
+async def _derived_at(pool) -> Optional[datetime]:
+    """When the last validated derivation started, or None."""
+    from core.pg_derivation import LAYER
+
+    async with pool.acquire() as conn:
+        return await conn.fetchval(_DERIVED_SQL, LAYER)
+
+
 async def _keep(
     pool, year: int, month: int, answers: Sequence[Tuple[str, str]], at: datetime,
 ) -> List[str]:
@@ -241,10 +302,11 @@ async def freeze_month(store, *, now: Optional[datetime] = None) -> Dict[str, An
     `now` is the clock that chooses the month and stamps `frozen_at` — the
     wall clock when left out. Returns what it did, for the job's history: the
     sales types `frozen` and those frozen `already`, and, when there are any,
-    those `waiting` — an answer resting on part of a forecast, not kept, with
-    the reason. A refused read raises `read_fallback.ReadUnavailable` with
-    nothing written (the job answers it); any other failure raises with
-    nothing written either.
+    those `waiting`, with the reason — every one the month lacks while the
+    derivation has not taken in the month that has just ended, or an answer
+    resting on part of a forecast, not kept. A refused read raises
+    `read_fallback.ReadUnavailable` with nothing written (the job answers
+    it); any other failure raises with nothing written either.
     """
     if not os.getenv("KS_PG_DSN", "").strip():
         return {"skipped": "KS_PG_DSN is not set"}
@@ -262,7 +324,10 @@ async def freeze_month(store, *, now: Optional[datetime] = None) -> Dict[str, An
     due = [sales_type for sales_type in SALES_TYPES if sales_type not in held]
     answers: List[Tuple[str, str]] = []
     waiting: Dict[str, str] = {}
-    if due:
+    underived = not_derived(await _derived_at(pool), at) if due else None
+    if underived is not None:
+        waiting = dict.fromkeys(due, underived)
+    elif due:
         # Every answer before any row: a refusal at any read leaves the month
         # as it was, read live, and the next run asks again.
         computed = [(sales_type, await store.generate_smart_goals(year, month, sales_type))

@@ -625,6 +625,7 @@
   "promo.error.scopeItemsTooMany": "At most {{max}}.",
   "promo.error.spanTooLong": "A promotion lasts at most {{max}} days.",
   "promo.error.startTime": "A time, HH:MM.",
+  "promo.error.startTooFar": "At most a year ahead: {{date}} or earlier.",
   "promo.error.tooLong": "At most {{max}} characters.",
   "promo.field.addItem": "Add \"{{value}}\"",
   "promo.field.brands": "Brands",

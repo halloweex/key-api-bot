@@ -1301,28 +1301,54 @@ function useInvalidatePromotions() {
   }
 }
 
+/**
+ * What a page does after each write, whichever write it was: its toast, its
+ * form closed, its row no longer busy. They are given to `useMutation`, never
+ * to `mutate`: TanStack calls `mutate`'s callbacks for the newest call of the
+ * hook only, so a second cancel sent before the first one answered took the
+ * first one's error toast and its form close with it (review of #397).
+ */
+export interface PromotionWriteEffects<TVariables> {
+  onSuccess?: (saved: Promotion, variables: TVariables) => void
+  onError?: (error: Error, variables: TVariables) => void
+  /** After either, once the lists have been asked for again. */
+  onSettled?: (variables: TVariables) => void
+}
+
+export interface SavePromotionVariables {
+  /** None for a new promotion. */
+  id?: number
+  body: PromotionIn
+}
+
+function usePromotionWrite<TVariables>(
+  write: (variables: TVariables) => Promise<Promotion>,
+  effects: PromotionWriteEffects<TVariables>,
+) {
+  const invalidate = useInvalidatePromotions()
+  return useMutation<Promotion, Error, TVariables>({
+    mutationFn: write,
+    onSuccess: (saved, variables) => effects.onSuccess?.(saved, variables),
+    onError: (error, variables) => effects.onError?.(error, variables),
+    onSettled: (_saved, _error, variables) => {
+      invalidate()
+      effects.onSettled?.(variables)
+    },
+  })
+}
+
 /** Create (no `id`) or save a new version of (`id`) a promotion. */
-export function useSavePromotion() {
-  const invalidate = useInvalidatePromotions()
-  return useMutation<Promotion, Error, { id?: number; body: PromotionIn }>({
-    mutationFn: ({ id, body }) =>
-      id === undefined ? api.createPromotion(body) : api.updatePromotion(id, body),
-    onSettled: invalidate,
-  })
+export function useSavePromotion(effects: PromotionWriteEffects<SavePromotionVariables> = {}) {
+  return usePromotionWrite<SavePromotionVariables>(
+    ({ id, body }) => (id === undefined ? api.createPromotion(body) : api.updatePromotion(id, body)),
+    effects,
+  )
 }
 
-export function useCancelPromotion() {
-  const invalidate = useInvalidatePromotions()
-  return useMutation<Promotion, Error, number>({
-    mutationFn: (id) => api.cancelPromotion(id),
-    onSettled: invalidate,
-  })
+export function useCancelPromotion(effects: PromotionWriteEffects<number> = {}) {
+  return usePromotionWrite<number>((id) => api.cancelPromotion(id), effects)
 }
 
-export function useRestorePromotion() {
-  const invalidate = useInvalidatePromotions()
-  return useMutation<Promotion, Error, number>({
-    mutationFn: (id) => api.restorePromotion(id),
-    onSettled: invalidate,
-  })
+export function useRestorePromotion(effects: PromotionWriteEffects<number> = {}) {
+  return usePromotionWrite<number>((id) => api.restorePromotion(id), effects)
 }
