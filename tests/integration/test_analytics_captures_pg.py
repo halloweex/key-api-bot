@@ -45,9 +45,9 @@ REPO = Path(__file__).resolve().parents[2]
 REV = replay.load(replay.VERSIONS / "0036_analytics_captures.py")
 BEFORE = "0035_batch_e_chains"
 HEAD = "0036_analytics_captures"
-# The database's head, which 0037 (the frozen month goals) and 0038 (the
-# discount columns) moved past 0036: the steps below go from and to it,
-# through 0036, as a rollback would.
+# The database's head, which 0037 (the frozen month goals), 0038 (the
+# discount columns) and 0039 (the promotions calendar) moved past 0036: the
+# steps below go from and to it, through 0036, as a rollback would.
 CURRENT = pg.REQUIRED_REVISION
 
 # One row each, the least every table's NOT NULLs accept.
@@ -159,8 +159,9 @@ class TestTheRevisionOnAServer:
     @pytest.mark.asyncio
     async def test_the_downgrade_moves_the_stamp_and_keeps_every_row(self):
         """D2, as Alembic renders it and the server runs it: down to 0035 from
-        the head (through the stamp-only steps of 0038, the discount columns,
-        and 0037, the frozen month goals), the stamp is 0035,
+        the head (through the stamp-only steps of 0039, the promotions
+        calendar, 0038, the discount columns, and 0037, the frozen month
+        goals), the stamp is 0035,
         `rollback-step14`'s check passes, every table is there with its row;
         up again, the stamp is the head and nothing else moved.
         Kills: a DROP in the downgrade, or a re-upgrade that is not a no-op."""

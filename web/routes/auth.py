@@ -5,7 +5,9 @@ import os
 import logging
 from typing import Sequence
 
-from fastapi import APIRouter, Request, Response, HTTPException
+from urllib.parse import quote
+
+from fastapi import APIRouter, Request, Response, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
@@ -57,10 +59,49 @@ SESSION_MAX_AGE = 7 * 24 * 60 * 60
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
 COOKIE_SECURE = is_production_url(DASHBOARD_URL) or os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
+# Where a sign-in goes back to (2026-11-19). A page that sends an anonymous
+# visitor to /login names itself in `?next=`, and the sign-in returns there
+# instead of to `/`. That is what keeps the bot's «Додати» button, which opens
+# /marketing#promotions, on the promotions calendar after a session expired:
+# the browser carries the #fragment across both redirects itself. The
+# Telegram Mini App's sign-in reads `next` from the page (`data-next`), the
+# Login Widget's from `NEXT_COOKIE`: its callback's query string is the signed
+# auth data, and a parameter of ours there would fail the signature.
+NEXT_COOKIE = "ks_login_next"
+NEXT_MAX_LEN = 512
+NEXT_COOKIE_MAX_AGE = 600
+
+
+def safe_next(value: str | None) -> str | None:
+    """`value` when it is a page of this site to return to, else None.
+
+    One leading slash, then a path and an optional query: no scheme, no host
+    (`//`), no backslash (browsers read `/\\host` as `//host`), no control
+    character, at most `NEXT_MAX_LEN` characters, and never `/` itself or the
+    sign-in's own pages, which would only loop. Anything else is dropped and
+    the sign-in goes to `/`, as it always did: an open redirect here would
+    hand a signed-in visitor to any site a link names."""
+    if not value or len(value) > NEXT_MAX_LEN:
+        return None
+    if not value.startswith("/") or value.startswith("//") or "\\" in value:
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        return None
+    path = value.split("?", 1)[0]
+    if path == "/" or path.startswith(("/login", "/logout", "/auth/")):
+        return None
+    return value
+
 
 @router.get("/login")
-async def login_page(request: Request, error: str = None, status: str = None):
+async def login_page(
+    request: Request,
+    error: str | None = None,
+    status: str | None = None,
+    next_: str | None = Query(None, alias="next"),
+):
     """Show login page with Telegram Login Widget."""
+    target = safe_next(next_)
     # Check if already logged in
     session = request.cookies.get(SESSION_COOKIE)
     if session:
@@ -71,14 +112,14 @@ async def login_page(request: Request, error: str = None, status: str = None):
             if user_id:
                 access = check_user_access(user_id)
                 if access['authorized']:
-                    return RedirectResponse(url="/", status_code=302)
+                    return RedirectResponse(url=target or "/", status_code=302)
         except (BadSignature, SignatureExpired):
             pass
 
     # Build callback URL
     callback_url = str(request.url_for('telegram_callback'))
 
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request,
         "login.html",
         {
@@ -86,8 +127,16 @@ async def login_page(request: Request, error: str = None, status: str = None):
             "callback_url": callback_url,
             "error": error,
             "status": status,
+            "next": target or "",
         },
     )
+    if target:
+        # Read by the Login Widget's callback alone, and only for a while.
+        response.set_cookie(
+            key=NEXT_COOKIE, value=target, max_age=NEXT_COOKIE_MAX_AGE,
+            path="/auth/telegram", httponly=True, samesite="lax", secure=COOKIE_SECURE,
+        )
+    return response
 
 
 @router.get("/auth/telegram/callback")
@@ -130,10 +179,13 @@ async def telegram_callback(request: Request):
 
     # Build welcome redirect URL with user's name
     first_name = auth_data.get('first_name', '')
-    from urllib.parse import quote
     welcome_param = f"?welcome={quote(first_name)}" if first_name else ""
 
-    response = RedirectResponse(url=f"/{welcome_param}", status_code=302)
+    # Back to the page that sent the visitor to /login, when it named one.
+    target = safe_next(request.cookies.get(NEXT_COOKIE))
+    response = RedirectResponse(url=target or f"/{welcome_param}", status_code=302)
+    if NEXT_COOKIE in request.cookies:
+        response.delete_cookie(NEXT_COOKIE, path="/auth/telegram")
     response.set_cookie(
         key=SESSION_COOKIE,
         value=signed_session,
@@ -372,7 +424,11 @@ async def require_auth(request: Request) -> RedirectResponse | None:
     """
     user = await get_current_user(request)
     if not user:
-        return RedirectResponse(url="/login", status_code=302)
+        # The page asked for, so the sign-in can return to it (`safe_next`).
+        asked = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        target = safe_next(asked)
+        url = "/login" if target is None else f"/login?next={quote(target, safe='')}"
+        return RedirectResponse(url=url, status_code=302)
     return None
 
 

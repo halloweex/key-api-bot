@@ -56,8 +56,34 @@ moves with it:
   day the line added the first day a second time; the two differ on those
   mornings only.
 
-In 2024–2026 only Black Friday reached 4×. The threshold was set on one
-November, which is why the line stands beside the range and never inside it.
+In the 900 days production reads (since June 2024, read on 2026-11-18) only
+Black Friday reached 4×. Early 2024 reached 9.5×, but those runs are
+artefacts — Sundays reopened in February 2024 against the tiny norms of the
+weeks the shop was closed on them — and lie outside the read. The threshold
+was set on one November, which is why the line stands beside the range and
+never inside it.
+
+A PLANNED PROMOTION'S LINE
+
+A promotion entered in the calendar (revision 0039, `core/promotions.py`)
+gets a line of its own on the badge, "if it goes like the past noticeable
+ones" (`typical_promotion`):
+
+- the runs above that lasted 2 days or more and started in the 730 days
+  before T, Black Friday left out (a November run that peaked at 4× or more:
+  its own line covers it);
+- each run's net effect: revenue over the norm across the run and the 3 days
+  either side of it, in normal days of its month — the days a promotion pulls
+  sales forward from, or leaves short after it, count against it;
+- the median of those, times today's normal day; nothing with fewer than 5
+  runs.
+
+It is inflated, by construction: a run is found only because it raised
+revenue, so a promotion that moved nothing never enters the median. The page
+says so beside the number, and neither the point nor the range moves with it.
+On production's series to 2026-11-17 the 13 multi-day runs since March 2024
+have a median of 4.40 normal days (≈ ₴0.46M at ₴105 148 a day); the 730 days
+before 2026-11-18 hold 10 of them, with a median of 4.58.
 
 CAUSAL BY CONSTRUCTION
 
@@ -73,7 +99,8 @@ uses 24 weeks past the series' start, where the weekday tables no longer
 depend on where it starts.
 
 Pure: numpy and the standard library, no I/O. `PredictionService.get_forecast`
-reads the history and runs `month_outlook` on its thread pool.
+reads the history and runs `month_outlook` and `promotion_outlook` on its
+thread pool.
 """
 from __future__ import annotations
 
@@ -99,6 +126,10 @@ NORM_WEEKS = 8             # a day's weekday norm: the 8 calendar weeks before i
 NORM_MIN_DAYS = 4          # ... from at least 4 open days
 BF_MIN_PEAK = 4.0          # last year's events this strong are counted
 SAME_WEEKDAY_YEAR = 364    # an event one year on, on its weekday
+TYPICAL_WINDOW_DAYS = 730  # a planned promotion's line: runs starting this far back
+TYPICAL_MIN_SPAN_DAYS = 2  # ... that lasted this long, the first and last day included
+TYPICAL_MARGIN_DAYS = 3    # ... counted with this many days either side
+TYPICAL_MIN_RUNS = 5       # ... and no line from fewer of them
 # What production reads: the 730-day windows, the 56-day warm-up before the
 # first of them, and 114 days to spare, so every table it reads has 24 weeks
 # behind it and nothing depends on where the read starts.
@@ -332,10 +363,7 @@ def black_friday(
     if date(year, month, 1) < first:
         return None
     norms = weekday_norms(revenue)
-    in_month = [norms[i] for i in range(len(revenue))
-                if (d := first + timedelta(days=i)).year == year and d.month == month
-                and norms[i] == norms[i]]
-    level = np.mean(in_month) if in_month else np.nan
+    level = month_level(norms, first, year, month)
     counted = [e for e in spike_events(revenue, first, norms)
                if (e.start.year, e.start.month) == (year, month)
                and e.peak >= BF_MIN_PEAK
@@ -349,15 +377,96 @@ def black_friday(
     size = float(sum(sum(revenue[j] - norms[j] for j in days) / level for days in ahead))
     if not counted or not np.isfinite(size) or size <= 0:
         return None
-    _mean, median = tables if tables is not None else weekday_tables(revenue, first.weekday())
-    n = (month_end(origin) - origin).days + 1
-    normal = float(np.mean(median[len(revenue), (origin.weekday() + np.arange(n)) % 7]))
+    normal = normal_day(revenue, first, origin, tables=tables)
     extra = size * normal
     if not np.isfinite(extra) or extra <= 0:
         return None
     days = [j for part in ahead for j in part]
     return BlackFriday(extra, size, normal,
                        first + timedelta(days=min(days)), first + timedelta(days=max(days)))
+
+
+def month_level(norms: np.ndarray, first: date, year: int, month: int) -> float:
+    """A month's normal day: the mean of its days' weekday norms, NaN when
+    none is known — the unit an event is sized in."""
+    in_month = [norms[i] for i in range(len(norms))
+                if (d := first + timedelta(days=i)).year == year and d.month == month
+                and norms[i] == norms[i]]
+    return float(np.mean(in_month)) if in_month else float("nan")
+
+
+def normal_day(
+    revenue: np.ndarray, first: date, origin: date, *,
+    tables: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+) -> float:
+    """Today's normal day: the median of each day left's weekday over its 8
+    most recent open days, averaged over the days left — what the Black
+    Friday line and a planned promotion's line are priced at."""
+    _mean, median = tables if tables is not None else weekday_tables(revenue, first.weekday())
+    n = (month_end(origin) - origin).days + 1
+    return float(np.mean(median[len(revenue), (origin.weekday() + np.arange(n)) % 7]))
+
+
+# ── A planned promotion's line ──────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class TypicalPromotion:
+    """What a past noticeable promotion of 2 days and more added, typically,
+    in today's money."""
+
+    extra: float        # size_days × normal_day
+    size_days: float    # the median run's net effect, in normal days of its month
+    normal_day: float
+    runs: int           # how many runs the median is of
+
+
+def typical_promotion(
+    revenue: np.ndarray, first: date, origin: date, *,
+    tables: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+) -> Optional[TypicalPromotion]:
+    """The median net effect of the runs of `TYPICAL_MIN_SPAN_DAYS` days and
+    more that started in the `TYPICAL_WINDOW_DAYS` before `origin`, Black
+    Friday's left out, at today's normal day — or None from fewer than
+    `TYPICAL_MIN_RUNS` runs.
+
+    A run's net effect is its revenue over the norm across the run and
+    `TYPICAL_MARGIN_DAYS` either side, the days with a norm only, in normal
+    days of the month it started in. Inflated by construction: a run is
+    found only because it raised revenue, so a promotion that moved nothing
+    never enters the median (see "A PLANNED PROMOTION'S LINE" above)."""
+    if (origin - first).days != len(revenue):
+        raise ValueError("the series must end the day before the origin")
+    norms = weekday_norms(revenue)
+    since = origin - timedelta(days=TYPICAL_WINDOW_DAYS)
+    sizes: List[float] = []
+    for e in spike_events(revenue, first, norms):
+        if e.start < since or (e.end - e.start).days + 1 < TYPICAL_MIN_SPAN_DAYS:
+            continue
+        if e.start.month == 11 and e.peak >= BF_MIN_PEAK:
+            continue     # Black Friday: its own line says what it adds
+        lo = max((e.start - first).days - TYPICAL_MARGIN_DAYS, 0)
+        hi = min((e.end - first).days + TYPICAL_MARGIN_DAYS, len(revenue) - 1)
+        net = sum(revenue[j] - norms[j] for j in range(lo, hi + 1) if np.isfinite(norms[j]))
+        sizes.append(float(net / month_level(norms, first, e.start.year, e.start.month)))
+    if len(sizes) < TYPICAL_MIN_RUNS:
+        return None
+    size = float(np.median(sizes))
+    normal = normal_day(revenue, first, origin, tables=tables)
+    extra = size * normal
+    if not np.isfinite(extra) or extra <= 0:
+        return None
+    return TypicalPromotion(extra, size, normal, len(sizes))
+
+
+def promotion_outlook(
+    rows: Sequence[Tuple[date, float]], origin: date,
+) -> Optional[TypicalPromotion]:
+    """`typical_promotion` over Gold's (date, revenue) before `origin`, read
+    as the range reads it (`history_before`)."""
+    first, revenue = history_before(rows, origin)
+    if len(revenue) == 0:
+        return None
+    return typical_promotion(revenue, first, origin)
 
 
 # ── What the forecast route answers ─────────────────────────────────────────

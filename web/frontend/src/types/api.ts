@@ -89,6 +89,25 @@ export interface RevenueForecast {
   month_range?: RevenueForecastRange | null
   /** `/api/revenue/forecast` only; null unless last year's month had one ahead. */
   black_friday?: RevenueForecastBlackFriday | null
+  /** `/api/revenue/forecast` only, retail only: the promotions planned now
+   *  whose days overlap today..the month's end. `[]` when none is planned,
+   *  null for another sales type or when it could not be read. */
+  planned_promotions?: PlannedPromotion[] | null
+}
+
+/**
+ * One planned promotion on the month's badge. `extra` is what a typical past
+ * promotion of two days or more added — the median of the ones that raised
+ * revenue visibly, so it is inflated — and null for Black Friday, which the
+ * Black Friday line already covers. Never inside the point or the range.
+ */
+export interface PlannedPromotion {
+  id: number
+  name: string
+  starts_on: string
+  ends_on: string
+  kind: PromotionKind
+  extra: number | null
 }
 
 /**
@@ -351,7 +370,17 @@ export interface SetGoalResponse {
 
 // ─── Smart Goal Types ─────────────────────────────────────────────────────────
 
-export interface SmartGoalData extends GoalData {
+/** How the month's automatic goal was built. `no_history`: the sales type
+ *  has no history of its own, so it has no automatic goal and every period's
+ *  amount is null (the owner's decision of 2026-11-19). `fallback` was a ₴3M
+ *  default the server no longer sets. */
+export type GoalCalculationMethod =
+  'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback' | 'no_history'
+
+export interface SmartGoalData extends Omit<GoalData, 'amount' | 'suggestedAmount'> {
+  /** Null when the period has no goal: no history of its own and none typed. */
+  amount: number | null
+  suggestedAmount: number | null
   weeklyBreakdown?: Record<number, number>  // week 1-5 -> goal amount
   lastYearRevenue?: number
   recent3MonthAvg?: number
@@ -360,8 +389,9 @@ export interface SmartGoalData extends GoalData {
   mlForecastGoal?: number
   growthRate?: number
   seasonalityIndex?: number
-  calculationMethod?: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
-  blendWeights?: Record<string, number>
+  calculationMethod?: GoalCalculationMethod
+  /** Null when no blend made the goal: the month average, or no goal. */
+  blendWeights?: Record<string, number> | null
 }
 
 export interface SmartGoalsResponse {
@@ -375,7 +405,7 @@ export interface SmartGoalsResponse {
     mlForecastGoal: number
     growthRate: number
     seasonalityIndex: number
-    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
+    calculationMethod: GoalCalculationMethod
     blendWeights: Record<string, number> | null
   }
   metadata: {
@@ -407,7 +437,8 @@ export interface GoalForecastResponse {
   targetYear: number
   targetMonth: number
   monthly: {
-    goal: number
+    /** Null: no history of its own (`calculationMethod` `no_history`). */
+    goal: number | null
     lastYearRevenue: number
     recent3MonthAvg: number
     historicalAvg: number
@@ -416,17 +447,17 @@ export interface GoalForecastResponse {
     growthRate: number
     seasonalityIndex: number
     confidence: 'high' | 'medium' | 'low'
-    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
+    calculationMethod: GoalCalculationMethod
     mlForecastGoal: number
     blendWeights: Record<string, number> | null
   }
   weekly: {
-    goal: number
+    goal: number | null
     breakdown: Record<number, number>
     weights: Record<number, number>
   }
   daily: {
-    goal: number
+    goal: number | null
     daysInMonth: number
   }
   metadata: {
@@ -1882,6 +1913,88 @@ export interface SmsTestSendResult {
     characters: number
     parts: number
   }
+}
+
+// ─── Promotions calendar (phase 1) ───────────────────────────────────────────
+// `/api/promotions`. A promotion is recorded before it starts, and every save
+// is a new version: the forecast's later test asks what was known on the
+// morning of a day, so an edit never overwrites what was known before it.
+
+export type PromotionKind = 'black_friday' | 'other'
+export type PromotionScope = 'store' | 'brands' | 'categories'
+export type PromotionChannel = 'sms' | 'instagram' | 'telegram' | 'site'
+export type PromotionStatus = 'planned' | 'cancelled'
+/** How a version was entered: the form, or the form prefilled from an SMS campaign. */
+export type PromotionSource = 'form' | 'form_from_sms'
+
+/** What a person enters about a promotion. */
+export interface PromotionFields {
+  name: string
+  /** Kyiv dates, `YYYY-MM-DD`, both included. */
+  starts_on: string
+  ends_on: string
+  /** `HH:MM`, only when it does not start in the morning. */
+  start_time: string | null
+  kind: PromotionKind
+  /** Up to how many percent; null when not said. */
+  discount_pct: number | null
+  scope: PromotionScope
+  /** Brand or category names; `[]` for the whole store. */
+  scope_items: string[]
+  channels: PromotionChannel[]
+  /** The SMS campaign it came from, by name. */
+  sms_campaign: string | null
+  note: string | null
+}
+
+/** A promotion as it stands: its latest version. */
+export interface Promotion extends PromotionFields {
+  id: number
+  version: number
+  status: PromotionStatus
+  /** Version 1's `recorded_at`, Kyiv ISO. */
+  created_at: string
+  /** This version's `recorded_at`, Kyiv ISO. */
+  updated_at: string
+  source: PromotionSource
+}
+
+export interface PromotionsResponse {
+  promotions: Promotion[]
+}
+
+/**
+ * One saved state of a promotion. Who saved it is not said — only whether it
+ * was the reader (`recorded_by_me`): the history needs neither ids nor names.
+ */
+export interface PromotionVersion extends PromotionFields {
+  id?: number
+  version: number
+  status: PromotionStatus
+  source: PromotionSource
+  recorded_at: string
+  recorded_by_me: boolean
+}
+
+/** Newest first. */
+export interface PromotionVersionsResponse {
+  versions: PromotionVersion[]
+}
+
+/** The body of `POST /api/promotions` and `PUT /api/promotions/{id}`. */
+export interface PromotionIn {
+  name: string
+  starts_on: string
+  ends_on: string
+  start_time?: string | null
+  kind: PromotionKind
+  discount_pct?: number | null
+  scope: PromotionScope
+  scope_items?: string[]
+  channels?: PromotionChannel[]
+  sms_campaign?: string | null
+  note?: string | null
+  source?: PromotionSource
 }
 
 // ─── Telegram bot activity ───────────────────────────────────────────────────

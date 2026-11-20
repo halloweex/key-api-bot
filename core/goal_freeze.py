@@ -69,6 +69,17 @@ reaches the month's end freezes it, from that run's inputs. A forecast with
 no row at all is absent, not short — the blend gives its weight to the
 other signals — and is kept, as is every answer without the ML signal.
 
+NO HISTORY OF ITS OWN IS FROZEN AS NO GOAL
+
+A sales type with no history of its own has no automatic goal
+(`calculationMethod` `no_history`, `goal` null in every period; the owner's
+decision of 2026-11-19), and that answer is kept like any other. It cannot
+change inside the month: the month a year earlier and the complete months
+before this one are settled by then, and no forecast is stored for such a
+sales type. November 2026 was frozen before the rule — ₴5.7M for the
+offline store and for the exhibition — and moves only when a person deletes
+those rows and triggers the job (`.claude/CLAUDE.md`, "Revenue goals").
+
 THE SHAPE IS THE CODE'S THAT FROZE IT
 
 A row keeps `generate_smart_goals`' answer as that day's code built it. A

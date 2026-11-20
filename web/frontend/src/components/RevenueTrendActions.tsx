@@ -1,4 +1,6 @@
+import type { MouseEvent } from 'react'
 import type {
+  PlannedPromotion,
   RevenueForecast,
   RevenueForecastBlackFriday,
   RevenueForecastRange,
@@ -11,6 +13,9 @@ import {
 } from './revenueTrendHelpers'
 import type { CompareType } from './revenueTrendTypes'
 import { Select } from './Select'
+import { navigate } from '../hooks/useRouter'
+import { PROMOTIONS_HREF } from '../utils/deepLink'
+import { promotionDays } from '../utils/promotions'
 
 interface GrowthTotals {
   current: number
@@ -24,6 +29,11 @@ interface ActionsProps {
   monthRange?: RevenueForecastRange | null
   /** What last year's Black Friday would add: pass it for the month only. */
   blackFriday?: RevenueForecastBlackFriday | null
+  /** The promotions planned for the rest of the month, a line each: pass
+   *  them for the month only. */
+  plannedPromotions?: PlannedPromotion[] | null
+  /** «+ акція» to the promotions calendar: the month, for `marketing` edit. */
+  canAddPromotion?: boolean
   growthData: GrowthTotals | undefined
   isLoading: boolean
   compareType: CompareType
@@ -33,10 +43,19 @@ interface ActionsProps {
   t: (key: string, options?: Record<string, string | number>) => string
 }
 
+/** In-app, unless the reader asked for a new tab or window. */
+function openCalendar(e: MouseEvent<HTMLAnchorElement>) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+  e.preventDefault()
+  navigate(PROMOTIONS_HREF)
+}
+
 export function RevenueTrendActions({
   forecast,
   monthRange,
   blackFriday,
+  plannedPromotions,
+  canAddPromotion = false,
   growthData,
   isLoading,
   compareType,
@@ -57,6 +76,10 @@ export function RevenueTrendActions({
       : null
   const promo = point !== undefined && blackFriday && point < blackFriday.total ? blackFriday : null
   const isBlackFriday = promo?.kind === 'black_friday'
+  // The planned promotions are said beside the point, never inside it or the
+  // range; and only where the point is said at all.
+  const outlook = Boolean(forecast) && !isLoading
+  const planned = outlook ? plannedPromotions ?? [] : []
 
   // The line about Black Friday sits under the row, not in it: a row that
   // wraps counts every item's width in its own, and would squeeze the title.
@@ -120,6 +143,35 @@ export function RevenueTrendActions({
             total: formatShortCurrency(promo.total),
           })}
         </p>
+      )}
+
+      {/* A line per promotion planned for the rest of the month. `extra` is
+          what a typical past promotion of two days or more added; Black
+          Friday has none, its own line above already says it. */}
+      {planned.map((p) => {
+        const values = { name: p.name, dates: promotionDays(p.starts_on, p.ends_on) }
+        const extra = typeof p.extra === 'number' ? p.extra : null
+        return (
+          <p
+            key={p.id}
+            className="text-right text-[10px] sm:text-xs text-slate-500"
+            title={extra !== null ? t('chart.plannedPromoHint') : undefined}
+          >
+            {extra !== null
+              ? t('chart.plannedPromoLine', { ...values, extra: formatShortCurrency(extra) })
+              : t('chart.plannedPromo', values)}
+          </p>
+        )
+      })}
+
+      {outlook && canAddPromotion && (
+        <a
+          href={PROMOTIONS_HREF}
+          onClick={openCalendar}
+          className="text-[10px] sm:text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
+        >
+          {t('chart.addPromotion')}
+        </a>
       )}
     </div>
   )

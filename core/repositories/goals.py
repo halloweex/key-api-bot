@@ -433,6 +433,12 @@ GOAL_TABLES_SALES_TYPE = "retail"
 # Default: slightly more revenue in weeks 1-4, less in week 5.
 _DEFAULT_WEEKLY_WEIGHTS = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
 
+# A smart goal's `calculationMethod` when the sales type has no history of
+# its own to build one from, and so no automatic goal: `goal` is None in all
+# three periods (the owner's decision of 2026-11-19; see
+# `generate_smart_goals`).
+NO_HISTORY = "no_history"
+
 
 def _recency_weighted(rates: List[float]) -> float:
     """Oldest pair weighs 1.0, newest 2.0, linear in between."""
@@ -1193,6 +1199,14 @@ class GoalsMixin:
         3. Adjust using seasonality index
         4. Calculate weekly breakdown using weekly patterns
 
+        A sales type with no history of its own has no automatic goal (the
+        owner's decision of 2026-11-19): no last year's month, no recent
+        complete month with 25 days of sales, no forecast — and no month
+        average from the shared tables, which are retail's. Its answer
+        carries `goal` None in all three periods, an empty breakdown and
+        `calculationMethod` `NO_HISTORY`; the other fields are what was
+        read. Retail falls back on its own month average as before.
+
         Args:
             target_year: Year to generate goals for
             target_month: Month (1-12) to generate goals for
@@ -1273,6 +1287,7 @@ class GoalsMixin:
         if ml_forecast_goal > 0:
             signals["ml"] = ml_forecast_goal
 
+        monthly_goal: Optional[float]
         if signals:
             # Redistribute unavailable signal weights proportionally
             available_weight = sum(base_weights[k] for k in signals)
@@ -1284,18 +1299,26 @@ class GoalsMixin:
             dominant = max(blend_weights, key=lambda k: blend_weights[k] * signals[k])
             method_map = {"yoy": "yoy_growth", "recent": "recent_trend", "ml": "ml_forecast"}
             calculation_method = method_map[dominant]
-        elif historical_avg > 0:
+        elif historical_avg > 0 and sales_type == GOAL_TABLES_SALES_TYPE:
+            # The month's average over the years, from the shared tables —
+            # which hold retail's history (`GOAL_TABLES_SALES_TYPE`), and so
+            # are a sales type's own history for retail alone.
             monthly_goal = historical_avg * (1 + growth_rate)
             calculation_method = "historical_avg"
             blend_weights = {}
         else:
-            monthly_goal = 3000000  # 3M UAH default
-            growth_rate = dynamic_cap
-            calculation_method = "fallback"
+            # No history of its own, so no automatic goal (the owner's
+            # decision of 2026-11-19): no month a year earlier, no complete
+            # month with 25 days of sales, no forecast, and no month average
+            # of its own. Until then a sales type here took retail's month
+            # average × growth from the shared tables: November 2026 froze
+            # ₴5.7M for the offline store, open since the 12th, and for the
+            # exhibition, six days in September 2025, beside retail's ₴4.7M.
+            # Retail itself arrives here only with no history at all, where
+            # a ₴3M default stood ("fallback") — invented the same way.
+            monthly_goal = None
+            calculation_method = NO_HISTORY
             blend_weights = {}
-
-        # Round to nice number
-        monthly_goal = round(monthly_goal / 100000) * 100000
 
         if weekly_patterns:
             weekly_weights = {int(row[0]): float(row[1]) for row in weekly_patterns}
@@ -1307,25 +1330,35 @@ class GoalsMixin:
         if total_weight > 0:
             weekly_weights = {k: v / total_weight for k, v in weekly_weights.items()}
 
-        # Calculate weekly goals with residual adjustment
-        weekly_goals = {
-            week: round(monthly_goal * weight / 10000) * 10000
-            for week, weight in weekly_weights.items()
-        }
-        # Distribute residual so weekly goals sum exactly to monthly
-        residual = monthly_goal - sum(weekly_goals.values())
-        if residual != 0 and weekly_goals:
-            # Add residual to the largest week
-            largest_week = max(weekly_goals, key=lambda k: weekly_goals[k])
-            weekly_goals[largest_week] += residual
-
         # Fix: use calendar.monthrange for correct days (handles leap years)
         days_in_month = calendar.monthrange(target_year, target_month)[1]
-        daily_goal = round(monthly_goal / days_in_month / 10000) * 10000
 
-        # Calculate weekly goal (monthly / actual weeks)
-        weeks_in_month = days_in_month / 7.0
-        weekly_goal = round(monthly_goal / weeks_in_month / 50000) * 50000
+        # No goal for the month is no goal for its weeks and days either:
+        # None in all three, and no breakdown.
+        weekly_goals: Dict[int, float] = {}
+        daily_goal: Optional[int] = None
+        weekly_goal: Optional[int] = None
+        if monthly_goal is not None:
+            # Round to nice number
+            monthly_goal = round(monthly_goal / 100000) * 100000
+
+            # Calculate weekly goals with residual adjustment
+            weekly_goals = {
+                week: round(monthly_goal * weight / 10000) * 10000
+                for week, weight in weekly_weights.items()
+            }
+            # Distribute residual so weekly goals sum exactly to monthly
+            residual = monthly_goal - sum(weekly_goals.values())
+            if residual != 0 and weekly_goals:
+                # Add residual to the largest week
+                largest_week = max(weekly_goals, key=lambda k: weekly_goals[k])
+                weekly_goals[largest_week] += residual
+
+            daily_goal = round(monthly_goal / days_in_month / 10000) * 10000
+
+            # Calculate weekly goal (monthly / actual weeks)
+            weeks_in_month = days_in_month / 7.0
+            weekly_goal = round(monthly_goal / weeks_in_month / 50000) * 50000
 
         return {
             "targetYear": target_year,
@@ -1417,7 +1450,10 @@ class GoalsMixin:
         The month's automatic goal is the frozen one once the month is frozen
         — on its 1st, by `core.goal_freeze` (revision 0037) — and is computed
         live for a month that is not; `monthly.frozenAt` says which. A goal
-        typed on /goals overrides either, as before.
+        typed on /goals overrides either, as before. A sales type with no
+        history of its own has none (`calculationMethod` `NO_HISTORY`):
+        `amount` and `suggestedAmount` are None in every period no typed
+        goal fills.
 
         Args:
             sales_type: 'retail', 'b2b', or 'all'

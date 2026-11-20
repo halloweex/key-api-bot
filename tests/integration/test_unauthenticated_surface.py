@@ -440,11 +440,20 @@ class TestWsStatsStaysViewerReadable:
 
 class TestPageRoutesRequireASession:
 
-    @pytest.mark.parametrize("path", ["/", "/v2", "/v2/reports", "/admin/users", "/whatever"])
-    def test_anonymous_is_redirected_to_login(self, client, store, path):
+    @pytest.mark.parametrize("path,location", [
+        ("/", "/login"),
+        ("/v2", "/login?next=%2Fv2"),
+        ("/v2/reports", "/login?next=%2Fv2%2Freports"),
+        ("/admin/users", "/login?next=%2Fadmin%2Fusers"),
+        ("/whatever", "/login?next=%2Fwhatever"),
+        ("/marketing?x=1", "/login?next=%2Fmarketing%3Fx%3D1"),
+    ])
+    def test_anonymous_is_redirected_to_login(self, client, store, path, location):
+        """And names the page it asked for, so the sign-in returns there
+        (`safe_next`); the root needs no name."""
         response = client.get(path, follow_redirects=False)
         assert response.status_code == 302
-        assert response.headers["location"] == "/login"
+        assert response.headers["location"] == location
 
     def test_the_catch_all_does_not_shadow_the_api(self, client, store):
         """The pages router is included last and owns `/{path:path}`. An /api
@@ -480,6 +489,81 @@ class TestPageRoutesRequireASession:
             client.get("/admin/users", headers=headers).content
             == client.get("/", headers=headers).content
         )
+
+
+class TestTheSignInGoesBackToThePage:
+    """`?next=` (2026-11-19): the bot's «Додати» opens /marketing#promotions,
+    and after a session expired the sign-in used to land on `/`. The page
+    asked for now rides to /login and back, the #fragment carried by the
+    browser; only a path on this site is ever followed (`safe_next`)."""
+
+    @pytest.mark.parametrize("value", [
+        "/marketing", "/marketing?tab=1", "/v2/reports", "/%2F%2Fexample.org",
+    ])
+    def test_a_page_of_this_site_is_kept(self, value):
+        from web.routes.auth import safe_next
+        assert safe_next(value) == value
+
+    @pytest.mark.parametrize("value", [
+        None, "", "/", "//attacker.example", "/\\attacker.example", "https://attacker.example",
+        "javascript:alert(1)", "marketing", "/login", "/login?next=%2Fx", "/logout",
+        "/auth/telegram/callback", "/marketing\r\nSet-Cookie: x=1", "/" + "a" * 600,
+    ])
+    def test_anything_else_is_dropped(self, value):
+        """Kills: an open redirect (a host, a backslash read as one, a
+        scheme), a header split, or a loop through the sign-in itself."""
+        from web.routes.auth import safe_next
+        assert safe_next(value) is None
+
+    def test_the_login_page_carries_a_checked_next(self, client, store):
+        response = client.get("/login?next=%2Fmarketing", follow_redirects=False)
+        assert response.status_code == 200
+        assert 'data-next="/marketing"' in response.text
+        cookie = response.headers["set-cookie"]
+        assert "ks_login_next=" in cookie and "/marketing" in cookie
+        assert "Path=/auth/telegram" in cookie and "HttpOnly" in cookie
+
+    def test_an_unsafe_next_reaches_neither_the_page_nor_a_cookie(self, client, store):
+        response = client.get("/login?next=%2F%2Fattacker.example", follow_redirects=False)
+        assert response.status_code == 200
+        assert 'data-next=""' in response.text
+        assert "ks_login_next" not in response.headers.get("set-cookie", "")
+
+    def test_a_signed_in_visitor_goes_straight_back(self, client, store, monkeypatch):
+        monkeypatch.setattr("web.routes.auth.check_user_access", lambda uid: {"authorized": True})
+        headers = _cookie_header()
+        back = client.get("/login?next=%2Fmarketing", headers=headers, follow_redirects=False)
+        assert (back.status_code, back.headers["location"]) == (302, "/marketing")
+        home = client.get("/login?next=%2F%2Fattacker.example", headers=headers,
+                          follow_redirects=False)
+        assert (home.status_code, home.headers["location"]) == (302, "/")
+
+    @pytest.mark.parametrize("cookie,location", [
+        ("/marketing", "/marketing"),
+        (None, "/?welcome=Test"),
+        ("//attacker.example", "/?welcome=Test"),
+    ])
+    def test_the_widget_callback_returns_to_the_cookies_page(
+        self, client, store, monkeypatch, cookie, location,
+    ):
+        """The Login Widget signs every query parameter of its callback, so
+        `next` waits in a cookie scoped to the callback, and is spent there."""
+        async def _access(uid, auth_data=None):
+            return {"authorized": True, "role": "viewer", "status": "approved"}
+
+        monkeypatch.setattr("web.routes.auth.verify_telegram_auth", lambda data: True)
+        monkeypatch.setattr("web.routes.auth.check_user_access_async", _access)
+        headers = {"Cookie": f'ks_login_next="{cookie}"'} if cookie else {}
+        response = client.get(
+            f"/auth/telegram/callback?id={VIEWER_ID}&first_name=Test&auth_date=1&hash=x",
+            headers=headers, follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == location
+        set_cookies = response.headers.get_list("set-cookie")
+        assert any(c.startswith(f"{SESSION_COOKIE}=") for c in set_cookies)
+        if cookie:
+            spent = [c for c in set_cookies if c.startswith("ks_login_next=")]
+            assert spent and ("Max-Age=0" in spent[0] or "expires=" in spent[0].lower())
 
 
 class TestTheCatchAllCannotReadOutsideTheBuild:

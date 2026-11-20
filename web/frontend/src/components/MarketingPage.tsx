@@ -6,6 +6,7 @@ import { ChartSection } from './ChartSection'
 import { ROICalculator } from './ROICalculator'
 import { LazyPromocodeAnalyticsChart } from './chartsLazy'
 import { MonthlyReport } from './MonthlyReport'
+import { PromotionCalendar } from './PromotionCalendar'
 
 export const MarketingPage = memo(function MarketingPage() {
   const { t } = useTranslation()
@@ -16,6 +17,8 @@ export const MarketingPage = memo(function MarketingPage() {
       <section>
         <MonthlyReport />
       </section>
+      {/* Its own <section id="promotions">: /marketing#promotions lands there. */}
+      <PromotionCalendar />
       <ChartSection>
         <LazyPromocodeAnalyticsChart />
       </ChartSection>

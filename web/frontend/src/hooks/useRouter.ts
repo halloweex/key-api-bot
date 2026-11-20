@@ -1,6 +1,9 @@
 import { useSyncExternalStore } from 'react'
 
-const NAVIGATE_EVENT = 'app:navigate'
+/** Dispatched after `navigate` pushes; `popstate` covers back and forward.
+ *  A pushed hash fires no `hashchange`, so a hook reading the hash listens
+ *  to this too (`useHashTarget`). */
+export const NAVIGATE_EVENT = 'app:navigate'
 
 /** Navigate to a path using pushState (no full page reload). */
 export function navigate(to: string) {

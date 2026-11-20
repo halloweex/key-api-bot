@@ -172,20 +172,27 @@ export function rangeEnds(from: string, to: string): { from: string; to: string 
  * «31 августа – 30 сентября 2026», «4 ноября 2026», "October 1–31, 2026".
  * What a header says beside its period control, where «1 окт – 31 окт 2026»
  * would be the same dates said twice.
+ *
+ * `withYear: false` leaves the year out where both ends share one — for a
+ * line about this year's days, «26–28 ноября»; ends in two years keep both.
  */
-export function formatSpan(from: string, to: string): string {
+export function formatSpan(
+  from: string, to: string, { withYear = true }: { withYear?: boolean } = {},
+): string {
   if (!isIsoDate(from) || !isIsoDate(to)) return `${from} – ${to}`
-  if (from === to) return formatDay(from, { month: 'long' })
+  if (from === to) return formatDay(from, { month: 'long', withYear })
   const a = parts(from, 'long')
   const b = parts(to, 'long')
   const sameYear = a.year === b.year
   const sameMonth = sameYear && from.slice(5, 7) === to.slice(5, 7)
   if (english()) {
-    if (sameMonth) return `${a.month} ${a.day}–${b.day}, ${b.year}`
-    if (sameYear) return `${a.month} ${a.day} – ${b.month} ${b.day}, ${b.year}`
+    const year = withYear ? `, ${b.year}` : ''
+    if (sameMonth) return `${a.month} ${a.day}–${b.day}${year}`
+    if (sameYear) return `${a.month} ${a.day} – ${b.month} ${b.day}${year}`
     return `${a.month} ${a.day}, ${a.year} – ${b.month} ${b.day}, ${b.year}`
   }
-  if (sameMonth) return `${a.day}–${b.day} ${b.month} ${b.year}`
-  if (sameYear) return `${a.day} ${a.month} – ${b.day} ${b.month} ${b.year}`
+  const year = withYear ? ` ${b.year}` : ''
+  if (sameMonth) return `${a.day}–${b.day} ${b.month}${year}`
+  if (sameYear) return `${a.day} ${a.month} – ${b.day} ${b.month}${year}`
   return `${a.day} ${a.month} ${a.year} – ${b.day} ${b.month} ${b.year}`
 }

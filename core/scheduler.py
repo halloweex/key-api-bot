@@ -946,6 +946,29 @@ class BackgroundScheduler:
             first_run_delay_s=GOAL_FREEZE_DELAY_S,
         )
 
+        # Job: the Monday question about promotions (daily tick at 10:05
+        # Kyiv, asks once an ISO week), revision 0039.
+        #
+        # The forecast cannot know a promotion in advance, so the bot asks
+        # the admins and `KS_PROMO_ASK_RECIPIENTS` which promotions the two
+        # weeks from the Monday hold: [Немає] is an answer and is stored,
+        # [Додати] opens the calendar (`core/promo_asks.py`). The weekly
+        # reports' shape — a daily tick against its own ledger,
+        # `app.promotion_asks` — so a Monday spent down becomes a Tuesday
+        # question. 10:05 is after the 09:30 and 09:45 reports and outside
+        # every window the schedule keeps clear.
+        from core.promo_asks import RUN_AT as PROMO_ASK_AT
+
+        self._add_job(
+            job_id="promo_weekly_ask",
+            name="Promotions: the Monday question",
+            description="Ask which promotions the next two weeks hold, once a week",
+            func=self._run_promo_weekly_ask,
+            trigger=CronTrigger(hour=PROMO_ASK_AT.hour, minute=PROMO_ASK_AT.minute),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Memory monitor (every 30 minutes)
         # Reads cgroup memory stats and alerts admin via Telegram
         # when usage crosses warning/critical thresholds
@@ -1248,6 +1271,15 @@ class BackgroundScheduler:
                     "month_goal_freeze", exc,
                     "nothing frozen; the month's goal is computed live "
                     "until a run freezes it")}
+
+    async def _run_promo_weekly_ask(self) -> Dict[str, Any]:
+        """Ask about the next two weeks' promotions, once an ISO week
+        (revision 0039, `core/promo_asks.py`). A run that reached nobody
+        records nothing, and the next day's asks again."""
+        with correlation_context():
+            from core import promo_asks
+
+            return await promo_asks.run_weekly_ask()
 
     async def _run_manager_stats(self) -> Dict[str, Any]:
         """Run manager stats update job."""
