@@ -155,6 +155,8 @@ describe('the promotions planned for the month', () => {
 
   async function month(props: {
     forecast?: RevenueForecast
+    monthRange?: RevenueForecastRange | null
+    blackFriday?: RevenueForecastBlackFriday | null
     plannedPromotions?: PlannedPromotion[] | null
     canAddPromotion?: boolean
   }) {
@@ -164,6 +166,8 @@ describe('the promotions planned for the month', () => {
     const { container } = render(
       <RevenueTrendActions
         forecast={props.forecast}
+        monthRange={props.monthRange}
+        blackFriday={props.blackFriday}
         plannedPromotions={props.plannedPromotions}
         canAddPromotion={props.canAddPromotion}
         growthData={undefined}
@@ -204,6 +208,18 @@ describe('the promotions planned for the month', () => {
     expect((await month({ plannedPromotions: [SPRING], canAddPromotion: true })).textContent).toBe('')
     expect(lines(await month({ forecast: FORECAST, plannedPromotions: [] }))).toEqual([])
     expect(lines(await month({ forecast: FORECAST, plannedPromotions: null }))).toEqual([])
+  })
+
+  it('says the rest of the badge, and nothing of promotions, to a reader without marketing', async () => {
+    // The planned promotions are /marketing's: `/api/revenue/forecast`
+    // answers `planned_promotions: null` to an account that may not open it.
+    const c = await month({
+      forecast: FORECAST, monthRange: RANGE, blackFriday: BLACK_FRIDAY, plannedPromotions: null,
+    })
+    expect(lines(c)).toEqual(["Якщо Чорна п'ятниця як торік: +₴1.3M (≈ ₴4.5M)"])
+    expect(plain(c.textContent)).toContain('найімовірніше ₴2.9–3.6M')
+    expect(c.textContent).not.toContain('Заплановано')
+    expect(c.querySelector('a')).toBeNull()
   })
 
   it('offers «+ акція» only to whoever may add, and it opens the calendar in the page', async () => {
