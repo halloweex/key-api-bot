@@ -401,15 +401,13 @@ class TestTheWriter:
             await promotions.as_of(datetime(2027, 1, 1), *window)
 
     @pytest.mark.asyncio
-    async def test_the_history_and_the_stamps(self, db):
+    async def test_the_history_and_the_campaigns_named(self, db):
         a = await promotions.create(_data(sms_campaign="Весна SMS"), by=5, sms_view=True)
-        assert await promotions.latest_recorded_at() == a.recorded_at
-        b = await promotions.update(a.id, _data(name="Інша"), by=6)
+        await promotions.update(a.id, _data(name="Інша"), by=6)
         history = await promotions.versions(a.id)
         assert [(p.version, p.recorded_by) for p in history] == [(2, 6), (1, 5)]
         assert all(p.created_at == a.recorded_at for p in history)
         assert await promotions.versions(a.id + 1000) == []
-        assert await promotions.latest_recorded_at() == b.recorded_at
         assert await promotions.campaigns_named() == {"Весна SMS"}
 
 

@@ -489,8 +489,6 @@ _VERSIONS_SQL = (
     "WHERE v.promotion_id = $1 ORDER BY v.version DESC"
 )
 
-_LATEST_STAMP_SQL = "SELECT max(recorded_at) FROM app.promotion_versions"
-
 _CAMPAIGNS_NAMED_SQL = (
     "SELECT DISTINCT sms_campaign FROM app.promotion_versions "
     "WHERE sms_campaign IS NOT NULL"
@@ -663,14 +661,6 @@ async def versions(promotion_id: int) -> List[Promotion]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(_VERSIONS_SQL, promotion_id)
     return [_promotion(row) for row in rows]
-
-
-async def latest_recorded_at() -> Optional[datetime]:
-    """When any promotion was last saved, or None before the first: what the
-    forecast's cache keys on, so an edit shows on the next request."""
-    pool = await _pool()
-    async with pool.acquire() as conn:
-        return await conn.fetchval(_LATEST_STAMP_SQL)
 
 
 async def campaigns_named() -> Set[str]:

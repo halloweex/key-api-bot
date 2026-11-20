@@ -176,10 +176,13 @@ async def get_revenue_forecast(
 @limiter.limit("5/hour")
 async def train_revenue_forecast(
     request: Request,
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail only"),
     admin: dict = Depends(require_admin),
 ):
-    """Manually trigger revenue prediction model training. Requires admin."""
+    """Manually trigger revenue prediction model training. Requires admin.
+
+    Retail only: `PredictionService.train` refuses any other sales type with
+    a ValidationError, which web answers 400."""
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
