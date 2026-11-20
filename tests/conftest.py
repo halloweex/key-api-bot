@@ -223,3 +223,55 @@ def _a_fresh_sync_service(monkeypatch):
 # S14-11: they patched a chain's `writes_postgres()`/`reads_postgres()`/
 # `mode()` back to DuckDB for one test or one block. Those answers went with
 # the flags, and with them the DuckDB branches the helpers reached.
+
+
+# ─── Requested by name across the suite ──────────────────────────────────────
+# Not autouse. They lived in `tests/unit/test_read_fallback_sites.py`, and two
+# dozen modules imported them from there, so deleting that test module would
+# have broken every one of them.
+
+
+@pytest.fixture
+def fresh_read_fallback(monkeypatch):
+    """The refusal counts start from zero and are forgotten after the test,
+    and every `KS_READ_*` is unset — none is read since step 14's S14-07, so
+    a test that sets one asks nothing of it. (The fixture saved and restored
+    the mode's caches until S14-16 deleted them.)"""
+    from core import read_fallback
+
+    for name in [n for n in os.environ if n.startswith("KS_READ_")]:
+        monkeypatch.delenv(name, raising=False)
+    read_fallback.reset_counts()
+    yield read_fallback
+    read_fallback.reset_counts()
+
+
+@pytest.fixture
+def admin_client(monkeypatch):
+    """`TestClient(web.main.app)`, built without the context manager (no
+    startup jobs), signed in as a hardcoded admin whose session is resolved
+    without reading the user list. For a visitor of another role, or one read
+    from `app.dashboard_users` the way production reads it, see
+    `tests/helpers/app_client.py`."""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from core.permissions import ADMIN_USER_IDS
+    from web.main import app
+    from web.ratelimit import limiter
+    from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
+
+    admin = sorted(ADMIN_USER_IDS)[0]
+
+    async def _resolve(session):
+        return {"user_id": admin, "role": "admin"}
+
+    monkeypatch.setattr("web.routes.auth._resolve_session", _resolve)
+    limiter.reset()
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
+        {"id": str(admin), "first_name": "T", "last_name": "U", "username": "t",
+         "auth_date": str(int(time.time()))}, role="admin")))
+    yield client
+    limiter.reset()

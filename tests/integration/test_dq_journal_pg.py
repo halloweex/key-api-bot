@@ -21,71 +21,16 @@ the shadow, its daily comparison and the `duckdb` branch with S14-10.
 from __future__ import annotations
 
 import asyncio
-import os
-from datetime import date, datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
+from datetime import date, datetime, timezone
 
 import asyncpg
 import pytest
-import pytest_asyncio
 
 from core import chain_latch, dq_journal, pg_dq_journal_write as chain
-from core.data_quality import (
-    Discrepancy, DiscrepancyClass, IntegrityIssue, Severity, run_values,
-)
+from core.data_quality import IntegrityIssue, Severity, run_values
+from tests.helpers.dq_journal_pg import DSN, NOW, TABLES, _kwargs, pool  # noqa: F401
 
-DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
-
-TABLES = chain.CHAIN_TABLES
-# Fixed, so the literals below are DuckDB's answers on this very fixture.
-NOW = datetime(2026, 10, 1, 7, 30, tzinfo=timezone.utc)
-DAY = NOW.date()
-
-
-async def _clean(pool):
-    """The journal, the chain's owner rows and the beat in both places it
-    is read from — the throwaway database's, put back as the suite found it."""
-    async with pool.acquire() as conn:
-        for t in reversed(TABLES):
-            await conn.execute(f"DELETE FROM {t}")
-        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%' "
-                           "OR key = $1", chain.DIGEST_MARKER_KEY)
-        await conn.execute("DELETE FROM app.sync_metadata WHERE key = $1",
-                           chain.DIGEST_MARKER_KEY)
-
-
-@pytest_asyncio.fixture
-async def pool(monkeypatch):
-    from core import write_chains
-
-    for c in write_chains.WRITE_CHAINS:
-        monkeypatch.delenv(c.WRITE_ENV, raising=False)
-    monkeypatch.setenv("KS_PG_DSN", DSN)
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
-    await _clean(pool)
-    with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
-         patch("core.pg.require_revision", new=AsyncMock()):
-        yield pool
-    await _clean(pool)
-    await pool.close()
-
-
-def _kwargs(layer="integrity", started=None, issues=None, diffs=None):
-    started = started or NOW - timedelta(minutes=5)
-    return dict(
-        started_at=started, ended_at=started + timedelta(seconds=4), as_of=started,
-        window_start=DAY, window_end=DAY, layer=layer,
-        issues=issues if issues is not None else [
-            IntegrityIssue(check_name="pk_uniqueness_orders", table_name="orders",
-                           severity=Severity.WARN, count=2, sample_ids=(5, 6),
-                           description="двa дублі")],
-        discrepancies=diffs if diffs is not None else [
-            Discrepancy(month="2026-09", source_id=4,
-                        diff_class=DiscrepancyClass.MISSING_IN_DK, field="orders",
-                        dk_value=1.25, kc_value=3.5, severity=Severity.CRITICAL,
-                        order_ids=(77,))],
-    )
 
 
 _COLUMNS = {
@@ -327,3 +272,6 @@ class TestOneFindingPerKey:
         rows = await _pg_rows(pool, "app.data_quality_issues")
         assert [(r[0], r[1], r[2], r[4]) for r in rows] == [
             (run_id, "chain_invariants_unwatched", "(write chains)", 2)]
+        # And the run counts the folded findings, not the two it was handed.
+        runs = await _pg_rows(pool, "app.data_quality_runs")
+        assert [r[8] for r in runs if r[0] == run_id] == [1]

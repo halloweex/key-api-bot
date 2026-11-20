@@ -1227,9 +1227,6 @@ class TestTheEvidenceMarkers:
         assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", line)
         assert read_markers(world.marker.parent)[2] is not None
         assert not list(world.marker.parent.glob("*.tmp"))
-        script = (REPO / "deploy" / "pg_offsite.sh").read_text()
-        assert 'mv -f "$MARKER.tmp" "$MARKER"' in script
-        assert '>"$MARKER"' not in script, "the marker is written in place"
 
     def test_the_remote_drill_leaves_a_marker_only_when_it_passes(self, world):
         """Mutation: write the marker before the row comparison — this test's

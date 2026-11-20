@@ -39,59 +39,17 @@ reaches an engine at all is `TestNothingGoesRoundARefusal`'s, below.
 """
 from __future__ import annotations
 
-import ast
-import logging
 from datetime import date
 from pathlib import Path
-from typing import List, Set
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core import read_fallback
+from tests.helpers.router_walk import round_a_refusal
 
 ROOT = Path(__file__).resolve().parents[2]
 D1, D2 = date(2026, 8, 1), date(2026, 8, 3)
-
-
-def _dashboard(store):
-    return store._dashboard_run(
-        "SELECT 1 FROM {silver_orders} s LEFT JOIN {managers} m ON s.manager_id = m.id"
-        " WHERE s.id = ?", [7])
-
-
-def _silver(store):
-    return store._pg_silver("SELECT 1 FROM {order_lines} l WHERE l.order_id = ?", [7])
-
-
-def _gold_summary(store):
-    return store._pg_gold_summary(D1, D2, "retail", None)
-
-
-def _gold_series(store):
-    return store._pg_gold_series(D1, D2, "b2b", 4)
-
-
-def _managers(store):
-    return store.get_manager_sales_365d()
-
-
-# (reader, surface, module, function the reader calls, the switch it no longer
-# reads, how to call it, what the call must hand the engine: a table the
-# rendered statement names, or the arguments)
-READERS = [
-    ("_dashboard_run", "dashboard", "pg_dashboard_read", "fetch", "KS_READ_DASHBOARD",
-     _dashboard, "bronze.managers"),
-    ("_pg_silver", "dashboard", "pg_silver_read", "fetch", "KS_READ_SILVER",
-     _silver, "silver.order_lines"),
-    ("_pg_gold_summary", "dashboard", "pg_gold_read", "fetch_summary", "KS_READ_GOLD",
-     _gold_summary, (D1, D2, "retail", None)),
-    ("_pg_gold_series", "dashboard", "pg_gold_read", "fetch_series", "KS_READ_GOLD",
-     _gold_series, (D1, D2, "b2b", 4)),
-    ("get_manager_sales_365d", "managers", "pg_silver_read", "fetch", "KS_READ_SILVER",
-     _managers, "silver.orders"),
-]
-IDS = [r[0] for r in READERS]
 
 
 @pytest.fixture
@@ -117,31 +75,6 @@ def store(tmp_path, monkeypatch):
 
 
 class TestAFailureIsTheRefusalOffMade:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "reader,surface,module,function,switch,call,handed", READERS, ids=IDS)
-    async def test_a_503_naming_the_surface_counted_as_a_refusal(
-        self, store, monkeypatch, caplog, reader, surface, module, function, switch,
-        call, handed,
-    ):
-        down = OSError("connection refused")
-        monkeypatch.setattr(f"core.{module}.{function}", AsyncMock(side_effect=down))
-
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            with pytest.raises(read_fallback.ReadUnavailable) as raised:
-                await call(store)
-
-        assert raised.value.surface == surface
-        assert raised.value.__cause__ is down
-        assert read_fallback.refusals()[surface]["count"] == 1
-        # `refuse`'s line, word for word: `read_refused`'s lever greps "read
-        # refused", and a fallback was grepped by the phrase below. (Until
-        # step 14's S14-16 it named KS_READ_FALLBACK=off as what refused.)
-        assert (f"read refused: {surface} — its engine failed, and no other "
-                f"store may answer it "
-                f"(1 refused since start): connection refused") in caplog.text
-        assert "falling back to DuckDB" not in caplog.text
-
     @pytest.mark.asyncio
     @pytest.mark.parametrize("method,kwargs,module,function", [
         ("get_summary_stats", {}, "pg_gold_read", "fetch_summary"),
@@ -171,100 +104,6 @@ REFUSING_HELPERS = {"_pg_gold_summary", "_pg_gold_series", "_pg_silver",
                     "get_manager_sales_365d"}
 
 
-def _judged_by_rule_5(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[str]:
-    """The engine reaches of `fn`, in the words of S14-05's walk, that rule 5
-    of `test_read_fallback_sites.py` judges: every call its `_engine_calls`
-    returns, and every import in `fn` binding what those calls are read by —
-    a module by its alias (`from core import pg_x`, `import core.pg_x as y`),
-    spelled out (`import core.pg_x`), or a function by its name (`from
-    core.pg_x import y`) — and the same of a `core.ch_*` module, which rule 5
-    reads since step 14's S14-07. `fn`'s own nodes only, as rule 5 reads
-    it."""
-    from tests.unit.test_read_fallback_sites import (
-        ENGINE_PREFIXES, _engine_calls, _is_engine_module, _own_nodes,
-    )
-    from tests.unit.test_read_routers_postgres_only import _dotted
-
-    judged = [f"engine: {_dotted(c.func)}()" for c in _engine_calls(fn, aliases, names)]
-    for n in _own_nodes(fn):
-        if isinstance(n, ast.ImportFrom) and n.module == "core":
-            judged += [f"engine: imports core.{a.name}" for a in n.names
-                       if a.name.startswith(ENGINE_PREFIXES)]
-        elif isinstance(n, ast.ImportFrom) and n.module and _is_engine_module(n.module):
-            judged.append(f"engine: imports {n.module}")
-        elif isinstance(n, ast.Import):
-            judged += [f"engine: imports {a.name}" for a in n.names
-                       if _is_engine_module(a.name)]
-    return judged
-
-
-def _engine_held_as_a_value(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[str]:
-    """Where `fn` holds an engine module or function other than as the
-    callee of a call rule 5 judges. `fetch = pg_gold_read.fetch_series`, then
-    `await fetch(...)` outside the `try`, is a call neither walk sees."""
-    from tests.unit.test_read_fallback_sites import (
-        _engine_calls, _names_an_engine_module, _own_nodes,
-    )
-    from tests.unit.test_read_routers_postgres_only import _dotted
-
-    callees = set()
-    for call in _engine_calls(fn, aliases, names):
-        node = call.func
-        while isinstance(node, ast.Attribute):
-            callees.add(id(node))
-            node = node.value
-        callees.add(id(node))
-    held = []
-    for n in _own_nodes(fn):
-        if id(n) in callees:
-            continue
-        if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
-                and (n.id in aliases or n.id in names or n.id == "get_pool")):
-            held.append(f"engine: {n.id} held as a value")
-        elif isinstance(n, ast.Attribute) and _names_an_engine_module(n):
-            held.append(f"engine: {_dotted(n)} held as a value")
-    return held
-
-
-def round_a_refusal(source: str, relpath: str) -> List[str]:
-    """What in `source` reaches what only a router or a refusing helper may,
-    and is neither. S14-05's walk of the tab modules
-    (`test_read_routers_postgres_only._what_reaches_round_the_router`: an
-    engine, the old shape's machinery, the environment), with one allowance:
-    a function rule 5 of `test_read_fallback_sites.py` holds clean — it
-    refuses, and every engine call it makes sits inside the `try` whose
-    handler is the refusal — may reach an engine, but only by what rule 5
-    judges. Every other engine reach of it is still reported: S14-05's walk
-    sees calls rule 5 does not (a function imported by its name was one,
-    until the review of this PR's merge widened rule 5), and an engine held
-    as a value is called by a name no walk reads. A name defined twice in
-    the file gets no allowance, since the walk keys its reaches by name."""
-    from collections import Counter
-
-    from tests.unit.test_read_fallback_sites import (
-        _engine_aliases, _engine_names, _functions, read_switch_modules, walk_source,
-    )
-    from tests.unit.test_read_routers_postgres_only import (
-        _what_reaches_round_the_router,
-    )
-
-    tree = ast.parse(source)
-    aliases, names = _engine_aliases(tree), _engine_names(tree)
-    _routers, reaches = _what_reaches_round_the_router(source)
-    defined = Counter(getattr(fn, "name", "") for fn in _functions(tree))
-    clean = {s.function for s in walk_source(source, relpath, read_switch_modules())
-             if s.rule == "refuse" and s.ok and defined[s.function] == 1}
-    out = []
-    for function, found in sorted(reaches.items()):
-        left = Counter(found)
-        if function in clean:
-            fn = next(f for f in _functions(tree) if getattr(f, "name", "") == function)
-            left -= Counter(_judged_by_rule_5(fn, aliases, names))
-            left += Counter(_engine_held_as_a_value(fn, aliases, names))
-        out += [f"{function}: {f}" for f in sorted(left.elements())]
-    return out
-
-
 class TestNothingGoesRoundARefusal:
     """The merge of S14-05's main (#327, the pixel-only breakdown) brought
     `test_nothing_but_the_router_reaches_an_engine`: in the three tab modules
@@ -283,9 +122,7 @@ class TestNothingGoesRoundARefusal:
 
     def test_the_dashboard_file(self):
         source = (ROOT / REVENUE).read_text(encoding="utf-8")
-        from tests.unit.test_read_routers_postgres_only import (
-            _what_reaches_round_the_router,
-        )
+        from tests.helpers.router_walk import _what_reaches_round_the_router
 
         routers, reaches = _what_reaches_round_the_router(source)
         assert routers == REVENUE_ROUTERS, routers

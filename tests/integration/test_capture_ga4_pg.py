@@ -35,7 +35,9 @@ from core import analytics_captures as cap
 from core import ga4
 from core import ga4_capture as gc
 from core.data_quality import Severity
-from tests.unit.test_capture_ga4 import TODAY, FakeGA4, ga4_key, people  # noqa: F401 — fixture
+from tests.helpers.ga4_capture_fakes import (  # noqa: F401 — fixture
+    TODAY, FakeGA4, ga4_key, people,
+)
 from web.services import ga4_funnel_service as svc
 
 DSN = os.getenv("KS_PG_DSN")

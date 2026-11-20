@@ -37,6 +37,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.helpers.router_walk import _what_reaches_round_the_router
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -48,81 +49,6 @@ TAB_MODULES = [
     ("core/repositories/margin.py", "_margin_run"),
     ("core/repositories/products_intel.py", "_intel_run"),
 ]
-OLD_SHAPE = {"fall_back", "no_address", "no_engine", "enabled", "available"}
-# Postgres (`core.pg`, `core.pg_*`), the driver, and — since step 14's S14-07,
-# whose cohorts read ClickHouse alone — ClickHouse's modules (`core.ch_*`).
-ENGINE_MODULES = ("core.pg", "core.ch_", "asyncpg")
-
-
-def _dotted(node) -> str:
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
-
-
-def _what_reaches_round_the_router(source: str):
-    """`(routers, reaches)` for one module: the `_*_run` functions — rule 5
-    of `test_read_fallback_sites.py` judges those — and, for every other
-    function, what it reaches that only a router may: an engine (a function
-    of a `core.pg*` module — or, since step 14's S14-07, of a `core.ch_*`
-    one — by the module or imported by name; `get_pool`; an import of
-    `core.pg*`, `core.ch_*` or `asyncpg` of its own), the old shape's
-    machinery (`fall_back`, `no_address`, `no_engine`, `enabled`,
-    `available`), or the environment (`os.getenv`, `os.environ`, a
-    `KS_READ_*` name outside a docstring)."""
-    tree = ast.parse(source)
-    modules, functions = set(), set()
-    for n in ast.walk(tree):
-        if isinstance(n, ast.ImportFrom) and n.module:
-            if n.module == "core":
-                modules |= {a.asname or a.name for a in n.names
-                            if a.name.startswith(("pg", "ch_"))}
-            elif n.module.startswith(ENGINE_MODULES):
-                functions |= {a.asname or a.name for a in n.names}
-        elif isinstance(n, ast.Import):
-            modules |= {a.asname for a in n.names
-                        if a.asname and a.name.startswith(ENGINE_MODULES)}
-    routers, reaches = set(), {}
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if fn.name.startswith("_") and fn.name.endswith("_run"):
-            routers.add(fn.name)
-            continue
-        docstrings = {id(f.body[0].value) for f in ast.walk(fn)
-                      if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
-                      and f.body and isinstance(f.body[0], ast.Expr)}
-        found = []
-        for n in ast.walk(fn):
-            if isinstance(n, (ast.Import, ast.ImportFrom)):
-                names = ([n.module or ""] if isinstance(n, ast.ImportFrom)
-                         else [a.name for a in n.names])
-                if isinstance(n, ast.ImportFrom) and n.module == "core":
-                    names = [f"core.{a.name}" for a in n.names]
-                found += [f"engine: imports {m}" for m in names
-                          if m.startswith(ENGINE_MODULES)]
-            elif isinstance(n, ast.Call):
-                name = _dotted(n.func)
-                head, last = name.split(".", 1)[0], name.rsplit(".", 1)[-1]
-                if (head in modules or name in functions
-                        or name.startswith(ENGINE_MODULES) or last == "get_pool"):
-                    found.append(f"engine: {name}()")
-                elif last in OLD_SHAPE:
-                    found.append(f"old shape: {name}()")
-                elif name in ("os.getenv", "getenv", "os.environ.get", "environ.get"):
-                    found.append(f"environment: {name}()")
-            elif isinstance(n, ast.Subscript) and _dotted(n.value) in ("os.environ", "environ"):
-                found.append("environment: os.environ[...]")
-            elif (isinstance(n, ast.Constant) and isinstance(n.value, str)
-                  and "KS_READ_" in n.value and id(n) not in docstrings):
-                found.append(f"environment: {n.value[:40]!r}")
-        if found:
-            reaches[fn.name] = found
-    return routers, reaches
 
 
 class TestNothingGoesRoundTheRouter:

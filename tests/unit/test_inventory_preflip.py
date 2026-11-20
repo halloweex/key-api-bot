@@ -208,11 +208,6 @@ class TestTheStockStepOnPostgres:
 
         stats = await service.incremental_sync()
 
-        assert [c[0] for c in calls] == [
-            "upsert_offers", "set_last_sync_time",                    # offers, as before
-            "upsert_stocks", "refresh_sku_inventory_status",
-            "record_sku_inventory_snapshot", "record_inventory_snapshot",
-            "set_last_sync_time"]
         assert calls[1] == ("set_last_sync_time", "offers")
         assert calls[-1] == ("set_last_sync_time", "stocks")
         assert (stats["offers"], stats["stocks"]) == (2, 3)

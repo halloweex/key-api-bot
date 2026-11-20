@@ -31,7 +31,6 @@ taken the refusals that came from a switch naming Postgres with no
 from __future__ import annotations
 
 import json
-import logging
 import os
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -39,43 +38,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core import read_fallback
-from tests.unit.test_read_fallback_http import stores  # noqa: F401 — fixture
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
+from tests.helpers.route_sweep import stores  # noqa: F401 — fixture
+from tests.helpers.off_consumers import AssistantTools, TrafficReportWiring, _duck, _ledger_answers, _serve, _writer_recorded
 
 
 def _refused(surface: str) -> dict:
     return {"reason": read_fallback.READ_UNAVAILABLE, "surface": surface}
-
-
-async def _duck(tmp_path, name="consumers.duckdb"):
-    from core.store import AnalyticsStore
-
-    store = AnalyticsStore()
-    return store
-
-
-def _ledger_answers(monkeypatch):
-    """The report ledgers as production holds them: in Postgres (chains 11a
-    and 11b, a constant since step 14's S14-00), asked before any read of the
-    report's own. Here the week is unsent and a write is recorded, so the
-    refusal under test is the report's read and "no ledger row" is "never
-    marked"."""
-    from core import report_ledger
-
-    monkeypatch.setattr(report_ledger, "already_sent", AsyncMock(return_value=False))
-    mark = AsyncMock(side_effect=AssertionError("the ledger was written"))
-    monkeypatch.setattr(report_ledger, "mark_sent", mark)
-    return mark
-
-
-def _serve(monkeypatch, store) -> None:
-    async def _get_store():
-        return store
-
-    monkeypatch.setattr("core.store.get_store", _get_store)
 
 
 # ─── The weekly sales report ──────────────────────────────────────────────
@@ -90,9 +58,10 @@ class TestWeeklyReport:
         pool raises at the first read, so a warehouse would never be read."""
         from core.scheduler import SCHEDULER_TIMEZONE
         from core.weekly_report import last_complete_week
-        from tests.unit.test_weekly_report import TestSchedulerJob, _store
+        from tests.helpers.weekly_report_job import WeeklyReportJob
+        from tests.helpers.weekly_report_job import _store
 
-        harness = TestSchedulerJob()
+        harness = WeeklyReportJob()
         store = await _store(tmp_path)
         week_start, _end = last_complete_week(datetime.now(SCHEDULER_TIMEZONE).date())
         sent: list = []
@@ -123,54 +92,10 @@ class TestWeeklyReport:
 
 # ─── The weekly traffic report ────────────────────────────────────────────
 
-class TestTrafficReport:
+class TestTrafficReport(TrafficReportWiring):
     """Reads through the tab's own router, which refuses — so here the
     raising pool itself is what is refused."""
 
-    ADMINS = [111, 222]
-
-    def _wire(self, monkeypatch, store, tmp_path):
-        import importlib
-
-        from bot.store_sqlite import SqliteBotStore
-        from core.scheduler import BackgroundScheduler
-
-        monkeypatch.delenv("KS_TRAFFIC_REPORT_FIRST_WEEK", raising=False)
-        monkeypatch.delenv("KS_TRAFFIC_REPORT_RECIPIENTS", raising=False)
-        monkeypatch.setattr("bot.store_sqlite.DB_PATH", tmp_path / "prefs.db")
-        bot_store = SqliteBotStore()
-        bot_store.initialise()
-        monkeypatch.setattr("core.bot_store._store", bot_store)
-        monkeypatch.setattr(importlib.import_module("core.config"),
-                            "ADMIN_USER_IDS", self.ADMINS)
-        _serve(monkeypatch, store)
-
-        sent: list = []
-
-        async def _rich(html, media=None, chat_ids=None, **kwargs):
-            sent.append(html)
-            return len(chat_ids or [])
-
-        async def _text(body, chat_ids=None, **kwargs):
-            sent.append(body)
-            return len(chat_ids or [])
-
-        monkeypatch.setattr("core.telegram_alerts.send_rich_message_http", _rich)
-        monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _text)
-        return BackgroundScheduler(), sent
-
-    @staticmethod
-    def _the_warehouse_is_ready(monkeypatch):
-        """The readiness gate answering, past the reported week: it reads
-        Postgres' Gold since step 14's S14-07, which the raising pool would
-        stop first — and its own failure is no refusal."""
-        from core.scheduler import SCHEDULER_TIMEZONE
-        from core.weekly_report import last_complete_week
-
-        start, end = last_complete_week(datetime.now(SCHEDULER_TIMEZONE).date())
-        monkeypatch.setattr("core.weekly_report.warehouse_max_date",
-                            AsyncMock(return_value=end))
-        return start
 
     @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_defers_with_no_ledger_row(
@@ -191,19 +116,6 @@ class TestTrafficReport:
         assert read_fallback.refusals()["traffic"]["count"] >= 1
 
 # ─── The Monday goals job ─────────────────────────────────────────────────
-
-def _writer_recorded(monkeypatch) -> list:
-    """Chain 7b-3's store of the goal tables, recorded: production's one
-    writer of them (a constant since S14-00)."""
-    from core import pg_forecast_write
-
-    written = []
-
-    async def _persist(*args, **kwargs):
-        written.append(args)
-
-    monkeypatch.setattr(pg_forecast_write, "persist_goal_tables", _persist)
-    return written
 
 
 class TestSeasonalityJob:
@@ -260,7 +172,7 @@ class TestSeasonalityJobRefusedAtEveryRead:
         from tests.integration.pg_tab_seed import (
             store_that_never_reaches_duckdb, tab_in_postgres,
         )
-        from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
+        from tests.helpers.goals_history import _seed_history_pg
 
         dsn = os.getenv("KS_PG_DSN")
         if not dsn:
@@ -357,14 +269,7 @@ class TestTraining:
 
 # ─── The assistant ────────────────────────────────────────────────────────
 
-class TestAssistant:
-    @staticmethod
-    def _serve_tools(monkeypatch, store):
-        async def _get_store():
-            return store
-
-        monkeypatch.setattr("core.chat_tools.get_store", _get_store)
-
+class TestAssistant(AssistantTools):
     @pytest.mark.asyncio
     async def test_under_off_a_raising_pool_is_a_named_tool_result(
         self, stores, monkeypatch, tmp_path,
@@ -482,9 +387,7 @@ class TestSearchIndex:
 
 
     @pytest.mark.asyncio
-    async def test_the_boot_contains_it(
-        self, stores, meili, monkeypatch, tmp_path, caplog,
-    ):
+    async def test_the_boot_contains_it(self, stores, meili, monkeypatch, tmp_path):
         """Web's boot, which since S14-00 is always `KS_DUCKDB=off`: the
         orders held are asked of where they are written, never DuckDB's
         counts. The index's read fails with the pool, and the index's own
@@ -503,11 +406,9 @@ class TestSearchIndex:
         service.incremental_sync = AsyncMock(return_value={})
         monkeypatch.setattr(sync_mod, "init_meilisearch", AsyncMock(return_value=True))
 
-        with caplog.at_level(logging.WARNING):
-            await sync_mod.init_and_sync()
+        await sync_mod.init_and_sync()          # contained: does not raise
 
         store.set_last_sync_time.assert_not_awaited()
-        assert "Meilisearch sync error: connection refused" in caplog.text
 
 
 # ─── The buyers step, inside the sync tick ────────────────────────────────

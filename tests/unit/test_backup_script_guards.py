@@ -214,20 +214,8 @@ def test_gpg_runs_only_through_gpg_safe():
             )
     # `ark_ship.sh` was the third until it was deleted on 2026-11-19.
     assert {"pg_offsite.sh", "pg_restore_drill.sh"} <= set(callers), callers
-
-    # The walk itself, on the shape a review found it missing: a call whose
-    # options start on the continuation line.
-    probe = "f() {\n    gpg \\\n        --symmetric --batch -o out in\n}\n"
-    assert re.findall(r"(?<![\w./-])gpg\s+-\S*", _calls(probe)), "continuation not joined"
-
-    lib = "\n".join(_code_lines(definers[0].read_text()))
-    assert 'home="$(mktemp -d ' in lib, "gpg_safe's home must be made fresh per call"
-    assert re.search(r'GNUPGHOME="\$home" gpg --no-keyring "\$@"', lib), (
-        "gpg_safe must run gpg in its own home"
-    )
-    assert not re.search(r"(?m)^\s*set\s+-", lib), (
-        "a sourced library sets no shell options; errexit is the caller's"
-    )
+    # What gpg_safe itself does (a fresh home per call, `--no-keyring`, no
+    # shell options of its own) is run, not read: tests/unit/test_gpg_safe.py.
 
 
 def test_the_shipper_holds_a_lock_it_does_not_wait_for():

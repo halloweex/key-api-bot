@@ -212,18 +212,11 @@ def _plain(rows):
 
 class TestTheScreenReadsTheKyivYear:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("switch", [None, "duckdb", "junk-s14-06"],
-                             ids=["unset", "duckdb", "junk"])
-    async def test_the_rows_are_the_kyiv_year_in_the_body_s_order(
-        self, in_postgres, monkeypatch, switch,
-    ):
+    async def test_the_rows_are_the_kyiv_year_in_the_body_s_order(self, in_postgres):
         """Against a truth no engine computed: the edge day's first minute is
         in, the evening before is out, a return and a retired source bring
-        nothing — whatever `KS_READ_SILVER` says, which nothing reads since
-        step 14's S14-06."""
+        nothing."""
         store, _pool, orders, today = in_postgres
-        if switch is not None:
-            monkeypatch.setenv("KS_READ_SILVER", switch)
         assert _plain(await store.get_manager_sales_365d()) == _expected(orders, today)
 
     @pytest.mark.asyncio

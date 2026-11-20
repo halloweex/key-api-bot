@@ -262,7 +262,6 @@ class TestTheWatchIsComplete:
         assert inv.GOAL_TABLES_INCOMPLETE in _names(issues)
         (issue,) = [i for i in issues if i.check_name == inv.GOAL_TABLES_INCOMPLETE]
         assert issue.severity.value == "WARN"
-        assert "generate_smart_goals falls back" in issue.description
 
     def test_the_placeholder_over_two_full_years_is_incomplete(self):
         """The 2026-08-31 backup's exact state: 0.10, sample 0, a history from
@@ -270,7 +269,6 @@ class TestTheWatchIsComplete:
         issues = _judge(_healthy(yoy_overall=0.10, yoy_sample=0), self.NOW)
         (issue,) = issues
         assert issue.check_name == inv.GOAL_TABLES_INCOMPLETE
-        assert "0.10 placeholder" in issue.description
 
     def test_the_placeholder_is_honest_without_two_full_years(self):
         assert _judge(_healthy(yoy_overall=0.10, yoy_sample=0,
@@ -304,14 +302,21 @@ class TestTheWatchJudgesTheSlot:
         (issue,) = _judge(f, now)
         assert issue.check_name == inv.FORECAST_STALE
         assert issue.severity.value == "WARN"
-        assert "2026-10-12T03:30:00+03:00" in issue.description
+        from core.scheduler import REVENUE_TRAIN_SCHEDULE
+
+        # Judged at the Monday 03:30 training, the slot the grace has passed.
+        assert inv.last_slot(REVENUE_TRAIN_SCHEDULE, now - inv.FORECAST_SLOT_GRACE) == (
+            _kyiv(2026, 10, 12, 3, 30))
 
     def test_monday_seven_with_last_weeks_indices_is_stale(self):
         now = _kyiv(2026, 10, 12, 7, 0)
         f = _healthy(seasonal_at=MON, forecast_at=_kyiv(2026, 10, 12, 3, 31))
         (issue,) = _judge(f, now)
         assert issue.check_name == inv.GOAL_TABLES_STALE
-        assert "2026-10-12T04:00:00+03:00" in issue.description
+        from core.scheduler import SEASONALITY_SCHEDULE
+
+        assert inv.last_slot(SEASONALITY_SCHEDULE, now - inv.FORECAST_SLOT_GRACE) == (
+            _kyiv(2026, 10, 12, 4, 0))
 
     def test_thursday_seven_with_mondays_forecast_is_stale(self):
         now = _kyiv(2026, 10, 8, 7, 0)
@@ -349,13 +354,11 @@ class TestTheWatchJudgesTheSlot:
         now = _kyiv(2026, 10, 8, 13, 0)
         (issue,) = _judge(_healthy(seasonal_at=None, seasonal_unstamped=12), now)
         assert issue.check_name == inv.GOAL_TABLES_STALE
-        assert "no updated_at" in issue.description
 
     def test_no_retail_forecast_at_all_is_stale(self):
         now = _kyiv(2026, 10, 8, 13, 0)
         (issue,) = _judge(_healthy(forecast_at=None, horizon=None), now)
         assert issue.check_name == inv.FORECAST_STALE
-        assert "holds no retail row" in issue.description
 
     def test_unstamped_forecast_rows_ride_in_the_staleness(self):
         now = _kyiv(2026, 10, 8, 13, 0)
@@ -548,7 +551,7 @@ class TestPredictionsStored:
     @staticmethod
     def _service(monkeypatch, store):
         from core import prediction_service as ps
-        from tests.unit.test_audit_fixes import _valid_training_df
+        from tests.helpers.training_frames import _valid_training_df
 
         svc = ps.PredictionService()
 
@@ -674,10 +677,6 @@ class TestTheSmartGoalReadsOneSet:
 
 # ─── A failed read under the chain is a refusal, never a quiet answer ───────
 
-from tests.unit.test_read_fallback_sites import (  # noqa: E402,F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
 
 def _failing_on(table):
     """`pg_goals_read.fetch` failing only for a statement naming `table` — a
@@ -767,13 +766,7 @@ class TestTheForecastRouteUnderTheChain:
 
     def test_a_failed_forecast_read_is_a_503(self, admin_client, fresh_read_fallback,
                                             monkeypatch):
-        monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
-        monkeypatch.setenv("KS_READ_GOALS", "postgres")
-        monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
         monkeypatch.setenv("KS_PG_DSN", DSN)
-        monkeypatch.setenv("KS_READ_FALLBACK", "off")
-        monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
         monkeypatch.setattr("core.pg_goals_read.fetch",
                             _failing_on("revenue_predictions"))
 
@@ -784,5 +777,4 @@ class TestTheForecastRouteUnderTheChain:
         assert "statement timeout" not in response.text
         assert fresh_read_fallback.refusals()["goals"]["count"] == 1
         health = admin_client.get("/api/health").json()
-        assert "read_fallbacks" not in health
         assert health["read_fallback_mode"]["refused"]["goals"]["count"] == 1

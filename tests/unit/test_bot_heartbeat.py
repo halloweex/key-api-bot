@@ -7,7 +7,6 @@ that would fail if either property were lost again.
 """
 from __future__ import annotations
 
-import inspect
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -70,9 +69,8 @@ class TestWritingIt:
     def test_it_is_written_atomically(self, beat_file):
         """A healthcheck reading a file mid-write would see an empty one and
         call it a bad beat."""
-        source = inspect.getsource(write_beat)
-        assert ".replace(" in source
         write_beat()
+        assert is_healthy() is True
         assert not beat_file.with_suffix(".tmp").exists()
 
     @pytest.mark.asyncio
@@ -99,12 +97,30 @@ class TestWritingIt:
                    side_effect=RuntimeError("boom")):
             await beat_job(context=None)
 
-    def test_the_probe_goes_through_the_port(self):
-        """Not a direct sqlite3 or asyncpg call: the check must exercise
-        whichever engine is actually live."""
-        source = inspect.getsource(heartbeat.probe_store)
-        assert "get_bot_store()" in source
-        assert "sqlite3" not in source and "asyncpg" not in source
+    @pytest.mark.parametrize("answers", [True, False])
+    @pytest.mark.asyncio
+    async def test_the_probe_reads_the_store_the_bot_uses(self, beat_file, answers):
+        """Not a direct sqlite3 or asyncpg call: the beat follows whichever
+        store the port hands out, so a live engine that cannot answer goes
+        stale (27.08: health was read off a file nobody wrote)."""
+        from core.bot_store import use_bot_store
+
+        class _Access:
+            def status(self, user_id):
+                if not answers:
+                    raise RuntimeError("the store is away")
+                return None
+
+        class _Store:
+            access = _Access()
+
+        previous = use_bot_store(_Store())
+        try:
+            await beat_job(context=None)
+        finally:
+            use_bot_store(previous)
+        assert is_healthy() is answers
+        assert beat_file.exists() is answers
 
 
 class TestTheEntryPoint:

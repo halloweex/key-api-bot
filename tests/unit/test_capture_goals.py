@@ -26,8 +26,7 @@ import pytest
 
 from core import pg_goals_write
 from core.repositories.goals import GoalsMixin
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
-from tests.unit.test_write_chains import _CAPTURE_WALKED, _Walk
+from tests.helpers.write_walk import _CAPTURE_WALKED, _Walk
 
 GOALS = "app.revenue_goals"
 HISTORY = "app.revenue_goal_history"

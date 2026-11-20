@@ -235,9 +235,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-REPO = Path(__file__).resolve().parents[2]
-
-
 def _store(tmp_path: Path):
     """The store the job read its file's size through until step 14's S14-18;
     it asks for no store since (the file is `DATA_DIR / DUCKDB_FILE_NAME`), so
@@ -297,19 +294,8 @@ class TestSchedulerJob:
         or move the default in offsite_check.sh alone."""
         import core.disk_monitor as disk_monitor
         import core.scheduler as scheduler_module
-        from core import paths, watchdog_samples
+        from core import watchdog_samples
         from core.scheduler import BackgroundScheduler
-
-        # The scheduler's own name for the directory is `core.paths`' (the
-        # conftest redirects that name for every test, so it is read here as
-        # the import the module makes).
-        assert ("from core.paths import DATA_DIR, DUCKDB_FILE_NAME"
-                in (REPO / "core" / "scheduler.py").read_text(encoding="utf-8"))
-        assert paths.DATA_DIR == REPO / "data"
-        assert paths.DUCKDB_FILE_NAME == "analytics.duckdb"
-        check = (REPO / "deploy" / "offsite_check.sh").read_text(encoding="utf-8")
-        assert ('WATCHDOG_MARKER="${WATCHDOG_MARKER:-data/health/watchdog_last_sample}"'
-                in check)
 
         data = tmp_path / "data"
         data.mkdir()

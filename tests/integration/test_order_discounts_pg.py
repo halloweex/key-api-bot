@@ -254,7 +254,7 @@ class TestTheRevisionOnAServer:
         in the downgrade, an IF NOT EXISTS missing from the upgrade. (The head
         is 0039 since the promotions calendar descended from 0038.)"""
         from core import pg
-        from tests.integration.test_analytics_captures_pg import _alembic_sql
+        from tests.helpers.alembic_sql import _alembic_sql
 
         down_to, here = "0037_frozen_month_goals", pg.REQUIRED_REVISION
         conn = await asyncpg.connect(DSN)

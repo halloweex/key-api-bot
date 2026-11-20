@@ -83,8 +83,12 @@ class TestOneRecord:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("ledger,chain", CHAINS)
     async def test_the_row_and_the_upsert_are_duckdbs(self, pool, ledger, chain):
+        """The first record is stored at two places, as the report printed it
+        (a half-cent rounds up); the second rewrites the week."""
         before = datetime.now(timezone.utc)
         assert await report_ledger.mark_sent(ledger, WEEK, "retail", 1234.565, 7) == "recorded"
+        (first,) = await _rows(pool, chain)
+        assert first[:4] == (WEEK, "retail", Decimal("1234.57"), 7)
         assert await report_ledger.mark_sent(ledger, WEEK, "retail", 99.0, 2) == "recorded"
         (row,) = await _rows(pool, chain)
         assert row[:4] == DUCKDB_LEDGER_ROW
@@ -134,7 +138,8 @@ class TestTheJobSendsOnce:
         tick that finds Postgres's row. Mutation: drop the spool branch from
         the gate (two messages), or let the drain stamp now() (the row's
         `sent_at` would be the drain's)."""
-        from tests.unit.test_weekly_report import TestSchedulerJob, _store
+        from tests.helpers.weekly_report_job import WeeklyReportJob
+        from tests.helpers.weekly_report_job import _store
 
         chain = pg_weekly_ledger_write
         real = chain.mark_sent
@@ -148,7 +153,7 @@ class TestTheJobSendsOnce:
 
         monkeypatch.setattr(chain, "mark_sent", mark_sent)
         store = await _store(tmp_path)
-        job = TestSchedulerJob()
+        job = WeeklyReportJob()
         week_start = await job._seed(warehouse, complete=True)
         sent = []
         scheduler = job._wire(monkeypatch, store, sent, tmp_path)

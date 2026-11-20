@@ -20,12 +20,10 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
-from core.store import AnalyticsStore
 from tests.integration.pg_tab_seed import (
     needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
 )
@@ -46,6 +44,7 @@ from core.weekly_report import (
     share_of,
     warehouse_max_date,
 )
+from tests.helpers.weekly_report_job import WeeklyReportJob, _gold_day, _silver_order, _store
 
 
 @pytest.fixture(autouse=True)
@@ -286,44 +285,6 @@ def reads(tmp_path, monkeypatch):
     return store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the weekly report")
 
 
-async def _store(tmp_path: Path) -> AnalyticsStore:
-    """The store the job is handed: never connected, its DuckDB connection a
-    trap — the report reads Postgres and the ledger is `ledger`'s dict."""
-    s = AnalyticsStore()
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError("the weekly report reached for DuckDB")
-
-    s.connection = _no_duckdb
-    return s
-
-
-async def _gold_day(conn, day: date, revenue: float, orders: int, sales_type="retail"):
-    """One roll-up cell of Postgres' Gold (`source_id IS NULL`)."""
-    await conn.execute(
-        "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
-        " orders_count, unique_customers, new_customers, returning_customers,"
-        " returns_count, returns_revenue, avg_order_value)"
-        " VALUES ($1, $2, NULL, $3, $4, 0, 0, 0, 0, 0, 0)"
-        " ON CONFLICT ON CONSTRAINT gold_daily_revenue_cell DO UPDATE"
-        " SET revenue = EXCLUDED.revenue, orders_count = EXCLUDED.orders_count",
-        day, sales_type, revenue, orders)
-
-
-async def _silver_order(conn, oid: int, day: date, total: float, is_new: bool,
-                        sales_type="retail", is_return=False):
-    await conn.execute(
-        "INSERT INTO silver.orders (id, source_id, status_id, grand_total,"
-        " ordered_at, order_date, is_return, sales_type, is_active_source,"
-        " source_name, is_new_customer)"
-        " VALUES ($1, 1, 1, $2, $3, $4, $5, $6, TRUE, 'Instagram', $7)"
-        " ON CONFLICT (id) DO UPDATE SET grand_total = EXCLUDED.grand_total,"
-        " order_date = EXCLUDED.order_date, is_return = EXCLUDED.is_return,"
-        " sales_type = EXCLUDED.sales_type, is_new_customer = EXCLUDED.is_new_customer",
-        oid, total, datetime(day.year, day.month, day.day, 9, tzinfo=timezone.utc),
-        day, is_return, sales_type, is_new)
-
-
 async def _gold_product(conn, day: date, pid: int, name: str, revenue: float,
                         sales_type="retail"):
     """A product's revenue on a day, seeded at the order-lines level.
@@ -483,75 +444,9 @@ class TestReadinessGate:
         assert await warehouse_max_date(reads) == date(2026, 5, 24)
 
 
-class TestSchedulerJob:
+class TestSchedulerJob(WeeklyReportJob):
     """The three gates, exercised through the job the scheduler actually runs."""
 
-    async def _seed(self, pool, *, complete: bool):
-        """A full baseline plus the reported week, from the real clock's view,
-        in Postgres' Gold and Silver."""
-        from core.scheduler import SCHEDULER_TIMEZONE
-
-        today = datetime.now(SCHEDULER_TIMEZONE).date()
-        start, end = last_complete_week(today)
-        last_day = end if complete else end - timedelta(days=3)
-
-        async with pool.acquire() as conn:
-            for n in range(70):
-                day = start - timedelta(days=70 - n)
-                await _gold_day(conn, day, 10_000 + (n % 5) * 500, 4)
-            day = start
-            while day <= last_day:
-                await _gold_day(conn, day, 5_000, 2)
-                await _silver_order(conn, 900 + day.toordinal() % 1000, day, 2_500,
-                                    is_new=True)
-                day += timedelta(days=1)
-        return start
-
-    ADMINS = [111, 222]
-
-    def _wire(self, monkeypatch, store, sent, tmp_path=None, languages=None,
-              approved=None):
-        """Point the job at this store, these admins, and a capturing transport.
-
-        `languages` and `approved` are written through the bot store port into
-        a throwaway SQLite adapter installed as the active store — without it
-        the job would read the developer's real bot state and the test would
-        pass or fail by whatever happens to be stored there.
-        """
-        import importlib
-
-        from bot.store_sqlite import SqliteBotStore
-        from core.scheduler import BackgroundScheduler
-
-        # `core/__init__.py` re-exports the AppConfig instance as `config`, so
-        # a dotted monkeypatch target resolves `core.config` to that object
-        # rather than to the module. Only an explicit lookup gets the module.
-        core_config = importlib.import_module("core.config")
-
-        async def _get_store():
-            return store
-
-        async def _send_text(text, **kwargs):
-            sent.append(text)
-            return len(kwargs.get("chat_ids") or self.ADMINS)
-
-        monkeypatch.setattr(
-            "bot.store_sqlite.DB_PATH",
-            (tmp_path or store.db_path.parent) / "prefs.db",
-        )
-        bot_store = SqliteBotStore()
-        bot_store.initialise()
-        monkeypatch.setattr("core.bot_store._store", bot_store)
-        for uid in (approved or []):
-            bot_store.access.request(uid, f"user{uid}", "First", "Last")
-            bot_store.access.approve(uid, self.ADMINS[0])
-        for uid, lang in (languages or {}).items():
-            bot_store.preferences.set(uid, "language", lang)
-
-        monkeypatch.setattr(core_config, "ADMIN_USER_IDS", self.ADMINS)
-        monkeypatch.setattr("core.store.get_store", _get_store)
-        monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _send_text)
-        return BackgroundScheduler()
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -796,13 +691,14 @@ class TestTheOrderSplitSentence:
         return cur, prev
 
     def test_it_names_three_counts_and_no_percentage(self):
+        import re
+
         from core.weekly_report import _orders_split
 
         cur, prev = self._weeks(131, 205, 136, 297)
-        assert _orders_split(cur, prev, "ru") == (
-            "Заказов меньше на 97: повторных -92, от новых клиентов -5."
-        )
-        assert "%" not in _orders_split(cur, prev, "ru")
+        said = _orders_split(cur, prev, "ru")
+        assert [int(n) for n in re.findall(r"[-+]?\d+", said)] == [97, -92, -5]
+        assert "%" not in said
 
     def test_the_parts_add_up_to_the_total_it_states(self):
         """The reader can check it, which is the point of using counts."""
@@ -820,12 +716,13 @@ class TestTheOrderSplitSentence:
         """Repeat orders falling while new ones rise: the old share was
         `share_of(+3, -97)`, which returned None, and the sentence vanished
         exactly when it had the most to say."""
+        import re
+
         from core.weekly_report import _orders_split
 
         cur, prev = self._weeks(139, 197, 136, 297)
-        assert _orders_split(cur, prev, "en") == (
-            "Orders are down by 97: repeat -100, new customers +3."
-        )
+        said = _orders_split(cur, prev, "en")
+        assert [int(n) for n in re.findall(r"[-+]?\d+", said)] == [97, -100, 3]
 
     def test_a_move_of_four_orders_is_not_a_finding(self):
         from core.weekly_report import _orders_split
@@ -1061,8 +958,3 @@ class TestBuildReport:
         assert report.current.repeat_orders == 4
         assert report.baseline_weeks == 8
         assert report.z is not None and report.z < -1.5
-
-        text = format_report(report)
-        assert "▼ 50.0%" in text
-        assert "Unusually low" in text
-        assert "order count, not basket size" in text

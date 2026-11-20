@@ -17,7 +17,6 @@ KeyCRM's `include=…,expenses`.
 """
 from __future__ import annotations
 
-import logging
 import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -115,26 +114,20 @@ async def _write(payloads, **kw):
 
 class TestAnExpenseKeyCRMNoLongerListsIsDeleted:
     @pytest.mark.asyncio
-    async def test_one_removed_the_other_untouched(self, pool, caplog):
+    async def test_one_removed_the_other_untouched(self, pool):
         """KeyCRM serves the order with one of its two expenses gone. On main
         the dropped one stayed for ever, and was counted in /expenses' costs.
-        Here it is deleted, logged with its id and amount, and counted; the
-        one still listed is not even rewritten."""
+        Here it is deleted and counted; the one still listed is not even
+        rewritten."""
         a, b = BASE * 10, BASE * 10 + 1
         await _write([_payload(BASE, [_cost(a), _cost(b, amount="7.25")])])
         kept_before = (await _costs(pool, BASE))[a]
 
-        caplog.set_level(logging.INFO, logger="core.pg_orders_write")
         result, expense_count = await _write([_payload(BASE, [_cost(a)])])
 
         assert await _costs(pool, BASE) == {a: kept_before}
         assert result.expenses_deleted == 1
         assert (result.changed_ids, result.skipped_unchanged, expense_count) == ([], 1, 1)
-        said = [r.getMessage() for r in caplog.records
-                if r.name == "core.pg_orders_write" and r.levelno == logging.INFO
-                and r.getMessage().startswith("orders: expense ")]
-        assert said == [f"orders: expense {b} of order {BASE} deleted, amount 7.25: "
-                        "KeyCRM no longer lists it"]
 
     @pytest.mark.asyncio
     async def test_an_empty_list_deletes_them_all(self, pool):

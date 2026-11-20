@@ -35,7 +35,6 @@ from scripts.utm_reclassify_dryrun import fallback_verdict
 from tests.integration.pg_tab_seed import (
     needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 DAY = date(2026, 8, 12)
 WINDOW = (DAY - timedelta(days=1), DAY + timedelta(days=1))

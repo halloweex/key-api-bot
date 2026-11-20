@@ -49,14 +49,8 @@ from core.repositories import goals as goals_module
 from tests.integration.pg_tab_seed import (
     derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_goals_off_duckdb_silver import (
-    ALL_IDS,
-    DSN,
-    EXPECTED,
-    INTERVALS,
-    MANAGERS,
-    ORDERS,
-    _calculators,
+from tests.helpers.goals_history import (
+    ALL_IDS, DSN, EXPECTED, INTERVALS, MANAGERS, ORDERS, _calculators,
     _seed_history_pg,
 )
 
@@ -206,12 +200,8 @@ class TestTheBounds:
         `WHERE NOT s.is_return AND s.sales_type = 'retail'` — the first bound
         becomes the history's own first day, and this fails.
         """
-        from tests.unit.test_goals_off_duckdb_silver import (
-            B2B_MANAGER_ID,
-            HISTORY_END,
-            HISTORY_START,
-            _kyiv_noon,
-        )
+        from core.duckdb_constants import B2B_MANAGER_ID
+        from tests.helpers.goals_history import HISTORY_END, HISTORY_START, _kyiv_noon
 
         first = HISTORY_START - timedelta(days=40)
         last = HISTORY_END + timedelta(days=40)

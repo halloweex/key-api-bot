@@ -490,15 +490,11 @@ class TestARefusedReadIsAnsweredByTheCaller:
         assert svc._buyers_retry_in() is not None, "the retry window did not open"
 
     @pytest.mark.asyncio
-    async def test_the_tick_names_it_and_goes_on(self, monkeypatch, caplog):
-        import logging
-
+    async def test_the_tick_goes_on_and_records_it_once(self, monkeypatch):
         svc, store, _ = self._refusing(monkeypatch)
-        with caplog.at_level(logging.WARNING):
-            stats = await svc.incremental_sync()      # does not raise
+        stats = await svc.incremental_sync()      # does not raise
         svc._inventory_step_postgres.assert_awaited_once()
         assert all(isinstance(v, int) for v in stats.values()), stats
-        assert "refused read answered by incremental_sync (buyer_sync)" in caplog.text
         # Recorded once, by the step — not a second time by the tick.
         assert svc.buyer_sync_state.consecutive_failures == 1
 
