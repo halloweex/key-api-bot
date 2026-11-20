@@ -6118,16 +6118,6 @@
                 }
             }
         ],
-        "./web/routes/pages.py": [
-            {
-                "code": "reportReturnType",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 23,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./web/services/auth_service.py": [
             {
                 "code": "reportOptionalMemberAccess",

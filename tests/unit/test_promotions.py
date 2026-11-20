@@ -19,6 +19,7 @@ real database — is `tests/integration/test_promotions_pg.py`.
 """
 from __future__ import annotations
 
+import json
 import time as _time
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
@@ -167,11 +168,73 @@ class TestParse:
         data = promotions.parse(_payload(id=12, status="cancelled", version=3))
         assert data == promotions.parse(_payload())
 
+    @pytest.mark.parametrize("field", ["scope_items", "channels"])
+    def test_a_long_list_is_refused_before_any_item_is_read(self, field):
+        """The body is parsed on web's event loop: 200 000 items held it for
+        two minutes while each was compared with every other. Kills: any
+        per-item work before the bound."""
+
+        class Unread(list):
+            def __iter__(self):
+                raise AssertionError("an item was read")
+
+        err = _refused(_payload(**{field: Unread(["x"] * (promotions.ITEMS_MAX + 1))}))
+        assert (err.field, err.message) == (field, "Must hold at most 50 items")
+
+    def test_the_bound_is_on_what_was_sent_not_on_what_is_left(self):
+        """51 copies of one brand: refused, not reduced to one first."""
+        err = _refused(_payload(scope_items=["COSRX"] * 51))
+        assert (err.field, err.message) == ("scope_items", "Must hold at most 50 items")
+        assert promotions.parse(_payload(scope_items=["COSRX"] * 50)).scope_items == ("COSRX",)
+
+    @pytest.mark.parametrize("over,field", [
+        ({"name": "BF \ud800"}, "name"),
+        ({"note": "x\ud83d"}, "note"),
+        ({"sms_campaign": "\udfffSMS"}, "sms_campaign"),
+        ({"scope_items": ["COSRX\udfff"]}, "scope_items"),
+        ({"channels": ["sms\ud800"]}, "channels"),
+    ])
+    def test_a_lone_surrogate_is_refused_naming_the_field(self, over, field):
+        """JSON's `\\ud800` decodes to a string UTF-8 cannot encode; asyncpg
+        failed the save with a 500. Kills: the check dropped from any text."""
+        err = _refused(_payload(**over))
+        assert (err.field, err.message) == (field, "Must be valid Unicode text")
+
+    def test_a_pair_of_surrogates_is_one_character_and_is_kept(self):
+        data = promotions.parse(json.loads('{"name": "\\ud83d\\ude00", "starts_on": '
+                                           '"2027-03-05", "ends_on": "2027-03-05", '
+                                           '"kind": "other", "scope": "store"}'))
+        assert data.name == "\U0001F600"
+
+    def test_the_first_day_is_at_most_a_year_ahead(self):
+        """Where the list's window ends: a promotion starting later was saved
+        and then shown nowhere, so nobody could edit or cancel it."""
+        day = date(2026, 11, 20)
+        ok = promotions.parse(_payload(starts_on="2027-11-20", ends_on="2027-11-21"), day=day)
+        assert ok.starts_on == date(2027, 11, 20) == day + timedelta(days=365)
+        with pytest.raises(ValidationError) as caught:
+            promotions.parse(_payload(starts_on="2027-11-21", ends_on="2027-11-22"), day=day)
+        assert (caught.value.field, caught.value.message) == (
+            "starts_on", "Must be at most 365 days ahead (on or before 2027-11-20)")
+
+    def test_without_a_day_it_is_todays_in_kyiv(self, monkeypatch):
+        monkeypatch.setattr(promotions, "today", lambda: date(2026, 1, 10))
+        assert _refused(_payload(starts_on="2027-01-11", ends_on="2027-01-11")).field == "starts_on"
+        assert promotions.parse(_payload(starts_on="2027-01-10", ends_on="2027-01-10"))
+
 
 class TestSameContent:
     def test_the_source_is_not_the_content(self):
         a = promotions.parse(_payload())
         assert a.same_content(replace(a, source="form_from_sms"))
+
+    def test_the_items_are_a_set(self):
+        """The page diffs them as a set; a save that only reorders them read
+        as «Збережено без змін» beside a new version. Kills: an ordered
+        comparison."""
+        a = promotions.parse(_payload(scope_items=["COSRX", "Anua", "Mixsoon"]))
+        assert a.same_content(replace(a, scope_items=("Mixsoon", "COSRX", "Anua")))
+        assert not a.same_content(replace(a, scope_items=("Mixsoon", "COSRX")))
 
     @pytest.mark.parametrize("field,value", [
         ("name", "Інша"), ("ends_on", date(2027, 3, 9)), ("start_time", None),
@@ -363,9 +426,21 @@ class TestTheWriter:
         every press of Save — a history of "no change" entries."""
         first = await promotions.create(promotions.parse(_payload()), by=555)
         again = await promotions.update(
-            first.id, promotions.parse(_payload(source="form_from_sms")), by=777)
+            first.id, promotions.parse(_payload(source="form_from_sms")), by=777,
+            sms_view=True)
         assert again == first
         assert len(memory.rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_save_that_only_reorders_the_items_writes_nothing(self, memory):
+        """The stored order stays. Kills: a version the history shows as
+        «Збережено без змін»."""
+        first = await promotions.create(
+            promotions.parse(_payload(scope_items=["COSRX", "Anua"])), by=555)
+        again = await promotions.update(
+            first.id, promotions.parse(_payload(scope_items=["Anua", "COSRX"])), by=777)
+        assert again == first and again.data.scope_items == ("COSRX", "Anua")
+        assert [r["scope_items"] for r in memory.rows] == [["COSRX", "Anua"]]
 
     @pytest.mark.asyncio
     async def test_cancel_and_restore_are_versions_with_the_content_kept(self, memory):
@@ -413,6 +488,74 @@ class TestTheWriter:
     def test_one_lock_key_for_every_promotion(self):
         assert 0 < promotions.PROMOTIONS_LOCK_KEY < 2 ** 63
         assert "pg_advisory_xact_lock" in promotions._LOCK_SQL
+
+
+class TestTheSmsLink:
+    """Which SMS campaign a promotion names, and whether a version came from
+    one, are the `sms` tab's (`sms_link`), decided under the lock against the
+    version read there. Kills: the page's hiding of the picker as the only
+    thing standing between a marketing editor and the link."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("over", [{"sms_campaign": "Весна SMS"},
+                                      {"source": "form_from_sms"}])
+    async def test_a_new_link_needs_the_sms_view(self, memory, over):
+        data = promotions.parse(_payload(**over))
+        with pytest.raises(promotions.PromotionForbidden, match="No view access to sms"):
+            await promotions.create(data, by=1)
+        assert memory.rows == [] and memory.log[-1] == "ROLLBACK"
+        made = await promotions.create(data, by=1, sms_view=True)
+        assert made.data == data
+
+    @pytest.mark.asyncio
+    async def test_the_null_shown_without_the_view_keeps_the_campaign(self, memory):
+        """The API shows such a caller `sms_campaign: null`, and the page
+        sends the promotion back whole. Kills: their edit clearing the link,
+        or refusing an edit of a linked promotion."""
+        first = await promotions.create(
+            promotions.parse(_payload(sms_campaign="Весна SMS")), by=1, sms_view=True)
+        same = await promotions.update(first.id, promotions.parse(_payload()), by=2)
+        assert same == first and len(memory.rows) == 1
+        edited = await promotions.update(
+            first.id, promotions.parse(_payload(name="Інша")), by=2)
+        assert (edited.version, edited.data.name, edited.data.sms_campaign) == (
+            2, "Інша", "Весна SMS")
+        assert memory.rows[-1]["sms_campaign"] == "Весна SMS"
+
+    @pytest.mark.asyncio
+    async def test_another_campaign_needs_the_view_the_same_one_does_not(self, memory):
+        first = await promotions.create(
+            promotions.parse(_payload(sms_campaign="Весна SMS")), by=1, sms_view=True)
+        with pytest.raises(promotions.PromotionForbidden):
+            await promotions.update(
+                first.id, promotions.parse(_payload(sms_campaign="Осінь SMS")), by=2)
+        same = await promotions.update(
+            first.id, promotions.parse(_payload(name="Y", sms_campaign="Весна SMS")), by=2)
+        assert same.version == 2 and same.data.sms_campaign == "Весна SMS"
+
+    @pytest.mark.asyncio
+    async def test_saying_it_came_from_sms_needs_the_view(self, memory):
+        """Unless the current version says so already; dropping the mark is
+        how any later edit in the form is typed."""
+        typed = await promotions.create(promotions.parse(_payload()), by=1)
+        with pytest.raises(promotions.PromotionForbidden):
+            await promotions.update(
+                typed.id, promotions.parse(_payload(name="Y", source="form_from_sms")), by=2)
+        from_sms = await promotions.create(
+            promotions.parse(_payload(source="form_from_sms")), by=1, sms_view=True)
+        kept = await promotions.update(
+            from_sms.id, promotions.parse(_payload(name="Y", source="form_from_sms")), by=2)
+        dropped = await promotions.update(
+            from_sms.id, promotions.parse(_payload(name="Z")), by=2)
+        assert (kept.data.source, dropped.data.source) == ("form_from_sms", "form")
+
+    @pytest.mark.asyncio
+    async def test_with_the_view_a_null_clears_it(self, memory):
+        first = await promotions.create(
+            promotions.parse(_payload(sms_campaign="Весна SMS")), by=1, sms_view=True)
+        cleared = await promotions.update(
+            first.id, promotions.parse(_payload()), by=1, sms_view=True)
+        assert (cleared.version, cleared.data.sms_campaign) == (2, None)
 
 
 # ─── The routes ──────────────────────────────────────────────────────────────
@@ -464,6 +607,34 @@ class TestTheRoutes:
                                      headers={"content-type": "application/json"})
         assert response.status_code == 400
         assert response.json() == {"detail": "body: Must be a JSON object"}
+
+    @pytest.mark.parametrize("opening,closing", [(b"[", b"]"), (b'{"a":', b"}")])
+    def test_a_body_nested_past_the_decoders_depth_is_400(
+            self, admin_client, saves, opening, closing):
+        """`json.loads` raises RecursionError there, which is not a
+        ValueError. Kills: the 500 it was."""
+        depth = 200_000
+        response = admin_client.post(
+            "/api/promotions", content=opening * depth + b"1" + closing * depth,
+            headers={"content-type": "application/json"})
+        assert response.status_code == 400
+        assert response.json() == {"detail": "body: Must be a JSON object"}
+        assert saves["calls"] == []
+
+    def test_a_lone_surrogate_in_the_body_is_400_naming_the_field(self, admin_client, saves):
+        body = json.dumps(_payload(name="BF")).replace('"BF"', '"BF \\ud800"').encode()
+        response = admin_client.post("/api/promotions", content=body,
+                                     headers={"content-type": "application/json"})
+        assert response.status_code == 400
+        assert response.json() == {"detail": "name: Must be valid Unicode text"}
+
+    def test_a_start_more_than_a_year_ahead_is_400(self, admin_client, saves):
+        start = promotions.today() + timedelta(days=366)
+        response = admin_client.post("/api/promotions", json=_payload(
+            starts_on=start.isoformat(), ends_on=start.isoformat()))
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith("starts_on: Must be at most 365 days ahead")
+        assert saves["calls"] == []
 
     @pytest.mark.parametrize("method,path,save", [
         ("PUT", "/api/promotions/12", "update"),
@@ -616,6 +787,86 @@ class TestTheMarketingTab:
         client = as_person("viewer", None)
         assert client.get("/api/promotions").status_code == 200
         assert client.post("/api/promotions", json=_payload()).status_code == 403
+
+
+class TestTheSmsCampaignIsTheSmsTabs:
+    """`sms_campaign` is served to a caller with `sms` view alone, and a save
+    tells the writer whether its caller has it (`core.promotions.sms_link`).
+    An editor's default tabs hold marketing and not sms. Kills: the SMS
+    campaign's name on the page of somebody who may not open /sms, and the
+    link changed by somebody who may not."""
+
+    @pytest.mark.parametrize("tabs,shown", [(["marketing"], None),
+                                            (None, None),
+                                            (["marketing", "sms"], "Весна SMS")])
+    def test_every_answer_names_it_only_to_the_sms_tab(self, as_person, saves, tabs, shown):
+        saves["promotion"] = _promotion(sms_campaign="Весна SMS")
+        client = as_person("editor", tabs)
+        (listed,) = client.get("/api/promotions").json()["promotions"]
+        (version,) = client.get("/api/promotions/12/versions").json()["versions"]
+        made = client.post("/api/promotions", json=_payload())
+        edited = client.put("/api/promotions/12", json=_payload())
+        cancelled = client.post("/api/promotions/12/cancel")
+        restored = client.post("/api/promotions/12/restore")
+        for answer in (listed, version, made.json(), edited.json(),
+                       cancelled.json(), restored.json()):
+            assert answer["sms_campaign"] == shown
+            assert answer["name"] == "Весняний розпродаж"
+
+    @pytest.mark.parametrize("tabs,sms_view", [(["marketing"], False),
+                                               (["marketing", "sms"], True)])
+    def test_a_save_tells_the_writer_whether_its_caller_has_it(
+            self, as_person, saves, tabs, sms_view):
+        client = as_person("editor", tabs)
+        client.post("/api/promotions", json=_payload())
+        client.put("/api/promotions/12", json=_payload())
+        sent = {name: kwargs["sms_view"] for name, _args, kwargs in saves["calls"]
+                if name in ("create", "update")}
+        assert sent == {"create": sms_view, "update": sms_view}
+
+    @pytest.mark.parametrize("method,path", [("POST", "/api/promotions"),
+                                             ("PUT", "/api/promotions/12")])
+    def test_a_link_the_writer_refuses_is_403(self, as_person, saves, method, path, caplog):
+        saves["fail"] = promotions.PromotionForbidden()
+        client = as_person("editor", ["marketing"])
+        with caplog.at_level("INFO", logger="web.routes.api.promotions"):
+            response = client.request(method, path, json=_payload(sms_campaign="Весна SMS"))
+        assert response.status_code == 403
+        assert response.json() == {"detail": "No view access to sms"}
+        assert f"user={PERSON}" in caplog.text and "Authorization refused" in caplog.text
+
+
+class TestThePlannedPromotionsAreTheMarketingTabs:
+    """`planned_promotions` in `/api/revenue/forecast` is the calendar's,
+    and the calendar is the marketing tab's: null for a caller with the
+    dashboard and not marketing. Kills: the dashboard-only account reading
+    the promotions the calendar keeps from it."""
+
+    FORECAST = {"predicted_total": 1.0, "month_range": None, "black_friday": None,
+                "planned_promotions": [{"id": 12, "name": "Весняний розпродаж",
+                                        "starts_on": "2027-03-05", "ends_on": "2027-03-08",
+                                        "kind": "other", "extra": 1000.0}]}
+
+    @pytest.fixture
+    def forecast(self, monkeypatch):
+        from web.services import dashboard_service
+
+        async def get(sales_type="retail"):
+            return dict(self.FORECAST)
+
+        monkeypatch.setattr(dashboard_service, "get_forecast_data", get)
+
+    @pytest.mark.parametrize("tabs,listed", [(["dashboard"], False),
+                                             (["dashboard", "marketing"], True),
+                                             (None, True)])
+    def test_only_the_marketing_tab_reads_them(self, as_person, forecast, tabs, listed):
+        client = as_person("viewer", tabs)
+        response = client.get("/api/revenue/forecast")
+        assert response.status_code == 200
+        answer = response.json()
+        expected = self.FORECAST["planned_promotions"] if listed else None
+        assert answer["planned_promotions"] == expected
+        assert answer["predicted_total"] == 1.0
 
 
 # ─── One writer ─────────────────────────────────────────────────────────────

@@ -141,7 +141,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/health` | Health check (status, version, uptime, the blocks the canary judges); `status` is `healthy` and `degraded_by` empty since step 14's S14-17 took DuckDB's block, its ledger and their three causes out |
 | `/api/summary` | Summary statistics |
 | `/api/revenue/trend` | Revenue time series (+ `include_forecast=true` for ML predictions) |
-| `/api/revenue/forecast` | ML revenue forecast for current month, with `month_range` (the month total's 80% range: `lo`, `hi`, `coverage`, `days_left`) and `black_friday` (what last year's Black Friday would add, its days still ahead: `extra`, `total`, `size_days`, `normal_day`, `last_year_start`, `last_year_end`, `kind`) and `planned_promotions` (the calendar's promotions planned for today..the month's end: `id`, `name`, `starts_on`, `ends_on`, `kind`, `extra` — what a past noticeable promotion added, null for `black_friday`; `[]` when nothing is planned), retail only, each null when it cannot be said — see "Revenue Prediction" and "Календарь акций". The trend's `forecast` carries none of them |
+| `/api/revenue/forecast` | ML revenue forecast for current month, with `month_range` (the month total's 80% range: `lo`, `hi`, `coverage`, `days_left`) and `black_friday` (what last year's Black Friday would add, its days still ahead: `extra`, `total`, `size_days`, `normal_day`, `last_year_start`, `last_year_end`, `kind`) and `planned_promotions` (the calendar's promotions planned for today..the month's end: `id`, `name`, `starts_on`, `ends_on`, `kind`, `extra` — what a past noticeable promotion added, null for `black_friday`; `[]` when nothing is planned; null for a caller without `marketing` view, the calendar being that tab's), retail only, each null when it cannot be said — see "Revenue Prediction" and "Календарь акций". The trend's `forecast` carries none of them |
 | `/api/revenue/forecast/train` | Manually trigger model training (POST) |
 | `/api/revenue/forecast/evaluate` | Walk-forward CV evaluation with baselines (GET) |
 | `/api/revenue/forecast/tune` | Hyperparameter grid search, reported and never applied (POST) |
@@ -175,9 +175,9 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
 | `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation, the entry funnel and the press table (which button people leave after) — for page `/tg-bot` (tab `tgbot`: admins and the marketing presets). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
-| `/api/promotions` | The promotions calendar (tab `marketing`, view): each promotion's current state whose days overlap `from`..`to` (default today − 90 .. today + 365, Kyiv), by first day then id; `include_cancelled=true` adds the cancelled. A Postgres failure is a 503 naming `promotions`. POST (edit) saves a new one: 201 and the promotion — see "Календарь акций" |
+| `/api/promotions` | The promotions calendar (tab `marketing`, view): each promotion's current state whose days overlap `from`..`to` (default today − 90 .. today + 365, Kyiv), by first day then id; `include_cancelled=true` adds the cancelled. A Postgres failure is a 503 naming `promotions`. Every answer here carries `sms_campaign` only for a caller with `sms` view, null otherwise. POST (edit) saves a new one: 201 and the promotion; 400 for a first day past today + 365, 403 for an SMS link without `sms` view — see "Календарь акций" |
 | `/api/promotions/{id}/versions` | One promotion's versions, newest first, each with `recorded_at` and `recorded_by_me` — never the author's id (tab `marketing`, view). 404 for an unknown id |
-| `/api/promotions/{id}` | PUT (marketing edit): the body as a new version — none when nothing changed; 404 unknown, 409 when cancelled |
+| `/api/promotions/{id}` | PUT (marketing edit): the body as a new version — none when nothing changed, a reorder of `scope_items` included; 404 unknown, 409 when cancelled, 403 when it changes the SMS link without `sms` view |
 | `/api/promotions/{id}/cancel`, `/restore` | POST (marketing edit): a version with `status` `cancelled` / `planned`, the content kept; 409 when it already is / is not cancelled |
 
 **Retired by the owner's decision OD-10 (2026-09-30)**, and kept retired by
@@ -899,7 +899,9 @@ Instagram, Telegram, сайт). Каждая правка — отдельная
 N+1 на двоих; `recorded_at` — часы после лока, не раньше предыдущей версии.
 `tests/unit/test_promotions.py` обходит репозиторий за писателем.
 `recorded_by` — Telegram-id автора, наружу не отдаётся: история говорит
-только `recorded_by_me`.
+только `recorded_by_me`. `scope_items` сравниваются как множество
+(`same_content`, как и дифф страницы): сохранение, которое их только
+переставляет, версии не пишет, и хранимый порядок остаётся.
 
 **Как акции попадают в систему** — три пути:
 
@@ -908,34 +910,77 @@ N+1 на двоих; `recorded_at` — часы после лока, не ран
   читать, edit — сохранять (30 в минуту, как `/api/expenses`). Неверное
   поле — 400 `{"detail": "<поле>: <причина>"}`, неизвестный id — 404,
   правка или отмена отменённой и восстановление запланированной — 409,
-  упавшее чтение — 503 с `surface: promotions`;
+  упавшее чтение — 503 с `surface: promotions`. Первый день — не позже
+  сегодня + 365 (Киев), где кончается окно списка: акция дальше сохранялась
+  и не показывалась нигде, её нельзя было ни править, ни отменить (400
+  `starts_on: …`; форма ограничена так же). С 20.11.2026 текст, который не
+  кодирует UTF-8 (одиночный суррогат `\ud800`), — 400 с именем поля, а тело
+  глубже, чем рекурсирует JSON-декодер, — 400 `body: Must be a JSON object`
+  (оба были 500); список длиннее 50 отклоняется до разбора элементов
+  (200 000 элементов держали цикл событий web две минуты: каждый
+  сравнивался с каждым);
 - бот спрашивает раз в неделю (`promo_weekly_ask`, тик ежедневно в 10:05,
   журнал `app.promotion_asks`): «Акції на 23.11 – 06.12.2026?» — две недели
   с понедельника текущей ISO-недели, что в них уже запланировано и какие
   SMS-кампании за последние 7 дней не названы ни одной акцией (`sms_campaign`
-  любой версии). [Немає] — тоже ответ: он пишется в `app.promotion_checkins`
-  через порт стора бота (`core.bot_store.PromoAsks`, оператор —
-  `core.promo_asks.RECORD_NONE_SQL`; на SQLite `available()` ложь, и бот так
-  и отвечает), принимается только от одобренного адресата, после ответа
+  любой версии). [Немає] — тоже ответ, а если вопрос перечислил уже
+  запланированные акции, кнопка — [Інших немає] (`pask:nomore:`), и
+  подтверждение — «інших акцій немає». Обе пишут `none` в
+  `app.promotion_checkins` через порт стора бота (`core.bot_store.PromoAsks`,
+  оператор — `core.promo_asks.RECORD_NONE_SQL`; на SQLite `available()` ложь,
+  и бот так и отвечает); после [Інших немає] `none` значит «ничего, кроме
+  перечисленных на момент `answered_at`», и их список даёт
+  `promotions.as_of(answered_at)`. Ответ пишется один раз на
+  (`period_from`, `answered_by`) — `INSERT … SELECT … WHERE NOT EXISTS`, без
+  UNIQUE и без ревизии: PTB обрабатывает обновления по одному; повторное
+  нажатие (вопрос пришёл дважды, двойной тап) отвечает «Вже записано» и
+  ничего не пишет. Принимается только от одобренного адресата, и одобрение
+  хендлер спрашивает сам, без `@authorized`: тот незнакомому или
+  отклонённому переписывал сам вопрос в приглашение запросить доступ, каждую
+  неделю. Неодобренному — алерт, вопрос остаётся как был. После ответа
   клавиатура убирается. [Додати] открывает дашборд как Web App (как кнопка
   меню бота) на `/marketing#promotions`; по http — обычной ссылкой. Даты
   числами, как везде в боте (`fmt_window`): в макете стояло «24 листопада –
   7 грудня», но месяц после числа склоняется;
 - ссылка «+ акція» у плашки прогноза месяца, для `marketing` edit.
 
-**Кому бот пишет**: админы плюс `KS_PROMO_ASK_RECIPIENTS` — Telegram-id через
-запятую, пустой по умолчанию, кривая запись выбрасывается с предупреждением
-(форма и причина `core.traffic_report.audience`: список пишет человек, а не
-выводит код из прав на вкладку). Язык — по системному правилу, один рендер на
+**Связь с SMS — данные вкладки `sms`** (`core.promotions.sms_link`,
+20.11.2026). Какую SMS-кампанию называет акция (`sms_campaign`) и набрана ли
+версия из неё (`source = form_from_sms`), видит и меняет только тот, у кого
+есть view вкладки `sms` (правило `require_permission`, через `has_permission`).
+Остальным каждый ответ `/api/promotions*` отдаёт `sms_campaign: null`, а их
+сохранение, которое называет другую кампанию или впервые говорит
+`form_from_sms`, — 403 «No view access to sms», и ничего не пишется. Их
+`sms_campaign: null` — тот null, который им показали (страница отправляет
+акцию целиком): кампания переносится в новую версию, а не стирается. Решается
+под локом, по прочитанной там версии. До этого правило держала только
+страница — пикер кампаний она показывала лишь с `sms` view.
+
+**Кому бот пишет**: админы плюс те из `KS_PROMO_ASK_RECIPIENTS`, кого бот
+сейчас одобряет (`promo_asks.audience`, через порт стора бота). Список —
+Telegram-id через запятую, пустой по умолчанию, кривая запись выбрасывается с
+предупреждением (форма и причина `core.traffic_report.audience`: список пишет
+человек, а не выводит код из прав на вкладку); id из списка без одобрения в
+боте (не просил, отклонён, снят за неактивность) пропускается с WARNING — его
+ответ бот всё равно отклонил бы; стор не читается — пишут одним админам.
+Одобренные, которых нет в списке, не добавляются никогда:
+`tests/unit/test_alert_recipients.py` проверяет поток данных — `readers`
+связан один раз из `audience(...)`, каждый `chat_ids=` — переменная цикла по
+`group_by_language(readers, …)`. Язык — по системному правилу, один рендер на
 язык. `KS_ALERTS_DISABLED` глушит и его; прогон, никого не достигший, ничего
-не пишет в журнал, и назавтра вопрос уйдёт снова.
+не пишет в журнал, и назавтра вопрос уйдёт снова. Запись в журнал после
+доставки повторяется (0, 2 и 10 с, `MARK_RETRY_DELAYS`, как
+`core/report_ledger.py`); не удалась и третья — ERROR в логе и
+`recorded: false` в результате джоба, и назавтра вопрос уйдёт снова.
 
 **На плашке прогноза** — строка на каждую запланированную акцию месяца
 (`planned_promotions`, см. «Revenue Prediction»): «если как прошлые заметные
 акции: +₴X» — медиана чистого эффекта прошлых всплесков от 2 дней за 730 дней,
 по сегодняшнему обычному дню. Она завышена по построению — неудачная акция
 всплеском не становится и в медиану не попадает, — и подсказка это говорит.
-Точку и диапазон она не двигает.
+Точку и диапазон она не двигает. Календарь — вкладка `marketing`, поэтому
+`/api/revenue/forecast` отдаёт `planned_promotions` только тому, у кого есть
+её view, остальным — null (`web/routes/api/analytics.py`).
 
 **Фаза 2 — реклама** (расход из Meta по дням, план бюджета на месяц) не
 построена.
@@ -1353,6 +1398,39 @@ On production on 2026-10-17, the new code's own SQL beside plain SQL: «2+ с
   people's own requests, one rejection can be a temporary block, and the rule
   can change without a clean-up. On production on 2026-10-18 it removed 17 of
   18 104 people from "all buyers".
+
+### Where a sign-in returns (`next`)
+
+A page that sends an anonymous visitor to /login names itself in `?next=`
+(`require_auth`; the root needs none), and the sign-in returns there instead
+of to `/` (2026-11-19, so that the bot's «Додати» lands on the calendar after
+a session expired). The Telegram Mini App's sign-in reads it from the page
+(`data-next`, `login-webapp.js`) and keeps the `#fragment`. The Login
+Widget's reads the cookie `ks_login_next` (path `/auth/telegram`, ten
+minutes, HttpOnly), because the widget signs every query parameter of its
+callback, and on that path the `#fragment` is lost.
+
+`safe_next` is the one gate: one leading slash, no host, scheme, backslash or
+control character, at most 512 characters, never `/` or the sign-in's own
+pages, since an open redirect here would hand a signed-in visitor to any site
+a link names. Since 2026-11-20 also nothing but ASCII — the cookie is
+latin-1, and `/login?next=/тест` or an anonymous `/привіт` answered 500 — and
+never an asset (`auth.ASSET_EXTENSIONS`).
+
+- **An anonymous request for an asset is a 404**, answered before the
+  sign-in (`pages._serve_spa_route`). A browser on /login probes
+  `/favicon.ico` and the like by itself; redirected, the probe went through
+  /login, rewrote the cookie, and the widget's sign-in landed on the icon.
+- **A /login without a valid `next` clears the cookie**, every time: the
+  cookie's path keeps the browser from sending it to /login, so the page
+  cannot tell whether one is set. Without that, an abandoned
+  `/login?next=/sms` won a later plain sign-in for ten minutes. A refused
+  widget callback goes back to /login with the `next` it read, so one failed
+  try does not lose the way back.
+
+`tests/integration/test_unauthenticated_surface.py`
+(`TestTheSignInGoesBackToThePage`) holds all of it.
+
 ### Two axes: a level and an area
 
 Access is a **pair**, and conflating the two halves is the mistake this section

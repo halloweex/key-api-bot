@@ -41,7 +41,17 @@ THE CHECKS
 
 `parse` holds every field to what the table holds it to, and says which field
 and why in English — the API answers that as a 400. The table's CHECKs are the
-second line: a row this module writes never meets one.
+second line: a row this module writes never meets one. Text that UTF-8 cannot
+encode (a lone surrogate) is refused there too, a list longer than
+`ITEMS_MAX` before any item is read, and a first day more than
+`WINDOW_AHEAD_DAYS` ahead, where the list's window ends.
+
+THE SMS LINK
+
+Which SMS campaign a promotion names, and whether a version was typed from
+one, are the `sms` tab's (`sms_link`): a save that changes either needs that
+tab's view, decided against the version read under the lock, and the API
+serves `sms_campaign` to nobody else.
 
 Reads and writes ask `require_revision()` first, as every Postgres door here
 does.
@@ -113,8 +123,24 @@ class PromotionIn:
 
     def same_content(self, other: "PromotionIn") -> bool:
         """Whether a save of `other` over this would change anything a
-        reader sees. `source` says how a state was typed, not what it is."""
-        return replace(self, source=other.source) == other
+        reader sees. `source` says how a state was typed, not what it is,
+        and the items are a set: the page compares them as one, so a save
+        that only reorders them writes nothing and the stored order stays."""
+        return (replace(self, source=other.source, scope_items=tuple(sorted(self.scope_items)))
+                == replace(other, scope_items=tuple(sorted(other.scope_items))))
+
+
+def _checked(value: str, field: str) -> str:
+    """`value` unless it holds what no column of text can: a NUL, or a lone
+    UTF-16 surrogate, which JSON's `\\ud800` decodes to and UTF-8 cannot
+    encode — asyncpg then failed the save with a 500."""
+    if "\x00" in value:
+        raise ValidationError(field, "Must not contain a NUL character")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValidationError(field, "Must be valid Unicode text") from None
+    return value
 
 
 def _text(payload: Mapping[str, Any], field: str, limit: int, *,
@@ -126,9 +152,7 @@ def _text(payload: Mapping[str, Any], field: str, limit: int, *,
         return None
     if not isinstance(value, str):
         raise ValidationError(field, "Must be text")
-    if "\x00" in value:
-        raise ValidationError(field, "Must not contain a NUL character")
-    value = value.strip()
+    value = _checked(value, field).strip()
     if not value:
         if required:
             raise ValidationError(field, "Must not be empty")
@@ -204,34 +228,50 @@ def _percent(payload: Mapping[str, Any], field: str) -> Optional[Decimal]:
 
 
 def _texts(payload: Mapping[str, Any], field: str) -> List[str]:
-    """A list of strings, each stripped; duplicates dropped, order kept."""
+    """A list of at most `ITEMS_MAX` strings, each stripped; duplicates
+    dropped, order kept.
+
+    The length is refused before any item is looked at, and the repeats are
+    found with a set: the body is parsed on web's event loop, and 200 000
+    items held it for two minutes when each was compared with every other."""
     value = payload.get(field)
     if value is None:
         return []
     if not isinstance(value, list):
         raise ValidationError(field, "Must be a list")
+    if len(value) > ITEMS_MAX:
+        raise ValidationError(field, f"Must hold at most {ITEMS_MAX} items")
     out: List[str] = []
+    seen: Set[str] = set()
     for item in value:
         if not isinstance(item, str):
             raise ValidationError(field, "Must be a list of text")
-        if "\x00" in item:
-            raise ValidationError(field, "Must not contain a NUL character")
-        item = item.strip()
+        item = _checked(item, field).strip()
         if not item:
             raise ValidationError(field, "Must not hold an empty item")
-        if item not in out:
+        if item not in seen:
+            seen.add(item)
             out.append(item)
     return out
 
 
-def parse(payload: Any) -> PromotionIn:
+def parse(payload: Any, *, day: Optional[date] = None) -> PromotionIn:
     """`PromotionIn` out of a request body, or `ValidationError(field,
     reason)` for the first field that is wrong. Keys it does not know are
-    ignored: the page may send a promotion back whole."""
+    ignored: the page may send a promotion back whole.
+
+    The first day is at most `WINDOW_AHEAD_DAYS` after `day` (today in Kyiv
+    when None), where the list's window ends: a promotion starting later was
+    saved and then shown nowhere, so nobody could edit or cancel it."""
     if not isinstance(payload, Mapping):
         raise ValidationError("body", "Must be a JSON object")
     name = _text(payload, "name", NAME_MAX, required=True)
     starts_on = _day(payload, "starts_on")
+    latest_start = (day or today()) + timedelta(days=WINDOW_AHEAD_DAYS)
+    if starts_on > latest_start:
+        raise ValidationError(
+            "starts_on",
+            f"Must be at most {WINDOW_AHEAD_DAYS} days ahead (on or before {latest_start})")
     ends_on = _day(payload, "ends_on")
     if ends_on < starts_on:
         raise ValidationError("ends_on", "Must not be before starts_on")
@@ -247,8 +287,6 @@ def parse(payload: Any) -> PromotionIn:
         raise ValidationError("scope_items", "Must be empty when scope is store")
     if scope != "store" and not items:
         raise ValidationError("scope_items", f"Must name at least one item when scope is {scope}")
-    if len(items) > ITEMS_MAX:
-        raise ValidationError("scope_items", f"Must hold at most {ITEMS_MAX} items")
     if any(len(item) > ITEM_MAX for item in items):
         raise ValidationError("scope_items", f"Each item must be at most {ITEM_MAX} characters")
 
@@ -299,6 +337,39 @@ class PromotionConflict(Exception):
     def __init__(self, promotion_id: int, message: str):
         super().__init__(f"Promotion {promotion_id} {message}")
         self.promotion_id = promotion_id
+
+
+class PromotionForbidden(Exception):
+    """The save changes the promotion's link to an SMS campaign, and the one
+    saving may not open the `sms` tab (`sms_link`). The API's 403."""
+
+    def __init__(self) -> None:
+        super().__init__("No view access to sms")
+
+
+def sms_link(current: Optional[PromotionIn], data: PromotionIn,
+             sms_view: bool) -> PromotionIn:
+    """`data` as somebody with or without `sms` view may save it over
+    `current` (None for a new promotion).
+
+    Which SMS campaign a promotion names (`sms_campaign`) and whether a
+    version was typed from one (`source = form_from_sms`) belong to the `sms`
+    tab, and the API shows the name only to whoever may open it. So without
+    that view a save that names another campaign than the current version,
+    or says it came from one when the current version does not, raises
+    `PromotionForbidden`; and its `sms_campaign: null` is the null the API
+    showed, so the current campaign is carried into the new version rather
+    than cleared. With the view, `data` is saved as it came."""
+    if sms_view:
+        return data
+    stored = current.sms_campaign if current is not None else None
+    if data.sms_campaign is None:
+        data = replace(data, sms_campaign=stored)
+    elif data.sms_campaign != stored:
+        raise PromotionForbidden()
+    if data.source == "form_from_sms" and (current is None or current.source != "form_from_sms"):
+        raise PromotionForbidden()
+    return data
 
 
 def _kyiv(stamp: datetime) -> str:
@@ -507,23 +578,29 @@ async def _write_version(promotion_id: Optional[int], decide: _Decision,
                 data=data)
 
 
-async def create(data: PromotionIn, *, by: Optional[int]) -> Promotion:
-    """A new promotion, planned: its version 1."""
-    return await _write_version(None, lambda _current: (PLANNED, data), by)
+async def create(data: PromotionIn, *, by: Optional[int],
+                 sms_view: bool = False) -> Promotion:
+    """A new promotion, planned: its version 1. `sms_view` says whether the
+    one saving may open the `sms` tab (`sms_link`)."""
+    return await _write_version(
+        None, lambda _current: (PLANNED, sms_link(None, data, sms_view)), by)
 
 
-async def update(promotion_id: int, data: PromotionIn, *, by: Optional[int]) -> Promotion:
+async def update(promotion_id: int, data: PromotionIn, *, by: Optional[int],
+                 sms_view: bool = False) -> Promotion:
     """The promotion with `data` as its content, in a version of its own —
     none when nothing changed. A cancelled promotion refuses an edit:
-    restoring it is a decision of its own."""
+    restoring it is a decision of its own. The SMS link is decided against
+    the version read under the lock (`sms_link`)."""
 
     def decide(current: Optional[Promotion]):
         assert current is not None
         if current.status == CANCELLED:
             raise PromotionConflict(promotion_id, "is cancelled: restore it first")
-        if current.data.same_content(data):
+        saved = sms_link(current.data, data, sms_view)
+        if current.data.same_content(saved):
             return None
-        return PLANNED, data
+        return PLANNED, saved
 
     return await _write_version(promotion_id, decide, by)
 
