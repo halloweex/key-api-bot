@@ -88,6 +88,11 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
           queryClient.invalidateQueries({ queryKey: ['summary'] })
           queryClient.invalidateQueries({ queryKey: ['revenueTrend'] })
           queryClient.invalidateQueries({ queryKey: ['salesBySource'] })
+          // The month badge's range, Black Friday line and planned
+          // promotions (`/api/revenue/forecast`, every sales type), with the
+          // trend's live point beside them: past midnight or a month's end
+          // the point is the new day's, and so must they be.
+          queryClient.invalidateQueries({ queryKey: ['revenueForecast'] })
           break
 
         case 'products_synced':

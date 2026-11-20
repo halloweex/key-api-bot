@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PromotionForm } from '../PromotionForm'
 import type { Promotion, SmsCampaignSummary } from '../../types/api'
+import { addDays, kyivToday } from '../../utils/smsDates'
 
 // `t` is the setup's: every string is its key, so the assertions read which
 // sentence is said, not how it is translated.
@@ -63,6 +64,24 @@ describe('the promotion form refuses what the API refuses', () => {
     expect(screen.getByText('promo.error.discount')).toBeInTheDocument()
   })
 
+  it('offers a first day at most a year ahead, and refuses one typed past it', async () => {
+    // The list reads a year ahead: a later promotion would be saved and then
+    // shown nowhere, to be changed or cancelled. The API refuses it too.
+    const latest = addDays(kyivToday(), 365)
+    const { onSubmit } = form()
+    expect(field('promo.field.startsOn')).toHaveAttribute('max', latest)
+    await userEvent.type(field('promo.field.name'), 'Наступна весна')
+    setDate('promo.field.startsOn', addDays(latest, 1))
+    await save()
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(screen.getByText('promo.error.startTooFar')).toBeInTheDocument()
+    expect(field('promo.field.startsOn')).toHaveAttribute('aria-invalid', 'true')
+
+    setDate('promo.field.startsOn', latest)
+    await save()
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ starts_on: latest }))
+  })
+
   it('wants the brands named when the promotion is on brands', async () => {
     const { onSubmit } = form()
     await userEvent.type(field('promo.field.name'), 'Весна')
@@ -96,6 +115,30 @@ describe('what the form sends', () => {
       scope_items: ['COSRX'], channels: ['sms', 'instagram'], sms_campaign: null,
       note: null, source: 'form',
     })
+  })
+
+  it('takes a discount written with a comma, as a Ukrainian keyboard writes it', async () => {
+    // A number field held "7,5" as no value where the browser wanted a point,
+    // and the promotion was saved with no discount at all.
+    const { onSubmit } = form()
+    expect(field('promo.field.discount')).toHaveAttribute('type', 'text')
+    expect(field('promo.field.discount')).toHaveAttribute('inputmode', 'decimal')
+    await userEvent.type(field('promo.field.name'), 'Весна')
+    setDate('promo.field.startsOn', '2027-03-05')
+    await userEvent.type(field('promo.field.discount'), '7,5')
+    expect(field('promo.field.discount').value).toBe('7,5')
+    await save()
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ discount_pct: 7.5 }))
+  })
+
+  it('says a discount it cannot read, rather than sending none', async () => {
+    const { onSubmit } = form()
+    await userEvent.type(field('promo.field.name'), 'Весна')
+    setDate('promo.field.startsOn', '2027-03-05')
+    await userEvent.type(field('promo.field.discount'), '7,5%')
+    await save()
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(screen.getByText('promo.error.discount')).toBeInTheDocument()
   })
 
   it('opens a promotion as it stands and sends it changed', async () => {

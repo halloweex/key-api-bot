@@ -625,6 +625,7 @@
   "promo.error.scopeItemsTooMany": "Не більше {{max}}.",
   "promo.error.spanTooLong": "Акція триває не довше {{max}} днів.",
   "promo.error.startTime": "Час у форматі ГГ:ХХ.",
+  "promo.error.startTooFar": "Не далі ніж на рік уперед: {{date}} або раніше.",
   "promo.error.tooLong": "Не довше {{max}} символів.",
   "promo.field.addItem": "Додати «{{value}}»",
   "promo.field.brands": "Бренди",
