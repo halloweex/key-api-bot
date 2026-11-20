@@ -39,10 +39,7 @@ from apscheduler.triggers.cron import CronTrigger
 from core import goal_freeze, read_fallback
 from core.repositories import goals as goals_repo
 from core.repositories.goals import GoalsMixin
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
+from tests.helpers.goal_freeze import BUSY, ledger  # noqa: F401
 
 KYIV = ZoneInfo("Europe/Kyiv")
 TABLE = "app.frozen_month_goals"
@@ -303,30 +300,6 @@ class _Store:
         return self.short.get(sales_type, (end - start).days + 1)
 
 
-@pytest.fixture
-def ledger(monkeypatch):
-    """The writer's two Postgres steps replaced: `held` is what the month
-    holds already, and `kept` records what a run would write."""
-    monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-    state = {"held": set(), "kept": [], "pool": object()}
-
-    async def _pool():
-        return state["pool"]
-
-    async def _held(pool, year, month):
-        assert pool is state["pool"]
-        return set(state["held"])
-
-    async def _keep(pool, year, month, answers, at):
-        state["kept"].append((year, month, list(answers), at))
-        return [sales_type for sales_type, _ in answers]
-
-    monkeypatch.setattr(goal_freeze, "_pool", _pool)
-    monkeypatch.setattr(goal_freeze, "_held", _held)
-    monkeypatch.setattr(goal_freeze, "_keep", _keep)
-    return state
-
-
 def _at(*args) -> datetime:
     return datetime(*args, tzinfo=KYIV)
 
@@ -488,14 +461,6 @@ def _in_kyiv() -> CronTrigger:
                        timezone=SCHEDULER_TIMEZONE)
 
 
-#: Minutes of the Kyiv day the job must not start in: 05:00-05:50, 07:20-07:45,
-#: 08:55-09:55, ten minutes either side of the 01/07/13/19 checks and of the
-#: 02:40 GA4 capture, and the 03:00-04:59 hours a clock change can skip or
-#: repeat (the GA4 capture's list, `tests/unit/test_capture_ga4.py`).
-BUSY = [(300, 350), (440, 465), (535, 595), (180, 299), (150, 170)] + [
-    (h * 60 - 10, h * 60 + 10) for h in (1, 7, 13, 19)]
-
-
 class TestTheJob:
     def test_it_is_registered_at_half_past_its_hours_and_a_few_minutes_after_a_start(self):
         before = datetime.now(timezone.utc)
@@ -588,7 +553,7 @@ class TestTheJob:
 
 @pytest.fixture(scope="module")
 def walk():
-    from tests.unit.test_write_chains import _CAPTURE_WALKED, _Walk
+    from tests.helpers.write_walk import _CAPTURE_WALKED, _Walk
 
     return _Walk(_CAPTURE_WALKED)
 

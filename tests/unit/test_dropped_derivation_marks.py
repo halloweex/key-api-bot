@@ -227,7 +227,7 @@ PERSISTENT = canary.DERIVATION_MARKS_PERSISTENT
 
 
 def _payload(count, age):
-    from tests.unit.test_canary import _healthy_payload
+    from tests.helpers.canary_payload import _healthy_payload
 
     payload = _healthy_payload()
     payload["derivation"] = {"mode": "own", "error": None,

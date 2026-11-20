@@ -41,12 +41,8 @@ import pytest_asyncio
 from core import goal_freeze, pg
 from tests import migration_replay as replay
 from tests.integration.pg_tab_seed import store_that_never_reaches_duckdb, tab_in_postgres
-from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
-from tests.unit.test_goals_read_paths_do_not_write import _ConnectPerAcquire
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
+from tests.helpers.goals_history import _seed_history_pg
+from tests.helpers.app_client import ConnectionPerAcquire
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -446,7 +442,7 @@ class TestNoGetWrites:
         and the frozen month is answered frozen. Kills: a GET that froze the
         month it was asked about."""
         store, pool = history
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_ConnectPerAcquire(DSN))), \
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=ConnectionPerAcquire(DSN))), \
                 patch("core.pg.require_revision", new=AsyncMock()):
             for path in ("/api/goals/smart", "/api/goals/forecast"):
                 response = admin_client.get(path, params={"year": 2026, "month": 10})
@@ -455,7 +451,7 @@ class TestNoGetWrites:
 
         await goal_freeze.freeze_month(store, now=OCTOBER)
         kept = await _rows(pool)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_ConnectPerAcquire(DSN))), \
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=ConnectionPerAcquire(DSN))), \
                 patch("core.pg.require_revision", new=AsyncMock()):
             smart = admin_client.get("/api/goals/smart", params={"year": 2026, "month": 10})
             forecast = admin_client.get("/api/goals/forecast", params={"year": 2026, "month": 10})

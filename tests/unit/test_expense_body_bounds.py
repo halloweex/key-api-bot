@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 BASE = {"expense_date": "2026-02-10", "amount": 5, "category": "c", "expense_type": "t"}
 

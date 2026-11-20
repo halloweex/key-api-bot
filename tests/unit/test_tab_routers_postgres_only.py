@@ -61,10 +61,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core import read_fallback
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -188,7 +184,7 @@ def _engine_bindings(tree: ast.AST) -> Dict[str, str]:
     """Every name the file binds to an engine module or to a function of
     one, and the module: `from core import pg_x as y`, `from core.pg_x
     import f`, `import core.pg_x as y`."""
-    from tests.unit.test_read_fallback_sites import ENGINE_PREFIXES, _is_engine_module
+    from tests.helpers.engine_walk import ENGINE_PREFIXES, _is_engine_module
 
     out: Dict[str, str] = {}
     for n in ast.walk(tree):
@@ -210,7 +206,7 @@ def _imported_names(tree: ast.AST) -> Dict[str, str]:
     """`{alias: name}` for every function the file imports out of an engine
     module by its name (`from core.pg_x import f as g`), so a reach through
     `g` is judged as `f`."""
-    from tests.unit.test_read_fallback_sites import _is_engine_module
+    from tests.helpers.engine_walk import _is_engine_module
 
     return {a.asname or a.name: a.name
             for n in ast.walk(tree)
@@ -227,7 +223,7 @@ def _chain_writers(module: str) -> FrozenSet[str]:
     (`pg_operational.replicate_after_manual_expense`, the hourly copy called
     sooner, was one until step 14's S14-13). A reader of the module — `read_snapshot_calendar`, `preflight`,
     `reading`, `reads_the_chain` — is none of them."""
-    from tests.unit.test_chain_latch import _writers
+    from tests.helpers.chain_writers import _writers
 
     mod = importlib.import_module(module)
     found = set(_writers(mod))
@@ -306,7 +302,7 @@ def round_the_routers(source: str, relpath: str) -> List[str]:
     `get_stock_summary`) and pass."""
     from collections import Counter
 
-    from tests.unit.test_dashboard_routers_postgres_only import round_a_refusal
+    from tests.helpers.router_walk import round_a_refusal
 
     tree = ast.parse(source)
     bindings, names = _engine_bindings(tree), _imported_names(tree)
@@ -345,10 +341,8 @@ class TestNothingGoesRoundTheRouter:
     @pytest.mark.parametrize("path,routers,refusing", THIRD_SET,
                              ids=[p for p, _r, _f in THIRD_SET])
     def test_nothing_but_the_router_reads_an_engine(self, path, routers, refusing):
-        from tests.unit.test_read_fallback_sites import read_switch_modules, walk_source
-        from tests.unit.test_read_routers_postgres_only import (
-            _what_reaches_round_the_router,
-        )
+        from tests.helpers.engine_walk import read_switch_modules, walk_source
+        from tests.helpers.router_walk import _what_reaches_round_the_router
 
         source = (ROOT / path).read_text(encoding="utf-8")
         found, reaches = _what_reaches_round_the_router(source)
@@ -371,10 +365,8 @@ class TestNothingGoesRoundTheRouter:
         assert not writers & set(readers), sorted(writers & set(readers))
 
     def test_only_the_cohort_router_reads_clickhouse(self):
-        from tests.unit.test_read_fallback_sites import read_switch_modules, walk_source
-        from tests.unit.test_read_routers_postgres_only import (
-            _what_reaches_round_the_router,
-        )
+        from tests.helpers.engine_walk import read_switch_modules, walk_source
+        from tests.helpers.router_walk import _what_reaches_round_the_router
 
         source = (ROOT / COHORTS_FILE).read_text(encoding="utf-8")
         tree = ast.parse(source)

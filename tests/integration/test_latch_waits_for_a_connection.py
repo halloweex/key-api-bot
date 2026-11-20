@@ -556,7 +556,7 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
     statement, through the module's private helpers and constants, bar the
     readers it names and holds to writing nothing. A writer reached only
     through another module's function is past what the walk follows."""
-    from tests.unit.test_chain_latch import _writers
+    from tests.helpers.chain_writers import _writers
 
     found = {(chain.__name__, name) for chain in write_chains.WRITE_CHAINS
              for name in _writers(chain)}

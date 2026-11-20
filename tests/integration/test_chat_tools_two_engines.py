@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from tests.integration.pg_tab_seed import call_key, golden
-from tests.integration.test_dashboard_two_engines import (  # noqa: F401 — fixture
+from tests.helpers.dashboard_fixture import (  # noqa: F401 — fixture
     DSN, WINDOW, _comparable, original_in_postgres,
 )
 

@@ -9,35 +9,19 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from core import pg_warehouse_dq as twins
 from core.data_quality import IntegrityIssue, Severity
 from core.pg_warehouse_dq import (
-    Attribution, DerivationJournal, Facts, JournalRun, LineItems, OrderLanding, RowValues,
+    Attribution, DerivationJournal, Facts, JournalRun, LineItems, OrderLanding,
     SilverArc, Unwatched, Watermark,
 )
-
-
-WM = Watermark(today=date(2026, 9, 17), in_flight=2, backfilled=True,
-               landing_age_s=120, landing_failures=0)
-ARC_CLEAN = SilverArc(0, 0, 0.0, None, (), 0, 0.0, ())
-ATT_OK = Attribution(orders=100, tagged=30, base_orders=400, base_tagged=120)
-LI_NONE = LineItems(0, 0.0, (), 0, 0.0, ())
-REBUILT = datetime(2026, 9, 17, 6, 50, tzinfo=timezone.utc)
-
-
-def _rv(**kw):
-    base = dict(reported=0, covered=0, abandoned=0, in_flight=0, columns=(), sample=(),
-                oldest_age_s=None, rebuilt_at=REBUILT, compared=48000, elapsed_ms=230)
-    base.update(kw)
-    return RowValues(**base)
-
-
-RV_CLEAN = _rv()
-JOURNAL_QUIET = DerivationJournal(since=REBUILT, runs=())
+from tests.helpers.warehouse_dq_facts import (
+    ARC_CLEAN, ATT_OK, REBUILT, RV_CLEAN, WM, _facts, _rv,
+)
 
 
 def _names(issues):
@@ -163,7 +147,6 @@ class TestAttribution:
         assert issue.check_name == "pg_attribution_coverage_unwatched"
 
 
-
 class TestLineItems:
     LI = LineItems(5, 500.0, (1,), 7, 700.0, (2,))
     # 2026-11-14 on production, by sales type (the retail and exhibition
@@ -241,14 +224,6 @@ class TestLineItems:
         assert li.headline_sample == (5, 12, 11, 10, 107, 106, 105, 104, 103, 102)
         assert li.headline_by_type == (("b2b", 2, 60.0), ("retail", 4, 40.0))
         assert twins.line_items_from_rows([]) == LineItems(0, 0.0, (), 0, 0.0, ())
-
-
-def _facts(**groups):
-    base = dict(silver_arc=ARC_CLEAN, attribution=ATT_OK, line_items=LI_NONE,
-                derivation_signal=JOURNAL_QUIET, order_landing=OrderLanding(),
-                own_entity=twins.OwnEntity(), silver_row_values=RV_CLEAN)
-    base.update(groups)
-    return Facts(whole=None, watermark=WM, **base)
 
 
 class TestTheRowValues:
@@ -656,8 +631,6 @@ class TestTheSignalMissed:
         assert REGISTRY["pg_signal_missed"].kind is Kind.CONDITION
         for name in ("pg_signal_missed", "pg_derivation_signal_unwatched"):
             assert name in HUMAN_CHECK_NAMES
-
-
 
 
 # ─── DN-23: the order-landing twins ───────────────────────────────────────────

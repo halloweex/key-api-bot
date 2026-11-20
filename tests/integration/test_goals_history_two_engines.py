@@ -37,11 +37,7 @@ import pytest_asyncio
 from tests.integration.pg_tab_seed import (
     call_key, comparable, golden, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_goals_off_duckdb_silver import (
-    TIMEOUT_S,
-    _seed_history_pg,
-    _without_clock,
-)
+from tests.helpers.goals_history import TIMEOUT_S, _seed_history_pg, _without_clock
 
 asyncpg = pytest.importorskip("asyncpg")
 

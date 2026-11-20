@@ -37,11 +37,7 @@ import pytest_asyncio
 
 from core import pg, promo_asks, promotions
 from tests import migration_replay as replay
-from tests.unit.test_goals_read_paths_do_not_write import _ConnectPerAcquire
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
+from tests.helpers.app_client import ConnectionPerAcquire
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -208,7 +204,7 @@ class TestTheRevisionOnAServer:
     async def test_it_applies_twice(self):
         """Every statement again, then Alembic's step from 0038. Kills: an IF
         NOT EXISTS dropped, or a COMMENT that does not parse on a server."""
-        from tests.integration.test_analytics_captures_pg import _alembic_sql
+        from tests.helpers.alembic_sql import _alembic_sql
 
         conn = await asyncpg.connect(DSN)
         tx = conn.transaction()
@@ -228,7 +224,7 @@ class TestTheRevisionOnAServer:
         """Down to 0038 the stamp is 0038, an image at 0038 passes its check,
         and every row is still there; up again, nothing moved. Kills: a DROP
         in the downgrade, or a re-upgrade that is not a no-op."""
-        from tests.integration.test_analytics_captures_pg import _alembic_sql
+        from tests.helpers.alembic_sql import _alembic_sql
 
         conn = await asyncpg.connect(DSN)
         tx = conn.transaction()
@@ -417,7 +413,7 @@ class TestTheWriter:
 def through_the_app(db):
     """`core.pg.get_pool` answering every acquire with a connection of its
     own, in whichever loop asks: the app runs in the client's portal."""
-    with patch("core.pg.get_pool", new=AsyncMock(return_value=_ConnectPerAcquire(DSN))):
+    with patch("core.pg.get_pool", new=AsyncMock(return_value=ConnectionPerAcquire(DSN))):
         yield db
 
 
@@ -648,7 +644,7 @@ class TestPlannedPromotionsEndToEnd:
                     starts_on=(month_end + timedelta(days=1)).isoformat(),
                     ends_on=(month_end + timedelta(days=2)).isoformat()), by=1)
 
-            with patch("core.pg.get_pool", new=AsyncMock(return_value=_ConnectPerAcquire(DSN))):
+            with patch("core.pg.get_pool", new=AsyncMock(return_value=ConnectionPerAcquire(DSN))):
                 response = admin_client.get("/api/revenue/forecast")
             assert response.status_code == 200, response.text
             answer = response.json()

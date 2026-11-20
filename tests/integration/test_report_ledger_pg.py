@@ -134,7 +134,8 @@ class TestTheJobSendsOnce:
         tick that finds Postgres's row. Mutation: drop the spool branch from
         the gate (two messages), or let the drain stamp now() (the row's
         `sent_at` would be the drain's)."""
-        from tests.unit.test_weekly_report import TestSchedulerJob, _store
+        from tests.helpers.weekly_report_job import WeeklyReportJob
+        from tests.helpers.weekly_report_job import _store
 
         chain = pg_weekly_ledger_write
         real = chain.mark_sent
@@ -148,7 +149,7 @@ class TestTheJobSendsOnce:
 
         monkeypatch.setattr(chain, "mark_sent", mark_sent)
         store = await _store(tmp_path)
-        job = TestSchedulerJob()
+        job = WeeklyReportJob()
         week_start = await job._seed(warehouse, complete=True)
         sent = []
         scheduler = job._wire(monkeypatch, store, sent, tmp_path)

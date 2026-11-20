@@ -548,7 +548,7 @@ class TestPredictionsStored:
     @staticmethod
     def _service(monkeypatch, store):
         from core import prediction_service as ps
-        from tests.unit.test_audit_fixes import _valid_training_df
+        from tests.helpers.training_frames import _valid_training_df
 
         svc = ps.PredictionService()
 
@@ -674,10 +674,6 @@ class TestTheSmartGoalReadsOneSet:
 
 # ─── A failed read under the chain is a refusal, never a quiet answer ───────
 
-from tests.unit.test_read_fallback_sites import (  # noqa: E402,F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
 
 def _failing_on(table):
     """`pg_goals_read.fetch` failing only for a statement naming `table` — a
