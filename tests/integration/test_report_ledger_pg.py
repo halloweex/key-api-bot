@@ -83,8 +83,12 @@ class TestOneRecord:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("ledger,chain", CHAINS)
     async def test_the_row_and_the_upsert_are_duckdbs(self, pool, ledger, chain):
+        """The first record is stored at two places, as the report printed it
+        (a half-cent rounds up); the second rewrites the week."""
         before = datetime.now(timezone.utc)
         assert await report_ledger.mark_sent(ledger, WEEK, "retail", 1234.565, 7) == "recorded"
+        (first,) = await _rows(pool, chain)
+        assert first[:4] == (WEEK, "retail", Decimal("1234.57"), 7)
         assert await report_ledger.mark_sent(ledger, WEEK, "retail", 99.0, 2) == "recorded"
         (row,) = await _rows(pool, chain)
         assert row[:4] == DUCKDB_LEDGER_ROW

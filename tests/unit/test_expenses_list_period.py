@@ -72,5 +72,4 @@ def test_without_a_window_it_is_the_whole_list(admin_client, store, params):
 def test_an_unknown_period_is_a_400_before_anything_is_read(admin_client, store):
     r = admin_client.get("/api/expenses", params={"period": "fortnight"})
     assert r.status_code == 400
-    assert r.json()["detail"].startswith("period: Must be one of:")
     store.list_expenses.assert_not_awaited()

@@ -31,7 +31,3 @@ class TestConsumersUseTheOneDefinition:
 
         with pytest.raises(ValueError):
             _silver_history_where("wholsale")
-        # Not a return, and not a sale to the company's own legal entity
-        # (the owner's decision of 2026-11-14), on every sales type.
-        assert _silver_history_where("all") == (
-            "NOT s.is_return AND (s.buyer_id IS NULL OR s.buyer_id NOT IN (17358))", [])

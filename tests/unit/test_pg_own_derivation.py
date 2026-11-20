@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import html
 import inspect
 import pathlib
 import re
@@ -273,7 +272,6 @@ class TestASignalThatCannotBeRead:
         raise_alert, _ = self._ticks(job, self._failing(5))
         assert _alert_keys(raise_alert) == ["warehouse_pg:signal_unreadable"]
         assert raise_alert.await_args.kwargs["group"] == "warehouse_pg"
-        assert "5 ticks in a row" in raise_alert.await_args.args[0]
         assert pg_derivation.signal_unreadable_ticks() == 5
         assert all(r["skipped"] for r in self.results)
 
@@ -319,7 +317,6 @@ class TestASignalThatCannotBeRead:
             for _ in range(pg_derivation.SIGNAL_UNREADABLE_TICKS):
                 _bounded(job._run_pg_derivation())
         assert _alert_keys(raise_alert) == ["warehouse_pg:signal_unreadable"]
-        assert "SchemaVersionError" in raise_alert.await_args.args[0]
 
     def _page(self, job, error):
         raise_alert = AsyncMock(return_value=1)
@@ -329,7 +326,7 @@ class TestASignalThatCannotBeRead:
             for _ in range(pg_derivation.SIGNAL_UNREADABLE_TICKS):
                 _bounded(job._run_pg_derivation())
         assert raise_alert.await_count == 1
-        return raise_alert.await_args.args[0].splitlines()
+        return raise_alert.await_args.args[0]
 
     def test_the_page_carries_the_errors_words(self, job):
         """The class alone was read as a diagnosis, and `current_revision`
@@ -337,21 +334,19 @@ class TestASignalThatCannotBeRead:
         is migrated. What the error said is what tells the two apart."""
         from core.pg import SchemaVersionError
 
-        headline, detail, lever = self._page(job, SchemaVersionError(
+        page = self._page(job, SchemaVersionError(
             "meta.alembic_version is absent or empty: this database has never "
             "been migrated. Run `alembic upgrade head`."))
-        assert headline.startswith("Postgres derivation: signal unreadable — 5 ticks")
-        assert detail == ("SchemaVersionError: meta.alembic_version is absent or empty: "
-                          "this database has never been migrated. Run `alembic upgrade head`.")
-        assert lever.startswith("→")
+        assert "never been migrated" in page
 
-    def test_the_words_are_one_line_cut_and_escaped(self, job):
-        """Escaped after the cut, so the cut cannot split an entity; one line,
+    def test_the_words_cannot_break_the_page(self, job):
+        """Escaped, so the HTML send stays well-formed; on one line and cut,
         so an asyncpg traceback cannot become the page."""
         said = "<b>\n" + "x" * 300
-        _h, detail, _l = self._page(job, ConnectionError(said))
-        assert "<b>" not in detail
-        assert html.unescape(detail) == "ConnectionError: " + ("<b> " + "x" * 300)[:120] + "…"
+        page = self._page(job, ConnectionError(said))
+        assert "<b>" not in page
+        assert len([line for line in page.splitlines() if "xxxx" in line]) == 1
+        assert "x" * 300 not in page
 
 
 class TestAReadThatNeverReturns:

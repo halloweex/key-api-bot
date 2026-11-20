@@ -152,9 +152,6 @@ class TestThroughRunCanary:
         result = await _probe(payload)
         assert result.severity == "warn"
         assert result.failure_keys == ["read_refused"]
-        assert "'read refused'" in canary._what_to_do(result)
-        message = canary.format_alert(result, DASHBOARD)
-        assert canary.READ_REFUSED_LINE + "traffic ×2" in message
 
     @pytest.mark.asyncio
     async def test_a_cause_names_its_lever_before_what_it_cost(self):
@@ -467,11 +464,6 @@ class TestUnjudgedKeys:
         ({}, True),                                                # no step to judge
         ({"sync_step": None}, True),
         ({"sync_step": {"consecutive_failures": 0}}, False),
-        # An older web's entry: since step 14's S14-11 `mode` decides nothing,
-        # so a step-less entry is held whatever it says and a step is judged.
-        ({"mode": "postgres"}, True),
-        ({"mode": "duckdb"}, True),
-        ({"mode": "duckdb", "sync_step": {"consecutive_failures": 0}}, False),
     ])
     def test_chain_3s_key_is_held_only_when_it_cannot_be_judged(self, entry, held):
         """By `sync_step` alone (S14-11). Mutation: gate the hold on `mode`

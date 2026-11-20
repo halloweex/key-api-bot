@@ -272,3 +272,6 @@ class TestOneFindingPerKey:
         rows = await _pg_rows(pool, "app.data_quality_issues")
         assert [(r[0], r[1], r[2], r[4]) for r in rows] == [
             (run_id, "chain_invariants_unwatched", "(write chains)", 2)]
+        # And the run counts the folded findings, not the two it was handed.
+        runs = await _pg_rows(pool, "app.data_quality_runs")
+        assert [r[8] for r in runs if r[0] == run_id] == [1]

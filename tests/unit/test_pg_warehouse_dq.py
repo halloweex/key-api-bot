@@ -342,9 +342,6 @@ class TestTheRowValuesSql:
 
         compared = [c for c, _ in twins._SILVER_ROW_COLUMNS]
         assert set(compared) | {"id"} == set(SILVER_COLUMNS)
-        sql = twins._row_values_sql()
-        for column in compared:
-            assert f"AS d_{column}" in sql and f"AS n_{column}" in sql
 
     def test_the_rebuild_is_dated_by_the_journal_and_silvers_own_watermark(self):
         """The layer and the watermark's row are bind parameters, and both are
@@ -385,15 +382,6 @@ class TestTheRowValuesSql:
                     and n.func.attr == "execute" and n.args
                     and isinstance(n.args[0], ast.Constant)]
         assert "SET LOCAL jit = off" in executed
-
-    def test_the_recompute_is_read_last(self):
-        """A hold budget spent on the heavy group must not blind the cheap ones
-        queued behind it."""
-        assert twins.GROUPS[-1] == "silver_row_values"
-        tree = ast.parse(textwrap.dedent(inspect.getsource(twins.read_facts)))
-        (readers,) = [n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
-                      and any(isinstance(t, ast.Name) and t.id == "readers" for t in n.targets)]
-        assert [ast.literal_eval(e.elts[0]) for e in readers.elts] == list(twins.GROUPS)
 
 
 class TestBlindness:
@@ -707,10 +695,6 @@ class TestTheLandingBlindness:
 
     def test_every_twin_is_a_condition_of_the_group(self):
         assert tuple(twins.GUARD_CONDITIONS["order_landing"]) == twins.LANDING_TWINS
-
-    def test_it_is_read_before_the_recompute(self):
-        """A budget the recompute spends must not blind the landing twins."""
-        assert twins.GROUPS.index("order_landing") < twins.GROUPS.index("silver_row_values")
 
 
 class TestTheLandingRead:

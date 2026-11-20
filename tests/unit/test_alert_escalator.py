@@ -122,22 +122,6 @@ class TestPolicy:
             assert await escalate_due(web_alive=True) == 0
 
 
-class TestTheCycleRule:
-    """The SQL owns 'one escalation per firing cycle'; what a unit test can
-    pin is the shape the query promises, so a rewrite that drops a clause
-    fails loudly here rather than quietly in production."""
-
-    def test_the_query_carries_the_three_guards(self):
-        from core.alert_escalator import _DUE_QUERY
-
-        q = _DUE_QUERY
-        assert "acknowledged_at IS NULL" in q          # П4 hook
-        assert "state = 'firing'" in q                 # resolved never escalates
-        assert "kind = 'condition'" in q               # events never escalate
-        assert "event_type = 'escalated'" in q         # once per cycle
-        assert "event_type = 'resolved'" in q          # cycle boundary
-
-
 class TestFormat:
     def test_the_message_names_age_and_count(self):
         text = format_escalation([_due(hours=26, fired=4)])

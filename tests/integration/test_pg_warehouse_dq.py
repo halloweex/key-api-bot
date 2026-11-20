@@ -850,7 +850,9 @@ class TestTheRowValues:
 
     @pytest.mark.asyncio
     async def test_a_budget_spent_on_the_recompute_blinds_it_alone(self, rv, monkeypatch):
-        """Read last, so the three cheap groups keep their verdicts."""
+        """The recompute is read last, so every other group — the landing
+        twins and the own-entity rule included — has its verdict before the
+        heavy one can spend the budget."""
         from core import pg_warehouse_dq
 
         monkeypatch.setattr(pg_warehouse_dq, "HOLD_BUDGET_S", 2)
@@ -860,8 +862,9 @@ class TestTheRowValues:
         facts = await asyncio.wait_for(pg_warehouse_dq.read_facts(pool=rv), timeout=30)
         assert isinstance(facts.silver_row_values, pg_warehouse_dq.Unwatched)
         assert "hold budget" in facts.silver_row_values.reason
-        for group in ("silver_arc", "attribution", "line_items"):
-            assert not isinstance(getattr(facts, group), pg_warehouse_dq.Unwatched), group
+        for group in pg_warehouse_dq.GROUPS:
+            if group != "silver_row_values":
+                assert not isinstance(getattr(facts, group), pg_warehouse_dq.Unwatched), group
         held = []
         issues = pg_warehouse_dq.check_pg_warehouse(facts, held_out=held)
         names = {i.check_name for i in issues}

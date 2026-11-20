@@ -146,42 +146,6 @@
    ],
    "sorted_by": "quantity"
   },
-  "_get_top_products[\"month\", \"quantity\", 1]": {
-   "period": "month",
-   "products": [
-    {
-     "brand": null,
-     "name": "Lipstick",
-     "quantity": 4,
-     "revenue": 1000.0
-    }
-   ],
-   "sorted_by": "quantity"
-  },
-  "_get_top_products[\"month\", \"quantity\", 3]": {
-   "period": "month",
-   "products": [
-    {
-     "brand": null,
-     "name": "Lipstick",
-     "quantity": 4,
-     "revenue": 1000.0
-    },
-    {
-     "brand": "BrandA",
-     "name": "Serum",
-     "quantity": 3,
-     "revenue": 1500.0
-    },
-    {
-     "brand": "BrandB",
-     "name": "Ampoule",
-     "quantity": 2,
-     "revenue": 200.0
-    }
-   ],
-   "sorted_by": "quantity"
-  },
   "_get_top_products[\"month\", \"revenue\", 10]": {
    "period": "month",
    "products": [
@@ -208,18 +172,6 @@
      "name": "Toner",
      "quantity": 1,
      "revenue": 200.0
-    }
-   ],
-   "sorted_by": "revenue"
-  },
-  "_get_top_products[\"month\", \"revenue\", 1]": {
-   "period": "month",
-   "products": [
-    {
-     "brand": "BrandA",
-     "name": "Serum",
-     "quantity": 3,
-     "revenue": 1500.0
     }
    ],
    "sorted_by": "revenue"

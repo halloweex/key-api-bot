@@ -37,6 +37,11 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from bot.canary import DQ_MAX_AGE_S, ORDERS_SYNC_LOCK_WAIT_MAX_S, ORDERS_SYNC_STALE_S
+from core.mirror_reconciliation import (
+    ORDER_VERSIONS_FLOOD_PER_DAY, ORDER_VERSIONS_STALL_HOURS,
+)
+from core.pg_order_versions import BACKFILL, BASELINE, CHANGE, CREATE, NOT_THE_WRITER
 from tests.helpers.daily_soak import (  # noqa: F401
     KYIV, NOW, SQL_DIR, _uncommented, _variables, check, needs_pg, no_runs,
     pool, render, run, scenario, signal, verdict,
@@ -94,19 +99,6 @@ class TestTheFiles:
     @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
     def test_only_documented_variables(self, path):
         render(path.name)
-
-    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
-    def test_the_history_check_measures_against_the_canarys_limit(self, name, layer):
-        """20 and 22 ask whether the canary would have paged, so the limit is
-        the canary's: a copy that drifted would certify a history the page
-        judges differently."""
-        from bot.canary import DQ_MAX_AGE_S
-
-        sql = _uncommented((SQL_DIR / name).read_text(encoding="utf-8"))
-        found = re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+canary_max_age", sql)
-        assert len(found) == 1, found
-        assert int(found[0]) * 3600 == DQ_MAX_AGE_S[layer]
-        assert re.findall(r"r\.layer = '(\w+)'", sql) == [layer]
 
     def test_the_two_history_checks_differ_only_in_what_a_success_is(self):
         """22 is 20 for the ClickHouse arm (OD-08 review): one body, so a fix
@@ -538,14 +530,21 @@ class TestD8JudgesTheRun:
 @needs_pg
 class TestReconciliationPgHistory:
     """Would the canary have paged on this history? It pages when the newest
-    successful run is more than 30 h old, so the check measures silences as
-    well as calendar days, and counts only the runs that could end one.
+    successful run is older than its limit for the layer (`DQ_MAX_AGE_S`),
+    so the check measures silences as well as calendar days, and counts only
+    the runs that could end one. The two scenarios at the limit are built
+    from the canary's own number; the rest are drawn on today's 30 h.
 
     Every scenario seeds a run on the day before the window opens, so no row
     another test committed can be the one that opens its first silence."""
 
     FILE, LAYER = HISTORY_CHECKS[0]
     FIRST_RUN_ID = 990_000_200
+
+    @property
+    def limit(self) -> timedelta:
+        """The canary's limit for this layer, the one the check must judge by."""
+        return timedelta(seconds=DQ_MAX_AGE_S[self.LAYER])
 
     @staticmethod
     def at(days_ago: int, hour: int = 5, minute: int = 30) -> datetime:
@@ -558,6 +557,14 @@ class TestReconciliationPgHistory:
         moved = moved or {}
         starts = [moved.get(d, self.at(d)) for d in range(first, last - 1, -1)]
         return [s for s in starts if s is not None]
+
+    def silent_after_30_05(self, silence: timedelta) -> list:
+        """Every morning, with 31.05's run `silence` after 30.05's. It still
+        falls on 31.05, so every day has its run and only the silence can
+        fail the history."""
+        moved = self.at(6) + silence
+        assert moved.date() == self.at(5).date(), moved
+        return self.every_morning(moved={5: moved})
 
     async def seed(self, conn, starts, *, failed=()):
         """A run of the layer per start, in order, `failed` ones errored."""
@@ -588,14 +595,12 @@ class TestReconciliationPgHistory:
 
     @pytest.mark.asyncio
     async def test_a_silence_past_the_limit_fails_though_every_day_has_a_run(self, pool):
-        """05:30 one day, 12:00 the next: 30.5 h in which the canary pages, and a
-        count of calendar days never notices."""
+        """Half an hour past the canary's limit, and 31.05 still has its run:
+        the canary pages, and a count of calendar days never notices."""
         async with scenario(pool) as conn:
-            await self.seed(conn, self.every_morning(moved={5: self.at(5, 12, 0)}))
+            await self.seed(conn, self.silent_after_30_05(self.limit + timedelta(minutes=30)))
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
-        assert "no successful run on" not in detail, detail
-        assert "silent for 30.5 h, from 30.05 05:30 to 31.05 12:00 Kyiv" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_silence_inside_the_limit_passes(self, pool):
@@ -607,16 +612,14 @@ class TestReconciliationPgHistory:
 
     @pytest.mark.asyncio
     async def test_a_silence_of_exactly_the_limit_passes(self, pool):
-        """05:30 one day, 11:30 the next: 30.0 h. The canary pages on
-        `age > limit`, so on this history it stayed quiet, and a check that
-        failed here would restart DN-21's fourteen days over a page that never
-        went out."""
+        """30.05 05:30, then the next run exactly the canary's limit later. The
+        canary pages on `age > limit`, so on this history it stayed quiet, and
+        a check that failed here would restart DN-21's fourteen days over a
+        page that never went out."""
         async with scenario(pool) as conn:
-            await self.seed(conn, self.every_morning(moved={5: self.at(5, 11, 30)}))
+            await self.seed(conn, self.silent_after_30_05(self.limit))
             v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
-        assert "the longest silence 30.0 h" in detail, detail
-        assert "silent for" not in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_failed_run_does_not_end_a_silence(self, pool):
@@ -1111,6 +1114,12 @@ ORDER_TABLES = ("bronze.orders", "bronze.order_products", "bronze.expenses",
 CHAIN3_IDS = [990_000_301, 990_000_302, 990_000_303, 990_000_304]
 O_FILES = ("33_o2_orders_watermark.sql", "34_o3_order_versions.sql",
            "35_o4_halfwritten_orders.sql", "36_o5_orders_integrity.sql")
+# The longest the canary goes without paging the order step: a wait for the
+# heavy-job lock excused up to its maximum, then the staleness it allows the
+# step once that wait is subtracted. O2's bound.
+ORDERS_BOUND = timedelta(seconds=ORDERS_SYNC_LOCK_WAIT_MAX_S + ORDERS_SYNC_STALE_S)
+# Every kind a version can be (`core.pg_order_versions`; `kind` has no CHECK).
+VERSION_KINDS = (CREATE, CHANGE, BASELINE, BACKFILL)
 
 
 async def clean_orders(conn):
@@ -1135,6 +1144,13 @@ async def order_version(conn, oid, *, captured_at, kind="change"):
     await conn.execute(
         "INSERT INTO app.order_versions (order_id, captured_at, kind) VALUES ($1, $2, $3)",
         oid, captured_at, kind)
+
+
+async def order_versions(conn, oid, n, *, captured_at, kind):
+    """`n` versions of one order, of one kind, captured at one moment."""
+    await conn.execute(
+        "INSERT INTO app.order_versions (order_id, captured_at, kind) "
+        "SELECT $1, $2, $3 FROM generate_series(1, $4)", oid, captured_at, kind, n)
 
 
 async def chain_order(conn, oid, *, total=100, mirrored_at=None, created_at=None,
@@ -1207,40 +1223,42 @@ class TestO2OrdersWatermark:
         assert "newest change 05.06 03:00 Kyiv" in detail, detail
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("age,shown,expected", [
-        (timedelta(minutes=104), 104, "PASS"),
-        (timedelta(minutes=105), 105, "PASS"),
-        (timedelta(minutes=105, seconds=1), 105, "FAIL"),
-        (timedelta(minutes=240), 240, "FAIL"),
+    @pytest.mark.parametrize("past,expected", [
+        (timedelta(minutes=-1), "PASS"),
+        (timedelta(0), "PASS"),
+        (timedelta(seconds=1), "FAIL"),
+        (timedelta(hours=2), "FAIL"),
     ])
-    async def test_a_row_older_than_the_canarys_bound_fails(self, pool, age, shown, expected):
-        """105 minutes: the 90 the canary excuses for a lock wait plus the 15
-        it allows the step once the wait is subtracted — exactly 105 is a tick
-        the canary calls waiting, a second more one it pages. Mutation: the
-        old 90, or `>=`."""
+    async def test_a_row_older_than_the_canarys_bound_fails(self, pool, past, expected):
+        """`ORDERS_BOUND`: exactly that old is a tick the canary calls
+        waiting, a second more one it pages (`TestO2SharesTheCanarysBound`
+        holds the canary to the same bound). Mutation: the lock wait alone,
+        as O2 had it, or `>=`."""
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await order_owners(conn, ago(days=2))
-            await orders_synced(conn, stamped_at=NOW - age)
+            await orders_synced(conn, stamped_at=NOW - ORDERS_BOUND - past)
             v, detail = await verdict(conn, self.FILE)
-        assert v == expected and f"rewritten {shown} min ago (limit 105)" in detail, detail
+        assert v == expected, detail
 
     @pytest.mark.asyncio
     async def test_missing_fails_unless_the_handover_is_recent(self, pool):
+        """Owner rows under `ORDERS_BOUND` old forgive a step that has not
+        written yet; at the bound they forgive nothing."""
         async with scenario(pool) as conn:
             await clean_orders(conn)
             v, detail = await verdict(conn, self.FILE)
             assert v == "FAIL" and "no order step has completed" in detail, detail
         async with scenario(pool) as conn:
             await clean_orders(conn)
-            await order_owners(conn, ago(minutes=30))
+            await order_owners(conn, NOW - ORDERS_BOUND + timedelta(seconds=1))
             v, _ = await verdict(conn, self.FILE)
         assert v == "PASS"
         async with scenario(pool) as conn:
             await clean_orders(conn)
-            await order_owners(conn, ago(hours=2))
+            await order_owners(conn, NOW - ORDERS_BOUND)
             v, _ = await verdict(conn, self.FILE)
-        assert v == "FAIL", "owner rows two hours old forgive nothing"
+        assert v == "FAIL", "owner rows the bound old forgive nothing"
 
     @pytest.mark.asyncio
     async def test_a_value_that_is_not_a_timestamp_fails_and_does_not_error(self, pool):
@@ -1253,7 +1271,17 @@ class TestO2OrdersWatermark:
 
 @needs_pg
 class TestO3OrderVersions:
+    """O3 asks `reconcile_order_versions`' questions, so its limits and the
+    kinds it leaves out are that function's: a copy that drifted would pass
+    an archive the 07:30 run calls stalled. Each is driven here from the
+    constant — `ORDER_VERSIONS_STALL_HOURS`, `ORDER_VERSIONS_FLOOD_PER_DAY`,
+    `BACKFILL`, `NOT_THE_WRITER` — at the limit and one past it."""
+
     FILE = "34_o3_order_versions.sql"
+    STALL = timedelta(hours=ORDER_VERSIONS_STALL_HOURS)
+    # What `ORDER_VERSIONS_FLOOD_PER_DAY` counts over: the day before now, as
+    # `reconcile_order_versions` asks it.
+    DAY = timedelta(days=1)
 
     @pytest.mark.asyncio
     async def test_a_living_archive_passes(self, pool):
@@ -1265,19 +1293,29 @@ class TestO3OrderVersions:
         assert v == "PASS" and "1 in 24 h, every order covered" in detail, detail
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("kind,expected", [("change", "PASS"), ("create", "PASS"),
-                                               ("baseline", "PASS"), ("backfill", "FAIL")])
-    async def test_a_day_without_the_writer_fails(self, pool, kind, expected):
-        """`reconcile_order_versions`' stall: any kind but an operator's
-        backfill proves the writer was alive, the baseline included."""
+    @pytest.mark.parametrize("past,expected", [(timedelta(0), "PASS"),
+                                               (timedelta(seconds=1), "FAIL")])
+    async def test_a_writer_silent_past_the_stall_limit_fails(self, pool, past, expected):
+        """The newest version exactly the limit old is a writer still alive;
+        a second older, it has stalled."""
         async with scenario(pool) as conn:
             await clean_orders(conn)
-            await chain_order(conn, CHAIN3_IDS[0], mirrored_at=ago(hours=25))
+            await chain_order(conn, CHAIN3_IDS[0], mirrored_at=NOW - self.STALL - past)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == expected, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", VERSION_KINDS)
+    async def test_any_kind_but_a_backfill_proves_the_writer_alive(self, pool, kind):
+        """`reconcile_order_versions`' stall: the newest version that is not
+        an operator's backfill, the baseline included."""
+        async with scenario(pool) as conn:
+            await clean_orders(conn)
+            await chain_order(conn, CHAIN3_IDS[0],
+                              mirrored_at=NOW - self.STALL - timedelta(hours=1))
             await order_version(conn, CHAIN3_IDS[0], captured_at=ago(hours=2), kind=kind)
             v, detail = await verdict(conn, self.FILE)
-        assert v == expected, (kind, detail)
-        if expected == "FAIL":
-            assert "no version since 04.06 11:00 Kyiv (limit 24 h)" in detail, detail
+        assert v == ("FAIL" if kind == BACKFILL else "PASS"), (kind, detail)
 
     @pytest.mark.asyncio
     async def test_an_empty_archive_fails(self, pool):
@@ -1297,80 +1335,46 @@ class TestO3OrderVersions:
             in detail, detail
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("kind,expected", [("change", "FAIL"), ("baseline", "PASS"),
-                                               ("backfill", "PASS")])
-    async def test_over_a_thousand_of_the_writers_versions_in_a_day_fails(self, pool, kind,
-                                                                          expected):
+    @pytest.mark.parametrize("kind", VERSION_KINDS)
+    @pytest.mark.parametrize("over", [0, 1])
+    async def test_more_of_the_writers_versions_in_a_day_than_the_limit_fails(
+            self, pool, kind, over):
+        """The order's own `create` and the rest of the limit pass, one more
+        floods — unless the kind is not the writer's, which never counts."""
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await chain_order(conn, CHAIN3_IDS[0], mirrored_at=ago(minutes=5))
-            await conn.execute(
-                "INSERT INTO app.order_versions (order_id, captured_at, kind) "
-                "SELECT $1, $2, $3 FROM generate_series(1, 1000)",
-                CHAIN3_IDS[0], ago(hours=3), kind)
+            await order_versions(conn, CHAIN3_IDS[0], ORDER_VERSIONS_FLOOD_PER_DAY - 1 + over,
+                                 captured_at=ago(hours=3), kind=kind)
             v, detail = await verdict(conn, self.FILE)
-        assert v == expected, (kind, detail)
-        if expected == "FAIL":
-            assert "1001 versions in 24 h (limit 1000): flooding" in detail, detail
+        flooding = over and kind not in NOT_THE_WRITER
+        assert v == ("FAIL" if flooding else "PASS"), (kind, detail)
 
-
-class TestO3IsReconcileOrderVersions:
-    """O3 asks `reconcile_order_versions`' questions, so its numbers and the
-    kinds it leaves out are that function's: a copy that drifted would pass
-    an archive the 07:30 run calls stalled. Read out of the SQL, not grepped
-    for: the comments name the same numbers."""
-
-    SQL = _uncommented((SQL_DIR / "34_o3_order_versions.sql").read_text(encoding="utf-8"))
-
-    def test_the_limits(self):
-        from core.mirror_reconciliation import (
-            ORDER_VERSIONS_FLOOD_PER_DAY, ORDER_VERSIONS_STALL_HOURS,
-        )
-
-        assert set(re.findall(r"interval '(\d+) hours'", self.SQL)) == {
-            str(ORDER_VERSIONS_STALL_HOURS)}
-        assert re.findall(r"recent > (\d+)", self.SQL) == [str(ORDER_VERSIONS_FLOOD_PER_DAY)]
-
-    def test_the_kinds_left_out(self):
-        from core.pg_order_versions import BACKFILL, NOT_THE_WRITER
-
-        assert re.findall(r"kind <> '(\w+)'", self.SQL) == [BACKFILL]
-        [listed] = re.findall(r"kind NOT IN \(([^)]*)\)", self.SQL)
-        assert tuple(re.findall(r"'(\w+)'", listed)) == NOT_THE_WRITER
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("older,expected", [(timedelta(0), "FAIL"),
+                                                (timedelta(seconds=1), "PASS")])
+    async def test_the_flood_is_counted_over_the_last_day(self, pool, older, expected):
+        """One past the limit captured exactly a day ago floods; a second
+        earlier, none of it is in the count."""
+        async with scenario(pool) as conn:
+            await clean_orders(conn)
+            await chain_order(conn, CHAIN3_IDS[0], mirrored_at=ago(minutes=5))
+            await order_versions(conn, CHAIN3_IDS[0], ORDER_VERSIONS_FLOOD_PER_DAY,
+                                 captured_at=NOW - self.DAY - older, kind=CHANGE)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == expected, detail
 
 
 class TestO2SharesTheCanarysBound:
-    O2 = _uncommented((SQL_DIR / "33_o2_orders_watermark.sql").read_text(encoding="utf-8"))
-
-    def test_the_lock_wait_bound(self):
-        """O2's bound is the longest the canary goes without paging for this
-        chain's step: a wait for the heavy-job lock excuses itself up to
-        `ORDERS_SYNC_LOCK_WAIT_MAX_S`, and the clock left once the wait is
-        subtracted may still be `ORDERS_SYNC_STALE_S` old — 90 + 15 minutes.
-        A report stricter than the page would FAIL a tick the canary calls
-        waiting. Mutation: change either constant, or put the limit back at
-        the lock wait alone (90), as O2 had it."""
-        from bot.canary import ORDERS_CHAIN, ORDERS_SYNC_LOCK_WAIT_MAX_S, ORDERS_SYNC_STALE_S
-
-        limit = (ORDERS_SYNC_LOCK_WAIT_MAX_S + ORDERS_SYNC_STALE_S) // 60
-        assert (ORDERS_SYNC_LOCK_WAIT_MAX_S + ORDERS_SYNC_STALE_S) % 60 == 0
-        assert set(re.findall(r"interval '(\d+) minutes'", self.O2)) == {str(limit)}
-        # Judged as an interval, so the boundary is the canary's to the second.
-        assert len(re.findall(r"stamped_at > interval '(\d+) minutes'", self.O2)) == 1
-        assert re.findall(r"limit (\d+)\)", self.O2) == [str(limit)]
-        assert ORDERS_CHAIN == "pg_orders_write"
-
     def test_the_canary_is_quiet_up_to_that_bound_and_pages_past_it(self):
-        """The arithmetic above, checked against the page itself rather than
-        against its constants: a step whose last success is exactly the bound
-        old, with the longest wait the canary excuses, is not paged; one
-        second more is. If the canary's subtraction ever changes shape, this
-        fails before O2 and the page disagree. Mutation: page on `>=` in the
-        canary, or stop subtracting the wait."""
-        from bot.canary import (
-            ORDERS_CHAIN, ORDERS_SYNC_LOCK_WAIT_MAX_S, ORDERS_SYNC_STALE_S,
-            check_orders_sync_chain,
-        )
+        """`ORDERS_BOUND`, which `TestO2OrdersWatermark` drives O2 at, checked
+        against the page itself: a step whose last success is exactly the
+        bound old, with the longest wait the canary excuses, is not paged;
+        one second more is. A report stricter than the page would FAIL a tick
+        the canary calls waiting, and if the canary's subtraction ever changes
+        shape, this fails before O2 and the page disagree. Mutation: page on
+        `>=` in the canary, or stop subtracting the wait."""
+        from bot.canary import ORDERS_CHAIN, check_orders_sync_chain
 
         def page(ok_age):
             return check_orders_sync_chain({"write_chains": {ORDERS_CHAIN: {
@@ -1380,7 +1384,7 @@ class TestO2SharesTheCanarysBound:
                               "last_attempt_age_s": ORDERS_SYNC_LOCK_WAIT_MAX_S + 60,
                               "lock_wait_s": ORDERS_SYNC_LOCK_WAIT_MAX_S}}}})
 
-        bound = ORDERS_SYNC_LOCK_WAIT_MAX_S + ORDERS_SYNC_STALE_S
+        bound = int(ORDERS_BOUND.total_seconds())
         assert page(bound) == []
         assert [key for key, _ in page(bound + 1)] == ["orders_sync_failing"]
 

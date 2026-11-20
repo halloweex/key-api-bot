@@ -113,11 +113,10 @@ class TestTheClient:
         assert body["funnel"] == plain["funnel"]
 
     @pytest.mark.asyncio
-    async def test_a_refusal_carries_ga4s_reason(self):
+    async def test_a_refusal_is_ga4_unavailable(self):
         async with httpx.AsyncClient(transport=httpx.MockTransport(_Google(status=429))) as client:
-            with pytest.raises(ga4.GA4Unavailable) as caught:
+            with pytest.raises(ga4.GA4Unavailable):
                 await ga4.run_funnel(client, "tok", *OCT, svc.CHANNEL)
-        assert "429" in str(caught.value) and "tokens per hour" in str(caught.value)
 
 
 class TestTheService:

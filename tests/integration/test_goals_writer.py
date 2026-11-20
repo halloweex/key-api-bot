@@ -311,32 +311,18 @@ class TestInputPostgresWouldRefuseNeverTakesTheLatch:
 
 
 class TestTheReadsFollowTheChain:
-    """The review's first two findings, reproduced and closed. The goal a
-    human typed is read where the chain wrote it, whatever the page's own
-    read flag says — putting `KS_READ_GOALS` or `KS_READ_MARKETING` back is
-    every read port's documented rollback — and a Postgres failure on it
-    raises rather than showing the goal DuckDB held before the flip.
+    """The review's first two findings, reproduced and closed: the goal a
+    human typed is read where the chain wrote it, and a Postgres failure on
+    it is refused rather than answered with a goal from anywhere else."""
 
-    Each test starts from a goal DuckDB wrote and the hourly copy shipped, so
-    both stores hold the pre-flip value, and then types a different one under
-    the flag: an answer of the pre-flip value is a read of the frozen copy."""
-
-    PRE_FLIP = 1_000_000.0
     TYPED = 2_500_000.0
 
-    async def _flip_after_a_shipped_goal(self, store, env):
-        # Postgres holds the pre-flip goal and then the typed one. (Until step
-        # 14's S14-11 DuckDB was written the pre-flip goal first, through its
-        # branch, as the hourly copy left it; the branch went, and DuckDB's
-        # table stays empty — a read of it would answer no goal at all.)
-        await store.set_goal("monthly", self.PRE_FLIP)          # Postgres
-        await store.set_goal("monthly", self.TYPED)             # Postgres
-
     @pytest.mark.asyncio
-    async def test_the_goals_page_reads_the_chain_with_its_flag_at_duckdb(self, stores):
-        store, _pool, env = stores
-        await self._flip_after_a_shipped_goal(store, env)
-        env.setenv("KS_READ_GOALS", "duckdb")                   # a read rollback
+    async def test_a_typed_goal_overrides_the_smart_one(self, stores):
+        """The goal typed on /goals is the month's goal on the goals page and
+        on the dashboard's smart goal alike."""
+        store, _pool, _env = stores
+        await store.set_goal("monthly", self.TYPED)
 
         assert (await store.get_goals())["monthly"]["amount"] == self.TYPED
         smart = await store.get_smart_goals()
@@ -344,15 +330,13 @@ class TestTheReadsFollowTheChain:
         assert smart["monthly"]["isCustom"] is True
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
     async def test_a_postgres_failure_raises_rather_than_showing_the_frozen_goal(
-        self, stores, read_flag,
+        self, stores,
     ):
         from core import pg_goals_read, read_fallback
 
-        store, _pool, env = stores
-        await self._flip_after_a_shipped_goal(store, env)
-        env.setenv("KS_READ_GOALS", read_flag)
+        store, _pool, _env = stores
+        await store.set_goal("monthly", self.TYPED)
         read_fallback.reset_counts()
         real = pg_goals_read.fetch
 
@@ -365,7 +349,7 @@ class TestTheReadsFollowTheChain:
 
         # Since step 14's S14-07 the failure is the goal router's refusal, a
         # 503 naming `goals` — counted, where it escaped raw — and never a
-        # fallback, whatever `KS_READ_GOALS` says.
+        # fallback.
         with patch.object(pg_goals_read, "fetch", new=goals_table_down):
             for read in (store.get_goals, store.get_smart_goals):
                 with pytest.raises(read_fallback.ReadUnavailable) as raised:
@@ -375,17 +359,15 @@ class TestTheReadsFollowTheChain:
         assert read_fallback.refusals()["goals"]["count"] == 2
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
-    async def test_the_target_line_raises_too(self, stores, read_flag):
+    async def test_the_target_line_raises_too(self, stores):
         """Since step 14's S14-05 the target line is read on `/marketing`'s
         one path, which refuses any failure: the same 503 naming `marketing`
         as the rest of the page, counted — where the goal's own branch let
         the driver's exception out uncounted. Still never DuckDB's goal."""
         from core import pg_marketing_read, read_fallback
 
-        store, _pool, env = stores
-        await self._flip_after_a_shipped_goal(store, env)
-        env.setenv("KS_READ_MARKETING", read_flag)
+        store, _pool, _env = stores
+        await store.set_goal("monthly", self.TYPED)
         read_fallback.reset_counts()
         real = pg_marketing_read.fetch
 
