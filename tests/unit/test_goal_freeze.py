@@ -14,7 +14,8 @@ each named by the mutation it kills:
   read through the one door, and a row frozen by this revision's code (a
   literal, never to be edited) goes on being read;
 - the freeze: once per month and sales type, every answer computed before
-  any row, never before 00:30 on the 1st, the month Kyiv's;
+  any row, never before 00:30 on the 1st nor before a validated derivation
+  started five minutes past the month's first midnight, the month Kyiv's;
 - the job: registered daily at 00:30 and after a start, clear of the busy
   windows, a refusal answered with nothing written;
 - the table has one writer, reached from the job alone.
@@ -303,12 +304,19 @@ class _Store:
         return self.short.get(sales_type, (end - start).days + 1)
 
 
+# A validated derivation after every moment these tests freeze at, unless a
+# test says when the last one started.
+DERIVED_LATER = datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+
 @pytest.fixture
 def ledger(monkeypatch):
-    """The writer's two Postgres steps replaced: `held` is what the month
-    holds already, and `kept` records what a run would write."""
+    """The writer's Postgres steps replaced: `held` is what the month holds
+    already, `derived_at` when the last validated derivation started, and
+    `kept` records what a run would write."""
     monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-    state = {"held": set(), "kept": [], "pool": object()}
+    state = {"held": set(), "kept": [], "pool": object(), "derived_at": DERIVED_LATER,
+             "derivation_read": 0}
 
     async def _pool():
         return state["pool"]
@@ -317,12 +325,18 @@ def ledger(monkeypatch):
         assert pool is state["pool"]
         return set(state["held"])
 
+    async def _derived_at(pool):
+        assert pool is state["pool"]
+        state["derivation_read"] += 1
+        return state["derived_at"]
+
     async def _keep(pool, year, month, answers, at):
         state["kept"].append((year, month, list(answers), at))
         return [sales_type for sales_type, _ in answers]
 
     monkeypatch.setattr(goal_freeze, "_pool", _pool)
     monkeypatch.setattr(goal_freeze, "_held", _held)
+    monkeypatch.setattr(goal_freeze, "_derived_at", _derived_at)
     monkeypatch.setattr(goal_freeze, "_keep", _keep)
     return state
 
@@ -461,6 +475,95 @@ class TestTheFreeze:
         store = _Store()
         assert await goal_freeze.freeze_month(store) == {"skipped": "KS_PG_DSN is not set"}
         assert store.asked == []
+
+
+class TestTheMonthThatHasJustEndedIsDerivedFirst:
+    """The goal reads Silver and Gold, and "the last three complete months"
+    count the month that has just ended. A freeze at 00:30 on the 1st over a
+    derivation stuck since the evening before would have kept, all month, a
+    goal built on part of that month's last day: nothing checked that the
+    derivation ran (the forecast review, 2026-11-20). A month is frozen once
+    a validated derivation started `DERIVED_AFTER` past its first midnight."""
+
+    AT = _at(2026, 12, 1, 0, 30)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("derived_at", [
+        None,                                   # the journal holds no validated run
+        _at(2026, 11, 30, 23, 55),              # the last day not over
+        _at(2026, 12, 1, 0, 4, 59),             # inside the sync's margin
+    ], ids=["never", "before-midnight", "inside-the-margin"])
+    async def test_every_sales_type_waits_and_nothing_is_computed(self, ledger, derived_at):
+        """Kills: a freeze that trusts the clock alone — FREEZE_AT's half an
+        hour — over a derivation that has not run."""
+        ledger["derived_at"] = derived_at
+        store = _Store()
+        result = await goal_freeze.freeze_month(store, now=self.AT)
+
+        assert result["frozen"] == [] and result["already"] == []
+        assert set(result["waiting"]) == set(goal_freeze.SALES_TYPES)
+        assert store.asked == [] and store.days_asked == [] and ledger["kept"] == []
+        assert len(set(result["waiting"].values())) == 1
+        assert "since 2026-12-01 00:05 Kyiv" in result["waiting"]["retail"]
+
+    @pytest.mark.asyncio
+    async def test_a_derivation_from_the_margin_on_freezes_the_month(self, ledger):
+        """00:05:00 on the dot: the boundary is in. Kills: `>` for `>=`."""
+        ledger["derived_at"] = _at(2026, 12, 1, 0, 5)
+        result = await goal_freeze.freeze_month(_Store(), now=self.AT)
+        assert result["frozen"] == list(goal_freeze.SALES_TYPES) and "waiting" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_next_run_after_the_derivation_freezes_it(self, ledger):
+        """A quiet night: the heartbeat derives by 01:05, and the 01:30 run
+        freezes what the 00:30 one left."""
+        ledger["derived_at"] = _at(2026, 11, 30, 23, 50)
+        first = await goal_freeze.freeze_month(_Store(), now=self.AT)
+        assert first["frozen"] == [] and ledger["kept"] == []
+
+        ledger["derived_at"] = _at(2026, 12, 1, 1, 5)
+        second = await goal_freeze.freeze_month(_Store(), now=self.AT + timedelta(hours=1))
+        assert second["frozen"] == list(goal_freeze.SALES_TYPES) and "waiting" not in second
+
+    @pytest.mark.asyncio
+    async def test_only_what_the_month_lacks_waits(self, ledger):
+        ledger["held"] = {"retail", "all"}
+        ledger["derived_at"] = None
+        result = await goal_freeze.freeze_month(_Store(), now=_at(2026, 12, 2, 9, 30))
+        assert set(result["waiting"]) == {"b2b", "internal", "exhibition", "offline"}
+        assert result["already"] == ["all", "retail"]
+
+    @pytest.mark.asyncio
+    async def test_a_frozen_month_asks_nothing_of_the_derivation(self, ledger):
+        """Days 2 to 31 stay one SELECT. Kills: the journal read on every run."""
+        ledger["held"] = set(goal_freeze.SALES_TYPES)
+        ledger["derived_at"] = None
+        result = await goal_freeze.freeze_month(_Store(), now=_at(2026, 12, 9, 0, 30))
+        assert result == {"month": "2026-12", "frozen": [],
+                          "already": sorted(goal_freeze.SALES_TYPES)}
+        assert ledger["derivation_read"] == 0
+
+    def test_the_reason_says_when_the_last_one_started(self):
+        """In Kyiv, as the job's reader reads it. 21:55 UTC on 30 November is
+        23:55 in Kyiv (EET)."""
+        last = datetime(2026, 11, 30, 21, 55, tzinfo=timezone.utc)
+        assert goal_freeze.not_derived(last, self.AT) == (
+            "no validated derivation has started since 2026-12-01 00:05 Kyiv "
+            "(the last started 2026-11-30 23:55): the month that has just ended "
+            "may not all be in Silver yet")
+        assert "none is journalled" in goal_freeze.not_derived(None, self.AT)
+
+    def test_it_is_the_months_first_midnight_whatever_the_day(self):
+        """Mid-month, a derivation of this month is enough: the deploy day
+        froze November 2026. And the month is Kyiv's: 22:30 UTC on 30
+        November is December there."""
+        assert goal_freeze.not_derived(_at(2026, 11, 1, 0, 5), _at(2026, 11, 18, 0, 5)) is None
+        assert goal_freeze.not_derived(_at(2026, 10, 31, 23, 59), _at(2026, 11, 18, 0, 5))
+        december = datetime(2026, 11, 30, 22, 30, tzinfo=timezone.utc)
+        assert goal_freeze.not_derived(_at(2026, 11, 30, 12, 0), december)
+        assert goal_freeze.not_derived(_at(2026, 12, 1, 0, 5), december) is None
+    # Which runs count — validated, error-free, the warehouse's — is read off
+    # a real journal: `tests/integration/test_goal_freeze_pg.py`.
 
 
 # ─── The job ────────────────────────────────────────────────────────────────

@@ -919,8 +919,9 @@ class BackgroundScheduler:
         # the actual (a median 4-6 %, ₴0.5M in July 2026), so the owner froze
         # it on the 1st (2026-11-18). This keeps the month's answer for every
         # sales type once, and `/goals/smart` reads it (`core/goal_freeze.py`).
-        # Hourly so a run turned away — a refused read, or an answer whose ML
-        # signal rests on part of a forecast, which waits for the next
+        # Hourly so a run turned away — a refused read, a derivation that has
+        # not yet taken in the month that has just ended, or an answer whose
+        # ML signal rests on part of a forecast, which waits for the next
         # training — is asked again within the hour, and a 1st the process
         # missed is frozen on the day it runs; once the month is frozen a run
         # is one SELECT and stops. The hours skip the windows the schedule
