@@ -294,7 +294,7 @@ meta ──── the store's own bookkeeping
 
 **Key tables:**
 - `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text), and since revision 0038 the discount: `products_total` (the lines before the order's discount), `total_discount` (that discount in money), `discount_amount`/`discount_percent` (as typed), `discount_data` (KeyCRM's object, JSONB: a `loyalty` key when a programme applied)
-- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted. Since revision 0038 also `price` (before any discount), `total_discount` — **per unit**, so a line's discount in money is `total_discount * quantity` — `discount_percent`, `discount_amount`, `loyalty_discount`, `individual_discount`. **A gift-certificate redemption is an order discount in KeyCRM** — its face value as `discount_amount`, so in `total_discount`, `discount_percent` 0, no promocode (measured on the 2026-08-22 certificate orders) — so `total_discount > 0` is not "bought at a discount"; revision 0038's docstring has the split. NULL on all eleven means not landed yet (before 0038, until `scripts/backfill_discounts.py` reached the order); a figure KeyCRM sends that its column cannot hold also lands NULL, never refusing the order (`core.landing_rows._discount`). Not versioned: `app.order_versions` compares none of them
+- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted. Since revision 0038 also `price` (before any discount), `total_discount` — **per unit**, so a line's discount in money is `total_discount * quantity` — `discount_percent`, `discount_amount`, `loyalty_discount`, `individual_discount`. **A gift-certificate redemption is an order discount in KeyCRM** — its face value as `discount_amount`, so in `total_discount`, `discount_percent` 0, no promocode (measured on the 2026-08-22 certificate orders) — so `total_discount > 0` is not "bought at a discount"; revision 0038's docstring has the split. NULL on all eleven means not landed yet (before 0038, until `scripts/backfill_discounts.py` reached the order); a figure KeyCRM sends that its column cannot hold also lands NULL, never refusing the order (`core.landing_rows._discount`). Not versioned: `app.order_versions` compares none of them; the 05:30 reconciliation compares `products_total`, `total_discount` and the lines' discount in money with KeyCRM (see "Postgres against KeyCRM")
 - `bronze.products` / `bronze.categories` - The catalogue (hierarchical categories by parent_id); a product KeyCRM retires stays, never deleted
 - `bronze.expenses` / `bronze.expense_types` - Order-level expenses (delivery, commission, etc.)
 - `silver.orders` - One row per order with `sales_type` materialised and the Kyiv `order_date`; what every tab reads
@@ -461,10 +461,15 @@ only through that revision's own module, and an older migrate image has none.
    goal freeze stop while the older image runs, and it computes every
    month's goal live. The eleven discount columns of `bronze.orders` and
    `bronze.order_products` (0038) stay the same way: an image below 0038
-   names its order columns one by one and never sees them. The orders such
-   an image writes keep the discount they held; after the roll forward,
-   re-run `scripts/backfill_discounts.py` from the page holding the first
-   order it wrote. The promotions calendar's three tables and its sequence
+   names its order columns one by one and never sees them. An order such an
+   image rewrites keeps its header's discount, but the lines it rewrites lose
+   theirs: it deletes them and inserts them back naming its own six columns,
+   so the six discount columns read NULL; and an order it inserts holds NULL
+   in the header's five. After the roll forward the 05:30 reconciliation
+   names those inside its 90 days and re-fetches them by id, behind the
+   revenue drifts; for older ones, or sooner, re-run
+   `scripts/backfill_discounts.py` from the page holding the first order it
+   wrote. The promotions calendar's three tables and its sequence
    (0039) stay too: an image below 0039 has no calendar, no Monday question
    and no `planned_promotions`, and a [Немає] tapped meanwhile is refused by
    a bot that does not know the button.
@@ -1833,7 +1838,7 @@ whole reason the group is read from the source now.
 | `pg_warehouse_derive` | every 1 min | Postgres derives Silver and Gold when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants, the analysts' capture stamps (WARN at most) |
-| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses included (Postgres only, O3 (a)) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
+| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses (O3 (a)) and its discount (revision 0038) included (Postgres only) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
 | `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
 | `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts); the id is kept, the operational copy out of DuckDB went in step 14's S14-13, and the copy of `data/bot.db`, standing down under `KS_BOT_STORE=postgres`, on 2026-11-19 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
@@ -2410,7 +2415,36 @@ float by its binary value, so 2.675 is stored as 2.67, and text as written,
 so "2.675" is 2.68. An order whose expenses differ is re-fetched
 last in the same batch, and its write deletes what KeyCRM no longer lists
 (O2 (a)); since revision 0036 what that delete removes is kept in
-`app.expense_deletions` (see "The analysts' captures"). History below.
+`app.expense_deletions` (see "The analysts' captures").
+
+**The discount, since revision 0038** (compared from 2026-11-19, once the
+backfill had landed every stored order's figures, none NULL). Nothing else
+watches it: `app.order_versions` compares none of its eleven columns. The
+Postgres arm compares three figures per order with KeyCRM's own fields,
+exactly, as `VALUE_MISMATCH` (WARN — a discount moves no revenue):
+`products_total` and `total_discount` from the header, and `line_discount`,
+the lines' discount in money — each line's `total_discount` (per unit) times
+its `quantity`, summed, NULL when any line's is NULL
+(`reconciliation_io.postgres_discounts_of` and `keycrm_discount_facts`). The
+line figure is there because the header's cannot stand in for it: the 05:15
+refresh rewrites headers only, and an image below 0038 rewrites an order's
+lines without the discount columns (NULL) while its header upsert keeps the
+header's. KeyCRM's side goes through chain 3's own parse, so `_discount`'s
+rounding (to the column's scale, half away from zero) and its NULL for a
+figure the column cannot hold are on both sides. A figure the payload does not
+carry is not compared, nor an order the chain refuses whole. Not compared: how
+a discount was entered — the order's `discount_amount`, `discount_percent` and
+`discount_data`, a line's `price`, percent, typed amount, loyalty and
+individual figures. Every writer lands them with the money, from the same
+payload, so a store that lost them lost the money too, and five of them are
+not in KeyCRM's published API spec. Nor `products_total - total_discount =
+grand_total`: KeyCRM breaks it on 81 of 50 723 orders, and a gift certificate's
+redemption is an order discount there. `GET /order` and `GET /order/{id}`
+return the same `OrderWithIncludes` in that spec, so the re-fetch brings what
+the snapshot compared. An order whose discount differs is re-fetched with the
+expenses, after every missing order and drift (`reconciliation_io.REPAIRED_LAST`);
+its write puts KeyCRM's figures on the header and on every line, and archives
+no version. History below.
 
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the
@@ -4391,4 +4425,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-19 (revision 0039: the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
+*Last updated: 2026-11-20 (the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
