@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.361
+
+- Compare each order's discount with KeyCRM in the 05:30 reconciliation
+
+
 ## 3.0.360
 
 - docs, promotions: groups B's and C's notes, the train route retail only, no promotions stamp
