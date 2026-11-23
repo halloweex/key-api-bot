@@ -44,21 +44,22 @@ async def _now(conn) -> datetime:
     return await conn.fetchval("SELECT now()")
 
 
-async def _series(conn, *, state, first, count, acked=False, suppressed=0):
+async def _series(conn, *, state, first, count, acked=False, suppressed=0,
+                  kind="condition"):
     await conn.execute(
         """
         INSERT INTO app.alert_series
             (condition_key, kind, state, first_fired_at, last_fired_at,
              fired_count, suppressed_count, resolved_at, instance,
              acknowledged_by, acknowledged_at, acknowledged_reason)
-        VALUES ($1, 'condition', $2, $3, $3, $4, $9, $5, 'test', $6, $7, $8)
+        VALUES ($1, $10, $2, $3, $3, $4, $9, $5, 'test', $6, $7, $8)
         """,
         KEY, state, first, count,
         first if state == "resolved" else None,
         "someone" if acked else None,
         first if acked else None,
         "known" if acked else None,
-        suppressed,
+        suppressed, kind,
     )
 
 
@@ -151,6 +152,19 @@ class TestTheEscalatorMeasuresTheIncident:
             # Not a fire: a cycle that began here would be sixty hours old.
             await _event(conn, "action_requested", t - 60 * H)
             await _event(conn, "fired", t - timedelta(minutes=10))
+            assert await _due(conn) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("series", [
+        {"acked": True},        # acknowledged: a human has it (П4)
+        {"kind": "event"},      # an event never escalates
+    ], ids=["acknowledged", "event"])
+    async def test_what_is_never_escalated(self, pool, series):
+        """Standing seven hours, firing, and still not due."""
+        async with pool.acquire() as conn:
+            t = await _now(conn)
+            await _series(conn, state="firing", first=t - 7 * H, count=1, **series)
+            await _event(conn, "fired", t - 7 * H)
             assert await _due(conn) == []
 
     @pytest.mark.asyncio

@@ -194,16 +194,12 @@ class TestWhatTheScriptPromises:
 
     def test_the_web_container_is_never_asked(self, healthy):
         """Not its environment — it holds every secret on the host — and not
-        its files. The script asked five flags, three readers and KS_DUCKDB
-        by name and five latch markers until S14-20. Mutation: put a
-        `docker exec keycrm-web printenv` or a `test -f` back."""
+        its files: of every docker call the run makes, the ones naming the
+        web container only inspect it or read its logs. Mutation: put a
+        `docker exec keycrm-web printenv` back."""
         assert not [c for c in healthy.calls if "keycrm-web" in c
                     and not c.startswith(("inspect", "logs"))], healthy.calls
         assert not [c for c in healthy.calls if "Config.Env" in c]
-        code = [ln for ln in SCRIPT.read_text().splitlines()
-                if not ln.lstrip().startswith("#")]
-        assert not [ln for ln in code if "printenv" in ln or "test -f" in ln
-                    or "write-chain-owners" in ln], code
 
     def test_the_override_floor_is_passed(self, tmp_path, healthy):
         """B3's one knob, kept: the fewest human overrides there may be. The

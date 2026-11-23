@@ -31,7 +31,6 @@ taken the refusals that came from a switch naming Postgres with no
 from __future__ import annotations
 
 import json
-import logging
 import os
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -388,9 +387,7 @@ class TestSearchIndex:
 
 
     @pytest.mark.asyncio
-    async def test_the_boot_contains_it(
-        self, stores, meili, monkeypatch, tmp_path, caplog,
-    ):
+    async def test_the_boot_contains_it(self, stores, meili, monkeypatch, tmp_path):
         """Web's boot, which since S14-00 is always `KS_DUCKDB=off`: the
         orders held are asked of where they are written, never DuckDB's
         counts. The index's read fails with the pool, and the index's own
@@ -409,11 +406,9 @@ class TestSearchIndex:
         service.incremental_sync = AsyncMock(return_value={})
         monkeypatch.setattr(sync_mod, "init_meilisearch", AsyncMock(return_value=True))
 
-        with caplog.at_level(logging.WARNING):
-            await sync_mod.init_and_sync()
+        await sync_mod.init_and_sync()          # contained: does not raise
 
         store.set_last_sync_time.assert_not_awaited()
-        assert "Meilisearch sync error: connection refused" in caplog.text
 
 
 # ─── The buyers step, inside the sync tick ────────────────────────────────

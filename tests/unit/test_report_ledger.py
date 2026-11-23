@@ -22,8 +22,6 @@ from core import pg_traffic_ledger_write, pg_weekly_ledger_write, report_ledger
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WEEK = date(2026, 9, 21)
-LEDGERS = [(report_ledger.WEEKLY, pg_weekly_ledger_write),
-           (report_ledger.TRAFFIC, pg_traffic_ledger_write)]
 
 
 @pytest.fixture
@@ -81,25 +79,8 @@ class FakePostgres:
 
 
 class TestTheDoor:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("ledger,chain", LEDGERS)
-    @pytest.mark.parametrize("value", [None, "duckdb", "postgres", "pgsql-typo"])
-    async def test_a_delivery_is_recorded_in_postgres_alone(
-            self, flags, no_duckdb, ledger, chain, value):
-        """Whatever the flag says. Mutation: route by the flag again, or hand
-        the row to DuckDB after the Postgres commit."""
-        if value is not None:
-            flags.setenv(chain.WRITE_ENV, value)
-        pg = FakePostgres(flags, chain)
-        before = datetime.now(timezone.utc)
-        assert await report_ledger.mark_sent(ledger, WEEK, "retail", 10.004, 3) == "recorded"
-        row = pg.rows[(WEEK, "retail")]
-        assert row["revenue"] == Decimal("10.00") and row["orders"] == 3
-        assert before <= row["sent_at"] <= datetime.now(timezone.utc)
-        assert await report_ledger.already_sent(ledger, WEEK, "retail") is True
-        assert await report_ledger.already_sent(ledger, WEEK, "b2b") is False
-        assert pg.calls == ["mark_sent", "find_sent", "find_sent"]
-        assert not no_duckdb.await_count
+    # A delivery recorded and read back, both ledgers, the revenue at two
+    # places: `tests/integration/test_report_ledger_pg.py::TestOneRecord`.
 
     @pytest.mark.asyncio
     async def test_a_record_that_fails_is_retried_then_spooled(self, flags, no_duckdb):

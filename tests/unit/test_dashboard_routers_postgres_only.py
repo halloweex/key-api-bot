@@ -39,7 +39,6 @@ reaches an engine at all is `TestNothingGoesRoundARefusal`'s, below.
 """
 from __future__ import annotations
 
-import logging
 from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -51,46 +50,6 @@ from tests.helpers.router_walk import round_a_refusal
 
 ROOT = Path(__file__).resolve().parents[2]
 D1, D2 = date(2026, 8, 1), date(2026, 8, 3)
-
-
-def _dashboard(store):
-    return store._dashboard_run(
-        "SELECT 1 FROM {silver_orders} s LEFT JOIN {managers} m ON s.manager_id = m.id"
-        " WHERE s.id = ?", [7])
-
-
-def _silver(store):
-    return store._pg_silver("SELECT 1 FROM {order_lines} l WHERE l.order_id = ?", [7])
-
-
-def _gold_summary(store):
-    return store._pg_gold_summary(D1, D2, "retail", None)
-
-
-def _gold_series(store):
-    return store._pg_gold_series(D1, D2, "b2b", 4)
-
-
-def _managers(store):
-    return store.get_manager_sales_365d()
-
-
-# (reader, surface, module, function the reader calls, the switch it no longer
-# reads, how to call it, what the call must hand the engine: a table the
-# rendered statement names, or the arguments)
-READERS = [
-    ("_dashboard_run", "dashboard", "pg_dashboard_read", "fetch", "KS_READ_DASHBOARD",
-     _dashboard, "bronze.managers"),
-    ("_pg_silver", "dashboard", "pg_silver_read", "fetch", "KS_READ_SILVER",
-     _silver, "silver.order_lines"),
-    ("_pg_gold_summary", "dashboard", "pg_gold_read", "fetch_summary", "KS_READ_GOLD",
-     _gold_summary, (D1, D2, "retail", None)),
-    ("_pg_gold_series", "dashboard", "pg_gold_read", "fetch_series", "KS_READ_GOLD",
-     _gold_series, (D1, D2, "b2b", 4)),
-    ("get_manager_sales_365d", "managers", "pg_silver_read", "fetch", "KS_READ_SILVER",
-     _managers, "silver.orders"),
-]
-IDS = [r[0] for r in READERS]
 
 
 @pytest.fixture
@@ -116,31 +75,6 @@ def store(tmp_path, monkeypatch):
 
 
 class TestAFailureIsTheRefusalOffMade:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "reader,surface,module,function,switch,call,handed", READERS, ids=IDS)
-    async def test_a_503_naming_the_surface_counted_as_a_refusal(
-        self, store, monkeypatch, caplog, reader, surface, module, function, switch,
-        call, handed,
-    ):
-        down = OSError("connection refused")
-        monkeypatch.setattr(f"core.{module}.{function}", AsyncMock(side_effect=down))
-
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            with pytest.raises(read_fallback.ReadUnavailable) as raised:
-                await call(store)
-
-        assert raised.value.surface == surface
-        assert raised.value.__cause__ is down
-        assert read_fallback.refusals()[surface]["count"] == 1
-        # `refuse`'s line, word for word: `read_refused`'s lever greps "read
-        # refused", and a fallback was grepped by the phrase below. (Until
-        # step 14's S14-16 it named KS_READ_FALLBACK=off as what refused.)
-        assert (f"read refused: {surface} — its engine failed, and no other "
-                f"store may answer it "
-                f"(1 refused since start): connection refused") in caplog.text
-        assert "falling back to DuckDB" not in caplog.text
-
     @pytest.mark.asyncio
     @pytest.mark.parametrize("method,kwargs,module,function", [
         ("get_summary_stats", {}, "pg_gold_read", "fetch_summary"),

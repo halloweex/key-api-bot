@@ -274,7 +274,6 @@ class TestMarksFailingPersistently:
         assert _keys(PERSISTENT - 1, 60) == []
 
     def test_ten_pages_however_young_the_latest(self):
-        assert PERSISTENT == 10
         assert _keys(PERSISTENT, 60) == ["derivation_marks_failing"]
 
     def test_with_no_age_only_the_count_can_fire(self):

@@ -75,56 +75,17 @@ PINNED = "halloweex/keycrm-web:rollback-step14"
 #
 # deploy/stage4_soak.sh's P4 read the file through the same reader until step
 # 14's S14-02 retired it with the week it judged.
+# The forms that move what deploy/restore-test.sh does, one each: off, no
+# key at all, a value nobody reads, and the two forms docker refuses. The
+# 48 the table held were measured for the scripts that stopped web and
+# deleted backups during the week of silence, all deleted since.
 ENV_FORMS = [
     # (id, text, docker, web)
     ("off", "KS_DUCKDB=off\n", "off", "off"),
-    ("upper-crlf", "KS_DUCKDB=OFF \r\n", "off", "off"),
-    ("double-quoted", 'KS_DUCKDB="off"\n', "invalid", "off"),
-    ("single-quoted", "KS_DUCKDB='Off'\n", "invalid", "off"),
-    ("on", "KS_DUCKDB=on\n", "on", "on"),
-    ("blank", "KS_DUCKDB=\n", "on", "on"),
     ("absent", "ADMIN_USER_IDS=1,2\n", "on", "on"),
     ("typo", "KS_DUCKDB=of\n", "invalid", "invalid"),
-    ("on-last", "KS_DUCKDB=off\nKS_DUCKDB=on\n", "on", "on"),
-    ("off-last", "KS_DUCKDB=on\nKS_DUCKDB=off\n", "off", "off"),
-    ("comment", "# KS_DUCKDB=off\n", "on", "on"),
-    ("indented-comment", "  # KS_DUCKDB=off\n", "on", "on"),
-    ("other-key", "KS_DUCKDB_X=off\n", "on", "on"),
-    ("other-key-2", "KS_DUCKDBX=off\n", "on", "on"),
-    ("prefixed-key", "XKS_DUCKDB=off\n", "on", "on"),
-    ("inline-comment", "KS_DUCKDB=off # week of silence\n", "invalid", "off"),
-    ("inline-comment-crlf", "KS_DUCKDB=off # c\r\n", "invalid", "off"),
-    ("inline-comment-padded", "KS_DUCKDB=  OFF  # c\n", "invalid", "off"),
-    ("inline-comment-on", "KS_DUCKDB=on # c\n", "invalid", "on"),
-    ("hash-no-space", "KS_DUCKDB=off#x\n", "invalid", "invalid"),
-    ("tab-hash", "KS_DUCKDB=off\t# tab\n", "invalid", "invalid"),
-    ("quoted-then-comment", 'KS_DUCKDB="off" # c\n', "invalid", "off"),
-    ("single-quoted-then-comment", "KS_DUCKDB='off' # c\n", "invalid", "off"),
-    ("comment-inside-quotes", 'KS_DUCKDB="off # c"\n', "invalid", "invalid"),
-    ("quoted-padded", 'KS_DUCKDB=" off "\n', "invalid", "off"),
-    ("quoted-empty", 'KS_DUCKDB=""\n', "invalid", "on"),
-    ("quoted-on", 'KS_DUCKDB="on"\n', "invalid", "on"),
-    ("leading-spaces", "  KS_DUCKDB=off\n", "off", "off"),
-    ("leading-tab", "\tKS_DUCKDB=off\n", "off", "off"),
-    ("space-after-equals", "KS_DUCKDB= off\n", "off", "off"),
-    ("trailing-spaces", "KS_DUCKDB=off   \n", "off", "off"),
-    ("indented-last", "KS_DUCKDB=on\n  KS_DUCKDB=off # c\n", "invalid", "off"),
     ("export", "export KS_DUCKDB=off\n", "refused", "off"),
-    ("export-crlf", "export KS_DUCKDB=off\r\n", "refused", "off"),
-    ("export-two-spaces", "export  KS_DUCKDB=off\n", "refused", "off"),
-    ("export-indented", "  export KS_DUCKDB=off\n", "refused", "off"),
-    ("export-quoted", 'export KS_DUCKDB="off"\n', "refused", "off"),
-    ("export-typo", "export KS_DUCKDB=of\n", "refused", "invalid"),
     ("spaces-around-equals", "KS_DUCKDB = off\n", "refused", "off"),
-    ("space-before-equals", "KS_DUCKDB =off\n", "refused", "off"),
-    ("colon-space", "KS_DUCKDB: off\n", "refused", "off"),
-    ("colon", "KS_DUCKDB:off\n", "on", "off"),
-    ("export-first", "export KS_DUCKDB=on\nKS_DUCKDB=off\n", "refused", "off"),
-    ("export-last-on", "KS_DUCKDB=off\nexport KS_DUCKDB=on\n", "refused", "on"),
-    ("colon-last-off", "KS_DUCKDB=on\nKS_DUCKDB:off\n", "on", "off"),
-    ("colon-last-on", "KS_DUCKDB=off\nKS_DUCKDB:on\n", "off", "on"),
-    ("commented-last", "KS_DUCKDB=off\n# KS_DUCKDB=on\n", "off", "off"),
-    ("blank-last", "KS_DUCKDB=off\nKS_DUCKDB=\n", "on", "on"),
 ]
 
 READ = r"""
@@ -189,13 +150,6 @@ class TestTheReader:
         for other in ("KS_DUCKDB_FAKE=off\n", "export BOT_TOKEN=x\n"):
             fields, verdict, note = _read(tmp_path, secret + other)
             assert "AAHdq" not in "|".join(fields) + verdict + note
-        text = (DEPLOY / "duckdb_env.sh").read_text()
-        code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
-        greps = [ln.strip() for ln in code if "grep" in ln]
-        assert greps == [
-            """lines="$(grep -E '^[[:space:]]*(export[[:space:]]+)?KS_DUCKDB[[:space:]]*[=:]' \\"""
-        ], greps
-        assert not any(re.search(r"\b(printenv|env|export|set)\b\s*($|\|)", ln) for ln in code)
 
 
 # ── the nightly snapshot ──────────────────────────────────────────────────────

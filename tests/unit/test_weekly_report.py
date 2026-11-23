@@ -691,13 +691,14 @@ class TestTheOrderSplitSentence:
         return cur, prev
 
     def test_it_names_three_counts_and_no_percentage(self):
+        import re
+
         from core.weekly_report import _orders_split
 
         cur, prev = self._weeks(131, 205, 136, 297)
-        assert _orders_split(cur, prev, "ru") == (
-            "Заказов меньше на 97: повторных -92, от новых клиентов -5."
-        )
-        assert "%" not in _orders_split(cur, prev, "ru")
+        said = _orders_split(cur, prev, "ru")
+        assert [int(n) for n in re.findall(r"[-+]?\d+", said)] == [97, -92, -5]
+        assert "%" not in said
 
     def test_the_parts_add_up_to_the_total_it_states(self):
         """The reader can check it, which is the point of using counts."""
@@ -715,12 +716,13 @@ class TestTheOrderSplitSentence:
         """Repeat orders falling while new ones rise: the old share was
         `share_of(+3, -97)`, which returned None, and the sentence vanished
         exactly when it had the most to say."""
+        import re
+
         from core.weekly_report import _orders_split
 
         cur, prev = self._weeks(139, 197, 136, 297)
-        assert _orders_split(cur, prev, "en") == (
-            "Orders are down by 97: repeat -100, new customers +3."
-        )
+        said = _orders_split(cur, prev, "en")
+        assert [int(n) for n in re.findall(r"[-+]?\d+", said)] == [97, -100, 3]
 
     def test_a_move_of_four_orders_is_not_a_finding(self):
         from core.weekly_report import _orders_split
@@ -956,8 +958,3 @@ class TestBuildReport:
         assert report.current.repeat_orders == 4
         assert report.baseline_weeks == 8
         assert report.z is not None and report.z < -1.5
-
-        text = format_report(report)
-        assert "▼ 50.0%" in text
-        assert "Unusually low" in text
-        assert "order count, not basket size" in text

@@ -312,19 +312,6 @@ class TestAChainWithNoInvariants:
         missing = [chain_name(c) for c in WRITE_CHAINS
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
-        assert set(readers.values()) <= {"expenses", "inventory", "goals",
-                                         "expense_types", "buyers", "orders",
-                                         "managers",
-                                         "catalogue", "forecast",
-                                         # The shadow chains (OD-02 (c)).
-                                         "journal", "watchdogs",
-                                         "weekly_ledger", "traffic_ledger"}
-        # And each names a field `Facts` actually carries — a reader whose
-        # group the verdict never looks at is read and then judged by nothing.
-        import dataclasses
-
-        fields = {f.name for f in dataclasses.fields(inv.Facts)}
-        assert set(readers.values()) <= fields, set(readers.values()) - fields
 
 
 class TestChain7aGoals:

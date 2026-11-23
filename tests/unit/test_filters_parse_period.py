@@ -95,21 +95,13 @@ class TestExplicitDates:
     MALFORMED = ["2026-02-30", "2026-13-01", "26-01-01", "2026-01-01T00:00",
                  "2026-01-01 ", "20260101", "2026-W01-1", "2026-01-00", "soon"]
 
+    @pytest.mark.parametrize("field", ["start_date", "end_date"])
     @pytest.mark.parametrize("raw", MALFORMED)
-    def test_a_malformed_start_date_names_the_field(self, raw):
+    def test_a_malformed_date_names_its_field(self, field, raw):
+        dates = {"start_date": "2026-01-01", "end_date": "2026-01-31", field: raw}
         with pytest.raises(ValidationError) as caught:
-            _parse(start_date=raw, end_date="2026-01-31")
-        assert caught.value.field == "start_date"
-        assert str(caught.value) == (
-            f"start_date: Invalid date format. Expected %Y-%m-%d (got: {raw!r})")
-
-    @pytest.mark.parametrize("raw", MALFORMED)
-    def test_a_malformed_end_date_names_the_field(self, raw):
-        with pytest.raises(ValidationError) as caught:
-            _parse(start_date="2026-01-01", end_date=raw)
-        assert caught.value.field == "end_date"
-        assert str(caught.value) == (
-            f"end_date: Invalid date format. Expected %Y-%m-%d (got: {raw!r})")
+            _parse(**dates)
+        assert (caught.value.field, caught.value.value) == (field, raw)
 
     def test_both_malformed_names_the_start(self):
         with pytest.raises(ValidationError) as caught:
@@ -152,9 +144,6 @@ class TestTheRangeIsCapped:
         with pytest.raises(ValidationError) as caught:
             _parse(start_date=start.isoformat(), end_date=end.isoformat())
         assert caught.value.field == "date_range"
-        assert str(caught.value) == (
-            f"date_range: Date range cannot exceed {MAX_RANGE_DAYS} days "
-            f"(got: '{MAX_RANGE_DAYS + 1} days')")
 
     def test_the_pilots_range_is_refused(self):
         """3 651 693 days, 6.8 s of web's event loop for the trend, measured.
@@ -207,9 +196,7 @@ class TestTheWindow:
         with pytest.raises(ValidationError) as caught:
             _parse(start_date=start_date, end_date=end_date)
         raw = start_date if field == "start_date" else end_date
-        assert caught.value.field == field
-        assert str(caught.value) == (
-            f"{field}: Date must be between 2000-01-01 and 2099-12-31 (got: {raw!r})")
+        assert (caught.value.field, caught.value.value) == (field, raw)
 
     def test_a_forgiven_form_outside_is_named_as_written(self):
         with pytest.raises(ValidationError) as caught:

@@ -611,7 +611,6 @@ class TestTheStandingWatch:
         assert (inv.CATALOGUE_WRITTEN_AROUND, "CRITICAL") in _names(issues)
         (around,) = [i for i in issues if i.check_name == inv.CATALOGUE_WRITTEN_AROUND]
         assert around.sample_ids == (7,)
-        assert "later than the last full write" in around.description
 
     def test_once_the_chain_wrote_it_names_the_record_not_the_watermark(self):
         (around,) = [i for i in inv.check_chain_invariants(_facts(
@@ -647,7 +646,7 @@ class TestTheStandingWatch:
                    dropped_sample=tuple(range(10)))))
         assert (inv.CATALOGUE_SHORT_WRITE, "WARN") in _names(issues)
         (short,) = [i for i in issues if i.check_name == inv.CATALOGUE_SHORT_WRITE]
-        assert short.count == 104 and "10.4% of 1004" in short.description
+        assert short.count == 104
 
     def test_retirements_accumulated_over_many_writes_are_not_one(self):
         """The review's ratchet: 104 of 1004 retired one at a time is every

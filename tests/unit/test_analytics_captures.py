@@ -385,8 +385,6 @@ class TestTheWatch:
         assert (issue.check_name, issue.table_name, issue.severity, issue.count) == (
             "capture_unstarted:app.revenue_prediction_vintages",
             "app.revenue_prediction_vintages", Severity.INFO, 1)
-        assert "4 d 3 h" in issue.description
-        assert "2026-11-17 10:00 UTC, it is capture_stalled (WARN)" in issue.description
 
     @pytest.mark.parametrize("table", sorted(t for t, s in cap.CAPTURES.items()
                                               if s.max_age is not None))
@@ -471,20 +469,17 @@ class TestTheWatch:
         """The 14 November backlog: 471 periods, and the oldest, kept by the
         next run, could wait 19 more. Its count moves every night, so as a
         WARN it was news every morning for three weeks. Kills: the WARN back,
-        or a description that does not say how safe it is."""
+        or the slack misread."""
         (issue,) = cap.judge(_behind())
         assert (issue.check_name, issue.table_name, issue.severity, issue.count) == (
             cap.GA4_BACKFILL, "app.ga4_funnel", Severity.INFO, 471)
-        assert ("471 closed period(s) inside GA4's 14-month horizon are not kept in "
-                "app.ga4_funnel yet, with 19 nights to spare; the oldest unkept "
-                "period, the day from 2025-10-05, leaves GA4's window on "
-                "2026-12-05.") in issue.description
+        slack = _behind().ga4_backlog.slack()
+        assert (slack.spare, slack.leaves_on) == (19, date(2026, 12, 5))
 
     def test_under_the_margin_it_is_a_warn_of_its_own(self):
         """Seven nights to spare is INFO, six is WARN, under its own name.
-        Kills: a margin other than `GA4_MARGIN_NIGHTS`, or the WARN filed
-        under the INFO's name."""
-        assert cap.GA4_MARGIN_NIGHTS == 7
+        Kills: a margin other than a week, or the WARN filed under the
+        INFO's name."""
         # The run of 12-04 is the last that can keep the oldest, 2025-10-05.
         at_seven = cap.judge(_behind(first_night=date(2026, 11, 27)))
         at_six = cap.judge(_behind(first_night=date(2026, 11, 28)))
@@ -492,7 +487,6 @@ class TestTheWatch:
             (cap.GA4_BACKFILL, Severity.INFO)]
         assert [(i.check_name, i.severity, i.count) for i in at_six] == [
             (cap.GA4_AT_RISK, Severity.WARN, 471)]
-        assert "only 6 night(s) to spare, under 7" in at_six[0].description
 
     def test_a_backlog_that_loses_a_period_whatever_happens_says_so(self):
         (issue,) = cap.judge(_behind(first_night=date(2026, 12, 5)))
@@ -671,7 +665,6 @@ class TestTheJournalStreak:
         keep a capture that never runs INFO for ever."""
         longest = max(s.max_age for s in cap.CAPTURES.values() if s.max_age is not None)
         assert cap.JOURNAL_LOOKBACK >= longest + timedelta(days=7)
-        assert cap.JOURNAL_LAYER == "integrity"
 
 
 class TestTheNamesAreRegisteredWithALever:

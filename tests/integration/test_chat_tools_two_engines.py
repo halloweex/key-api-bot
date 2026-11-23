@@ -99,10 +99,11 @@ class TestTheBreakdowns:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("by", ["revenue", "quantity"])
-    @pytest.mark.parametrize("limit", [1, 3, 10])
-    async def test_the_top_products(self, original_in_postgres, by, limit):
+    async def test_the_top_products(self, original_in_postgres, by):
+        """At the default limit; a shorter limit is a prefix of the same list,
+        and the cut at the limit is `test_a_tie_at_the_limit_is_broken_on_the_product`."""
         answer, recorded = await _answer(
-            original_in_postgres, "_get_top_products", "month", by, limit)
+            original_in_postgres, "_get_top_products", "month", by, 10)
         assert answer["products"]
         assert _comparable(answer) == recorded
 

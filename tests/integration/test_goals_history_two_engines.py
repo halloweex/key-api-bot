@@ -111,15 +111,18 @@ class TestTheLiteral:
         await history.recalculate_goal_tables(include_weekly=True)
         smart = _without_clock(await asyncio.wait_for(
             history.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
-        tables = await history._compute_goal_tables(include_weekly=True)
 
         assert smart["monthly"]["lastYearRevenue"] > 0
         assert _as_recorded(smart) == GOLDEN[
             call_key("generate_smart_goals", [2026, 10, sales_type])]
-        assert _as_recorded(tables) == GOLDEN[call_key("_compute_goal_tables", [sales_type])]
+        if sales_type == "retail":
+            # One set of tables whatever the sales type: the shared tables
+            # hold retail's history (`GOAL_TABLES_SALES_TYPE`).
+            tables = await history._compute_goal_tables(include_weekly=True)
+            assert _as_recorded(tables) == GOLDEN[call_key("_compute_goal_tables", ["retail"])]
 
     def test_every_literal_is_asked(self):
         assert set(GOLDEN) == (
             {call_key("_history_answers", [s]) for s in ("retail", "b2b", "all")}
             | {call_key("generate_smart_goals", [2026, 10, s]) for s in ("retail", "b2b")}
-            | {call_key("_compute_goal_tables", [s]) for s in ("retail", "b2b")})
+            | {call_key("_compute_goal_tables", ["retail"])})

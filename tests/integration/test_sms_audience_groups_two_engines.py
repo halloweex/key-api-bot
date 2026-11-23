@@ -5,14 +5,15 @@ Two things are proved here by running SQL, which is what a rendered-text test
 cannot do:
 
 1. **One group selects what the audience selected before groups existed.**
-   The query as it stood on main before this change is frozen in
-   `tests/sms_segments_legacy.py`. Each case below runs it and the current
-   query side by side over the same rows: the rows must be identical, funnel
-   included. The current query is rendered by `sms_segments_fragments` — the
-   function `get_sms_segments` executes — so the comparison is with what the
-   store runs, not with a copy of it. That is the promise that keeps every
-   past campaign, built-in preset and saved preset reproducible. It ran on
-   DuckDB too until step 14's S14-08.
+   The query as it stood on main before groups (5b4d1c61) was run once on
+   this fixture for every case below, and its rows are the literal in
+   `tests/integration/golden/sms_audience_before_groups.json`. Each case runs
+   the current query the way `get_sms_segments` runs it
+   (`sms_segments_fragments`, then `pg_sms_read.render` and `fetch_segments`)
+   and must select those rows, funnel included. That is the promise that
+   keeps every past campaign, built-in preset and saved preset reproducible.
+   The old query itself is gone, so a case cannot be added to the list: there
+   is nothing left to record its answer from.
 
 2. **Groups mean what they meant.** The owner's campaign and its edges — a
    shared phone across groups, a group narrower than another, the period
@@ -36,14 +37,14 @@ from datetime import date
 import pytest
 import pytest_asyncio
 
+from core.pg_sms_read import fetch_segments, render
 from core.repositories.customers import (
     SMS_TIER_DEFAULTS, SmsAudienceFilters, SmsAudienceGroup, sms_segments_fragments,
 )
-from core.sql_dialect import POSTGRES, numbered, sms_segments_select
+from core.sql_dialect import POSTGRES
 from tests import sms_audience_fixture as fx
 from tests.integration import pg_sms_seed
 from tests.integration.pg_sms_seed import golden, kyiv_today, relative, shifted
-from tests.sms_segments_legacy import legacy_render
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -53,6 +54,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 GOLDEN = golden("sms_audience_groups")
+# The rows the query before groups selected for each of LEGACY_CASES.
+BEFORE_GROUPS = golden("sms_audience_before_groups")
 # The Kyiv day the literals were recorded on: the one date below written out
 # rather than counted back from today moves with the calendar from it.
 RECORDED_ON = date(2026, 10, 28)
@@ -117,16 +120,11 @@ LEGACY_CASES = [
 @pytest_asyncio.fixture
 async def engine(tmp_path, monkeypatch):
     """The repository on Postgres, the fixture seeded, its DuckDB connection
-    a trap; and the pool, for the statements the tests run themselves."""
+    a trap; and the pool `core.pg.get_pool` answers with."""
     async with pg_sms_seed.on_postgres(monkeypatch) as pool:
         async with pool.acquire() as conn:
             await fx.seed_postgres(conn)
         yield pg_sms_seed.store(tmp_path, "groups.duckdb"), pool
-
-
-async def _run(pool, sql, params):
-    async with pool.acquire() as conn:
-        return [tuple(r) for r in await conn.fetch(numbered(sql), *params)]
 
 
 def _plain(rows):
@@ -150,62 +148,40 @@ class TestOneGroupIsTheAudienceBeforeGroups:
     @pytest.mark.parametrize("label,case", LEGACY_CASES,
                              ids=[c[0] for c in LEGACY_CASES])
     async def test_the_rows_are_the_old_querys_rows(self, engine, label, case):
-        _store, pool = engine
-        dialect = POSTGRES
         basis = case.get("ltv_basis", "revenue")
         window = case.get("window", 270)
-        filters = _filters(case)
-        common = dict(
+        tiers = case.get("tiers", ())
+        fragments, params, _ = sms_segments_fragments(
+            [SmsAudienceGroup(window, _filters(case))],
+            order_lines=POSTGRES.order_lines,
             ltv_basis=basis,
             sales_type=case.get("sales_type", "retail"),
             grouping=case.get("grouping", "single"),
+            tiers=list(tiers) or None,
             vip_ltv=SMS_TIER_DEFAULTS[basis]["vip"],
             core_ltv=SMS_TIER_DEFAULTS[basis]["core"],
             core_min_orders=2,
             reactivation_max_recency=min(120, window),
         )
-        tiers = case.get("tiers", ())
+        rows = await fetch_segments(render(**fragments), params)
 
-        old_sql, old_params = legacy_render(
-            dialect, filters, tiers=tiers, max_recency_days=window, **common,
-        )
-        fragments, new_params, _ = sms_segments_fragments(
-            [SmsAudienceGroup(window, filters)], order_lines=dialect.order_lines,
-            tiers=list(tiers) or None, **common,
-        )
-        new_sql = sms_segments_select(dialect, **fragments)
-
-        old_rows = await _run(pool, old_sql, old_params)
-        new_rows = await _run(pool, new_sql, new_params)
-
-        assert old_rows, "the comparison ran over nothing"
-        # The old projection is the first 26 columns; after it come the group
-        # mask and one count per group, which the old query did not have.
-        assert _plain([r[:26] for r in new_rows]) == _plain(old_rows), (
-            f"{dialect.name}: one group ({label}) selects differently from the "
-            f"audience before groups"
+        before = BEFORE_GROUPS[label]
+        # The old projection is the leading columns, in the order the store
+        # reads them; after it come the group mask and the counts that groups
+        # added, which the old query did not have.
+        width = len(before[0])
+        assert relative(_plain([r[:width] for r in rows]), kyiv_today()) == before, (
+            f"one group ({label}) selects differently from the audience before "
+            f"groups"
         )
 
-    @pytest.mark.asyncio
-    async def test_the_cases_are_not_all_the_same_audience(self, engine):
-        """A pin that compared one roster eighteen times would prove one
+    def test_the_cases_are_not_all_the_same_audience(self):
+        """A pin that compared one roster in every case would prove one
         thing. The cases must actually select different people."""
-        _store, pool = engine
-        rosters = set()
-        for _label, case in LEGACY_CASES:
-            basis = case.get("ltv_basis", "revenue")
-            window = case.get("window", 270)
-            sql, params = legacy_render(
-                POSTGRES, _filters(case),
-                ltv_basis=basis, sales_type=case.get("sales_type", "retail"),
-                tiers=case.get("tiers", ()), grouping=case.get("grouping", "single"),
-                max_recency_days=window,
-                vip_ltv=SMS_TIER_DEFAULTS[basis]["vip"],
-                core_ltv=SMS_TIER_DEFAULTS[basis]["core"],
-                reactivation_max_recency=min(120, window),
-            )
-            rows = await _run(pool, sql, params)
-            rosters.add(frozenset(r[0] for r in rows if r[0] is not None))
+        rosters = {
+            frozenset(row[0] for row in BEFORE_GROUPS[label] if row[0] is not None)
+            for label, _case in LEGACY_CASES
+        }
         assert len(rosters) >= 10
 
 

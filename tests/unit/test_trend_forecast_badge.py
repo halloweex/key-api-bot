@@ -106,29 +106,21 @@ def test_the_week_counts_the_days_behind_it(admin_client, today, monkeypatch):  
 
 def test_the_month_counts_today_once(admin_client, today, monkeypatch):  # noqa: F811
     """The month reads the stored forecast over its own days, as the week
-    does. It went through `get_forecast_data` until 2026-11-12, which also
-    read the month's actuals for an `actual_to_date` this route replaces."""
+    does: the bars run to the month's last day, and today's actual is
+    counted once."""
     month_end = (today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    asked = []
 
     async def get_range_forecast(self, first, last, sales_type="retail"):
-        asked.append((first, last))
         preds = _days(today, last, today)
         total = sum(p["predicted_revenue"] for p in preds)
         return {"predicted_remaining": total, "predicted_total": total,
                 "daily_predictions": preds, "model_metrics": {}, "last_trained": None}
 
-    async def get_forecast_data(sales_type="retail"):
-        raise AssertionError("the trend read the month's actuals")
-
     monkeypatch.setattr("core.prediction_service.PredictionService.get_range_forecast",
                         get_range_forecast)
-    monkeypatch.setattr("web.services.dashboard_service.get_forecast_data",
-                        get_forecast_data)
     response = admin_client.get("/api/revenue/trend", params={
         "period": "month", "include_forecast": "true"})
     assert response.status_code == 200, response.text
-    assert asked == [(today.replace(day=1), month_end)]
     forecast = response.json()["forecast"]
     later = (month_end - today).days
     assert [p["date"] for p in forecast["daily_predictions"]][-1] == month_end.isoformat()

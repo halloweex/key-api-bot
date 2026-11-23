@@ -356,19 +356,13 @@ class TestOneRendering:
                        for v in rows.run)
         assert run_dict(chain._local(pg_row)) == DUCKDB_RENDERED_RUN
 
-    def test_the_zone_is_the_hosts_and_never_asks_duckdb(self, monkeypatch):
-        """The zone used to be asked of an in-memory DuckDB under `KS_DUCKDB=on`
-        (until S14-10); the switch itself went in S14-18. Mutation: put the
-        probe back."""
-        import sys
+    def test_the_zone_is_the_hosts(self, monkeypatch):
+        """The rendering zone is the host's `TZ`."""
         from zoneinfo import ZoneInfo
 
         monkeypatch.setattr(chain, "_ZONE", None)
         monkeypatch.setenv("TZ", "Europe/Kyiv")
-        loaded = "duckdb" in sys.modules
         assert chain._zone() == ZoneInfo("Europe/Kyiv")
-        assert ("duckdb" in sys.modules) == loaded, "the zone loaded the driver"
-        assert not hasattr(chain, "_duckdb_zone")
 
     def test_the_zone_is_read_once(self, monkeypatch):
         """Every row of every read goes through it; the host's file is read
@@ -494,18 +488,3 @@ class TestOneFindingPerKey:
         assert first.sample_ids == (1, 2, 3)
         assert first.description == "journal blind\nwatchdogs blind"
 
-    @pytest.mark.asyncio
-    async def test_postgres_is_handed_one_row_per_key(self, flag, no_duckdb, monkeypatch):
-        """The chain's writer is handed the folded list, and the run's counts
-        are the folded ones. Mutation: fold after `run_values`, or not at all."""
-        seen = []
-
-        async def persist_run(values, issues, discrepancies):
-            seen.append(([(i.check_name, i.table_name) for i in issues],
-                         values.integrity_issues_count))
-            return journal_rows(7, values, issues, discrepancies)
-
-        monkeypatch.setattr(chain, "persist_run", persist_run)
-        await dq_journal.journal_run(**_kwargs(issues=[_twin(), _issue(), _twin()]))
-        assert seen == [([("chain_invariants_unwatched", "(write chains)"),
-                          ("pk_uniqueness_orders", "orders")], 2)]

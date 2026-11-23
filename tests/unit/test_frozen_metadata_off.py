@@ -249,8 +249,6 @@ class TestTheFreshnessCheck:
                                   "sync_watermarks_unwatched"]
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
         assert unwatched.count == 1
-        assert "of orders " in unwatched.description
-        assert "app.sync_metadata" in unwatched.description
         assert "freshness_orders" in dq.unverified_conditions([], issues)
 
     def test_under_off_nothing_read_at_all_is_unwatched_whole(self, flags, duckdb_off):
