@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.filters import parse_period
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 PERIODS = ["today", "yesterday", "week", "last_week", "month", "last_month",
            "last_7_days", "last_28_days"]

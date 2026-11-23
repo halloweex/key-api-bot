@@ -204,7 +204,7 @@ class TestTheRebuildsWriteShape:
 
         from core.pg_gold import CLEAR_SQL, rebuild_gold
         from core.pg_silver import REBUILD_LOCK_TIMEOUT
-        from tests.unit.test_pg_silver import _recorded
+        from tests.helpers.recording_pool import _recorded
 
         conn = _recorded(rebuild_gold)
         assert conn.transactions == 1

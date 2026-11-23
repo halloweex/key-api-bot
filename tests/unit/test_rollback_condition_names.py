@@ -37,35 +37,15 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from tests.helpers.retired_conditions import ALL_RETIRED, ROLLBACK_RETIRED
 
 ROOT = Path(__file__).resolve().parents[2]
 
-ROLLBACK_RETIRED = {
-    "warehouse_cutover.retired_conditions": frozenset({
-        "attribution_coverage_website", "gold_cell_values", "gold_missing_cells",
-        "gold_orphan_cells", "goods_shipped_without_sale", "headline_vs_line_items",
-        "silver_missing_rows", "silver_orphan_rows", "silver_row_values",
-    }),
-    "duckdb_off.retired_conditions": frozenset({
-        "pk_uniqueness_buyers", "pk_uniqueness_categories", "pk_uniqueness_products",
-        "shadow_duckdb_only_rows", "shadow_missing_in_duckdb", "shadow_pruned_rows",
-        "shadow_row_values",
-    }),
-    "pg_orders_write.retired_conditions": frozenset({
-        "fk_orphan_order_products_order_id", "not_null_orders_ordered_at",
-        "not_null_orders_source_id", "not_null_orders_status_id",
-        "orders_without_line_items", "pk_uniqueness_order_products",
-        "pk_uniqueness_orders", "status_group_vs_return_list",
-        "value_domain_orders_source_id", "value_domain_orders_status_id",
-    }),
-}
 # A page under this group holds chain 3's flip before step 14 whatever its name.
 ROLLBACK_RETIRED_GROUPS = frozenset({"dq:reconciliation"})
 # The marks the images before step 14 set on delivered pages, and read as
 # "retired".
 ROLLBACK_MARKS = frozenset({"warehouse_comparison", "duckdb_history"})
-
-ALL_RETIRED = frozenset().union(*ROLLBACK_RETIRED.values())
 
 
 class TestTheLiteralIsTheRollbackImages:

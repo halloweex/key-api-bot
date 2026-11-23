@@ -55,17 +55,11 @@ import pytest_asyncio
 from tests.integration.pg_tab_seed import (
     derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
-from tests.unit.test_read_fallback_http import (  # noqa: F401, F811 — fixtures
-    _request_for,
-    no_network,
-    sweep_client,
-    swept_routes,
+from tests.helpers.goals_history import _seed_history_pg
+from tests.helpers.route_sweep import (  # noqa: F401, F811 — fixtures
+    _request_for, no_network, sweep_client, swept_routes,
 )
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
+from tests.helpers.app_client import ConnectionPerAcquire
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -76,26 +70,6 @@ DSN = os.getenv("KS_PG_DSN")
 # frozen month goals (revision 0037) among them, which only the job writes.
 GOAL_TABLES = ("app.seasonal_indices", "app.growth_metrics", "app.weekly_patterns",
                "app.revenue_predictions", "app.revenue_goals", "app.frozen_month_goals")
-
-
-class _ConnectPerAcquire:
-    """`core.pg.get_pool`'s answer for an app served by `TestClient`: every
-    acquire opens a connection of its own in whichever loop asks, so the
-    client's portal loop and the test's never share one, and nothing is left
-    bound to a loop that has closed."""
-
-    def __init__(self, dsn):
-        self._dsn = dsn
-
-    @asynccontextmanager
-    async def acquire(self, *_a, **_k):
-        import asyncpg
-
-        conn = await asyncpg.connect(self._dsn)
-        try:
-            yield conn
-        finally:
-            await conn.close()
 
 
 async def _fingerprint(pool) -> dict:
@@ -142,9 +116,9 @@ async def _history_and_goal_tables(conn, pool) -> None:
 @pytest_asyncio.fixture
 async def served(tmp_path, monkeypatch):
     """The history and the goal tables in Postgres, served to an app under
-    `TestClient` (`_ConnectPerAcquire`): yields the pool to read them with."""
+    `TestClient` (`ConnectionPerAcquire`): yields the pool to read them with."""
     async with tab_in_postgres(DSN, monkeypatch, _history_and_goal_tables) as pool:
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_ConnectPerAcquire(DSN))), \
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=ConnectionPerAcquire(DSN))), \
                 patch("core.pg.require_revision", new=AsyncMock()):
             yield pool
 

@@ -26,7 +26,6 @@ import pytest
 
 from core.validators import INT32_MAX, INT64_MAX
 from tests.routes_helper import iter_endpoints
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 
 # ─── Integers past their column ──────────────────────────────────────────────

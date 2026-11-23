@@ -35,7 +35,7 @@ from core import goal_freeze
 from core.duckdb_constants import KNOWN_SALES_TYPES
 from core.repositories import goals as goals_repo
 from core.repositories.goals import GOAL_TABLES_SALES_TYPE, NO_HISTORY, GoalsMixin
-from tests.unit.test_goal_freeze import ledger  # noqa: F401 — fixture
+from tests.helpers.goal_freeze import ledger  # noqa: F401 — fixture
 
 KYIV = ZoneInfo("Europe/Kyiv")
 

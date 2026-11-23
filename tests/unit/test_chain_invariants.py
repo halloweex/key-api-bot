@@ -1011,7 +1011,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
         could not look either is journalled failed since O10 (a)
         (`tests/unit/test_blind_integrity_runs.py`)."""
         from core import pg_warehouse_dq
-        from tests.unit.test_pg_warehouse_dq import _facts as twins_looking
+        from tests.helpers.warehouse_dq_facts import _facts as twins_looking
 
         scheduler, journal, sent, resolve = job
         blind = inv.Facts.blind(("pg_expenses_write",), "Postgres is unreachable")

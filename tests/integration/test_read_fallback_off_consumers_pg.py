@@ -97,15 +97,16 @@ class TestTheTrafficReport:
             await conn.execute("TRUNCATE gold.daily_revenue")
 
     async def _job(self, monkeypatch, tmp_path, *, gate_answers=False):
-        from tests.unit.test_read_fallback_off_consumers import TestTrafficReport, _duck
-        from tests.unit.test_traffic_report import _seed_gold
+        from tests.helpers.off_consumers import TrafficReportWiring
+        from tests.helpers.off_consumers import _duck
+        from tests.helpers.traffic_report_job import _seed_gold
 
         store = await _duck(tmp_path)
         if gate_answers:
-            week_start = TestTrafficReport._the_warehouse_is_ready(monkeypatch)
+            week_start = TrafficReportWiring._the_warehouse_is_ready(monkeypatch)
         else:
             week_start = await _seed_gold(store)
-        scheduler, sent = TestTrafficReport()._wire(monkeypatch, store, tmp_path)
+        scheduler, sent = TrafficReportWiring()._wire(monkeypatch, store, tmp_path)
         return store, week_start, scheduler, sent
 
     @pytest.mark.asyncio
@@ -124,7 +125,7 @@ class TestTheTrafficReport:
     async def test_an_outage_defers_it_with_no_ledger_row(
         self, live, monkeypatch, tmp_path,
     ):
-        from tests.unit.test_read_fallback_off_consumers import _ledger_answers
+        from tests.helpers.off_consumers import _ledger_answers
 
         pool, _get_pool = live
         store, week_start, scheduler, sent = await self._job(
@@ -177,7 +178,7 @@ class TestTheGoalsJob:
         from tests.integration.pg_tab_seed import (
             store_that_never_reaches_duckdb, tab_in_postgres,
         )
-        from tests.unit.test_read_fallback_off_consumers import _serve
+        from tests.helpers.off_consumers import _serve
 
         _pool, get_pool = live
         async with tab_in_postgres(DSN, monkeypatch, _twenty_five_march_days) as pool:
@@ -201,10 +202,7 @@ class TestTheGoalsJob:
     ):
         from core.scheduler import BackgroundScheduler
         from tests.integration.pg_tab_seed import store_that_never_reaches_duckdb
-        from tests.unit.test_read_fallback_off_consumers import (
-            _serve,
-            _writer_recorded,
-        )
+        from tests.helpers.off_consumers import _serve, _writer_recorded
 
         pool, _get_pool = live
         store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the goals job")
@@ -222,11 +220,12 @@ class TestTheAssistant:
     @pytest.mark.asyncio
     async def test_a_working_postgres_answers_the_tool(self, live, tmp_path, monkeypatch):
         from core.chat_tools import execute_tool
-        from tests.unit.test_read_fallback_off_consumers import TestAssistant, _duck
+        from tests.helpers.off_consumers import AssistantTools
+        from tests.helpers.off_consumers import _duck
 
         _pool, get_pool = live
         store = await _duck(tmp_path)
-        TestAssistant._serve_tools(monkeypatch, store)
+        AssistantTools._serve_tools(monkeypatch, store)
         result = await execute_tool("list_expenses", {})
 
         assert get_pool.await_count > 0
@@ -236,11 +235,12 @@ class TestTheAssistant:
     @pytest.mark.asyncio
     async def test_an_outage_is_the_named_result(self, live, tmp_path, monkeypatch):
         from core.chat_tools import DATA_UNAVAILABLE, execute_tool
-        from tests.unit.test_read_fallback_off_consumers import TestAssistant, _duck
+        from tests.helpers.off_consumers import AssistantTools
+        from tests.helpers.off_consumers import _duck
 
         pool, _get_pool = live
         store = await _duck(tmp_path)
-        TestAssistant._serve_tools(monkeypatch, store)
+        AssistantTools._serve_tools(monkeypatch, store)
         await pool.close()
 
         result = await execute_tool("list_expenses", {})

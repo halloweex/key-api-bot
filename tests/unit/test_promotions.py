@@ -31,10 +31,6 @@ import pytest
 
 from core import promotions
 from core.exceptions import ValidationError
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
 
 UTC = timezone.utc
 TABLE = "app.promotion_versions"
@@ -873,7 +869,7 @@ class TestThePlannedPromotionsAreTheMarketingTabs:
 
 @pytest.fixture(scope="module")
 def walk():
-    from tests.unit.test_write_chains import _CAPTURE_WALKED, _Walk
+    from tests.helpers.write_walk import _CAPTURE_WALKED, _Walk
 
     return _Walk(_CAPTURE_WALKED)
 

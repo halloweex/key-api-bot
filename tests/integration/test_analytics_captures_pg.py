@@ -24,10 +24,7 @@ What is pinned, each named by the mutation it kills:
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from datetime import timedelta
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -37,11 +34,11 @@ import pytest_asyncio
 from core import analytics_captures as cap
 from core import pg
 from tests import migration_replay as replay
+from tests.helpers.alembic_sql import _alembic_sql
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
-REPO = Path(__file__).resolve().parents[2]
 REV = replay.load(replay.VERSIONS / "0036_analytics_captures.py")
 BEFORE = "0035_batch_e_chains"
 HEAD = "0036_analytics_captures"
@@ -83,20 +80,6 @@ ONE_ROW_EACH = {
         "breakdown, breakdown_value, step, active_users) "
         "VALUES ('day', '2026-11-12', '2026-11-12', 'ua', 'total', '', 1, 10)"),
 }
-
-
-def _alembic_sql(*args: str) -> str:
-    """What `alembic <args> --sql` would execute, without its BEGIN/COMMIT, so
-    it can run inside the test's own transaction."""
-    out = subprocess.run(
-        [sys.executable, "-m", "alembic", *args, "--sql"],
-        cwd=REPO, capture_output=True, text=True, timeout=120,
-        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
-    )
-    assert out.returncode == 0, out.stderr[-2000:]
-    lines = [line for line in out.stdout.splitlines()
-             if line.strip() not in ("BEGIN;", "COMMIT;")]
-    return "\n".join(lines)
 
 
 async def _stamp(conn) -> str:

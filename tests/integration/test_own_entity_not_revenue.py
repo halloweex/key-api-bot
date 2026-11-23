@@ -315,7 +315,7 @@ class TestTheNameRuleInPostgres:
         The unit test's statement guard
         (`test_the_statement_folds_by_translate_alone`) is what stops it."""
         from core import pg_warehouse_dq as twins
-        from tests.unit.test_own_entity_not_revenue import LOOKS_LIKE_THE_ENTITY, NOT_THE_ENTITY
+        from tests.helpers.own_entity import LOOKS_LIKE_THE_ENTITY, NOT_THE_ENTITY
 
         _store, pool = own
         async with pool.acquire() as conn:
@@ -408,8 +408,8 @@ async def test_the_entity_is_in_no_cohort_on_clickhouse(name):
     `is_active_source` FALSE as Silver derives it: every body answers what it
     answers without the entity. Mutation: drop the membership clause — the
     entity joins March's cohort and every size there reads 4."""
-    from tests.integration.test_cohorts_active_sources import _ask, _at_risk_today, _seed
-    from tests.unit.test_cohort_active_sources import EXPECTED, ORDERS
+    from tests.helpers.cohort_fixture import _ask, _at_risk_today, _seed
+    from tests.helpers.cohort_fixture import EXPECTED, ORDERS
 
     await _seed(ORDERS + [(301, OWN, "2026-03-15", 1, False, 9000)])
     rows = await _ask(name)

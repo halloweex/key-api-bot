@@ -9,8 +9,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -601,7 +599,7 @@ class TestTheMonthOutlook:
         from concurrent.futures import ThreadPoolExecutor
 
         import core.prediction_service as ps
-        from tests.unit.test_forecast_range import REVENUE
+        from tests.helpers.forecast_range_series import REVENUE
 
         state = {"trained": self.TRAINED, "missing": None, "fail": None, "reads": [],
                  "revenue": REVENUE, "promotions": [], "list_fail": None, "listed": []}
@@ -648,7 +646,7 @@ class TestTheMonthOutlook:
 
     def _expected(self):
         from core import forecast_range as fr
-        from tests.unit.test_forecast_range import REVENUE
+        from tests.helpers.forecast_range_series import REVENUE
 
         rows = [(d, v) for d, v in sorted(REVENUE.items()) if d < self.TODAY]
         return fr.month_outlook(rows, self.TODAY, 11 * 125_000.0)
@@ -781,7 +779,7 @@ class TestTheMonthOutlook:
         """Two promotions this month — one ordinary, one Black Friday — over
         the typical-promotion test's shop, whose runs give a typical effect
         (`tests/unit/test_typical_promotion.py`)."""
-        from tests.unit.test_typical_promotion import REVENUE as SHOP
+        from tests.helpers.typical_promotion_series import REVENUE as SHOP
 
         state["revenue"] = SHOP
         state["promotions"] = [

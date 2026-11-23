@@ -19,8 +19,6 @@ needs a live Postgres, which CI supplies.
 from __future__ import annotations
 
 import os
-import sys
-import types
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -34,6 +32,7 @@ from core.data_quality import (
     Severity,
 )
 from core.scheduler import DQ_DIGEST_LAST_SENT_KEY, BackgroundScheduler
+from tests.helpers.dq_outbox import _install_outbox
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -71,28 +70,6 @@ def _issue(count: int, severity=Severity.WARN):
         severity=severity, count=count, sample_ids=(1, 2),
         description=f"{count} order(s) have grand_total = 0",
     )
-
-
-class _Outbox:
-    """Stands in for bot.main.send_admin_message, which the job imports late."""
-
-    def __init__(self, fail: bool = False):
-        self.messages: list[str] = []
-        self.fail = fail
-
-    async def __call__(self, text, key=None, **kw):
-        if self.fail:
-            raise RuntimeError("telegram is down")
-        self.messages.append(text)
-        return 1
-
-
-def _install_outbox(monkeypatch, *, fail: bool = False) -> _Outbox:
-    box = _Outbox(fail=fail)
-    module = types.ModuleType("bot.main")
-    module.send_admin_message = box
-    monkeypatch.setitem(sys.modules, "bot.main", module)
-    return box
 
 
 async def _seed_two_runs(first: int, second: int) -> None:

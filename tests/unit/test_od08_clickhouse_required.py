@@ -166,7 +166,7 @@ class TestTheJobFilesWhatTheComparisonCannotReturn:
     async def test_after_step_13_a_raise_pages_although_the_run_failed(
         self, postgres_alone,
     ):
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         persisted, paged, _ = await _run(
             {"reconcile_clickhouse": RuntimeError("lock wait")})
@@ -175,7 +175,7 @@ class TestTheJobFilesWhatTheComparisonCannotReturn:
 
     @pytest.mark.asyncio
     async def test_a_job_that_never_reached_the_comparison(self, duckdb_derives):
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         def break_the_import():
             # `from core.ch_silver import reconcile_clickhouse` now raises
@@ -194,7 +194,7 @@ class TestTheJobFilesWhatTheComparisonCannotReturn:
     ):
         """What the comparison returned is the verdict — the job adds nothing,
         clean or not."""
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         persisted, _, _ = await _run({})
         assert persisted["issues"] == []
@@ -215,7 +215,7 @@ class TestABlindRunResolvesNothingItDidNotSee:
     ):
         """KS_CH_URL set, so the archive half counted its buckets and only
         the Gold half's conditions are held."""
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         held = []
@@ -225,7 +225,7 @@ class TestABlindRunResolvesNothingItDidNotSee:
 
     @pytest.mark.asyncio
     async def test_a_run_that_compared_holds_nothing(self, monkeypatch, duckdb_derives):
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         held = []
@@ -285,7 +285,7 @@ class TestABlindArchiveRunResolvesNothingEither:
         self, monkeypatch, postgres_alone,
     ):
         """The reviewer's scenario, after step 13."""
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         outage = dict(self.OUTAGE)
@@ -301,7 +301,7 @@ class TestABlindArchiveRunResolvesNothingEither:
         self, monkeypatch, duckdb_derives,
     ):
         """No KS_CH_URL: the archive half returns [], which is not a count."""
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         monkeypatch.delenv("KS_CH_URL", raising=False)
         held = []
@@ -316,7 +316,7 @@ class TestABlindArchiveRunResolvesNothingEither:
         """KS_CH_URL set and the buckets counted: a delivered
         `ch_history_buckets` that the count no longer finds does resolve.
         Mutation: hold it unconditionally and this fails."""
-        from tests.unit.test_mirror_landing_isolation import _run
+        from tests.helpers.mirror_landing import _run
 
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         held = []
@@ -592,7 +592,7 @@ class TestTheAgentReadsTheClickHouseRunbook:
 # ─── reconciliation_ch joins the canary ─────────────────────────────────────
 
 def _ch_layer_aged(age_seconds):
-    from tests.unit.test_canary import _healthy_payload
+    from tests.helpers.canary_payload import _healthy_payload
 
     payload = _healthy_payload()
     payload["data_quality"]["reconciliation_ch"]["age_seconds"] = age_seconds
@@ -629,7 +629,7 @@ class TestTheCanaryPagesReconciliationCh:
     @pytest.mark.asyncio
     async def test_pages_through_run_canary_as_a_warning(self):
         from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _mock_transport
+        from tests.helpers.canary_payload import DASHBOARD, _mock_transport
 
         payload = _ch_layer_aged(31 * 3600)
         future = datetime.now(timezone.utc) + timedelta(days=60)
@@ -703,7 +703,7 @@ class TestTheReconciliationCatchUpReadsItsArms:
 
     @staticmethod
     async def _queued(monkeypatch, ages):
-        from tests.unit.test_scheduler_catchup import _scheduler_with
+        from tests.helpers.fake_scheduler import _scheduler_with
 
         # Which arms this host writes is read off `stores`' environment.
         scheduler = _scheduler_with(monkeypatch, ages, writes_layers=None)

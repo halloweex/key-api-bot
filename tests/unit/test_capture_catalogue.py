@@ -16,7 +16,7 @@ import pytest
 from core import analytics_captures as cap
 from core import pg_catalogue_write as chain
 from core.landing_rows import product_rows
-from tests.unit import test_chain_writers_sql_frozen as frozen
+from tests.helpers import chain_writers_sql as frozen
 
 
 class _Conn(frozen._Recorder):

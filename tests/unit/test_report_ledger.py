@@ -243,9 +243,8 @@ class TestTheJobSendsOnce:
         the job then raises on the refusal, every day, for a week that was
         never going to be sent."""
         from core.traffic_report import FIRST_WEEK_ENV
-        from tests.unit.test_traffic_report import (
-            TestTheScheduledJob, _job_store, _seed_gold,
-        )
+        from tests.helpers.traffic_report_job import TrafficReportJob
+        from tests.helpers.traffic_report_job import _job_store, _seed_gold
 
         chain = pg_traffic_ledger_write
         flags.setenv(chain.WRITE_ENV, "postgres")
@@ -253,7 +252,7 @@ class TestTheJobSendsOnce:
         store = await _job_store(tmp_path)
         week_start = await _seed_gold(store)
         monkeypatch.setenv(FIRST_WEEK_ENV, (week_start + timedelta(days=7)).isoformat())
-        job = TestTheScheduledJob()
+        job = TrafficReportJob()
         scheduler = job._wire(monkeypatch, store, tmp_path)
         sent = job._capture(monkeypatch)
         result = await scheduler._run_traffic_report()
@@ -358,7 +357,9 @@ class TestTheCanary:
         from unittest.mock import patch
 
         from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+        from tests.helpers.canary_payload import (
+            DASHBOARD, _healthy_payload, _mock_transport,
+        )
 
         payload = _healthy_payload()
         payload.setdefault("write_chains", {})["pg_weekly_ledger_write"] = {
