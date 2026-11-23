@@ -625,6 +625,7 @@
   "promo.error.scopeItemsTooMany": "Не больше {{max}}.",
   "promo.error.spanTooLong": "Акция длится не дольше {{max}} дней.",
   "promo.error.startTime": "Время в формате ЧЧ:ММ.",
+  "promo.error.startTooFar": "Не дальше чем на год вперёд: {{date}} или раньше.",
   "promo.error.tooLong": "Не длиннее {{max}} символов.",
   "promo.field.addItem": "Добавить «{{value}}»",
   "promo.field.brands": "Бренды",

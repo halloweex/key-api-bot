@@ -2398,23 +2398,28 @@ async def alert_action_callback(update, context) -> None:
 # ── The Monday question about promotions ────────────────────────────────────
 #
 # `pask:none:<period_from>` (`core/promo_asks.py`): a recipient tapped
-# [Немає] — no promotion is planned in the two weeks from that Monday. "None"
-# is an answer, and it is stored. Like the alert button above, a standalone
-# handler rather than a conversation entry point, and it records rather than
-# runs: the answer is a row in `app.promotion_checkins`, written through the
-# store port. Approved (`@authorized`) and a recipient of the question — the
-# admins and `KS_PROMO_ASK_RECIPIENTS`, the list the job writes to — or it
-# records nothing.
+# [Немає] — no promotion is planned in the two weeks from that Monday — or,
+# as `pask:nomore:`, [Інших немає], none besides those the question listed.
+# "None" is an answer, and it is stored, once per window and person. Like the
+# alert button above, a standalone handler rather than a conversation entry
+# point, and it records rather than runs: the answer is a row in
+# `app.promotion_checkins`, written through the store port. Approved and a
+# recipient of the question — the admins and `KS_PROMO_ASK_RECIPIENTS`, the
+# list the job writes to — or it records nothing.
+#
+# Not `@authorized`: for somebody it does not know, or has denied, that
+# decorator rewrites the message tapped into the access prompt, and the
+# question is gone from the chat. Approval is asked here instead, and refused
+# with an alert that leaves the message as it is.
 
-@authorized
 async def promo_ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """A recipient answered the Monday question with [Немає]."""
+    """A recipient answered the Monday question with [Немає] or [Інших немає]."""
     import html as _html
 
     from telegram import Message
 
     from core.bot_store import get_bot_store
-    from core.promo_asks import audience, parse_callback, recorded_line
+    from core.promo_asks import addressees, parse_callback, recorded_line
 
     query = update.callback_query
     if query is None:
@@ -2422,17 +2427,26 @@ async def promo_ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lang = _lang(update)
     user_id = query.from_user.id
 
-    if user_id not in audience(ADMIN_USER_IDS):
+    if not is_admin(user_id):
+        status = database.get_user_auth_status(user_id)
+        if not status or status.get("status") != database.STATUS_APPROVED:
+            logger.info("Promotions answer from %s, whose access is not approved", user_id)
+            await query.answer(t("promo_ask.not_approved", lang), show_alert=True)
+            return
+        # What `@authorized` does for an approved person: a tap is activity.
+        database.update_last_activity(user_id)
+
+    if user_id not in addressees(ADMIN_USER_IDS):
         # Approved, but not somebody this was sent to: a forwarded message.
         await query.answer(t("promo_ask.not_recipient", lang), show_alert=True)
         return
 
-    period = parse_callback(query.data or "")
-    if period is None:
+    answer = parse_callback(query.data or "")
+    if answer is None:
         logger.warning("Unknown promotions answer %r from %s", query.data, user_id)
         await query.answer(t("promo_ask.unknown", lang), show_alert=True)
         return
-    period_from, period_to = period
+    period_from, period_to, besides_listed = answer
 
     asks = getattr(get_bot_store(), "promo_asks", None)
     if asks is None or not asks.available():
@@ -2447,13 +2461,21 @@ async def promo_ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer(t("promo_ask.failed", lang), show_alert=True)
         return
 
-    logger.info("Promotions answer: none for %s..%s by %s as #%s",
-                period_from, period_to, user_id, answer_id)
-    line = recorded_line(lang, period_from, period_to)
-    await query.answer(line)
+    line = recorded_line(lang, period_from, period_to, besides_listed)
+    if answer_id is None:
+        # This person answered for this window already, perhaps on the same
+        # question sent again: the first answer is the record.
+        logger.info("Promotions answer for %s..%s by %s: recorded already",
+                    period_from, period_to, user_id)
+        await query.answer(t("promo_ask.already_recorded", lang))
+    else:
+        logger.info("Promotions answer: none%s for %s..%s by %s as #%s",
+                    " besides those listed" if besides_listed else "",
+                    period_from, period_to, user_id, answer_id)
+        await query.answer(line)
 
     # The question stays in the chat with its answer under it, and the
-    # keyboard goes: a second tap would only record the same answer again.
+    # keyboard goes: a second tap would only find the answer recorded.
     try:
         message = query.message
         original = message.text_html if isinstance(message, Message) and message.text else None

@@ -3,16 +3,19 @@
 Pinned here, each named by the mutation it kills:
 
 - the window is the two weeks from the Monday of the week asked in;
-- the button's callback is matched strictly, and fits Telegram's ceiling;
-- who is asked: the admins and `KS_PROMO_ASK_RECIPIENTS`, a bad entry
-  dropped with a warning;
+- the button's callback is matched strictly, in its two kinds ([Немає],
+  [Інших немає]), and fits Telegram's ceiling;
+- who is asked: the admins and those of `KS_PROMO_ASK_RECIPIENTS` the bot
+  approves, a bad entry dropped with a warning, nobody else approved added;
 - the message in three languages: the window numerically, what is planned,
-  last week's SMS no promotion names, every name escaped; the two buttons;
+  last week's SMS no promotion names, every name escaped; the two buttons,
+  the first [Інших немає] under a list;
 - the job: registered daily at 10:05, clear of every window the schedule
-  keeps; once a week against its ledger; one render per language; nothing
-  recorded when nobody was reached;
-- the bot's handler: approved, a recipient, a real callback, the store's
-  answer — or nothing recorded; the keyboard goes once used;
+  keeps; once a week against its ledger, whose record is retried; one render
+  per language; nothing recorded when nobody was reached;
+- the bot's handler: approved — asked by itself, never rewriting the
+  question — a recipient, a real callback, the store's answer once per window
+  and person — or nothing recorded; the keyboard goes once used;
 - the ledger and the checkins have one writer each.
 
 The server's half — the ledger and a checkin through the bot's adapter on a
@@ -54,24 +57,39 @@ class TestTheButton:
     def test_it_round_trips(self):
         data = promo_asks.callback_for(MONDAY)
         assert data == "pask:none:2026-11-23"
-        assert promo_asks.parse_callback(data) == (MONDAY, date(2026, 12, 6))
+        assert promo_asks.parse_callback(data) == promo_asks.Answer(
+            MONDAY, date(2026, 12, 6), False)
 
-    def test_the_handlers_pattern_matches_what_is_sent(self):
+    def test_no_others_round_trips_as_its_own_kind(self):
+        """[Інших немає] carries its own kind, so the bot's confirmation says
+        "no other promotions". Kills: the two buttons read as one."""
+        data = promo_asks.callback_for(MONDAY, besides_listed=True)
+        assert data == "pask:nomore:2026-11-23"
+        assert promo_asks.parse_callback(data) == promo_asks.Answer(
+            MONDAY, date(2026, 12, 6), True)
+
+    @pytest.mark.parametrize("besides_listed", [False, True])
+    def test_the_handlers_pattern_matches_what_is_sent(self, besides_listed):
         """The bot registers `CALLBACK_PATTERN`. Kills: a pattern that misses
         the button — a tap that dies in silence."""
         import re
 
-        assert re.match(promo_asks.CALLBACK_PATTERN, promo_asks.callback_for(MONDAY))
+        assert re.match(promo_asks.CALLBACK_PATTERN,
+                        promo_asks.callback_for(MONDAY, besides_listed))
 
-    def test_it_fits_telegrams_ceiling(self):
-        assert len(promo_asks.callback_for(date(2099, 12, 21)).encode()) <= 64
+    @pytest.mark.parametrize("besides_listed", [False, True])
+    def test_it_fits_telegrams_ceiling(self, besides_listed):
+        assert len(promo_asks.callback_for(date(2099, 12, 21), besides_listed).encode()) <= 64
 
     @pytest.mark.parametrize("data", [
         "pask:none:2026-11-24",          # a Tuesday: no question starts there
+        "pask:nomore:2026-11-24",
         "pask:none:2026-02-30",          # no such day
         "pask:none:2026-11-23\n",        # what `$` would let through
+        "pask:nomore:2026-11-23\n",
         "pask:none:2026-11-23:x",
         "pask:yes:2026-11-23",
+        "pask:nonemore:2026-11-23",
         "afix:none:2026-11-23",
         "pask:none:1999-12-27",          # before the dashboard's window
         "pask:none:2099-12-28",          # a window ending past it
@@ -85,19 +103,64 @@ class TestTheButton:
 
 class TestTheAudience:
     def test_the_admins_alone_by_default(self, monkeypatch):
+        """And the bot's store is not asked: nobody named needs approving."""
         monkeypatch.delenv(promo_asks.RECIPIENTS_ENV, raising=False)
-        assert promo_asks.audience({20, 10}) == [10, 20]
+
+        def never():
+            raise AssertionError("approval read with nobody named")
+
+        assert promo_asks.audience({20, 10}, approved=never) == [10, 20]
 
     def test_the_list_is_added_once(self, monkeypatch):
         monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, " 30 ; 10,40 ")
-        assert promo_asks.audience({10, 20}) == [10, 20, 30, 40]
+        assert promo_asks.audience({10, 20}, approved=lambda: {30, 40}) == [10, 20, 30, 40]
 
     def test_a_bad_entry_is_dropped_with_a_warning(self, monkeypatch, caplog):
         """Kills: one typo costing everybody the question."""
         monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30,@marketer,40")
         with caplog.at_level("WARNING", logger="core.promo_asks"):
-            assert promo_asks.audience({10}) == [10, 30, 40]
+            assert promo_asks.audience({10}, approved=lambda: {30, 40}) == [10, 30, 40]
         assert "@marketer" in caplog.text
+
+    def test_a_listed_id_the_bot_does_not_approve_is_not_asked(self, monkeypatch, caplog):
+        """Never asked, denied, swept as inactive: the bot would refuse the
+        answer, and approval is the bot's to give. Kills: the list alone
+        deciding who is written to."""
+        monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30,40")
+        with caplog.at_level("WARNING", logger="core.promo_asks"):
+            assert promo_asks.audience({10}, approved=lambda: {30}) == [10, 30]
+        assert "40 is not approved" in caplog.text
+
+    def test_approval_adds_nobody_the_list_does_not_name(self, monkeypatch):
+        """Kills: the approved users becoming the audience."""
+        monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30")
+        assert promo_asks.audience({10}, approved=lambda: {30, 50, 60}) == [10, 30]
+
+    def test_an_admin_needs_no_approval(self, monkeypatch):
+        monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "10,30")
+        assert promo_asks.audience({10, 20}, approved=lambda: set()) == [10, 20]
+
+    def test_approval_is_read_through_the_bots_store(self, monkeypatch):
+        monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30,40")
+        store = SimpleNamespace(access=SimpleNamespace(
+            approved=lambda: [{"user_id": 40}, {"user_id": 50}]))
+        monkeypatch.setattr("core.bot_store.get_bot_store", lambda: store)
+        assert promo_asks.audience({10}) == [10, 40]
+
+    def test_a_store_it_cannot_read_asks_the_admins_alone(self, monkeypatch, caplog):
+        def broken():
+            raise RuntimeError("pool closed")
+
+        monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30")
+        monkeypatch.setattr("core.bot_store.get_bot_store", broken)
+        with caplog.at_level("WARNING", logger="core.promo_asks"):
+            assert promo_asks.audience({10}) == [10]
+        assert "pool closed" in caplog.text
+
+    def test_whom_it_is_for_before_approval(self, monkeypatch):
+        """What the bot checks a tap against, beside approval."""
+        monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30,10")
+        assert promo_asks.addressees({20, 10}) == [10, 20, 30]
 
 
 # ─── The message ─────────────────────────────────────────────────────────────
@@ -160,6 +223,15 @@ class TestTheMessage:
         assert promo_asks.recorded_line("uk", MONDAY, date(2026, 12, 6)) == \
             "Записано: акцій на 23.11 – 06.12.2026 немає"
 
+    def test_after_no_others_it_says_no_other_promotions(self):
+        """The window held the listed promotions: "none" there means none
+        besides them. Kills: a confirmation that contradicts the message."""
+        lines = {lang: promo_asks.recorded_line(lang, MONDAY, date(2026, 12, 6), True)
+                 for lang in LANGUAGES}
+        assert lines["uk"] == "Записано: інших акцій на 23.11 – 06.12.2026 немає"
+        assert lines["en"] == "Recorded: no other promotions for 23.11 – 06.12.2026"
+        assert lines["ru"] == "Записано: других акций на 23.11 – 06.12.2026 нет"
+
 
 class TestTheKeyboard:
     def test_none_and_add_as_a_web_app(self):
@@ -171,6 +243,15 @@ class TestTheKeyboard:
             {"text": "Немає", "callback_data": "pask:none:2026-11-23"},
             {"text": "Додати", "web_app": {"url": "https://dash.example/marketing#promotions"}},
         ]]}
+
+    @pytest.mark.parametrize("lang,label", [("uk", "Інших немає"), ("en", "No others"),
+                                            ("ru", "Других нет")])
+    def test_when_promotions_are_listed_it_is_no_others(self, lang, label):
+        """"None" under a list of planned promotions would say there are
+        none. Kills: the plain button beside a list."""
+        markup = promo_asks.keyboard(lang, MONDAY, "https://dash.example/", listed=True)
+        first = markup["inline_keyboard"][0][0]
+        assert first == {"text": label, "callback_data": "pask:nomore:2026-11-23"}
 
     def test_an_address_telegram_takes_no_web_app_at_is_a_link(self):
         markup = promo_asks.keyboard("en", MONDAY, "http://localhost:8080")
@@ -240,7 +321,7 @@ def job(monkeypatch):
     """`run_weekly_ask` over an in-memory ledger, calendar and transport."""
     state: Dict[str, Any] = {"asked": set(), "marked": [], "sent": [], "delivered": 1,
                              "planned": [], "named": set(), "sms": [],
-                             "languages": {}}
+                             "languages": {}, "approved": set(), "recorded": True}
     monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
     monkeypatch.delenv(promo_asks.RECIPIENTS_ENV, raising=False)
 
@@ -252,6 +333,12 @@ def job(monkeypatch):
 
     async def mark(_pool, week, sent_at, delivered):
         state["marked"].append((week, sent_at, delivered))
+        return state["recorded"]
+
+    # The bot's store, as the web container reaches it: whom the bot approves.
+    bot_store = SimpleNamespace(access=SimpleNamespace(
+        approved=lambda: [{"user_id": uid} for uid in sorted(state["approved"])]))
+    monkeypatch.setattr("core.bot_store.get_bot_store", lambda: bot_store)
 
     async def recent(_pool, since, named):
         state["since"] = since
@@ -294,11 +381,41 @@ class TestTheJob:
     @pytest.mark.asyncio
     async def test_it_asks_the_week_from_its_monday_once_and_records_it(self, job):
         result = await promo_asks.run_weekly_ask(now=NOW)
-        assert result == {"week": "2026-11-23", "sent": True, "delivered": 2,
-                          "recipients": 2, "planned": 0, "sms": 0}
+        assert result == {"week": "2026-11-23", "sent": True, "recorded": True,
+                          "delivered": 2, "recipients": 2, "planned": 0, "sms": 0}
         assert job["window"] == (MONDAY, date(2026, 12, 6))
         assert [(w, d) for w, _at, d in job["marked"]] == [(MONDAY, 2)]
         assert job["since"] == NOW - timedelta(days=7)
+
+    @pytest.mark.asyncio
+    async def test_approved_users_the_list_does_not_name_receive_nothing(self, job, monkeypatch):
+        """The bot's store holds approved people nobody listed (50, 60) and a
+        listed one it has not approved (40). Only the admins and the listed
+        and approved one (30) are written to. Kills: the audience widened to
+        the bot's approved users, or the list read without approval."""
+        monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30,40")
+        job["approved"] = {30, 50, 60}
+        result = await promo_asks.run_weekly_ask(now=NOW)
+        reached = sorted(uid for sent in job["sent"] for uid in sent["chat_ids"])
+        assert reached == [10, 20, 30]
+        assert result["recipients"] == 3
+
+    @pytest.mark.asyncio
+    async def test_a_list_of_planned_promotions_makes_the_button_no_others(self, job):
+        job["planned"] = [_planned("Знижки", date(2026, 11, 27), date(2026, 11, 29))]
+        await promo_asks.run_weekly_ask(now=NOW)
+        for sent in job["sent"]:
+            first = sent["reply_markup"]["inline_keyboard"][0][0]
+            assert (first["text"], first["callback_data"]) == (
+                "No others", "pask:nomore:2026-11-23")
+
+    @pytest.mark.asyncio
+    async def test_a_record_that_failed_is_said(self, job):
+        """Delivered and not recorded: the next tick asks again, and the
+        job's result says why. Kills: `recorded` claimed for a failed write."""
+        job["recorded"] = False
+        result = await promo_asks.run_weekly_ask(now=NOW)
+        assert (result["sent"], result["recorded"]) == (True, False)
 
     @pytest.mark.asyncio
     async def test_a_week_asked_already_is_quiet(self, job):
@@ -313,6 +430,7 @@ class TestTheJob:
         """Admins in English, the named list in Ukrainian, a stored choice
         over either — `core.bot_prefs.default_language_for`."""
         monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, "30,40")
+        job["approved"] = {30, 40}
         job["languages"] = {40: "ru"}
         await promo_asks.run_weekly_ask(now=NOW)
         by_language = {s["text"].split("?")[0]: s["chat_ids"] for s in job["sent"]}
@@ -359,6 +477,70 @@ class TestTheJob:
         assert await BackgroundScheduler()._run_promo_weekly_ask() == {"sent": True}
 
 
+class _FlakyPool:
+    """A pool whose first `failures` writes raise, as a connection dropped
+    under the record would."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        self.writes: List[tuple] = []
+        self.attempts = 0
+
+    def acquire(self):
+        pool = self
+
+        class _Conn:
+            async def execute(self, sql, *args):
+                pool.attempts += 1
+                if pool.attempts <= pool.failures:
+                    raise ConnectionResetError("server closed the connection")
+                pool.writes.append((sql, args))
+
+        class _Ctx:
+            async def __aenter__(self):
+                return _Conn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+
+class TestTheRecord:
+    """The ledger's row, written after the question went out: retried before
+    the job gives up, `core.report_ledger`'s way. Without it one dropped
+    connection re-sent the question to everybody the next day."""
+
+    @pytest.fixture
+    def slept(self, monkeypatch):
+        delays: List[float] = []
+
+        async def sleep(seconds):
+            delays.append(seconds)
+
+        monkeypatch.setattr(promo_asks.asyncio, "sleep", sleep)
+        return delays
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_is_retried(self, slept):
+        """Kills: one attempt, then a week asked twice."""
+        pool = _FlakyPool(failures=2)
+        at = datetime(2026, 11, 23, 8, 5, tzinfo=timezone.utc)
+        assert await promo_asks._mark_asked(pool, MONDAY, at, 3) is True
+        assert pool.writes == [(promo_asks._MARK_ASKED_SQL, (MONDAY, at, 3))]
+        assert slept == [2, 10]
+
+    @pytest.mark.asyncio
+    async def test_giving_up_is_logged_loudly(self, slept, caplog):
+        pool = _FlakyPool(failures=99)
+        at = datetime(2026, 11, 23, 8, 5, tzinfo=timezone.utc)
+        with caplog.at_level("WARNING", logger="core.promo_asks"):
+            assert await promo_asks._mark_asked(pool, MONDAY, at, 3) is False
+        assert pool.attempts == len(promo_asks.MARK_RETRY_DELAYS) == 3
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and "NOT recorded" in errors[0].getMessage()
+
+
 # ─── The bot's handler ──────────────────────────────────────────────────────
 
 ADMIN, NAMED, STRANGER = 101, 202, 303
@@ -371,10 +553,16 @@ def bot(monkeypatch):
     from bot import handlers_legacy as h
 
     recorded: List[dict] = []
+    touched: List[int] = []
 
     class Asks:
+        """`RECORD_NONE_SQL`'s behaviour: one answer per window and person,
+        a second asked for returning no id."""
         ok = True
         raises = None
+
+        def __init__(self):
+            self.answered = set()
 
         def available(self):
             return self.ok
@@ -382,20 +570,28 @@ def bot(monkeypatch):
         def record_none(self, **kwargs):
             if self.raises:
                 raise self.raises
+            key = (kwargs["period_from"], kwargs["by_user_id"])
+            if key in self.answered:
+                return None
+            self.answered.add(key)
             recorded.append(kwargs)
             return 77
 
     store = SimpleNamespace(promo_asks=Asks())
-    status = {"status": h.database.STATUS_APPROVED}
+    # The tapper's row in the bot's list of who asked for access; None for
+    # somebody who never asked.
+    auth: Dict[str, Any] = {"row": {"status": h.database.STATUS_APPROVED}}
     monkeypatch.setattr(h, "is_admin", lambda uid: uid == ADMIN)
     monkeypatch.setattr(h, "ADMIN_USER_IDS", {ADMIN})
-    monkeypatch.setattr(h.database, "get_user_auth_status", lambda uid: status)
-    monkeypatch.setattr(h.database, "is_user_authorized", lambda uid: True)
-    monkeypatch.setattr(h.database, "update_last_activity", lambda uid: None)
+    monkeypatch.setattr(h.database, "get_user_auth_status", lambda uid: auth["row"])
+    monkeypatch.setattr(h.database, "is_user_authorized",
+                        lambda uid: (auth["row"] or {}).get("status")
+                        == h.database.STATUS_APPROVED)
+    monkeypatch.setattr(h.database, "update_last_activity", touched.append)
     monkeypatch.setattr(h, "_lang", lambda update: "uk")
     monkeypatch.setattr("core.bot_store.get_bot_store", lambda: store)
     monkeypatch.setenv(promo_asks.RECIPIENTS_ENV, str(NAMED))
-    return SimpleNamespace(h=h, store=store, recorded=recorded, status=status)
+    return SimpleNamespace(h=h, store=store, recorded=recorded, auth=auth, touched=touched)
 
 
 def _tap(user_id, data="pask:none:2026-11-23", text="<b>Акції на 23.11 – 06.12.2026?</b>"):
@@ -443,13 +639,49 @@ class TestTheHandler:
         query.edit_message_text.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_recipient_whose_access_is_pending_records_nothing(self, bot):
-        """`@authorized` before anything: the list names a Telegram id, and
-        approval is still the bot's to give."""
-        bot.status["status"] = bot.h.database.STATUS_PENDING
+    @pytest.mark.parametrize("row", [None, "denied", "pending", "frozen"])
+    async def test_an_unapproved_tapper_gets_an_alert_and_the_question_stays(self, bot, row):
+        """Never asked, denied (a marketer swept as inactive), pending,
+        frozen: the list names a Telegram id, and approval is still the
+        bot's to give. Kills: `@authorized` in front of the handler, which
+        for an unknown or denied person rewrote the question into the access
+        prompt, every week."""
+        bot.auth["row"] = None if row is None else {"status": row}
         update, query = _tap(NAMED)
         await bot.h.promo_ask_callback(update, None)
         assert bot.recorded == []
+        query.answer.assert_awaited_once_with(t("promo_ask.not_approved", "uk"),
+                                              show_alert=True)
+        query.edit_message_text.assert_not_awaited()
+        query.edit_message_reply_markup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_approved_tap_is_activity(self, bot):
+        """As `@authorized` counted it: the inactivity sweep reads it."""
+        update, _query = _tap(NAMED)
+        await bot.h.promo_ask_callback(update, None)
+        assert bot.touched == [NAMED]
+
+    @pytest.mark.asyncio
+    async def test_a_second_tap_says_it_is_recorded_already(self, bot):
+        """The question sent twice, or tapped twice: one answer per window
+        and person. Kills: a second row for the same answer."""
+        await bot.h.promo_ask_callback(_tap(NAMED)[0], None)
+        update, query = _tap(NAMED)
+        await bot.h.promo_ask_callback(update, None)
+        assert len(bot.recorded) == 1
+        query.answer.assert_awaited_once_with("Вже записано")
+        text = query.edit_message_text.await_args.args[0]
+        assert text.endswith("✅ Записано: акцій на 23.11 – 06.12.2026 немає")
+
+    @pytest.mark.asyncio
+    async def test_no_others_is_recorded_and_said_as_such(self, bot):
+        update, query = _tap(ADMIN, data="pask:nomore:2026-11-23")
+        await bot.h.promo_ask_callback(update, None)
+        assert bot.recorded == [{"period_from": MONDAY, "period_to": date(2026, 12, 6),
+                                 "by_user_id": ADMIN}]
+        query.answer.assert_awaited_once_with(
+            "Записано: інших акцій на 23.11 – 06.12.2026 немає")
 
     @pytest.mark.asyncio
     async def test_a_callback_it_did_not_send_records_nothing(self, bot):
@@ -538,6 +770,18 @@ class TestTheAdapters:
                                                   period_to=date(2026, 12, 6), by_user_id=9) == 5
         conn.fetchval.assert_awaited_once_with(
             promo_asks.RECORD_NONE_SQL, MONDAY, date(2026, 12, 6), 9)
+
+    @pytest.mark.asyncio
+    async def test_a_second_answer_writes_nothing_and_says_so(self):
+        """The statement inserts only where this person has no answer for
+        this window yet; `tests/integration/test_promotions_pg.py` runs it.
+        Kills: a crash on the empty insert, or an id made up for it."""
+        assert "WHERE NOT EXISTS" in promo_asks.RECORD_NONE_SQL
+        conn = MagicMock()
+        conn.fetchval = AsyncMock(return_value=None)
+        assert await promo_asks.write_none_answer(conn, period_from=MONDAY,
+                                                  period_to=date(2026, 12, 6),
+                                                  by_user_id=9) is None
 
 
 # ─── One writer each ────────────────────────────────────────────────────────

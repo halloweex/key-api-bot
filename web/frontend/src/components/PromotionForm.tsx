@@ -11,6 +11,7 @@ import {
   draftFromPromotion,
   draftToPayload,
   emptyDraft,
+  latestStart,
   LIMITS,
   PROMOTION_CHANNELS,
   PROMOTION_KINDS,
@@ -99,7 +100,8 @@ export function PromotionForm({
     () => (promotion ? draftFromPromotion(promotion) : emptyDraft()))
   // Errors are said once a save was tried, and then as they are mended.
   const [tried, setTried] = useState(false)
-  const errors = validateDraft(draft)
+  const today = kyivToday()
+  const errors = validateDraft(draft, today)
   const shown = (field: DraftField): string | undefined => {
     const e: DraftError | undefined = tried ? errors[field] : undefined
     return e ? t(e.key, e.params) : undefined
@@ -203,6 +205,9 @@ export function PromotionForm({
               id={id('startsOn')}
               type="date"
               width="full"
+              // The picker offers nothing later; a date typed past it is
+              // refused beside the field (`validateDraft`).
+              max={latestStart(today)}
               value={draft.startsOn}
               onChange={(startsOn) => edit({
                 startsOn,
@@ -251,14 +256,15 @@ export function PromotionForm({
 
         <Pair>
           <Field id={id('discount')} label={t('promo.field.discount')} error={shown('discount')}>
+            {/* Text, not a number field: where a browser expects a point, a
+                number field holds "7,5" as no value at all, and the discount
+                was saved as none. The draft reads a comma as the point. */}
             <Input
               id={id('discount')}
-              type="number"
+              type="text"
               width="full"
               inputMode="decimal"
-              min={0}
-              max={LIMITS.discount}
-              step="any"
+              autoComplete="off"
               value={draft.discount}
               onChange={(discount) => edit({ discount })}
               {...invalid('discount')}

@@ -75,10 +75,47 @@ export const PromotionCalendar = memo(function PromotionCalendar() {
   const { data, isLoading, error, refetch } = usePromotions()
   const [showCancelled, setShowCancelled] = useState(false)
   const [editing, setEditing] = useState<Editing>(null)
-  const [pendingId, setPendingId] = useState<number | null>(null)
-  const save = useSavePromotion()
-  const cancel = useCancelPromotion()
-  const restore = useRestorePromotion()
+  // Every promotion with a cancel or a restore on its way: two can be.
+  const [busy, setBusy] = useState<ReadonlySet<number>>(() => new Set())
+  const markBusy = useCallback((id: number, on: boolean) => setBusy((ids) => {
+    if (ids.has(id) === on) return ids
+    const next = new Set(ids)
+    if (on) next.add(id)
+    else next.delete(id)
+    return next
+  }), [])
+  // A write closes the form only if it is still open on what was written:
+  // the person may have moved on to another promotion meanwhile.
+  const closeFormOf = useCallback((id: number | undefined) => setEditing((e) => {
+    if (e === null) return e
+    if (id === undefined) return e === 'new' ? null : e
+    return e !== 'new' && e.id === id ? null : e
+  }), [])
+
+  // Each write's toast, form and busy row are the hook's, so that each of
+  // two overlapping writes has its own (`PromotionWriteEffects`).
+  const save = useSavePromotion({
+    onSuccess: (saved, { id }) => {
+      closeFormOf(id)
+      addToast({ type: 'success', title: t('promo.saved'), message: saved.name, duration: 3000 })
+    },
+    // The API names the field and the rule; it is said as it came.
+    onError: (e) => addToast({ type: 'error', title: t('promo.saveFailed'), message: e.message }),
+  })
+  const { mutate: cancel } = useCancelPromotion({
+    onSuccess: (saved, id) => {
+      // Its form would only be refused now (409).
+      closeFormOf(id)
+      addToast({ type: 'info', title: t('promo.cancelled', { name: saved.name }), message: t('promo.cancelledHint') })
+    },
+    onError: (e) => addToast({ type: 'error', title: t('promo.cancelFailed'), message: e.message }),
+    onSettled: (id) => markBusy(id, false),
+  })
+  const { mutate: restore } = useRestorePromotion({
+    onSuccess: (saved) => addToast({ type: 'success', title: t('promo.restored', { name: saved.name }), duration: 3000 }),
+    onError: (e) => addToast({ type: 'error', title: t('promo.restoreFailed'), message: e.message }),
+    onSettled: (id) => markBusy(id, false),
+  })
 
   // The link opens the form once per arrival; closing it is the reader's.
   // Set while rendering, from the hash, rather than in an effect: the form
@@ -110,41 +147,23 @@ export const PromotionCalendar = memo(function PromotionCalendar() {
 
   const close = useCallback(() => setEditing(null), [])
 
+  const { mutate: saveMutate } = save
   const submit = useCallback((body: PromotionIn) => {
     const id = editing !== null && editing !== 'new' ? editing.id : undefined
-    save.mutate({ id, body }, {
-      onSuccess: (saved) => {
-        setEditing(null)
-        addToast({ type: 'success', title: t('promo.saved'), message: saved.name, duration: 3000 })
-      },
-      // The API names the field and the rule; it is said as it came.
-      onError: (e) => addToast({ type: 'error', title: t('promo.saveFailed'), message: e.message }),
-    })
-  }, [editing, save, addToast, t])
+    saveMutate({ id, body })
+  }, [editing, saveMutate])
 
   const onEdit = useCallback((p: Promotion) => setEditing(p), [])
 
   const onCancel = useCallback((p: Promotion) => {
-    setPendingId(p.id)
-    cancel.mutate(p.id, {
-      onSuccess: () => {
-        // Its form would only be refused now (409).
-        setEditing((e) => (e !== null && e !== 'new' && e.id === p.id ? null : e))
-        addToast({ type: 'info', title: t('promo.cancelled', { name: p.name }), message: t('promo.cancelledHint') })
-      },
-      onError: (e) => addToast({ type: 'error', title: t('promo.cancelFailed'), message: e.message }),
-      onSettled: () => setPendingId(null),
-    })
-  }, [cancel, addToast, t])
+    markBusy(p.id, true)
+    cancel(p.id)
+  }, [cancel, markBusy])
 
   const onRestore = useCallback((p: Promotion) => {
-    setPendingId(p.id)
-    restore.mutate(p.id, {
-      onSuccess: () => addToast({ type: 'success', title: t('promo.restored', { name: p.name }), duration: 3000 }),
-      onError: (e) => addToast({ type: 'error', title: t('promo.restoreFailed'), message: e.message }),
-      onSettled: () => setPendingId(null),
-    })
-  }, [restore, addToast, t])
+    markBusy(p.id, true)
+    restore(p.id)
+  }, [restore, markBusy])
 
   const item = (p: Promotion) => (
     <PromotionItem
@@ -152,7 +171,7 @@ export const PromotionCalendar = memo(function PromotionCalendar() {
       promotion={p}
       today={today}
       canEdit={canEdit}
-      busy={pendingId === p.id}
+      busy={busy.has(p.id)}
       onEdit={onEdit}
       onCancel={onCancel}
       onRestore={onRestore}
