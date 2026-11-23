@@ -294,8 +294,9 @@ class PromoAsks(Protocol):
 
     def record_none(self, *, period_from: date, period_to: date,
                     by_user_id: int) -> "Optional[int]":
-        """Record that no promotion is planned in the window. Returns the
-        answer's id, or None."""
+        """Record that no promotion is planned in the window, once per window
+        and person. Returns the answer's id, or None when this person had
+        answered for the window already (or where `available()` is false)."""
         ...
 
 

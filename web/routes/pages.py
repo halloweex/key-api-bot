@@ -3,11 +3,11 @@ Page routes for serving HTML templates and React SPA.
 """
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from web.config import STATIC_V2_DIR
-from web.routes.auth import require_auth
+from web.routes.auth import get_current_user, is_asset_path, require_auth
 
 router = APIRouter(tags=["pages"])
 
@@ -114,8 +114,17 @@ async def catch_all_spa(request: Request, path: str):
     return await _serve_spa_route(request, path)
 
 
-async def _serve_spa_route(request: Request, path: str) -> HTMLResponse:
+async def _serve_spa_route(request: Request, path: str) -> Response:
     """Serve React SPA for authenticated users, handling static assets."""
+    asset = is_asset_path(path)
+    if asset and await get_current_user(request) is None:
+        # An asset is not a page to sign in for. A browser on /login probes
+        # /favicon.ico and the like by itself, and a redirect would take the
+        # probe through /login, whose answer rewrites the way back
+        # (`auth.NEXT_COOKIE`). So an anonymous request for one is the 404 a
+        # missing file is, whether or not the file exists.
+        return HTMLResponse(content="Not found", status_code=404)
+
     # Check authentication
     redirect = await require_auth(request)
     if redirect:
@@ -123,8 +132,7 @@ async def _serve_spa_route(request: Request, path: str) -> HTMLResponse:
 
     # Check if path is a static asset (js, css, etc.)
     # Static assets are served by the mounted static files handler
-    static_extensions = {'.js', '.css', '.json', '.ico', '.svg', '.png', '.jpg', '.woff', '.woff2'}
-    if any(path.endswith(ext) for ext in static_extensions):
+    if asset:
         # Let the static file handler deal with this
         # This shouldn't normally be reached as static files are mounted separately
         # Resolve and confirm the path stays inside STATIC_V2_DIR — blocks
@@ -150,13 +158,24 @@ def _get_media_type(path: str) -> str:
     ext = Path(path).suffix.lower()
     media_types = {
         '.js': 'application/javascript',
+        '.mjs': 'application/javascript',
         '.css': 'text/css',
+        '.map': 'application/json',
         '.json': 'application/json',
+        '.webmanifest': 'application/manifest+json',
+        '.xml': 'application/xml',
+        '.txt': 'text/plain',
         '.ico': 'image/x-icon',
         '.svg': 'image/svg+xml',
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.avif': 'image/avif',
         '.woff': 'font/woff',
         '.woff2': 'font/woff2',
+        '.ttf': 'font/ttf',
+        '.otf': 'font/otf',
     }
     return media_types.get(ext, 'application/octet-stream')

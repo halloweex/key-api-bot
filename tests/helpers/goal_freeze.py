@@ -1,17 +1,26 @@
 """The goal freeze's ledger fixture and the busy hours the job keeps clear."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from core import goal_freeze
 
 
+# A validated derivation after every moment these tests freeze at, unless a
+# test says when the last one started.
+DERIVED_LATER = datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+
 @pytest.fixture
 def ledger(monkeypatch):
-    """The writer's two Postgres steps replaced: `held` is what the month
-    holds already, and `kept` records what a run would write."""
+    """The writer's Postgres steps replaced: `held` is what the month holds
+    already, `derived_at` when the last validated derivation started, and
+    `kept` records what a run would write."""
     monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-    state = {"held": set(), "kept": [], "pool": object()}
+    state = {"held": set(), "kept": [], "pool": object(), "derived_at": DERIVED_LATER,
+             "derivation_read": 0}
 
     async def _pool():
         return state["pool"]
@@ -20,12 +29,18 @@ def ledger(monkeypatch):
         assert pool is state["pool"]
         return set(state["held"])
 
+    async def _derived_at(pool):
+        assert pool is state["pool"]
+        state["derivation_read"] += 1
+        return state["derived_at"]
+
     async def _keep(pool, year, month, answers, at):
         state["kept"].append((year, month, list(answers), at))
         return [sales_type for sales_type, _ in answers]
 
     monkeypatch.setattr(goal_freeze, "_pool", _pool)
     monkeypatch.setattr(goal_freeze, "_held", _held)
+    monkeypatch.setattr(goal_freeze, "_derived_at", _derived_at)
     monkeypatch.setattr(goal_freeze, "_keep", _keep)
     return state
 

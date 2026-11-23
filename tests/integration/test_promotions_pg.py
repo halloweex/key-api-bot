@@ -15,8 +15,9 @@ Pinned, each named by the mutation it kills:
   cancel and restore, concurrent saves each getting a version of their own
   and a save waiting under the lock building on the one before it, `as_of`;
 - the API through the app: the contract's JSON, 400/404/409, the
-  `marketing` tab;
-- a checkin written through the bot's adapter, and the Monday job's ledger;
+  `marketing` tab, and the SMS link the `sms` tab's;
+- a checkin written through the bot's adapter, once per window and person,
+  and the Monday job's ledger;
 - `planned_promotions` end to end: Bronze seeded, Silver and Gold derived,
   the forecast stored, promotions saved, `/api/revenue/forecast` answered.
 """
@@ -281,7 +282,8 @@ class TestTheWriter:
         created = await promotions.create(_data(), by=111)
         edited = await promotions.update(created.id, _data(discount_pct=25), by=222)
         same = await promotions.update(created.id, _data(discount_pct=25.0,
-                                                         source="form_from_sms"), by=333)
+                                                         source="form_from_sms"), by=333,
+                                       sms_view=True)
         cancelled = await promotions.cancel(created.id, by=111)
         restored = await promotions.restore(created.id, by=222)
 
@@ -395,15 +397,13 @@ class TestTheWriter:
             await promotions.as_of(datetime(2027, 1, 1), *window)
 
     @pytest.mark.asyncio
-    async def test_the_history_and_the_stamps(self, db):
-        a = await promotions.create(_data(sms_campaign="Весна SMS"), by=5)
-        assert await promotions.latest_recorded_at() == a.recorded_at
-        b = await promotions.update(a.id, _data(name="Інша"), by=6)
+    async def test_the_history_and_the_campaigns_named(self, db):
+        a = await promotions.create(_data(sms_campaign="Весна SMS"), by=5, sms_view=True)
+        await promotions.update(a.id, _data(name="Інша"), by=6)
         history = await promotions.versions(a.id)
         assert [(p.version, p.recorded_by) for p in history] == [(2, 6), (1, 5)]
         assert all(p.created_at == a.recorded_at for p in history)
         assert await promotions.versions(a.id + 1000) == []
-        assert await promotions.latest_recorded_at() == b.recorded_at
         assert await promotions.campaigns_named() == {"Весна SMS"}
 
 
@@ -495,6 +495,61 @@ class TestTheApi:
         assert len(await _rows(through_the_app, made.id)) == 1
         limiter.reset()
 
+    @pytest.mark.asyncio
+    async def test_the_sms_link_is_the_sms_tabs(self, through_the_app, monkeypatch):
+        """An editor holding marketing and not sms: the campaign is null in
+        every answer, the promotion sent back whole keeps it in the next
+        version, and naming another one is a 403 with nothing written.
+        Kills: the link changed, or cleared, by somebody who may not open
+        /sms, and its name served to them."""
+        from fastapi.testclient import TestClient
+
+        from core import permissions
+        from web.main import app
+        from web.ratelimit import limiter
+        from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
+
+        person = 555_000_779
+
+        async def resolve(session):
+            return {"user_id": person, "role": "editor", "allowed_features": ["marketing"]}
+
+        async def matrix(role):
+            return permissions.get_permissions_for_role(role)
+
+        monkeypatch.setattr("web.routes.auth._resolve_session", resolve)
+        monkeypatch.setattr(permissions, "get_permissions_for_role_async", matrix)
+        limiter.reset()
+        client = TestClient(app)
+        client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
+            {"id": str(person), "first_name": "T", "last_name": "U", "username": "t",
+             "auth_date": str(int(_time.time()))}, role="editor")))
+        made = await promotions.create(_data(sms_campaign="Весна SMS"), by=111, sms_view=True)
+        window = {"from": "2027-03-01", "to": "2027-03-31"}
+
+        (shown,) = client.get("/api/promotions", params=window).json()["promotions"]
+        assert shown["sms_campaign"] is None
+        history = client.get(f"/api/promotions/{made.id}/versions").json()["versions"]
+        assert [v["sms_campaign"] for v in history] == [None]
+
+        edited = client.put(f"/api/promotions/{made.id}", json={**shown, "name": "Інша"})
+        assert edited.status_code == 200, edited.text
+        assert (edited.json()["version"], edited.json()["sms_campaign"]) == (2, None)
+        rows = await _rows(through_the_app, made.id)
+        assert [(r["name"], r["sms_campaign"]) for r in rows] == [
+            ("Весняний розпродаж", "Весна SMS"), ("Інша", "Весна SMS")]
+
+        refused = client.put(f"/api/promotions/{made.id}",
+                             json={**shown, "sms_campaign": "Осінь SMS"})
+        assert (refused.status_code, refused.json()) == (403, {"detail": "No view access to sms"})
+        assert client.post("/api/promotions",
+                           json=_payload(source="form_from_sms")).status_code == 403
+        assert len(await _rows(through_the_app, made.id)) == 2
+        async with through_the_app.acquire() as conn:
+            assert await conn.fetchval("SELECT count(DISTINCT promotion_id) "
+                                       "FROM app.promotion_versions") == 1
+        limiter.reset()
+
 
 # ─── The bot's answer and the job's ledger ──────────────────────────────────
 
@@ -521,6 +576,37 @@ class TestTheMondayQuestion:
         assert (row["period_from"], row["period_to"], row["answer"], row["answered_by"]) == (
             date(2026, 11, 23), date(2026, 12, 6), "none", 4242)
         assert row["answered_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_one_answer_per_window_and_person(self, db, tmp_path, monkeypatch):
+        """`RECORD_NONE_SQL` on a server: a second answer of one person for
+        one window inserts nothing and returns no id; another person, or the
+        next window, is an answer of its own. Kills: a duplicate row for a
+        double tap, or a statement whose parameters the server cannot type."""
+        from bot import store_sqlite
+        from bot.store_postgres import PostgresBotStore
+
+        monkeypatch.setattr(store_sqlite, "DB_PATH", tmp_path / "bot.db")
+        monday, sunday = date(2026, 11, 23), date(2026, 12, 6)
+        later = (monday + timedelta(days=7), sunday + timedelta(days=7))
+        store = PostgresBotStore(DSN)
+        try:
+            store.initialise()
+            asks = store.promo_asks
+            first = asks.record_none(period_from=monday, period_to=sunday, by_user_id=4242)
+            again = asks.record_none(period_from=monday, period_to=sunday, by_user_id=4242)
+            other = asks.record_none(period_from=monday, period_to=sunday, by_user_id=4343)
+            next_week = asks.record_none(period_from=later[0], period_to=later[1],
+                                         by_user_id=4242)
+        finally:
+            store.close()
+        assert isinstance(first, int) and again is None
+        assert isinstance(other, int) and isinstance(next_week, int)
+        async with db.acquire() as conn:
+            rows = await conn.fetch("SELECT period_from, answered_by FROM app.promotion_checkins "
+                                    "ORDER BY id")
+        assert [(r["period_from"], r["answered_by"]) for r in rows] == [
+            (monday, 4242), (monday, 4343), (later[0], 4242)]
 
     @pytest.mark.asyncio
     async def test_the_job_asks_once_a_week_and_names_last_weeks_sms(self, db, monkeypatch):
@@ -551,7 +637,7 @@ class TestTheMondayQuestion:
                 "criteria, promocode, exported_at) VALUES ($1, 'net', 'retail', 0, '{}', $2, "
                 "now() - interval '2 days')",
                 [(campaigns[0], "AUTUMN10"), (campaigns[1], None)])
-        await promotions.create(_data(sms_campaign=campaigns[1]), by=1)
+        await promotions.create(_data(sms_campaign=campaigns[1]), by=1, sms_view=True)
         try:
             first = await promo_asks.run_weekly_ask()
             second = await promo_asks.run_weekly_ask()

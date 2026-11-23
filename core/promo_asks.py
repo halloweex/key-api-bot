@@ -3,11 +3,11 @@
 People enter what they are asked for and see used. So the bot asks every
 week — admins plus a named list — about the two weeks from that week's
 Monday, lists what is planned in them already and the SMS campaigns of the
-last seven days no promotion names, and offers two buttons: [Немає], which
-is an answer and is stored (`app.promotion_checkins`), and [Додати], which
-opens the dashboard's calendar (`/marketing#promotions`). The owner approved
-it on 2026-11-19 with the promotions calendar (revision 0039,
-`core/promotions.py`).
+last seven days no promotion names, and offers two buttons: [Немає] — [Інших
+немає] when it listed promotions — which is an answer and is stored
+(`app.promotion_checkins`), and [Додати], which opens the dashboard's
+calendar (`/marketing#promotions`). The owner approved it on 2026-11-19 with
+the promotions calendar (revision 0039, `core/promotions.py`).
 
 ONCE A WEEK FROM A DAILY JOB
 
@@ -16,28 +16,36 @@ windows the schedule keeps) and asks about the ISO week the day is in, once:
 `app.promotion_asks` records each week the question reached somebody, as
 `weekly_report_sends` does for the sales report. A Monday the process was
 down for becomes a Tuesday question, never a week nobody was asked. The record
-is written after the delivery; a delivery whose record then fails is asked
-again the next day, which is the residual, and a run that reached nobody
-records nothing and tries again tomorrow. `KS_ALERTS_DISABLED` silences it
-with the rest of the outgoing Telegram (`send_admin_message_http`).
+is written after the delivery and retried (`MARK_RETRY_DELAYS`); a delivery
+whose record still fails is logged as an ERROR and asked again the next day,
+which is the residual, and a run that reached nobody records nothing and
+tries again tomorrow. `KS_ALERTS_DISABLED` silences it with the rest of the
+outgoing Telegram (`send_admin_message_http`).
 
 WHO IS ASKED
 
-The admins plus `KS_PROMO_ASK_RECIPIENTS`, a comma-separated list of Telegram
-ids, empty by default — `core.traffic_report.audience`'s shape and reason: a
-list typed by a person, never a rule derived from who holds the marketing
-tab. A malformed entry is dropped with a warning. Each is written to in their
-language by the system rule (`core.bot_prefs.default_language_for` and the
-stored choice), one render per language. `tests/unit/test_alert_recipients.py`
-names this send as the third `chat_ids` override that widens an audience.
+The admins plus those of `KS_PROMO_ASK_RECIPIENTS` the bot approves now
+(`audience`). The list is a comma-separated string of Telegram ids, empty by
+default — `core.traffic_report.audience`'s shape and reason: a list typed by a
+person, never a rule derived from who holds the marketing tab. A malformed
+entry is dropped with a warning, and so is a listed id the bot's store does
+not hold as approved (never asked, denied, swept as inactive): the bot would
+refuse that person's answer anyway. Each is written to in their language by
+the system rule (`core.bot_prefs.default_language_for` and the stored
+choice), one render per language. `tests/unit/test_alert_recipients.py` names
+this send as the third `chat_ids` override that widens an audience.
 
 WHAT THE BUTTON CARRIES
 
-`pask:none:<period_from>` — a colon, for `afix:`'s and `atab:`'s reason —
-matched strictly by `parse_callback`: the shape, a real Monday, nothing else.
+`pask:none:<period_from>`, or `pask:nomore:<period_from>` for [Інших немає]
+— a colon, for `afix:`'s and `atab:`'s reason — matched strictly by
+`parse_callback`: the shape, a real Monday, nothing else. Both record the
+answer `none`; after [Інших немає] it means "nothing besides the promotions
+the question listed", which `core.promotions.as_of(answered_at)` gives back.
 The tap arrives at the bot, which writes the answer through its store port
 (`core.bot_store.PromoAsks`) with `write_none_answer` below: the statement
-lives here, once, for any adapter. Only an approved recipient may answer
+lives here, once, for any adapter, and records one answer per window and
+person. Only an approved recipient may answer
 (`bot/handlers_legacy.promo_ask_callback`).
 
 Dates are numeric (`23.11 – 06.12.2026`), as everywhere in the bot's
@@ -46,12 +54,15 @@ Russian, and `core.i18n.fmt_window` cannot decline one wrong.
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import os
 import re
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple,
+)
 
 from core.duckdb_constants import DEFAULT_TZ
 from core.filters import EARLIEST_DATE, LATEST_DATE
@@ -76,16 +87,26 @@ ADD_PATH = "/marketing#promotions"
 RECIPIENTS_ENV = "KS_PROMO_ASK_RECIPIENTS"
 
 CALLBACK_PREFIX = "pask"
+# The first button's two kinds: [Немає] when the question listed nothing,
+# [Інших немає] when it listed promotions already planned.
+KIND_NONE = "none"
+KIND_NO_OTHER = "nomore"
 # For the bot's `CallbackQueryHandler`; `parse_callback` is the strict reader.
-CALLBACK_PATTERN = r"^pask:none:\d{4}-\d{2}-\d{2}$"
-_CALLBACK = re.compile(r"pask:none:(\d{4}-\d{2}-\d{2})")
+CALLBACK_PATTERN = r"^pask:(?:none|nomore):\d{4}-\d{2}-\d{2}$"
+_CALLBACK = re.compile(r"pask:(none|nomore):(\d{4}-\d{2}-\d{2})")
 # Telegram's ceiling on callback_data, as `core.alert_actions` checks it.
 CALLBACK_MAX_BYTES = 64
 
-# The answer the bot records for [Немає]. One statement for any adapter.
+# The answer the bot records for either button: once per window and person.
+# A second tap — the question sent twice, or tapped twice — inserts nothing
+# and returns no id. No UNIQUE key, so no revision: the bot handles its
+# updates one at a time, and two taps of one person never race.
 RECORD_NONE_SQL = (
     "INSERT INTO app.promotion_checkins (period_from, period_to, answer, answered_by) "
-    "VALUES ($1, $2, 'none', $3) RETURNING id"
+    "SELECT $1::date, $2::date, 'none', $3::bigint "
+    "WHERE NOT EXISTS (SELECT 1 FROM app.promotion_checkins "
+    "WHERE period_from = $1::date AND answered_by IS NOT DISTINCT FROM $3::bigint) "
+    "RETURNING id"
 )
 
 _ASKED_SQL = "SELECT 1 FROM app.promotion_asks WHERE week_start = $1"
@@ -96,6 +117,10 @@ _MARK_ASKED_SQL = (
     "INSERT INTO app.promotion_asks (week_start, sent_at, delivered) "
     "VALUES ($1, $2, $3) ON CONFLICT (week_start) DO NOTHING"
 )
+
+# Seconds before each attempt at the record after the first, as
+# `core.report_ledger.RETRY_DELAYS`: about 12 s in all, inside the job.
+MARK_RETRY_DELAYS: Sequence[float] = (0, 2, 10)
 
 _RECENT_SMS_SQL = (
     "SELECT campaign, promocode FROM app.sms_campaigns "
@@ -116,17 +141,29 @@ def period_of(monday: date) -> Tuple[date, date]:
     return monday, monday + timedelta(days=PERIOD_DAYS - 1)
 
 
-def callback_for(period_from: date) -> str:
-    """[Немає]'s callback_data, or raise: a keyboard Telegram would refuse
-    costs the whole message, not the button."""
-    data = f"{CALLBACK_PREFIX}:none:{period_from.isoformat()}"
+class Answer(NamedTuple):
+    """What a tap on the question's first button says: no promotion in the
+    window, or with `besides_listed` none besides those the question listed."""
+
+    period_from: date
+    period_to: date
+    besides_listed: bool = False
+
+
+def callback_for(period_from: date, besides_listed: bool = False) -> str:
+    """The first button's callback_data — [Немає], or [Інших немає] with
+    `besides_listed` — or raise: a keyboard Telegram would refuse costs the
+    whole message, not the button."""
+    kind = KIND_NO_OTHER if besides_listed else KIND_NONE
+    data = f"{CALLBACK_PREFIX}:{kind}:{period_from.isoformat()}"
     if len(data.encode("utf-8")) > CALLBACK_MAX_BYTES:
         raise ValueError(f"callback_data too long: {data!r}")
     return data
 
 
-def parse_callback(data: Any) -> Optional[Tuple[date, date]]:
-    """`pask:none:2026-11-23` → (2026-11-23, 2026-12-06), or None.
+def parse_callback(data: Any) -> Optional[Answer]:
+    """`pask:none:2026-11-23` → Answer(2026-11-23, 2026-12-06, False), and
+    `pask:nomore:…` with True; None for anything else.
 
     Strict: the whole string, a real date, a Monday, inside the dashboard's
     date window. Anything else did not come from `callback_for`, and the bot
@@ -137,7 +174,7 @@ def parse_callback(data: Any) -> Optional[Tuple[date, date]]:
     if match is None:
         return None
     try:
-        start = date.fromisoformat(match.group(1))
+        start = date.fromisoformat(match.group(2))
     except ValueError:
         return None
     if start.isoweekday() != 1:
@@ -145,7 +182,7 @@ def parse_callback(data: Any) -> Optional[Tuple[date, date]]:
     end = start + timedelta(days=PERIOD_DAYS - 1)
     if start < EARLIEST_DATE or end > LATEST_DATE:
         return None
-    return start, end
+    return Answer(start, end, match.group(1) == KIND_NO_OTHER)
 
 
 def add_url(dashboard_url: Optional[str]) -> Optional[str]:
@@ -154,15 +191,19 @@ def add_url(dashboard_url: Optional[str]) -> Optional[str]:
     return f"{base}{ADD_PATH}" if base else None
 
 
-def keyboard(lang: str, period_from: date, dashboard_url: Optional[str]) -> Dict[str, Any]:
-    """[Немає] and [Додати], as the Bot API's `reply_markup`.
+def keyboard(lang: str, period_from: date, dashboard_url: Optional[str], *,
+             listed: bool = False) -> Dict[str, Any]:
+    """[Немає] and [Додати], as the Bot API's `reply_markup`. When the
+    question lists promotions already planned (`listed`), the first button is
+    [Інших немає]: "no promotion" would contradict the message above it.
 
     [Додати] opens the dashboard as the bot's menu button does, as a Web App
     (`MenuButtonWebApp`), so the calendar opens inside Telegram, signed in.
     Telegram takes a Web App only over https; any other address is a plain
     link, and no address no button."""
+    label = "promo_ask.btn_no_other" if listed else "promo_ask.btn_none"
     row: List[Dict[str, Any]] = [
-        {"text": t("promo_ask.btn_none", lang), "callback_data": callback_for(period_from)},
+        {"text": t(label, lang), "callback_data": callback_for(period_from, listed)},
     ]
     url = add_url(dashboard_url)
     if url:
@@ -194,11 +235,49 @@ def extra_recipients() -> List[int]:
     return out
 
 
-def audience(admin_ids: Iterable[int]) -> List[int]:
-    """Everyone the question is written to, in a stable order: the admins,
-    then the named list."""
+def addressees(admin_ids: Iterable[int]) -> List[int]:
+    """Whom the question is for, in a stable order: the admins, then the
+    named list — before the bot's approval is asked (`audience`)."""
     ids = sorted(int(a) for a in admin_ids) + extra_recipients()
     return list(dict.fromkeys(ids))
+
+
+def approved_ids() -> Set[int]:
+    """Everyone the bot's store holds as approved now.
+
+    The bot gives approval and takes it away — a denial, the inactivity
+    sweep — and this asks the same store through its port, as
+    `core.bot_prefs`' readers do. Forgiving as they are: a store that cannot
+    be read approves nobody, and the question goes to the admins alone."""
+    try:
+        from core.bot_store import get_bot_store
+
+        return {int(row["user_id"]) for row in get_bot_store().access.approved()}
+    except Exception as exc:  # noqa: BLE001 — the admins are still asked
+        logger.warning("Promotions question: could not read whom the bot approves (%s); "
+                       "asking the admins alone", exc)
+        return set()
+
+
+def audience(admin_ids: Iterable[int],
+             approved: Optional[Callable[[], Set[int]]] = None) -> List[int]:
+    """Everyone the question is written to, in a stable order: the admins,
+    then those of the named list the bot approves now (`approved`, by default
+    `approved_ids`, read only when the list names somebody).
+
+    A listed id the bot does not approve — never asked, denied, swept as
+    inactive — is left out with a warning: the bot would refuse that
+    person's answer, and an approval is the bot's to give, not the list's."""
+    admins = {int(a) for a in admin_ids}
+    ids = addressees(admins)
+    named = [uid for uid in ids if uid not in admins]
+    if not named:
+        return ids
+    allowed = (approved or approved_ids)()
+    for uid in named:
+        if uid not in allowed:
+            logger.warning("%s: %s is not approved in the bot, not asking", RECIPIENTS_ENV, uid)
+    return [uid for uid in ids if uid in admins or uid in allowed]
 
 
 # ─── The message ─────────────────────────────────────────────────────────────
@@ -239,18 +318,24 @@ def render(
     return "\n".join(lines)
 
 
-def recorded_line(lang: str, period_from: date, period_to: date) -> str:
-    """What the bot says once [Немає] is recorded."""
-    return t("promo_ask.recorded_none", lang, window=fmt_window(period_from, period_to))
+def recorded_line(lang: str, period_from: date, period_to: date,
+                  besides_listed: bool = False) -> str:
+    """What the bot says once the answer is recorded: no promotions in the
+    window, or with `besides_listed` no other promotions there."""
+    key = "promo_ask.recorded_no_other" if besides_listed else "promo_ask.recorded_none"
+    return t(key, lang, window=fmt_window(period_from, period_to))
 
 
 # ─── The statements ──────────────────────────────────────────────────────────
 
 async def write_none_answer(conn, *, period_from: date, period_to: date,
-                            by_user_id: Optional[int]) -> int:
+                            by_user_id: Optional[int]) -> Optional[int]:
     """Record that `by_user_id` said no promotion is planned in the window.
-    Returns the answer's id. Run by the bot's adapter on its own connection."""
-    return int(await conn.fetchval(RECORD_NONE_SQL, period_from, period_to, by_user_id))
+    Returns the answer's id, or None when this person has answered for this
+    window already: the first answer is the record. Run by the bot's adapter
+    on its own connection."""
+    answer_id = await conn.fetchval(RECORD_NONE_SQL, period_from, period_to, by_user_id)
+    return int(answer_id) if answer_id is not None else None
 
 
 async def _pool():
@@ -266,10 +351,24 @@ async def _already_asked(pool, week: date) -> bool:
         return await conn.fetchval(_ASKED_SQL, week) is not None
 
 
-async def _mark_asked(pool, week: date, sent_at: datetime, delivered: int) -> None:
-    """The ledger's one writer: the week asked, once."""
-    async with pool.acquire() as conn:
-        await conn.execute(_MARK_ASKED_SQL, week, sent_at, delivered)
+async def _mark_asked(pool, week: date, sent_at: datetime, delivered: int) -> bool:
+    """The ledger's one writer: the week asked, once. False when the record
+    failed every attempt (`MARK_RETRY_DELAYS`), which is logged as an ERROR:
+    the question went out, and the next tick will ask it again."""
+    for delay in MARK_RETRY_DELAYS:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(_MARK_ASKED_SQL, week, sent_at, delivered)
+        except Exception as exc:  # noqa: BLE001 — retried, then logged loudly
+            logger.warning("Promotions question: recording week %s failed (%s)",
+                           week, type(exc).__name__)
+            continue
+        return True
+    logger.error("Promotions question for week %s reached %s and is NOT recorded in "
+                 "app.promotion_asks: the next tick will ask it again", week, delivered)
+    return False
 
 
 async def _recent_campaigns(pool, since: datetime,
@@ -286,8 +385,9 @@ async def _recent_campaigns(pool, since: datetime,
 async def run_weekly_ask(*, now: Optional[datetime] = None) -> Dict[str, Any]:
     """Ask about the two weeks from this ISO week's Monday, once a week.
 
-    Returns what it did, for `/api/jobs`: `sent`, and otherwise the `reason`
-    (`already_asked`, `not_delivered`). Stands down without `KS_PG_DSN`."""
+    Returns what it did, for `/api/jobs`: `sent` and whether the week is
+    `recorded`, and otherwise the `reason` (`already_asked`,
+    `not_delivered`). Stands down without `KS_PG_DSN`."""
     if not os.getenv("KS_PG_DSN", "").strip():
         return {"skipped": "KS_PG_DSN is not set"}
     from core import promotions
@@ -308,7 +408,9 @@ async def run_weekly_ask(*, now: Optional[datetime] = None) -> Dict[str, Any]:
     campaigns = await _recent_campaigns(
         pool, at - timedelta(days=SMS_LOOKBACK_DAYS), await promotions.campaigns_named())
 
-    # The admins and whoever the owner listed, each in their own language.
+    # The admins and those the owner listed whom the bot approves, each in
+    # their own language. `readers` is the whole audience: every send below
+    # goes to a bucket of it (`tests/unit/test_alert_recipients.py`).
     readers = audience(ADMIN_USER_IDS)
     defaults = {uid: default_language_for(uid, ADMIN_USER_IDS) for uid in readers}
     delivered = 0
@@ -316,14 +418,14 @@ async def run_weekly_ask(*, now: Optional[datetime] = None) -> Dict[str, Any]:
         delivered += await send_admin_message_http(
             render(lang, period_from, period_to, planned, campaigns),
             chat_ids=recipients,
-            reply_markup=keyboard(lang, period_from, DASHBOARD_URL),
+            reply_markup=keyboard(lang, period_from, DASHBOARD_URL, listed=bool(planned)),
         )
     if not delivered:
         logger.warning("Promotions question for %s reached nobody", week)
         return {**result, "sent": False, "reason": "not_delivered"}
 
-    await _mark_asked(pool, week, datetime.now(timezone.utc), delivered)
-    result.update(sent=True, delivered=delivered, recipients=len(readers),
-                  planned=len(planned), sms=len(campaigns))
+    recorded = await _mark_asked(pool, week, datetime.now(timezone.utc), delivered)
+    result.update(sent=True, recorded=recorded, delivered=delivered,
+                  recipients=len(readers), planned=len(planned), sms=len(campaigns))
     logger.info("Promotions question sent", extra=result)
     return result

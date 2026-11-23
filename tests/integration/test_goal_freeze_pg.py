@@ -15,6 +15,8 @@ Pinned, each named by the mutation it kills:
 - the freeze writes once and only once a month: a second run keeps the first
   answer and its stamp, and two runs at once leave one row per sales type,
   all six from the same run;
+- it waits for the derivation: only a validated run of the warehouse that
+  started five minutes or more past the month's first midnight frees it;
 - the frozen answer is served though every live input moves — Silver's
   revenue, the stored forecast — while a live computation moves with them;
 - a typed goal overrides a frozen one; a month with no row is computed live
@@ -176,15 +178,35 @@ class TestTheRevisionOnAServer:
 
 # ─── The freeze ─────────────────────────────────────────────────────────────
 
+async def _derived(pool, started_at: datetime, *, passed: bool = True,
+                   error: str | None = None, layer: str = "warehouse") -> None:
+    """A derivation run journalled as `core.pg_derivation.record_run` writes
+    one: the freeze waits for a validated one past the month's first
+    midnight (`goal_freeze.not_derived`)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO meta.derivation_runs (layer, trigger, started_at, ended_at, "
+            "validation_passed, error) VALUES ($1, 'test_goal_freeze', $2, $2, $3, $4)",
+            layer, started_at, None if error else passed, error)
+
+
 @pytest_asyncio.fixture
 async def history(tmp_path, monkeypatch):
     """The three-year history in Postgres' Bronze, Silver and Gold derived
     from it, the frozen goals empty, and a store that never reaches DuckDB:
-    `(store, pool)`."""
+    `(store, pool)`. The derivation journal holds one validated run, on
+    `OCTOBER` — the day most freezes here run on — and is emptied after, as
+    every test of the journal empties it."""
     async with tab_in_postgres(DSN, monkeypatch, _seed_history_pg) as pool:
         async with pool.acquire() as conn:
             assert await conn.fetchval(f"SELECT COUNT(*) FROM {TABLE}") == 0
-        yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the goal freeze"), pool
+            await conn.execute("DELETE FROM meta.derivation_runs")
+        await _derived(pool, OCTOBER)
+        try:
+            yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the goal freeze"), pool
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM meta.derivation_runs")
 
 
 async def _rows(pool, year=None, month=None) -> dict:
@@ -339,6 +361,7 @@ class TestTheFrozenAnswerIsServed:
         store, pool = history
         await _predict_rest_of_month(pool, 10_000.0)
         at = _this_month_at()
+        await _derived(pool, at)
         result = await goal_freeze.freeze_month(store, now=at)
         assert result["frozen"] == list(goal_freeze.SALES_TYPES)
         frozen = await store.get_smart_goals("retail")
@@ -414,6 +437,7 @@ class TestAShortForecastWaits:
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM app.revenue_predictions WHERE sales_type = 'retail'")
             await conn.executemany(insert, [(d, 10_000.0) for d in december[:28]])
+        await _derived(pool, at - timedelta(minutes=20))
 
         first = await goal_freeze.freeze_month(store, now=at)
         assert first["waiting"] == {
@@ -430,6 +454,38 @@ class TestAShortForecastWaits:
         assert second["frozen"] == ["retail"] and "waiting" not in second
         kept = json.loads((await _rows(pool, 2026, 12))[(2026, 12, "retail")][0])
         assert kept["monthly"]["mlForecastGoal"] == pytest.approx(31 * 10_000.0)
+
+
+class TestItWaitsForTheDerivation:
+    @pytest.mark.asyncio
+    async def test_on_the_1st_only_a_validated_run_past_the_margin_frees_it(self, history):
+        """1 December 2026, 00:30, over a real `meta.derivation_runs`. The
+        fixture's run of 5 October, a run that raised, one whose checks
+        failed, one of another layer and one inside the five minutes after
+        midnight leave every sales type `waiting` and nothing written; a
+        validated run of the warehouse at 00:20 freezes the month. Kills:
+        any of the journal read's filters dropped (the forecast review,
+        2026-11-20: nothing checked that the derivation had run)."""
+        store, pool = history
+        at = datetime(2026, 12, 1, 0, 30, tzinfo=KYIV)
+        cases = (
+            (at - timedelta(minutes=20), {"error": "silver.orders: boom"}, "2026-10-05 12:00"),
+            (at - timedelta(minutes=18), {"passed": False}, "2026-10-05 12:00"),
+            (at - timedelta(minutes=16), {"layer": "elsewhere"}, "2026-10-05 12:00"),
+            (at - timedelta(minutes=27), {}, "2026-12-01 00:03"),
+        )
+        for started_at, kind, last in cases:
+            await _derived(pool, started_at, **kind)
+            result = await goal_freeze.freeze_month(store, now=at)
+            assert result["frozen"] == [], kind
+            assert set(result["waiting"]) == set(goal_freeze.SALES_TYPES), kind
+            assert f"(the last started {last})" in result["waiting"]["retail"], kind
+        assert await _rows(pool, 2026, 12) == {}
+
+        await _derived(pool, at - timedelta(minutes=10))
+        result = await goal_freeze.freeze_month(store, now=at)
+        assert result["frozen"] == list(goal_freeze.SALES_TYPES) and "waiting" not in result
+        assert set(await _rows(pool, 2026, 12)) == {(2026, 12, s) for s in goal_freeze.SALES_TYPES}
 
 
 class TestNoGetWrites:
@@ -473,6 +529,9 @@ class TestTheJob:
         monkeypatch.setattr("core.store.get_store", AsyncMock(return_value=store))
         monkeypatch.setattr(goal_freeze, "too_early", lambda at: False)
         now = datetime.now(KYIV)
+        # This month's derivation, journalled past its margin whatever the
+        # minute the suite runs at.
+        await _derived(pool, _this_month_at())
 
         first = await BackgroundScheduler()._run_month_goal_freeze()
         second = await BackgroundScheduler()._run_month_goal_freeze()

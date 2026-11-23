@@ -35,6 +35,17 @@ export const LIMITS = {
 
 /** How far back the "past" list reaches, and the server's default window. */
 export const PAST_DAYS = 90
+/**
+ * How far ahead a promotion may start: the list reads up to today + this, so
+ * a later one would be saved and then shown nowhere, to be changed or
+ * cancelled. The API refuses it too (`starts_on`).
+ */
+export const AHEAD_DAYS = 365
+
+/** The last first day a promotion may have, in Kyiv. */
+export function latestStart(today: string = kyivToday()): string {
+  return addDays(today, AHEAD_DAYS)
+}
 
 // ─── The form's draft ────────────────────────────────────────────────────────
 
@@ -99,7 +110,7 @@ export type DraftField =
 /** An i18n key under `promo.error.` and what it says. */
 export interface DraftError {
   key: string
-  params?: Record<string, number>
+  params?: Record<string, number | string>
 }
 
 export type DraftErrors = Partial<Record<DraftField, DraftError>>
@@ -107,8 +118,9 @@ export type DraftErrors = Partial<Record<DraftField, DraftError>>
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/
 const DISCOUNT = /^\d+(\.\d{1,2})?$/
 
-/** What is wrong with the draft, field by field; `{}` when it can be sent. */
-export function validateDraft(d: PromotionDraft): DraftErrors {
+/** What is wrong with the draft, field by field; `{}` when it can be sent.
+ *  `today` is Kyiv's, the day the first day is counted from. */
+export function validateDraft(d: PromotionDraft, today: string = kyivToday()): DraftErrors {
   const errors: DraftErrors = {}
   const name = d.name.trim()
   if (!name) errors.name = { key: 'promo.error.nameRequired' }
@@ -116,7 +128,9 @@ export function validateDraft(d: PromotionDraft): DraftErrors {
 
   const startOk = isIsoDate(d.startsOn)
   const endOk = isIsoDate(d.endsOn)
+  const latest = latestStart(today)
   if (!startOk) errors.startsOn = { key: 'promo.error.dateRequired' }
+  else if (d.startsOn > latest) errors.startsOn = { key: 'promo.error.startTooFar', params: { date: formatDay(latest) } }
   if (!endOk) errors.endsOn = { key: 'promo.error.dateRequired' }
   if (startOk && endOk) {
     if (d.endsOn < d.startsOn) errors.endsOn = { key: 'promo.error.endBeforeStart' }

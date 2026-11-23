@@ -9,7 +9,9 @@ from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional, List
 
 from core.filters import has_comparison
-from web.routes.auth import require_admin, require_any_permission, require_permission
+from web.routes.auth import (
+    has_permission, require_admin, require_any_permission, require_permission,
+)
 from web.services import dashboard_service
 from web.schemas import CategoryResponse, BrandResponse
 from ._deps import (
@@ -150,9 +152,13 @@ async def get_revenue_trend(
 async def get_revenue_forecast(
     request: Request,
     sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
-    _gate=Depends(require_permission("dashboard")),
+    user=Depends(require_permission("dashboard")),
 ):
-    """Get ML revenue forecast for the current month."""
+    """Get ML revenue forecast for the current month.
+
+    `planned_promotions` is the promotions calendar's, which is the
+    `marketing` tab's (`/api/promotions`): null for a caller who may not view
+    that tab, as for a forecast with nothing to say."""
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
@@ -161,6 +167,8 @@ async def get_revenue_forecast(
     forecast = await dashboard_service.get_forecast_data(sales_type)
     if not forecast:
         return {"status": "unavailable", "message": "Forecast not available yet"}
+    if not await has_permission(user, "marketing", "view"):
+        forecast = {**forecast, "planned_promotions": None}
     return forecast
 
 
@@ -168,10 +176,13 @@ async def get_revenue_forecast(
 @limiter.limit("5/hour")
 async def train_revenue_forecast(
     request: Request,
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail only"),
     admin: dict = Depends(require_admin),
 ):
-    """Manually trigger revenue prediction model training. Requires admin."""
+    """Manually trigger revenue prediction model training. Requires admin.
+
+    Retail only: `PredictionService.train` refuses any other sales type with
+    a ValidationError, which web answers 400."""
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:

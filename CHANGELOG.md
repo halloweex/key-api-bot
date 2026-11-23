@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.361
+
+- Compare each order's discount with KeyCRM in the 05:30 reconciliation
+
+
+## 3.0.360
+
+- docs, promotions: groups B's and C's notes, the train route retail only, no promotions stamp
+- fix(forecast): Black Friday a year on, one outlook a day, and a freeze that waits for the derivation
+- fix(promotions,auth): the review's group A — sign-in, the API, the SMS link, the bot
+- fix(promotions): a write is seen by the page that made it (review of #397, group B)
+
+
 ## 3.0.359
 
 - fix(auth): the sign-in returns to the page that asked for it
