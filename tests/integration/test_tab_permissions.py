@@ -457,7 +457,6 @@ class TestTheSessionIsResolvedOncePerRequest:
 # ─── the request itself, in the UI ───────────────────────────────────────────
 
 
-@needs_postgres
 class TestTheAccessRequestQueue:
     """A request lands in the *bot's* list and the dashboard's list gains a row
     only when somebody approves — so an incoming request was invisible on the
@@ -492,6 +491,7 @@ class TestTheAccessRequestQueue:
                            "FROM app.authorized_users WHERE user_id = $1", self.ASKER)
         return found[0] if found else None
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_the_queue_is_listed(self, monkeypatch, tmp_path):
         async with bot_store_on_postgres(monkeypatch, tmp_path):
@@ -511,6 +511,7 @@ class TestTheAccessRequestQueue:
         assert client.get(
             "/api/admin/access-requests", headers=headers).status_code == 403
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_approving_writes_both_rows_and_says_so(self, monkeypatch, tmp_path, told):
         async with bot_store_on_postgres(monkeypatch, tmp_path):
@@ -532,6 +533,7 @@ class TestTheAccessRequestQueue:
         # and the person is told, and nobody else
         assert told == [[self.ASKER]]
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_omitting_the_body_grants_the_default(self, monkeypatch, tmp_path, told):
         from core.permissions import ACCESS_PRESETS, DEFAULT_PRESET, parse_features
@@ -546,6 +548,7 @@ class TestTheAccessRequestQueue:
             stored = (await dashboard_row(self.ASKER))["allowed_features"]
         assert parse_features(stored) == list(ACCESS_PRESETS[DEFAULT_PRESET])
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_a_request_already_decided_is_refused(self, monkeypatch, tmp_path, told):
         """Two admins answering the same request: the second is refused by the
@@ -564,6 +567,7 @@ class TestTheAccessRequestQueue:
             assert (await dashboard_row(self.ASKER))["allowed_features"] == "traffic"
         assert told == [[self.ASKER]]
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_denying_writes_no_dashboard_row(self, monkeypatch, tmp_path, told):
         async with bot_store_on_postgres(monkeypatch, tmp_path):
@@ -579,6 +583,7 @@ class TestTheAccessRequestQueue:
                 "a refusal is not a decision about a row"
         assert told == [[self.ASKER]]
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_an_unknown_tab_is_refused(self, monkeypatch, tmp_path, told):
         async with bot_store_on_postgres(monkeypatch, tmp_path):
