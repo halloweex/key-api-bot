@@ -5,7 +5,7 @@ nginx/rust/routes.conf names a location, nothing anybody is answered changes.
 The service starts in a profile the Python deploy never names, nginx reaches it
 by a name resolved per request, so nginx starts with or without it, and the
 include that would route to it is empty. When a route is listed, the pilot
-reads as `ks_readonly`, answers from an image built without the test clock,
+reads as `ks_rust_api`, answers from an image built without the test clock,
 and is handed back to web on exactly two codes.
 
 The behaviour itself was rehearsed with real containers — nginx 1.31, the
@@ -132,12 +132,17 @@ class TestTheFallback:
 
     def test_a_switched_route_is_proxied_as_the_api_location_proxies(self):
         """The pilot's location and the fallback both send web's headers and
-        add `location /api/`'s `expires`: a client cannot tell who answered."""
+        add `location /api/`'s `expires`: a client cannot tell who answered.
+        Read off `location /api/` rather than written here: it went from
+        `expires 60s` to `expires -1` on 2026-11-20, and a switched route
+        would have kept the browser's minute of cache that change removed."""
         api = _block(NGINX_CONF, "location /api/")
         fallback = _block(SERVER, "location @rust_fallback_to_web")
         assert _headers(PROXY) == _headers(api) == _headers(fallback)
-        for text in (api, fallback, PROXY):
-            assert "expires 60s;" in _directives(text)
+        expires = re.findall(r"^expires .+;$", _directives(api), re.MULTILINE)
+        assert len(expires) == 1, expires
+        for text in (fallback, PROXY):
+            assert re.findall(r"^expires .+;$", _directives(text), re.MULTILINE) == expires
         assert "proxy_pass http://$web_upstream:8080;" in _directives(fallback)
 
     def test_both_halves_log_which_upstream_answered(self):
@@ -161,11 +166,12 @@ class TestTheService:
     def test_it_is_on_the_internal_network_only(self):
         assert SERVICE["networks"] == ["default"]
 
-    def test_it_reads_as_the_read_only_role(self):
-        """`ks_readonly` holds SELECT and nothing else, so "the pilot writes
-        nothing" is a grant, not only a property of its code."""
+    def test_it_reads_as_its_own_role(self):
+        """`ks_rust_api` holds SELECT on the tables the pilot reads and nothing
+        else (deploy/rust/ks_rust_api.sql, tests/unit/test_rust_api_role.py), so
+        "the pilot writes nothing" is a grant, not only a property of its code."""
         env = SERVICE["environment"]
-        assert env["KS_PG_DSN"].startswith("postgresql://ks_readonly:${KS_READONLY_PASSWORD")
+        assert env["KS_PG_DSN"].startswith("postgresql://ks_rust_api:${KS_RUST_API_PASSWORD")
         assert env["KS_PG_DSN"].endswith("@postgres:5432/ks")
         assert not [k for k, v in env.items() if "ks_app" in str(v)]
 
@@ -198,7 +204,7 @@ class TestTheService:
 
     def test_its_healthcheck_asks_readiness(self):
         """Rule 13: a check that does the system's work. `/readyz` reads the
-        schema revision as ks_readonly; the image has no shell, so the binary
+        schema revision as ks_rust_api; the image has no shell, so the binary
         itself asks it."""
         assert SERVICE["healthcheck"]["test"] == ["CMD", "/usr/local/bin/ks-api", "healthcheck"]
         assert 'probe(target, "/readyz")' in (RUST_SRC / "main.rs").read_text()

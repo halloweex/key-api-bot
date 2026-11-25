@@ -152,6 +152,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_* not understood, a latch against its flag (DN-06) and a
     # chain's own condition for moving unmet (DN-26). No flag is read since,
     # so none of the three has an emitter.
+    # The Rust pilot, probed from the bot where KS_RUST_API_URL says where it
+    # is (bot/canary.py, check_rust_api): its container, its readiness, and
+    # the share of its window it handed to Python for a reason of its own.
+    "rust_api_unreachable": _c("the next probe reaches ks-rust-api"),
+    "rust_api_not_ready": _c("ks-rust-api's /readyz answers 200"),
+    "rust_api_handover_share": _c("the window's share of hand-overs falls under the limit"),
     # What the host's backup scripts last proved, judged from `/api/health`'s
     # `backups` block at `core/backup_evidence.py`'s limits: a PITR drill or
     # an off-site restore drill older than eight days, an off-site shipment

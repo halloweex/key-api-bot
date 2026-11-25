@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import socket
 import ssl
 from dataclasses import dataclass, field
@@ -45,8 +46,11 @@ CERT_WARN_DAYS = 14
 # on the next probe (≤15 min later), and UptimeRobot watches from outside
 # on its own clock. Everything else — cert, dq, mirrors, alerting — pages
 # on the first probe as before: none of those flap with the event loop.
+# The Rust pilot's container is recreated by every deploy that changes it, so
+# a probe in that minute is the same blip.
 FLAKY_PROBE_KEYS = frozenset(
-    {"health_unreachable", "health_http", "health_status"}
+    {"health_unreachable", "health_http", "health_status",
+     "rust_api_unreachable", "rust_api_not_ready"}
 )
 
 
@@ -965,6 +969,64 @@ def check_backup_evidence(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return [("backup_evidence_stale", "Backup evidence stale: " + "; ".join(stale))]
 
 
+# ─── The Rust pilot (rust/README.md) ────────────────────────────────────────
+#
+# Probed only where the bot is told where it is: `KS_RUST_API_URL`
+# (`http://ks-rust-api:8090` in docker-compose.yml, the `default` network both
+# containers are on). Unset, nothing is asked and nothing is judged.
+#
+# Two questions, the plan's (revision 3, step 2): is the container there, and
+# how much of what it was asked did it hand to the Python app for a reason of
+# its own. A 501 nginx turns into Python's answer, so the person still gets
+# one; that is why every finding here is a warning and not an outage.
+# Hand-overs by design are not counted against it: a route the pilot does not
+# port (`route`), the trend's filters it leaves to Python (`line_level_filter`,
+# `promocode_filter`, `source_without_gold_channel`) and input the page never
+# sends (`input`). The share counts the rest — the schema at another revision,
+# Postgres or the pool or the session's stores not answering, a statement its
+# role stopped — over the window the pilot keeps (`/stats`, 15 minutes).
+RUST_API_URL_ENV = "KS_RUST_API_URL"
+RUST_HANDOVER_REASONS = ("revision", "database", "pool", "session", "timeout")
+# Above this share of the window's requests, with at least the minimum asked:
+# one failed read in a quiet quarter of an hour is not a finding.
+RUST_HANDOVER_SHARE_MAX = 0.05
+RUST_HANDOVER_MIN_REQUESTS = 20
+
+
+def check_rust_api(
+    readyz: tuple[Optional[int], Optional[dict], Optional[str]],
+    stats: tuple[Optional[int], Optional[dict], Optional[str]],
+) -> tuple["list[tuple[str, str]]", bool]:
+    """Judge the pilot's `/readyz` and `/stats` answers, as `check_health`
+    returns them. Returns the findings and whether the share was judged: a
+    probe that read no window cannot clear a firing share (`unjudged_keys`)."""
+    code, payload, error = readyz
+    if error:
+        return [("rust_api_unreachable", f"ks-rust-api did not answer: {error}")], False
+    if code != 200:
+        reason = (payload or {}).get("reason") or f"HTTP {code}"
+        return [("rust_api_not_ready",
+                 f"ks-rust-api not ready ({reason}): it hands every request to Python")], False
+    s_code, s_payload, _ = stats
+    window = (s_payload or {}).get("window") if s_code == 200 else None
+    if not isinstance(window, dict):
+        return [], False
+    requests = window.get("requests")
+    handed = window.get("handed_over") or {}
+    if not isinstance(requests, int) or not isinstance(handed, dict):
+        return [], False
+    failed = {r: n for r, n in handed.items()
+              if r in RUST_HANDOVER_REASONS and isinstance(n, int) and n > 0}
+    total = sum(failed.values())
+    if requests < RUST_HANDOVER_MIN_REQUESTS or total <= RUST_HANDOVER_SHARE_MAX * requests:
+        return [], True
+    minutes = max(1, round(((s_payload or {}).get("window_s") or 0) / 60))
+    reasons = ", ".join(f"{r} {n}" for r, n in sorted(failed.items()))
+    return [("rust_api_handover_share",
+             f"ks-rust-api handed {total} of {requests} requests to Python "
+             f"in {minutes} min ({reasons})")], True
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -1107,6 +1169,21 @@ async def run_canary(
         if orders_failures:
             severity = "critical"
 
+    # The Rust pilot, where the bot is told where it is (see check_rust_api).
+    rust_unjudged: list[str] = []
+    rust_url = os.environ.get(RUST_API_URL_ENV, "").strip().rstrip("/")
+    if rust_url:
+        readyz, stats = await asyncio.gather(
+            check_health(rust_url + "/readyz", client=client),
+            check_health(rust_url + "/stats", client=client))
+        rust_failures, share_judged = check_rust_api(readyz, stats)
+        for key, message in rust_failures:
+            fail(key, message)
+        if rust_failures and severity == "ok":
+            severity = "warn"
+        if not share_judged:
+            rust_unjudged.append("rust_api_handover_share")
+
     if cert_err:
         fail("cert_unreachable", f"cert check failed: {cert_err}")
         if severity == "ok":
@@ -1128,8 +1205,15 @@ async def run_canary(
         sync_seconds_since=sync_seconds,
         dq_ages=dq_ages,
         mirror_ages=mirror_ages,
-        unjudged_keys=unjudged_keys(payload, delivered=_delivered_canary_keys()),
+        unjudged_keys=_unjudged(payload, rust_unjudged),
     )
+
+
+def _unjudged(payload: Optional[dict], rust_unjudged: "list[str]") -> "list[str]":
+    """`unjudged_keys`, and a firing Rust share this probe read no window for."""
+    delivered = _delivered_canary_keys()
+    return (unjudged_keys(payload, delivered=delivered)
+            + [key for key in rust_unjudged if key in delivered])
 
 
 # ─── Alert formatting + dedup state machine ─────────────────────────────────
@@ -1163,6 +1247,10 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "on success only, and the next probe clears this"),
     ("report_ledger_pending",
      "Nothing to resend: the next daily tick drains data/report-ledger-pending into the ledger, under either flag; grep -i 'report ledger' in web's log"),
+    ("rust_api_",
+     "People get Python's answers meanwhile: nginx hands the pilot's 501s and 502s to web. "
+     "docker logs ks-rust-api; its /stats names the reasons. To take every route back: "
+     "empty nginx/rust/routes.conf, nginx -s reload"),
     # Last: when an engine is down its own key names the cause, and a refusal
     # is what that cause cost the pages.
     ("read_refused",

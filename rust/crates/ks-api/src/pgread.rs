@@ -59,7 +59,9 @@ pub async fn connection(
     Ok(conn)
 }
 
-/// The statement, within `timeout`: a failure here is the data's.
+/// The statement, within `timeout`: a failure here is the data's — unless
+/// this service's own role stopped it (`handover::stopped_by_own_limit`),
+/// which Python's would not have.
 pub async fn fetch(
     statement: impl Future<Output = Result<Vec<PgRow>, sqlx::Error>>,
     timeout: Duration,
@@ -67,5 +69,11 @@ pub async fn fetch(
     tokio::time::timeout(timeout, statement)
         .await
         .map_err(|_| ReadError::Failed(format!("no answer within {timeout:?}")))?
-        .map_err(|e| ReadError::Failed(e.to_string()))
+        .map_err(|e| {
+            if handover::stopped_by_own_limit(&e) {
+                ReadError::HandOver(Reason::Timeout, e.to_string())
+            } else {
+                ReadError::Failed(e.to_string())
+            }
+        })
 }

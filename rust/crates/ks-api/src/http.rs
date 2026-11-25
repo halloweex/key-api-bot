@@ -11,8 +11,9 @@
 //! and nginx hands it there (`nginx/rust/proxy.conf`). So is a request whose
 //! answer here could be wrong for a reason it does not carry — another schema
 //! revision, a store that did not answer before the first read
-//! (`crate::handover`). Two paths of its own, outside the app's table:
-//! `/healthz` (alive) and `/readyz` (able to answer, or why not).
+//! (`crate::handover`). Three paths of its own, outside the app's table:
+//! `/healthz` (alive), `/readyz` (able to answer, or why not) and `/stats`
+//! (what it answered and what it handed over, for its watchdog).
 
 use std::any::Any;
 use std::collections::hash_map::RandomState;
@@ -22,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use axum::body::HttpBody;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
@@ -41,10 +43,13 @@ use crate::access::routing::{Captures, Resolution, Router};
 use crate::access::store::PgAccess;
 use crate::gold::PgGold;
 use crate::handover::Reason;
+use crate::stats::{Branch, Outcome, Stats};
 use crate::trend::{self, Failure, ReadError};
 
 /// `DEFAULT_REQUEST_TIMEOUT` in `web/middleware.py`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The pilot's own paths: not the app's, not logged, not counted.
+const OWN_PATHS: [&str; 3] = ["/healthz", "/readyz", "/stats"];
 /// The endpoints the pilot answers past the gates, by the contract's name.
 const TREND: &str = "web.routes.api.analytics.get_revenue_trend";
 const SPA_CATCH_ALL: &str = "web.routes.pages.catch_all_spa";
@@ -54,6 +59,7 @@ pub struct AppState {
     access: Access<PgAccess>,
     router: Router,
     limiter: Limiter,
+    stats: Stats,
     /// What `scope["server"]` would say, for a redirect without a usable Host.
     listen: SocketAddr,
     #[cfg(feature = "test-clock")]
@@ -73,6 +79,7 @@ impl AppState {
             access,
             router,
             limiter: Limiter::default(),
+            stats: Stats::default(),
             listen,
             #[cfg(feature = "test-clock")]
             test_clock,
@@ -95,14 +102,17 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> axum::Router {
+    let state = Arc::new(state);
     axum::Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/stats", get(stats))
         .fallback(dispatch)
         .layer(middleware::from_fn(reject_nul))
-        .layer(middleware::from_fn(observe))
+        .layer(middleware::from_fn(vary))
+        .layer(middleware::from_fn_with_state(state.clone(), observe))
         .layer(CatchPanicLayer::custom(panicked))
-        .with_state(Arc::new(state))
+        .with_state(state)
 }
 
 #[derive(Serialize)]
@@ -152,6 +162,17 @@ fn raw_json(status: StatusCode, body: Vec<u8>) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
+/// The 500 `ServerErrorMiddleware` writes for an unhandled exception, outside
+/// every other middleware: `vary` leaves it as Python's GZip never sees it.
+#[derive(Clone, Copy, Debug)]
+struct Unhandled;
+
+fn unhandled() -> Response {
+    let mut response = json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL);
+    response.extensions_mut().insert(Unhandled);
+    response
+}
+
 fn detail(status: StatusCode, detail: &str) -> Response {
     json(status, &Detail { detail })
 }
@@ -162,28 +183,32 @@ const INTERNAL: ErrorBody<'static> = ErrorBody {
     surface: None,
 };
 
-fn not_in_pilot(what: String, branch: &str) -> Response {
-    json(
+fn not_in_pilot(what: String, branch: &'static str) -> Response {
+    let mut response = json(
         StatusCode::NOT_IMPLEMENTED,
         &NotInPilot {
             error: "Not Implemented",
             detail: format!("{what} is not in the Rust pilot; the Python app serves it"),
             branch,
         },
-    )
+    );
+    response.extensions_mut().insert(Branch(branch));
+    response
 }
 
 /// A request handed to the Python app: the 501 nginx does not pass on, its
 /// `branch` the reason.
 fn hand_over(reason: Reason) -> Response {
-    json(
+    let mut response = json(
         StatusCode::NOT_IMPLEMENTED,
         &NotInPilot {
             error: "Not Implemented",
             detail: format!("{}; the Python app serves it", reason.sentence()),
             branch: reason.as_str(),
         },
-    )
+    );
+    response.extensions_mut().insert(Branch(reason.as_str()));
+    response
 }
 
 impl IntoResponse for Failure {
@@ -195,7 +220,7 @@ impl IntoResponse for Failure {
             Failure::BadRequest(message) => detail(StatusCode::BAD_REQUEST, &message),
             Failure::Raised(why) => {
                 tracing::error!(why, "the Python app raises here; answering its 500");
-                json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL)
+                unhandled()
             }
             Failure::Unavailable(surface, ReadError::HandOver(reason, why)) => {
                 tracing::warn!(
@@ -246,7 +271,7 @@ fn refused(refusal: Refusal) -> Response {
         }
         Refusal::Raised => {
             tracing::error!("the session check raises here in Python; answering its 500");
-            json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL)
+            unhandled()
         }
         Refusal::HandOver(reason) => hand_over(reason),
     }
@@ -465,9 +490,16 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// What the pilot answered and handed over (`crate::stats`): the last
+/// `stats::WINDOW_MINUTES` minutes and the totals since start, for the
+/// watchdog in `bot/canary.py`. The pilot's, not the app's, as `/healthz` is.
+async fn stats(State(state): State<Arc<AppState>>) -> Response {
+    json(StatusCode::OK, &state.stats.snapshot())
+}
+
 fn panicked(_payload: Box<dyn Any + Send + 'static>) -> Response {
     tracing::error!("handler panicked; answering the Python app's 500");
-    json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL)
+    unhandled()
 }
 
 /// Eight hex digits, unique enough to find one request in a log.
@@ -535,8 +567,10 @@ fn unquoted(raw: &str) -> Vec<u8> {
     out
 }
 
-/// `RequestLoggingMiddleware` and `RequestTimeoutMiddleware` in one.
-async fn observe(request: Request, next: Next) -> Response {
+/// `RequestLoggingMiddleware` and `RequestTimeoutMiddleware` in one, and the
+/// count `/stats` publishes: every answer to the app's table, each 501 by the
+/// branch its builder put on it.
+async fn observe(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
     let id = request
         .headers()
         .get("x-request-id")
@@ -544,7 +578,7 @@ async fn observe(request: Request, next: Next) -> Response {
         .map_or_else(correlation_id, str::to_owned);
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    let quiet = path == "/healthz" || path == "/readyz";
+    let quiet = OWN_PATHS.contains(&path.as_str());
     let started = Instant::now();
     if !quiet {
         tracing::info!(%method, %path, request_id = %id, "Request started");
@@ -581,6 +615,80 @@ async fn observe(request: Request, next: Next) -> Response {
         } else {
             tracing::warn!(%method, %path, status, elapsed_ms, "Request completed");
         }
+        state.stats.record(outcome(&response));
     }
     response
+}
+
+/// A 501 by the branch its builder put on it; any other status is answered.
+fn outcome(response: &Response) -> Outcome {
+    if response.status() != StatusCode::NOT_IMPLEMENTED {
+        return Outcome::Answered;
+    }
+    let branch = response.extensions().get::<Branch>().map(|b| b.0);
+    Outcome::HandedOver(branch.unwrap_or("unnamed"))
+}
+
+/// `GZipMiddleware`'s `Vary`, without its compression, as the app's stack
+/// sets it — measured by the harnesses, not read off GZip's `minimum_size`.
+/// The app's logging and timeout middlewares are `BaseHTTPMiddleware`s, which
+/// hand GZip every body as a stream, and GZip puts `Vary: Accept-Encoding` on
+/// any stream, whatever its size or the client accepts. So every answer with a
+/// body carries it — a 36-byte 401 too — and three do not: an empty body (a
+/// 307 reaches GZip as one empty message), the 504 the timeout middleware
+/// writes itself (one short message, so `vary` sits inside `observe`), and the
+/// 500 `ServerErrorMiddleware` writes outside GZip (`Unhandled`). nginx's
+/// `gzip_vary` would not stand in: it covers only what it would compress, a
+/// 200, 403 or 404 of 256 bytes or more.
+async fn vary(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    if response.extensions().get::<Unhandled>().is_none()
+        && needs_vary(response.body().size_hint().exact())
+    {
+        add_vary(response.headers_mut(), "Accept-Encoding");
+    }
+    response
+}
+
+/// A body GZip receives as a stream: any but an empty one.
+fn needs_vary(body_len: Option<u64>) -> bool {
+    body_len != Some(0)
+}
+
+/// `MutableHeaders.add_vary_header`: joined to a `Vary` already there.
+fn add_vary(headers: &mut HeaderMap, value: &str) {
+    let joined = match headers.get(header::VARY).and_then(|v| v.to_str().ok()) {
+        Some(existing) => format!("{existing}, {value}"),
+        None => value.to_owned(),
+    };
+    if let Ok(joined) = HeaderValue::from_str(&joined) {
+        headers.insert(header::VARY, joined);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::{add_vary, needs_vary};
+
+    #[test]
+    fn vary_is_on_every_body_but_an_empty_one() {
+        assert!(!needs_vary(Some(0)));
+        assert!(needs_vary(Some(1)));
+        assert!(needs_vary(Some(36)));
+        assert!(needs_vary(Some(64 * 1024)));
+        assert!(needs_vary(None));
+    }
+
+    #[test]
+    fn vary_is_joined_to_one_already_there() {
+        let mut headers = HeaderMap::new();
+        add_vary(&mut headers, "Accept-Encoding");
+        assert_eq!(headers[header::VARY], "Accept-Encoding");
+        let mut headers = HeaderMap::new();
+        headers.insert(header::VARY, HeaderValue::from_static("Cookie"));
+        add_vary(&mut headers, "Accept-Encoding");
+        assert_eq!(headers[header::VARY], "Cookie, Accept-Encoding");
+    }
 }

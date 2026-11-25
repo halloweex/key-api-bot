@@ -16,6 +16,7 @@ pub mod pgread;
 pub mod pyrt;
 #[rustfmt::skip]
 mod pytables;
+pub mod stats;
 pub mod strptime;
 pub mod trend;
 pub mod validate;

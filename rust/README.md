@@ -65,19 +65,23 @@ The trend: the same status and body as `web/routes/api/analytics.py` for
 every request on the Gold branch — no `category_id`, no `brand`, no
 promocode, a source with a Gold channel (none, 1, 2, 4) — the validators'
 400s, FastAPI's 422s and the 500s Python raises on a date it cannot parse or
-a window outside the years 1–9999 included. 501 for the line-level filter,
-a promocode, source 3 and the forecast overlay; 503 when a statement fails,
-as under `KS_READ_FALLBACK=off`.
+a window outside the years 1–9999 included, and the stored forecast with its
+badge (`include_forecast`, read from `app.revenue_predictions`). 501 for the
+line-level filter, a promocode and source 3; 503 when a statement fails, as
+under `KS_READ_FALLBACK=off`. The month badge's 80% range and Black Friday
+line are not the trend's: the page asks `/api/revenue/forecast` for them,
+which stays in Python.
 
 **Where its own answer could be wrong for a reason the request does not
 carry, it hands the request to Python** — a 501 naming the reason, which
 nginx does not pass on (`src/handover.rs`): the schema at another revision
 than the contract's (every migration window), Postgres not answering the
 revision check every read asks first, no pooled connection within
-`KS_PILOT_POOL_WAIT` (2.5 s), and the session's own reads — the user list,
-the bot's list, the role matrix — failing. Python answers those requests as
-it would have: its 401, its 500, its fallback to the code's matrix, or the
-data its own reads found.
+`KS_PILOT_POOL_WAIT` (2.5 s), a statement its own role stopped (the role's
+`statement_timeout` or `lock_timeout`, which Python's role does not have),
+and the session's own reads — the user list, the bot's list, the role matrix
+— failing. Python answers those requests as it would have: its 401, its 500,
+its fallback to the code's matrix, or the data its own reads found.
 
 What it never does: issue a session (the Telegram sign-in stays in Python),
 write anything (the role matrix Python seeds on its first read is computed
@@ -177,7 +181,7 @@ Everything a route needs to move is already in place and routes nothing:
 
 - **The service.** `rust-api` in `docker-compose.yml`, in the `rust` profile, so
   a plain `docker compose pull` / `up -d` never touches it. It reads Postgres as
-  `ks_readonly`, publishes no port, and its healthcheck (`ks-api healthcheck`)
+  `ks_rust_api` (below), publishes no port, and its healthcheck (`ks-api healthcheck`)
   asks `/readyz`: Postgres answers that role and the schema is at the
   contract's revision. An image older than the schema shows up unhealthy.
 - **The switch.** `nginx/rust/routes.conf`, mounted as a directory and empty.
@@ -193,3 +197,47 @@ Everything a route needs to move is already in place and routes nothing:
   pull, `up` under the profile, wait for healthy, `nginx -t`, `nginx -s reload`.
   A change to `routes.conf` alone is that job's reload and nothing else
   (`deploy/changed_components.py` decides).
+
+## The guards (plan, revision 3, step 2)
+
+Four things stand between the pilot and a wrong answer nobody notices.
+Nothing here is on production until the owner's yes; the role is created by
+hand.
+
+- **`Vary: Accept-Encoding`**, as the app's stack sets it: on every answer
+  with a body, compressed or not, because its `BaseHTTPMiddleware`s hand GZip
+  a stream and GZip marks any stream; not on an empty body, the timeout's own
+  504 or an unhandled exception's 500 (`vary` in `src/http.rs`). nginx's
+  `gzip_vary` covers only what it would compress, a 200, 403 or 404 of 256
+  bytes and up. Both harnesses compare the header; the first port, by GZip's
+  500-byte minimum, differed on 11 140 answers.
+- **The watchdog**, in the bot's canary (`check_rust_api` in
+  `bot/canary.py`), every 15 minutes where `KS_RUST_API_URL` says where the
+  pilot is (`http://ks-rust-api:8090` in compose). It asks `/readyz` and the
+  pilot's own `/stats` — every answer of the last 15 minutes and since
+  start, each 501 by the branch it names (`src/stats.rs`) — and warns when
+  the container does not answer (`rust_api_unreachable`), is not ready
+  (`rust_api_not_ready`, the reason named), or handed more than 5% of at
+  least 20 requests to Python for a reason of its own: revision, database,
+  pool, session, timeout (`rust_api_handover_share`). Hand-overs by design —
+  a route not ported, a filter left to Python — are not counted. A warning,
+  not an outage: nginx answers from Python meanwhile. The first two wait for
+  a second probe, as `health_*` does, because a deploy recreates the
+  container.
+- **The drift sensor**: `test_python_answers_the_trend_as_recorded` in
+  `tests/integration/test_rust_pilot_trend.py`, the `drift` job of
+  `.github/workflows/rust-pilot.yml`. Python's answers to the
+  harness's 5 087 requests, on the harness's seed, against the digests
+  recorded in `tests/integration/golden/rust_trend_answers.json`; no Rust is
+  built. A Python change that moves the trend's answer fails the pull request
+  that made it. Then: port it to `crates/ks-api` and record again with
+  `KS_TREND_GOLDEN=write` (the module says how).
+- **Its own role**, `deploy/rust/ks_rust_api.sql`: SELECT on the six tables
+  the pilot reads (`tests/unit/test_rust_api_role.py` holds the list to its
+  statements), read-only sessions, five connections, `statement_timeout` 3 s
+  and `lock_timeout` 1 s. A statement the role stops is handed to Python
+  (`timeout`), not answered 503: Python's role has no such limit. The pool
+  waits 2.5 s for a connection (`KS_PILOT_POOL_WAIT`). CI's harness reads as
+  this role; compose names it with `KS_RUST_API_PASSWORD` from `.env`, empty
+  by default so that a missing password costs the Rust step and not every
+  compose command.
