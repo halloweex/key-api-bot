@@ -23,6 +23,7 @@ flip, the replica's control and the DuckDB halves went with the DuckDB path.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
@@ -106,18 +107,39 @@ def _open(intervals, manager_id):
     return [i for i in intervals if i[0] == manager_id and i[2] is None]
 
 
-class _Conn:
-    """A live connection, except that `fail_on` raises where the writer runs
-    that statement, and `pause_after` holds the writer after it — so a test
-    can inject a failure or a race exactly where it means to."""
+@contextlib.asynccontextmanager
+async def _intervals_refused_from(pool, day: date):
+    """Postgres refuses any interval inserted from `day`, by a trigger on the
+    test database: a failure the writer meets mid-transaction, whatever its
+    statements look like. Dropped on the way out."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "CREATE OR REPLACE FUNCTION app.t_refuse_classification() "
+            "RETURNS trigger LANGUAGE plpgsql AS "
+            "$$ BEGIN RAISE EXCEPTION 'refused by the test'; END $$")
+        await conn.execute(
+            "CREATE TRIGGER t_refuse_classification BEFORE INSERT "
+            "ON app.manager_classifications FOR EACH ROW "
+            f"WHEN (NEW.valid_from = DATE '{day.isoformat()}') "
+            "EXECUTE FUNCTION app.t_refuse_classification()")
+    try:
+        yield
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DROP TRIGGER IF EXISTS t_refuse_classification "
+                               "ON app.manager_classifications")
+            await conn.execute("DROP FUNCTION IF EXISTS app.t_refuse_classification()")
 
-    def __init__(self, conn, *, fail_on=None, pause_after=None, paused=None):
-        self._conn, self.fail_on = conn, fail_on
+
+class _Conn:
+    """A live connection, except that `pause_after` holds the writer after
+    that statement — so a test can stage a race where it means to."""
+
+    def __init__(self, conn, *, pause_after=None, paused=None):
+        self._conn = conn
         self.pause_after, self.paused = pause_after, paused
 
     async def execute(self, sql, *args):
-        if self.fail_on and sql.startswith(self.fail_on):
-            raise asyncpg.DataError("injected")
         out = await self._conn.execute(sql, *args)
         if self.pause_after and sql.startswith(self.pause_after):
             self.paused.set()
@@ -217,21 +239,19 @@ class TestAClassification:
 
     @pytest.mark.asyncio
     async def test_a_failure_before_the_insert_leaves_everything_as_it_was(self, stores):
-        """One transaction. Mutation: split the statements into autocommits —
-        the manager would be left with no open interval."""
-        store, pool, env = stores
+        """One transaction: Postgres refuses the new interval after the open
+        one was closed, and nothing of the write is left. Mutation: split the
+        statements into autocommits — the manager would be left with no open
+        interval, every order from that date on `internal`."""
+        store, pool, _env = stores
         async with pool.acquire() as conn:
             await conn.execute("INSERT INTO bronze.managers (id, name) VALUES (34, 'M')")
             await conn.execute(
                 "INSERT INTO app.manager_classifications (manager_id, is_retail, "
                 "valid_from, set_at) VALUES (34, FALSE, '1970-01-01', now())")
-        env.setenv(ENV, "postgres")
         before = await _pg_intervals(pool)
-        failing = _Pool(pool, fail_on="INSERT INTO app.manager_classifications "
-                                      "(manager_id, is_retail, valid_from, valid_to, set_by, "
-                                      "set_at,  note, mirrored_at) VALUES")
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=failing)):
-            with pytest.raises(asyncpg.DataError):
+        async with _intervals_refused_from(pool, date(2026, 6, 1)):
+            with pytest.raises(asyncpg.PostgresError):
                 await store.set_manager_retail_status(34, True, date(2026, 6, 1), 7, None)
         assert await _pg_intervals(pool) == before
         assert (await _pg_managers(pool))[34]["is_retail"] is False
@@ -411,6 +431,33 @@ class TestTheReadsFollow:
                 "SELECT requested FROM meta.derivation_signal "
                 "WHERE layer = 'warehouse'") == requested + 1
         assert [(m["id"], m["is_retail"]) for m in listed] == [(34, True)]
+
+
+    @pytest.mark.asyncio
+    async def test_a_classification_without_a_date_runs_from_today_in_kyiv(self, stores):
+        """The owner's decision of 2026-08-20: a reclassification restates no
+        past report unless a date is asked for. With none, the open interval
+        is closed and the new one opened at today's Kyiv date, and the
+        admin's id is the one recorded."""
+        from tests.helpers.app_client import signed_in
+        from tests.helpers.managers_fixture import today_in_kyiv
+
+        store, pool, _env = stores
+        await store.upsert_managers([{"id": 34, "name": "M"}])
+        before = today_in_kyiv()
+        async with signed_in("admin") as admin:
+            res = await admin.post("/api/managers/34/retail-status",
+                                   params={"is_retail": "true"})
+        after = today_in_kyiv()
+        assert res.status_code == 200, res.text
+
+        intervals = await _pg_intervals(pool, 34)
+        today = intervals[-1][1]
+        assert today in {before, after}, (today, before)
+        assert intervals == [
+            (34, BASELINE, today, False, None, "baseline frozen from managers.is_retail"),
+            (34, today, None, True, admin.user_id, None)]
+        assert (await _pg_managers(pool))[34]["is_retail"] is True
 
 
 # ─── The review of chain 5 (2026-10-08) ─────────────────────────────────────

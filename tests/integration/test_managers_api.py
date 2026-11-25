@@ -1,14 +1,16 @@
 """HTTP contract for the manager classification endpoints.
 
-`managers.is_retail` decides `sales_type`, and every dashboard endpoint
+A manager's classification decides `sales_type`, and every dashboard endpoint
 defaults to `Query("retail")` — so a manager nobody has classified sells into
-`other` and appears on no page. KeyCRM does not carry that fact, which makes
-these two endpoints the only way it can ever be set. They must be admin-only,
-and setting it must mark the warehouse dirty: `sales_type` is materialised
-into Silver, so a classification that never triggers a rebuild changes nothing
-a human can see.
+`internal` and appears on no page but the admin's. KeyCRM does not carry that
+fact, which makes these two endpoints the only way it can ever be set. They
+must be admin-only. The list is read over the test Postgres
+(`TestTheListOverPostgres`); what a classification writes — the interval from
+today in Kyiv when no date is given, the derivation signal in the same
+transaction — is `test_managers_chain_writer.py`'s.
 """
 from datetime import date
+import os
 import time
 
 import pytest
@@ -17,6 +19,11 @@ from fastapi.testclient import TestClient
 from web.main import app
 from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
 from core.permissions import ADMIN_USER_IDS
+from tests.helpers import managers_fixture
+from tests.helpers.app_client import signed_in
+from tests.integration.pg_tab_seed import needs_postgres, tab_in_postgres
+
+DSN = os.getenv("KS_PG_DSN")
 
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 
@@ -59,20 +66,6 @@ class _FakeStore:
         # this fake records the call and nothing else. It also marked a DuckDB
         # dirty flag here, until step 14's S14-15 deleted the flag.
         self.set_calls.append((manager_id, is_retail, effective_from, set_by, note))
-
-    async def get_manager_sales_365d(self):
-        """Silver grouped by (manager_id, sales_type), as the endpoint reads it.
-
-        No `connection()` on this fake, on purpose: the route asks the store
-        which engine answers, and a route that opened DuckDB itself again would
-        be a 500 here rather than a green test.
-        """
-        return [
-            (34, "other", 230_300.0),
-            (22, "retail", 8_215_717.77),
-            (15, "b2b", 15_549_070.0),
-            (None, "retail", 1_000_000.0),
-        ]
 
 
 @pytest.fixture(autouse=True)
@@ -126,44 +119,6 @@ class TestBehaviour:
     def _as_admin(self, client):
         client.cookies.set(SESSION_COOKIE, _make_cookie(ADMIN_ID))
 
-    def test_listing_shows_what_an_unclassified_manager_sells(self, client, store):
-        body = client.get(LIST_PATH).json()
-        assert body["status"] == "ok"
-
-        by_id = {m["id"]: m for m in body["managers"]}
-        assert by_id[34]["sales_type"] == "other"
-        assert by_id[34]["revenue_365d"] == 230_300.0
-        assert by_id[22]["sales_type"] == "retail"
-
-    def test_the_b2b_manager_is_not_reported_as_unclassified(self, client, store):
-        """is_retail is FALSE for wholesale too — which is not the same thing.
-        Deriving the label from it called ₴15.5M of B2B `other`."""
-        by_id = {m["id"]: m for m in client.get(LIST_PATH).json()["managers"]}
-
-        assert by_id[15]["sales_type"] == "b2b"
-        assert by_id[15]["revenue_365d"] == 15_549_070.0
-
-    def test_a_manager_who_has_sold_nothing_has_no_sales_type(self, client, store):
-        """Silver says nothing about them, so neither does this."""
-        by_id = {m["id"]: m for m in client.get(LIST_PATH).json()["managers"]}
-
-        assert by_id[99]["sales_type"] is None
-        assert by_id[99]["revenue_365d"] == 0.0
-
-    def test_setting_forwards_the_classification_forward_dated(self, client, store):
-        """The route hands the store the manager, the flag and no date — today,
-        decided in the store. That the store then raises the derivation
-        signal, so Silver is rebuilt and the screen changes, is
-        test_managers_chain_writer.py's to prove against a real Postgres; it
-        was a DuckDB dirty flag on this fake until step 14's S14-15."""
-        res = client.post(f"{SET_PATH}?is_retail=true")
-
-        assert res.status_code == 200
-        assert len(store.set_calls) == 1
-        manager_id, is_retail, effective_from, _set_by, _note = store.set_calls[0]
-        assert (manager_id, is_retail) == (34, True)
-        assert effective_from is None, "no date given means today, decided in the store"
-
     def test_classification_is_forward_dated_unless_backdated(self, client, store):
         """A reclassification must not restate last year's reports by default.
 
@@ -183,3 +138,24 @@ class TestBehaviour:
 
         assert res.status_code == 404
         assert store.set_calls == []
+
+
+@needs_postgres
+class TestTheListOverPostgres:
+    @pytest.mark.asyncio
+    async def test_each_manager_shows_the_sales_type_silver_gave_and_a_year_of_revenue(
+            self, monkeypatch):
+        """The label is Silver's, not derived from `is_retail`: that is FALSE
+        for the wholesale manager too, and deriving it called ₴15.5M of b2b
+        `other`. Staff sell `internal`; a manager who sold nothing has no
+        label and no revenue; a return, an order from before the year and an
+        order with no manager count for nobody."""
+        async with tab_in_postgres(DSN, monkeypatch, managers_fixture.populate):
+            async with signed_in("admin") as admin:
+                res = await admin.get(LIST_PATH)
+
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "ok"
+        listed = [(m["id"], m["is_retail"], m["sales_type"], m["revenue_365d"])
+                  for m in res.json()["managers"]]
+        assert listed == managers_fixture.EXPECTED_LIST
