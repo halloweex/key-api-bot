@@ -13,7 +13,6 @@ that nothing reads the flag.
 """
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from decimal import Decimal
 
@@ -22,6 +21,7 @@ import pytest_asyncio
 
 from core import chain_latch, pg_buyers_write as chain
 from core import pg_chain_invariants as inv
+from tests.helpers.buyers_fixture import buyers_in_postgres
 from tests.integration.pg_tab_seed import needs_postgres
 
 @pytest.fixture
@@ -62,27 +62,8 @@ TEST_BUYER_IDS = range(990_000_001, 990_000_100)
 
 @pytest_asyncio.fixture
 async def buyers_pg():
-    """A pool on the test Postgres that `core.pg.get_pool` answers with, the
-    chain's tables and owner rows empty before and after."""
-    import asyncpg
-    from unittest.mock import AsyncMock, patch
-
-    pool = await asyncpg.create_pool(os.environ["KS_PG_DSN"], min_size=1, max_size=2)
-
-    async def clean():
-        async with pool.acquire() as conn:
-            for table in ("bronze.buyer_contacts", "app.buyer_gender", "bronze.buyers"):
-                await conn.execute(f"DELETE FROM {table}")
-            await conn.execute(
-                "DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
-
-    await clean()
-    try:
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            yield pool
-    finally:
-        await clean()
-        await pool.close()
+    async with buyers_in_postgres() as pool:
+        yield pool
 
 
 @needs_postgres
