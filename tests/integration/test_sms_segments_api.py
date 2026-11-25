@@ -726,21 +726,29 @@ class TestTestSend:
 
         assert r.json()["cost"] == {"encoding": "ucs2", "characters": 71, "parts": 2}
 
-    def test_stoplist_refusal_is_reported_not_recorded(self, client, gateway, store):
-        from core.turbosms import SendResult
+    @pytest.mark.asyncio
+    async def test_a_stoplisted_rehearsal_is_reported_and_records_nothing(
+        self, on_pg, monkeypatch,
+    ):
+        """A rehearsal must not move the data a campaign is measured on: a
+        number the gateway refuses as opted out at the provider is said in
+        the answer, and neither an opt-out nor a campaign is written."""
+        gw = install_gateway(monkeypatch)
+        gw.stoplisted = {"380961111111"}
 
-        gateway.results = [
-            SendResult(phone="380961111111", message_id=None, code=404,
-                       status="NOT_ALLOWED_NUMBER_STOPLIST"),
-        ]
+        async with signed_in("admin") as admin:
+            r = await admin.post(TEST_SEND_PATH, params={
+                "phone": "380961111111", "text": "hi"})
 
-        body = client.post(
-            TEST_SEND_PATH, params={"phone": "380961111111", "text": "hi"},
-            headers=_admin_headers(),
-        ).json()
-
-        assert (body["accepted"], body["stoplisted"]) == (False, True)
-        assert store.freezes == [], "a rehearsal must not create a campaign"
+        assert r.status_code == 200, r.text
+        assert (r.json()["accepted"], r.json()["stoplisted"]) == (False, True)
+        assert gw.sent == [["380961111111"]]
+        async with pg_conn() as conn:
+            written = {table: await conn.fetchval(f"SELECT count(*) FROM {table}")
+                       for table in ("app.marketing_optouts", "app.sms_campaigns",
+                                     "app.sms_campaign_members")}
+        assert written == {"app.marketing_optouts": 0, "app.sms_campaigns": 0,
+                           "app.sms_campaign_members": 0}
 
     def test_gateway_failure_is_a_502(self, client, gateway):
         from core.turbosms import TurboSmsError
@@ -768,29 +776,50 @@ class TestOptout:
     exists for (the same number under a second buyer record).
     """
 
-    def test_normalises_the_phone(self, client, store):
-        r = client.post(
-            OPTOUT_PATH,
-            params={"buyer_id": 1, "phone": "+38 (096) 111-11-11"},
-            headers=_admin_headers(),
-        )
+    @staticmethod
+    async def _two_buyers() -> None:
+        async with pg_conn() as conn:
+            await _catalogue(conn)
+            await _buyer(conn, 7, "380961111111", [(71, 10, 1)])
+            await _buyer(conn, 8, "380962222222", [(81, 10, 1)])
 
-        assert r.status_code == 200
-        assert store.optouts == [
-            {"buyer_id": 1, "phone": "380961111111", "reason": "manual",
-             "source": str(ADMIN_ID)},
-        ], "a phone that isn't canonical can never suppress by phone"
+    @staticmethod
+    async def _optouts() -> list:
+        async with pg_conn() as conn:
+            return [tuple(row) for row in await conn.fetch(
+                "SELECT buyer_id, channel, phone, reason, source"
+                " FROM app.marketing_optouts ORDER BY buyer_id")]
 
-    def test_buyer_only_optout_still_works(self, client, store):
-        r = client.post(
-            OPTOUT_PATH, params={"buyer_id": 7}, headers=_admin_headers(),
-        )
+    @pytest.mark.asyncio
+    async def test_an_optout_by_phone_suppresses_the_number_under_any_buyer(self, on_pg):
+        """Filed under buyer 1 with the number as typed, the opt-out must keep
+        buyer 7, who carries that number, out of the audience: the second
+        buyer record is the case the phone column exists for."""
+        await self._two_buyers()
 
-        assert r.status_code == 200
-        assert store.optouts == [
-            {"buyer_id": 7, "phone": None, "reason": "manual",
-             "source": str(ADMIN_ID)},
-        ]
+        async with signed_in("admin") as admin:
+            before = await admin.get(SEGMENTS_PATH, params={"include_customers": "true"})
+            r = await admin.post(OPTOUT_PATH, params={
+                "buyer_id": 1, "phone": "+38 (096) 111-11-11"})
+            after = await admin.get(SEGMENTS_PATH, params={"include_customers": "true"})
+
+        assert r.status_code == 200, r.text
+        assert set(_tiers(before)) == {7, 8}
+        assert set(_tiers(after)) == {8}
+        assert await self._optouts() == [
+            (1, "sms", "380961111111", "manual", str(admin.user_id))]
+
+    @pytest.mark.asyncio
+    async def test_an_optout_by_buyer_alone_suppresses_the_buyer(self, on_pg):
+        await self._two_buyers()
+
+        async with signed_in("admin") as admin:
+            r = await admin.post(OPTOUT_PATH, params={"buyer_id": 7})
+            after = await admin.get(SEGMENTS_PATH, params={"include_customers": "true"})
+
+        assert r.status_code == 200, r.text
+        assert set(_tiers(after)) == {8}
+        assert await self._optouts() == [(7, "sms", None, "manual", str(admin.user_id))]
 
     @pytest.mark.parametrize("phone", ["0961111111", "380961111", "123456789012"])
     def test_rejects_a_phone_a_campaign_could_not_contain(self, client, store, phone):
