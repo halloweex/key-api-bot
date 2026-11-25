@@ -56,6 +56,17 @@ async def bot_store_on_postgres(monkeypatch, tmp_path) -> AsyncIterator[Any]:
             store.close()
 
 
+@asynccontextmanager
+async def access_lists_empty(monkeypatch) -> AsyncIterator[Any]:
+    """The access tables empty before and after one block, and
+    `core.pg.get_pool` on the test Postgres — for a test that needs no bot
+    store."""
+    from tests.integration.pg_sms_seed import on_postgres
+
+    async with on_postgres(monkeypatch, ACCESS_LIST_TABLES, what="the access path") as pool:
+        yield pool
+
+
 async def execute(sql: str, *args: Any) -> None:
     """One statement against the test Postgres, on a connection of its own."""
     import asyncpg
@@ -88,15 +99,27 @@ async def pending_request(user_id: int, *, username: str = "asker",
         user_id, username, first_name, denial_count)
 
 
+async def dashboard_user(user_id: int, *, role: str = "viewer",
+                         status: str = "approved",
+                         allowed_features: str | None = None) -> None:
+    """A row in the dashboard's list, as an admin's decisions leave it."""
+    await execute(
+        "INSERT INTO app.dashboard_users (user_id, first_name, role, status, "
+        "allowed_features) VALUES ($1, 'Test', $2, $3, $4)",
+        user_id, role, status, allowed_features)
+
+
 async def dashboard_row(user_id: int) -> Dict[str, Any] | None:
-    """The person's row in the dashboard's list, or None."""
+    """The person's row in the dashboard's list, or None. `reviewed_by` says
+    whether any admin's write reached it."""
     found = await rows(
-        "SELECT user_id, role, status, allowed_features, denial_count "
+        "SELECT user_id, role, status, allowed_features, denial_count, reviewed_by "
         "FROM app.dashboard_users WHERE user_id = $1", user_id)
     return found[0] if found else None
 
 
 __all__ = [
-    "ACCESS_LIST_TABLES", "DSN", "bot_store_on_postgres", "dashboard_row",
-    "execute", "pending_request", "rows",
+    "ACCESS_LIST_TABLES", "DSN", "access_lists_empty", "bot_store_on_postgres",
+    "dashboard_row",
+    "dashboard_user", "execute", "pending_request", "rows",
 ]
