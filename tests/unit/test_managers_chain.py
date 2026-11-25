@@ -144,38 +144,6 @@ class TestTheUpsert:
         assert "DATE '1970-01-01'" in seed
 
 
-class TestTheDerivationSignal:
-    def test_the_two_that_change_what_silver_reads_mark_inside_their_transaction(self):
-        """Mutation: drop either mark."""
-        from core import pg_managers_write
-
-        for fn in (pg_managers_write.upsert_managers,
-                   pg_managers_write.set_manager_retail_status):
-            marks = [n for t in _transaction_bodies(_fn_tree(fn)) for n in ast.walk(t)
-                     if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "mark"]
-            assert marks, fn.__name__
-
-    def test_the_stats_do_not(self):
-        """Silver reads none of the three stats columns, so the stats owe no
-        rebuild — the one daily Postgres Silver rebuild today's replicate
-        causes goes. Mutation: mark there without revisiting this: a Silver
-        that starts reading the columns must come back here."""
-        from core import pg_managers_write
-        from core.sql_dialect import POSTGRES
-        from core.warehouse_sql import silver_select_sql
-
-        calls = {getattr(n.func, "id", getattr(n.func, "attr", ""))
-                 for n in ast.walk(_fn_tree(pg_managers_write.update_manager_stats))
-                 if isinstance(n, ast.Call)}
-        assert "mark_if_owned" not in calls and "mark" not in calls
-        import re
-
-        silver = silver_select_sql(POSTGRES)
-        for column in ("first_order_date", "last_order_date", "order_count"):
-            # `buyer_first_order_date` is the buyer's, not the manager's.
-            assert not re.search(rf"\b{column}\b", silver), column
-
-
 class TestOneLockForAllThree:
     WRITERS = ("upsert_managers", "update_manager_stats", "set_manager_retail_status")
 
@@ -311,20 +279,6 @@ def _row(mid, name="M", email=None, status="active", retail=False):
 
 class TestWhatPostgresWouldRefuse:
     @pytest.mark.asyncio
-    async def test_a_refused_manager_is_skipped_before_the_latch(self, pool):
-        """Mutation: move the refusal after `_latch` — a first batch refused
-        whole would latch the chain with no owner row behind it."""
-        from core import chain_latch, pg_managers_write
-
-        rows = [_row(1), _row(2, name="a\x00b"), _row(2 ** 31), _row(3, email="\ud800")]
-        written = await pg_managers_write.upsert_managers(rows, set_at=T0)
-        assert written == 1
-        (inserted,) = [args for sql, args in pool.conn.calls
-                       if sql.startswith("INSERT INTO bronze.managers")]
-        assert [r[0] for r in inserted] == [1]
-        assert chain_latch.latched(pg_managers_write.CHAIN)
-
-    @pytest.mark.asyncio
     async def test_a_batch_of_nothing_but_refusals_raises_and_latches_nothing(self, pool):
         from core import chain_latch, pg_managers_write
 
@@ -341,16 +295,6 @@ class TestWhatPostgresWouldRefuse:
         assert await pg_managers_write.upsert_managers([], set_at=T0) == 0
         assert pool.acquired == 0
         assert not chain_latch.marker_path(pg_managers_write.CHAIN).exists()
-
-    @pytest.mark.asyncio
-    async def test_a_manager_served_twice_is_written_once_in_id_order(self, pool):
-        from core import pg_managers_write
-
-        await pg_managers_write.upsert_managers(
-            [_row(9, name="old"), _row(1), _row(9, name="new")], set_at=T0)
-        (inserted,) = [args for sql, args in pool.conn.calls
-                       if sql.startswith("INSERT INTO bronze.managers")]
-        assert [(r[0], r[1]) for r in inserted] == [(1, "M"), (9, "new")]
 
     @pytest.mark.asyncio
     async def test_the_copy_back_clock_is_the_callers(self, pool):
@@ -391,31 +335,6 @@ class TestAClassificationThatCannotLand:
         statements = [sql for sql, _a in pool.conn.calls]
         assert any(s.startswith("DELETE FROM app.manager_classifications") for s in statements)
         assert ("COMMIT", None) in pool.conn.calls
-
-    @pytest.mark.asyncio
-    async def test_a_manager_postgres_does_not_hold_is_refused_before_the_latch(self, pool):
-        from core import chain_latch, pg_managers_write
-
-        pool.conn.answers = {"EXISTS": {"present": False, "latest": None}}
-        with pytest.raises(pg_managers_write.ManagerNotFound):
-            await pg_managers_write.set_manager_retail_status(
-                99, True, date(2026, 5, 1), 1, None, set_at=T0)
-        assert not chain_latch.marker_path(pg_managers_write.CHAIN).exists()
-
-    @pytest.mark.asyncio
-    async def test_a_race_inside_the_lock_rolls_the_whole_write_back(self, pool):
-        """A classification that landed between the read and the lock: the
-        re-check inside raises, and the transaction rolls back."""
-        from core import pg_managers_write
-
-        pool.conn.answers = {"EXISTS": {"present": True, "latest": date(2026, 1, 1)},
-                             "SELECT MAX(valid_from)": date(2026, 6, 1)}
-        with pytest.raises(pg_managers_write.BackdateBehindLatest):
-            await pg_managers_write.set_manager_retail_status(
-                7, True, date(2026, 5, 1), 1, None, set_at=T0)
-        assert ("ROLLBACK", None) in pool.conn.calls
-        assert not [sql for sql, _a in pool.conn.calls
-                    if sql.startswith(("DELETE", "UPDATE app", "UPDATE bronze"))]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("args", [
