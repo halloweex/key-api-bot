@@ -1,7 +1,7 @@
 # The Rust pilot: one endpoint, never deployed. See rust/README.md.
 [workspace]
 resolver = "3"
-members = ["crates/ks-api", "crates/ks-loadgen"]
+members = ["crates/ks-api", "crates/ks-core", "crates/ks-loadgen", "crates/ks-worker"]
 
 [workspace.package]
 edition = "2024"

@@ -893,6 +893,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ks-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "form_urlencoded",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rust_decimal",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ks-loadgen"
 version = "0.1.0"
 dependencies = [
@@ -901,6 +918,20 @@ dependencies = [
  "hyper-util",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "ks-worker"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ks-core",
+ "rust_decimal",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
