@@ -607,15 +607,69 @@ async def test_a_re_freeze_after_a_claim_is_refused_and_the_roster_survives(tmp_
     assert ids == [1, 2], "the claimed roster is the control group; it must not move"
 
 
-def test_the_binding_is_written_before_it_is_read():
-    """Check-then-insert let two concurrent callbacks with one captured event
-    id both read 'not bound'; the loser's write landed anyway."""
-    import inspect
+async def _lock_waiters(conn) -> int:
+    """Backends of this database waiting on a lock right now. The activity
+    view is read once per transaction unless its snapshot is cleared."""
+    await conn.execute("SELECT pg_stat_clear_snapshot()")
+    return await conn.fetchval(
+        "SELECT count(*) FROM pg_stat_activity"
+        " WHERE datname = current_database() AND wait_event_type = 'Lock'")
 
-    from core.repositories.customers import CustomersMixin
 
-    src = inspect.getsource(CustomersMixin.record_sms_delivery)
-    assert src.index("INSERT INTO {dlr_events}") < src.index("SELECT message_id FROM {dlr_events}")
+@pytest.mark.asyncio
+async def test_two_callbacks_racing_one_event_id_let_one_write(tmp_path):
+    """One captured (id, signature) pair, two callbacks at once, each naming
+    another message. Check-then-insert let both read "not bound" and the
+    loser's write landed anyway; exactly one may write, the other is refused,
+    and the refused one leaves its message untouched.
+
+    Both run on their own pool connections while a third holds the roster's
+    rows, so each transaction is inside its write before either commits:
+    the race is the same on every run, not left to how two coroutines
+    happen to interleave."""
+    import asyncio
+
+    import asyncpg
+
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target"), _member(2, "target")])
+    await store.record_sms_send("aug", {1: "mid-1", 2: "mid-2"}, [], {}, SENT)
+
+    holder = await asyncpg.connect(pg_sms_seed.DSN)
+    try:
+        hold = holder.transaction()
+        await hold.start()
+        await holder.execute(
+            "SELECT 1 FROM app.sms_campaign_members WHERE campaign = 'aug' FOR UPDATE")
+        calls = [
+            asyncio.ensure_future(store.record_sms_delivery(
+                "mid-1", "DELIVRD", True, datetime(2026, 8, 10, 9, 5), event_id="evt-1")),
+            asyncio.ensure_future(store.record_sms_delivery(
+                "mid-2", "UNDELIV", False, datetime(2026, 8, 10, 9, 6), event_id="evt-1")),
+        ]
+        for _ in range(200):
+            if await _lock_waiters(holder) >= 2 or all(c.done() for c in calls):
+                break
+            await asyncio.sleep(0.01)
+        await hold.rollback()
+        outcomes = await asyncio.gather(*calls, return_exceptions=True)
+    finally:
+        await holder.close()
+
+    written = [m for m, o in zip(("mid-1", "mid-2"), outcomes) if o is True]
+    refused = [o for o in outcomes if isinstance(o, DlrEventRebound)]
+    assert len(written) == 1 and len(refused) == 1, outcomes
+    winner, loser = written[0], refused[0].message_id
+    assert refused[0].bound_message_id == winner
+    async with pg_conn() as conn:
+        rows = {r["message_id"]: (r["delivery_status"], r["delivered"]) for r in await conn.fetch(
+            "SELECT message_id, delivery_status, delivered FROM app.sms_campaign_members"
+            " WHERE campaign = 'aug'")}
+        bound = [tuple(r) for r in await conn.fetch(
+            "SELECT event_id, message_id FROM app.sms_dlr_events")]
+    assert rows[winner] == {"mid-1": ("DELIVRD", True), "mid-2": ("UNDELIV", False)}[winner]
+    assert rows[loser] == ("Accepted", None), "the refused callback wrote nothing"
+    assert bound == [("evt-1", winner)]
 
 
 def test_the_re_freeze_delete_carries_the_claim_check():
