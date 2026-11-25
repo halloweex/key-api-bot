@@ -1,17 +1,30 @@
-"""API tests for /api/customers/sms-segments and its CSV export.
+"""API tests for the SMS routes: who may call them, the audience and its CSV,
+the results, the test send and the opt-out.
 
-The store is stubbed out — segmentation logic itself is covered by
-tests/unit/test_sms_segments.py. What matters here is the HTTP contract:
-these endpoints hand out customer names and phone numbers, so authorization,
-parameter validation and holdout handling must all hold at the route layer.
+These hand out customer names and phone numbers and spend money, so who may
+call what, the holdout and what a call writes must all hold at the route.
+The tests of those run the route over the test Postgres as a signed-in
+visitor (`tests/helpers/app_client.py`), with buyers and Silver's orders
+seeded (`tests/integration/pg_sms_seed.py`), and read back what it answered
+and wrote. The rest — parameter validation, the CSV's shape, the test send's
+message — stand on a stubbed store and gateway; segmentation itself is
+covered by tests/unit/test_sms_segments.py.
 """
 import csv
 import io
 import time
+from datetime import timedelta
+from urllib.parse import urlencode
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
+from tests.helpers.app_client import signed_in
+from tests.helpers.sms_send_gateway import install_gateway
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import insert, order_row, pg_conn
+from tests.routes_helper import iter_endpoints
 from web.main import app
 from web.routes.auth import (
     session_serializer,
@@ -46,80 +59,6 @@ def _make_cookie(user_id: int, role: str = "admin") -> str:
 
 def _admin_headers() -> dict:
     return {"Cookie": f"{SESSION_COOKIE}={_make_cookie(ADMIN_ID)}"}
-
-
-def _all_dep_calls(dependant) -> set:
-    calls = set()
-    for d in dependant.dependencies:
-        if d.call is not None:
-            calls.add(d.call)
-        calls |= _all_dep_calls(d)
-    return calls
-
-
-def _route(path: str, method: str = "GET"):
-    # `app.routes` is no longer flat — see tests/routes_helper.
-    from tests.routes_helper import find_route
-
-    return find_route(app, path, method)
-
-
-def _deps(path: str, method: str = "GET") -> set:
-    """Every dependency callable applying to an endpoint.
-
-    Takes the path rather than a route object: on the fastapi production runs,
-    `require_admin` is attached at `include_router(...)` and lives in the
-    include context, not on the route's own `dependant`. Reading only the
-    dependant would report every admin endpoint as unprotected.
-    """
-    from tests.routes_helper import route_dependencies
-
-    return set(route_dependencies(app, path, method))
-
-
-def _permission_gates(path: str, method: str = "GET") -> set:
-    """The (feature, action) pairs a route's permission dependencies demand.
-
-    Read out of the closure `require_permission` builds rather than matched by
-    name: a dependency that stopped checking anything would still be called
-    `check_permission`, and the point of this assertion is that the check is
-    really there.
-    """
-    gates = set()
-    for dep in _deps(path, method):
-        code = getattr(dep, "__code__", None)
-        closure = getattr(dep, "__closure__", None)
-        if code is None or not closure:
-            continue
-        cells = dict(zip(code.co_freevars, closure))
-        if "feature" not in cells or "action" not in cells:
-            continue
-        gates.add((cells["feature"].cell_contents, cells["action"].cell_contents))
-    return gates
-
-
-def _role_store(role: str, tabs=None):
-    """A store stub that reports one level, and optionally a tab set.
-
-    Having no `seed_default_permissions` is deliberate: the permission lookup
-    falls back to the hardcoded matrix, which is what this file is asserting
-    about.
-
-    `tabs` is the second half of the answer since roles became levels: the
-    matrix says how deep, the tab set says where, and `None` means the level's
-    default — which does not include SMS below admin.
-    """
-
-    class _Store:
-        async def get_user(self, uid):
-            return {
-                "status": "approved", "role": role, "allowed_features": tabs,
-            }
-
-    async def _fake_get_store():
-        return _Store()
-
-    return _fake_get_store
 
 
 def _customer(buyer_id: int, tier: str, assignment: str) -> dict:
@@ -242,108 +181,159 @@ def store(monkeypatch):
     return fake
 
 
-# ─── Authorization ────────────────────────────────────────────────────────
+# ─── Over the test Postgres ───────────────────────────────────────────────
 
-class TestSmsSegmentsAuth:
-    """PII endpoints need the `sms` permission, not merely a session.
+@pytest_asyncio.fixture
+async def on_pg(monkeypatch):
+    """`/sms`'s tables and the dashboard's access lists, emptied before and
+    after, on the test Postgres."""
+    if not pg_sms_seed.DSN:
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+    async with pg_sms_seed.on_postgres(
+        monkeypatch, pg_sms_seed.SMS_TABLES + pg_sms_seed.ACCESS_TABLES,
+    ) as pool:
+        yield pool
 
-    They stopped being admin-only on purpose: running a campaign is grantable
-    without user management, expenses, margin and internal sales attached. What
-    must not slip is the other direction — a plain viewer reaching the roster.
+
+# Every line sells one unit of PRODUCT at ₴1 000; it costs ₴200, an 80 % margin.
+PRODUCT = 102
+
+
+async def _catalogue(conn) -> None:
+    await insert(conn, "bronze.products", [
+        dict(id=PRODUCT, name="Cream", sku="SKU-102", price=1000)])
+    await insert(conn, "bronze.offer_stocks", [
+        dict(id=1, sku="SKU-102", price=1000, purchased_price=200, quantity=10)])
+
+
+async def _buyer(conn, buyer_id: int, phone: str, orders) -> None:
+    """A retail buyer and their orders, each `(order id, days ago, units)` —
+    one line of PRODUCT, billed in full."""
+    await insert(conn, "bronze.buyers", [
+        dict(id=buyer_id, full_name=f"Buyer {buyer_id}", phone=phone, city="Kyiv")])
+    for oid, days_ago, units in orders:
+        day = pg_sms_seed.kyiv_today() - timedelta(days=days_ago)
+        await insert(conn, "silver.orders", [
+            order_row(oid=oid, buyer_id=buyer_id, day=day, total=1000 * units)])
+        await insert(conn, "bronze.order_products", [dict(
+            id=oid, order_id=oid, product_id=PRODUCT, name="Cream",
+            quantity=units, price_sold=1000)])
+
+
+async def _ladder() -> None:
+    """One buyer for each tier on the revenue basis, and one the basis decides.
+
+    1 — three orders of 10 units, ₴30 000: VIP on either basis.
+    2 — two orders of one unit: CORE by its order count.
+    3 — one unit, 60 days ago: REACTIVATION.
+    4 — one order of 8 units: ₴8 000 is CORE on revenue (VIP from ₴10 000);
+        its ₴6 400 margin is VIP on margin's own cut-off (₴5 500), and CORE
+        under a cut-off typed at ₴9 000.
     """
+    async with pg_conn() as conn:
+        await _catalogue(conn)
+        await _buyer(conn, 1, "380960000001", [(11, 10, 10), (12, 11, 10), (13, 12, 10)])
+        await _buyer(conn, 2, "380960000002", [(21, 20, 1), (22, 40, 1)])
+        await _buyer(conn, 3, "380960000003", [(31, 60, 1)])
+        await _buyer(conn, 4, "380960000004", [(41, 10, 8)])
 
-    @pytest.fixture(autouse=True)
-    def _clean_permission_cache(self):
-        from core.permissions import invalidate_permissions_cache
 
-        invalidate_permissions_cache()
-        yield
-        invalidate_permissions_cache()
+LADDER_TIERS = {1: "VIP", 2: "CORE", 3: "REACTIVATION", 4: "CORE"}
 
-    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH, RESULTS_PATH])
-    def test_requires_session(self, client, path):
-        assert client.get(path).status_code == 401
 
-    # The method is spelled out rather than derived from the path: the rule
-    # that derived it read "send" out of the path, and "/sent" does not contain
-    # it — so the one gate that decides where every measurement window starts
-    # would have been looked up as a GET and silently found nothing.
-    @pytest.mark.parametrize("method,path,gate", [
-        ("GET", SEGMENTS_PATH, ("sms", "view")),
-        ("GET", CSV_PATH, ("sms", "edit")),
-        # The templated form: routes are looked up by declaration, not by a
-        # filled-in campaign name.
-        ("GET", "/api/customers/sms-campaigns/{campaign}/results", ("sms", "view")),
-        ("POST", "/api/customers/sms-campaigns/{campaign}/send", ("sms", "edit")),
-        ("POST", "/api/customers/sms-campaigns/{campaign}/sent", ("sms", "edit")),
-        ("GET", "/api/customers/sms-campaigns", ("sms", "view")),
+def _tiers(response) -> dict:
+    assert response.status_code == 200, response.text
+    return {c["buyerId"]: c["tier"] for c in response.json()["customers"]}
+
+
+# ─── Who may call each route ──────────────────────────────────────────────
+
+# Every SMS route: (method, route, query, the action on `sms` it needs). Each
+# query is one the route answers without sending or writing anything once
+# the visitor is through the gate — no confirmation for the send, a number
+# the test send and the opt-out refuse, campaigns and presets that do not
+# exist — so its status says only whether the gate let the visitor in.
+SMS_ROUTES = [
+    ("GET", "/api/customers/sms-segments", {}, "view"),
+    # The sizes are `view`; the names and phone numbers behind them are `edit`.
+    ("GET", "/api/customers/sms-segments", {"include_customers": "true"}, "edit"),
+    ("GET", "/api/customers/sms-segments/export/csv", {}, "edit"),
+    ("GET", "/api/customers/sms-audience-presets", {}, "view"),
+    ("PUT", "/api/customers/sms-audience-presets/{name}", {}, "edit"),
+    ("DELETE", "/api/customers/sms-audience-presets/{name}", {}, "edit"),
+    ("GET", "/api/customers/sms-campaigns", {}, "view"),
+    ("POST", "/api/customers/sms-campaigns", {"campaign": "matrix"}, "edit"),
+    ("GET", "/api/customers/sms-campaigns/{campaign}/results", {}, "view"),
+    # Marking a campaign sent sets where every measurement window starts.
+    ("POST", "/api/customers/sms-campaigns/{campaign}/sent", {}, "edit"),
+    ("POST", "/api/customers/sms-campaigns/{campaign}/send", {"text": "hi"}, "edit"),
+    ("POST", "/api/customers/sms-campaigns/optout",
+     {"buyer_id": 1, "phone": "0961111111"}, "edit"),
+    ("GET", "/api/customers/sms/channels", {}, "view"),
+    ("POST", "/api/customers/sms/test-send", {"phone": "0961111111", "text": "hi"}, "edit"),
+]
+
+
+def _label(method: str, route: str, query: dict) -> str:
+    return f"{method} {route}" + (f"?{urlencode(query)}" if query else "")
+
+
+def _url(route: str) -> str:
+    return route.format(name="matrix", campaign="matrix")
+
+
+class TestWhoMayUseEachRoute:
+    """The `sms` tab decides which of these a person may open, and the level
+    what they may do there: `view` is "the tab is in my set", `edit` is that
+    and editor or above. The rows, the CSV, the send and the opt-out are
+    names, phone numbers and money; a plain viewer must never reach them,
+    and a viewer holding the tab reads sizes and results without sending."""
+
+    def test_every_sms_route_is_in_the_table(self):
+        served = {
+            (method, endpoint.path)
+            for endpoint in iter_endpoints(app)
+            if endpoint.path.startswith("/api/customers/sms")
+            for method in endpoint.methods - {"HEAD"}
+        }
+        assert served == {(method, route) for method, route, _q, _a in SMS_ROUTES}
+
+    def test_a_visitor_without_a_session_is_refused_everywhere(self):
+        client = TestClient(app)
+
+        statuses = {
+            _label(method, route, query):
+                client.request(method, _url(route), params=query).status_code
+            for method, route, query, _action in SMS_ROUTES
+        }
+
+        assert statuses == {label: 401 for label in statuses}
+
+    @pytest.mark.parametrize("role, tabs, may", [
+        # The level's own tabs hold no SMS, an editor's no more than a viewer's.
+        ("viewer", None, set()),
+        ("editor", None, set()),
+        ("viewer", "sms", {"view"}),
+        ("editor", "sms", {"view", "edit"}),
     ])
-    def test_permission_gate(self, method, path, gate):
-        assert _route(path, method) is not None, f"{path} is not registered"
-        assert gate in _permission_gates(path, method), \
-            f"{path} must be gated on {gate}, found {_permission_gates(path, method)}"
+    @pytest.mark.asyncio
+    async def test_the_tab_opens_the_routes_and_the_level_the_edits(
+        self, on_pg, monkeypatch, role, tabs, may,
+    ):
+        install_gateway(monkeypatch)   # nothing here may reach TurboSMS
 
-    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
-    def test_viewer_is_forbidden(self, client, monkeypatch, path):
-        viewer_id = 555_000_222
-        assert viewer_id not in ADMIN_USER_IDS
+        async with signed_in(role, tabs=tabs) as visitor:
+            answered = {}
+            for method, route, query, _action in SMS_ROUTES:
+                r = await visitor.request(method, _url(route), params=query)
+                answered[_label(method, route, query)] = (
+                    "refused" if r.status_code == 403
+                    else "no session" if r.status_code == 401 else "let in")
 
-        monkeypatch.setattr("core.store.get_store", _role_store("viewer"))
-
-        r = client.get(
-            path,
-            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(viewer_id, role='viewer')}"},
-        )
-        assert r.status_code == 403
-
-    def test_the_sms_tab_is_what_opens_the_sizes(self, client, store, monkeypatch):
-        """`marketer` used to be the role that reached this, and it was an
-        *area* wearing a level's clothes. The tab is the area now."""
-        reader_id = 555_000_333
-        assert reader_id not in ADMIN_USER_IDS
-
-        monkeypatch.setattr(
-            "core.store.get_store", _role_store("viewer", ["sms"]))
-
-        r = client.get(
-            SEGMENTS_PATH,
-            params={"campaign": "aug-promo"},
-            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(reader_id, role='viewer')}"},
-        )
-        assert r.status_code == 200, r.text
-
-    def test_the_roster_itself_needs_the_level_too(self, client, store, monkeypatch):
-        """The CSV is names and phone numbers — `sms` **edit**. Holding the tab
-        is where; being an editor is how deep. This is the pair the old role
-        could not express: a marketer who may read results but not send."""
-        person_id = 555_000_334
-        assert person_id not in ADMIN_USER_IDS
-
-        monkeypatch.setattr(
-            "core.store.get_store", _role_store("viewer", ["sms"]))
-        refused = client.get(
-            CSV_PATH,
-            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(person_id, role='viewer')}"},
-        )
-        assert refused.status_code == 403, refused.text
-
-        monkeypatch.setattr(
-            "core.store.get_store", _role_store("editor", ["sms"]))
-        allowed = client.get(
-            CSV_PATH,
-            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(person_id, role='editor')}"},
-        )
-        assert allowed.status_code == 200, allowed.text
-
-    def test_viewer_cannot_pull_customer_rows(self, client, store, monkeypatch):
-        """`view` is sizes. The rows themselves are names and phone numbers."""
-        monkeypatch.setattr("core.store.get_store", _role_store("viewer"))
-
-        headers = {"Cookie": f"{SESSION_COOKIE}={_make_cookie(555_000_444, role='viewer')}"}
-        assert client.get(SEGMENTS_PATH, headers=headers).status_code == 403
-        assert client.get(
-            SEGMENTS_PATH, params={"include_customers": "true"}, headers=headers,
-        ).status_code == 403
+        assert answered == {
+            _label(method, route, query): "let in" if action in may else "refused"
+            for method, route, query, action in SMS_ROUTES
+        }
 
 
 # ─── JSON endpoint ────────────────────────────────────────────────────────
@@ -646,16 +636,6 @@ def gateway(monkeypatch):
 class TestTestSend:
     """A rehearsal must reach the gateway and touch nothing else."""
 
-    def test_sending_needs_edit_permission(self):
-        assert _route(TEST_SEND_PATH, "POST") is not None, \
-            "test-send is not registered"
-        assert ("sms", "edit") in _permission_gates(TEST_SEND_PATH, "POST")
-
-    def test_requires_session(self, client):
-        assert client.post(
-            TEST_SEND_PATH, params={"phone": "380961111111", "text": "hi"},
-        ).status_code == 401
-
     def test_sends_the_normalised_number(self, client, gateway):
         r = client.post(
             TEST_SEND_PATH,
@@ -731,16 +711,6 @@ class TestOptout:
     exists for (the same number under a second buyer record).
     """
 
-    def test_optout_needs_edit_permission(self):
-        assert _route(OPTOUT_PATH, "POST") is not None, \
-            "optout is not registered"
-        assert ("sms", "edit") in _permission_gates(OPTOUT_PATH, "POST")
-
-    def test_requires_session(self, client):
-        assert client.post(
-            OPTOUT_PATH, params={"buyer_id": 1},
-        ).status_code == 401
-
     def test_normalises_the_phone(self, client, store):
         r = client.post(
             OPTOUT_PATH,
@@ -789,10 +759,6 @@ class TestChannelSelection:
 
         assert body["sms"] is True
         assert body["viber"] is False
-
-    def test_channels_endpoint_needs_sms_permission(self):
-        assert _route(CHANNELS_PATH) is not None
-        assert ("sms", "view") in _permission_gates(CHANNELS_PATH)
 
     def test_hybrid_send_passes_a_viber_message(self, client, gateway):
         client.post(
