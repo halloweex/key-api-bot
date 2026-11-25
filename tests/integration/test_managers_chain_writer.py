@@ -420,6 +420,7 @@ class TestAClassificationThatCannotLand:
         store, pool, _env = stores
         await store.upsert_managers([{"id": 34, "name": "M"}])
         holder = await asyncpg.connect(DSN)
+        backdate = None
         try:
             await holder.execute("SELECT pg_advisory_lock($1)", pg_managers_write.CHAIN_LOCK_KEY)
             backdate = asyncio.ensure_future(store.set_manager_retail_status(
@@ -444,6 +445,10 @@ class TestAClassificationThatCannotLand:
                 await asyncio.wait_for(backdate, 10)
         finally:
             await holder.close()
+            # On a failure above, let the writer finish before the fixture
+            # cleans up, so nothing it writes outlives the test.
+            if backdate is not None and not backdate.done():
+                await asyncio.wait([backdate], timeout=10)
         assert await _pg_intervals(pool, 34) == landed
         assert (await _pg_managers(pool))[34]["is_retail"] is True
 
