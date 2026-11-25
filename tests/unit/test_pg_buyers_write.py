@@ -1,5 +1,8 @@
 """Chain 4: its shape, and what is refused before the latch.
 
+`TestTheMigratedSchema` holds the refusals to the schema as migrated, on the
+test Postgres: the loyalty figures' NUMERIC bounds and the verdicts' CHECKs.
+
 The writers themselves are exercised against a live Postgres in
 `tests/integration/test_buyers_chain_writer.py` and, for the latch, in
 `tests/integration/test_latch_waits_for_a_connection.py`. Until step 14's
@@ -10,14 +13,16 @@ that nothing reads the flag.
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime
-from pathlib import Path
+from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 
 from core import chain_latch, pg_buyers_write as chain
 from core import pg_chain_invariants as inv
+from tests.helpers.buyers_fixture import buyers_in_postgres
+from tests.integration.pg_tab_seed import needs_postgres
 
 @pytest.fixture
 def flags(monkeypatch):
@@ -45,22 +50,96 @@ class TestTheShape:
         assert chain.CHAIN_WATERMARK_MAX_AGE_MIN is None
         assert inv.watermark_limit_min(chain) is None
 
-    def test_the_numeric_columns_are_the_migrations(self):
-        text = Path("migrations/versions/0011_buyers_lines_vitrina.py").read_text()
-        for column, (precision, scale) in chain.NUMERIC_COLUMNS.items():
-            assert re.search(
-                rf"{column}\s+NUMERIC\({precision},\s*{scale}\)", text), column
 
-    def test_the_verdict_values_are_the_checks(self):
-        """The CHECK constraints of revision 0024 against the classifier's
-        vocabulary: a verdict the table refuses would cost the portion's
-        verdicts, every tick, and nothing would say why but a log line."""
-        from core.gender import CONFIDENCE_LADDER, GENDERS
+# ─── The migrated schema the writer answers to ──────────────────────────────
 
-        text = Path("migrations/versions/0024_buyer_gender.py").read_text()
-        assert "gender IN ('f', 'm')" in text and GENDERS == ("f", "m")
-        assert ("confidence IN ('certain', 'high', 'medium')" in text
-                and CONFIDENCE_LADDER == ("certain", "high", "medium"))
+# Where KeyCRM sends each NUMERIC column of `bronze.buyers`: a key of the
+# buyer's first loyalty programme (`Buyer.from_api`). A NUMERIC column this
+# does not name fails the test below: its refusal has to be decided.
+LOYALTY_KEY = {"loyalty_discount": "discount", "loyalty_amount": "amount"}
+TEST_BUYER_IDS = range(990_000_001, 990_000_100)
+
+
+@pytest_asyncio.fixture
+async def buyers_pg():
+    async with buyers_in_postgres() as pool:
+        yield pool
+
+
+@needs_postgres
+class TestTheMigratedSchema:
+    @pytest.mark.asyncio
+    async def test_each_numeric_column_holds_what_the_writer_lets_through(self, buyers_pg):
+        """The refusal before the latch must agree with the columns as
+        migrated: one unit over a column's largest value is refused before
+        the latch (Postgres would refuse it after, leaving a marker with no
+        owner row), and the largest value itself lands, exactly. A later
+        migration that widens or narrows a column without the writer
+        following fails here."""
+        from core.models import Buyer
+        from core.store import AnalyticsStore
+
+        async with buyers_pg.acquire() as conn:
+            columns = await conn.fetch(
+                "SELECT column_name, numeric_precision, numeric_scale "
+                "FROM information_schema.columns WHERE table_schema = 'bronze' "
+                "AND table_name = 'buyers' AND data_type = 'numeric' "
+                "ORDER BY column_name")
+        assert columns, "bronze.buyers has no NUMERIC column"
+        for c in columns:
+            assert c["column_name"] in LOYALTY_KEY, (
+                f"{c['column_name']}: which KeyCRM field lands here?")
+
+        def buyer(buyer_id, column, value):
+            return Buyer.from_api({"id": buyer_id, "full_name": "Олена Петренко",
+                                   "loyalty": [{LOYALTY_KEY[column]: float(value)}]})
+
+        # NUMERIC(p, s) holds values under 10^(p-s), in steps of 10^-s.
+        bound, largest = {}, {}
+        for c in columns:
+            name = c["column_name"]
+            bound[name] = Decimal(10) ** (c["numeric_precision"] - c["numeric_scale"])
+            largest[name] = bound[name] - Decimal(1).scaleb(-c["numeric_scale"])
+
+        store = AnalyticsStore()
+        ids = iter(TEST_BUYER_IDS)
+        for column, over in bound.items():
+            over_id, skipped = next(ids), []
+            assert await store.upsert_buyers(
+                [buyer(over_id, column, over)], skipped_out=skipped) == 0, column
+            assert skipped == [over_id], column
+        assert not chain_latch.marker_path(chain.CHAIN).exists(), (
+            "a value the column refuses reached Postgres after the latch")
+
+        landing = {column: next(ids) for column in largest}
+        assert await store.upsert_buyers(
+            [buyer(landing[column], column, top) for column, top in largest.items()]
+        ) == len(largest)
+        async with buyers_pg.acquire() as conn:
+            for column, top in largest.items():
+                stored = await conn.fetchval(
+                    f"SELECT {column} FROM bronze.buyers WHERE id = $1", landing[column])
+                assert stored == top, column
+
+    @pytest.mark.asyncio
+    async def test_every_verdict_the_classifier_can_give_is_one_the_table_takes(
+            self, buyers_pg):
+        """A verdict `app.buyer_gender` refuses costs the portion's verdicts,
+        every tick, and nothing says why but a log line. Every gender and
+        confidence the classifier declares, and NULL for each, is stored."""
+        from core.gender import CONFIDENCE_LADDER, GENDERS, RULES_VERSION
+
+        pairs = [(g, c) for g in (*GENDERS, None) for c in (*CONFIDENCE_LADDER, None)]
+        rows = [(buyer_id, g, c, RULES_VERSION)
+                for buyer_id, (g, c) in zip(TEST_BUYER_IDS, pairs)]
+        async with buyers_pg.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO app.buyer_gender (buyer_id, gender, method, confidence, "
+                "rules_version) VALUES ($1, $2, 'test', $3, $4)", rows)
+            stored = await conn.fetch(
+                "SELECT gender, confidence FROM app.buyer_gender "
+                "WHERE buyer_id = ANY($1::int[])", [r[0] for r in rows])
+        assert sorted(map(tuple, stored), key=repr) == sorted(pairs, key=repr)
 
 
 def _row(**kw):
