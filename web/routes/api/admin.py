@@ -164,12 +164,31 @@ async def _pg_derivation_status() -> dict:
     }
 
 
+async def _job_lease_or_409(scheduler, job_id: str):
+    """The job's switch and lease for a lever that runs its body itself
+    (`core/job_lease.py`), as a scheduled run takes them: a 409 when the job
+    is Rust's or another process is running it, rather than a second run
+    beside that one. Release the lease after the body."""
+    from core import job_lease
+
+    try:
+        return await scheduler.claim_job_run(job_id)
+    except job_lease.RunsElsewhere as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
+
+
 async def _derive_postgres_now(trigger: str) -> dict:
     """Run the Postgres derivation immediately, past its floor; takes the
-    heavy lock itself, so call it after releasing yours."""
+    heavy lock itself, so call it after releasing yours. Under the job's
+    switch and lease (`pg_warehouse_derive`)."""
     from core.scheduler import get_scheduler
 
-    return await get_scheduler()._run_pg_derivation(trigger=trigger, force=True)
+    scheduler = get_scheduler()
+    lease = await _job_lease_or_409(scheduler, "pg_warehouse_derive")
+    try:
+        return await scheduler._run_pg_derivation(trigger=trigger, force=True)
+    finally:
+        await lease.release()
 
 
 @router.post("/warehouse/refresh")
@@ -412,7 +431,8 @@ async def get_jobs(request: Request):
                 "duration_ms": h.get("duration_ms"),
                 "status": h.get("status", "unknown"),
                 "error": h.get("error"),
-                "result": None,
+                # Only a skipped run carries one: why it was not run here.
+                "result": h.get("result"),
             })
     all_history.sort(key=lambda x: x.get("started_at") or "", reverse=True)
 
@@ -646,13 +666,21 @@ async def reconcile_on_demand(
     logger.info("On-demand reconciliation over %s days by admin %s (background=%s)",
                 days, admin.get("user_id"), background)
 
-    if not background:
-        return await scheduler._run_dq_reconciliation(window_days=days)
+    # The job's switch and lease, held until the run ends — in the detached
+    # task too, so a reconciliation another process is running is answered
+    # 409 here rather than run beside it.
+    lease = await _job_lease_or_409(scheduler, "dq_reconciliation")
 
-    task = asyncio.create_task(
-        scheduler._run_dq_reconciliation(window_days=days),
-        name=f"reconcile_{days}d",
-    )
+    async def reconcile_and_release():
+        try:
+            return await scheduler._run_dq_reconciliation(window_days=days)
+        finally:
+            await lease.release()
+
+    if not background:
+        return await reconcile_and_release()
+
+    task = asyncio.create_task(reconcile_and_release(), name=f"reconcile_{days}d")
     # Hold a reference: asyncio keeps only a weak one, and a task nobody holds
     # can be collected mid-flight.
     _BACKGROUND_TASKS.add(task)

@@ -174,8 +174,8 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/warehouse/status` | The Postgres derivation: owed or not, when built, the last journalled run (`cutover` and `duckdb_frozen` went with step 13's switch in step 14's S14-15) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
-| `/api/jobs` | Scheduler jobs with live next_run and history |
-| `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
+| `/api/jobs` | Scheduler jobs with live next_run and history. A run not made in this process — the job switched to Rust, or its lease held by another process — is `skipped` (`last_status` and the history entry), and only that entry carries a `result`: `reason` `executed_by_rust` or `lease_held`, with the holder's pid and `application_name`; see "Who executes a job" |
+| `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin); a job switched to Rust is recorded `skipped` |
 | `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation, the entry funnel and the press table (which button people leave after) — for page `/tg-bot` (tab `tgbot`: admins and the marketing presets). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
 | `/api/promotions` | The promotions calendar (tab `marketing`, view): each promotion's current state whose days overlap `from`..`to` (default today − 90 .. today + 365, Kyiv), by first day then id; `include_cancelled=true` adds the cancelled. A Postgres failure is a 503 naming `promotions`. Every answer here carries `sms_campaign` only for a caller with `sms` view, null otherwise. POST (edit) saves a new one: 201 and the promotion; 400 for a first day past today + 365, 403 for an SMS link without `sms` view — see "Календарь акций" |
 | `/api/promotions/{id}/versions` | One promotion's versions, newest first, each with `recorded_at` and `recorded_by_me` — never the author's id (tab `marketing`, view). 404 for an unknown id |
@@ -1895,6 +1895,57 @@ whole reason the group is read from the source now.
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
 | `bot_memory_watch` | every 30 min (bot) | бот сторожит свои 512 МБ тем же evaluator'ом; предыдущий сэмпл — в `data/memory-bot-last.json` (OOM-счётчик ядра сбрасывается при recreate) |
+
+**Who executes a job: Python, or a Rust process — and one run at a time**
+(K0 of the Rust plan, `core/job_lease.py`). Every job above can be handed
+to a Rust worker on its own, and no job runs in two processes at once.
+
+- **The switch** is a row of `meta.chain_watermarks`, key
+  `executor:<job_id>`: exactly `rust` (byte for byte, no trimming or case)
+  and the job is Rust's; anything else, no row included, and it is
+  Python's. No row exists until somebody switches a job, so until then
+  every job runs here as before. Read by both sides before every run,
+  written only by `scripts/job_executor.py`:
+  `docker exec keycrm-web python /app/scripts/job_executor.py set ch_sync rust`,
+  and back with `… set ch_sync python` — no deploy, no restart, the next
+  tick reads it; `… show` lists every job, its switch and who holds its
+  lease. The CLI refuses a job the scheduler does not register.
+- **The lease** is `pg_try_advisory_lock(key)`, session-level, taken by
+  whoever the switch names just before a run and released after it. Not
+  granted is `skipped`, not an error, and the next tick asks again. The key
+  is the bigint whose hex is `6b734a4c` and then the first eight hex digits
+  of sha256(job id) (`lease_key`; `ch_sync` is 7742613876423907721), a
+  prefix no other advisory key here uses. Python holds its leases on one
+  session of its own (`application_name` `ks-web-jobs`), never a pooled
+  connection; a session's locks are re-entrant, so two runs of one job
+  inside web — a catch-up beside its scheduled twin, a lever beside the
+  minute tick — both hold it, as both ran before. `_heavy_job_lock` and the
+  order it keeps are untouched: the lease is taken before the job's body.
+- **Every way into a job's body goes through it**: its schedule, a
+  catch-up, a first-run delay, `POST /api/jobs/{id}/trigger` (one wrapper,
+  `_add_job`'s), and the two admin doors that call a job's method
+  themselves — `/api/warehouse/refresh` and `/rebuild-silver`
+  (`pg_warehouse_derive`) and `/api/reconcile` (`dq_reconciliation`) —
+  which answer 409 rather than run beside another process or a Rust-owned
+  job. `dq_mirror_landing`'s ClickHouse comparison, which ships Silver and
+  derives Gold into `ch_sync`'s tables, holds `ch_sync`'s lease for the
+  ship and the comparison whoever the switch names (`claim_job_lease`, the
+  lease alone; five tries 30 s apart, never a wait), and a lease still held
+  ships nothing and files `gold_values_unwatched` naming the holder. Not
+  fenced, and K2's to fence with the order tables: the sync doors that run
+  the same work through `sync_service` (`/api/sync/resync`,
+  `/refresh-statuses`, the buyer syncs). Names with a `:` are left to the
+  Rust worker's own leases (`ch_sync:shadow`); no scheduler job carries one.
+- **When Postgres cannot be asked** a job runs in Python without a lease,
+  as before, except one this process last saw switched to Rust, which stays
+  skipped; one WARNING says so, and one INFO when it answers again. A lease
+  whose session ended during the run is an ERROR at its release.
+- **Each skip is one line in the log**: INFO for Rust's turn, WARNING for a
+  lease held elsewhere, naming the holder.
+- **`KS_JOB_LEASES=off`** (in `.env`, then `up -d web`) turns all of it
+  off — no switch read, no lease — and must never be used while a job is
+  switched to Rust. So must a rollback of web to an image from before K0:
+  switch every job back to `python` first.
 
 **`freshness_orders` judges when the order step last wrote, not the
 watermark's value** (2026-10-29). `last_sync_orders` holds KeyCRM's newest
@@ -4471,4 +4522,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-20 (the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
+*Last updated: 2026-11-25 (K0: who executes a scheduler job, Python or Rust, and a lease in Postgres that keeps each job to one process; 2026-11-20: the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
