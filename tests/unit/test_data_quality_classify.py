@@ -24,54 +24,29 @@ from core.data_quality import (
 
 
 class TestIsMaterial:
-    def test_orders_diff_of_one_is_material(self):
-        """One missed order is the whole point of reconciliation —
-        threshold for `orders` is 0, so any non-zero diff fires."""
-        assert is_material("orders", 100, 99)
+    """Each field's threshold, on both sides of it. `orders` and
+    `returns_count` fire on any difference (one missed order is the point of
+    reconciliation); `qty` allows one unit of line-item recombination;
+    `revenue` must pass both its absolute floor and its percentage ceiling, so
+    rounding on a multi-million base stays quiet."""
 
-    def test_orders_zero_diff_not_material(self):
-        """Equal values are not a discrepancy."""
-        assert not is_material("orders", 100, 100)
-
-    def test_revenue_diff_below_100_uah_not_material(self):
-        """100 UAH abs floor catches the noise."""
-        assert not is_material("revenue", 50_100, 50_000)  # diff=100
-
-    def test_revenue_above_floor_below_ceiling_filtered(self):
-        """AND rule: above abs floor but below pct ceiling → filtered.
-        ₴200 drift on ₴50K base = 0.4% < 0.5% ceiling → noise."""
-        assert not is_material("revenue", 50_200, 50_000)
-
-    def test_revenue_large_abs_but_tiny_pct_filtered(self):
-        """The AND rule: even ₴500 absolute drift is noise when KC is huge
-        (relative drift << 0.5%). This prevents alert spam on a multi-million-UAH
-        base where rounding artefacts accumulate."""
-        assert not is_material("revenue", 100_000_500, 100_000_000)  # 0.0005%
-
-    def test_revenue_above_both_floor_and_ceiling_is_material(self):
-        """Both thresholds exceeded → real signal."""
-        assert is_material("revenue", 101_000, 100_000)  # 1000 abs, 1%
-
-    def test_returns_count_any_nonzero_is_material(self):
-        assert is_material("returns_count", 5, 4)
-        assert is_material("returns_count", 5, 6)
-
-    def test_returns_count_zero_diff_not_material(self):
-        assert not is_material("returns_count", 5, 5)
-
-    def test_qty_diff_of_two_is_material(self):
-        """qty threshold is 1 — allows for 1-unit line-item recombination noise."""
-        assert is_material("qty", 1000, 998)
-
-    def test_qty_diff_of_one_not_material(self):
-        assert not is_material("qty", 1000, 999)
-
-    def test_returns_revenue_diff_below_floor_not_material(self):
-        """50 UAH abs floor on returns_revenue."""
-        assert not is_material("returns_revenue", 5_040, 5_000)  # diff=40
-
-    def test_returns_revenue_diff_above_floor_is_material(self):
-        assert is_material("returns_revenue", 6_000, 5_000)  # diff=1000, 20%
+    @pytest.mark.parametrize("field, ours, keycrm, material", [
+        ("orders", 100, 99, True),
+        ("orders", 100, 100, False),
+        ("revenue", 50_100, 50_000, False),            # ₴100: at the floor
+        ("revenue", 50_200, 50_000, False),            # over the floor, 0.4% < 0.5%
+        ("revenue", 100_000_500, 100_000_000, False),  # ₴500, 0.0005%
+        ("revenue", 101_000, 100_000, True),           # ₴1 000 and 1%
+        ("returns_count", 5, 4, True),
+        ("returns_count", 5, 6, True),
+        ("returns_count", 5, 5, False),
+        ("qty", 1000, 998, True),
+        ("qty", 1000, 999, False),
+        ("returns_revenue", 5_040, 5_000, False),      # ₴40 under the ₴50 floor
+        ("returns_revenue", 6_000, 5_000, True),
+    ])
+    def test_the_threshold(self, field, ours, keycrm, material):
+        assert is_material(field, ours, keycrm) is material
 
     def test_unknown_field_raises(self):
         with pytest.raises(ValueError, match="unknown field"):

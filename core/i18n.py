@@ -1143,6 +1143,82 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "access.frozen_alert": {
         EN: "Account frozen", UK: "Обліковий запис заморожено", RU: "Аккаунт заморожен",
     },
+
+    # ── The Monday question about promotions (`core/promo_asks.py`) ──
+    # `{window}` is `fmt_window`'s numeric span; `{items}` is a list already
+    # joined, each item escaped for HTML before it is put in.
+    "promo_ask.question": {
+        EN: "Promotions for {window}?",
+        UK: "Акції на {window}?",
+        RU: "Акции на {window}?",
+    },
+    "promo_ask.planned": {
+        EN: "Already planned: {items}.",
+        UK: "Вже заплановано: {items}.",
+        RU: "Уже запланировано: {items}.",
+    },
+    "promo_ask.planned_item": {
+        EN: "“{name}”, {dates}",
+        UK: "«{name}», {dates}",
+        RU: "«{name}», {dates}",
+    },
+    "promo_ask.sms": {
+        EN: "SMS last week: {items}. If it was a promotion, add it.",
+        UK: "SMS минулого тижня: {items}. Якщо це була акція, додайте її.",
+        RU: "SMS на прошлой неделе: {items}. Если это была акция, добавьте её.",
+    },
+    "promo_ask.sms_item": {
+        EN: "“{name}”",
+        UK: "«{name}»",
+        RU: "«{name}»",
+    },
+    "promo_ask.sms_item_code": {
+        EN: "“{name}” (promo code {code})",
+        UK: "«{name}» (промокод {code})",
+        RU: "«{name}» (промокод {code})",
+    },
+    "promo_ask.btn_none": {EN: "None", UK: "Немає", RU: "Нет"},
+    # Instead of `btn_none` when the question lists promotions already planned.
+    "promo_ask.btn_no_other": {EN: "No others", UK: "Інших немає", RU: "Других нет"},
+    "promo_ask.btn_add": {EN: "Add", UK: "Додати", RU: "Добавить"},
+    "promo_ask.recorded_none": {
+        EN: "Recorded: no promotions for {window}",
+        UK: "Записано: акцій на {window} немає",
+        RU: "Записано: акций на {window} нет",
+    },
+    "promo_ask.recorded_no_other": {
+        EN: "Recorded: no other promotions for {window}",
+        UK: "Записано: інших акцій на {window} немає",
+        RU: "Записано: других акций на {window} нет",
+    },
+    "promo_ask.already_recorded": {
+        EN: "Already recorded", UK: "Вже записано", RU: "Уже записано",
+    },
+    "promo_ask.not_approved": {
+        EN: "Your access to the bot is not approved, so the answer is not recorded",
+        UK: "Ваш доступ до бота не схвалено, тож відповідь не записано",
+        RU: "Ваш доступ к боту не одобрен, поэтому ответ не записан",
+    },
+    "promo_ask.not_recipient": {
+        EN: "Only the people this question was sent to can answer it",
+        UK: "Відповісти можуть лише ті, кому надіслано це питання",
+        RU: "Ответить могут только те, кому отправлен этот вопрос",
+    },
+    "promo_ask.unknown": {
+        EN: "This button no longer works",
+        UK: "Ця кнопка вже не діє",
+        RU: "Эта кнопка больше не работает",
+    },
+    "promo_ask.unavailable": {
+        EN: "The answer is recorded only when the bot keeps its state in Postgres",
+        UK: "Відповідь записується лише тоді, коли бот зберігає дані в Postgres",
+        RU: "Ответ записывается, только когда бот хранит данные в Postgres",
+    },
+    "promo_ask.failed": {
+        EN: "Could not record the answer, try again",
+        UK: "Не вдалося записати відповідь, спробуйте ще раз",
+        RU: "Не удалось записать ответ, попробуйте ещё раз",
+    },
 }
 
 

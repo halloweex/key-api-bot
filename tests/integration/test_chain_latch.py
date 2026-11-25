@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import date, datetime, timezone
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -75,11 +75,6 @@ async def stores(tmp_path, monkeypatch):
     await pool.close()
 
 
-async def _expense_rows(pool):
-    async with pool.acquire() as conn:
-        return await conn.fetch("SELECT * FROM app.manual_expenses ORDER BY id")
-
-
 async def _owners(pool):
     return await chain_latch.read_owners(pool)
 
@@ -104,23 +99,6 @@ class TestChain8AfterTheFlagGoesBack:
     """
 
     @pytest.mark.asyncio
-    async def test_the_writes_stay_in_postgres_and_the_ids_keep_counting(
-        self, stores,
-    ):
-        store, pool, env = stores
-        env.setenv("KS_WRITE_EXPENSES", "postgres")
-        first = await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 4200)
-        assert chain_latch.latched("pg_expenses_write"), "the first write did not latch"
-
-        env.delenv("KS_WRITE_EXPENSES")                      # the flag goes back
-
-        second = await store.add_expense(date(2026, 9, 18), "marketing", "TikTok Ads", 900)
-
-        assert second["id"] == first["id"] + 1, "the id came from somewhere else"
-        rows = await _expense_rows(pool)
-        assert [r["id"] for r in rows] == [first["id"], second["id"]]
-
-    @pytest.mark.asyncio
     async def test_the_owner_row_is_written_with_the_first_expense(self, stores):
         store, pool, env = stores
         env.setenv("KS_WRITE_EXPENSES", "postgres")
@@ -134,79 +112,6 @@ class TestChain8AfterTheFlagGoesBack:
         # comparison reads it against the shipper's last_ok_at.
         await store.add_expense(date(2026, 9, 18), "marketing", "TikTok Ads", 20)
         assert await _owners(pool) == owners
-
-    @pytest.mark.asyncio
-    async def test_the_flag_put_back_is_read_by_nothing(self, stores):
-        """Since step 14's S14-11 no flag is read: `/api/health` publishes
-        nothing of it (until then `chain_flag_mismatch`), and the next typed
-        expense still lands in Postgres. Until S14-13 the hourly copy was
-        asked too, and stamped nothing on the table; the copy is gone."""
-        from web.routes.api.health import _write_chains
-
-        store, pool, env = stores
-        env.setenv("KS_WRITE_EXPENSES", "postgres")
-        first = await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 4200)
-        env.setenv("KS_WRITE_EXPENSES", "duckdb")
-
-        second = await store.add_expense(date(2026, 9, 18), "marketing", "TikTok Ads", 900)
-
-        assert [r["id"] for r in await _expense_rows(pool)] == [first["id"], second["id"]]
-        assert _write_chains()["pg_expenses_write"] == {}
-
-
-class TestChain1AfterTheFlagGoesBack:
-    """Inventory, where the cost of a second writer is a movement with two ids.
-
-    `stock_movements` records a delta against the previous `offer_stocks`, and
-    KeyCRM has no history endpoint: a movement written under the wrong
-    allocator cannot be reconciled with anything afterwards.
-    """
-
-    STOCKS = [{"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
-               "quantity": 40, "reserve": 0}]
-
-    @pytest.mark.asyncio
-    async def test_the_movements_and_the_watermark_stay_in_postgres(self, stores):
-        store, pool, env = stores
-        env.setenv("KS_WRITE_INVENTORY", "postgres")
-        await store.upsert_offers([{"id": 1, "product_id": 101, "sku": "S-1"}])
-        assert await store.upsert_stocks(self.STOCKS) == 1
-        await store.set_last_sync_time("stocks", datetime(2026, 9, 17, 12, tzinfo=timezone.utc))
-
-        env.delenv("KS_WRITE_INVENTORY")                     # the flag goes back
-
-        changed = [dict(self.STOCKS[0], quantity=37)]
-        assert await store.upsert_stocks(changed) == 1
-
-        async with pool.acquire() as conn:
-            movements = await conn.fetch(
-                "SELECT offer_id, movement_type, delta FROM app.stock_movements "
-                "ORDER BY id")
-            allocator = await conn.fetchval(
-                "SELECT last_value FROM app.stock_movements_id_seq")
-        assert [(m["movement_type"], m["delta"]) for m in movements] == [
-            ("initial", 40), ("stock_out", -3)]
-        assert allocator >= 2, "Postgres' sequence stopped allocating"
-
-
-        # And the watermark is read back from Postgres, not from DuckDB's
-        # frozen copy — revision 0032's defect, one flag flip later.
-        assert await store.get_last_sync_time("stocks") == datetime(
-            2026, 9, 17, 12, tzinfo=timezone.utc)
-
-    @pytest.mark.asyncio
-    async def test_all_six_tables_are_claimed(self, stores):
-        """The first write claims every table of the chain. Until step 14's
-        S14-13 the hourly copy was asked here too, and stood down for all
-        six; the copy is gone."""
-        from core.pg_inventory_write import CHAIN_TABLES
-
-        store, pool, env = stores
-        env.setenv("KS_WRITE_INVENTORY", "postgres")
-        await store.upsert_offers([{"id": 1, "product_id": 101, "sku": "S-1"}])
-        env.delenv("KS_WRITE_INVENTORY")
-
-        assert set(await _owners(pool)) == set(CHAIN_TABLES)
 
 
 class TestWhenTheFirstWriteFails:

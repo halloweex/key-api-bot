@@ -11,49 +11,100 @@ its re-export and the bot crash-looped in production on
     AttributeError: module 'bot.handlers' has no attribute 'alert_action_callback'
 
 — after a green suite, because every test for it imported `bot.handlers_legacy`.
-The registration is the only place the two names have to agree, so this reads
-the registration.
+So this starts the bot: `main()` runs as the container runs it, up to the
+moment it would start polling Telegram, on an Application that only keeps what
+is registered on it. A name the facade lacks fails the start here exactly as
+it failed it there.
+
+What a start does not look up is a name used only inside a job's body — the
+session sweep's `handlers.cleanup_expired_sessions` — which is resolved when
+the job first runs, ten minutes in, and would not stop the bot starting.
 """
-import ast
-import re
-from pathlib import Path
-
-import pytest
-
 import bot.handlers as facade
 
-MAIN = Path(__file__).resolve().parents[2] / "bot" / "main.py"
+
+class _JobQueue:
+    def __init__(self):
+        self.jobs = []
+
+    def run_once(self, callback, when, **kwargs):
+        self.jobs.append(callback)
+
+    def run_daily(self, callback, time, **kwargs):
+        self.jobs.append(callback)
+
+    def run_repeating(self, callback, interval, **kwargs):
+        self.jobs.append(callback)
 
 
-def _referenced_names() -> set:
-    """Every `handlers.<name>` `bot/main.py` mentions.
+class _Application:
+    """What `Application.builder().token(...).build()` hands `main()`: it keeps
+    what is registered on it, and polls nothing."""
 
-    Parsed rather than grepped: a comment or a docstring naming a handler is
-    not a reference, and a test that fails on prose is a test somebody deletes.
-    """
-    tree = ast.parse(MAIN.read_text())
-    names = set()
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "handlers"):
-            names.add(node.attr)
-    return names
+    def __init__(self):
+        self.handlers = []
+        self.job_queue = _JobQueue()
+        self.polling = None
 
+    def add_handler(self, handler, group=0):
+        self.handlers.append(handler)
 
-def test_main_references_something_at_all():
-    """A guard that found nothing would pass forever."""
-    assert len(_referenced_names()) > 20
+    def run_polling(self, **kwargs):
+        self.polling = kwargs
 
 
-@pytest.mark.parametrize("name", sorted(_referenced_names()))
-def test_every_handler_main_registers_exists_on_the_facade(name):
-    assert hasattr(facade, name), (
-        f"bot/main.py registers handlers.{name}, and the facade does not "
-        f"export it. Add it to the import list *and* __all__ in "
-        f"bot/handlers/__init__.py — the bot fails at startup, not at import, "
-        f"so nothing else catches this."
-    )
+class _Builder:
+    def __init__(self, application):
+        self._application = application
+
+    def token(self, _token):
+        return self
+
+    def build(self):
+        return self._application
+
+
+def _start_the_bot(monkeypatch, tmp_path) -> _Application:
+    """`bot.main.main()`, run to the start of polling; the Application it built."""
+    from telegram.ext import Application
+
+    import bot.main as main
+    from bot import handlers_legacy, store_sqlite
+    from core.bot_store import use_bot_store
+
+    application = _Application()
+
+    def _not_this_one(*_a, **_k):
+        raise AssertionError("main() built an Application this test did not hand it")
+
+    monkeypatch.setattr(Application, "builder", lambda: _Builder(application))
+    # Should a start ever build its Application another way, it must not poll
+    # Telegram from a test: the real one refuses, and the start fails below.
+    monkeypatch.setattr(Application, "run_polling", _not_this_one)
+    # The one setting `validate_config` reads at the call, not at import; a
+    # start that fails validation returns before it registers anything.
+    monkeypatch.setenv("ADMIN_USER_IDS", "1")
+    # What `main()` installs for the life of the process, put back afterwards.
+    monkeypatch.setattr(main, "_application", main._application)
+    monkeypatch.setattr(handlers_legacy, "report_service", handlers_legacy.report_service)
+    monkeypatch.setattr(store_sqlite, "DB_PATH", tmp_path / "bot.db")
+    previous = use_bot_store(store_sqlite.SqliteBotStore())
+    try:
+        main.main()
+    finally:
+        use_bot_store(previous)
+    return application
+
+
+def test_the_bot_starts(monkeypatch, tmp_path):
+    """Every handler `main()` registers is looked up on the facade as it is
+    registered, so a missing re-export raises out of `main()` — the start
+    that crash-looped on 2026-09-11 — and fails this test with it."""
+    application = _start_the_bot(monkeypatch, tmp_path)
+
+    assert application.polling is not None, (
+        "main() returned before it started polling, so nothing was registered")
+    assert application.handlers, "a start that registers nothing answers nothing"
 
 
 def test_the_facade_exports_what_it_declares():

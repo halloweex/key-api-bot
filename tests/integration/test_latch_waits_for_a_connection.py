@@ -28,10 +28,7 @@ so a test cannot pass because something upstream failed first; the pool counts
 what it handled and every test requires exactly the writer's one.
 
 No chain routes by its flag since step 14 (chains 3, 6 and 6a since S14-09,
-the rest since S14-11), so every writer is driven in the state step 14
-promises: no flag, the flag at `duckdb` and a value nobody could read
-(`FLAG_VALUES`). A writer that asked its flag again would stop before its
-acquire, or raise, in one of the three.
+the rest since S14-11), so every writer is driven with no flag set.
 """
 from __future__ import annotations
 
@@ -275,6 +272,28 @@ async def _classify(store):
     return await store.set_manager_retail_status(34, True, date(2026, 10, 7), 1, "x")
 
 
+async def _restore_discounts(_store):
+    """Chain 3's discount backfill (revision 0038), on an order Postgres holds
+    without its discount — without one it reads, finds nothing owed and
+    returns before the latch, which is the point of reading first. Seeded
+    through the pool the test hands out, which serves anybody but the
+    writer's module the live pool."""
+    from datetime import datetime
+
+    from core.pg import get_pool
+
+    payload = _order_payload()
+    stamp = datetime.fromisoformat(payload["updated_at"])
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.orders (id, source_id, status_id, grand_total, "
+            "ordered_at, updated_at) VALUES ($1, 1, 12, 100, $2, $2) "
+            "ON CONFLICT (id) DO NOTHING", ORDER_ID, stamp)
+    return await pg_orders_write.restore_discounts(
+        [dict(payload, products_total="100.00", total_discount=0)])
+
+
 def _journal_run(_store):
     """Chain 9's writer, with the values the router would hand it."""
     from datetime import datetime, timezone
@@ -354,6 +373,8 @@ WRITERS = {
     # NULL comment to fill it still opens its transaction and claims.
     "restore_manager_comments": (pg_orders_write, lambda _s: (
         pg_orders_write.restore_manager_comments({ORDER_ID: "utm_source=ig"}))),
+    # Reached from `scripts/backfill_discounts.py`, page by page.
+    "restore_discounts": (pg_orders_write, _restore_discounts),
     "upsert_managers": (pg_managers_write, lambda s: s.upsert_managers(
         [{"id": 1, "name": "M1"}])),
     "update_manager_stats": (pg_managers_write, lambda s: s.update_manager_stats()),
@@ -388,33 +409,6 @@ WRITERS = {
 
 def _writer_name(key: str) -> str:
     return key.split(":", 1)[0]
-
-
-# The values every writer is driven under, since no chain's flag routes
-# anything (S14-09 for chains 3, 6 and 6a, S14-11 for the rest): absent,
-# `duckdb` — what routed them to DuckDB until S14-00 — and one the flags'
-# readers refused until S14-11 deleted them.
-FLAG_VALUES = (None, "duckdb", "pgsql-typo")
-
-
-def _flags_for(chain) -> tuple:
-    return FLAG_VALUES
-
-
-def _cases(keys, chain_of) -> list:
-    """`(key, flag)` for every key, each flagless chain's under every value."""
-    return [pytest.param(key, flag, id=f"{key}-{flag or 'unset'}")
-            for key in keys for flag in _flags_for(chain_of(key))]
-
-
-def _set_flag(env, chain, flag) -> None:
-    if flag is None:
-        env.delenv(chain.WRITE_ENV, raising=False)
-    else:
-        env.setenv(chain.WRITE_ENV, flag)
-    # The point of the case: a chain is never driven at the value that would
-    # make a writer reading its flag again look correct.
-    assert os.environ.get(chain.WRITE_ENV) != "postgres"
 
 
 @pytest_asyncio.fixture
@@ -532,7 +526,7 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
     statement, through the module's private helpers and constants, bar the
     readers it names and holds to writing nothing. A writer reached only
     through another module's function is past what the walk follows."""
-    from tests.unit.test_chain_latch import _writers
+    from tests.helpers.chain_writers import _writers
 
     found = {(chain.__name__, name) for chain in write_chains.WRITE_CHAINS
              for name in _writers(chain)}
@@ -542,28 +536,12 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
         assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
 
 
-def test_every_chain_is_driven_with_no_flag():
-    """Each writer, and each first write, runs under every value of
-    `FLAG_VALUES` and never under `postgres` — what keeps the proofs below in
-    step 14's state rather than production's flag. Mutation: drive a chain at
-    `postgres` again."""
-    for key, (chain, _call) in WRITERS.items():
-        flags = {p.values[1] for p in _cases([key], lambda k: WRITERS[k][0])}
-        assert flags == set(FLAG_VALUES), key
-    for chain_name, (key, *_row) in FIRST_WRITES.items():
-        flags = {p.values[1] for p in _cases([chain_name], _first_write_chain)}
-        assert flags == set(FLAG_VALUES), chain_name
-
-
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
-    @pytest.mark.parametrize("writer, flag", _cases(WRITERS, lambda k: WRITERS[k][0]))
+    @pytest.mark.parametrize("writer", list(WRITERS))
     @pytest.mark.asyncio
-    async def test_no_marker_and_no_owner_row(
-        self, stores, refusing, writer, flag,
-    ):
+    async def test_no_marker_and_no_owner_row(self, stores, refusing, writer):
         store, live, env = stores
         chain, call = WRITERS[writer]
-        _set_flag(env, chain, flag)
         pool = _RefusesTheWriter(live, refusing.pool, chain.__name__)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
@@ -595,10 +573,6 @@ class TestAnAcquireThatFailsLeavesTheChainUnlatched:
         chain_latch._latched = None                 # read the disk, not the cache
         assert not chain_latch.latched(chain.CHAIN)
         assert await chain_latch.read_owners(live) == {}
-        # Until step 14's S14-00 the flag put back to duckdb then routed the
-        # chain to DuckDB again. Nothing routes by the flag now; what still
-        # matters is that an image from before step 14, which does, would find
-        # no marker.
 
 
 class TestAClaimRollsBackWithItsWrite:
@@ -610,12 +584,11 @@ class TestAClaimRollsBackWithItsWrite:
     same thing for one writer per chain on a write that commits; this one
     needs no row to read back, so `delete_expense` is covered too."""
 
-    @pytest.mark.parametrize("writer, flag", _cases(WRITERS, lambda k: WRITERS[k][0]))
+    @pytest.mark.parametrize("writer", list(WRITERS))
     @pytest.mark.asyncio
-    async def test_a_write_that_rolls_back_leaves_no_owner_row(self, stores, writer, flag):
+    async def test_a_write_that_rolls_back_leaves_no_owner_row(self, stores, writer):
         store, live, env = stores
         chain, call = WRITERS[writer]
-        _set_flag(env, chain, flag)
         pool = _RollsBackTheWriter(live, chain.__name__)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
@@ -656,24 +629,19 @@ FIRST_WRITES = {
 }
 
 
-def _first_write_chain(chain_name: str):
-    return WRITERS[FIRST_WRITES[chain_name][0]][0]
-
-
 class TestAFirstWriteLatchesAndClaimsInItsOwnTransaction:
     def test_every_registered_chain_has_a_first_write_here(self):
         assert set(FIRST_WRITES) == {write_chains.chain_name(c)
                                      for c in write_chains.WRITE_CHAINS}
 
-    @pytest.mark.parametrize("chain_name, flag", _cases(FIRST_WRITES, _first_write_chain))
+    @pytest.mark.parametrize("chain_name", list(FIRST_WRITES))
     @pytest.mark.asyncio
     async def test_the_owner_rows_and_the_row_share_one_transaction(
-        self, stores, chain_name, flag,
+        self, stores, chain_name,
     ):
         store, live, env = stores
         writer, table, key_column, key = FIRST_WRITES[chain_name]
         chain, call = WRITERS[writer]
-        _set_flag(env, chain, flag)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=live)):
             await call(store)

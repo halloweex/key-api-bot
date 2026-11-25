@@ -23,6 +23,7 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -129,7 +130,10 @@ class _PostgresHarness:
             async with self._store._pool.acquire() as conn:
                 await conn.execute(
                     "TRUNCATE app.authorized_users, app.user_preferences, "
-                    "app.celebrated_milestones, app.report_history"
+                    "app.celebrated_milestones, app.report_history, "
+                    # The dashboard's list and the level matrix its tab rule
+                    # reads (`may_use`): empty, it is the code's defaults.
+                    "app.dashboard_users, app.role_permissions"
                 )
 
         self._run(wipe())
@@ -238,6 +242,23 @@ class TestRequestingAccess:
         database.deny_user(1, admin_id=9)
         assert database.request_access(1) is False
         assert _row(db, 1)["status"] == database.STATUS_DENIED
+
+    def test_the_request_is_read_back_as_pending(self, db):
+        database.request_access(1, "ann", "Ann", "A")
+        status = database.get_user_auth_status(1)
+        assert (status["status"], status["username"]) == (
+            database.STATUS_PENDING, "ann")
+        assert database.has_pending_request(1) is True
+
+    def test_somebody_who_never_asked_has_no_status(self, db):
+        assert database.get_user_auth_status(404) is None
+        assert database.has_pending_request(404) is False
+
+    def test_a_verdict_ends_the_pending_request(self, db):
+        database.request_access(1)
+        database.approve_user(1, 9)
+        assert database.get_user_auth_status(1)["status"] == database.STATUS_APPROVED
+        assert database.has_pending_request(1) is False
 
 
 class TestApproval:
@@ -469,6 +490,14 @@ class TestTheLists:
         assert database.get_all_authorized_users() == []
         assert database.get_frozen_users() == []
 
+    def test_the_pending_requests_are_listed_oldest_first(self, db):
+        for user_id in (1, 2, 3):
+            database.request_access(user_id)
+        database.approve_user(2, 9)
+        _set(db, 1, requested_at=_utc_ago(hours=1))
+        _set(db, 3, requested_at=_utc_ago(hours=2))
+        assert [u["user_id"] for u in database.get_pending_requests()] == [3, 1]
+
 
 # ── preferences ──────────────────────────────────────────────────────────────
 
@@ -541,6 +570,18 @@ class TestMilestones:
         assert database.is_milestone_celebrated("monthly", "2026-09", 1000000) is False
         assert database.mark_milestone_celebrated("monthly", "2026-09", 1000000, 1.0) is True
 
+    def test_the_celebrated_ones_are_listed_by_period_type(self, db):
+        database.mark_milestone_celebrated("monthly", "2026-08", 1000000, 1_050_000.0)
+        database.mark_milestone_celebrated("daily", "2026-08-14", 200000, 210_000.0)
+
+        monthly = database.get_celebrated_milestones("monthly")
+        assert [(m["period_key"], m["milestone_amount"]) for m in monthly] == [
+            ("2026-08", 1000000)]
+        assert {(m["period_type"], m["period_key"])
+                for m in database.get_celebrated_milestones()} == {
+            ("monthly", "2026-08"), ("daily", "2026-08-14")}
+        assert len(database.get_celebrated_milestones(limit=1)) == 1
+
 
 # ── cache ────────────────────────────────────────────────────────────────────
 
@@ -562,6 +603,79 @@ class TestCache:
         database.cache_set("fresh", 2, ttl_minutes=10)
         assert database.cache_cleanup() == 1
         assert database.cache_get("fresh") == 2
+
+    def test_a_deleted_value_is_gone_and_only_that_one(self, db):
+        database.cache_set("k", {"a": 1}, ttl_minutes=10)
+        database.cache_set("other", 2, ttl_minutes=10)
+        database.cache_delete("k")
+        assert database.cache_get("k") is None
+        assert database.cache_get("other") == 2
+
+
+# ── what the store counts ────────────────────────────────────────────────────
+
+
+class TestTheStats:
+    def test_they_count_what_is_stored(self, db):
+        database.save_user_preferences(1)
+        database.save_user_preferences(2)
+        database.cache_set("fresh", 1, ttl_minutes=10)
+        database.cache_set("stale", 1, ttl_minutes=-1)
+        assert database.get_database_stats() == {
+            "users": 2, "reports": 0, "active_cache": 1}
+
+
+# ── the dashboard's list, which is not the bot's ─────────────────────────────
+
+
+@pytest.mark.parametrize("db", ["postgres"], indirect=True)
+class TestTheDashboardsList:
+    """`app.dashboard_users` decides which tabs a person opens on the web
+    dashboard, and so what the bot hands them (`may_use`). It is in Postgres
+    alone: a bot whose own state is SQLite has no way to it, says so, and
+    narrows nothing (the test below)."""
+
+    def test_a_grant_is_read_back_with_its_tabs(self, db):
+        assert database.dashboard_access_available() is True
+        assert database.grant_dashboard_access(1, 9, ["traffic"], username="ann") is True
+        row = database.get_dashboard_access(1)
+        assert (row["status"], row["username"], row["allowed_features"]) == (
+            "approved", "ann", ["traffic"])
+
+    def test_the_tabs_decide_what_the_bot_hands_out(self, db):
+        """All three states the column carries: no override is the level's
+        default, an empty set is nothing at all, a list is exactly that."""
+        database.grant_dashboard_access(1, 9, None)
+        database.grant_dashboard_access(2, 9, [])
+        database.grant_dashboard_access(3, 9, ["traffic"])
+
+        assert [database.may_use(u, "dashboard") for u in (1, 2, 3)] == [
+            True, False, False]
+        assert [database.may_use(u, "reports") for u in (1, 2, 3)] == [
+            True, False, False]
+        assert [database.may_use(u, "traffic") for u in (1, 2, 3)] == [
+            True, False, True]
+
+    def test_changing_the_tabs_changes_the_answer(self, db):
+        database.grant_dashboard_access(1, 9, ["traffic"])
+        assert database.set_dashboard_features(1, ["dashboard"], 9) is True
+        assert database.get_dashboard_access(1)["allowed_features"] == ["dashboard"]
+        assert database.may_use(1, "dashboard") is True
+        assert database.may_use(1, "traffic") is False
+
+    def test_somebody_with_no_row_is_not_narrowed(self, db):
+        assert database.set_dashboard_features(404, ["traffic"], 9) is False
+        assert database.get_dashboard_access(404) is None
+        assert database.may_use(404, "dashboard") is True
+
+
+@pytest.mark.parametrize("db", ["sqlite"], indirect=True)
+def test_on_sqlite_there_is_no_list_and_nothing_is_narrowed(db):
+    assert database.dashboard_access_available() is False
+    assert database.grant_dashboard_access(1, 9, ["traffic"]) is False
+    assert database.get_dashboard_access(1) is None
+    assert database.set_dashboard_features(1, ["traffic"], 9) is False
+    assert database.may_use(1, "dashboard") is True
 
 
 # ── a verdict is for a pending request ───────────────────────────────────────

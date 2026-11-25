@@ -113,59 +113,8 @@ class TestTheJob:
         sched._reconcile_postgres.assert_not_awaited()
         sync.repair_orders.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_no_run_is_journalled_on_the_old_layer(self):
-        """A run on `reconciliation` would be a fresh, clean verdict of a
-        comparison nothing made. Recorded at the door every route goes through
-        (`dq_journal.journal_run`), recording rather than raising: the job's
-        own `except Exception` would swallow a raise. The Postgres arm's own
-        persistence is stubbed, so nothing should reach the door at all."""
-        journalled = []
-
-        async def journal_run(**kwargs):
-            journalled.append(kwargs["layer"])
-            return 7
-
-        sched, _sync, result = await _run(
-            pg_result={"issues": [], "discrepancies": [], "error": None},
-            journal_run=journal_run)
-        assert result["error"] is None
-        assert journalled == []
-        assert "run_id" not in result and "stood_down" not in result
-        sched._send_dq_alert_throttled.assert_not_awaited()
-        sched._resolve_dq_layer.assert_not_awaited()
-
 
 class TestTheLayerIsGone:
-    def test_it_is_watched_by_nothing(self):
-        """Mutation: leave `reconciliation` in any of the lists — the canary
-        then pages `dq_missing:reconciliation` (nothing writes it), the
-        digest prints "no successful run" every morning, and the catch-up
-        re-runs the 05:30 job at every start."""
-        from bot.canary import DQ_MAX_AGE_S
-        from core.alerting import REGISTRY
-        from core.data_quality import DIGEST_MAX_AGE_HOURS, WATCHED_LAYERS
-        from core.scheduler import CATCHUP_CHECKS, CATCHUP_SIBLING_LAYERS
-
-        assert "reconciliation" not in WATCHED_LAYERS
-        assert "reconciliation" not in DIGEST_MAX_AGE_HOURS
-        assert "reconciliation" not in DQ_MAX_AGE_S
-        assert CATCHUP_CHECKS["dq_reconciliation"][0] is None
-        assert "reconciliation" not in CATCHUP_SIBLING_LAYERS["dq_reconciliation"]
-        assert not [k for k in REGISTRY if k.endswith(":reconciliation")]
-        # The arms that stay are watched everywhere.
-        for layer in ("reconciliation_pg", "reconciliation_ch"):
-            assert layer in WATCHED_LAYERS and layer in DQ_MAX_AGE_S
-            assert f"dq_stale:{layer}" in REGISTRY
-
-    def test_the_canary_does_not_miss_a_layer_nothing_writes(self):
-        from bot.canary import check_dq_freshness
-
-        fresh = {"last_success_at": "2026-10-01T05:30:00+03:00", "age_seconds": 3600}
-        failures, _ = check_dq_freshness({"data_quality": {
-            "reconciliation_pg": fresh, "reconciliation_ch": fresh,
-            "integrity": fresh, "mirror_landing": fresh}})
-        assert failures == []
 
     def test_the_postgres_arm_still_pages(self):
         from bot.canary import check_dq_freshness
@@ -173,15 +122,6 @@ class TestTheLayerIsGone:
         old = {"last_success_at": "2026-09-01T05:30:00+03:00", "age_seconds": 40 * 86400}
         failures, _ = check_dq_freshness({"data_quality": {"reconciliation_pg": old}})
         assert "dq_stale:reconciliation_pg" in {k for k, _ in failures}
-
-    def test_health_publishes_no_stand_down_mark(self):
-        """`stood_down` marked the old layer for the canary (chain 3); with
-        the layer gone the field went from the public schema too."""
-        from web.routes.api import health
-        from web.schemas import DataQualityFreshness
-
-        assert "stood_down" not in DataQualityFreshness.model_fields
-        assert not hasattr(health, "_mark_stood_down")
 
     def test_the_endpoint_publishes_the_journal_as_it_is(self, monkeypatch):
         """Through `/api/health` and the canary: the block chain 9 answers
@@ -220,7 +160,7 @@ class TestTheLayerIsGone:
         """Mutation: give the job back a layer of its own — absent, it would
         read as never succeeded, and every start would re-run the 05:30 job
         and spend a KeyCRM fetch."""
-        from tests.unit.test_scheduler_catchup import _scheduler_with
+        from tests.helpers.fake_scheduler import _scheduler_with
 
         def entry(age):
             return {"last_success_at": "2026-09-01T05:30:00+03:00", "age_seconds": age}
@@ -233,7 +173,7 @@ class TestTheLayerIsGone:
 
     @pytest.mark.asyncio
     async def test_a_stale_postgres_arm_is_still_caught_up(self, monkeypatch):
-        from tests.unit.test_scheduler_catchup import _scheduler_with
+        from tests.helpers.fake_scheduler import _scheduler_with
 
         def entry(age):
             return {"last_success_at": "2026-09-01T05:30:00+03:00", "age_seconds": age}
@@ -256,7 +196,7 @@ class TestTheLayerIsGone:
         from core import dq_journal
         from core.data_quality import WATCHED_LAYERS
         from tests.journal_fake import install_journal
-        from tests.unit.test_dq_digest_beat import _install_outbox
+        from tests.helpers.dq_outbox import _install_outbox
 
         install_journal(monkeypatch)
         outbox = _install_outbox(monkeypatch)

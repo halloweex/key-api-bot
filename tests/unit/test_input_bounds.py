@@ -26,7 +26,6 @@ import pytest
 
 from core.validators import INT32_MAX, INT64_MAX
 from tests.routes_helper import iter_endpoints
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 
 # ─── Integers past their column ──────────────────────────────────────────────
@@ -54,6 +53,11 @@ OUT_OF_RANGE = [
     ("POST", f"/api/admin/access-requests/{INT64_MAX + 1}/approve", "user_id"),
     ("POST", f"/api/admin/access-requests/{INT64_MAX + 1}/deny", "user_id"),
     ("POST", f"/api/managers/{INT32_MAX + 1}/retail-status?is_retail=true", "manager_id"),
+    # A promotion's id is a BIGINT from `app.promotion_ids` (revision 0039).
+    ("GET", f"/api/promotions/{INT64_MAX + 1}/versions", "promotion_id"),
+    ("PUT", f"/api/promotions/{INT64_MAX + 1}", "promotion_id"),
+    ("POST", f"/api/promotions/{INT64_MAX + 1}/cancel", "promotion_id"),
+    ("POST", f"/api/promotions/{-INT64_MAX - 2}/restore", "promotion_id"),
 ]
 
 

@@ -5,12 +5,12 @@ Automated sales reporting Telegram bot for KoreanStory with interactive web dash
 
 ## Architecture
 
-Selective — only the entries worth naming. `core/` alone holds 120 modules;
+Selective — only the entries worth naming. `core/` alone holds 122 modules;
 the listing below is not a directory dump and should not be read as one.
 
 ```
 key-api-bot/
-├── core/                         # Shared modules (bot + web), 120 files
+├── core/                         # Shared modules (bot + web), 122 files
 │   ├── config.py                # Shared configuration
 │   ├── keycrm.py                # Unified async KeyCRM client
 │   ├── store.py                 # The analytics store (AnalyticsStore), over Postgres;
@@ -21,7 +21,9 @@ key-api-bot/
 │   ├── models.py                # Data models (Order, OrderProduct, Buyer, Manager) and the source/status enums
 │   ├── filters.py               # Date period parsing (DateRange, parse_period)
 │   ├── scheduler.py             # APScheduler jobs, addressed by string id
-│   └── prediction_service.py    # LightGBM revenue prediction (train, predict, forecast)
+│   ├── prediction_service.py    # LightGBM revenue prediction (train, predict, forecast)
+│   ├── promotions.py            # The promotions calendar: its one writer and the as-of reads
+│   └── promo_asks.py            # The bot's Monday question about promotions
 │
 ├── bot/                          # Telegram bot package
 │   ├── config.py                # Configuration, constants, enums
@@ -34,7 +36,7 @@ key-api-bot/
 ├── web/                          # Web dashboard (FastAPI + React)
 │   ├── main.py                  # FastAPI app entry point
 │   ├── routes/
-│   │   ├── api/                 # Package, 16 modules; __init__ include_routers them
+│   │   ├── api/                 # Package, 17 modules; __init__ include_routers them
 │   │   ├── auth.py              # Authentication routes
 │   │   └── pages.py             # HTML page routes (React SPA)
 │   ├── services/
@@ -62,7 +64,7 @@ key-api-bot/
 │   ├── api_fingerprint.py       # sha256 of past-window API answers, before/after a deploy
 │   └── restore_from_export.py   # The only restore path, on the pinned image. Never delete.
 │
-├── tests/                        # 326 test modules. pytest.ini sets testpaths, so only
+├── tests/                        # 399 test modules. pytest.ini sets testpaths, so only
 │                                # this tree is collected — scripts/ is not.
 │
 ├── rust/                         # Pilot, NOT deployed: /api/revenue/trend in Rust,
@@ -143,8 +145,8 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/health` | Health check (status, version, uptime, the blocks the canary judges); `status` is `healthy` and `degraded_by` empty since step 14's S14-17 took DuckDB's block, its ledger and their three causes out |
 | `/api/summary` | Summary statistics |
 | `/api/revenue/trend` | Revenue time series (+ `include_forecast=true` for ML predictions) |
-| `/api/revenue/forecast` | ML revenue forecast for current month |
-| `/api/revenue/forecast/train` | Manually trigger model training (POST) |
+| `/api/revenue/forecast` | ML revenue forecast for current month, with `month_range` (the month total's 80% range: `lo`, `hi`, `coverage`, `days_left`) and `black_friday` (what last year's Black Friday would add, its days still ahead: `extra`, `total`, `size_days`, `normal_day`, `last_year_start`, `last_year_end`, `kind`) and `planned_promotions` (the calendar's promotions planned for today..the month's end: `id`, `name`, `starts_on`, `ends_on`, `kind`, `extra` — what a past noticeable promotion added, null for `black_friday`; `[]` when nothing is planned; null for a caller without `marketing` view, the calendar being that tab's), retail only, each null when it cannot be said — see "Revenue Prediction" and "Календарь акций". The trend's `forecast` carries none of them |
+| `/api/revenue/forecast/train` | Manually trigger model training (POST, admin). Retail only, as the scheduled training is: there is one model, in memory and in `data/revenue_model.joblib`, and its forecast in `app.revenue_predictions` is read as retail's. Any other `sales_type` is a 400 naming the field: `PredictionService.train` refuses it, for every caller. Until 2026-11-20 a b2b training replaced the retail model |
 | `/api/revenue/forecast/evaluate` | Walk-forward CV evaluation with baselines (GET) |
 | `/api/revenue/forecast/tune` | Hyperparameter grid search, reported and never applied (POST) |
 | `/api/sales/by-source` | Sales breakdown by source |
@@ -155,6 +157,8 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
+| `/api/goals/smart` | The month's goals — monthly, weekly, daily — for `year`/`month` (default: this Kyiv month). The automatic goal is the one frozen on the 1st once the month is frozen, else computed now; `monthly.frozenAt` says which; a goal typed on /goals overrides either; a sales type with no history of its own has none (`calculationMethod` `no_history`, every `amount` null) — see "Revenue goals: the month's goal is frozen on the 1st" |
+| `/api/goals/forecast` | `generate_smart_goals`' whole answer for any month, through the same door: the frozen one for a frozen month (`monthly.frozenAt`), else computed now |
 | `/api/customers/sms-segments` | Campaign audience — one arm or one per value level, one or more groups ORed (`or_groups`) (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
 | `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit); `follow_up_of=X` freezes a follow-up |
@@ -175,6 +179,10 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
 | `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation, the entry funnel and the press table (which button people leave after) — for page `/tg-bot` (tab `tgbot`: admins and the marketing presets). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
+| `/api/promotions` | The promotions calendar (tab `marketing`, view): each promotion's current state whose days overlap `from`..`to` (default today − 90 .. today + 365, Kyiv), by first day then id; `include_cancelled=true` adds the cancelled. A Postgres failure is a 503 naming `promotions`. Every answer here carries `sms_campaign` only for a caller with `sms` view, null otherwise. POST (edit) saves a new one: 201 and the promotion; 400 for a first day past today + 365, 403 for an SMS link without `sms` view — see "Календарь акций" |
+| `/api/promotions/{id}/versions` | One promotion's versions, newest first, each with `recorded_at` and `recorded_by_me` — never the author's id (tab `marketing`, view). 404 for an unknown id |
+| `/api/promotions/{id}` | PUT (marketing edit): the body as a new version — none when nothing changed, a reorder of `scope_items` included; 404 unknown, 409 when cancelled, 403 when it changes the SMS link without `sms` view |
+| `/api/promotions/{id}/cancel`, `/restore` | POST (marketing edit): a version with `status` `cancelled` / `planned`, the content kept; 409 when it already is / is not cancelled |
 
 **Retired by the owner's decision OD-10 (2026-09-30)**, and kept retired by
 `tests/unit/test_od10_retired_doors.py`: `GET /api/buyers/{id}`,
@@ -289,8 +297,8 @@ meta ──── the store's own bookkeeping
 ```
 
 **Key tables:**
-- `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text)
-- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted
+- `bronze.orders` - Core order facts with source_id, status_id, `status_group_id`, grand_total, ordered_at, buyer_id, manager_id, `manager_comment` (the UTM attribution's text), and since revision 0038 the discount: `products_total` (the lines before the order's discount), `total_discount` (that discount in money), `discount_amount`/`discount_percent` (as typed), `discount_data` (KeyCRM's object, JSONB: a `loyalty` key when a programme applied)
+- `bronze.order_products` - Line items with product_id, quantity, price_sold; ids are `order_id * 1000 + position`, replaced per order, never upserted. Since revision 0038 also `price` (before any discount), `total_discount` — **per unit**, so a line's discount in money is `total_discount * quantity` — `discount_percent`, `discount_amount`, `loyalty_discount`, `individual_discount`. **A gift-certificate redemption is an order discount in KeyCRM** — its face value as `discount_amount`, so in `total_discount`, `discount_percent` 0, no promocode (measured on the 2026-08-22 certificate orders) — so `total_discount > 0` is not "bought at a discount"; revision 0038's docstring has the split. NULL on all eleven means not landed yet (before 0038, until `scripts/backfill_discounts.py` reached the order); a figure KeyCRM sends that its column cannot hold also lands NULL, never refusing the order (`core.landing_rows._discount`). Not versioned: `app.order_versions` compares none of them; the 05:30 reconciliation compares `products_total`, `total_discount` and the lines' discount in money with KeyCRM (see "Postgres against KeyCRM")
 - `bronze.products` / `bronze.categories` - The catalogue (hierarchical categories by parent_id); a product KeyCRM retires stays, never deleted
 - `bronze.expenses` / `bronze.expense_types` - Order-level expenses (delivery, commission, etc.)
 - `silver.orders` - One row per order with `sales_type` materialised and the Kyiv `order_date`; what every tab reads
@@ -299,9 +307,13 @@ meta ──── the store's own bookkeeping
 - `app.stock_movements`, `app.inventory_sku_history`, `app.sku_inventory_status`, `app.inventory_history` - The stock history KeyCRM does not keep
 - `app.manager_classifications` - Who sells retail, wholesale or internally, as of when; only a human knows
 - `app.revenue_predictions`, `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`, `app.revenue_goals` - The forecast and the goals
+- `app.frozen_month_goals` - Each month's automatic goal per sales type, frozen once on its 1st (revision 0037): what `/api/goals/smart` and `/api/goals/forecast` answer for that month. One writer, the job `month_goal_freeze`; insert-only, ~72 rows a year (see "Revenue goals: the month's goal is frozen on the 1st")
 - `app.data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
 - `app.order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items, so a repair job cannot loop on them forever. The two kinds are skipped differently (`core/pg_orders_read.py`): an id the gap scan found absent upstream is never asked for again (`order_id_gaps` excludes every ledgered id, whatever its age), while an order KeyCRM served without line items is re-fetched by the half-written repair once its `checked_at` is 30 days old (`MISS_RETRY_DAYS`), and each such re-fetch that comes back empty restamps it
 - `app.weekly_report_sends` / `app.traffic_report_sends` - one row per week delivered; what keeps a daily job to one message a week and makes a missed Monday recoverable
+- `app.promotion_versions` - every saved state of a planned promotion (revision 0039): the current state is the highest `version`, the state as of T the highest recorded at T or earlier; a promotion's id comes from the sequence `app.promotion_ids`. Append-only, one writer, `core/promotions.py` (see "Календарь акций")
+- `app.promotion_checkins` - the answers to the bot's Monday question; `none` is an answer and is kept. Written by the bot through its store port (`core.promo_asks.RECORD_NONE_SQL`)
+- `app.promotion_asks` - one row per ISO week the Monday question went out (`week_start`, its Monday): the ledger of the daily `promo_weekly_ask`
 - `app.dashboard_users`, `app.role_permissions` - Access (see "Which tabs one person may open"); `app.authorized_users`, `app.user_preferences` - the bot's
 - `app.sms_campaigns`, `app.sms_campaign_members`, `app.sms_dlr_events`, `app.marketing_optouts` - The SMS campaigns, their rosters, delivery reports and opt-outs
 - `app.alert_series` / `app.alert_events` - The alert journal
@@ -434,34 +446,55 @@ first and the revert after, for the record (below).
 
 From revision 0036 on, a rollback to any image that requires an earlier
 revision than the database is at — `rollback-step14`, an `:s14-NN`, the
-image just before 0036's own PR, any earlier version by number —
-moves `meta.alembic_version` down first, with a migrate image that knows the
-revision the database is at. Alembic steps down from a revision only through
-that revision's own module, and an older migrate image has none.
+image just before 0036's, 0037's, 0038's or 0039's own PR, any earlier version by
+number — moves `meta.alembic_version` down first, with a migrate image that
+knows the revision the database is at. Alembic steps down from a revision
+only through that revision's own module, and an older migrate image has none.
 
 1. **The stamp, while `keycrm-migrate:latest` is still the image at the
-   database's revision** — before any retag or pull:
-   `docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains`.
-   It moves the stamp and executes nothing else: the eleven tables of the
-   analysts' captures and their rows stay (owner decision D2), and the
-   captures stop while the older image runs.
+   database's revision** — before any retag or pull, down to the revision
+   the target requires:
+   `docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains`
+   for `rollback-step14` and every image before 0036,
+   `… alembic downgrade 0036_analytics_captures` for an image between 0036's
+   PR and 0037's, `… alembic downgrade 0037_frozen_month_goals` for one
+   between 0037's and 0038's, `… alembic downgrade 0038_order_discounts`
+   for one between 0038's and 0039's. Each moves the stamp and executes nothing
+   else: the eleven tables of the analysts' captures (owner decision D2),
+   the frozen month goals (0037) and their rows stay; the captures and the
+   goal freeze stop while the older image runs, and it computes every
+   month's goal live. The eleven discount columns of `bronze.orders` and
+   `bronze.order_products` (0038) stay the same way: an image below 0038
+   names its order columns one by one and never sees them. An order such an
+   image rewrites keeps its header's discount, but the lines it rewrites lose
+   theirs: it deletes them and inserts them back naming its own six columns,
+   so the six discount columns read NULL; and an order it inserts holds NULL
+   in the header's five. After the roll forward the 05:30 reconciliation
+   names those inside its 90 days and re-fetches them by id, behind the
+   revenue drifts; for older ones, or sooner, re-run
+   `scripts/backfill_discounts.py` from the page holding the first order it
+   wrote. The promotions calendar's three tables and its sequence
+   (0039) stay too: an image below 0039 has no calendar, no Monday question
+   and no `planned_promotions`, and a [Немає] tapped meanwhile is refused by
+   a bot that does not know the button.
 2. **The images, at once**: tag the target as `latest` for web, bot and
    migrate — `…:rollback-step14`, or `docker pull …/keycrm-<image>:<VERSION>`
    for an earlier version by number, which every deploy pushes beside
    `latest` — and `docker compose up -d` without `pull`. The older migrate's
    `upgrade head` is then a no-op, and web and bot start.
 3. **A `git revert` only after**, if one is wanted for the record: its deploy
-   meets a database at 0035, and its migrate is a no-op.
+   meets a database at the revision it requires, and its migrate is a no-op.
 
 **Skipped, the stamp move stops the running web and bot — they do not merely
 stay old.** A retag's `up -d`, or a revert's deploy, recreates them, and they
 wait for `migrate` to complete successfully; the older migrate image's own
-`alembic upgrade head` exits 255 ("Can't locate revision identified by
-'0036_analytics_captures'"), so web and bot are left `Created`, not running
+`alembic upgrade head` exits 255 ("Can't locate revision identified by" the
+database's revision, `'0036_analytics_captures'`, `'0037_frozen_month_goals'`,
+`'0038_order_discounts'` or `'0039_promotions'`), so web and bot are left `Created`, not running
 (measured with Compose 2.23). A revert deployed first is the same outage for
 the whole CI build and deploy, and by then `latest` is the older migrate
 image, which cannot step down. The other order costs seconds: between steps
-1 and 2 the running 0036 web refuses every Postgres read (`require_revision`
+1 and 2 the running web refuses every Postgres read (`require_revision`
 asks the stamp on each, uncached: a 401 for every session but a hardcoded
 admin's, a 503 on every tab), so the two go together, in one sitting.
 
@@ -471,9 +504,9 @@ Docker Hub under its version (`deploy.yml` pushes `:<VERSION>` beside
 Bring it back as `latest` for migrate alone, step down, and go on with step 2:
 
 ```bash
-docker pull …/keycrm-migrate:<the version at 0036>
-docker tag …/keycrm-migrate:<the version at 0036> …/keycrm-migrate:latest
-docker compose run --rm --no-deps migrate alembic downgrade 0035_batch_e_chains
+docker pull …/keycrm-migrate:<the version at the database's revision>
+docker tag …/keycrm-migrate:<that version> …/keycrm-migrate:latest
+docker compose run --rm --no-deps migrate alembic downgrade <the target's revision>
 # then step 2: tag the target as latest for web, bot and migrate; up -d
 ```
 
@@ -560,11 +593,15 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-11-05 (step 14's S14-20), with the store up: 9 288
-passed, 10 skipped, in about 12 minutes** — the skips are ClickHouse (6), no
-real gpg on the machine (3) and one TIMESTAMPTZ case. Any change that lowers
-the passing count is a regression until explained. (It was 1 297 passed on
-2026-08-14 without a store, and 3 771 with one on 2026-09-08.)
+**Baseline as of 2026-11-19, with revision 0039 (the promotions calendar)
+and the store up: 9 378 passed, 26 skipped** — measured in Docker as CI runs
+it (Python 3.14 with `requirements-dev.lock`, a throwaway Postgres 17.2,
+`TZ=UTC`); the skips are ClickHouse (18), "root lists a directory" (5), no
+real gpg (2) and one TIMESTAMPTZ case. Any change that lowers the passing
+count is a regression until explained. (It was 9 045 on 2026-11-18, after the
+cleanup that deleted 1 300 tombstone cases — tests guarding the finished
+DuckDB exit — 10 344 just before it, 9 288 on 2026-11-05, 1 297 on 2026-08-14
+without a store, and 3 771 with one on 2026-09-08.)
 
 **CI runs the suite against a real PostgreSQL** since 2026-09-08. Without one,
 every differential test — the ones proving DuckDB and Postgres answer the same
@@ -657,6 +694,17 @@ baseline in the same commit as any fix that removes a finding, or the job
 fails on the leftover. A basedpyright bump is a commit of its own, with the
 baseline rewritten beside it.
 
+### The frontend
+
+`frontend` is CI's third job: in `web/frontend` it runs `npm ci`, the Vitest
+suite (`npm test`) and the production build (`npm run build`, which is
+`tsc -b && vite build`), on Node 20 — the major `Dockerfile.web`'s
+`node:20-alpine` builds with, and `tests/unit/test_ci_workflow.py` holds the
+job to it. Until it existed nothing ran npm on a pull request, so a frontend
+change was first built by the image, after the merge. `tsc --noEmit` is no
+stand-in for the build: `tsconfig.json` lists no files of its own, so it
+checks none.
+
 ## Caching
 
 **There is no server-side response cache, and there never has been in
@@ -687,6 +735,18 @@ What does exist:
 - **Client-side caching** — TanStack Query, 2 min for realtime data
   (`web/frontend/src/hooks/useApi.ts`), which absorbs most repeats before the
   server sees them
+- **Nothing in the browser's own cache under `/api/`** (2026-11-20). nginx
+  answers both API locations with `expires -1` (`Cache-Control: no-cache`),
+  and the client's GETs ask with `cache: 'no-store'`. Under `expires 60s` the
+  browser answered the refetch after a save from its own copy for a minute:
+  a promotion just saved was missing from the list, and saving it again made
+  two. What to reuse is TanStack Query's call, which knows a save has made an
+  answer stale. `tests/unit/test_api_not_cached.py` holds both halves.
+- **A GET in flight is shared only while no write comes between**:
+  `fetchApi` hands a second caller the pending request only if no write was
+  sent or answered since it left (`writeEpoch`,
+  `web/frontend/src/api/client.ts`), so the refetch after a save never gets
+  an answer read before it
 - **Gzip compression** - ~70% smaller responses
 - **orjson** - Fast JSON serialization
 
@@ -723,10 +783,247 @@ What does exist:
 - Frontend shows forecast bars (lighter opacity) on Revenue Trend chart for the month, the week and a custom range with future days
 - **Every forecast a page shows is read from `revenue_predictions`; no request runs the model** (owner's decision, 2026-11-04 — the Rust council's decision 6). It is as of the last training (Mon/Thu), retail only — b2b and the other sales types show none — and `last_trained` (the Kyiv day of the rows' `created_at`) and `model_metrics` come from the same rows, so any process, the Rust read API included, can answer it. Until then the week and a custom range ran the model on the request over 780 days of Gold, and `last_trained` came from web's memory — null after every restart, until the next training
 - "Predicted: ₴X" badge in chart header — what the bars add up to (`dashboard_service.stack_forecast_on_actuals`): the period's actual so far, plus on each forecast day what its forecast adds above that day's actual. Until 2026-11-05 the month added today's revenue so far to today's whole forecast (₴116 546 twice on 2026-11-04) and the week held only the days from today on
+- **The month's badge says its 80% range, and Black Friday on a line of its own** (owner's choice, 2026-11-18, after the team's analysis — the artifact "Разбор прогноза выручки"): «Прогноз: ₴3.2M · найімовірніше ₴2.9–3.6M» and, under it, «Якщо Чорна п'ятниця як торік: +₴1.3M (≈ ₴4.5M)». `core/forecast_range.py` is the uncertainty engineer's method ported as validated, and reproduces the study's `sim_at(T, lvl_scale=1.0)` and `allowance_bf` to the bit at every origin of 2025-03..2026-10 and at 2026-11-18, but for the line on the three mornings inside 2024's event (below) (on production's series, outside the repo; `tests/unit/test_forecast_range.py` holds it to a transcription of the study's code on a synthetic one):
+  - **Range**: the days left are simulated from the 365 days before today — each day's one-step ratio (revenue over its weekday's mean of the 8 most recent open days) drawn in weekly blocks aligned on today's weekday, centred — times one lognormal level shift whose σ is matched to every n-day window of the 730 days before today (n = days left, scale 1.0); 4 000 draws, seed 0. lo/hi = K + F × [q10, q90]: K the month's actual through yesterday, F the stored LightGBM forecast from today to the month's end — null unless every one of those days is stored. On 2026 held out, with the LightGBM as it trains since 2026-11-18, it held the actual on 88% of mornings (±12.5%, interval score 0.273 against 0.320 for the model's own empirical band; 2025: 87%, 0.404 against 0.436). It does not hold Black Friday: November–December 2025 51%
+  - **Black Friday**: events are runs of days at ≥ 1.8× their weekday norm (the median of the same weekday over the 8 weeks before, open days only, ≥ 4 of them; one ordinary day between joins a run), sized in normal days of their month; last year's events of this month with a peak ≥ 4× land a year on by `forecast_range.year_shift` and add their size × today's normal day (the median-of-8-weeks weekday table, averaged over the days left). November's events move by Black Friday's own move, this year's last Friday of November less last year's (`core/black_friday.py`, shared with the model's calendar features): 364 days, and 371 in 2024 and next in 2029, 2035 and 2040, where a fixed 364 landed the run a week before Black Friday and the line was gone through the week of it (review of 2026-11-20). Any other month's events move 364 days, to the same weekday. Only the days that land from today to the month's end count, because the days before are in the month's actual already and a run into the next month is not this one's: the study counted the whole event while any of it was ahead, and on the morning of 2025-11-28 would have added ₴1.0M where two of 2024's four days had passed (₴0.44M). In the 900 days production reads (since June 2024, read on 2026-11-18) only Black Friday reached 4×; early 2024 reached 9.5×, but those runs are artefacts — Sundays reopened in February 2024 against the tiny norms of the weeks the shop was closed on them — and lie outside the read. The threshold was set on one November, so the line never moves the point or the range. `kind` is `black_friday` in November and `big_promotion` («велика акція») in any other month
+  - **Where it runs**: `PredictionService.get_forecast` (`/api/revenue/forecast`, never the trend, whose answer the Rust read API mirrors) reads 900 days of Gold through yesterday with `pg_forecast_read.fetch_frame` (a date with no row is a closed day, 0), computes on the ML thread pool the range, the line and the typical promotion from that one read and one set of weekday tables and norms (`forecast_range.outlook`), and keeps them per (Kyiv day, sales type, the forecast's `created_at`) for at most an hour (`OUTLOOK_TTL_S`). `planned_promotions` is read on every request, one small query, so a save shows on the next one and costs the range nothing; until 2026-11-20 the key held the promotions' latest `recorded_at` too, and every save, or a list read that failed, re-read Gold and simulated again on the one ML thread. Retail only. Any failure of the range — the read, a computation stuck behind a training past `OUTLOOK_TIMEOUT_S` — is logged and answered with nulls, not kept, and the forecast is answered all the same; the planned list is still shown then, each `extra` null. A failure of the list's read nulls `planned_promotions` alone
+  - **Planned promotions** (revision 0039): `planned_promotions` lists the calendar's promotions planned now whose days overlap today..the month's end. Each carries `extra`: for `kind = other`, `forecast_range.typical_promotion` — the runs above of 2 days and more that started in the 730 days before today, Black Friday's left out (a November run that peaked at ≥ 4×), each sized by its net effect over the run and 3 days either side in normal days of its month; their median × today's normal day, nothing from fewer than 5 runs; for `black_friday`, null — its line covers it; and null for all when the range could not be made, the stored forecast not covering the month (no history is read then) or a failure, the list itself shown all the same. It is inflated by construction: a run is found only because it raised revenue, so a promotion that moved nothing never enters it, and the page says so in its tooltip. The point and the range never move with it. On production's series to 2026-11-17 the 13 multi-day runs since March 2024 have a median of 4.40 normal days (≈ ₴0.46M at ₴105 148 a day); the 730 days before 2026-11-18 hold 10 of them, median 4.58. A promotion already under way counts whole, as the method has no days-ahead rule
+  - **On the page** (`useMonthForecastOutlook`, one query with the date picker's `useMaxForecastDate`): the month only. The range is the morning's and the point counts today's sales as they come, so once a big day carries the point past an end the range is not shown beside it. The line's total is the server's, the morning's month (K + F + `extra`), not the point plus `extra`: on a day of the event the point counts its sales as they come while `extra` holds last year's same day, and the sum would count them twice. Once the point reaches that total the line is not shown either. The range's hint says it holds «без великої акції»: November–December 2025 it held 51%. `orders_synced` invalidates the badge's query (`['revenueForecast']`) as it does the trend's (`hooks/useWebSocket.ts`, 2026-11-20), so across midnight or a month's end the range, the line and the planned promotions move with the trend's live point instead of standing beside it from the day before
 - **The comparison under the chart is the whole period's** (owner's decision, 2026-11-12). The month and the week end today (`parse_period`) and are drawn to their last day (`dashboard_service.last_day_of_period`). Their comparison is the window before the whole period, day by day: `previous_period` sets November beside 2–31 October, and a week beside the week before, Monday beside Monday. The dashed line therefore runs under the forecast days too. The growth badge adds up the days through today on both sides, so 1–12 November is set beside 2–13 October. A range reaching into the future counts only its days behind it, where it used to set its days so far beside the whole window. The store's trend takes `period_end` and `through`, and `dashboard_service.fit_trend` lays the window under the days drawn, by date. Until then the month compared its days so far with as many days before them, and set each forecast day beside the day as many days back as there were forecast days, read from Silver: under 19–30 November the line drew 1–12 November. `year_ago`, the chart's default, already went day by day
 - Graceful degradation: chart works normally if model unavailable
 - Model saved to `data/revenue_model.joblib`, auto-rejected on load if feature count mismatches; the 31-feature model of the replaced procedure is rejected that way, and web's startup then trains the current one in the background (`web/main.py`)
 - **Known limitations**: a shift of the month's level (July 2026, ₴4.33M → ₴3.25M, was an acquisition drop) is not visible on the 1st in any data the shop records; promotions are not known in advance, and Black Friday has one past instance to learn from
+
+### Revenue goals: the month's goal is frozen on the 1st
+
+The dashboard's monthly goal (`MilestoneProgress`, `GET /api/goals/smart`) is
+the smart goal, `GoalsMixin.generate_smart_goals`: a blend of last year's
+month times growth, the last three complete months times seasonality, and the
+ML term — the month's actual revenue so far plus the stored forecast of the
+rest. It was computed on every request, and the ML term (30–40 % of the
+blend) drifts toward the actual as the month goes: the goal moved within a
+month by a median 4–6 %, ₴0.5M in July 2026. A past month's goal moved after
+the fact as well, because "the last three complete months" are counted from
+today and the ML term is 0 for a month that has ended. **The owner's decision
+of 2026-11-18: the month's automatic goal is frozen on the 1st** (revision
+0037).
+
+- **What is kept**: `app.frozen_month_goals`, a row per (year, month,
+  sales_type) — `generate_smart_goals`' answer whole, as JSONB, and
+  `frozen_at`. Every sales type the routes accept (`core.goal_freeze.SALES_TYPES`:
+  `KNOWN_SALES_TYPES` and `all`, six today), so ~72 rows a year of ~1.5 KB.
+  Append-only, and the bound is that arithmetic: no code deletes a row.
+- **One writer**, `core/goal_freeze.py`, reached from the job
+  `month_goal_freeze` alone (at half past the hours of `goal_freeze.RUN_HOURS`,
+  00:30 Kyiv the first, clear of the windows the schedule keeps, and 4 min
+  after a start; a frozen month costs a run one SELECT).
+  `ON CONFLICT DO NOTHING`: the first freeze of a month wins, so a second run,
+  a manual trigger or two at once cannot move a frozen goal. Every sales
+  type's answer is computed before any row is written, and the month's rows
+  are written in one transaction; a refused read defers the whole month (DN-20c:
+  `skipped`, `read_unavailable` in `/api/jobs`), and the next run asks again.
+  Never before 00:30 on the 1st: the month that has just ended is one of "the
+  last three complete months", and its last orders reach Silver minutes after
+  midnight. Nor before `meta.derivation_runs` holds a validated derivation
+  that started at 00:05 on the 1st (Kyiv) or later (`goal_freeze.DERIVED_AFTER`,
+  review of 2026-11-20): until then every sales type the month lacks is
+  `waiting`, with the reason, and nothing is computed.
+- **The reader** is `GoalsMixin.smart_goals_of_month`, one door for
+  `/api/goals/smart` and `/api/goals/forecast`, so a month cannot have two
+  goals: the frozen answer for a frozen month, `generate_smart_goals` computed
+  now for any other — a month before the deploy, a future month, one whose
+  freeze has not run. `monthly.frozenAt` says which (ISO in Kyiv, null when
+  live); daily and weekly come from the same answer. A goal typed on /goals
+  (`app.revenue_goals.is_custom`) overrides either, as before. **A GET never
+  freezes** (OD-14 (i)): a month nobody froze is read live and stays
+  unfrozen. The GET sweep (`tests/unit/test_goals_read_paths_do_not_write.py`)
+  replaces the writer with a recorder that raises, and
+  `tests/unit/test_goal_freeze.py` walks the repository for the one writer.
+- **A goal resting on part of a forecast waits.** The ML signal sums whatever
+  rows of the stored forecast there are, and each training stores 60 days
+  ahead, so on a 1st with no training for 30 days and more the signal, and
+  the goal, come out too low — 4.0M where it was 4.2M with 24 days of 31 on
+  the review's fixture. Live, the next training corrected it; frozen, it
+  would stand all month. An answer whose signal rests on fewer days than are
+  left (`GoalsMixin.forecast_days_stored`, the signal's own table, filter and
+  window) is not kept: that sales type is read live, the job's result names
+  it under `waiting`, and the first run after a training that reaches the
+  month's end freezes it. A forecast with no row at all is absent, not short
+  — the blend gives its weight to the other signals — and is kept.
+- **A sales type with no history of its own has no goal** (owner's decision,
+  2026-11-19). The three signals are the sales type's own: the month a year
+  earlier, the last three complete months with 25 days of sales, the stored
+  forecast. With none of them `generate_smart_goals` used to fall back on the
+  month's average in the shared seasonality tables, which hold retail's
+  history (`GOAL_TABLES_SALES_TYPE`), times growth — whatever sales type was
+  asked — and on a ₴3M default under an empty table. Production froze
+  November 2026 so: the offline store (open since the 12th, ₴21 140 on three
+  days of sales by the 18th) and the exhibition (six days in September 2025)
+  at ₴5.7M each, retail's November average ₴4 399 005.46 × 1.2911, beside
+  retail's own ₴4.7M. Now such an answer carries `goal` null in every period,
+  no weekly breakdown and `calculationMethod` `no_history` (`NO_HISTORY`), is
+  frozen so, and the dashboard's goal card says in a line that there is no
+  goal (`MilestoneProgress`). Retail keeps its month-average fallback: the
+  shared tables are its own history. The store gets a goal from its first
+  complete month with 25 days of sales, or in its second year from the month
+  a year earlier; the exhibition only in a month that had a fair a year
+  before. A goal typed on /goals still fills its period — but
+  `app.revenue_goals` is one row per period for every sales type, so a goal
+  typed for the store is typed for retail too. The card no longer draws its
+  hardcoded ₴200K / ₴1M / ₴4M targets for a period the server answered with
+  no goal, or with one rounded to 0 (a day under ₴5 000, a week under
+  ₴25 000, a month under ₴50 000); a request that failed still gets them.
+- **November 2026 is the deploy day's**, not the 1st's: the start after the
+  deploy froze the month in progress; months before it stay live. A month
+  whose 1st the process was down for is frozen on the day it runs again, its
+  ML term that day's. Its offline and exhibition rows were frozen before the
+  no-history rule, at ₴5.7M; they move only by the re-freeze under **Not
+  watched**.
+- **A row keeps the shape of the code that froze it.** A reader that needs a
+  key added to `generate_smart_goals` later must default it for older rows:
+  `tests/unit/test_goal_freeze.py` reads a row frozen by revision 0037's code,
+  a literal that is never edited. JSON has no integer keys, so the week maps
+  come back keyed by integers (`goal_freeze.decode`).
+- **Not watched**: a month never frozen — the job failing every day — is read
+  live, which is the behaviour before 0037, and nothing files it; the job's
+  failures are in `/api/jobs` and the web log. No code deletes a row:
+  re-freezing a month after a data incident on its 1st is a person's
+  `DELETE` of that month's rows (as `ks_app`) and a trigger of the job
+  (`POST /api/jobs/month_goal_freeze/trigger`), which freezes that day's
+  answer.
+- **Rolling back below 0037** moves the stamp first (`alembic downgrade
+  0036_analytics_captures` with the migrate image at the database's
+  revision, 0037's or a later one, "Rolling back below a revision"). The
+  table and its rows stay; an image at 0036 computes every goal live while
+  it runs, and the roll forward serves the frozen months again.
+
+### Календарь акций
+
+**Зачем.** Прогноз не знает акций заранее: всплески от 1,8× обычного дня с
+декабря 2023 — около 9 % выручки розницы, Чёрная пятница — 27–33 % своего
+ноября, а календарь модели — список дат в коде (`core/prediction_service.py`).
+Силу акции заранее не знает никто, поэтому записываем то, что известно *до*
+акции: дни (и время старта, если не с утра), тип (Чёрная пятница или другая),
+скидку, на что она (весь магазин, бренды, категории) и где объявляем (SMS,
+Instagram, Telegram, сайт). Каждая правка — отдельная версия, так что проверка
+через 3–4 месяца записей увидит календарь таким, каким он был в любое утро.
+Владелец одобрил макет «Календарь акций и рекламы» (версия 2) 19.11.2026; это
+фаза 1.
+
+**Версии** (ревизия 0039). `app.promotion_versions` — строка на каждое
+сохранённое состояние: `promotion_id` из последовательности
+`app.promotion_ids`, `version` 1, 2, … Текущее состояние — старшая версия
+(`promotions.current`), «на момент T» — старшая с `recorded_at <= T`
+(`promotions.as_of`). Отмена — версия со `status = 'cancelled'` и тем же
+содержанием, восстановление — с `'planned'`; сохранение без изменений не
+пишет ничего (версия — это изменение, правило `app.order_versions`). Один
+писатель, `core/promotions.py`, только INSERT, под
+`pg_advisory_xact_lock(PROMOTIONS_LOCK_KEY)`: последняя версия читается под
+локом, поэтому два одновременных сохранения получают N+1 и N+2, а не одну
+N+1 на двоих; `recorded_at` — часы после лока, не раньше предыдущей версии.
+`tests/unit/test_promotions.py` обходит репозиторий за писателем.
+`recorded_by` — Telegram-id автора, наружу не отдаётся: история говорит
+только `recorded_by_me`. `scope_items` сравниваются как множество
+(`same_content`, как и дифф страницы): сохранение, которое их только
+переставляет, версии не пишет, и хранимый порядок остаётся.
+
+**Как акции попадают в систему** — три пути:
+
+- раздел `PromotionCalendar` на /marketing (`/marketing#promotions`): список,
+  история правок, форма. API `/api/promotions*`, вкладка `marketing`: view —
+  читать, edit — сохранять (30 в минуту, как `/api/expenses`). Неверное
+  поле — 400 `{"detail": "<поле>: <причина>"}`, неизвестный id — 404,
+  правка или отмена отменённой и восстановление запланированной — 409,
+  упавшее чтение — 503 с `surface: promotions`. Первый день — не позже
+  сегодня + 365 (Киев), где кончается окно списка: акция дальше сохранялась
+  и не показывалась нигде, её нельзя было ни править, ни отменить (400
+  `starts_on: …`). С 20.11.2026 текст, который не
+  кодирует UTF-8 (одиночный суррогат `\ud800`), — 400 с именем поля, а тело
+  глубже, чем рекурсирует JSON-декодер, — 400 `body: Must be a JSON object`
+  (оба были 500); список длиннее 50 отклоняется до разбора элементов
+  (200 000 элементов держали цикл событий web две минуты: каждый
+  сравнивался с каждым);
+- бот спрашивает раз в неделю (`promo_weekly_ask`, тик ежедневно в 10:05,
+  журнал `app.promotion_asks`): «Акції на 23.11 – 06.12.2026?» — две недели
+  с понедельника текущей ISO-недели, что в них уже запланировано и какие
+  SMS-кампании за последние 7 дней не названы ни одной акцией (`sms_campaign`
+  любой версии). [Немає] — тоже ответ, а если вопрос перечислил уже
+  запланированные акции, кнопка — [Інших немає] (`pask:nomore:`), и
+  подтверждение — «інших акцій немає». Обе пишут `none` в
+  `app.promotion_checkins` через порт стора бота (`core.bot_store.PromoAsks`,
+  оператор — `core.promo_asks.RECORD_NONE_SQL`; на SQLite `available()` ложь,
+  и бот так и отвечает); после [Інших немає] `none` значит «ничего, кроме
+  перечисленных на момент `answered_at`», и их список даёт
+  `promotions.as_of(answered_at)`. Ответ пишется один раз на
+  (`period_from`, `answered_by`) — `INSERT … SELECT … WHERE NOT EXISTS`, без
+  UNIQUE и без ревизии: PTB обрабатывает обновления по одному; повторное
+  нажатие (вопрос пришёл дважды, двойной тап) отвечает «Вже записано» и
+  ничего не пишет. Принимается только от одобренного адресата, и одобрение
+  хендлер спрашивает сам, без `@authorized`: тот незнакомому или
+  отклонённому переписывал сам вопрос в приглашение запросить доступ, каждую
+  неделю. Неодобренному — алерт, вопрос остаётся как был. После ответа
+  клавиатура убирается. [Додати] открывает дашборд как Web App (как кнопка
+  меню бота) на `/marketing#promotions`; по http — обычной ссылкой. Даты
+  числами, как везде в боте (`fmt_window`): в макете стояло «24 листопада –
+  7 грудня», но месяц после числа склоняется;
+- ссылка «+ акція» у плашки прогноза месяца, для `marketing` edit.
+
+**Запись видна странице, которая её сделала** (20.11.2026, ревью #397).
+Список после сохранения перечитывается с сервера, а не из кэша браузера
+(см. «Caching»: `/api/` браузер не хранит, GET в полёте не переиспользуется
+через запись). Тосты записи, закрытие формы и «занятая» строка — колбэки
+самого `useMutation` (`PromotionWriteEffects` в `hooks/useApi.ts`):
+колбэки, переданные в `mutate`, TanStack вызывает только для последнего
+вызова, и вторая отмена, отправленная до ответа на первую, уносила тост
+ошибки и закрытие формы первой. Скидка — текстовое поле, запятая читается
+как точка: `type="number"` отдавал на «7,5» пустую строку, и акция молча
+сохранялась без скидки. Первый день форма ограничивает, как и API: не
+позже сегодня + 365 (Киев).
+
+**Связь с SMS — данные вкладки `sms`** (`core.promotions.sms_link`,
+20.11.2026). Какую SMS-кампанию называет акция (`sms_campaign`) и набрана ли
+версия из неё (`source = form_from_sms`), видит и меняет только тот, у кого
+есть view вкладки `sms` (правило `require_permission`, через `has_permission`).
+Остальным каждый ответ `/api/promotions*` отдаёт `sms_campaign: null`, а их
+сохранение, которое называет другую кампанию или впервые говорит
+`form_from_sms`, — 403 «No view access to sms», и ничего не пишется. Их
+`sms_campaign: null` — тот null, который им показали (страница отправляет
+акцию целиком): кампания переносится в новую версию, а не стирается. Решается
+под локом, по прочитанной там версии. До этого правило держала только
+страница — пикер кампаний она показывала лишь с `sms` view.
+
+**Кому бот пишет**: админы плюс те из `KS_PROMO_ASK_RECIPIENTS`, кого бот
+сейчас одобряет (`promo_asks.audience`, через порт стора бота). Список —
+Telegram-id через запятую, пустой по умолчанию, кривая запись выбрасывается с
+предупреждением (форма и причина `core.traffic_report.audience`: список пишет
+человек, а не выводит код из прав на вкладку); id из списка без одобрения в
+боте (не просил, отклонён, снят за неактивность) пропускается с WARNING — его
+ответ бот всё равно отклонил бы; стор не читается — пишут одним админам.
+Одобренные, которых нет в списке, не добавляются никогда:
+`tests/unit/test_alert_recipients.py` проверяет поток данных — `readers`
+связан один раз из `audience(...)`, каждый `chat_ids=` — переменная цикла по
+`group_by_language(readers, …)`. Язык — по системному правилу, один рендер на
+язык. `KS_ALERTS_DISABLED` глушит и его; прогон, никого не достигший, ничего
+не пишет в журнал, и назавтра вопрос уйдёт снова. Запись в журнал после
+доставки повторяется (0, 2 и 10 с, `MARK_RETRY_DELAYS`, как
+`core/report_ledger.py`); не удалась и третья — ERROR в логе и
+`recorded: false` в результате джоба, и назавтра вопрос уйдёт снова.
+
+**На плашке прогноза** — строка на каждую запланированную акцию месяца
+(`planned_promotions`, см. «Revenue Prediction»): «если как прошлые заметные
+акции: +₴X» — медиана чистого эффекта прошлых всплесков от 2 дней за 730 дней,
+по сегодняшнему обычному дню. Она завышена по построению — неудачная акция
+всплеском не становится и в медиану не попадает, — и подсказка это говорит.
+Точку и диапазон она не двигает. Календарь — вкладка `marketing`, поэтому
+`/api/revenue/forecast` отдаёт `planned_promotions` только тому, у кого есть
+её view, остальным — null (`web/routes/api/analytics.py`).
+
+**Фаза 2 — реклама** (расход из Meta по дням, план бюджета на месяц) не
+построена.
+
+**Откат ниже 0039** — сдвиг штампа (`alembic downgrade 0038_order_discounts`
+образом migrate на 0039, см. «Rolling back below a revision»); таблицы и их
+строки остаются.
 
 ### Telegram Bot
 - Sales summary reports by source
@@ -851,9 +1148,10 @@ nothing naming the rest. The SMS wizard builds retail audiences only
 (`salesType: 'retail'`; the content filter asks the campaign's sales type of
 the same order line), so its source condition «Офлайн-магазин» matches nobody,
 as «Виставка» never has: a store buyer is reachable by no audience the page
-can build. Goals and milestones for `offline` show the fallback targets
-(₴50 000 a day, ₴1 000 000 a month, a "fallback" smart goal), as the
-exhibition's do. An offline-store order billed at zero with goods in it reads
+can build. The store has no automatic goal until it has a history of its
+own, and the exhibition has none either (owner's decision 2026-11-19; "A
+sales type with no history of its own has no goal", under "Revenue goals").
+An offline-store order billed at zero with goods in it reads
 in `pg_headline_vs_line_items` (INFO) as "a sales type no decision covers":
 `ZERO_TOTAL_KINDS` waits for the owner to say whether the store redeems
 certificates as retail does.
@@ -1136,6 +1434,39 @@ On production on 2026-10-17, the new code's own SQL beside plain SQL: «2+ с
   people's own requests, one rejection can be a temporary block, and the rule
   can change without a clean-up. On production on 2026-10-18 it removed 17 of
   18 104 people from "all buyers".
+
+### Where a sign-in returns (`next`)
+
+A page that sends an anonymous visitor to /login names itself in `?next=`
+(`require_auth`; the root needs none), and the sign-in returns there instead
+of to `/` (2026-11-19, so that the bot's «Додати» lands on the calendar after
+a session expired). The Telegram Mini App's sign-in reads it from the page
+(`data-next`, `login-webapp.js`) and keeps the `#fragment`. The Login
+Widget's reads the cookie `ks_login_next` (path `/auth/telegram`, ten
+minutes, HttpOnly), because the widget signs every query parameter of its
+callback, and on that path the `#fragment` is lost.
+
+`safe_next` is the one gate: one leading slash, no host, scheme, backslash or
+control character, at most 512 characters, never `/` or the sign-in's own
+pages, since an open redirect here would hand a signed-in visitor to any site
+a link names. Since 2026-11-20 also nothing but ASCII — the cookie is
+latin-1, and `/login?next=/тест` or an anonymous `/привіт` answered 500 — and
+never an asset (`auth.ASSET_EXTENSIONS`).
+
+- **An anonymous request for an asset is a 404**, answered before the
+  sign-in (`pages._serve_spa_route`). A browser on /login probes
+  `/favicon.ico` and the like by itself; redirected, the probe went through
+  /login, rewrote the cookie, and the widget's sign-in landed on the icon.
+- **A /login without a valid `next` clears the cookie**, every time: the
+  cookie's path keeps the browser from sending it to /login, so the page
+  cannot tell whether one is set. Without that, an abandoned
+  `/login?next=/sms` won a later plain sign-in for ten minutes. A refused
+  widget callback goes back to /login with the `next` it read, so one failed
+  try does not lose the way back.
+
+`tests/integration/test_unauthenticated_surface.py`
+(`TestTheSignInGoesBackToThePage`) holds all of it.
+
 ### Two axes: a level and an area
 
 Access is a **pair**, and conflating the two halves is the mistake this section
@@ -1511,11 +1842,13 @@ whole reason the group is read from the source now.
 | `pg_warehouse_derive` | every 1 min | Postgres derives Silver and Gold when its signal says one is owed (or the hourly heartbeat), validates, journals, then parses the UTM verdicts. DuckDB's `warehouse_refresh`, not registered since step 13, went in step 14's S14-15 |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | Postgres-only since step 14's S14-14: sync freshness, snapshot continuity, the `pg_` twins (Silver, Gold, UTM, order tables), the chain invariants, the analysts' capture stamps (WARN at most) |
-| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses included (Postgres only, O3 (a)) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
-| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, `bot.db` against its copy, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
-| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts) and the copy of `data/bot.db`, which stands down under `KS_BOT_STORE=postgres`; the id is kept, the operational copy out of DuckDB went in step 14's S14-13 |
+| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — Postgres and ClickHouse, one fetch; слои `reconciliation_pg`, `reconciliation_ch`; re-fetches by id what Postgres lacks or holds wrong, an order's expenses (O3 (a)) and its discount (revision 0038) included (Postgres only) (DuckDB's arm and its layer `reconciliation` went in step 14's S14-12) |
+| `dq_mirror_landing` | 07:30 | Postgres alone and ClickHouse against it, tolerance zero: the UTM verdicts' completeness, Gold's two grains, the order-version archive's liveness, the buyers' completeness, ClickHouse's Silver round trip and Gold, its archive. Reconciliation A against DuckDB went in step 14's S14-12 |
+| `replicate_operational` | every 1 h | `derive_gender_pg` (the one writer of new buyers' gender verdicts); the id is kept, the operational copy out of DuckDB went in step 14's S14-13, and the copy of `data/bot.db`, standing down under `KS_BOT_STORE=postgres`, on 2026-11-19 |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `ga4_capture` | daily 02:40 | keep each closed GA4 day, ISO week and month in `app.ga4_funnel` before the 14-month horizon drops it, oldest first, at most 24 periods a run and an hour; stands down without a GA4 key or under `KS_ANALYTICS_CAPTURES=off` (revision 0036) |
+| `month_goal_freeze` | hourly at :30 outside the windows kept clear (`goal_freeze.RUN_HOURS`, 00:30 first), and 4 min after a start | freeze the Kyiv month's automatic goal for every sales type, once, in `app.frozen_month_goals` (revision 0037): never before 00:30 on the 1st nor before a validated derivation started at 00:05 on it or later (`waiting` until then), one SELECT once the month is frozen, a refused read defers the whole month to the next run, an answer whose ML signal rests on part of a forecast waits (`waiting`) and is read live; stands down without `KS_PG_DSN` |
+| `promo_weekly_ask` | daily 10:05 | ask the admins and `KS_PROMO_ASK_RECIPIENTS` which promotions the two weeks from this ISO week's Monday hold, once a week (`app.promotion_asks`, revision 0039); a run that reached nobody records nothing and the next day asks again; stands down without `KS_PG_DSN` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
@@ -1786,9 +2119,11 @@ does not consume. Unset means no floor, which is right for a report already
 running; this exists for the first week of a new one. Set to `2026-09-07` in
 production, so the first delivery is Monday 2026-09-14.
 
-This is the **only** `chat_ids` override in the repository that can widen an
-audience rather than narrow one, and `tests/unit/test_alert_recipients.py`
-says so at the site of the guard.
+This was the **only** `chat_ids` override in the repository that can widen an
+audience rather than narrow one until the Monday question about promotions
+(revision 0039) joined it on the same terms — `KS_PROMO_ASK_RECIPIENTS`, a
+list a human typed, empty by default; `tests/unit/test_alert_recipients.py`
+names both at the site of the guard.
 
 Same shape as the sales report otherwise: last complete Monday–Sunday week, a
 daily tick against its own ledger (`traffic_report_sends` — its own table,
@@ -1954,14 +2289,16 @@ Cap what rebounds; only delete what stays deleted.
   Правка владельца 30.08; «коротко» ≠ «по-русски» — язык шаблонов не
   менять без явной просьбы.
 - **Получатели алертов — только админы**, запинено
-  `tests/unit/test_alert_recipients.py`: chat_ids-override есть лишь у двух
-  отчётов; алерт-модулям запрещён импорт списка пользователей.
-  Бизнес-исключения: недельный отчёт продаж и веха-рассылка. С 08.09 к ним
-  добавился **отчёт по трафику**, и он единственный, чей override
-  *расширяет* аудиторию: `KS_TRAFFIC_REPORT_RECIPIENTS` — явный список
-  Telegram-id поверх админов, пустой по умолчанию, применяется одной
-  функцией `core.traffic_report.audience`. Правило не «нельзя расширять», а
-  «нельзя расширять молча»: список пишет человек, а не выводит код из прав
+  `tests/unit/test_alert_recipients.py`: chat_ids-override есть у двух
+  отчётов и у вопроса об акциях; алерт-модулям запрещён импорт списка
+  пользователей. Бизнес-исключения: недельный отчёт продаж и веха-рассылка.
+  С 08.09 к ним добавился **отчёт по трафику**, чей override *расширяет*
+  аудиторию: `KS_TRAFFIC_REPORT_RECIPIENTS` — явный список Telegram-id
+  поверх админов, пустой по умолчанию, применяется одной функцией
+  `core.traffic_report.audience`. С 19.11 так же расширяет **вопрос об
+  акциях по понедельникам** (`KS_PROMO_ASK_RECIPIENTS`,
+  `core.promo_asks.audience`, ревизия 0039). Правило не «нельзя расширять»,
+  а «нельзя расширять молча»: список пишет человек, а не выводит код из прав
   на вкладку.
 - **Антишум**: health_*-блип канарейки ждёт второго зонда (`defer_flaky` —
   ежедневная 4.5-мин UTM-заморозка 05:15 и пересоздания при деплоях);
@@ -2082,7 +2419,36 @@ float by its binary value, so 2.675 is stored as 2.67, and text as written,
 so "2.675" is 2.68. An order whose expenses differ is re-fetched
 last in the same batch, and its write deletes what KeyCRM no longer lists
 (O2 (a)); since revision 0036 what that delete removes is kept in
-`app.expense_deletions` (see "The analysts' captures"). History below.
+`app.expense_deletions` (see "The analysts' captures").
+
+**The discount, since revision 0038** (compared from 2026-11-19, once the
+backfill had landed every stored order's figures, none NULL). Nothing else
+watches it: `app.order_versions` compares none of its eleven columns. The
+Postgres arm compares three figures per order with KeyCRM's own fields,
+exactly, as `VALUE_MISMATCH` (WARN — a discount moves no revenue):
+`products_total` and `total_discount` from the header, and `line_discount`,
+the lines' discount in money — each line's `total_discount` (per unit) times
+its `quantity`, summed, NULL when any line's is NULL
+(`reconciliation_io.postgres_discounts_of` and `keycrm_discount_facts`). The
+line figure is there because the header's cannot stand in for it: the 05:15
+refresh rewrites headers only, and an image below 0038 rewrites an order's
+lines without the discount columns (NULL) while its header upsert keeps the
+header's. KeyCRM's side goes through chain 3's own parse, so `_discount`'s
+rounding (to the column's scale, half away from zero) and its NULL for a
+figure the column cannot hold are on both sides. A figure the payload does not
+carry is not compared, nor an order the chain refuses whole. Not compared: how
+a discount was entered — the order's `discount_amount`, `discount_percent` and
+`discount_data`, a line's `price`, percent, typed amount, loyalty and
+individual figures. Every writer lands them with the money, from the same
+payload, so a store that lost them lost the money too, and five of them are
+not in KeyCRM's published API spec. Nor `products_total - total_discount =
+grand_total`: KeyCRM breaks it on 81 of 50 723 orders, and a gift certificate's
+redemption is an order discount there. `GET /order` and `GET /order/{id}`
+return the same `OrderWithIncludes` in that spec, so the re-fetch brings what
+the snapshot compared. An order whose discount differs is re-fetched with the
+expenses, after every missing order and drift (`reconciliation_io.REPAIRED_LAST`);
+its write puts KeyCRM's figures on the header and on every line, and archives
+no version. History below.
 
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the
@@ -2213,7 +2579,8 @@ closed, not silently — but you find out the next morning, not at deploy.
 SMS state's copy (`replicate_sms`) and the dashboard users' copy
 (`replicate_dashboard_users`). The hourly job keeps its id,
 `replicate_operational` — `/api/jobs`' history and the catch-up read it — and
-runs `derive_gender_pg` and `replicate_bot_state`. `app.sync_metadata`,
+runs `derive_gender_pg` (and `replicate_bot_state`, the copy of `data/bot.db`,
+until 2026-11-19). `app.sync_metadata`,
 `app.warehouse_refreshes` and `app.reconciliation_log` are history (OD-S5-4).
 History below.
 
@@ -2428,7 +2795,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0036_analytics_captures` today, and every
+mismatch, ahead or behind. It is `0039_promotions` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
@@ -2734,7 +3101,8 @@ cannot tell the two apart.
 the switch it would roll back every approval, once an hour, looking fine in
 between. It refuses under `KS_BOT_STORE=postgres`, and `reconcile_bot_state`
 stands down with it — `bot.db` becomes a frozen artefact, so every change since
-the switch would read as a discrepancy the check itself created.
+the switch would read as a discrepancy the check itself created. Both were
+deleted on 2026-11-19 with the copy (see the next section).
 
 **The cache stays local under both engines** (revision 0009 left it out of
 Postgres). `initialise()` therefore still creates the SQLite cache table — found
@@ -2744,10 +3112,27 @@ on a real database, where a missing `data/bot.db` made `cache_set` raise
 **To switch**: `KS_BOT_STORE=postgres` on the bot **and** the web container —
 `web/services/auth_service.py` reads the same store. Both need `KS_PG_DSN`; the
 bot has none today. Roll back by removing the variable, but note that anything
-written to Postgres in between does not come back to SQLite: the copy is
-one-way and it was standing down the whole time.
+written to Postgres in between does not come back to SQLite: the copy was
+one-way and it was standing down the whole time. Since 2026-11-19 there is no
+copy at all, so after such a rollback `bot.db` would again be in no backup.
 
 ### The bot's own state, and the only store with no backup
+
+**Deleted on 2026-11-19, dead in production**: the copy (`core/pg_bot_state.py`,
+`replicate_bot_state`) and its comparison (`reconcile_bot_state`, with
+`compare_table` and `MirroredTable`, whose last caller it was). Both stood down
+under `KS_BOT_STORE=postgres`, which web and the bot have run since
+2026-08-27. The bot writes the four `app.*` tables itself through
+`bot/store_postgres.py`, and they ride the nightly Postgres dump; revision
+0009 and the tables stay. `compare_table`'s seven conditions
+(`mirror_missing_rows`, `mirror_orphan_rows`, `mirror_row_values`,
+`mirror_retired_rows`, `mirror_pruned_rows`, `mirror_never_shipped` and the
+bare `mirror_failing`) left REGISTRY, REMEDIATION and the human names with it
+and are never reused; the canary's `mirror_failing:<table>` is untouched.
+`dq_mirror_landing` runs six checks, and `replicate_operational` the gender
+derivation alone. The rule that no module under `bot/` but the adapter
+imports `core.pg*` stays, now in `tests/unit/test_store_postgres.py`. History
+below.
 
 `data/bot.db` is the third store in this system. Measured 2026-08-27: it is in
 **no backup at all** — `data/backups/` held `analytics-*.duckdb`,
@@ -3857,7 +4242,10 @@ a warehouse rebuilt from the second Ark (`deploy/restore_from_export.py`).
 The archives are read by DuckDB 1.5.5, the version that wrote every one, in
 the image pinned as `keycrm-web:rollback-step14` — never `:latest`, which
 carries no `duckdb` since S14-19. The second Ark is self-describing: the
-schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`. The restore
+schema, the Parquet, a `RESTORE.md` and its own `ark_freeze.py`, which is what
+verifies it — the tools that froze and shipped it, `deploy/ark_freeze.py` and
+`deploy/ark_ship.sh`, ran once at the start of the week of silence and were
+deleted on 2026-11-19 with `tests/unit/test_ark_ship_script.py`. The restore
 drill (`deploy/restore-test.sh`) pulls the newest off-site archive and
 rebuilds a validated warehouse in a throwaway container of that image;
 `deploy/restore_from_export.py` is the one restore path and is never deleted;
@@ -3874,7 +4262,7 @@ bot's carries the driver. `tests/unit/test_images_carry_no_duckdb.py` holds
 it: an AST walk of `core/`, `web/`, `bot/`, `scripts/`, `deploy/` and
 `migrations/` finds no import of the driver in any form (aliased, inside a
 function, `import_module`, `sys.modules`, a `python -c` program in a
-string) but in the three host tools that run on the pinned image, and every
+string) but in the two host tools that run on the pinned image, and every
 module under `core/`, `web/`, `bot/` and `scripts/` imports in a fresh
 interpreter in which `duckdb` cannot be found. `requirements-dev.txt` names
 `duckdb==1.5.5` on its own line, for those tools' tests and a few that
@@ -3890,29 +4278,29 @@ any rollback to an image from before step 14"). A tag is never removed by the
 deploy's `docker image prune -f`; `:latest` moves with every deploy and
 carries no DuckDB since S14-19.
 
-So `deploy/restore-test.sh` and `deploy/ark_ship.sh` — and
-`deploy/daily_offsite.sh`, the nightly snapshot, until S14-18 deleted it —
-no longer default to `:latest`. They take their image
-from `BACKUP_RESTORE_IMAGE` (the Ark: `BACKUP_ARK_IMAGE`, else the same) in
-`deploy/backup.env`, and ask it before anything is fetched, linked or frozen
+So `deploy/restore-test.sh` — like `deploy/daily_offsite.sh`, the nightly
+snapshot, until S14-18 deleted it, and `deploy/ark_ship.sh`, the second Ark's
+one-off shipment, until 2026-11-19 — no longer defaults to `:latest`. It takes
+its image from `BACKUP_RESTORE_IMAGE` in `deploy/backup.env` (the Ark's was
+`BACKUP_ARK_IMAGE`), and asks it before anything is fetched or linked
 (`deploy/archive_image.sh`): a tag that does not move (not `:latest`, not
 untagged), present on the host (nothing pulls it, and `rollback-step14` is on
 no registry), and `import duckdb` inside it saying 1.5.5. Any of them false is
 exit 2 with a line naming `rollback-step14`; the nightly snapshot, which only
 runs on the way back, pages it as a failed night, which is why the way back's
 step 3 sets the variable before it puts the snapshot's cron line back. Every
-container they start carries `--pull never`.
+container it starts carries `--pull never`.
 
 **What is mounted into it imports only what it carries.** The drill mounts
-`restore_from_export.py`, the Ark `ark_freeze.py`, and the table-fate
-check's recipe the check and `core/duckdb_table_fates.py` — files from the
-checkout, run inside that pinned image (the snapshot mounted
-`snapshot_export.py` and `core/snapshot_validation.py` until S14-18 deleted
-all three). A name main gains after it is a name
+`restore_from_export.py`, and the table-fate check's recipe the check and
+`core/duckdb_table_fates.py` — files from the checkout, run inside that
+pinned image (the snapshot mounted `snapshot_export.py` and
+`core/snapshot_validation.py` until S14-18 deleted all three, and the Ark
+`ark_freeze.py` until 2026-11-19). A name main gains after it is a name
 the container does not have. `tests/unit/test_archive_image.py` derives the
 mounts from the scripts and their headers' recipes, read as the shell reads
-them (`${PWD}`, `$(pwd)`, variables, function arguments, the `DOCKER_RUN`
-array; a checkout directory mounted whole is refused, and a source it cannot
+them (`${PWD}`, `$(pwd)`, variables, function arguments, an array; a
+checkout directory mounted whole is refused, and a source it cannot
 resolve must be listed with a reason), and holds every import in them to a
 frozen list of what the pinned image carries: the standard library, `duckdb`,
 `compact_duckdb`'s eight names and the `core` modules they reach today —
@@ -4007,7 +4395,7 @@ walk derived the commit before) and the walk requires that no literal DuckDB
 write of those tables is left. That cannot see a DuckDB tail back inside a
 router, since the walk reads every routed statement as Postgres's, so the
 four routers and `_PgTx`'s methods are held to their syntax instead
-(`tests/store_reach.py`): nothing on `self` but what renders the statement,
+(`tests/store_reach.py`, deleted with the tombstone tests on 2026-11-18): nothing on `self` but what renders the statement,
 no `super`, no way to the store or its file. A write naming its table as a
 `{hole}` — one text for two engines, chain 10's watchdog statements — is
 rendered for DuckDB by its module's own function, or says what fills the hole
@@ -4041,4 +4429,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-15 (the offline store, source 7: its own sales type)*
+*Last updated: 2026-11-20 (the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*

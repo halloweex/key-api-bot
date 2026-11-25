@@ -182,21 +182,6 @@ class TestDeliveredCount:
         assert await bot_main.send_admin_message("тревога", key="c:4") == 1
 
 
-class TestDiskThrottleIsKeyed:
-    """A WARN at 06:00 must not mute the escalation to CRITICAL at 12:00.
-
-    Step 00 fixed this by turning the shared float into a per-key dict;
-    step 02 moved the policy into the Gate, which keys per bucket by
-    construction — so the assertion is now that the private state is gone."""
-
-    def test_the_private_disk_cooldown_is_gone(self):
-        from core.scheduler import BackgroundScheduler
-
-        assert not hasattr(BackgroundScheduler, "_disk_alert_last_sent")
-        assert not hasattr(BackgroundScheduler, "_bronze_invariant_last_alert")
-        assert not hasattr(BackgroundScheduler, "_dq_last_alert")
-
-
 class TestTheFourthTransportIsGone:
     def test_no_raw_telegram_post_in_scheduler(self):
         """The memory monitor used to hold a private transport that bypassed

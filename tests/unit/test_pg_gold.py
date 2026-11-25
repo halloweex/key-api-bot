@@ -204,7 +204,7 @@ class TestTheRebuildsWriteShape:
 
         from core.pg_gold import CLEAR_SQL, rebuild_gold
         from core.pg_silver import REBUILD_LOCK_TIMEOUT
-        from tests.unit.test_pg_silver import _recorded
+        from tests.helpers.recording_pool import _recorded
 
         conn = _recorded(rebuild_gold)
         assert conn.transactions == 1
@@ -441,20 +441,6 @@ class TestTheRollUpCheckStandsAlone:
             _gold_row(5, revenue=30, orders_count=1),
         ])
         assert issues == []
-
-    def test_it_reads_no_duckdb(self):
-        """Nothing in it may reach the store: after step 13 its Gold is frozen,
-        and after a compaction empty."""
-        import ast
-        import inspect
-        import textwrap
-
-        from core.mirror_reconciliation import pg_gold_internal_check
-
-        tree = ast.parse(textwrap.dedent(inspect.getsource(pg_gold_internal_check)))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
-            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        assert not names & {"store", "connection", "fetch_duckdb_gold", "get_store"}
 
 # ── the hook ─────────────────────────────────────────────────────────────────
 

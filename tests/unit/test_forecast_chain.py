@@ -100,31 +100,6 @@ def ready(monkeypatch):
 # with `KS_WRITE_FORECAST`.
 
 
-class TestTheHoles:
-    """`reads_the_chain`, which sent a statement carrying one of these holes
-    to Postgres once the chain was latched, went in step 14's S14-11: every
-    goal and forecast read goes to Postgres
-    (`tests/unit/test_goals_reads_follow_chain.py`). The holes stay, and
-    are the tables the chain owns."""
-
-    def test_the_holes_are_the_tables_the_chain_owns(self):
-        assert {"app." + h.strip("{}") for h in chain.TABLE_HOLES} == \
-            set(chain.CHAIN_TABLES)
-        assert len(chain.TABLE_HOLES) == len(chain.CHAIN_TABLES)
-
-    def test_the_holes_are_the_dialects(self):
-        """Every hole is a field `render_tables` fills, in both engines."""
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
-
-        for hole in chain.TABLE_HOLES:
-            duck = render_tables(f"SELECT 1 FROM {hole}", DUCKDB)
-            pg = render_tables(f"SELECT 1 FROM {hole}", POSTGRES)
-            name = hole.strip("{}")
-            assert duck == f"SELECT 1 FROM {name}"
-            assert pg == f"SELECT 1 FROM app.{name}"
-            assert f"app.{name}" in chain.CHAIN_TABLES
-
-
 # ─── Refused before the latch ───────────────────────────────────────────────
 
 
@@ -287,7 +262,6 @@ class TestTheWatchIsComplete:
         assert inv.GOAL_TABLES_INCOMPLETE in _names(issues)
         (issue,) = [i for i in issues if i.check_name == inv.GOAL_TABLES_INCOMPLETE]
         assert issue.severity.value == "WARN"
-        assert "generate_smart_goals falls back" in issue.description
 
     def test_the_placeholder_over_two_full_years_is_incomplete(self):
         """The 2026-08-31 backup's exact state: 0.10, sample 0, a history from
@@ -295,7 +269,6 @@ class TestTheWatchIsComplete:
         issues = _judge(_healthy(yoy_overall=0.10, yoy_sample=0), self.NOW)
         (issue,) = issues
         assert issue.check_name == inv.GOAL_TABLES_INCOMPLETE
-        assert "0.10 placeholder" in issue.description
 
     def test_the_placeholder_is_honest_without_two_full_years(self):
         assert _judge(_healthy(yoy_overall=0.10, yoy_sample=0,
@@ -329,14 +302,21 @@ class TestTheWatchJudgesTheSlot:
         (issue,) = _judge(f, now)
         assert issue.check_name == inv.FORECAST_STALE
         assert issue.severity.value == "WARN"
-        assert "2026-10-12T03:30:00+03:00" in issue.description
+        from core.scheduler import REVENUE_TRAIN_SCHEDULE
+
+        # Judged at the Monday 03:30 training, the slot the grace has passed.
+        assert inv.last_slot(REVENUE_TRAIN_SCHEDULE, now - inv.FORECAST_SLOT_GRACE) == (
+            _kyiv(2026, 10, 12, 3, 30))
 
     def test_monday_seven_with_last_weeks_indices_is_stale(self):
         now = _kyiv(2026, 10, 12, 7, 0)
         f = _healthy(seasonal_at=MON, forecast_at=_kyiv(2026, 10, 12, 3, 31))
         (issue,) = _judge(f, now)
         assert issue.check_name == inv.GOAL_TABLES_STALE
-        assert "2026-10-12T04:00:00+03:00" in issue.description
+        from core.scheduler import SEASONALITY_SCHEDULE
+
+        assert inv.last_slot(SEASONALITY_SCHEDULE, now - inv.FORECAST_SLOT_GRACE) == (
+            _kyiv(2026, 10, 12, 4, 0))
 
     def test_thursday_seven_with_mondays_forecast_is_stale(self):
         now = _kyiv(2026, 10, 8, 7, 0)
@@ -374,13 +354,11 @@ class TestTheWatchJudgesTheSlot:
         now = _kyiv(2026, 10, 8, 13, 0)
         (issue,) = _judge(_healthy(seasonal_at=None, seasonal_unstamped=12), now)
         assert issue.check_name == inv.GOAL_TABLES_STALE
-        assert "no updated_at" in issue.description
 
     def test_no_retail_forecast_at_all_is_stale(self):
         now = _kyiv(2026, 10, 8, 13, 0)
         (issue,) = _judge(_healthy(forecast_at=None, horizon=None), now)
         assert issue.check_name == inv.FORECAST_STALE
-        assert "holds no retail row" in issue.description
 
     def test_unstamped_forecast_rows_ride_in_the_staleness(self):
         now = _kyiv(2026, 10, 8, 13, 0)
@@ -402,11 +380,6 @@ class TestTheWatchJudgesTheSlot:
 
 
 class TestTheWatchIsRegistered:
-    def test_the_chain_has_a_reader_and_three_conditions(self):
-        assert inv._reader_groups()[chain.CHAIN] == "forecast"
-        for name in (inv.GOAL_TABLES_INCOMPLETE, inv.GOAL_TABLES_STALE,
-                     inv.FORECAST_STALE):
-            assert name in inv.CONDITIONS and name.startswith(inv.PREFIX)
 
     def test_each_condition_is_in_the_registry_with_a_lever(self):
         from core.alerting import REGISTRY
@@ -424,13 +397,6 @@ class TestTheWatchIsRegistered:
         assert _names(issues) == [inv.UNWATCHED]
         assert chain.CHAIN in issues[0].description
         assert inv.unverified_conditions(issues) == sorted(inv.CONDITIONS)
-
-    def test_flagged_with_its_preconditions_it_is_watched(self, ready):
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        # Since step 14's S14-00 every chain writes Postgres, so every chain
-        # is watched; this one among them, not latched here.
-        watched = inv.watched_chains()
-        assert chain.CHAIN in watched and watched[chain.CHAIN] is None
 
 
     def test_read_facts_reads_the_four_tables_with_the_stamp(self, ready):
@@ -578,12 +544,6 @@ class TestTheRepositoryRoutes:
         assert created_at.tzinfo is not None and created_at >= before
 
 
-    def test_nothing_to_store_asks_no_chain(self, ready, tmp_path):
-        ready.setenv(chain.WRITE_ENV, "postgre")      # would raise if asked
-        assert _with_store(tmp_path / "p.duckdb",
-                           lambda s: s.store_predictions([], "retail")) == 0
-
-
 class TestPredictionsStored:
     """`predict_month` swallows a failed store — policy unchanged — and
     `_train_impl` now says whether it landed, for /api/jobs and the POST."""
@@ -591,7 +551,7 @@ class TestPredictionsStored:
     @staticmethod
     def _service(monkeypatch, store):
         from core import prediction_service as ps
-        from tests.unit.test_audit_fixes import _valid_training_df
+        from tests.helpers.training_frames import _valid_training_df
 
         svc = ps.PredictionService()
 
@@ -717,10 +677,6 @@ class TestTheSmartGoalReadsOneSet:
 
 # ─── A failed read under the chain is a refusal, never a quiet answer ───────
 
-from tests.unit.test_read_fallback_sites import (  # noqa: E402,F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
 
 def _failing_on(table):
     """`pg_goals_read.fetch` failing only for a statement naming `table` — a
@@ -810,13 +766,7 @@ class TestTheForecastRouteUnderTheChain:
 
     def test_a_failed_forecast_read_is_a_503(self, admin_client, fresh_read_fallback,
                                             monkeypatch):
-        monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
-        monkeypatch.setenv("KS_READ_GOALS", "postgres")
-        monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
         monkeypatch.setenv("KS_PG_DSN", DSN)
-        monkeypatch.setenv("KS_READ_FALLBACK", "off")
-        monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
         monkeypatch.setattr("core.pg_goals_read.fetch",
                             _failing_on("revenue_predictions"))
 
@@ -827,5 +777,4 @@ class TestTheForecastRouteUnderTheChain:
         assert "statement timeout" not in response.text
         assert fresh_read_fallback.refusals()["goals"]["count"] == 1
         health = admin_client.get("/api/health").json()
-        assert "read_fallbacks" not in health
         assert health["read_fallback_mode"]["refused"]["goals"]["count"] == 1

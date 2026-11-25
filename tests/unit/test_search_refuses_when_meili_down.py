@@ -47,7 +47,7 @@ class TestTheClient:
 
 @pytest.fixture
 def admin(monkeypatch):
-    from tests.integration.test_sms_audience_api import _headers
+    from tests.helpers.sms_api import _headers
     from web.ratelimit import limiter
 
     limiter.reset()

@@ -16,8 +16,8 @@ async makes `_lang` async and undoes that on purpose.
 
 Against that: sync SQLite access from async code is already the established
 pattern for these exact tables — `core/bot_prefs.py` reads them that way from
-the *web* container, and `core/pg_bot_state.py` copies them that way. The
-tables hold 51 rows.
+the *web* container, and `core/pg_bot_state.py` copied them that way (until
+2026-11-19). The tables hold 51 rows.
 
 **The cost is real and is written down here so it is not discovered later.** A
 synchronous port cannot be backed by asyncpg directly, so a Postgres adapter
@@ -51,6 +51,7 @@ and counts as `int`.
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import (
     Any, Dict, List, Optional, Protocol, Sequence, Tuple, runtime_checkable,
 )
@@ -187,7 +188,7 @@ class DashboardTabs(Protocol):
     admin approving an access request also chooses the tabs — and that write
     must go through the same pool and the same loop thread as everything else
     the bot stores. A second, unmanaged path to the database from inside the
-    bot is what `tests/unit/test_pg_bot_state.py` watches for, and it would be
+    bot is what `tests/unit/test_store_postgres.py` watches for, and it would be
     right to.
 
     `available()` is the honest half. The dashboard's user list lives in
@@ -252,7 +253,7 @@ class AlertActions(Protocol):
 
     In this port for `DashboardTabs`' reason — the bot writes it at exactly one
     moment, and that write must go through the same pool and the same loop
-    thread as everything else the bot stores. `tests/unit/test_pg_bot_state.py`
+    thread as everything else the bot stores. `tests/unit/test_store_postgres.py`
     watches for a second, unmanaged path to the database from inside the bot,
     and it would be right to.
 
@@ -271,6 +272,31 @@ class AlertActions(Protocol):
     def request(self, *, action: str, subject: str, condition_key: str,
                 by_user_id: int) -> "Optional[int]":
         """Record the authorisation. Returns the request id, or None."""
+        ...
+
+
+@runtime_checkable
+class PromoAsks(Protocol):
+    """The answer to the Monday question about promotions (revision 0039).
+
+    In this port for `AlertActions`' reason: the bot writes it at exactly one
+    moment — a recipient taps [Немає] — and that write goes through the same
+    pool and loop thread as everything else the bot stores. The statement is
+    `core.promo_asks.RECORD_NONE_SQL`, one text for any adapter.
+
+    `available()` is false on SQLite, honestly: the forecast and the page read
+    the answers from `app.promotion_checkins`, and a file this process holds
+    is not that table.
+    """
+
+    def available(self) -> bool:
+        ...
+
+    def record_none(self, *, period_from: date, period_to: date,
+                    by_user_id: int) -> "Optional[int]":
+        """Record that no promotion is planned in the window, once per window
+        and person. Returns the answer's id, or None when this person had
+        answered for the window already (or where `available()` is false)."""
         ...
 
 

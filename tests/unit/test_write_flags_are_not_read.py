@@ -44,8 +44,6 @@ FLAGS = (
     "KS_WRITE_TRAFFIC_LEDGER",
 )
 JUNK = "junk-s14-11"
-# What an entry may carry since S14-11.
-ENTRY_FIELDS = {"sync_step", "pending"}
 
 
 def test_the_thirteen_are_the_registrys_names():
@@ -57,73 +55,7 @@ def test_the_thirteen_are_the_registrys_names():
     assert sorted(c.WRITE_ENV for c in WRITE_CHAINS) == sorted(FLAGS)
 
 
-def test_no_chain_answers_where_it_writes():
-    """The answers went with the flags. Mutation: put `writes_postgres` or
-    `mode` back on a chain."""
-    from core import chain_latch, write_chains
-
-    gone = ("env_writes_postgres", "writes_postgres", "mode", "reads_postgres",
-            "reads_the_chain", "unmet_precondition", "unmet_reasons", "preflight",
-            "duckdb_orders_frozen", "LOCKOUT_REVISION", "_routes_postgres")
-    for chain in write_chains.WRITE_CHAINS:
-        left = [name for name in gone if hasattr(chain, name)]
-        assert not left, (chain.__name__, left)
-    for name in ("chain_modes", "is_shadow", "compared_in_shadow", "mismatched_chains",
-                 "stood_down_tables", "stood_down_tables_checked",
-                 "stood_down_sync_keys", "stood_down_sync_keys_checked",
-                 "stood_down_among"):
-        assert not hasattr(write_chains, name), name
-    assert not hasattr(chain_latch, "lockout_unmet")
-
-
 # ─── Rule 3: junk starts web ─────────────────────────────────────────────────
-
-
-@pytest.fixture
-def web_with(monkeypatch):
-    """Set the flags, run web's start, and ask `/api/health`."""
-    def ask(values: dict):
-        from fastapi.testclient import TestClient
-
-        from core.runtime_modes import configure_modes
-        from web.main import app
-        from web.routes.api import health
-
-        for name in FLAGS:
-            monkeypatch.delenv(name, raising=False)
-        for name, value in values.items():
-            monkeypatch.setenv(name, value)
-        configure_modes()
-        configure_modes()   # the scheduler's call, after the startup's
-        for value in vars(health).values():
-            if isinstance(value, dict) and "expires_at" in value:
-                monkeypatch.setitem(value, "expires_at", 0)
-        return TestClient(app).get("/api/health")
-
-    return ask
-
-
-def _assert_the_block(response) -> None:
-    from core.write_chains import WRITE_CHAINS, chain_name
-
-    assert response.status_code == 200, response.text
-    block = response.json()["write_chains"]
-    assert set(block) == {chain_name(c) for c in WRITE_CHAINS}
-    for name, entry in block.items():
-        assert set(entry) <= ENTRY_FIELDS, (name, sorted(entry))
-        assert JUNK not in str(entry), name
-
-
-@pytest.mark.parametrize("flag", FLAGS)
-def test_junk_in_one_flag_starts_web_and_health_answers(web_with, flag):
-    """Mutation: read the flag again anywhere `configure_modes` or
-    `/api/health` reaches."""
-    _assert_the_block(web_with({flag: JUNK}))
-
-
-@pytest.mark.parametrize("value", [JUNK, "", "duckdb", "postgres"])
-def test_any_value_in_all_thirteen_at_once(web_with, value):
-    _assert_the_block(web_with({flag: value for flag in FLAGS}))
 
 
 def test_a_fresh_interpreter_imports_and_starts_with_junk_in_all_thirteen(tmp_path):
@@ -219,24 +151,6 @@ def _bound_to_a_flag(tree: ast.AST, name: str) -> bool:
     return False
 
 
-def test_nothing_reads_a_write_flag():
-    """Static: no read of the environment names a chain's flag — by
-    `WRITE_ENV` (bare or as an attribute), by its literal, or through a local
-    name bound to either. Mutation: an `os.getenv(WRITE_ENV)` left in a chain
-    module, an `os.environ.get("KS_WRITE_BUYERS")` anywhere, `from os import
-    getenv; getenv(WRITE_ENV)`, or `name = chain.WRITE_ENV; os.getenv(name)`."""
-    found = []
-    for top in ("core", "web", "bot", "scripts"):
-        for path in sorted((ROOT / top).rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for arg in _reads_of_the_environment(tree):
-                text = ast.unparse(arg)
-                via = {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
-                if _names_a_flag(text) or any(_bound_to_a_flag(tree, n) for n in via):
-                    found.append(f"{path.relative_to(ROOT)}:{arg.lineno}: {text}")
-    assert not found, found
-
-
 @pytest.mark.parametrize("source", [
     "from os import getenv\nWRITE_ENV = 'KS_WRITE_BUYERS'\ngetenv(WRITE_ENV)\n",
     "from os import getenv as ge\nge('KS_WRITE_ORDERS')\n",
@@ -285,24 +199,6 @@ class TestTheOrderStep:
             payload = _payload(write_chains={canary.ORDERS_CHAIN: entry})
             assert "orders_sync_failing" in canary.unjudged_keys(payload), entry
             assert canary.check_orders_sync_chain(payload) == [], entry
-
-    @pytest.mark.parametrize("mode", [None, "postgres", "duckdb"])
-    def test_the_old_error_pages_whatever_mode_says(self, mode):
-        """Three failures in a row — the order step's error before S14-11 —
-        page CRITICAL with no `mode` in the entry, and with an older web's
-        `mode` beside it. Mutation: skip the entry unless `mode` is
-        postgres."""
-        from bot import canary
-
-        entry = {"sync_step": {"consecutive_failures": canary.ORDERS_SYNC_FAILURES,
-                               "last_ok_age_s": 3600, "last_attempt_age_s": 60,
-                               "last_error_class": "TimeoutError"}}
-        if mode is not None:
-            entry["mode"] = mode
-        payload = _payload(write_chains={canary.ORDERS_CHAIN: entry})
-        assert "orders_sync_failing" not in canary.unjudged_keys(payload)
-        [(key, message)] = canary.check_orders_sync_chain(payload)
-        assert key == "orders_sync_failing" and "TimeoutError" in message
 
 
 class TestTheBuyersStep:

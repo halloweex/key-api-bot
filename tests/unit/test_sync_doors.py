@@ -27,8 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.routes_helper import aliases, iter_endpoints
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
+from tests.routes_helper import iter_endpoints
 
 REPO = Path(__file__).resolve().parents[2]
 NGINX = REPO / "nginx" / "nginx.conf"
@@ -43,11 +42,6 @@ RETIRED = {
     "/api/duckdb/sync-all-buyers": "/api/sync/sync-all-buyers",
 }
 SLOW = {"/api/sync/resync", "/api/sync/refresh-statuses"}
-# What each lever's handler calls first, patched so that a request reaching
-# one would be seen and would do nothing — the full buyer fetch above all,
-# which is KeyCRM's ~460 pages.
-_HANDLERS = ("core.sync_service.force_resync", "core.sync_service.get_sync_service",
-             "web.routes.api.admin._sync_all_buyers")
 
 
 def _posts() -> dict:
@@ -64,36 +58,6 @@ def test_every_door_is_registered_and_in_the_schema(door):
 
     assert door in _posts(), door
     assert door in TestClient(app).get("/openapi.json").json()["paths"], door
-
-
-def test_no_path_under_the_old_prefix_is_registered():
-    """Mutation: put any of the four `@router.post("/duckdb/…")` back."""
-    from web.main import app
-
-    paths = {e.path for e in iter_endpoints(app)}
-    assert not [p for p in paths if p.startswith("/api/duckdb/")], sorted(paths)
-
-
-def test_no_route_is_an_alias_of_another():
-    """The aliases were the app's only routes out of the schema serving a
-    function a route in the schema serves at another path. Mutation: register
-    any lever under a second path, in the schema or out of it."""
-    from web.main import app
-
-    assert aliases(app) == frozenset()
-    functions = [e.route.endpoint for e in iter_endpoints(app)
-                 if e.path in DOORS]
-    assert len(functions) == len(set(functions)) == len(DOORS)
-
-
-def test_the_slow_levers_get_the_long_timeout_by_their_one_name():
-    """Mutation: drop a lever from `SLOW_ENDPOINTS`, or put an alias back."""
-    from web.middleware import SLOW_ENDPOINTS
-
-    assert SLOW <= set(SLOW_ENDPOINTS)
-    for door in set(DOORS) - SLOW:
-        assert door not in SLOW_ENDPOINTS, door
-    assert not [p for p in SLOW_ENDPOINTS if p.startswith("/api/duckdb/")]
 
 
 def _long_timeout_locations() -> list:
@@ -152,40 +116,3 @@ def test_the_resync_still_allows_one_a_minute(admin_client):  # noqa: F811
     assert first.status_code == 200, first.text
     assert second.status_code == 429, second.text
     assert resync.await_count == 1
-
-
-@pytest.mark.parametrize("old", sorted(RETIRED))
-def test_an_old_name_answers_as_no_route_and_runs_nothing(admin_client, old):  # noqa: F811
-    """An admin's POST to an old name is the JSON 405 of a path no route
-    serves, and a GET is the JSON 404 of every unmatched `/api/` GET — not
-    the SPA shell, and neither reaches a lever. Until the final stage the
-    POST ran the lever. Mutation: put the alias back — the POST answers as
-    the lever does."""
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    with patch(_HANDLERS[0], AsyncMock(return_value={"orders": 0})) as resync, \
-            patch(_HANDLERS[1], AsyncMock(return_value=MagicMock())) as sync, \
-            patch(_HANDLERS[2], AsyncMock(return_value={})) as fetch_all, \
-            patch("web.routes.api.admin.get_store", AsyncMock(return_value=MagicMock())):
-        post = admin_client.post(old, params={"days": 1}, follow_redirects=False)
-        get = admin_client.get(old, follow_redirects=False)
-    assert post.status_code == 405, (old, post.status_code, post.text[:120])
-    assert post.headers["content-type"].startswith("application/json")
-    assert get.status_code == 404, (old, get.status_code, get.text[:120])
-    assert get.json() == {"detail": "Not Found"}
-    resync.assert_not_awaited()
-    sync.assert_not_awaited()
-    fetch_all.assert_not_called()
-
-
-@pytest.mark.parametrize("old", ["/api/duckdb/stats", *sorted(RETIRED)])
-def test_an_old_get_is_the_json_404_even_without_a_session(old):
-    """Answered before the session check, as every unmatched `/api/` GET is
-    (`tests/unit/test_od10_retired_doors.py`)."""
-    from fastapi.testclient import TestClient
-
-    from web.main import app
-
-    response = TestClient(app).get(old, follow_redirects=False)
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Not Found"}

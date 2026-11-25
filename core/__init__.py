@@ -4,7 +4,6 @@ Core shared library for KoreanStory Sales Bot.
 This package contains shared logic used by both bot/ and web/ packages:
 - exceptions: Custom exception hierarchy
 - validators: Input validation functions
-- pagination: Unified API pagination
 - config: Centralized configuration
 """
 
@@ -19,17 +18,11 @@ from core.exceptions import (
 
 from core.validators import (
     validate_date_string,
-    validate_date_range,
     validate_source_id,
     validate_limit,
     validate_brand_name,
     validate_category_id,
     validate_period,
-)
-
-from core.pagination import (
-    KeyCRMPaginator,
-    AsyncKeyCRMPaginator,
 )
 
 from core.config import config
@@ -43,15 +36,11 @@ __all__ = [
     "ValidationError",
     # Validators
     "validate_date_string",
-    "validate_date_range",
     "validate_source_id",
     "validate_limit",
     "validate_brand_name",
     "validate_category_id",
     "validate_period",
-    # Pagination
-    "KeyCRMPaginator",
-    "AsyncKeyCRMPaginator",
     # Config
     "config",
 ]

@@ -420,16 +420,38 @@ def _row_refusal(row, ints, not_null, text, money, *, bounds=None) -> Optional[s
     return None
 
 
+def _discount_refusal(row, numerics: Mapping[str, Tuple[int, int]]) -> Optional[str]:
+    """Why Postgres would refuse one of the row's discount columns (revision
+    0038), or None. The parse already lands what its column cannot hold as
+    NULL (`landing_rows._discount`), so from a KeyCRM payload this never
+    fires; it is here so that this module's answer to "would Postgres refuse
+    the row" stays complete for a row built any other way."""
+    from core.pg_numeric import refusal
+
+    for column, (precision, scale) in numerics.items():
+        why = refusal(column, getattr(row, column), precision, scale, nullable=True)
+        if why:
+            return f"{column} does not fit NUMERIC({precision},{scale})"
+    return None
+
+
 def order_refusal(row) -> Optional[str]:
     """Why Postgres would refuse this header, or None. Names the column and the
     kind of value, never the value: a comment can carry a customer's words."""
-    return _row_refusal(row, _ORDER_INTS, _ORDER_NOT_NULL, _ORDER_TEXT,
-                        ("grand_total",))
+    from core.landing_rows import ORDER_DISCOUNT_NUMERICS
+
+    return (_row_refusal(row, _ORDER_INTS, _ORDER_NOT_NULL, _ORDER_TEXT,
+                         ("grand_total",))
+            or _discount_refusal(row, ORDER_DISCOUNT_NUMERICS)
+            or _text_refusal("discount_data", row.discount_data))
 
 
 def product_refusal(row) -> Optional[str]:
-    return _row_refusal(row, ("id",) + _PRODUCT_INTS, _PRODUCT_NOT_NULL,
-                        ("name",), ("price_sold",), bounds={"id": _INT64})
+    from core.landing_rows import LINE_DISCOUNT_NUMERICS
+
+    return (_row_refusal(row, ("id",) + _PRODUCT_INTS, _PRODUCT_NOT_NULL,
+                         ("name",), ("price_sold",), bounds={"id": _INT64})
+            or _discount_refusal(row, LINE_DISCOUNT_NUMERICS))
 
 
 def expense_refusal(row) -> Optional[str]:
@@ -1057,3 +1079,219 @@ async def restore_manager_comments(comments: Mapping[int, str]) -> List[int]:
                 await pg_landing._write_order_rows(
                     conn, rows, [], replace_products=False, version_kind=BACKFILL)
     return [int(r[0]) for r in rows]
+
+
+# ─── The discount backfill (revision 0038) ───────────────────────────────────
+#
+# Revision 0038 lands KeyCRM's discount figures with every order the sync
+# writes from then on. The ~50 000 orders written before it hold NULL there,
+# and KeyCRM's list is the only place their figures are: one walk of it,
+# 50 orders a page, lands them (`scripts/backfill_discounts.py`).
+#
+# ONLY THE DISCOUNT COLUMNS MOVE
+#
+# The walk is not a resync. Rewriting each order whole from today's KeyCRM
+# would also correct whatever drifted without `updated_at` moving — and move
+# revenue, brand and category figures that have already gone to suppliers,
+# as a side effect of a backfill nobody asked to do that. So each stored row
+# is written back as it is, with the discount columns alone taken from KeyCRM
+# (`ORDER_DISCOUNT_COLUMNS`), and the line items' discount only where the
+# stored lines are KeyCRM's lines (`LINE_DISCOUNT_COLUMNS`, below). Through
+# `pg_landing._write_order_rows`, the one writer of the order tables, as
+# `kind='backfill'`; `app.order_versions` compares none of these columns, so
+# no version is written (revision 0038's docstring).
+#
+# SAFE BESIDE THE RUNNING SYNC, WITHOUT THE HEAVY-JOB LOCK
+#
+# The CLI cannot take that lock: it lives in the web process. It does not
+# need it, because it writes an order only when the row Postgres holds is the
+# version KeyCRM served it — the stored `updated_at` equal to the payload's —
+# read `FOR UPDATE` in the writing transaction, the lock every chain-3 writer
+# takes on the same rows in the same id order. A sync tick that landed a newer
+# version between the walk's fetch and its write is found here and left alone
+# (`moved`): it was written by the parse that already carries the discount.
+# An order KeyCRM changed that the sync has not yet written is left too; the
+# sync writes it, discount included. What could still race is a discount that
+# KeyCRM changed without moving `updated_at` and that the 05:15 status refresh
+# landed between the fetch and the write — rewritten here with the figure a
+# second older; run the walk outside 05:00-05:30 Kyiv.
+
+
+@dataclass(frozen=True)
+class DiscountRestore:
+    """What `restore_discounts` did with one page. Ids, never values."""
+
+    headers_written: int = 0     # orders whose discount columns were written
+    lines_written: int = 0       # of those, orders whose lines' discount was written too
+    already_current: Tuple[int, ...] = ()   # stored discount already equals KeyCRM's
+    moved: Tuple[int, ...] = ()  # stored `updated_at` is not the payload's: the sync's
+    absent: Tuple[int, ...] = ()  # orders Postgres does not hold: the sync's or a repair's
+    lines_differ: Tuple[int, ...] = ()  # stored lines are not KeyCRM's: header only
+    refused: Tuple[Tuple[Any, str], ...] = ()  # payloads the parse or the checks refuse
+
+
+def _order_cents(value: Any) -> Any:
+    """A money value as the order writer stores it: `pg_landing._numeric`'s
+    text conversion, rounded half away from zero to two places as
+    `NUMERIC(12,2)` rounds it. Not `_cents`: that one reads a float by its
+    binary value, which is how asyncpg sends an expense, while the order
+    tables are sent `Decimal(str(value))` (`pg_landing._numeric`)."""
+    from decimal import ROUND_HALF_UP
+
+    from core.pg_landing import _numeric
+
+    number = _numeric(value)
+    return None if number is None else number.quantize(_CENT, rounding=ROUND_HALF_UP)
+
+
+def _json_value(text: Any) -> Any:
+    """`discount_data` as a value: the stored JSONB comes back as text in
+    Postgres' own key order, the parse's in sorted order."""
+    import json
+
+    return None if text is None else json.loads(text)
+
+
+def _line_identity(line: Any) -> tuple:
+    """What makes a stored line KeyCRM's line: its positional id and the five
+    facts the sync writes, money as the writer stores it."""
+    return (int(line["id"]), int(line["order_id"]), line["product_id"],
+            line["name"], line["quantity"], _order_cents(line["price_sold"]))
+
+
+def discount_plan(incoming: Mapping[int, Any], lines: Mapping[int, Sequence[Any]],
+                  stored: Mapping[int, Any], stored_lines: Mapping[int, Sequence[Any]]):
+    """What one page writes. Pure.
+
+    `incoming` is the parsed header by order id and `lines` its parsed line
+    items; `stored` the row Postgres holds by id (`ORDER_COLUMNS`), and
+    `stored_lines` its line items in id order (`ORDER_PRODUCT_COLUMNS`).
+
+    Returns `(headers, with_lines, current, moved, absent, lines_differ)`:
+    `headers` the rows to write — the stored row, the discount columns
+    KeyCRM's — and `with_lines` the ids among them whose line items are
+    rewritten too, with KeyCRM's discount."""
+    from core.landing_rows import (
+        LINE_DISCOUNT_COLUMNS, ORDER_COLUMNS, ORDER_DISCOUNT_COLUMNS,
+        ORDER_DISCOUNT_NUMERICS)
+
+    headers: List[tuple] = []
+    with_lines: List[int] = []
+    current: List[int] = []
+    moved: List[int] = []
+    absent: List[int] = []
+    lines_differ: List[int] = []
+    for oid, row in incoming.items():
+        held = stored.get(oid)
+        if held is None:
+            absent.append(oid)
+            continue
+        if _as_utc(held["updated_at"]) != _as_utc(row.updated_at):
+            moved.append(oid)
+            continue
+        header_due = (
+            any(held[c] != getattr(row, c) for c in ORDER_DISCOUNT_NUMERICS)
+            or _json_value(held["discount_data"]) != _json_value(row.discount_data))
+        mine = [r._asdict() for r in lines.get(oid, ())]
+        theirs = list(stored_lines.get(oid, ()))
+        same_lines = ([_line_identity(r) for r in theirs]
+                      == [_line_identity(r) for r in mine])
+        if not same_lines:
+            lines_differ.append(oid)
+        lines_due = same_lines and any(
+            s[c] != m[c] for s, m in zip(theirs, mine) for c in LINE_DISCOUNT_COLUMNS)
+        if not header_due and not lines_due:
+            current.append(oid)
+            continue
+        headers.append(tuple(getattr(row, c) if c in ORDER_DISCOUNT_COLUMNS else held[c]
+                             for c in ORDER_COLUMNS))
+        if lines_due:
+            with_lines.append(oid)
+    return headers, with_lines, current, moved, absent, lines_differ
+
+
+async def _discount_reads(conn, ids: Sequence[int], *, lock: bool):
+    """The stored headers and their line items for `discount_plan`. The
+    headers locked `FOR UPDATE` in id order inside the writing transaction —
+    the lock every chain-3 writer takes on them before it touches their
+    lines, so the lines need none of their own."""
+    from core.landing_rows import ORDER_COLUMNS, ORDER_PRODUCT_COLUMNS
+
+    heads = await conn.fetch(
+        f"SELECT {', '.join(ORDER_COLUMNS)} FROM bronze.orders "
+        "WHERE id = ANY($1::int[]) ORDER BY id" + (" FOR UPDATE" if lock else ""),
+        sorted(ids))
+    held_lines = await conn.fetch(
+        f"SELECT {', '.join(ORDER_PRODUCT_COLUMNS)} FROM bronze.order_products "
+        "WHERE order_id = ANY($1::int[]) ORDER BY id", sorted(ids))
+    stored = {int(r["id"]): r for r in heads}
+    stored_lines: Dict[int, List[Any]] = {}
+    for r in held_lines:
+        stored_lines.setdefault(int(r["order_id"]), []).append(r)
+    return stored, stored_lines
+
+
+async def restore_discounts(payloads: Sequence[Dict[str, Any]]) -> DiscountRestore:
+    """Land KeyCRM's discount on orders Postgres already holds, and nothing
+    else. One page of `GET /order?include=products.offer`. Raises, as every
+    writer of this chain does (OD-13 (a)).
+
+    See "The discount backfill" above for what is written and why it is safe
+    beside the sync. A page that would write nothing — every order current,
+    moved or absent — reads that before the latch and returns."""
+    from core import pg_landing
+    from core.landing_rows import landed_orders
+    from core.pg_order_versions import BACKFILL
+
+    landed = landed_orders(list(payloads), with_products=True)
+    refused: List[Tuple[Any, str]] = list(landed.refused)
+    by_order: Dict[int, List[Any]] = {}
+    for p in landed.products:
+        oid = _int_or_none(p.order_id)
+        if oid is not None:
+            by_order.setdefault(oid, []).append(p)
+    incoming: Dict[int, Any] = {}
+    for row in landed.orders:      # the last copy of a repeated order wins
+        oid = _int_or_none(row.id)
+        if oid is None:
+            refused.append((row.id, "the id is not an integer"))
+            continue
+        why = order_with_lines_refusal(row, by_order.get(oid, ()))
+        if why:
+            refused.append((oid, why))
+            incoming.pop(oid, None)
+        else:
+            incoming[oid] = row
+    if not incoming:
+        return DiscountRestore(refused=tuple(refused))
+
+    pool = await _pool()
+    async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
+        plan = discount_plan(incoming, by_order,
+                             *await _discount_reads(conn, list(incoming), lock=False))
+        if not plan[0]:
+            _, _, current, moved, absent, differ = plan
+            return DiscountRestore(already_current=tuple(current), moved=tuple(moved),
+                                   absent=tuple(absent), lines_differ=tuple(differ),
+                                   refused=tuple(refused))
+        stamp = _latch()
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+            headers, with_lines, current, moved, absent, differ = discount_plan(
+                incoming, by_order,
+                *await _discount_reads(conn, list(incoming), lock=True))
+            rewrite = set(with_lines)
+            full = [h for h in headers if int(h[0]) in rewrite]
+            only = [h for h in headers if int(h[0]) not in rewrite]
+            if full:
+                await pg_landing._write_order_rows(
+                    conn, full, [tuple(p) for oid in with_lines for p in by_order[oid]],
+                    replace_products=True, version_kind=BACKFILL)
+            if only:
+                await pg_landing._write_order_rows(
+                    conn, only, [], replace_products=False, version_kind=BACKFILL)
+    return DiscountRestore(
+        headers_written=len(headers), lines_written=len(with_lines),
+        already_current=tuple(current), moved=tuple(moved), absent=tuple(absent),
+        lines_differ=tuple(differ), refused=tuple(refused))

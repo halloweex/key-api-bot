@@ -42,7 +42,6 @@ from core.duckdb_constants import OFFLINE_STORE_SOURCE_ID, OWN_ENTITY_BUYER_IDS
 from tests.integration.pg_tab_seed import (
     derive, seed, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 asyncpg = pytest.importorskip("asyncpg")
 

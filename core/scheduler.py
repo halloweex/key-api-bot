@@ -750,20 +750,20 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: the buyers' gender and the bot's state (hourly).
+        # Job: the buyers' gender (hourly).
         #
         # The id is the one this job has always had, so `/api/jobs`' history
         # and the catch-up do not break. Until step 14's S14-13 it copied the
         # operational history out of DuckDB (`core.pg_operational`), with the
         # three ids-diffs, the SMS state and the dashboard's user list riding
         # along; each had stood down since its chain or store moved, and they
-        # went with S14-13. What is left: `derive_gender_pg`, the one writer of
-        # new gender verdicts, and the copy of `data/bot.db`, which stands
-        # down under `KS_BOT_STORE=postgres`.
+        # went with S14-13. The copy of `data/bot.db`, standing down under
+        # `KS_BOT_STORE=postgres` since 2026-08-27, went on 2026-11-19. What
+        # is left: `derive_gender_pg`, the one writer of new gender verdicts.
         self._add_job(
             job_id="replicate_operational",
-            name="Gender derivation and bot state",
-            description="Derive new buyers' gender in Postgres and copy data/bot.db",
+            name="Gender derivation",
+            description="Derive new buyers' gender in Postgres",
             func=self._run_replicate_operational,
             trigger=IntervalTrigger(hours=1),
             max_instances=1,
@@ -907,6 +907,65 @@ class BackgroundScheduler:
             description="Keep each closed period's GA4 funnel before the 14-month horizon drops it",
             func=self._run_ga4_capture,
             trigger=CronTrigger(hour=GA4_RUN_AT.hour, minute=GA4_RUN_AT.minute),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: freeze the month's automatic goal (at half past the hours of
+        # `RUN_HOURS`, 00:30 Kyiv the first, and a few minutes after a
+        # start), revision 0037.
+        #
+        # The smart goal moved inside its month as its ML term drifted toward
+        # the actual (a median 4-6 %, ₴0.5M in July 2026), so the owner froze
+        # it on the 1st (2026-11-18). This keeps the month's answer for every
+        # sales type once, and `/goals/smart` reads it (`core/goal_freeze.py`).
+        # Hourly so a run turned away — a refused read, a derivation that has
+        # not yet taken in the month that has just ended, or an answer whose
+        # ML signal rests on part of a forecast, which waits for the next
+        # training — is asked again within the hour, and a 1st the process
+        # missed is frozen on the day it runs; once the month is frozen a run
+        # is one SELECT and stops. The hours skip the windows the schedule
+        # keeps clear (`goal_freeze.RUN_HOURS`). It has earned
+        # `first_run_delay_s`: idempotent and that cheap, and the start is
+        # what freezes the month in progress on the day this ships and on the
+        # day a 1st spent down comes back. Never before 00:30 on the 1st,
+        # which the module enforces: a start at 00:05 leaves it to 00:30. No
+        # heavy lock: it reads Postgres and writes one small table.
+        from core.goal_freeze import FIRST_RUN_DELAY_S as GOAL_FREEZE_DELAY_S
+        from core.goal_freeze import FREEZE_AT as GOAL_FREEZE_AT
+        from core.goal_freeze import RUN_HOURS as GOAL_FREEZE_HOURS
+
+        self._add_job(
+            job_id="month_goal_freeze",
+            name="Month goal freeze",
+            description="Freeze this month's automatic goal for every sales type, once",
+            func=self._run_month_goal_freeze,
+            trigger=CronTrigger(hour=",".join(str(h) for h in GOAL_FREEZE_HOURS),
+                                minute=GOAL_FREEZE_AT.minute),
+            max_instances=1,
+            coalesce=True,
+            first_run_delay_s=GOAL_FREEZE_DELAY_S,
+        )
+
+        # Job: the Monday question about promotions (daily tick at 10:05
+        # Kyiv, asks once an ISO week), revision 0039.
+        #
+        # The forecast cannot know a promotion in advance, so the bot asks
+        # the admins and `KS_PROMO_ASK_RECIPIENTS` which promotions the two
+        # weeks from the Monday hold: [Немає] is an answer and is stored,
+        # [Додати] opens the calendar (`core/promo_asks.py`). The weekly
+        # reports' shape — a daily tick against its own ledger,
+        # `app.promotion_asks` — so a Monday spent down becomes a Tuesday
+        # question. 10:05 is after the 09:30 and 09:45 reports and outside
+        # every window the schedule keeps clear.
+        from core.promo_asks import RUN_AT as PROMO_ASK_AT
+
+        self._add_job(
+            job_id="promo_weekly_ask",
+            name="Promotions: the Monday question",
+            description="Ask which promotions the next two weeks hold, once a week",
+            func=self._run_promo_weekly_ask,
+            trigger=CronTrigger(hour=PROMO_ASK_AT.hour, minute=PROMO_ASK_AT.minute),
             max_instances=1,
             coalesce=True,
         )
@@ -1122,7 +1181,7 @@ class BackgroundScheduler:
             return result
 
     async def _run_replicate_operational(self) -> Dict[str, Any]:
-        """The hourly job that kept its id: the buyers' gender, then the bot.
+        """The hourly job that kept its id: the buyers' gender.
 
         The id `replicate_operational` stays — `/api/jobs`' history and the
         catch-up read it — but since step 14's S14-13 nothing here copies out
@@ -1130,15 +1189,15 @@ class BackgroundScheduler:
         (`core.pg_operational`), the three ids-diffs (`pg_buyers`,
         `pg_backfill`, `pg_expense_backfill`), the SMS state and the
         dashboard's user list; every one of them had stood down since its
-        write chain or store switch moved, and they went with S14-13.
+        write chain or store switch moved, and they went with S14-13. The
+        copy of `data/bot.db` (`core.pg_bot_state`) stood down under
+        `KS_BOT_STORE=postgres` from 2026-08-27 and went on 2026-11-19.
 
-        What is left is the one writer of new gender verdicts and the copy of
-        `data/bot.db`. Never raises: each returns its own error rather than
-        propagating, so a Postgres fault cannot take a scheduler job into the
-        failure history it shares with the sync.
+        What is left is the one writer of new gender verdicts. Never raises:
+        it returns its error rather than propagating, so a Postgres fault
+        cannot take a scheduler job into the failure history it shares with
+        the sync.
         """
-        from core.pg_bot_state import replicate_bot_state
-
         with correlation_context():
             # Chain 4 writes the verdicts in Postgres
             # (`core/pg_buyers_write.py`), so the derivation is Postgres's:
@@ -1147,8 +1206,7 @@ class BackgroundScheduler:
             # gender field for any of them. Until step 14's S14-11 it followed
             # the chain's `mode()` — DuckDB's `derive_gender`, or nothing for a
             # flag nobody could read. Its own `try`: the derivation never
-            # raises, and a fault in it must not cost the copy of the bot's
-            # state either.
+            # raises, and a fault in it must not become the job's.
             from core import pg_buyers_write
 
             result: Dict[str, Any] = {}
@@ -1159,10 +1217,6 @@ class BackgroundScheduler:
                              exc_info=True)
                 gender = {"error": f"{type(exc).__name__}: {exc}"}
             result["gender"] = gender
-            # `data/bot.db` rides the same job rather than getting one of its
-            # own: same cadence, same grace window, and one schedule to reason
-            # about. It stands down under `KS_BOT_STORE=postgres`.
-            result["bot_state"] = await replicate_bot_state()
             logger.info("Operational replication: %s", result)
             return result
 
@@ -1195,6 +1249,38 @@ class BackgroundScheduler:
 
         with correlation_context():
             return await run_capture()
+
+    async def _run_month_goal_freeze(self) -> Dict[str, Any]:
+        """Freeze the Kyiv month's automatic goal, once per sales type
+        (revision 0037, `core/goal_freeze.py`).
+
+        A refused read — `generate_smart_goals` reads through `/goals`'
+        router — defers the whole month with nothing written (DN-20c): the
+        month is read live until a run freezes it, and the next run, within
+        the hour, or the next start, asks again. Any other failure raises into the job's
+        history, with nothing written either.
+        """
+        with correlation_context():
+            from core import goal_freeze, read_fallback
+            from core.store import get_store
+
+            store = await get_store()
+            try:
+                return await goal_freeze.freeze_month(store)
+            except read_fallback.ReadUnavailable as exc:
+                return {"skipped": True, **read_fallback.answered(
+                    "month_goal_freeze", exc,
+                    "nothing frozen; the month's goal is computed live "
+                    "until a run freezes it")}
+
+    async def _run_promo_weekly_ask(self) -> Dict[str, Any]:
+        """Ask about the next two weeks' promotions, once an ISO week
+        (revision 0039, `core/promo_asks.py`). A run that reached nobody
+        records nothing, and the next day's asks again."""
+        with correlation_context():
+            from core import promo_asks
+
+            return await promo_asks.run_weekly_ask()
 
     async def _run_manager_stats(self) -> Dict[str, Any]:
         """Run manager stats update job."""
@@ -2006,10 +2092,10 @@ class BackgroundScheduler:
 
     async def _run_dq_mirror_landing(self) -> Dict[str, Any]:
         """The `mirror_landing` layer: the Postgres-alone completeness and
-        liveness checks, `data/bot.db` against its copy, the витрина, and
-        ClickHouse against Postgres (`core/mirror_reconciliation.py`'s
-        docstring). Until step 14's S14-12 it was Reconciliation A, Postgres
-        against DuckDB, and the closing criterion of step 05.
+        liveness checks and ClickHouse against Postgres
+        (`core/mirror_reconciliation.py`'s docstring). Until step 14's S14-12
+        it was Reconciliation A, Postgres against DuckDB, and the closing
+        criterion of step 05.
 
         Its own layer with its own age rather than riding along with the
         integrity scan — one layer covering two jobs would make a stale check
@@ -2037,7 +2123,6 @@ class BackgroundScheduler:
             MIRROR_LAYER,
             configured,
             pg_gold_internal_check,
-            reconcile_bot_state,
             reconcile_buyer_completeness,
             reconcile_order_utm_completeness,
             reconcile_order_versions,
@@ -2121,10 +2206,9 @@ class BackgroundScheduler:
                 # Gold's two grains against each other (DN-28): Postgres
                 # alone, asked on every run since `reconcile_gold` went.
                 await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
-                # And the third store. `data/bot.db` is SQLite, not DuckDB, and
-                # it is the only one of the three that is in no backup — which
-                # is the whole reason its fifty rows are being copied at all.
-                await check("reconcile_bot_state", lambda: reconcile_bot_state())
+                # `reconcile_bot_state`, `data/bot.db` against its copy in
+                # `app.*`, ran here until 2026-11-19: it stood down under
+                # `KS_BOT_STORE=postgres`, and went with the copy.
                 # And the archive, which is none of the above: it has no
                 # counterpart to be compared against, so this asks whether it
                 # is still being written rather than whether it agrees with
@@ -2587,9 +2671,12 @@ class BackgroundScheduler:
         from core.data_quality import IntegrityIssue, Severity
         from core.mirror_reconciliation import configured
         from core.reconciliation_io import (
+            carries_discounts,
             carries_expenses,
+            classify_discount_discrepancies,
             classify_expense_discrepancies,
             left_as_stored,
+            postgres_discounts_of,
             postgres_expenses_of,
             postgres_orders_in_window,
             rollup_from_orders,
@@ -2674,6 +2761,14 @@ class BackgroundScheduler:
                 pool, carries_expenses(kc_orders, pg_orders),
                 leave_out=left_as_stored(kc_orders))
             discrepancies += classify_expense_discrepancies(pg_expenses, kc_orders)
+            # Each order's discount, the same way (revision 0038):
+            # VALUE_MISMATCH on `products_total`, `total_discount` and the
+            # lines' discount in money, WARN, exact, and repaired by id below
+            # with the expenses. Only the figures KeyCRM's payload carried,
+            # and only orders chain 3 writes.
+            pg_discounts = await postgres_discounts_of(
+                pool, carries_discounts(kc_orders, pg_orders))
+            discrepancies += classify_discount_discrepancies(pg_discounts, kc_orders)
             logger.info(
                 f"DQ reconciliation (Postgres): pg_cells={len(pg_rollup)} "
                 f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
@@ -2963,7 +3058,8 @@ class BackgroundScheduler:
         persisted and alerted on CRITICAL by its own arm. Then re-fetches by
         id the orders the Postgres arm found missing (MISSING_IN_DK) or held
         wrong (STATUS_DRIFT, VALUE_MISMATCH — an order's expenses included
-        since O3 (a), last), and writes them under force.
+        since O3 (a), and its discount since revision 0038, both last), and
+        writes them under force.
 
         Until step 14's S14-12 the snapshot was compared against DuckDB too,
         on layer `reconciliation`; that arm stood down from chain 3's flip
@@ -2973,7 +3069,7 @@ class BackgroundScheduler:
         from zoneinfo import ZoneInfo
         from core.data_quality import DiscrepancyClass
         from core.reconciliation_io import (
-            EXPENSE_FIELDS,
+            REPAIRED_LAST,
             keycrm_orders_in_window,
             rollup_from_orders,
         )
@@ -3109,14 +3205,18 @@ class BackgroundScheduler:
             #    expense fields) is re-fetched too, last: since O2 (a) the
             #    write of the re-fetched order deletes what KeyCRM no longer
             #    lists and writes what moved, and a cost moves no revenue, so
-            #    the CRITICAL drifts keep the front of the bounded batch.
+            #    the CRITICAL drifts keep the front of the bounded batch. An
+            #    order whose discount differs (revision 0038) goes with them,
+            #    for the same reason: the write puts KeyCRM's figures on the
+            #    header and on every line, and archives no version — the
+            #    discount is not versioned.
             repair = None
             if not error_message:
                 source = (pg_result or {}).get("discrepancies") or []
 
-                def ids_of(*classes, costs: bool = False) -> list:
+                def ids_of(*classes, last: bool = False) -> list:
                     return sorted({oid for d in source if d.diff_class in classes
-                                   and (d.field in EXPENSE_FIELDS) == costs
+                                   and (d.field in REPAIRED_LAST) == last
                                    for oid in d.order_ids})
 
                 missing = ids_of(DiscrepancyClass.MISSING_IN_DK)
@@ -3124,7 +3224,7 @@ class BackgroundScheduler:
                                                  DiscrepancyClass.VALUE_MISMATCH)
                            if oid not in set(missing)]
                 costed = [oid for oid in ids_of(DiscrepancyClass.VALUE_MISMATCH,
-                                                costs=True)
+                                                last=True)
                           if oid not in set(missing) | set(drifted)]
                 repairable = missing + drifted + costed
 
@@ -3137,8 +3237,8 @@ class BackgroundScheduler:
                         if repair.get("remaining"):
                             logger.warning(
                                 "DQ repair: %d order(s) left for the next run "
-                                "(%d missing, %d drifted, %d with expenses "
-                                "differing found)",
+                                "(%d missing, %d drifted, %d with expenses or "
+                                "a discount differing found)",
                                 repair["remaining"], len(missing), len(drifted),
                                 len(costed))
                     except Exception as e:

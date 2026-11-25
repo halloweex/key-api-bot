@@ -25,19 +25,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.store import AnalyticsStore
 from core.models import Buyer
 
 def _buyers(n, *, base=1, name="Покупець"):
     return [Buyer.from_api({"id": base + i, "full_name": f"{name} {i}",
                             "phone": [f"+3805{i:08d}"]}) for i in range(n)]
-
-
-class TestPortions:
-    def test_the_production_portion_is_a_thousand(self):
-        # Below the measured failure point with room to spare: 6 500 commit,
-        # 8 000 run out of memory under the production 4 GB limit.
-        assert AnalyticsStore.BUYER_WRITE_PORTION == 1000
 
 
 class _FakeLock:

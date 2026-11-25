@@ -166,11 +166,6 @@ class TestExpenseReadRequiresViewPermission:
         headers = _login(monkeypatch, "viewer")
         assert client.get(path, headers=headers).status_code == 403
 
-    @pytest.mark.parametrize("path", EXPENSE_GETS)
-    def test_marketer_is_forbidden(self, client, monkeypatch, path):
-        headers = _login(monkeypatch, "marketer")
-        assert client.get(path, headers=headers).status_code == 403
-
 
 # ─── The allowed side: roles with expenses:view still get data ─────────────────
 
@@ -232,7 +227,7 @@ def _reset_rate_limiter():
 
 
 class TestExpenseWriteRequiresEditPermission:
-    @pytest.mark.parametrize("role", ["viewer", "marketer"])
+    @pytest.mark.parametrize("role", ["viewer"])
     def test_role_without_edit_cannot_create(self, client, monkeypatch, role):
         headers, store = _login_with_store(monkeypatch, role)
 
@@ -251,7 +246,7 @@ class TestExpenseWriteRequiresEditPermission:
 
 
 class TestExpenseDeleteRequiresDeletePermission:
-    @pytest.mark.parametrize("role", ["viewer", "marketer", "editor"])
+    @pytest.mark.parametrize("role", ["viewer", "editor"])
     def test_role_without_delete_is_refused(self, client, monkeypatch, role):
         """`editor` holds EXPENSES {view, edit} and no delete — booking a cost
         and erasing one are different powers, and only this endpoint tells

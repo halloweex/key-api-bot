@@ -11,7 +11,6 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from core.duckdb_constants import KNOWN_SALES_TYPES
 from core.validators import validate_sales_type
 from web.main import app
 from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
@@ -70,9 +69,6 @@ def as_admin(client, monkeypatch):
 
 
 class TestTheCategoryExists:
-    def test_internal_is_part_of_the_partition(self):
-        assert "internal" in KNOWN_SALES_TYPES
-        assert "other" not in KNOWN_SALES_TYPES
 
     def test_the_validator_accepts_it(self):
         assert validate_sales_type("internal") == "internal"

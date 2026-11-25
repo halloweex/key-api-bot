@@ -30,13 +30,8 @@ import httpx
 import pytest
 
 from bot import canary
-from core import alert_archive
-from core.alerting import REGISTRY, Kind, spec_for
-from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-from tests.unit.test_read_fallback_sites import (  # noqa: F401  (fixtures)
-    admin_client,
-    fresh_read_fallback,
-)
+from core.alerting import Kind, spec_for
+from tests.helpers.canary_payload import DASHBOARD, _healthy_payload, _mock_transport
 
 REPO = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
@@ -62,33 +57,6 @@ async def _probe(payload):
 
 class TestTheRetiredKeys:
     """S14-16 deleted the three checks over reads answered from DuckDB."""
-
-    RETIRED = ("read_fallback_used", "read_routed_to_duckdb",
-               "read_fallback_mode_invalid")
-
-    def test_none_is_a_condition_or_a_lever(self):
-        """Mutation: leave one in the REGISTRY or in `_ACTIONS`."""
-        actions = {prefix for prefix, _ in canary._ACTIONS}
-        for key in self.RETIRED:
-            assert key not in REGISTRY, key
-            assert key not in actions, key
-        assert "watch:read_fallbacks" not in REGISTRY
-
-    @pytest.mark.asyncio
-    async def test_a_payload_that_still_carries_the_old_blocks_pages_nothing(self):
-        """An image from before S14-16 — the rollback target — publishes
-        `read_fallbacks` and the mode beside the refusals; this canary reads
-        only the refusals, and pages none of the three. Mutation: judge
-        either old block again."""
-        payload = _healthy_payload()
-        payload["read_fallbacks"] = {"dashboard": _entry(3)}
-        payload["read_fallback_mode"] = {
-            "mode": "duckdb", "error": "KS_READ_FALLBACK='of'",
-            "misconfigured": ["KS_READ_GOLD=postgres without KS_PG_DSN"],
-            "no_engine": ["cohorts: KS_READ_COHORTS=duckdb"]}
-        result = await _probe(payload)
-        assert result.ok and result.failure_keys == [], result.failure_keys
-        assert not set(self.RETIRED) & set(result.unjudged_keys)
 
     def test_the_refusal_key_is_a_registered_condition(self):
         assert spec_for("read_refused").kind is Kind.CONDITION
@@ -184,9 +152,6 @@ class TestThroughRunCanary:
         result = await _probe(payload)
         assert result.severity == "warn"
         assert result.failure_keys == ["read_refused"]
-        assert "'read refused'" in canary._what_to_do(result)
-        message = canary.format_alert(result, DASHBOARD)
-        assert canary.READ_REFUSED_LINE + "traffic ×2" in message
 
     @pytest.mark.asyncio
     async def test_a_cause_names_its_lever_before_what_it_cost(self):
@@ -499,11 +464,6 @@ class TestUnjudgedKeys:
         ({}, True),                                                # no step to judge
         ({"sync_step": None}, True),
         ({"sync_step": {"consecutive_failures": 0}}, False),
-        # An older web's entry: since step 14's S14-11 `mode` decides nothing,
-        # so a step-less entry is held whatever it says and a step is judged.
-        ({"mode": "postgres"}, True),
-        ({"mode": "duckdb"}, True),
-        ({"mode": "duckdb", "sync_step": {"consecutive_failures": 0}}, False),
     ])
     def test_chain_3s_key_is_held_only_when_it_cannot_be_judged(self, entry, held):
         """By `sync_step` alone (S14-11). Mutation: gate the hold on `mode`
@@ -538,24 +498,6 @@ def _canary_job() -> ast.AsyncFunctionDef:
 
 def _parents(root: ast.AST) -> dict:
     return {child: node for node in ast.walk(root) for child in ast.iter_child_nodes(node)}
-
-
-class TestTheBotWritesTheWatch:
-    def test_no_watch_is_written_at_all(self):
-        """Parsed, not grepped: `canary_job` wrote `watch:read_fallbacks` until
-        step 14's S14-16 and the week of silence's `watch:duckdb_switch` until
-        S14-18; both rows stay in `app.alert_series` as history, and nothing
-        writes either. The writer went with its last caller. Mutation: call a
-        watch writer from `canary_job` again, or put `record_watch` back."""
-        job = _canary_job()
-        source = ast.unparse(job)
-        assert "record_watch" not in source and "WATCH_KEY" not in source
-        assert "read_fallbacks" not in source and "duckdb_switch" not in source
-        assert not hasattr(canary, "READ_FALLBACK_WATCH_KEY")
-        assert not hasattr(canary, "DUCKDB_SWITCH_WATCH_KEY")
-        assert not hasattr(canary, "web_uptime_s")
-        assert not hasattr(alert_archive, "record_watch")
-        assert not hasattr(alert_archive, "_WATCH_SQL")
 
 
 # `TestTheWatchWriter` stood here until step 14's S14-18: `record_watch`

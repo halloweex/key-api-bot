@@ -212,22 +212,10 @@ def test_gpg_runs_only_through_gpg_safe():
                 f"{path.relative_to(REPO)} calls gpg_safe without sourcing "
                 f"deploy/gpg_safe.sh"
             )
-    assert {"pg_offsite.sh", "pg_restore_drill.sh",
-            "ark_ship.sh"} <= set(callers), callers
-
-    # The walk itself, on the shape a review found it missing: a call whose
-    # options start on the continuation line.
-    probe = "f() {\n    gpg \\\n        --symmetric --batch -o out in\n}\n"
-    assert re.findall(r"(?<![\w./-])gpg\s+-\S*", _calls(probe)), "continuation not joined"
-
-    lib = "\n".join(_code_lines(definers[0].read_text()))
-    assert 'home="$(mktemp -d ' in lib, "gpg_safe's home must be made fresh per call"
-    assert re.search(r'GNUPGHOME="\$home" gpg --no-keyring "\$@"', lib), (
-        "gpg_safe must run gpg in its own home"
-    )
-    assert not re.search(r"(?m)^\s*set\s+-", lib), (
-        "a sourced library sets no shell options; errexit is the caller's"
-    )
+    # `ark_ship.sh` was the third until it was deleted on 2026-11-19.
+    assert {"pg_offsite.sh", "pg_restore_drill.sh"} <= set(callers), callers
+    # What gpg_safe itself does (a fresh home per call, `--no-keyring`, no
+    # shell options of its own) is run, not read: tests/unit/test_gpg_safe.py.
 
 
 def test_the_shipper_holds_a_lock_it_does_not_wait_for():
@@ -330,15 +318,16 @@ _DOCKER_RUN = re.compile(r"(?:^\s*|\$\(|=\()docker run\b[^\n]*", re.M)
 
 
 def test_the_archive_tools_run_only_a_pinned_image():
-    """Step 14 takes DuckDB out of the images at S14-19, and these three read
+    """Step 14 takes DuckDB out of the images at S14-19, and these tools read
     archives DuckDB 1.5.5 wrote. Each takes its image from a variable with no
     default, sources deploy/archive_image.sh and asks the image before it
     uses it, names no image of its own in code, and never pulls. Mutation:
     put `:-halloweex/keycrm-web:latest` back on any of them, or drop a
     `--pull never`."""
     names = {p.name for p in ARCHIVE_TOOLS}
-    # `daily_offsite.sh` was the third until step 14's S14-18 deleted it.
-    assert names >= {"restore-test.sh", "ark_ship.sh"}, names
+    # `daily_offsite.sh` was the third until step 14's S14-18 deleted it, and
+    # `ark_ship.sh` the second until it was deleted on 2026-11-19.
+    assert names >= {"restore-test.sh"}, names
     for path in ARCHIVE_TOOLS:
         code = _calls(path.read_text())
         where = path.relative_to(REPO)

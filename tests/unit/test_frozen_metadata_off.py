@@ -30,15 +30,13 @@ import pytest
 import pytest_asyncio
 
 from core import (
-    chain_latch, data_quality as dq, dq_journal,
-    pg_chain_watermarks, pg_frozen_metadata, pg_traffic_ledger_write,
-    pg_weekly_ledger_write, report_ledger,
+    chain_latch, data_quality as dq, dq_journal, pg_chain_watermarks,
+    pg_frozen_metadata,
 )
 from core.store import AnalyticsStore
 
 UTC = timezone.utc
 NOW = datetime(2026, 10, 10, 9, 0, tzinfo=UTC)
-WEEK = datetime(2026, 9, 28).date()
 DSN = os.getenv("KS_PG_DSN")
 
 
@@ -110,36 +108,6 @@ def _untouched(reached):
 
 
 class TestTheInheritedWatermark:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("chain,key", [
-        ("pg_orders_write", "orders"),
-        ("pg_orders_write", "meilisearch_pg"),
-    ])
-    async def test_under_off_the_copy_stands_in(self, flags, duckdb_off, chain, key):
-        """Chain 3 inherits while Postgres holds no key: under off the
-        stand-in is DuckDB's stamp as Postgres copied it, read without the
-        file. Chains 6 and 6a did too, until step 14's S14-09 took the
-        stand-in off them (below). Mutation: drop the `is_off()` branch — the
-        read goes to DuckDB, is refused, and the order step of every tick
-        fails (the sweep's rows for `get_last_sync_time`)."""
-        frozen = NOW - timedelta(hours=3)
-        chain_latch.latch(chain)
-        flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
-        copy = Copy(flags, {f"last_sync_{key}": frozen.isoformat()})
-        assert await AnalyticsStore().get_last_sync_time(key) == frozen
-        assert copy.asked == [f"last_sync_{key}"]
-        _untouched(duckdb_off)
-
-    @pytest.mark.asyncio
-    async def test_postgres_s_own_value_wins_and_the_copy_is_not_asked(
-            self, flags, duckdb_off):
-        live = NOW - timedelta(minutes=1)
-        chain_latch.latch("pg_orders_write")
-        flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=live))
-        copy = Copy(flags, {"last_sync_orders": (NOW - timedelta(days=3)).isoformat()})
-        assert await AnalyticsStore().get_last_sync_time("orders") == live
-        assert copy.asked == []
-        _untouched(duckdb_off)
 
     @pytest.mark.asyncio
     async def test_absent_from_the_copy_too_it_is_absent(self, flags, duckdb_off):
@@ -281,8 +249,6 @@ class TestTheFreshnessCheck:
                                   "sync_watermarks_unwatched"]
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
         assert unwatched.count == 1
-        assert "of orders " in unwatched.description
-        assert "app.sync_metadata" in unwatched.description
         assert "freshness_orders" in dq.unverified_conditions([], issues)
 
     def test_under_off_nothing_read_at_all_is_unwatched_whole(self, flags, duckdb_off):
@@ -371,37 +337,7 @@ def pg_beat(monkeypatch):
     return state
 
 
-@pytest.fixture
-def no_duckdb(monkeypatch):
-    """A store whose file may not be reached, wherever the code looks for it."""
-    from core import store as core_store
-
-    def connection(self):
-        raise AssertionError("reached DuckDB")
-
-    monkeypatch.setattr(core_store.AnalyticsStore, "connection", connection,
-                        raising=False)
-
-
 class TestTheDigestBeat:
-    @pytest.mark.asyncio
-    async def test_under_off_an_absent_beat_is_the_copy_s(self, flags, duckdb_off, pg_beat):
-        """Mutation: drop the copy — the first digest under off would restate
-        every standing finding as new, or the read would reach the file."""
-        beat = "2026-10-09T06:00:00+00:00"
-        copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: beat})
-        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
-        assert last == datetime.fromisoformat(beat)
-        assert copy.asked == [dq_journal.DIGEST_MARKER_KEY]
-        _untouched(duckdb_off)
-
-    @pytest.mark.asyncio
-    async def test_under_off_postgres_s_beat_wins(self, flags, duckdb_off, pg_beat):
-        pg_beat["marker"] = "2026-10-10T06:00:00+00:00"
-        copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-01-01T06:00:00+00:00"})
-        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
-        assert last == datetime.fromisoformat(pg_beat["marker"])
-        assert copy.asked == []
 
     @pytest.mark.asyncio
     async def test_under_off_no_beat_anywhere_is_none(self, flags, duckdb_off, pg_beat):
@@ -409,49 +345,6 @@ class TestTheDigestBeat:
         last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
         assert last is None
         _untouched(duckdb_off)
-
-    @pytest.mark.asyncio
-    async def test_under_on_the_beat_is_the_copys_too(self, flags, no_duckdb, pg_beat,
-                                                      monkeypatch):
-        """Until S14-10 a process on `KS_DUCKDB=on` inherited the beat from
-        DuckDB's own `sync_metadata`; the journal's DuckDB half went, and the
-        copy answers in either mode. Mutation: inherit only under off."""
-        copy = Copy(flags, {dq_journal.DIGEST_MARKER_KEY: "2026-09-29T06:00:00+00:00"})
-        last, _ = await dq_journal.digest_inputs(("integrity",), NOW)
-        assert last == datetime(2026, 9, 29, 6, tzinfo=UTC)
-        assert copy.asked == [dq_journal.DIGEST_MARKER_KEY]
-
-
-# ─── 4. The report ledgers' adoption ─────────────────────────────────────────
-
-
-class TestTheLedgerAdoptsNothingUnderOff:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("ledger,chain", [
-        (report_ledger.WEEKLY, pg_weekly_ledger_write),
-        (report_ledger.TRAFFIC, pg_traffic_ledger_write),
-    ])
-    async def test_postgres_alone_answers(self, flags, duckdb_off, ledger, chain):
-        """Mutation: keep the adopt under off — the gate reaches the file
-        before every report (the sweep's `already_sent` rows)."""
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
-        assert await report_ledger.already_sent(ledger, WEEK, "retail") is False
-        flags.setattr(chain, "find_sent", AsyncMock(return_value={"week_start": WEEK}))
-        assert await report_ledger.already_sent(ledger, WEEK, "retail") is True
-        _untouched(duckdb_off)
-
-    @pytest.mark.asyncio
-    async def test_under_on_nothing_is_adopted_either(self, flags, no_duckdb, monkeypatch):
-        """Until S14-10 a process on `KS_DUCKDB=on` adopted a week only DuckDB
-        held; the adoption went with the ledgers' DuckDB half, and Postgres
-        alone answers in either mode. Mutation: put the adoption back."""
-        chain = pg_weekly_ledger_write
-        flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
-        adopted = AsyncMock()
-        flags.setattr(chain, "mark_sent", adopted)
-        assert await report_ledger.already_sent(report_ledger.WEEKLY, WEEK, "retail") is False
-        assert adopted.await_count == 0
 
 
 # ─── The module ──────────────────────────────────────────────────────────────

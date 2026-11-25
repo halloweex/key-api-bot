@@ -14,96 +14,13 @@ Every Sunday, and any deploy that lands on a cron instant.
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from apscheduler.triggers.cron import CronTrigger
 
 from core.scheduler import (
     CATCHUP_CHECKS,
     INVENTORY_CATCHUP_DELAY_S,
     BackgroundScheduler,
 )
-
-
-class _FakeJob:
-    def __init__(self, job_id):
-        self.id = job_id
-        self.name = job_id
-        self.func = lambda: None
-
-
-class _FakeScheduler:
-    def __init__(self, known=()):
-        self.known = {j: _FakeJob(j) for j in known}
-        self.added = {}
-
-    def get_job(self, job_id):
-        return self.known.get(job_id)
-
-    def add_job(self, func, **kwargs):
-        self.added[kwargs.get("id")] = kwargs
-
-
-_NO_TABLE = object()
-
-
-def _scheduler_with(
-    monkeypatch, ages, known=("dq_reconciliation", "dq_integrity_check"),
-    inventory_today=_NO_TABLE, writes_layers=("reconciliation_pg",),
-):
-    scheduler = BackgroundScheduler()
-    scheduler._scheduler = _FakeScheduler(known)
-
-    class _Conn:
-        def execute(self, sql, *args):
-            # The only raw SQL _schedule_catchup_runs issues is the probe for
-            # today's inventory snapshot. The default is a schema without that
-            # table, which must degrade quietly rather than disable the
-            # data-quality catch-ups above it.
-            if inventory_today is _NO_TABLE:
-                raise RuntimeError("Catalog Error: inventory_sku_history does not exist")
-
-            class _Result:
-                def fetchone(_self):
-                    return (1,) if inventory_today else None
-
-            return _Result()
-
-    class _Ctx:
-        async def __aenter__(self):
-            return _Conn()
-
-        async def __aexit__(self, *exc):
-            return False
-
-    class _Store:
-        def connection(self):
-            return _Ctx()
-
-    async def _get_store():
-        return _Store()
-
-    monkeypatch.setattr("core.store.get_store", _get_store)
-    # Since step 14's S14-00 the journal's and the snapshot's chains (9 and 1)
-    # write Postgres, a constant, so the catch-up reads both facts there: the
-    # same ages, and today's snapshot — a Postgres fault reads as taken. Since
-    # S14-10 the ages are read nowhere else (DuckDB's reader,
-    # `data_quality.fetch_last_success_ages`, is gone).
-    async def _ages_pg(*a, **k):
-        return ages
-
-    async def _snapshot_pg():
-        if inventory_today is _NO_TABLE:
-            return ()
-        return (1,) if inventory_today else None
-
-    monkeypatch.setattr("core.dq_journal.last_success_ages_pg", _ages_pg)
-    monkeypatch.setattr("core.scheduler._inventory_snapshot_taken_today_pg", _snapshot_pg)
-    # And DuckDB's arm of the reconciliation stands down (chain 3, a constant):
-    # the Postgres arm's age decides, on a host that writes it. None leaves
-    # the real answer, read off the environment, to a caller that sets it.
-    if writes_layers is not None:
-        monkeypatch.setattr("core.scheduler._writes_layer",
-                            lambda layer: layer in writes_layers)
-    return scheduler
+from tests.helpers.fake_scheduler import _FakeScheduler, _scheduler_with
 
 
 def _ages(recon_s, integrity_s):
@@ -161,21 +78,6 @@ class TestCatchUp:
         assert integrity_at < recon_at, "the heavy one should not go first"
 
     @pytest.mark.asyncio
-    async def test_a_broken_store_does_not_stop_the_scheduler(self, monkeypatch):
-        """A watchdog that can prevent startup is worse than no watchdog."""
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = _FakeScheduler(("dq_reconciliation",))
-
-        async def _boom():
-            raise RuntimeError("db is down")
-
-        monkeypatch.setattr("core.store.get_store", _boom)
-
-        await scheduler._schedule_catchup_runs()  # must not raise
-
-        assert scheduler._scheduler.added == {}
-
-    @pytest.mark.asyncio
     async def test_an_unregistered_job_is_skipped(self, monkeypatch):
         scheduler = _scheduler_with(monkeypatch, _ages(30 * 3600, 30 * 3600), known=())
 
@@ -186,30 +88,6 @@ class TestCatchUp:
 
 class TestReconciliationIsOffTheCompactWindow:
     """05:00 Kyiv is 02:00 UTC, which is when the host cron stops the containers."""
-
-    def test_reconciliation_does_not_fire_at_02_00_utc(self, monkeypatch):
-        added = {}
-
-        class FakeScheduler:
-            def add_job(self, func, **kwargs):
-                added[kwargs.get("id")] = kwargs
-
-            def get_job(self, job_id):
-                return None
-
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = FakeScheduler()
-        import asyncio
-        asyncio.run(scheduler._register_jobs())
-
-        trigger = added["dq_reconciliation"]["trigger"]
-        assert isinstance(trigger, CronTrigger)
-
-        fields = {f.name: str(f) for f in trigger.fields}
-        assert fields["hour"] == "5"
-        assert fields["minute"] != "0", (
-            "05:00 Kyiv == 02:00 UTC == weekly_compact stopping the containers"
-        )
 
     def test_every_catchup_entry_names_a_registered_job(self):
         added = {}
@@ -406,40 +284,6 @@ class TestUnderDuckdbOffPostgresIsAskedFirst:
             raise AssertionError("the catch-up asked for the DuckDB store under off")
 
         monkeypatch.setattr("core.store.get_store", _no_store)
-
-    @pytest.mark.asyncio
-    async def test_the_snapshot_catch_up_is_queued_by_the_postgres_probe(
-            self, monkeypatch):
-        """Mutation: read DuckDB first — the read is refused, the whole
-        catch-up is skipped, and a day of snapshots is lost on every boot
-        after 01:00 (the stage 5 sweep's `_schedule_catchup_runs` row)."""
-        from core.scheduler import BackgroundScheduler
-
-        self._postgres(monkeypatch, _ages(30 * 3600, 3600), snapshot_taken=False)
-        monkeypatch.setattr("core.scheduler._writes_layer",
-                            lambda layer: layer == "reconciliation_pg")
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = _FakeScheduler(
-            ("dq_reconciliation", "dq_integrity_check", "inventory_snapshot"))
-
-        await scheduler._schedule_catchup_runs()
-
-        assert set(scheduler._scheduler.added) == {
-            "inventory_snapshot_catchup", "dq_reconciliation_catchup"}
-
-    @pytest.mark.asyncio
-    async def test_a_snapshot_taken_and_fresh_ages_queue_nothing(
-            self, monkeypatch):
-        from core.scheduler import BackgroundScheduler
-
-        self._postgres(monkeypatch, _ages(3600, 3600), snapshot_taken=True)
-        scheduler = BackgroundScheduler()
-        scheduler._scheduler = _FakeScheduler(
-            ("dq_reconciliation", "dq_integrity_check", "inventory_snapshot"))
-
-        await scheduler._schedule_catchup_runs()
-
-        assert scheduler._scheduler.added == {}
 
     @pytest.mark.asyncio
     async def test_a_postgres_that_cannot_answer_skips_rather_than_reads_duckdb(

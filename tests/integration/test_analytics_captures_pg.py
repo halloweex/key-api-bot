@@ -24,10 +24,7 @@ What is pinned, each named by the mutation it kills:
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from datetime import timedelta
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -37,14 +34,18 @@ import pytest_asyncio
 from core import analytics_captures as cap
 from core import pg
 from tests import migration_replay as replay
+from tests.helpers.alembic_sql import _alembic_sql
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
-REPO = Path(__file__).resolve().parents[2]
 REV = replay.load(replay.VERSIONS / "0036_analytics_captures.py")
 BEFORE = "0035_batch_e_chains"
 HEAD = "0036_analytics_captures"
+# The database's head, which 0037 (the frozen month goals), 0038 (the
+# discount columns) and 0039 (the promotions calendar) moved past 0036: the
+# steps below go from and to it, through 0036, as a rollback would.
+CURRENT = pg.REQUIRED_REVISION
 
 # One row each, the least every table's NOT NULLs accept.
 ONE_ROW_EACH = {
@@ -81,20 +82,6 @@ ONE_ROW_EACH = {
 }
 
 
-def _alembic_sql(*args: str) -> str:
-    """What `alembic <args> --sql` would execute, without its BEGIN/COMMIT, so
-    it can run inside the test's own transaction."""
-    out = subprocess.run(
-        [sys.executable, "-m", "alembic", *args, "--sql"],
-        cwd=REPO, capture_output=True, text=True, timeout=120,
-        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
-    )
-    assert out.returncode == 0, out.stderr[-2000:]
-    lines = [line for line in out.stdout.splitlines()
-             if line.strip() not in ("BEGIN;", "COMMIT;")]
-    return "\n".join(lines)
-
-
 async def _stamp(conn) -> str:
     return await conn.fetchval("SELECT version_num FROM meta.alembic_version")
 
@@ -108,7 +95,8 @@ class TestTheRevisionOnAServer:
     async def test_the_eleven_tables_are_there_at_the_head(self):
         conn = await asyncpg.connect(DSN)
         try:
-            assert await _stamp(conn) == HEAD == pg.REQUIRED_REVISION
+            assert await _stamp(conn) == CURRENT
+            assert HEAD in [m.revision for m in replay.lineage(CURRENT)]
             missing = [t for t in REV.TABLES
                        if await conn.fetchval("SELECT to_regclass($1)", t) is None]
             assert not missing
@@ -143,17 +131,22 @@ class TestTheRevisionOnAServer:
         try:
             for statement in REV.STATEMENTS:
                 await conn.execute(statement)
-            await conn.execute(_alembic_sql("upgrade", f"{BEFORE}:{HEAD}"))
-            assert await _stamp(conn) == HEAD
+            # Where a stamp-only downgrade leaves it, then up through 0036.
+            await conn.execute("UPDATE meta.alembic_version SET version_num = $1", BEFORE)
+            await conn.execute(_alembic_sql("upgrade", f"{BEFORE}:{CURRENT}"))
+            assert await _stamp(conn) == CURRENT
         finally:
             await tx.rollback()
             await conn.close()
 
     @pytest.mark.asyncio
     async def test_the_downgrade_moves_the_stamp_and_keeps_every_row(self):
-        """D2, as Alembic renders it and the server runs it: down to 0035, the
-        stamp is 0035, `rollback-step14`'s check passes, every table is there
-        with its row; up again, the stamp is 0036 and nothing else moved.
+        """D2, as Alembic renders it and the server runs it: down to 0035 from
+        the head (through the stamp-only steps of 0039, the promotions
+        calendar, 0038, the discount columns, and 0037, the frozen month
+        goals), the stamp is 0035,
+        `rollback-step14`'s check passes, every table is there with its row;
+        up again, the stamp is the head and nothing else moved.
         Kills: a DROP in the downgrade, or a re-upgrade that is not a no-op."""
         conn = await asyncpg.connect(DSN)
         tx = conn.transaction()
@@ -164,13 +157,13 @@ class TestTheRevisionOnAServer:
             before = await _counts(conn)
             assert all(n >= 1 for n in before.values())
 
-            await conn.execute(_alembic_sql("downgrade", f"{HEAD}:{BEFORE}"))
+            await conn.execute(_alembic_sql("downgrade", f"{CURRENT}:{BEFORE}"))
             assert await _stamp(conn) == BEFORE
             await pg.require_revision(BEFORE, conn=conn)
             assert await _counts(conn) == before
 
-            await conn.execute(_alembic_sql("upgrade", f"{BEFORE}:{HEAD}"))
-            assert await _stamp(conn) == HEAD
+            await conn.execute(_alembic_sql("upgrade", f"{BEFORE}:{CURRENT}"))
+            assert await _stamp(conn) == CURRENT
             assert await _counts(conn) == before
         finally:
             await tx.rollback()

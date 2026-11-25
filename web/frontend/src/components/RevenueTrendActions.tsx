@@ -1,7 +1,21 @@
-import type { RevenueForecast } from '../types/api'
-import { formatShortCurrency, getCompareTypeOptions } from './revenueTrendHelpers'
+import type { MouseEvent } from 'react'
+import type {
+  PlannedPromotion,
+  RevenueForecast,
+  RevenueForecastBlackFriday,
+  RevenueForecastRange,
+} from '../types/api'
+import {
+  formatDayRange,
+  formatShortCurrency,
+  formatShortRange,
+  getCompareTypeOptions,
+} from './revenueTrendHelpers'
 import type { CompareType } from './revenueTrendTypes'
 import { Select } from './Select'
+import { navigate } from '../hooks/useRouter'
+import { PROMOTIONS_HREF } from '../utils/deepLink'
+import { promotionDays } from '../utils/promotions'
 
 interface GrowthTotals {
   current: number
@@ -11,17 +25,37 @@ interface GrowthTotals {
 
 interface ActionsProps {
   forecast: RevenueForecast | undefined
+  /** The month's 80% range (`/api/revenue/forecast`): pass it for the month only. */
+  monthRange?: RevenueForecastRange | null
+  /** What last year's Black Friday would add: pass it for the month only. */
+  blackFriday?: RevenueForecastBlackFriday | null
+  /** The promotions planned for the rest of the month, a line each: pass
+   *  them for the month only. */
+  plannedPromotions?: PlannedPromotion[] | null
+  /** «+ акція» to the promotions calendar: the month, for `marketing` edit. */
+  canAddPromotion?: boolean
   growthData: GrowthTotals | undefined
   isLoading: boolean
   compareType: CompareType
   /** False when the period has nothing before it: no comparison to pick. */
   canCompare?: boolean
   onCompareTypeChange: (type: CompareType) => void
-  t: (key: string) => string
+  t: (key: string, options?: Record<string, string | number>) => string
+}
+
+/** In-app, unless the reader asked for a new tab or window. */
+function openCalendar(e: MouseEvent<HTMLAnchorElement>) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+  e.preventDefault()
+  navigate(PROMOTIONS_HREF)
 }
 
 export function RevenueTrendActions({
   forecast,
+  monthRange,
+  blackFriday,
+  plannedPromotions,
+  canAddPromotion = false,
   growthData,
   isLoading,
   compareType,
@@ -29,39 +63,115 @@ export function RevenueTrendActions({
   onCompareTypeChange,
   t,
 }: ActionsProps) {
+  const point = forecast?.predicted_total
+  // The range and the line are the morning's (data through yesterday) and
+  // the point counts today's sales as they come. The line's total is the
+  // server's, not the point plus `extra`: on a day of the event its sales
+  // would be counted twice, in the point and in last year's day. Once a big
+  // day has carried the point past an end of the range, or to the line's
+  // total, neither is said beside it.
+  const range =
+    point !== undefined && monthRange && monthRange.lo <= point && point <= monthRange.hi
+      ? monthRange
+      : null
+  const promo = point !== undefined && blackFriday && point < blackFriday.total ? blackFriday : null
+  const isBlackFriday = promo?.kind === 'black_friday'
+  // The planned promotions are said beside the point, never inside it or the
+  // range; and only where the point is said at all.
+  const outlook = Boolean(forecast) && !isLoading
+  const planned = outlook ? plannedPromotions ?? [] : []
+
+  // The line about Black Friday sits under the row, not in it: a row that
+  // wraps counts every item's width in its own, and would squeeze the title.
   return (
-    <div className="flex items-center gap-1.5 sm:gap-3 flex-wrap justify-end">
-      {forecast && !isLoading && (
-        <div className="px-1.5 sm:px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-1 bg-blue-50 text-blue-600 border border-blue-200">
-          <span>{t('chart.predictedColon')}</span>
-          <span>{formatShortCurrency(forecast.predicted_total)}</span>
-        </div>
-      )}
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-1.5 sm:gap-3 flex-wrap justify-end">
+        {forecast && !isLoading && (
+          <div className="px-1.5 sm:px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-1 bg-blue-50 text-blue-600 border border-blue-200">
+            <span>{t('chart.predictedColon')}</span>
+            <span>{formatShortCurrency(forecast.predicted_total)}</span>
+          </div>
+        )}
 
-      {growthData && !isLoading && (
-        <div
-          className={`px-1.5 sm:px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-1 ${
-            growthData.growth_percent >= 0
-              ? 'bg-emerald-100 text-emerald-700'
-              : 'bg-red-100 text-red-700'
-          }`}
+        {range && !isLoading && (
+          <span
+            className="text-[10px] sm:text-xs font-medium text-blue-600 whitespace-nowrap"
+            title={t('chart.forecastRangeHint')}
+          >
+            {t('chart.forecastRange', { range: formatShortRange(range.lo, range.hi) })}
+          </span>
+        )}
+
+        {growthData && !isLoading && (
+          <div
+            className={`px-1.5 sm:px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-1 ${
+              growthData.growth_percent >= 0
+                ? 'bg-emerald-100 text-emerald-700'
+                : 'bg-red-100 text-red-700'
+            }`}
+          >
+            <span>{growthData.growth_percent >= 0 ? '↑' : '↓'}</span>
+            <span>{Math.abs(growthData.growth_percent).toFixed(1)}%</span>
+          </div>
+        )}
+
+        {canCompare && (
+          <Select
+            variant="pill"
+            options={getCompareTypeOptions(t).map((opt) => ({
+              value: opt.value,
+              label: `${t('chart.vs')} ${opt.shortLabel}`,
+            }))}
+            value={compareType}
+            onChange={(v) => v && onCompareTypeChange(v as CompareType)}
+            allowEmpty={false}
+          />
+        )}
+      </div>
+
+      {promo && !isLoading && (
+        <p
+          className="text-right text-[10px] sm:text-xs text-slate-500"
+          title={t('chart.blackFridayHint', {
+            dates: formatDayRange(promo.last_year_start, promo.last_year_end),
+            days: promo.size_days.toFixed(1),
+            normal: formatShortCurrency(promo.normal_day),
+          })}
         >
-          <span>{growthData.growth_percent >= 0 ? '↑' : '↓'}</span>
-          <span>{Math.abs(growthData.growth_percent).toFixed(1)}%</span>
-        </div>
+          {t(isBlackFriday ? 'chart.blackFridayLine' : 'chart.bigPromoLine', {
+            extra: formatShortCurrency(promo.extra),
+            total: formatShortCurrency(promo.total),
+          })}
+        </p>
       )}
 
-      {canCompare && (
-        <Select
-          variant="pill"
-          options={getCompareTypeOptions(t).map((opt) => ({
-            value: opt.value,
-            label: `${t('chart.vs')} ${opt.shortLabel}`,
-          }))}
-          value={compareType}
-          onChange={(v) => v && onCompareTypeChange(v as CompareType)}
-          allowEmpty={false}
-        />
+      {/* A line per promotion planned for the rest of the month. `extra` is
+          what a typical past promotion of two days or more added; Black
+          Friday has none, its own line above already says it. */}
+      {planned.map((p) => {
+        const values = { name: p.name, dates: promotionDays(p.starts_on, p.ends_on) }
+        const extra = typeof p.extra === 'number' ? p.extra : null
+        return (
+          <p
+            key={p.id}
+            className="text-right text-[10px] sm:text-xs text-slate-500"
+            title={extra !== null ? t('chart.plannedPromoHint') : undefined}
+          >
+            {extra !== null
+              ? t('chart.plannedPromoLine', { ...values, extra: formatShortCurrency(extra) })
+              : t('chart.plannedPromo', values)}
+          </p>
+        )
+      })}
+
+      {outlook && canAddPromotion && (
+        <a
+          href={PROMOTIONS_HREF}
+          onClick={openCalendar}
+          className="text-[10px] sm:text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
+        >
+          {t('chart.addPromotion')}
+        </a>
       )}
     </div>
   )

@@ -580,6 +580,22 @@ class SqliteAlertActions:
         return None
 
 
+class SqlitePromoAsks:
+    """No answer to the Monday question under SQLite, and it says so.
+
+    The answer belongs in `app.promotion_checkins`, where the web container
+    reads it; a file this process holds is not that table, so `available()`
+    is false and the bot tells the person plainly instead of recording an
+    answer nothing will ever read.
+    """
+
+    def available(self) -> bool:
+        return False
+
+    def record_none(self, *, period_from, period_to, by_user_id: int):
+        return None
+
+
 class SqliteBotStore:
     """The four aggregates against one SQLite file, plus a fifth that is not
     reachable from here at all — see `NoDashboardTabs`."""
@@ -587,6 +603,7 @@ class SqliteBotStore:
     def __init__(self) -> None:
         self.access = SqliteAccessControl()
         self.alert_actions = SqliteAlertActions()
+        self.promo_asks = SqlitePromoAsks()
         self.preferences = SqlitePreferences()
         self.milestones = SqliteMilestones()
         self.cache = SqliteCache()

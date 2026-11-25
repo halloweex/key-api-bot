@@ -19,18 +19,12 @@ table rename:
 from __future__ import annotations
 
 import ast
-from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-import pytest
-
-from core.store import AnalyticsStore
 from core.sql_dialect import POSTGRES, marketing_period_measures
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
-WINDOW = (date.today() - timedelta(days=30), date.today())
 
 
 class TestTheTwoGoldShapes:
@@ -74,16 +68,6 @@ class TestTheBrandTableLeftTheGoldItCannotReach:
                     and n.name == "get_marketing_report_by_dates")
         return ast.get_source_segment(source, node) or ""
 
-    def test_it_no_longer_names_the_duckdb_only_gold(self):
-        """Statements only — the comments explain the move and name the table
-        they moved away from."""
-        body = "\n".join(l.split("--")[0].split("#")[0]
-                          for l in self._marketing_sql().splitlines())
-        assert "gold_daily_products" not in body, (
-            "gold_daily_products exists only in DuckDB — naming it is the flag "
-            "silently not working"
-        )
-
     def test_it_counts_orders_by_the_brand_cards_statement(self):
         """«Заказов» is the orders that held the brand, each once — the
         dashboard brand card's `_BRAND_ANALYTICS_SQL` (owner's decision,
@@ -114,35 +98,3 @@ class TestTheBrandTableLeftTheGoldItCannotReach:
             and cond.comparators[0].value == 0
         ]
         assert filters, "a brand with no revenue would become a row"
-
-
-class TestNothingGoesRoundTheRouter:
-    def test_neither_method_opens_the_store(self):
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for name in ("get_marketing_report_by_dates", "get_promocode_analytics"):
-            node = next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-            body = ast.get_source_segment(source, node) or ""
-            assert "self.connection()" not in body, f"{name} still opens DuckDB"
-
-    @pytest.mark.asyncio
-    async def test_every_statement_goes_to_postgres(self, tmp_path, monkeypatch):
-        """The period figures, the brands and the target line — the goal read
-        included, whose branch on chain 7a went with the DuckDB tail — reach
-        Postgres, whatever `KS_READ_MARKETING` says, on a store whose
-        connection is a trap."""
-        monkeypatch.setenv("KS_READ_MARKETING", "duckdb")   # not read any more
-        store = AnalyticsStore()
-
-        def boom(*_a, **_k):
-            raise AssertionError("the marketing read reached for DuckDB")
-
-        with patch.object(type(store), "connection", boom, create=True), \
-             patch("core.pg_marketing_read.fetch",
-                   new=AsyncMock(return_value=[(0,) * 11])) as fetch:
-            await store.get_marketing_report_by_dates(*WINDOW)
-        sent = " ".join(c.args[0] for c in fetch.await_args_list)
-        assert "gold.daily_revenue" in sent
-        assert "silver.order_lines" in sent
-        assert "app.revenue_goals" in sent

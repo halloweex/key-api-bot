@@ -6,7 +6,7 @@ All validators raise ValidationError on invalid input.
 
 import re
 from datetime import date, datetime
-from typing import Optional, Tuple
+from typing import Optional
 
 from core.duckdb_constants import KNOWN_SALES_TYPES, OFFLINE_STORE_SOURCE_ID
 from core.exceptions import ValidationError
@@ -34,79 +34,38 @@ INT32_MAX = 2**31 - 1
 INT64_MAX = 2**63 - 1
 
 
-def validate_date_string(
-    value: str,
-    field: str = "date",
-    format: str = "%Y-%m-%d"
-) -> date:
+# The one form an explicit date is read in, and the one a refusal names.
+_DATE_FORMAT = "%Y-%m-%d"
+
+
+def validate_date_string(value: str, field: str = "date") -> date:
     """
-    Validate and parse a date string.
+    Parse a YYYY-MM-DD date string.
 
     Args:
         value: Date string to validate
         field: Field name for error messages
-        format: Expected date format (default: YYYY-MM-DD)
 
     Returns:
         Parsed date object
 
     Raises:
-        ValidationError: If date is invalid or in wrong format
+        ValidationError: If the date does not exist or is in another format
+
+    Its one caller, `core.filters._read_date`, runs only when `parse_period`
+    holds both dates, and every route declares them `Optional[str]`: the
+    value is always a non-empty string. The checks for an empty value and a
+    non-string, the `format` parameter and `validate_date_range` were deleted
+    on 2026-11-19, unreachable from any caller.
     """
-    if not value:
-        raise ValidationError(field, "Date is required", value)
-
-    if not isinstance(value, str):
-        raise ValidationError(field, "Must be a string", value)
-
     try:
-        return datetime.strptime(value, format).date()
+        return datetime.strptime(value, _DATE_FORMAT).date()
     except ValueError:
         raise ValidationError(
             field,
-            f"Invalid date format. Expected {format}",
+            f"Invalid date format. Expected {_DATE_FORMAT}",
             value
         )
-
-
-def validate_date_range(
-    start_date: str,
-    end_date: str,
-    max_days: int = 365
-) -> Tuple[date, date]:
-    """
-    Validate a date range.
-
-    Args:
-        start_date: Start date string (YYYY-MM-DD)
-        end_date: End date string (YYYY-MM-DD)
-        max_days: Maximum allowed range in days
-
-    Returns:
-        Tuple of (start_date, end_date) as date objects
-
-    Raises:
-        ValidationError: If dates are invalid or range is too large
-    """
-    start = validate_date_string(start_date, "start_date")
-    end = validate_date_string(end_date, "end_date")
-
-    if start > end:
-        raise ValidationError(
-            "date_range",
-            "Start date must be before or equal to end date",
-            f"{start_date} to {end_date}"
-        )
-
-    days_diff = (end - start).days
-    if days_diff > max_days:
-        raise ValidationError(
-            "date_range",
-            f"Date range cannot exceed {max_days} days",
-            f"{days_diff} days"
-        )
-
-    return start, end
 
 
 def validate_source_id(

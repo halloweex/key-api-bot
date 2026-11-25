@@ -79,6 +79,23 @@ def store(monkeypatch):
     return fake
 
 
+@pytest.fixture
+def alerts(monkeypatch):
+    """Every alert the endpoint raised: its text, bucket and conditions."""
+    sent: list[dict] = []
+
+    # Intercepted at the Gate, not at the transport: the condition
+    # identity travels as `bucket`/`conditions` since step 02, and the
+    # transport below no longer sees a key at all.
+    async def _capture(text, *, conditions, bucket, parse_mode="HTML"):
+        sent.append({"text": text, "key": bucket,
+                     "conditions": list(conditions)})
+        return 2
+
+    monkeypatch.setattr("core.alerting.raise_alert", _capture)
+    return sent
+
+
 class TestSignature:
     def test_valid_signature_is_accepted(self, client, store):
         r = client.post(PATH, json=_signed("evt-1", "mid-1", "DELIVRD"))
@@ -277,21 +294,22 @@ class TestTheSignedIdIsBoundToItsMessage:
         )
 
     @pytest.mark.asyncio
-    async def test_the_rejection_is_counted_under_its_own_condition(
-        self, tmp_path, monkeypatch,
+    async def test_a_burst_of_rebounds_alerts_under_its_own_condition(
+        self, tmp_path, monkeypatch, alerts,
     ):
         """A burst of these is either a replay or the gateway reusing ids
-        across messages, and the counters are how anyone tells."""
-        store = await self._campaign(tmp_path, monkeypatch)
+        across messages, and the alert is how anyone hears of it — under its
+        own condition, not as a wrong secret."""
+        await self._campaign(tmp_path, monkeypatch)
         forged = _signed("evt-A", "mid-attacker", "Sent")
 
         async with self._client() as ac:
-            await ac.post(PATH, json=forged)
+            assert (await ac.post(PATH, json=forged)).status_code == 200
             forged["data"]["message_id"] = "mid-victim"
-            await ac.post(PATH, json=forged)
+            for _ in range(webhooks._ALERT_AT):
+                assert (await ac.post(PATH, json=forged)).status_code == 409
 
-        assert webhooks._dlr_counts["event_rebound"] == 1
-        assert webhooks._dlr_counts["accepted"] == 1, "the forged one is not accepted"
+        assert [a["key"] for a in alerts] == ["turbosms:webhook:event_rebound"]
 
     @pytest.mark.asyncio
     async def test_the_gateways_nine_retries_are_still_recorded(
@@ -332,11 +350,68 @@ class TestTheSignedIdIsBoundToItsMessage:
         assert await self._row(store, "mid-victim") == ("DELIVRD", True)
 
 
+def _without_an_id(client, monkeypatch, i):
+    payload = _signed(f"evt-{i}", "mid-1", "DELIVRD")
+    del payload["id"]
+    return client.post(PATH, json=payload)
+
+
+def _with_no_secret_set(client, monkeypatch, i):
+    monkeypatch.delenv("TURBOSMS_WEBHOOK_SECRET", raising=False)
+    return client.post(PATH, json=_signed(f"evt-{i}", "mid-1", "DELIVRD"))
+
+
+def _hanging_up_mid_body(client, monkeypatch, i):
+    from starlette.requests import ClientDisconnect
+
+    async def _hang_up(self):
+        raise ClientDisconnect()
+
+    monkeypatch.setattr("starlette.requests.Request.json", _hang_up)
+    return client.post(PATH, json=_signed(f"evt-{i}", "mid-1", "DELIVRD"))
+
+
+def _with_broken_json(client, monkeypatch, i):
+    return client.post(
+        PATH, content=b"{not json", headers={"Content-Type": "application/json"},
+    )
+
+
+# Each way a callback is refused before anything is written: the condition it
+# is counted under, the status the caller is answered, and how to provoke it.
+_REJECTIONS = [
+    # Neither a wrong secret nor an unparsed signature: there is nothing to
+    # check the signature against.
+    ("no_event_id", 401, _without_an_id),
+    # No configured secret fails closed, and says so under its own name.
+    ("secret_unset", 503, _with_no_secret_set),
+    # A gateway that hangs up mid-body is not sending bad JSON. Both land in
+    # the same `except` if you let them, and then abandoned requests read as
+    # bad payloads — on 2026-08-27, 25 of them sent their reader off to
+    # compare TURBOSMS_WEBHOOK_SECRET while the secret was provably fine.
+    # 408, not 400: nothing was wrong with the payload, and the client that
+    # would read the status has gone (nginx records the exchange as 499).
+    ("client_disconnected", 408, _hanging_up_mid_body),
+    ("malformed_body", 400, _with_broken_json),
+]
+
+
 class TestDiagnosis:
     """A wrong shared secret and an unparsed payload are the same 401 to the
-    caller, and they need opposite fixes. The counters have to tell them apart —
-    not knowing which cost four days of guessing after the 2026-08-05 campaign.
+    caller, and they need opposite fixes. Each refusal is counted, and past a
+    burst alerted on, under a condition of its own — not knowing which cost
+    four days of guessing after the 2026-08-05 campaign.
     """
+
+    @pytest.mark.parametrize("kind, status, send", _REJECTIONS,
+                             ids=[r[0] for r in _REJECTIONS])
+    def test_a_burst_alerts_under_its_own_condition(
+        self, client, store, alerts, monkeypatch, kind, status, send,
+    ):
+        for i in range(webhooks._ALERT_AT):
+            assert send(client, monkeypatch, i).status_code == status
+        assert [a["key"] for a in alerts] == [f"turbosms:webhook:{kind}"]
+        assert store.calls == [], "a refused callback writes nothing"
 
     def test_a_wrong_secret_is_counted_as_bad_signature(self, client, store):
         payload = _signed("evt-1", "mid-1", "DELIVRD", secret="the-wrong-one")
@@ -352,20 +427,6 @@ class TestDiagnosis:
         assert client.post(PATH, json=payload).status_code == 401
         assert webhooks._dlr_counts["no_signature"] == 1
         assert webhooks._dlr_counts["bad_signature"] == 0
-
-    def test_a_payload_without_an_id_field_is_counted_apart(self, client, store):
-        payload = _signed("evt-1", "mid-1", "DELIVRD")
-        del payload["id"]
-
-        assert client.post(PATH, json=payload).status_code == 401
-        assert webhooks._dlr_counts["no_event_id"] == 1
-        assert webhooks._dlr_counts["bad_signature"] == 0
-
-    def test_an_unset_secret_is_counted_apart(self, client, store, monkeypatch):
-        monkeypatch.delenv("TURBOSMS_WEBHOOK_SECRET", raising=False)
-
-        assert client.post(PATH, json=_signed("evt-1", "mid-1", "DELIVRD")).status_code == 503
-        assert webhooks._dlr_counts["secret_unset"] == 1
 
     def test_accepted_reports_are_counted_too(self, client, store):
         """Without a denominator, 'some rejections' cannot be read as a fault."""
@@ -431,21 +492,6 @@ class TestAlerting:
     gives up after 4.5 hours and cannot replay one. Silence is the real defect:
     20 618 callbacks failed across four days and nobody heard.
     """
-
-    @pytest.fixture
-    def alerts(self, monkeypatch):
-        sent: list[dict] = []
-
-        # Intercepted at the Gate, not at the transport: the condition
-        # identity travels as `bucket`/`conditions` since step 02, and the
-        # transport below no longer sees a key at all.
-        async def _capture(text, *, conditions, bucket, parse_mode="HTML"):
-            sent.append({"text": text, "key": bucket,
-                         "conditions": list(conditions)})
-            return 2
-
-        monkeypatch.setattr("core.alerting.raise_alert", _capture)
-        return sent
 
     def _reject_n(self, client, n: int) -> None:
         for i in range(n):
@@ -534,46 +580,6 @@ class TestExposure:
     def test_public_paths_stay_small(self):
         """Every entry here is reachable without a login — keep the list audited."""
         assert PUBLIC_API_PATHS == {"/api/health", "/api/webhooks/turbosms"}
-
-
-class TestAbandonedRequestsAreNotMalformedPayloads:
-    """A gateway that hangs up mid-body is not sending bad JSON.
-
-    Both land in the same `except` if you let them, and then a burst of
-    abandoned requests reads as a burst of bad payloads — which is what
-    happened on 2026-08-27, when 25 of them sent their reader off to compare
-    TURBOSMS_WEBHOOK_SECRET while the secret was provably fine. nginx logs
-    these as 499 and never as 400; that difference is the whole point.
-    """
-
-    def test_a_disconnect_is_counted_apart_from_a_bad_payload(
-        self, client, store, monkeypatch,
-    ):
-        from starlette.requests import ClientDisconnect
-
-        async def _hang_up(self):
-            raise ClientDisconnect()
-
-        monkeypatch.setattr("starlette.requests.Request.json", _hang_up)
-
-        r = client.post(PATH, json=_signed("evt-1", "mid-1", "DELIVRD"))
-
-        # 408, not 400: nothing was wrong with the payload, and the status is
-        # academic anyway — the client that would read it has already gone, so
-        # nginx records the exchange as 499.
-        assert r.status_code == 408
-        assert webhooks._dlr_counts["client_disconnected"] == 1
-        assert webhooks._dlr_counts["malformed_body"] == 0
-        assert store.calls == []
-
-    def test_genuinely_broken_json_still_counts_as_malformed(self, client, store):
-        r = client.post(
-            PATH, content=b"{not json", headers={"Content-Type": "application/json"},
-        )
-
-        assert r.status_code == 400
-        assert webhooks._dlr_counts["malformed_body"] == 1
-        assert webhooks._dlr_counts["client_disconnected"] == 0
 
 
 class TestTheAlertNamesItsOwnCause:

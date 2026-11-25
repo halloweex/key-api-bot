@@ -11,7 +11,6 @@ the default, and a report that still goes out.
 from __future__ import annotations
 
 import pathlib
-import sqlite3
 
 import pytest
 
@@ -90,45 +89,6 @@ class TestDegradation:
         assert read_user_languages([1, 2]) == {
             1: DEFAULT_LANGUAGE, 2: DEFAULT_LANGUAGE,
         }
-
-    def test_a_missing_database_is_not_an_error(self, tmp_path, monkeypatch):
-        """The web container can start before the bot has ever run."""
-        from bot.store_sqlite import SqliteBotStore
-
-        monkeypatch.setattr("bot.store_sqlite.DB_PATH", tmp_path / "nope.db")
-        monkeypatch.setattr("core.bot_store._store", SqliteBotStore())
-        assert read_user_languages([1, 2]) == {
-            1: DEFAULT_LANGUAGE, 2: DEFAULT_LANGUAGE,
-        }
-
-    def test_a_database_without_the_column_is_not_an_error(self, tmp_path, monkeypatch):
-        """An ordinary state mid-deploy: web restarted, bot has not yet."""
-        from bot.store_sqlite import SqliteBotStore
-
-        path = tmp_path / "old.db"
-        with sqlite3.connect(path) as conn:
-            conn.execute("CREATE TABLE user_preferences (user_id INTEGER PRIMARY KEY)")
-            conn.execute("INSERT INTO user_preferences VALUES (1)")
-        monkeypatch.setattr("bot.store_sqlite.DB_PATH", path)
-        monkeypatch.setattr("core.bot_store._store", SqliteBotStore())
-        assert read_user_languages([1]) == {1: DEFAULT_LANGUAGE}
-
-    def test_a_file_that_is_not_a_database_is_not_an_error(self, tmp_path, monkeypatch):
-        from bot.store_sqlite import SqliteBotStore
-
-        path = tmp_path / "junk.db"
-        path.write_bytes(b"not sqlite, not even close")
-        monkeypatch.setattr("bot.store_sqlite.DB_PATH", path)
-        monkeypatch.setattr("core.bot_store._store", SqliteBotStore())
-        assert read_user_languages([1]) == {1: DEFAULT_LANGUAGE}
-
-    def test_reading_does_not_modify_the_bot_s_database(self, bot_db, tmp_path):
-        path = tmp_path / "bot.db"
-        before = path.read_bytes()
-        read_user_languages([1, 2, 3])
-        read_approved_user_ids()
-        assert path.read_bytes() == before
-        assert not (path.parent / "bot.db-journal").exists()
 
 
 class TestDefaultLanguage:

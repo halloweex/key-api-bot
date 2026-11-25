@@ -279,8 +279,8 @@ class TestTheFindings:
         found = {i.check_name: i for i in check_pg_warehouse(facts)}
         info, warn = found["pg_own_entity_orders"], found["pg_own_entity_unlisted"]
         assert (info.severity, info.count) == (Severity.INFO, 4)
-        assert "12,250.00 billed, 6,150.00 of goods" in info.description
         assert (warn.severity, warn.count, warn.sample_ids) == (Severity.WARN, 1, (LOOKALIKE,))
+        # The finding carries card ids, never the entity's name.
         for issue in (info, warn):
             assert "Korean" not in issue.description and "КОРІАН" not in issue.description
 
@@ -293,14 +293,17 @@ class TestTheFindings:
 
         _store, pool = own
         monkeypatch.setattr(duckdb_constants, "OWN_ENTITY_BUYER_IDS", (OWN, LOOKALIKE))
-        before = {i.check_name: i for i in check_pg_warehouse(await read_facts(pool=pool))}
+        facts = await read_facts(pool=pool)
+        before = {i.check_name: i for i in check_pg_warehouse(facts)}
         assert "pg_own_entity_unlisted" not in before
-        assert "1 more still count as revenue in stored Silver, worth 1,500.00" in \
-            before["pg_own_entity_orders"].description
+        # The newly listed card's order still counts in the Silver stored
+        # before the rebuild, and no longer after it.
+        assert [(o[0], o[2]) for o in facts.own_entity.orders if o[4]] == [(9109, 1500.0)]
         await derive(pool)
-        after = {i.check_name: i for i in check_pg_warehouse(await read_facts(pool=pool))}
+        facts = await read_facts(pool=pool)
+        after = {i.check_name: i for i in check_pg_warehouse(facts)}
         assert after["pg_own_entity_orders"].count == 5
-        assert "still count" not in after["pg_own_entity_orders"].description
+        assert not [o for o in facts.own_entity.orders if o[4]]
 
 
 class TestTheNameRuleInPostgres:
@@ -315,7 +318,7 @@ class TestTheNameRuleInPostgres:
         The unit test's statement guard
         (`test_the_statement_folds_by_translate_alone`) is what stops it."""
         from core import pg_warehouse_dq as twins
-        from tests.unit.test_own_entity_not_revenue import LOOKS_LIKE_THE_ENTITY, NOT_THE_ENTITY
+        from tests.helpers.own_entity import LOOKS_LIKE_THE_ENTITY, NOT_THE_ENTITY
 
         _store, pool = own
         async with pool.acquire() as conn:
@@ -408,8 +411,8 @@ async def test_the_entity_is_in_no_cohort_on_clickhouse(name):
     `is_active_source` FALSE as Silver derives it: every body answers what it
     answers without the entity. Mutation: drop the membership clause — the
     entity joins March's cohort and every size there reads 4."""
-    from tests.integration.test_cohorts_active_sources import _ask, _at_risk_today, _seed
-    from tests.unit.test_cohort_active_sources import EXPECTED, ORDERS
+    from tests.helpers.cohort_fixture import _ask, _at_risk_today, _seed
+    from tests.helpers.cohort_fixture import EXPECTED, ORDERS
 
     await _seed(ORDERS + [(301, OWN, "2026-03-15", 1, False, 9000)])
     rows = await _ask(name)

@@ -14,63 +14,9 @@ touching only one branch, fails here and nowhere else.
 """
 from __future__ import annotations
 
-import pytest
-
-from core.duckdb_constants import DISPLAY_TIMEZONE, _date_in_kyiv
+from core.duckdb_constants import DISPLAY_TIMEZONE
 from core.sql_dialect import DUCKDB, POSTGRES
 from core.warehouse_sql import silver_sales_type_case, silver_select_sql
-
-
-def _normalise(sql: str, dialect) -> str:
-    """The rendering with both known dialect differences undone."""
-    out = sql.replace(
-        dialect.kyiv_date("o.ordered_at"), "<<KYIV(o.ordered_at)>>"
-    )
-    # Longest first: `bronze.managers` contains `managers`.
-    for attr in ("classifications", "managers", "orders"):
-        name = getattr(dialect, attr)
-        out = out.replace(name, f"<<{attr.upper()}>>")
-    return out
-
-
-class TestThereAreExactlyTwoDifferences:
-    def test_the_sales_type_case_is_one_rule(self):
-        assert _normalise(silver_sales_type_case(DUCKDB), DUCKDB) == _normalise(
-            silver_sales_type_case(POSTGRES), POSTGRES
-        )
-
-    def test_the_whole_projection_is_one_rule(self):
-        assert _normalise(silver_select_sql(DUCKDB), DUCKDB) == _normalise(
-            silver_select_sql(POSTGRES), POSTGRES
-        )
-
-    def test_the_two_renderings_are_not_accidentally_identical(self):
-        """A normalisation that flattened everything would pass the two above
-        while proving nothing."""
-        assert silver_select_sql(DUCKDB) != silver_select_sql(POSTGRES)
-
-
-class TestNothingChangedForDuckDB:
-    """Stored Silver is rebuilt from this text every two minutes. A change to
-    the default rendering is a change to production data."""
-
-    def test_there_is_no_default_any_more(self):
-        """The default was DuckDB until step 14's S14-07: the rebuild names
-        `DUCKDB` itself now (`tests/unit/test_warehouse_sql.py` holds every
-        builder to it)."""
-        with pytest.raises(TypeError):
-            silver_select_sql()
-        with pytest.raises(TypeError):
-            silver_sales_type_case()
-
-    def test_the_date_expression_is_byte_for_byte_what_it_was(self):
-        assert DUCKDB.kyiv_date("o.ordered_at") == _date_in_kyiv("o.ordered_at")
-
-    def test_it_still_names_the_unqualified_tables(self):
-        sql = silver_sales_type_case(DUCKDB)
-        assert "FROM manager_classifications mc" in sql
-        assert "FROM managers WHERE is_retail = TRUE" in sql
-        assert "bronze." not in sql and "app." not in sql
 
 
 class TestThePostgresRendering:

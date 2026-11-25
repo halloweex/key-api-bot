@@ -1,8 +1,8 @@
 """The bot's state in Postgres — the second adapter behind `core/bot_store.py`.
 
 `app.authorized_users` and its three neighbours have existed since revision
-0009 and have been receiving an hourly copy of `data/bot.db` ever since. This
-is what lets the bot read and write them instead.
+0009 and received an hourly copy of `data/bot.db` until this adapter took them
+over. This is what lets the bot read and write them instead.
 
 ONE DRIVER, ON A LOOP OF ITS OWN — MEASURED, NOT PREFERRED
 
@@ -48,11 +48,11 @@ include this one.
 
 WHAT IT DOES NOT DO
 
-It does not write `data/bot.db`, and nothing writes both. The hourly copy in
-`core/pg_bot_state.py` goes one way — SQLite to Postgres — so turning this
-adapter on means turning that copy off, or it will overwrite what the bot
-wrote. `KS_BOT_STORE=postgres` is therefore a switch, never a dual-write, and
-the guard for it lives in the copy rather than here.
+It does not write `data/bot.db`, and nothing writes both. `KS_BOT_STORE=postgres`
+is a switch, never a dual-write. The hourly copy in `core/pg_bot_state.py`
+went one way — SQLite to Postgres — and refused to run under this adapter,
+or it would have overwritten what the bot wrote; it stood down from the
+switch (2026-08-27) and was deleted on 2026-11-19.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ import asyncio
 import logging
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from bot.store_sqlite import (
@@ -757,6 +757,33 @@ class PostgresAlertActions:
             )
 
 
+class PostgresPromoAsks:
+    """`promo_asks` against `app.promotion_checkins` (revision 0039).
+
+    The statement is `core.promo_asks`', run on this adapter's pool and loop
+    thread: the answer to the Monday question lands where the web container
+    reads it, and the bot keeps one path to the database.
+    """
+
+    def __init__(self, run, pool):
+        self._run = run
+        self._pool = pool
+
+    def available(self) -> bool:
+        return True
+
+    def record_none(self, *, period_from: date, period_to: date,
+                    by_user_id: int) -> Optional[int]:
+        return self._run(self._record_none(period_from, period_to, by_user_id))
+
+    async def _record_none(self, period_from, period_to, by_user_id):
+        from core.promo_asks import write_none_answer
+
+        async with self._pool.acquire() as conn:
+            return await write_none_answer(conn, period_from=period_from,
+                                           period_to=period_to, by_user_id=by_user_id)
+
+
 class PostgresBotStore:
     """The three persistent aggregates against `app.*`; the cache stays local.
 
@@ -781,6 +808,7 @@ class PostgresBotStore:
         run, pool = self._loop.run, self._pool
         self.access = PostgresAccessControl(run, pool)
         self.alert_actions = PostgresAlertActions(run, pool)
+        self.promo_asks = PostgresPromoAsks(run, pool)
         self.preferences = PostgresPreferences(run, pool)
         self.milestones = PostgresMilestones(run, pool)
         self.cache = SqliteCache()

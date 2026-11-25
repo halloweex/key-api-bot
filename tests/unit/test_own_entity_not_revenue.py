@@ -29,6 +29,7 @@ from core.duckdb_constants import (
     NOT_OWN_ENTITY_BUYER_IDS, OWN_ENTITY_BUYER_IDS, REVENUE_SOURCE_IDS, not_own_entity,
 )
 from core.sql_dialect import POSTGRES
+from tests.helpers.own_entity import LOOKS_LIKE_THE_ENTITY, NOT_THE_ENTITY
 
 ROOT = Path(__file__).resolve().parents[2]
 OWN = OWN_ENTITY_BUYER_IDS[0]
@@ -176,7 +177,7 @@ class TestTheCohorts:
     @pytest.mark.parametrize("name", COHORT_BODIES)
     def test_the_membership_leaves_the_entity_out(self, name):
         import core.sql_dialect as dialects
-        from tests.unit.test_cohort_active_sources import _ctes
+        from tests.helpers.cohort_fixture import _ctes
 
         sql = getattr(dialects, name)(dialects.CLICKHOUSE_ANALYTICS,
                                       sales_type_filter="", months_back=12)
@@ -192,7 +193,7 @@ class TestTheCohorts:
         clause — the entity joins March's cohort, never retained, and every
         cohort size there reads 4."""
         pytest.importorskip("duckdb")
-        from tests.unit.test_cohort_active_sources import EXPECTED, ORDERS, run_on_duckdb
+        from tests.helpers.cohort_fixture import EXPECTED, ORDERS, run_on_duckdb
 
         with_entity = ORDERS + [(301, OWN, "2026-03-15", 1, False, 9000)]
         assert run_on_duckdb(name, with_entity) == EXPECTED[name]
@@ -376,7 +377,7 @@ class TestTheFindings:
 
     def test_a_blind_group_holds_both_and_says_so(self):
         from core import pg_warehouse_dq as twins
-        from tests.unit.test_pg_warehouse_dq import _facts
+        from tests.helpers.warehouse_dq_facts import _facts
 
         held: list = []
         issues = twins.check_pg_warehouse(
@@ -394,7 +395,7 @@ class TestTheFindings:
         is in the registry, has its own lever and a human name."""
         from core.alerting import REGISTRY
         from core.data_quality import HUMAN_CHECK_NAMES, REMEDIATION
-        from tests.unit.test_rollback_condition_names import ALL_RETIRED
+        from tests.helpers.retired_conditions import ALL_RETIRED
 
         names = {"pg_own_entity_orders", "pg_own_entity_unlisted", "pg_own_entity_unwatched"}
         assert not names & ALL_RETIRED
@@ -431,27 +432,6 @@ class TestTheReadBindsTheLists:
 
 
 # ─── What a name like the entity's is ───────────────────────────────────────
-
-# Spellings a buyer card is written with — the legal form, quotes of either
-# kind, case, a dash, Russian renderings, and Latin letters typed where
-# Cyrillic ones look the same (and the converse). The integration test runs
-# the same lists through Postgres' `translate()` and `~`.
-LOOKS_LIKE_THE_ENTITY = (
-    "Коріан Сторі", "ТОВ «Коріан Сторі»", 'ТОВ "КОРІАН СТОРІ"', "тов коріан сторі",
-    "ТзОВ «Коріан-Сторі»", "КОРІАН СТОРІ ТОВ", "Корiан Сторi", "КОРIАН СТОРI",
-    "Кориан Стори", "Кореан Стори", "ООО «Кориан Стори»", "Коріан\u00a0Сторі",
-    "Korean Story", "KOREAN STORY", "KoreanStory", "korean-story", "Korean_Story LLC",
-    "TOV Korean Story", "Korian Story", "Korean Stori", "Kоrean Story",
-    # Characters a pasted name carries unseen: a thin space, a narrow no-break
-    # space, a soft hyphen, a zero-width space, a byte-order mark, an
-    # ideographic space.
-    "Коріан\u2009Сторі", "ТОВ\u202f«Коріан\u00adСторі»",
-    "Korean\u200bStory", "\ufeffKorean\u3000Story",
-)
-NOT_THE_ENTITY = (
-    "", "Korean Shop", "Story Korean", "Korea Story", "Корея", "Історія", "Сторінка",
-    "Коріандр", "Korean", "Story", "Test Buyer", "Korean Beauty Story", "Kor Story",
-)
 
 
 class TestTheNameRule:

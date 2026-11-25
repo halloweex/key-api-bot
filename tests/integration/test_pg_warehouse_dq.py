@@ -850,7 +850,9 @@ class TestTheRowValues:
 
     @pytest.mark.asyncio
     async def test_a_budget_spent_on_the_recompute_blinds_it_alone(self, rv, monkeypatch):
-        """Read last, so the three cheap groups keep their verdicts."""
+        """The recompute is read last, so every other group — the landing
+        twins and the own-entity rule included — has its verdict before the
+        heavy one can spend the budget."""
         from core import pg_warehouse_dq
 
         monkeypatch.setattr(pg_warehouse_dq, "HOLD_BUDGET_S", 2)
@@ -860,8 +862,9 @@ class TestTheRowValues:
         facts = await asyncio.wait_for(pg_warehouse_dq.read_facts(pool=rv), timeout=30)
         assert isinstance(facts.silver_row_values, pg_warehouse_dq.Unwatched)
         assert "hold budget" in facts.silver_row_values.reason
-        for group in ("silver_arc", "attribution", "line_items"):
-            assert not isinstance(getattr(facts, group), pg_warehouse_dq.Unwatched), group
+        for group in pg_warehouse_dq.GROUPS:
+            if group != "silver_row_values":
+                assert not isinstance(getattr(facts, group), pg_warehouse_dq.Unwatched), group
         held = []
         issues = pg_warehouse_dq.check_pg_warehouse(facts, held_out=held)
         names = {i.check_name for i in issues}
@@ -1383,41 +1386,6 @@ class TestTheLandingBlindness:
         facts = await read_facts(pool=landing)
         assert isinstance(facts.order_landing, Unwatched)
         assert "backfilled" in facts.order_landing.reason
-
-
-class TestTheLandingThroughTheJob:
-    """The integrity job with the twins on, against an empty DuckDB: DuckDB
-    looks and finds nothing, so a Postgres defect is a disagreement, not a
-    second finding — and when DuckDB's half fails, the twin stands in and a
-    CRITICAL of its own pages."""
-
-    job = TestTheJobEndToEnd.job
-    _issues = TestTheJobEndToEnd._issues
-
-    async def _orphans(self, pool, n):
-        async with pool.acquire() as conn:
-            for position in range(1, n + 1):
-                await conn.execute(
-                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
-                    " price_sold) VALUES ($1, $2, NULL, 'dn23', 1, 10)",
-                    LANDING[20] * 1000 + position, LANDING[20])
-
-    @pytest.mark.asyncio
-    async def test_duckdb_failing_the_twin_stands_in_and_pages(self, landing, job, monkeypatch):
-        scheduler, store, sent = job
-        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
-        await self._orphans(landing, 1)
-        resolve = AsyncMock(return_value=0)
-        with patch("core.data_quality.check_internal_integrity", side_effect=RuntimeError("duckdb")), \
-             patch("core.alerting.resolve_group", resolve):
-            result = await scheduler._run_dq_integrity()
-
-        issues = await self._issues(store, result["run_id"])
-        assert issues["pg_fk_orphan_order_products_order_id"]["severity"] == "CRITICAL"
-        assert "pg_order_landing_disagree" not in issues
-        assert "pg_fk_orphan_order_products_order_id" in sent.await_args.kwargs["conditions"]
-        (call,) = resolve.await_args_list
-        assert "pg_fk_orphan_order_products_order_id" in call.kwargs["still_firing"]
 
 # ─── DN-23: the same rows, both engines ───────────────────────────────────────
 #

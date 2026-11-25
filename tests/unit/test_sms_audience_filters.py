@@ -420,55 +420,9 @@ class TestGenderFilter:
         assert not SmsAudienceFilters(genders=("m",)).is_empty()
         assert not SmsAudienceFilters(gender_min_confidence="high").is_empty()
 
-    def test_the_predicate_does_not_depend_on_the_engine(self):
-        """The reason the table NAME lives in `Dialect` and not in here.
-
-        Everything this fragment emits means the same in both engines, so the
-        byte-equality guard over the body — which passes constant group predicates
-        and therefore cannot see this — is not being relied on to catch a
-        divergence that could exist. If that ever stops being true, the
-        construct belongs in the body, not in a predicate string.
-        """
-        f = SmsAudienceFilters(genders=("m",), gender_min_confidence="high")
-        duck = f.predicate("revenue_ltv", "retail", order_lines="silver_order_lines")
-        postgres = f.predicate("revenue_ltv", "retail", order_lines="silver.order_lines")
-        assert duck == postgres
-
     def test_it_is_frozen_with_the_campaign(self):
         """`as_dict` is what tells a reader six months later who was messaged."""
         echo = SmsAudienceFilters(
             genders=("m",), gender_min_confidence="high",
         ).as_dict()
         assert echo == {"genders": ["m"], "gender_min_confidence": "high"}
-
-
-class TestTheGenderTableIsReachableFromBothEngines:
-    def test_the_body_joins_it_under_a_dialect_name(self):
-        from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
-
-        fragments = dict(
-            ltv_column="revenue_ltv",
-            sales_type_filter="AND l.sales_type = ?",
-            tier_case="CASE WHEN c.revenue_ltv >= ? THEN 'VIP' END",
-            arm_expr="tier_level",
-            ok_tier_expr="tier_level IS NOT NULL",
-            group_predicates=["TRUE"],
-            tier_subset="",
-        )
-        assert "LEFT JOIN buyer_gender g" in sms_segments_select(DUCKDB, **fragments)
-        assert "LEFT JOIN app.buyer_gender g" in sms_segments_select(
-            POSTGRES, **fragments,
-        )
-
-    def test_the_join_is_outer(self):
-        """An inner join would drop the 1.4% the classifier refused out of
-        every audience — including the ones not filtering on gender at all."""
-        from core.sql_dialect import DUCKDB, sms_segments_select
-
-        sql = sms_segments_select(
-            DUCKDB, ltv_column="revenue_ltv", sales_type_filter="",
-            tier_case="NULL", arm_expr="tier_level",
-            ok_tier_expr="TRUE", group_predicates=["TRUE"], tier_subset="",
-        )
-        assert "LEFT JOIN buyer_gender" in sql
-        assert "\n                JOIN buyer_gender" not in sql

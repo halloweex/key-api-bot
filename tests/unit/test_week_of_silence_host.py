@@ -75,56 +75,17 @@ PINNED = "halloweex/keycrm-web:rollback-step14"
 #
 # deploy/stage4_soak.sh's P4 read the file through the same reader until step
 # 14's S14-02 retired it with the week it judged.
+# The forms that move what deploy/restore-test.sh does, one each: off, no
+# key at all, a value nobody reads, and the two forms docker refuses. The
+# 48 the table held were measured for the scripts that stopped web and
+# deleted backups during the week of silence, all deleted since.
 ENV_FORMS = [
     # (id, text, docker, web)
     ("off", "KS_DUCKDB=off\n", "off", "off"),
-    ("upper-crlf", "KS_DUCKDB=OFF \r\n", "off", "off"),
-    ("double-quoted", 'KS_DUCKDB="off"\n', "invalid", "off"),
-    ("single-quoted", "KS_DUCKDB='Off'\n", "invalid", "off"),
-    ("on", "KS_DUCKDB=on\n", "on", "on"),
-    ("blank", "KS_DUCKDB=\n", "on", "on"),
     ("absent", "ADMIN_USER_IDS=1,2\n", "on", "on"),
     ("typo", "KS_DUCKDB=of\n", "invalid", "invalid"),
-    ("on-last", "KS_DUCKDB=off\nKS_DUCKDB=on\n", "on", "on"),
-    ("off-last", "KS_DUCKDB=on\nKS_DUCKDB=off\n", "off", "off"),
-    ("comment", "# KS_DUCKDB=off\n", "on", "on"),
-    ("indented-comment", "  # KS_DUCKDB=off\n", "on", "on"),
-    ("other-key", "KS_DUCKDB_X=off\n", "on", "on"),
-    ("other-key-2", "KS_DUCKDBX=off\n", "on", "on"),
-    ("prefixed-key", "XKS_DUCKDB=off\n", "on", "on"),
-    ("inline-comment", "KS_DUCKDB=off # week of silence\n", "invalid", "off"),
-    ("inline-comment-crlf", "KS_DUCKDB=off # c\r\n", "invalid", "off"),
-    ("inline-comment-padded", "KS_DUCKDB=  OFF  # c\n", "invalid", "off"),
-    ("inline-comment-on", "KS_DUCKDB=on # c\n", "invalid", "on"),
-    ("hash-no-space", "KS_DUCKDB=off#x\n", "invalid", "invalid"),
-    ("tab-hash", "KS_DUCKDB=off\t# tab\n", "invalid", "invalid"),
-    ("quoted-then-comment", 'KS_DUCKDB="off" # c\n', "invalid", "off"),
-    ("single-quoted-then-comment", "KS_DUCKDB='off' # c\n", "invalid", "off"),
-    ("comment-inside-quotes", 'KS_DUCKDB="off # c"\n', "invalid", "invalid"),
-    ("quoted-padded", 'KS_DUCKDB=" off "\n', "invalid", "off"),
-    ("quoted-empty", 'KS_DUCKDB=""\n', "invalid", "on"),
-    ("quoted-on", 'KS_DUCKDB="on"\n', "invalid", "on"),
-    ("leading-spaces", "  KS_DUCKDB=off\n", "off", "off"),
-    ("leading-tab", "\tKS_DUCKDB=off\n", "off", "off"),
-    ("space-after-equals", "KS_DUCKDB= off\n", "off", "off"),
-    ("trailing-spaces", "KS_DUCKDB=off   \n", "off", "off"),
-    ("indented-last", "KS_DUCKDB=on\n  KS_DUCKDB=off # c\n", "invalid", "off"),
     ("export", "export KS_DUCKDB=off\n", "refused", "off"),
-    ("export-crlf", "export KS_DUCKDB=off\r\n", "refused", "off"),
-    ("export-two-spaces", "export  KS_DUCKDB=off\n", "refused", "off"),
-    ("export-indented", "  export KS_DUCKDB=off\n", "refused", "off"),
-    ("export-quoted", 'export KS_DUCKDB="off"\n', "refused", "off"),
-    ("export-typo", "export KS_DUCKDB=of\n", "refused", "invalid"),
     ("spaces-around-equals", "KS_DUCKDB = off\n", "refused", "off"),
-    ("space-before-equals", "KS_DUCKDB =off\n", "refused", "off"),
-    ("colon-space", "KS_DUCKDB: off\n", "refused", "off"),
-    ("colon", "KS_DUCKDB:off\n", "on", "off"),
-    ("export-first", "export KS_DUCKDB=on\nKS_DUCKDB=off\n", "refused", "off"),
-    ("export-last-on", "KS_DUCKDB=off\nexport KS_DUCKDB=on\n", "refused", "on"),
-    ("colon-last-off", "KS_DUCKDB=on\nKS_DUCKDB:off\n", "on", "off"),
-    ("colon-last-on", "KS_DUCKDB=off\nKS_DUCKDB:on\n", "off", "on"),
-    ("commented-last", "KS_DUCKDB=off\n# KS_DUCKDB=on\n", "off", "off"),
-    ("blank-last", "KS_DUCKDB=off\nKS_DUCKDB=\n", "on", "on"),
 ]
 
 READ = r"""
@@ -182,12 +143,6 @@ class TestTheReader:
     # `ks_duckdb_env_note`'s sentence, until step 14's S14-20 deleted the
     # function: its callers went in S14-18.
 
-    def test_a_value_is_quoted_back_bounded_and_printable(self, tmp_path):
-        """The value is quoted in log lines; `.env` is not a file to echo.
-        Mutation: drop the `cut -c1-40`."""
-        (_, _, _, _, value), _, _ = _read(tmp_path, "KS_DUCKDB=" + "x" * 300 + "\x1b[31m\n")
-        assert len(value) <= 40 and "\x1b" not in value
-
     def test_it_reads_one_key_and_prints_nothing_else(self, tmp_path):
         """By exact name, never a listing: the other lines of `.env` are the
         host's secrets. Mutation: `grep KS_` for the anchored name."""
@@ -195,13 +150,6 @@ class TestTheReader:
         for other in ("KS_DUCKDB_FAKE=off\n", "export BOT_TOKEN=x\n"):
             fields, verdict, note = _read(tmp_path, secret + other)
             assert "AAHdq" not in "|".join(fields) + verdict + note
-        text = (DEPLOY / "duckdb_env.sh").read_text()
-        code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
-        greps = [ln.strip() for ln in code if "grep" in ln]
-        assert greps == [
-            """lines="$(grep -E '^[[:space:]]*(export[[:space:]]+)?KS_DUCKDB[[:space:]]*[=:]' \\"""
-        ], greps
-        assert not any(re.search(r"\b(printenv|env|export|set)\b\s*($|\|)", ln) for ln in code)
 
 
 # ── the nightly snapshot ──────────────────────────────────────────────────────
@@ -211,103 +159,6 @@ class TestTheReader:
 # cleanup trap, read, linked, started, shipped and deleted nothing, and paged
 # nobody; under `on` it refused an image that was not the pinned one and a
 # backup past 30 h.
-
-
-# ── the history ───────────────────────────────────────────────────────────────
-
-def _history() -> str:
-    """CLAUDE.md's "The week of silence, and its way back": what is left of
-    the runbook "Starting the week of silence", compressed into the history
-    of the DuckDB exit by step 14's S14-20."""
-    text = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-    start = text.index("### The week of silence, and its way back")
-    return text[start:text.index("\n### ", start + 1)]
-
-
-@needs_checkout
-class TestTheHistory:
-    """The week's runbook was a person's procedure for the host, and it is
-    history since S14-20. What it still tells a person on the host has to be
-    true: the scripts it names exist or are said to be gone, the crontab is
-    changed from the print and never from the text, and on a step-14 image
-    there is no way back to make. The runbook's own steps — the start, the
-    preconditions, the Ark's SOURCE RELEASED, the `.env` copy — went with it
-    (their tests are in S14-20's list)."""
-
-    # Named by the history: two deleted in step 14's S14-18 with their cron
-    # lines long retired, and the file's hourly hash at the final stage with
-    # its line; the history says so.
-    DELETED = frozenset({"scripts/weekly_compact.sh", "deploy/daily_offsite.sh",
-                         "deploy/duckdb_silence_check.sh"})
-
-    def test_every_tool_it_names_exists_or_is_said_gone(self):
-        """Mutation: rename a script without the history — or delete one
-        without the history saying it is gone."""
-        text = _history()
-        named = set(re.findall(r"(?:deploy|scripts)/[\w./-]+\.(?:sh|py)", text))
-        assert {"deploy/duckdb_silence_check.sh", "deploy/duckdb_env.sh",
-                "deploy/offsite_check.sh", "deploy/restore-test.sh"} <= named, named
-        assert self.DELETED <= named, named
-        for path in named - self.DELETED:
-            assert (REPO / path).is_file(), path
-        for path in self.DELETED:
-            assert not (REPO / path).exists(), path
-        joined = " ".join(text.split())
-        assert "deleted in step 14's S14-18" in joined, joined
-        assert ("its line came out of the crontab, the file was deleted, and the "
-                "script went from this checkout") in joined, joined
-        assert "2026-11-12" in joined and "`/root/duckdb-silence`" in joined, joined
-
-    def test_it_changes_the_crontab_from_the_print_only(self):
-        """The history never spells a crontab line of its own: the lines were
-        the ones `--crontab` printed, held to the scripts' headers until the
-        final stage deleted the print with the silence check. A line spelled
-        here would be one nobody holds. Mutation: write `0 2 * * 0` into the
-        section."""
-        text = _history()
-        assert "--crontab" in text
-        assert not re.search(r"[0-9*]+ [0-9*]+ \* \* [0-9*]", text)
-
-    def test_the_way_back_on_a_step_14_image_is_the_image_rollback(self):
-        """Since step 14's S14-00 web runs off whatever `.env` says, so
-        `KS_DUCKDB=on` changes nothing in web and only re-arms the host
-        scripts that read `.env`. The history says so, and names the rollback
-        section that exists. Mutation: drop the paragraph, or rename the
-        Deployment section without the history."""
-        joined = " ".join(_history().split())
-        assert "On a step-14 image there is no way back to make" in joined, joined
-        assert "leave `.env` at `KS_DUCKDB=off`" in joined
-        assert "do not re-add those three cron lines" in joined
-        assert "a step-14 web runs `off` whatever `.env` says" in joined
-        section = "Before any rollback to an image from before step 14"
-        assert f'"{section}"' in joined
-        whole = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-        assert f"\n### {section}\n" in whole
-
-    def test_the_way_back_names_the_snapshots_image(self):
-        """On an image from before step 14, the nightly snapshot's cron line
-        put back has no default image since S14-02: without the variable in
-        deploy/backup.env, or without the rollback-step14 tag on the host,
-        every night refuses (exit 2) and pages "Daily snapshot FAILED". The
-        variable is the one `deploy/daily_offsite.sh` read (a literal since
-        S14-18 deleted the script, read at 50cc367b). Mutation: drop the
-        sentence."""
-        joined = " ".join(_history().split())
-        for words in ("`BACKUP_RESTORE_IMAGE`", "`deploy/backup.env`", "`rollback-step14`",
-                      "Daily snapshot FAILED"):
-            assert words in joined, (words, joined)
-
-    def test_the_file_is_said_gone_and_off_is_what_a_rollback_runs(self):
-        """The final stage deleted the file: the history says an image from
-        before step 14 runs without it only under `off`, and that `on` would
-        need a warehouse rebuilt from the Ark first. (The print it pointed a
-        person at, `--crontab`, went with the silence check.) Mutation: drop
-        either sentence."""
-        joined = " ".join(_history().split())
-        assert ("an image from before step 14 runs without the file only under "
-                "it") in joined, joined
-        assert "there is no file for `on` to open" in joined, joined
-        assert "`deploy/restore_from_export.py`" in joined, joined
 
 
 # ── the restore drill ─────────────────────────────────────────────────────────

@@ -75,6 +75,10 @@ import type {
   SmsAudiencePresetsResponse,
   SmsCreateCampaignResponse,
   MarketingReportResponse,
+  Promotion,
+  PromotionIn,
+  PromotionsResponse,
+  PromotionVersionsResponse,
 } from '../types/api'
 
 export interface TurnoverParams {
@@ -99,6 +103,7 @@ export const queryKeys = {
   summary: (params: string) => ['summary', params] as const,
   returns: (params: string) => ['returns', params] as const,
   revenueTrend: (params: string) => ['revenueTrend', params] as const,
+  revenueForecast: (salesType: string) => ['revenueForecast', salesType] as const,
   salesBySource: (params: string) => ['salesBySource', params] as const,
   topProducts: (params: string) => ['topProducts', params] as const,
   productPerformance: (params: string) => ['productPerformance', params] as const,
@@ -159,6 +164,12 @@ export const queryKeys = {
   marginTrend: (params: string) => ['marginTrend', params] as const,
   marginBrandCategory: (params: string) => ['marginBrandCategory', params] as const,
   marginAlerts: (params: string) => ['marginAlerts', params] as const,
+  // Promotions calendar: the server's default window, cancelled ones included
+  // (the page filters them), and one promotion's versions.
+  promotions: () => ['promotions'] as const,
+  promotionVersions: (id: number) => ['promotions', id, 'versions'] as const,
+  /** Every sales type's forecast: a promotion moves the retail badge's lines. */
+  revenueForecastAll: () => ['revenueForecast'] as const,
 }
 
 // Cache TTL constants (in milliseconds)
@@ -227,16 +238,41 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
 
 // ─── Forecast ──────────────────────────────────────────────────────────────
 
+// `/api/revenue/forecast` is one query under one key: the date picker reads
+// how far the forecast reaches, the month's badge its range and Black Friday
+// line, and a page that shows both asks once.
+
 export function useMaxForecastDate() {
   const salesType = useFilterStore(selectSalesType)
 
   const { data } = useQuery({
-    queryKey: ['maxForecastDate', salesType],
+    queryKey: queryKeys.revenueForecast(salesType),
     queryFn: () => api.getRevenueForecast(salesType),
     staleTime: CACHE_TTL.STATIC,
   })
 
   return data?.forecast_end ?? data?.month_end ?? null
+}
+
+/** The month badge's 80% range and Black Friday line (2026-11-18), and a line
+ * per promotion planned for the rest of the month (2026-11-19). The server
+ * computes the first two once a day, so the realtime cache is only how soon a
+ * new day's are seen; a saved promotion invalidates this query itself. */
+export function useMonthForecastOutlook(enabled: boolean) {
+  const salesType = useFilterStore(selectSalesType)
+
+  const { data } = useQuery({
+    queryKey: queryKeys.revenueForecast(salesType),
+    queryFn: () => api.getRevenueForecast(salesType),
+    staleTime: CACHE_TTL.REALTIME,
+    enabled,
+  })
+
+  return {
+    monthRange: data?.month_range ?? null,
+    blackFriday: data?.black_friday ?? null,
+    plannedPromotions: data?.planned_promotions ?? null,
+  }
 }
 
 // ─── Sales ──────────────────────────────────────────────────────────────────
@@ -1222,4 +1258,97 @@ export function useSmsBalance() {
     refetchOnMount: 'always',
     retry: false,
   })
+}
+
+// ─── Promotions calendar ─────────────────────────────────────────────────────
+//
+// One list query, cancelled ones included: the page filters them behind its
+// "show cancelled" toggle, so the toggle is instant and can say how many
+// there are. The server's default window is today − 90 .. today + 365, which
+// holds both of the page's lists.
+
+export function usePromotions(enabled = true) {
+  return useQuery<PromotionsResponse>({
+    queryKey: queryKeys.promotions(),
+    queryFn: () => api.getPromotions({ includeCancelled: true }),
+    staleTime: CACHE_TTL.STANDARD,
+    enabled,
+  })
+}
+
+/** A promotion's saved states, newest first: asked when its history opens. */
+export function usePromotionVersions(id: number, enabled: boolean) {
+  return useQuery<PromotionVersionsResponse>({
+    queryKey: queryKeys.promotionVersions(id),
+    queryFn: () => api.getPromotionVersions(id),
+    staleTime: CACHE_TTL.STANDARD,
+    enabled,
+  })
+}
+
+/**
+ * After any write: the list, every history under it (its keys start with the
+ * list's) and the forecast of every sales type, whose month badge says a line
+ * per planned promotion. A refusal invalidates too — a 409 means the
+ * promotion moved under the page (somebody cancelled it meanwhile), and the
+ * list on screen is the one to correct.
+ */
+function useInvalidatePromotions() {
+  const queryClient = useQueryClient()
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.promotions() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.revenueForecastAll() })
+  }
+}
+
+/**
+ * What a page does after each write, whichever write it was: its toast, its
+ * form closed, its row no longer busy. They are given to `useMutation`, never
+ * to `mutate`: TanStack calls `mutate`'s callbacks for the newest call of the
+ * hook only, so a second cancel sent before the first one answered took the
+ * first one's error toast and its form close with it (review of #397).
+ */
+export interface PromotionWriteEffects<TVariables> {
+  onSuccess?: (saved: Promotion, variables: TVariables) => void
+  onError?: (error: Error, variables: TVariables) => void
+  /** After either, once the lists have been asked for again. */
+  onSettled?: (variables: TVariables) => void
+}
+
+export interface SavePromotionVariables {
+  /** None for a new promotion. */
+  id?: number
+  body: PromotionIn
+}
+
+function usePromotionWrite<TVariables>(
+  write: (variables: TVariables) => Promise<Promotion>,
+  effects: PromotionWriteEffects<TVariables>,
+) {
+  const invalidate = useInvalidatePromotions()
+  return useMutation<Promotion, Error, TVariables>({
+    mutationFn: write,
+    onSuccess: (saved, variables) => effects.onSuccess?.(saved, variables),
+    onError: (error, variables) => effects.onError?.(error, variables),
+    onSettled: (_saved, _error, variables) => {
+      invalidate()
+      effects.onSettled?.(variables)
+    },
+  })
+}
+
+/** Create (no `id`) or save a new version of (`id`) a promotion. */
+export function useSavePromotion(effects: PromotionWriteEffects<SavePromotionVariables> = {}) {
+  return usePromotionWrite<SavePromotionVariables>(
+    ({ id, body }) => (id === undefined ? api.createPromotion(body) : api.updatePromotion(id, body)),
+    effects,
+  )
+}
+
+export function useCancelPromotion(effects: PromotionWriteEffects<number> = {}) {
+  return usePromotionWrite<number>((id) => api.cancelPromotion(id), effects)
+}
+
+export function useRestorePromotion(effects: PromotionWriteEffects<number> = {}) {
+  return usePromotionWrite<number>((id) => api.restorePromotion(id), effects)
 }

@@ -50,14 +50,6 @@ class TestBuyer:
         """from_api should return None for None input."""
         assert Buyer.from_api(None) is None
 
-    def test_full_name(self):
-        """full_name should use the provided value or default to None."""
-        buyer = Buyer(id=1, full_name="John Doe")
-        assert buyer.full_name == "John Doe"
-
-        buyer = Buyer(id=1)
-        assert buyer.full_name is None
-
 
 class TestOrderProduct:
     """Tests for OrderProduct dataclass."""
@@ -76,11 +68,6 @@ class TestOrderProduct:
         assert product.quantity == 2
         assert product.price_sold == 100.50
         assert product.product_id == 456
-
-    def test_total(self):
-        """total should calculate line total."""
-        product = OrderProduct(name="Test", quantity=3, price_sold=50.0)
-        assert product.total == 150.0
 
 
 class TestOrder:

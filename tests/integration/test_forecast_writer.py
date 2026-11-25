@@ -102,7 +102,7 @@ async def stores(tmp_path, monkeypatch):
     across. DuckDB is here for what must not reach it."""
     from core.store import AnalyticsStore
     from tests.integration.pg_tab_seed import tab_in_postgres
-    from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
+    from tests.helpers.goals_history import _seed_history_pg
 
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
     store = AnalyticsStore()
@@ -607,18 +607,6 @@ class TestTheReadsFollowTheChain:
             await conn.execute(f"UPDATE {PREDICTIONS} SET predicted_revenue = 7")
 
     @pytest.mark.asyncio
-    async def test_latched_every_read_is_postgres_with_the_flag_at_duckdb(self, stores):
-        store, pool, env = stores
-        await self._two_versions(store, pool)
-        chain_latch.latch(CHAIN, pg_forecast_write.WRITE_ENV)
-        env.setenv("KS_READ_GOALS", "duckdb")                    # a read rollback
-
-        smart = await store.generate_smart_goals(2026, 10, "retail")
-        assert smart["monthly"]["seasonalityIndex"] == pytest.approx(1.2345)
-        preds = await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
-        assert {p["predicted_revenue"] for p in preds} == {7.0}
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("table", [SEASONAL, PREDICTIONS])
     async def test_a_postgres_failure_raises_rather_than_reading_duckdb(
             self, stores, table):
@@ -647,30 +635,6 @@ class TestTheReadsFollowTheChain:
         assert raised.value.surface == "goals"
         assert isinstance(raised.value.__cause__, ConnectionError)
         assert read_fallback.refusals()["goals"]["count"] == 1
-
-
-# ─── The flag put back ──────────────────────────────────────────────────────
-
-
-class TestTheFlagPutBack:
-    @pytest.mark.asyncio
-    async def test_the_flag_put_back_moves_nothing(self, stores):
-        """OD-19 (a): `KS_WRITE_FORECAST=duckdb` is not a rollback. Since step
-        14's S14-11 it is not even a disagreement — nothing reads the flag,
-        so `/api/health` says nothing of it. Until S14-13 the hourly replace
-        was asked here too, and stood down for the four tables; it went with
-        `core.pg_operational`."""
-        from web.routes.api.health import _write_chains
-
-        store, pool, env = stores
-        _flag(env)
-        await store.store_predictions(FORECAST, "retail", METRICS)
-        env.setenv(pg_forecast_write.WRITE_ENV, "duckdb")
-
-        await store.recalculate_goal_tables(include_weekly=True)
-
-        assert len(await _pg(pool, SEASONAL)) == 12, "the flag moved the write back"
-        assert _write_chains()[CHAIN] == {}
 
 
 # ─── The standing watch reads what it judges ────────────────────────────────

@@ -238,77 +238,40 @@ class TestTheDerivationRidesTheReplicationTick:
     DuckDB (`core.pg_operational.replicate_operational`), and a copy that ran
     before the derivation would have carried yesterday's verdict for a buyer
     decided an hour ago — `pg_gold`'s arrangement with `pg_silver`. The copy
-    went with S14-13; what the tick runs after the derivation is the copy of
-    `data/bot.db`, and `derive_gender_pg` is the one writer of new verdicts,
-    so a tick without it stops them.
+    went with S14-13, and the copy of `data/bot.db` that ran after the
+    derivation went on 2026-11-19. `derive_gender_pg` is the one writer of
+    new verdicts, so a tick without it stops them.
     """
 
-    def test_the_runner_derives_before_it_replicates(self):
-        import ast
-        import inspect
-
-        from core.scheduler import BackgroundScheduler
-
-        import textwrap
-
-        src = textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_replicate_operational))
-        tree = ast.parse(src)
-        # By line, not by `ast.walk` order: the walk is breadth-first, and a
-        # call nested in the chain-4 branch sorts after a shallower one below.
-        lines = {}
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Call):
-                name = getattr(n.func, "id", getattr(n.func, "attr", None))
-                lines.setdefault(name, []).append(n.lineno)
-        # Chain 4's derivation, in Postgres — the only one since step 14's
-        # S14-11 (DuckDB's `derive_gender` went with the flag).
-        assert "derive_gender_pg" in lines, "the tick no longer derives gender"
-        assert "derive_gender" not in lines, "the tick derives in DuckDB again"
-        assert "replicate_operational" not in lines, (
-            "the tick copies out of DuckDB again")
-        assert "replicate_bot_state" in lines
-        assert max(lines["derive_gender_pg"]) < min(lines["replicate_bot_state"])
-
     @pytest.mark.asyncio
-    async def test_the_tick_derives_and_copies_the_bot_without_the_store(self):
-        """What the job returns, run: the derivation's answer and the bot's
-        copy, the store never asked. (Held by the off sweep's job tests until
-        step 14's S14-18 deleted them with the switch.) Mutation: drop the
-        derivation, or ask the store."""
+    async def test_the_tick_derives_without_the_store(self):
+        """What the job returns, run: the derivation's answer, the store never
+        asked. (Held by the off sweep's job tests until step 14's S14-18
+        deleted them with the switch.) Mutation: drop the derivation, or ask
+        the store."""
         from unittest.mock import AsyncMock, patch
 
         from core.scheduler import BackgroundScheduler
 
         derive = AsyncMock(return_value={"decided": 2})
-        bot = AsyncMock(return_value={"skipped": "KS_BOT_STORE=postgres"})
         with patch("core.pg_buyers_write.derive_gender_pg", new=derive), \
-             patch("core.pg_bot_state.replicate_bot_state", new=bot), \
-             patch("core.store.get_store",
-                   new=AsyncMock(side_effect=AssertionError("the store was asked"))), \
              patch("core.store.get_store",
                    new=AsyncMock(side_effect=AssertionError("the store was asked"))):
             result = await BackgroundScheduler()._run_replicate_operational()
-        assert result == {"gender": {"decided": 2},
-                          "bot_state": {"skipped": "KS_BOT_STORE=postgres"}}
+        assert result == {"gender": {"decided": 2}}
         derive.assert_awaited_once()
-        bot.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_a_failed_derivation_does_not_cost_the_bot_its_copy(self):
+    async def test_a_failed_derivation_is_returned_not_raised(self):
         """Mutation: take the derivation's own `try` away."""
         from unittest.mock import AsyncMock, patch
 
         from core.scheduler import BackgroundScheduler
 
-        bot = AsyncMock(return_value={"rows": 3})
         with patch("core.pg_buyers_write.derive_gender_pg",
-                   new=AsyncMock(side_effect=RuntimeError("pg down"))), \
-             patch("core.pg_bot_state.replicate_bot_state", new=bot):
+                   new=AsyncMock(side_effect=RuntimeError("pg down"))):
             result = await BackgroundScheduler()._run_replicate_operational()
-        assert result == {"gender": {"error": "RuntimeError: pg down"},
-                          "bot_state": {"rows": 3}}
-        bot.assert_awaited_once()
+        assert result == {"gender": {"error": "RuntimeError: pg down"}}
 
     def test_the_cli_and_the_tick_share_one_implementation(self):
         """Two callers, one home — charter rule 1: both run chain 4's

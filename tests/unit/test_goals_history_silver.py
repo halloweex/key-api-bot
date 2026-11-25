@@ -36,35 +36,21 @@ Each guard names the mutation that bites it.
 from __future__ import annotations
 
 import ast
-import asyncio
-import os
 import re
-import subprocess
-import sys
-from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 
-from core import pg_goals_read
 from core.duckdb_constants import KNOWN_SALES_TYPES
 from core.models import OrderStatus
 from core.repositories import goals as goals_module
 from tests.integration.pg_tab_seed import (
     derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_goals_off_duckdb_silver import (
-    ALL_IDS,
-    DSN,
-    EXPECTED,
-    INTERVALS,
-    MANAGERS,
-    ORDERS,
-    TIMEOUT_S,
-    _calculators,
+from tests.helpers.goals_history import (
+    ALL_IDS, DSN, EXPECTED, INTERVALS, MANAGERS, ORDERS, _calculators,
     _seed_history_pg,
 )
 
@@ -77,10 +63,6 @@ GOALS = REPO / "core" / "repositories" / "goals.py"
 BRIDGE_TABLES = ("orders", "managers", "manager_classifications")
 _BRIDGE_TABLE = re.compile(
     r"(?<![\w.])(" + "|".join(BRIDGE_TABLES) + r")(?![\w])", re.IGNORECASE)
-PG_BRIDGE_TABLES = ("bronze.orders", "bronze.managers", "app.manager_classifications")
-_PG_BRIDGE_TABLE = re.compile(
-    r"(?<![\w.])(" + "|".join(re.escape(t) for t in PG_BRIDGE_TABLES) + r")(?![\w])",
-    re.IGNORECASE)
 
 
 # ─── T9: the orders Silver selects ─────────────────────────────────────────
@@ -218,12 +200,8 @@ class TestTheBounds:
         `WHERE NOT s.is_return AND s.sales_type = 'retail'` — the first bound
         becomes the history's own first day, and this fails.
         """
-        from tests.unit.test_goals_off_duckdb_silver import (
-            B2B_MANAGER_ID,
-            HISTORY_END,
-            HISTORY_START,
-            _kyiv_noon,
-        )
+        from core.duckdb_constants import B2B_MANAGER_ID
+        from tests.helpers.goals_history import HISTORY_END, HISTORY_START, _kyiv_noon
 
         first = HISTORY_START - timedelta(days=40)
         last = HISTORY_END + timedelta(days=40)
@@ -269,81 +247,6 @@ class TestSilverIsWhatIsRead:
         seasonality, yoy, _weekly, caps = await _calculators(store, "retail")
         assert seasonality == {} and yoy["sample_size"] == 0
         assert caps == [0.35] * 12
-
-
-# ─── T10: met by construction ──────────────────────────────────────────────
-
-@contextmanager
-def _bridge_tables_refused():
-    """Every statement a goal read sends Postgres from here on is checked —
-    refused if it names a table the deleted bridge read, counted if it reads
-    Silver, so a run that read nothing cannot pass. Yields the Silver
-    statements seen."""
-    real = pg_goals_read.fetch
-    seen: list = []
-
-    async def guarded(sql, params=()):
-        found = _PG_BRIDGE_TABLE.search(sql)
-        if found:
-            raise AssertionError(
-                f"a goal read named {found.group(1)!r}: {' '.join(sql.split())[:200]}")
-        if "silver.orders" in sql:
-            seen.append(sql)
-        return await real(sql, params)
-
-    with patch.object(pg_goals_read, "fetch", guarded):
-        yield seen
-
-
-class TestNoGoalReadNamesABridgeTable:
-    """Everything that computes a goal runs with `bronze.orders`,
-    `bronze.managers` and `app.manager_classifications` refused at the
-    statement. Mutation M13: put the last-year read (or any one history read)
-    back on `{orders} o`, and it raises here, named."""
-
-    @needs_postgres
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
-    async def test_the_calculators_and_the_smart_goal(self, history_pg, sales_type):
-        store, _pool = history_pg
-        with _bridge_tables_refused() as seen:
-            await store.calculate_seasonality_indices(sales_type)
-            await store.calculate_yoy_growth(sales_type)
-            await store.calculate_weekly_patterns(sales_type)
-            for month in range(1, 13):
-                await store._dynamic_growth_cap(month, sales_type)
-            await store.recalculate_goal_tables(include_weekly=True)
-            await asyncio.wait_for(
-                store.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S)
-            await store.get_smart_goals(sales_type, year=2026, month=10)
-            await store.get_goals(sales_type)
-        assert len(seen) >= 20, "the guard saw no Silver read — nothing was proved"
-
-    @needs_postgres
-    @pytest.mark.asyncio
-    async def test_the_monday_job(self, history_pg, monkeypatch):
-        from core.scheduler import BackgroundScheduler
-
-        store, _pool = history_pg
-
-        async def _get_store():
-            return store
-
-        monkeypatch.setattr("core.store.get_store", _get_store)
-        with _bridge_tables_refused() as seen:
-            result = await BackgroundScheduler()._run_seasonality_calc()
-        assert result["retail_months"] == 12
-        assert seen, "the job read no Silver"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("table", PG_BRIDGE_TABLES)
-    async def test_the_guard_bites_each_table(self, table):
-        """Not vacuous: a statement naming any of the three is refused before
-        it reaches a server — what the deleted bridge's reads were, and why
-        this guard stays."""
-        with _bridge_tables_refused():
-            with pytest.raises(AssertionError, match=f"named {table!r}"):
-                await pg_goals_read.fetch(f"SELECT COUNT(*) FROM {table}")
 
 
 # ─── T12: the window and the row set, read off the module ─────────────────
@@ -397,74 +300,6 @@ class TestTheBodies:
 
 # ─── T13: the retired switch ───────────────────────────────────────────────
 
-def _string_constants(path: Path):
-    """Every string constant in a module, docstrings and comments left out
-    — a name in prose is history, a name in code is a read."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    docstrings = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                             ast.AsyncFunctionDef)):
-            first = node.body[0] if node.body else None
-            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
-                    and isinstance(first.value.value, str)):
-                docstrings.add(id(first.value))
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and id(node) not in docstrings):
-            yield node.value
-
-
-class TestTheSwitch:
-    def test_nothing_in_the_code_reads_it(self):
-        """Since step 14's S14-07 no module of web or the bot names
-        `KS_GOALS_HISTORY` in code — the refusal, its health block and its
-        canary check went. Mutation: read it again, for a decision or to
-        publish it."""
-        readers = sorted(
-            str(path.relative_to(REPO))
-            for tree in ("core", "web", "bot")
-            for path in (REPO / tree).rglob("*.py")
-            if any("KS_GOALS_HISTORY" in value for value in _string_constants(path)))
-        assert readers == [], readers
-
-    def test_nothing_but_silver_is_a_history(self):
-        """The bridge's code path is gone, and so are the switch's names.
-        Mutation: restore any of `history_from_silver`,
-        `_orders_sales_type_predicate`, `_bridge_rows` or `HISTORY_ENV`."""
-        assert not hasattr(pg_goals_read, "history_from_silver")
-        assert not hasattr(pg_goals_read, "HISTORY_ENV")
-        assert not hasattr(pg_goals_read, "history_mode")
-        assert not hasattr(goals_module, "_orders_sales_type_predicate")
-        assert not hasattr(goals_module, "_refuse_a_retired_history")
-        assert not hasattr(goals_module.GoalsMixin, "_bridge_rows")
-
-    @pytest.mark.parametrize("value", ["silvr", "bridge"])
-    def test_nothing_raises_at_import(self, value, tmp_path):
-        """Rule 3: any value in a variable nothing reads imports and starts.
-        Imported fresh, with the value set, away from any `.env`."""
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
-               "PYTHONPATH": str(REPO), "TZ": "UTC", "KS_GOALS_HISTORY": value,
-               "DASHBOARD_SECRET_KEY": "test-only-signing-key"}
-        done = subprocess.run(
-            [sys.executable, "-c",
-             "import core.pg_goals_read, core.repositories.goals, "
-             "core.scheduler, web.main"],
-            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
-        assert done.returncode == 0, done.stderr[-2000:]
-
-    @needs_postgres
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", ["bridge", "silvr"])
-    async def test_any_value_answers_as_unset_does(self, history_pg, monkeypatch, value):
-        """`bridge` refused every history read until S14-07; now it is
-        nothing. Mutation: refuse it again."""
-        store, _pool = history_pg
-        monkeypatch.delenv("KS_GOALS_HISTORY", raising=False)
-        unset = await _calculators(store, "retail")
-        monkeypatch.setenv("KS_GOALS_HISTORY", value)
-        assert await _calculators(store, "retail") == unset
-
 
 class TestTheConditionStaysRetired:
     """`goals_history_mode_invalid` paged a refused `KS_GOALS_HISTORY` until
@@ -478,16 +313,3 @@ class TestTheConditionStaysRetired:
         from core.alerting import REGISTRY
 
         assert self.NAME not in REGISTRY
-
-    def test_the_canary_neither_judges_nor_levers_it(self):
-        from bot import canary
-
-        assert not hasattr(canary, "check_goals_history_mode")
-        assert self.NAME not in dict(canary._ACTIONS)
-        canary_source = (REPO / "bot" / "canary.py").read_text(encoding="utf-8")
-        assert self.NAME not in canary_source
-
-    def test_health_publishes_no_goals_history(self):
-        from web.schemas import HealthResponse
-
-        assert "goals_history" not in HealthResponse.model_fields

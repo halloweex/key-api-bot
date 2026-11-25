@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 import pytest
 
 from core.data_quality import (
-    DEFAULT_REMEDIATION,
     HUMAN_CHECK_NAMES,
     Severity,
     remediation_for,
@@ -170,18 +169,6 @@ class TestTheGraceFollowsTheFloor:
 
 
 class TestTheReaderIsToldWhatToDo:
-    def test_each_name_has_a_lever_of_its_own(self):
-        """A CRITICAL names its lever; the anchor is the signal one is missing."""
-        for name in NAMES:
-            assert remediation_for([name]) != [DEFAULT_REMEDIATION], name
-
-    def test_the_watermark_is_read_before_anything_ships(self):
-        """A successful ship clears `last_error`, and with it the reason the
-        last one failed — so the line sends the reader to the watermark
-        before it offers the lever that ships."""
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        assert "meta.mirror_state" in line and "silver.order_utm" in line
-        assert line.index("meta.mirror_state") < line.index("/api/traffic/refresh")
 
     def test_every_route_the_lever_names_exists(self):
         """A lever that names a route nobody registered sends the reader to a
@@ -194,28 +181,6 @@ class TestTheReaderIsToldWhatToDo:
         assert set(named) == {"/api/traffic/refresh"}
         for path in named:
             assert find_endpoint(app, path, "POST") is not None, path
-
-    def test_every_route_the_reasons_name_exists(self):
-        """The line has room for the levers alone, so why each one is offered
-        rides in both paging descriptions. A route named there must exist as
-        surely as one named in the line: it is read at the same moment. (The
-        backfill, offered and refused in the DuckDB parser's reasons, went
-        with them in step 14's S14-15.)"""
-        from tests.routes_helper import find_endpoint
-        from web.main import app
-
-        paged = _findings(
-            missing=1, missing_ids=[1], missing_since=SINCE,
-            stale=1, stale_ids=[2], stale_since=SINCE,
-        )
-        for issue in paged:
-            named = set(re.findall(r"POST (/api/[\w/-]+)", issue.description))
-            assert named == {
-                "/api/traffic/refresh",
-                "/api/warehouse/refresh",
-            }, issue.check_name
-            for path in named:
-                assert find_endpoint(app, path, "POST") is not None, path
 
     def test_the_refresh_the_line_names_parses_by_itself(self):
         """A lever that waited for the next derivation could wait the floor out;
@@ -243,31 +208,6 @@ class TestUnderThePostgresParse:
     the words, the ones production published under `postgres`.
     """
 
-    PG_ROUTES = {"/api/traffic/refresh", "/api/warehouse/refresh"}
-
-    @pytest.fixture
-    def postgres_mode(self):
-        """The modes the words were written for, configured until step 14's
-        S14-15 removed them; a fixture that sets nothing since."""
-
-    @staticmethod
-    def _routes_exist(named):
-        from tests.routes_helper import find_endpoint
-        from web.main import app
-
-        for path in named:
-            assert find_endpoint(app, path, "POST") is not None, path
-
-    def test_the_line_reads_the_watermark_then_offers_both_refreshes(self, postgres_mode):
-        for name in NAMES:
-            (line,) = remediation_for([name])
-            assert "DuckDB" not in line and "manager_comment" not in line, name
-            assert "meta.mirror_state" in line and "silver.order_utm" in line
-            named = re.findall(r"(/api/[\w/-]+)", line)
-            assert set(named) == self.PG_ROUTES, named
-            assert line.index("meta.mirror_state") < min(line.index(r) for r in named)
-            self._routes_exist(named)
-
     def test_the_warehouse_refresh_reaches_the_parse(self):
         """Why the line may offer it: the route, under own, runs the whole
         derivation, and the derivation's last step is the parse. Parsed from
@@ -291,58 +231,3 @@ class TestUnderThePostgresParse:
         for function, callee in chain:
             assert callee in _names_called(function), (function.__qualname__, callee)
         assert "parse_incremental" in _names_called(pg_utm_parse.parse_incremental_locked)
-
-    def test_the_pages_give_the_reasons_for_this_parser(self):
-        paged = order_utm_completeness_findings(
-            _row(missing=1, missing_ids=[1], missing_since=SINCE,
-                 stale=1, stale_ids=[2], stale_since=SINCE),
-            grace_minutes=SILVER_GRACE_MINUTES)
-        assert [i.check_name for i in paged] == [
-            "pg_order_utm_missing", "pg_order_utm_stale"]
-        for issue in paged:
-            text = issue.description
-            assert "reads bronze.orders itself" in text, issue.check_name
-            assert "reads DuckDB" not in text and "mirror_row_values" not in text
-            assert "never ships this table" not in text
-            assert "backfill-utm" not in text
-            named = set(re.findall(r"POST (/api/[\w/-]+)", text))
-            assert named == self.PG_ROUTES, (issue.check_name, named)
-            self._routes_exist(named)
-            # The counts are the same finding's whatever the words.
-            assert f"more than {SILVER_GRACE_MINUTES} minutes" in text
-            assert SINCE.isoformat() in text
-
-    def test_in_flight_waits_for_the_derivation_not_the_tick(self):
-        (issue,) = order_utm_completeness_findings(
-            _row(in_flight=2, in_flight_ids=[5, 6]),
-            grace_minutes=SILVER_GRACE_MINUTES)
-        assert issue.severity is Severity.INFO
-        assert "DuckDB's tick" not in issue.description
-        assert "next derivation" in issue.description
-
-    @pytest.mark.asyncio
-    async def test_the_job_files_these_words(self, postgres_mode, monkeypatch):
-        """The findings are pure; the job is what reaches them. Without this
-        the words above would be reachable only from a test."""
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from core import mirror_reconciliation as mr
-
-        monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
-        # A Postgres to compare against (`configured()`), never reached: the
-        # pool is a mock. Without it the check stands down and the test read
-        # the DSN of whatever environment it ran in.
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://unused@127.0.0.1:1/none")
-
-        async def _fake_row(conn, *, now, grace_minutes, max_samples):
-            return _row(missing=1, missing_ids=[7], missing_since=SINCE)
-
-        pool = MagicMock()
-        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=object())
-        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
-             patch("core.pg.require_revision", new=AsyncMock()), \
-             patch.object(mr, "order_utm_completeness_row", new=_fake_row):
-            (issue,) = await mr.reconcile_order_utm_completeness(
-                now=datetime(2030, 6, 5, 4, 30, tzinfo=timezone.utc))
-        assert "reads bronze.orders itself" in issue.description

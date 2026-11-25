@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 SECRET = "Connect call failed ('10.1.2.3', 5432) for user ks_app"
 

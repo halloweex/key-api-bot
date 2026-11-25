@@ -10,29 +10,16 @@ decided by hand.
 """
 from __future__ import annotations
 
-import ast
-import inspect
 import re
 from datetime import date
 from decimal import Decimal
-from pathlib import Path
 
-from core import ch_gold
 from core.ch_gold import (
     COLUMNS,
     _TABLE_DDL,
     parse_tsv,
     render_tsv,
 )
-
-ROOT = Path(__file__).resolve().parents[2]
-
-# The copy mode's conditions. Deleted with it (O11 a) and never reused: a page
-# under one of these names would read as the retired copy's.
-COPY_MODE_CONDITIONS = frozenset({
-    "ch_gold_unreachable", "ch_gold_ship_failed", "ch_gold_row_missing",
-    "ch_gold_row_extra", "ch_gold_value_mismatch",
-})
 
 
 def _row(**overrides):
@@ -91,33 +78,3 @@ class TestTheDDLAndTheColumnListAgree:
             _TABLE_DDL, re.MULTILINE,
         )
         assert tuple(declared) == COLUMNS
-
-
-class TestTheCopyModeIsGone:
-    def test_the_module_holds_no_shipper_and_no_comparison(self):
-        """O11 (a): nothing here ships, reads back or compares any more —
-        the module is a DDL and a codec. Mutation: put back `ship_gold` (or
-        any coroutine) in `core/ch_gold.py`."""
-        coroutines = [name for name, fn in vars(ch_gold).items()
-                      if inspect.iscoroutinefunction(fn)]
-        assert coroutines == []
-        for gone in ("ship_gold", "reconcile_ch_gold", "compare_rows",
-                     "ensure_schema", "STAGING"):
-            assert not hasattr(ch_gold, gone), gone
-
-    def test_its_condition_names_are_registered_and_emitted_by_nothing(self):
-        """A deleted condition name is never reused. Mutation: register or
-        emit any of the five again (`check_name="ch_gold_ship_failed"`)."""
-        from core.alerting import REGISTRY
-        from core.data_quality import HUMAN_CHECK_NAMES, REMEDIATION
-
-        emitted = set()
-        for tree in ("core", "web", "bot", "scripts", "deploy"):
-            for path in sorted((ROOT / tree).rglob("*.py")):
-                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                    if isinstance(node, ast.Constant) and node.value in COPY_MODE_CONDITIONS:
-                        emitted.add((str(path.relative_to(ROOT)), node.value))
-        assert emitted == set()
-        assert not COPY_MODE_CONDITIONS & set(REGISTRY)
-        assert not COPY_MODE_CONDITIONS & set(HUMAN_CHECK_NAMES)
-        assert not [p for p, _ in REMEDIATION if p.startswith("ch_gold")]
