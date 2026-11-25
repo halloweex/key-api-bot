@@ -354,31 +354,6 @@ class TestSmsSegmentsJson:
         assert call["tier"] is None
         assert call["ltv_basis"] == "revenue", "revenue stays the default basis"
 
-    def test_margin_basis_swaps_the_default_thresholds(self, client, store):
-        """Margin cut-offs are calibrated to select the same share of the base.
-
-        Without this, switching basis would silently shrink every tier by
-        roughly the blended margin rate.
-        """
-        r = client.get(
-            SEGMENTS_PATH, params={"ltv_basis": "margin"}, headers=_admin_headers(),
-        )
-        assert r.status_code == 200
-
-        call = store.calls[0]
-        assert call["ltv_basis"] == "margin"
-        assert call["vip_ltv"] == 5500.0
-        assert call["core_ltv"] == 2750.0
-
-    def test_explicit_thresholds_override_basis_defaults(self, client, store):
-        client.get(
-            SEGMENTS_PATH,
-            params={"ltv_basis": "margin", "vip_ltv": 9000, "core_ltv": 1000},
-            headers=_admin_headers(),
-        )
-        assert store.calls[0]["vip_ltv"] == 9000
-        assert store.calls[0]["core_ltv"] == 1000
-
     def test_threshold_coherence_checked_against_basis_defaults(self, client, store):
         """core_ltv=8000 is fine on revenue (VIP 10000) but not on margin (VIP 5500)."""
         ok = client.get(
@@ -393,21 +368,70 @@ class TestSmsSegmentsJson:
         )
         assert bad.status_code == 400
 
-    def test_customers_withheld_by_default(self, client, store):
-        r = client.get(SEGMENTS_PATH, headers=_admin_headers())
-        assert r.json()["customers"] == []
-        assert store.calls[0]["include_customers"] is False
 
-    def test_customers_returned_on_request(self, client, store):
-        r = client.get(
-            SEGMENTS_PATH, params={"include_customers": "true"}, headers=_admin_headers(),
-        )
-        assert len(r.json()["customers"]) == 3
+class TestTheAudienceOverPostgres:
+    """What the preview answers about real buyers (`_ladder`): the cut-offs
+    each basis brings, the rows withheld unless asked for, the tiers a
+    campaign names."""
 
-    def test_tier_is_normalised(self, client, store):
-        r = client.get(SEGMENTS_PATH, params={"tier": "vip"}, headers=_admin_headers())
-        assert r.status_code == 200
-        assert store.calls[0]["tier"] == ["VIP"]
+    @pytest.mark.asyncio
+    async def test_the_margin_basis_brings_its_own_cut_offs(self, on_pg):
+        """Margin cut-offs are set to select the same share of the base, so
+        switching the basis swaps them — or every tier would shrink by about
+        the blended margin rate — and a cut-off typed by hand wins over
+        either. Buyer 4's ₴6 400 margin is VIP on margin's own cut-off and
+        CORE under a typed ₴9 000; its ₴8 000 revenue is CORE."""
+        await _ladder()
+
+        async with signed_in("admin") as admin:
+            revenue = await admin.get(SEGMENTS_PATH, params={"include_customers": "true"})
+            margin = await admin.get(SEGMENTS_PATH, params={
+                "include_customers": "true", "ltv_basis": "margin"})
+            typed = await admin.get(SEGMENTS_PATH, params={
+                "include_customers": "true", "ltv_basis": "margin",
+                "vip_ltv": 9000, "core_ltv": 1000})
+
+        assert _tiers(revenue) == LADDER_TIERS
+        assert _tiers(margin) == {**LADDER_TIERS, 4: "VIP"}
+        assert _tiers(typed) == LADDER_TIERS
+
+    @pytest.mark.asyncio
+    async def test_customer_rows_come_only_when_asked_for(self, on_pg):
+        """The preview counts people; their names and phone numbers leave
+        only on request."""
+        await _ladder()
+
+        async with signed_in("admin") as admin:
+            sizes = await admin.get(SEGMENTS_PATH)
+            rows = await admin.get(SEGMENTS_PATH, params={"include_customers": "true"})
+
+        assert sizes.status_code == 200, sizes.text
+        assert sizes.json()["totals"]["customers"] == 4
+        assert sizes.json()["customers"] == []
+        assert set(_tiers(rows)) == {1, 2, 3, 4}
+
+    @pytest.mark.parametrize("tier, chosen", [
+        ("vip", ["VIP"]),
+        ("CORE,REACTIVATION", ["CORE", "REACTIVATION"]),
+        (" core , Reactivation ", ["CORE", "REACTIVATION"]),
+        ("CORE,CORE", ["CORE"]),
+        ("", ["VIP", "CORE", "REACTIVATION"]),
+    ])
+    @pytest.mark.asyncio
+    async def test_the_tiers_a_campaign_names_are_read_forgivingly(
+        self, on_pg, tier, chosen,
+    ):
+        """One campaign may take several tiers — a discount suits Core and
+        Reactivation and cannibalises VIP — so the filter is a set: case,
+        spaces and a repeat are forgiven, and no tier is every tier."""
+        await _ladder()
+
+        async with signed_in("admin") as admin:
+            r = await admin.get(SEGMENTS_PATH, params={
+                "tier": tier, "include_customers": "true"})
+
+        assert _tiers(r) == {b: t for b, t in LADDER_TIERS.items() if t in chosen}
+        assert [s["tier"] for s in r.json()["segments"]] == chosen
 
 
 # ─── Parameter validation ─────────────────────────────────────────────────
@@ -830,29 +854,6 @@ class TestMultiTierSelection:
     splitting it into two rosters would mean two sends to reconcile later.
     """
 
-    def test_several_tiers_reach_the_store_as_a_list(self, client, store):
-        client.get(
-            SEGMENTS_PATH, params={"tier": "CORE,REACTIVATION"},
-            headers=_admin_headers(),
-        )
-
-        assert store.calls[0]["tier"] == ["CORE", "REACTIVATION"]
-
-    def test_whitespace_and_case_are_forgiven(self, client, store):
-        client.get(
-            SEGMENTS_PATH, params={"tier": " core , Reactivation "},
-            headers=_admin_headers(),
-        )
-
-        assert store.calls[0]["tier"] == ["CORE", "REACTIVATION"]
-
-    def test_duplicates_collapse(self, client, store):
-        client.get(
-            SEGMENTS_PATH, params={"tier": "CORE,CORE"}, headers=_admin_headers(),
-        )
-
-        assert store.calls[0]["tier"] == ["CORE"]
-
     def test_one_bad_name_rejects_the_whole_request(self, client, store):
         """Silently dropping it would send to fewer people than were asked for."""
         r = client.get(
@@ -862,11 +863,6 @@ class TestMultiTierSelection:
         assert r.status_code == 400
         assert "GOLD" in r.json()["detail"]
         assert store.calls == []
-
-    def test_empty_tier_means_every_tier(self, client, store):
-        client.get(SEGMENTS_PATH, params={"tier": ""}, headers=_admin_headers())
-
-        assert store.calls[0]["tier"] is None
 
     def test_export_filename_names_the_tiers_it_holds(self, client, store):
         r = client.get(
