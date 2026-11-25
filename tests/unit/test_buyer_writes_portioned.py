@@ -1,15 +1,10 @@
-"""Every buyer writer mirrors, in portions, and the long one does not hold the
-warehouse while it waits on KeyCRM (chain 4, PR-1, step 3).
+"""The admin's full buyer sync and the manual one, and the heavy-job lock.
 
-Three shapes this replaces, each measured:
-
-* the mirror was a line at ONE caller, so the admin `sync-all-buyers` wrote
-  DuckDB alone and every buyer it changed stayed a daily CRITICAL in the
-  comparison with nothing able to repair it;
-* one transaction carried the whole batch, and twenty thousand buyers run DuckDB
-  out of memory under the production limit (8 000 already do);
-* `sync-all-buyers` would have held the heavy-job lock through ~460 sequential
-  KeyCRM pages, stopping the minute sync for as long.
+The full sync writes every buyer KeyCRM lists in portions, each under the
+heavy-job lock, and counts the buyers Postgres holds before and after; it
+runs here against the test Postgres with KeyCRM faked at its HTTP
+transport. The routes answer at once and refuse a second run, and the
+manual sync gives up on a busy lock inside the request budget.
 
 Since step 14's S14-00 chain 4 writes the buyers, a constant, so DuckDB's
 portions and their mirroring are no path production takes: those tests, and
@@ -25,11 +20,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.models import Buyer
-
-def _buyers(n, *, base=1, name="Покупець"):
-    return [Buyer.from_api({"id": base + i, "full_name": f"{name} {i}",
-                            "phone": [f"+3805{i:08d}"]}) for i in range(n)]
+from tests.helpers.buyers_fixture import (
+    buyer_payload, buyers_in_postgres, keycrm_serving_buyers)
+from tests.integration.pg_tab_seed import needs_postgres
 
 
 class _FakeLock:
@@ -68,52 +61,39 @@ def fresh_limits():
     limiter.reset()
 
 
-def _store_for_sync_all(upsert):
-    store = MagicMock()
-    store.BUYER_WRITE_PORTION = 1000
-    conn = MagicMock()
-    conn.execute.return_value.fetchone.return_value = (0,)
-    store.connection.return_value.__aenter__ = AsyncMock(return_value=conn)
-    store.connection.return_value.__aexit__ = AsyncMock(return_value=False)
-    store.upsert_buyers = upsert
-    return store
-
-
-def _keycrm(monkeypatch, fetch):
-    from core import keycrm
-
-    client = MagicMock()
-    client.fetch_all_buyers = fetch
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
-    monkeypatch.setattr(keycrm, "KeyCRMClient", MagicMock(return_value=client))
-
-
-class TestUnderChain4:
-    """The buyers land in Postgres alone, so sync-all counts them there, and a
-    flag nobody can read is refused at both doors before anything starts."""
-
-    READERS = ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD")
-
+@needs_postgres
+class TestTheFullSync:
     @pytest.mark.asyncio
-    async def test_sync_all_counts_the_buyers_where_they_are_written(self, monkeypatch):
-        from core import pg_buyer_sync_read
+    async def test_every_buyer_keycrm_lists_lands_and_the_new_ones_are_counted(
+            self, monkeypatch):
+        """Two buyers held, KeyCRM listing four over two pages — one of the
+        two renamed, three new — written in two portions: every buyer lands
+        with its phone, and the counts are Postgres's before and after."""
+        from core.store import AnalyticsStore
         from web.routes.api import admin
 
-        monkeypatch.setenv("KS_WRITE_BUYERS", "postgres")
-        for reader in self.READERS:
-            monkeypatch.setenv(reader, "postgres")
-        counts = iter([100, 103])
-        monkeypatch.setattr(pg_buyer_sync_read, "count_buyers",
-                            AsyncMock(side_effect=lambda: next(counts)))
-        _keycrm(monkeypatch, AsyncMock(return_value=_buyers(3)))
-        store = _store_for_sync_all(AsyncMock(return_value=3))
-        store.connection.side_effect = AssertionError("DuckDB counted under chain 4")
+        async with buyers_in_postgres() as pool:
+            await pool.executemany(
+                "INSERT INTO bronze.buyers (id, full_name) VALUES ($1, $2)",
+                [(1, "Олена Петренко"), (2, "Іван Коваль")])
+            keycrm_serving_buyers(monkeypatch, [
+                [buyer_payload(2, "Іван Коваленко"), buyer_payload(3, "Марія Шевченко")],
+                [buyer_payload(4, "Петро Бондар"), buyer_payload(5, "Оксана Ткаченко")],
+            ])
+            store = AnalyticsStore()
+            store.BUYER_WRITE_PORTION = 3       # three buyers, then one
 
-        result = await admin._sync_all_buyers(store)
+            result = await admin._sync_all_buyers(store)
 
-        assert (result["before_count"], result["after_count"],
-                result["new_buyers"]) == (100, 103, 3)
+            names = {r["id"]: r["full_name"] for r in await pool.fetch(
+                "SELECT id, full_name FROM bronze.buyers")}
+            with_phone = {r["buyer_id"] for r in await pool.fetch(
+                "SELECT buyer_id FROM bronze.buyer_contacts WHERE contact_type = 'phone'")}
+        assert result == {"status": "done", "buyers_fetched": 4, "buyers_written": 4,
+                          "before_count": 2, "after_count": 5, "new_buyers": 3}
+        assert names == {1: "Олена Петренко", 2: "Іван Коваленко", 3: "Марія Шевченко",
+                         4: "Петро Бондар", 5: "Оксана Ткаченко"}
+        assert with_phone == {2, 3, 4, 5}
 
 
 class TestTheRoutes:
