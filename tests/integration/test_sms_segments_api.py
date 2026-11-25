@@ -32,6 +32,7 @@ from web.routes.auth import (
     SESSION_COOKIE,
 )
 from core.permissions import ADMIN_USER_IDS
+from core.store import AnalyticsStore
 
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 
@@ -546,27 +547,6 @@ class TestSmsSegmentsCsv:
         assert store.freezes == []
         assert r.headers["X-Campaign-Frozen"] == "false"
 
-    def test_freeze_records_the_whole_roster(self, client, store):
-        """The holdout is excluded from the CSV but must still be recorded."""
-        r = client.get(
-            CSV_PATH,
-            params={"freeze": "true", "campaign": "aug-promo", "promocode": "KS-AUG"},
-            headers=_admin_headers(),
-        )
-        assert r.status_code == 200
-
-        assert len(store.freezes) == 1
-        frozen = store.freezes[0]
-        assert frozen["campaign"] == "aug-promo"
-        assert frozen["promocode"] == "KS-AUG"
-        assert len(frozen["customers"]) == 3, "target AND holdout are frozen"
-        assert {c["assignment"] for c in frozen["customers"]} == {"target", "holdout"}
-
-        # ...while the file itself still carries only the target group
-        assert len(self._rows(r)) == 2
-        assert r.headers["X-Campaign-Frozen"] == "true"
-        assert r.headers["X-Campaign-Holdout"] == "1"
-
     def test_truncated_roster_refuses_to_freeze(self, client, store):
         """A partial roster would silently shrink the control group."""
         store.truncated = True
@@ -601,23 +581,76 @@ class TestSmsSegmentsCsv:
             RESULTS_PATH, params={"window_days": 400}, headers=_admin_headers(),
         ).status_code == 422
 
-    def test_unknown_campaign_is_404(self, client, store):
-        store.results_error = "campaign 'aug' is not frozen"
-        r = client.get(RESULTS_PATH, headers=_admin_headers())
-        assert r.status_code == 404
-
-    def test_unsent_campaign_is_409(self, client, store):
-        """Frozen but unsent is a state problem, not a missing resource."""
-        store.results_error = "campaign 'aug' has no send date — mark it sent"
-        r = client.get(RESULTS_PATH, headers=_admin_headers())
-        assert r.status_code == 409
-        assert "send date" in r.json()["detail"]
-
     def test_export_is_rate_limited(self, client, store):
         """Bulk PII export is capped — a leaked session can't drain the base."""
         codes = [client.get(CSV_PATH, headers=_admin_headers()).status_code for _ in range(7)]
         assert codes[:5] == [200] * 5
         assert 429 in codes[5:]
+
+
+class TestTheFrozenCampaignOverPostgres:
+    """What a freeze records and what the results then answer, read back out
+    of Postgres."""
+
+    @pytest.mark.asyncio
+    async def test_a_frozen_export_records_the_control_it_leaves_out(self, on_pg):
+        """The file carries the target arm alone — the control must not be
+        messaged — while the freeze records both arms and the campaign's
+        promocode: the control recorded here is the only one the campaign
+        will ever be measured against. Sixteen buyers, half withheld, so both
+        arms hold someone."""
+        async with pg_conn() as conn:
+            await _catalogue(conn)
+            for buyer_id in range(1, 17):
+                await _buyer(conn, buyer_id, f"38096{buyer_id:07d}",
+                             [(100 + buyer_id, 10, 1)])
+
+        async with signed_in("admin") as admin:
+            r = await admin.get(CSV_PATH, params={
+                "freeze": "true", "campaign": "aug-promo", "promocode": "KS-AUG",
+                "holdout_pct": 50})
+
+        assert r.status_code == 200, r.text
+        async with pg_conn() as conn:
+            arms = {row["buyer_id"]: row["assignment"] for row in await conn.fetch(
+                "SELECT buyer_id, assignment FROM app.sms_campaign_members"
+                " WHERE campaign = 'aug-promo'")}
+            campaign = await conn.fetchrow(
+                "SELECT promocode, holdout_pct, sent_at FROM app.sms_campaigns"
+                " WHERE campaign = 'aug-promo'")
+        target = {b for b, arm in arms.items() if arm == "target"}
+        holdout = {b for b, arm in arms.items() if arm == "holdout"}
+        assert set(arms) == set(range(1, 17)), "both arms are frozen"
+        assert target and holdout
+        in_file = csv.DictReader(io.StringIO(r.content.decode("utf-8-sig")))
+        assert {int(row["buyer_id"]) for row in in_file} == target
+        assert r.headers["X-Campaign-Holdout"] == str(len(holdout))
+        assert tuple(campaign) == ("KS-AUG", 50, None), "frozen, not sent"
+
+    @pytest.mark.asyncio
+    async def test_results_need_a_campaign_frozen_and_sent(self, on_pg):
+        """No such campaign is a 404. Frozen but unsent is a state, not a
+        missing resource — there is no window to measure yet — so a 409;
+        once sent, it is measured."""
+        store = AnalyticsStore()
+        await store.freeze_sms_campaign(
+            campaign="aug", criteria={}, ltv_basis="margin", sales_type="retail",
+            holdout_pct=0, customers=[{
+                "buyerId": 1, "phone": "380960000001", "tier": "ALL",
+                "assignment": "target", "orders": 1, "revenueLtv": 1000.0,
+                "marginLtv": 800.0, "recencyDays": 10}],
+        )
+
+        async with signed_in("admin") as admin:
+            unknown = await admin.get("/api/customers/sms-campaigns/nobody/results")
+            unsent = await admin.get(RESULTS_PATH)
+            await store.record_sms_send("aug", {1: "m-1"}, [], {})
+            sent = await admin.get(RESULTS_PATH)
+
+        assert unknown.status_code == 404
+        assert unsent.status_code == 409
+        assert sent.status_code == 200, sent.text
+        assert sent.json()["campaign"] == "aug"
 
 
 # ─── Test send ────────────────────────────────────────────────────────────
