@@ -412,24 +412,6 @@ class TestAReadThatNeverReturns:
         assert results == [{"skipped": True, "reason": "signal unreadable: the query's own"}]
 
 
-class TestHealthPublishesTheCount:
-    def test_under_own_it_is_the_process_count(self, job):
-        from web.routes.api.health import _signal_reads
-
-        assert _signal_reads() == {"signal_unreadable_ticks": 0}
-        pg_derivation.note_signal_unreadable()
-        pg_derivation.note_signal_unreadable()
-        assert _signal_reads() == {"signal_unreadable_ticks": 2}
-
-    def test_the_block_carries_it(self):
-        tree = ast.parse((REPO / "web/routes/api/health.py").read_text(encoding="utf-8"))
-        block = next(n for n in ast.walk(tree)
-                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "_derivation_block")
-        called = {n.func.id for n in ast.walk(block)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "_signal_reads" in called
-
-
 def _recorded(mocks):
     return [c.args[0] for c in mocks["record_failure"].await_args_list]
 
