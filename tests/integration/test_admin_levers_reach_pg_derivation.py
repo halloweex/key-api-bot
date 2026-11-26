@@ -4,7 +4,7 @@
 lever every Silver/Gold alert names: they run the Postgres derivation now,
 past the 600-second floor a scheduled tick waits for. `GET
 /api/warehouse/status` says whether a rebuild is owed and what the last run
-did. All three are admin-only (`tests/integration/test_security_hardening.py`).
+did. All three sit on the admin-only router.
 """
 from __future__ import annotations
 

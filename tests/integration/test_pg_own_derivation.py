@@ -312,7 +312,7 @@ class TestEveryStageLeavesAWatermark:
         assert result["status"] == "error" and result["stage"] == "signal", result
         assert await _signal_state(pool) is None
         (run,) = await _runs(pool)
-        assert run["error"].startswith("signal:")
+        assert run["error"] and run["validation_passed"] is None, "the failure was not journalled"
 
     @pytest.mark.asyncio
     async def test_an_unwritable_journal_does_not_lift_the_floor(self, own, monkeypatch):
