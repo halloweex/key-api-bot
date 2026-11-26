@@ -77,9 +77,8 @@ class TestTheRebuildIsRenderedForPostgres:
 
 
 class TestTheRebuildIsOneTransaction:
-    def test_every_statement_runs_inside_one_transaction(self):
-        conn = _recorded(rebuild_silver)
-        assert conn.transactions == 1
+    """That a rebuild failing after its clear keeps the previous Silver is
+    held on a real server: `tests/integration/test_pg_rebuild_shape.py`."""
 
     def test_the_statements_in_order(self):
         """Bound the lock wait, clear, insert once, count, stamp. Mutation:

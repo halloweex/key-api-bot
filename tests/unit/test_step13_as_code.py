@@ -15,8 +15,6 @@ checks, and the Alert Gate's marks API. What is pinned here:
 - `/api/health` and its model carry neither block, and `derivation` neither
   `mode` nor `error`; the canary judges neither, and the six conditions are
   out of the registry and the canary's tables (rule 8);
-- the admin levers run the Postgres derivation alone, and the status page
-  answers it alone;
 - the UTM doors parse Postgres alone, and their answer is the router's;
 - the marks on `data/alert-gate-*.json` entries survive the Gate rewriting
   the file: an image from before step 14 reads them.
@@ -25,7 +23,9 @@ The on-disk record (`warehouse_writer` in `app.sync_metadata`) and the marker
 (`data/warehouse-utm-reparsed-at`) are left as they are: no production string
 names either for a write (`TestWhatIsGone`). That the canary no longer judges
 the blocks an image from before step 14 still publishes is in
-`tests/unit/test_canary.py`.
+`tests/unit/test_canary.py`; that the admin levers run the Postgres derivation
+and the status page reads it, in
+`tests/integration/test_admin_levers_reach_pg_derivation.py`.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -150,54 +150,6 @@ class TestHealthAndTheCanary:
         for key in RETIRED_CONDITIONS:
             assert key not in REGISTRY, key
             assert not any(key.startswith(t) or t.startswith(key) for t in tables), key
-
-
-# ─── the admin levers ────────────────────────────────────────────────────────
-
-
-class _Scheduler:
-    def __init__(self):
-        self._heavy_job_lock = asyncio.Lock()
-        self.derived = []
-
-    async def _run_pg_derivation(self, *, trigger=None, force=False):
-        self.derived.append((trigger, force))
-        return {"status": "success", "trigger": trigger}
-
-
-class TestTheAdminLevers:
-    def _call(self, route, **kwargs):
-        from web.routes.api import admin
-
-        scheduler = _Scheduler()
-        store = MagicMock()
-        store.connection = MagicMock(side_effect=AssertionError("DuckDB touched"))
-        with patch("core.scheduler.get_scheduler", return_value=scheduler), \
-             patch.object(admin, "get_store", AsyncMock(return_value=store)):
-            result = asyncio.run(_unwrap(getattr(admin, route))(MagicMock(), **kwargs))
-        return result, scheduler
-
-    def test_refresh_derives_postgres_alone(self):
-        result, scheduler = self._call("refresh_warehouse", admin={})
-        assert result == {"trigger": "manual",
-                          "postgres": {"status": "success", "trigger": "manual"}}
-        assert scheduler.derived == [("manual", True)]
-
-    def test_rebuild_silver_derives_postgres_alone(self):
-        result, scheduler = self._call("rebuild_silver_from_scratch", admin={})
-        assert result == {"postgres": {"status": "success", "trigger": "manual"}}
-        assert scheduler.derived == [("manual", True)]
-
-    def test_the_status_page_answers_the_derivation_alone(self, monkeypatch):
-        from web.routes.api import admin
-
-        async def status():
-            return {"requested": 3, "built": 3, "owed": False}
-
-        monkeypatch.setattr(admin, "_pg_derivation_status", status)
-        result, _ = self._call("get_warehouse_status")
-        assert result == {"writer": "postgres",
-                          "postgres": {"requested": 3, "built": 3, "owed": False}}
 
 
 # ─── the UTM doors ───────────────────────────────────────────────────────────
