@@ -16,6 +16,8 @@ Held here:
   recorded, and none is an UPDATE or a TRUNCATE;
 * **a reader never holds a rebuild back**, and keeps its snapshot of the
   previous rows;
+* **a rebuild that fails after its clear keeps the previous Silver**: the
+  clear, the insert and the stamp are one transaction;
 * **a conflicting lock costs the run, not the job**: the rebuild gives up at
   `lock_timeout`, the derivation journals a failed run with the debt still
   owed, and the next tick, once the lock is gone, rebuilds.
@@ -310,6 +312,37 @@ class TestAReaderNeverHoldsTheRebuildBack:
         assert before > 0
         if table == "silver.orders":
             assert seen[1] == before
+
+
+class TestAFailedRebuildKeepsThePreviousSilver:
+    @pytest.mark.asyncio
+    async def test_an_insert_failing_after_the_clear_leaves_every_row_and_the_stamp(
+            self, landed):
+        """The failure is made real by a constraint no new row can meet, added
+        for this test and dropped after it: the rebuild's DELETE runs, its
+        INSERT raises. Mutation: run the clear outside the transaction, and
+        Silver is empty after the failure."""
+        from core.pg_silver import SILVER_TABLE, rebuild_silver
+
+        await rebuild_silver(landed)
+        async with landed.acquire() as conn:
+            await _snapshot(conn, SILVER_TABLE, "silver_before")
+            stamp = dict(await conn.fetchrow(
+                "SELECT * FROM meta.mirror_state WHERE table_name = $1", SILVER_TABLE))
+            await conn.execute(
+                f"ALTER TABLE {SILVER_TABLE} ADD CONSTRAINT test_no_new_rows"
+                " CHECK (false) NOT VALID")
+            try:
+                with pytest.raises(asyncpg.exceptions.CheckViolationError):
+                    await rebuild_silver(landed)
+            finally:
+                await conn.execute(
+                    f"ALTER TABLE {SILVER_TABLE} DROP CONSTRAINT IF EXISTS test_no_new_rows")
+            assert await conn.fetchval("SELECT count(*) FROM silver_before") \
+                == 4000 + len(_branch_orders())
+            assert await _except_both_ways(conn, SILVER_TABLE, "silver_before") == (0, 0)
+            assert dict(await conn.fetchrow(
+                "SELECT * FROM meta.mirror_state WHERE table_name = $1", SILVER_TABLE)) == stamp
 
 
 class TestAConflictingLockCostsTheRunNotTheJob:
