@@ -59,7 +59,11 @@ interface ResultRow {
 
 /** Rate over the arm, the counts it came from, and what one person was worth.
  *
- *  The per-person line is the whole reason this cell has three rows. An arm's
+ *  "21 / 8 403" under "Got the SMS" read as 21 people having received it
+ *  (2026-11-26). The line names what it counts, buyers out of the arm, and the
+ *  arm's own revenue sits beside it.
+ *
+ *  The per-person line is the whole reason this cell has its last row. An arm's
  *  own money only ever appeared here as a conversion percentage, and the
  *  incremental figure two columns over is a difference — so "₴22 a head against
  *  ₴7 a head" , the one comparison anybody reads without training, was on the
@@ -74,10 +78,15 @@ function RateCell({ stats }: { stats: SmsGroupStats }) {
   return (
     <>
       <div className="font-medium text-slate-800">{rate.toFixed(1)}%</div>
-      <div className="text-[11px] text-slate-500">
-        {formatNumber(stats.converted)} / {formatNumber(stats.contacts)}
+      <div className="text-[11px] text-slate-500 tabular-nums">
+        {t('sms.boughtOf', {
+          bought: formatNumber(stats.converted), of: formatNumber(stats.contacts),
+        })}
       </div>
-      <div className="text-[11px] text-slate-600 mt-0.5">
+      <div className="text-[11px] text-slate-600 mt-0.5 tabular-nums">
+        {t('sms.armRevenue', { revenue: formatCurrency(stats.revenue) })}
+      </div>
+      <div className="text-[11px] text-slate-600 tabular-nums">
         {formatCurrency(perPerson)} <span className="text-slate-400">{t('sms.perPerson')}</span>
       </div>
     </>
