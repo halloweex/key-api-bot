@@ -152,12 +152,6 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_* not understood, a latch against its flag (DN-06) and a
     # chain's own condition for moving unmet (DN-26). No flag is read since,
     # so none of the three has an emitter.
-    # The Rust pilot, probed from the bot where KS_RUST_API_URL says where it
-    # is (bot/canary.py, check_rust_api): its container, its readiness, and
-    # the share of its window it handed to Python for a reason of its own.
-    "rust_api_unreachable": _c("the next probe reaches ks-rust-api"),
-    "rust_api_not_ready": _c("ks-rust-api's /readyz answers 200"),
-    "rust_api_handover_share": _c("the window's share of hand-overs falls under the limit"),
     # What the host's backup scripts last proved, judged from `/api/health`'s
     # `backups` block at `core/backup_evidence.py`'s limits: a PITR drill or
     # an off-site restore drill older than eight days, an off-site shipment
@@ -497,6 +491,14 @@ _CAPTURE_CLEARS = {
 }
 for _key in _captures.conditions():
     REGISTRY[_key] = _c(_CAPTURE_CLEARS[_key.split(":", 1)[0]])
+
+# The Rust pilot's watch (core/rust_api_watch.py): four conditions on the
+# integrity layer, WARN, a line in the 09:00 digest and never a page (the
+# owner's decision of 2026-11-25). Read off the module that files them.
+from core import rust_api_watch as _rust_watch  # noqa: E402
+
+for _key in _rust_watch.CONDITIONS:
+    REGISTRY[_key] = _c(_rust_watch.CLEARS[_key])
 
 
 # Channel messages that ride the same throttle machinery but are not

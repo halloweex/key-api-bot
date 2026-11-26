@@ -314,11 +314,6 @@ services:
       # Names this process's slice of shared state (both containers mount
       # ./data): the alert gate's decision file is alert-gate-{role}.json.
       - KS_ROLE=bot
-      # The Rust pilot's watchdog (bot/canary.py, check_rust_api): where the
-      # canary asks its /readyz and /stats, on the `default` network both are
-      # on. The pilot runs in the `rust` profile, started by the deploy's Rust
-      # step; a container that is not there is a warning, after two probes.
-      - KS_RUST_API_URL=http://ks-rust-api:8090
     depends_on:
       # The bot checks `REQUIRED_REVISION` in `initialise()` and refuses to
       # start against an older schema — correct, and until this was added it
@@ -392,6 +387,12 @@ services:
       # runs unchanged. The password is the platform's `ks_app` CH user.
       - KS_CH_URL=${KS_CH_URL:-}
       - KS_CH_PASSWORD=${KS_CH_PASSWORD:-}
+      # The Rust pilot's watch (core/rust_api_watch.py): the integrity job asks
+      # its /readyz and /stats here, on the `default` network both are on, and
+      # files a WARN for the 09:00 digest, never a page. The pilot runs in the
+      # `rust` profile, started by the deploy's Rust step; until it is, the
+      # morning's digest says it did not answer.
+      - KS_RUST_API_URL=http://ks-rust-api:8090
       # Step 1 of «Одна бронза»: which engine serves the Gold-only reads of
       # /api/summary and /api/revenue/trend. `duckdb` (default) or `postgres`;
       # a typo raises on the first read rather than serving the old store.

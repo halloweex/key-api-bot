@@ -110,9 +110,7 @@ class TestTheTableFollowsTheChecks:
         for fn in ast.walk(tree):
             if not (isinstance(fn, ast.FunctionDef) and fn.name.startswith("check_")):
                 continue
-            # Their own probes, not /api/health's payload: a block web did
-            # not publish cannot be why they found nothing.
-            if fn.name in ("check_health", "check_cert_expiry", "check_rust_api"):
+            if fn.name in ("check_health", "check_cert_expiry"):
                 continue
             for key in _returned_keys(fn):
                 assert (key.endswith("_block_missing") or key in named
