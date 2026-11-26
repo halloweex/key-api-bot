@@ -7,6 +7,7 @@ import { MarginByBrandChart } from './MarginByBrandChart'
 import { MarginByCategoryChart } from './MarginByCategoryChart'
 import { MarginAlerts } from './MarginAlerts'
 import { MarginBrandCategoryTable } from './MarginBrandCategoryTable'
+import { StockMarginSection } from './StockMarginSection'
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -40,6 +41,9 @@ export const MarginPage = memo(function MarginPage() {
       <section aria-label="Brand category cross-tab">
         <MarginBrandCategoryTable />
       </section>
+
+      {/* The margin of everything in stock — admins only; nothing at all for anybody else */}
+      <StockMarginSection />
     </PageShell>
   )
 })

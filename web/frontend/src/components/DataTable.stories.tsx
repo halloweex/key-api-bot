@@ -107,6 +107,36 @@ export const Sortable: Story = {
   render: () => <SortableDemo />,
 }
 
+/** A wide table on a narrow screen: the first column stays put while the rest scroll (`pinned`). */
+export const PinnedFirstColumn: Story = {
+  args: { children: null },
+  globals: { viewport: { value: 'mobile2', isRotated: false } },
+  render: () => (
+    <DataTable variant="feature">
+      <thead>
+        <Tr header>
+          <Th pinned>Product</Th>
+          <Th>Brand</Th>
+          <Th align="right">Qty</Th>
+          <Th align="right">Revenue</Th>
+          <Th align="right">Per unit</Th>
+        </Tr>
+      </thead>
+      <tbody>
+        {ROWS.map((r) => (
+          <Tr key={r.name}>
+            <Td pinned bold>{r.name}</Td>
+            <Td>{r.brand}</Td>
+            <Td align="right" tabular>{r.qty}</Td>
+            <Td align="right" tabular>₴{r.revenue.toLocaleString('uk-UA')}</Td>
+            <Td align="right" tabular>₴{Math.round(r.revenue / r.qty).toLocaleString('uk-UA')}</Td>
+          </Tr>
+        ))}
+      </tbody>
+    </DataTable>
+  ),
+}
+
 /** A total row the others are read against: `emphasis`. */
 export const WithTotalRow: Story = {
   args: { children: null },

@@ -18,6 +18,12 @@ import { pushLayer } from '../utils/layerStack'
 // Telegram Mini App's BackButton (the sheet is on `utils/layerStack`). The
 // footer slot holds the one action that ends the task («Готово»), sticky
 // above the home indicator, so it is reachable however long the body is.
+//
+// `placement="side"` is for a record read beside a table (NN/g "Data Tables":
+// a side panel, not an inline accordion): from `sm` up the same sheet stands
+// at the right edge, full height; below it it is the phone's bottom sheet.
+
+type Placement = 'bottom' | 'side'
 
 export function BottomSheet({
   open,
@@ -25,6 +31,7 @@ export function BottomSheet({
   onClose,
   footer,
   closeLabel = 'Close',
+  placement = 'bottom',
   children,
 }: {
   open: boolean
@@ -32,8 +39,10 @@ export function BottomSheet({
   onClose: () => void
   footer?: ReactNode
   closeLabel?: string
+  placement?: Placement
   children: ReactNode
 }) {
+  const side = placement === 'side'
   const panel = useRef<HTMLDivElement>(null)
   const titleId = useId()
   // Held in a ref: a caller passing a fresh closure on every render must not
@@ -90,7 +99,10 @@ export function BottomSheet({
   if (!open) return null
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex flex-col justify-end">
+    <div className={side
+      ? 'fixed inset-0 z-50 flex flex-col justify-end sm:flex-row'
+      : 'fixed inset-0 z-50 flex flex-col justify-end'}
+    >
       <div
         className="absolute inset-0 bg-slate-900/40"
         aria-hidden
@@ -101,9 +113,12 @@ export function BottomSheet({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="relative flex max-h-[88vh] flex-col rounded-t-2xl bg-white shadow-2xl"
+        className={side
+          ? 'relative flex max-h-[88vh] flex-col rounded-t-2xl bg-white shadow-2xl '
+            + 'sm:h-full sm:max-h-none sm:w-[420px] sm:max-w-full sm:rounded-none'
+          : 'relative flex max-h-[88vh] flex-col rounded-t-2xl bg-white shadow-2xl'}
       >
-        <div className="flex justify-center pt-2" aria-hidden>
+        <div className={side ? 'flex justify-center pt-2 sm:hidden' : 'flex justify-center pt-2'} aria-hidden>
           <span className="h-1 w-10 rounded-full bg-slate-300" />
         </div>
         <div className="flex items-center justify-between gap-3 px-4 pb-2 pt-1">
