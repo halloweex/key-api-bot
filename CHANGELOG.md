@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.363
+
+- fix(sms): results name the buyers line and show each arm's revenue
+- feat(sms): send the rest of a send that broke off, a detailed progress bar
+
+
 ## 3.0.362
 
 - fix(sms): send in batches of 1 000, record each as it lands, show progress
