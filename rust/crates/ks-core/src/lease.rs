@@ -252,3 +252,47 @@ mod tests {
         assert_eq!(APPLICATION_NAME, "ks-rust-worker");
     }
 }
+
+#[cfg(test)]
+mod k0_table {
+    use super::lease_key;
+
+    /// Every scheduler job's key as К0's own `core.job_lease.lease_key`
+    /// computes it (PR #405 at 7f36d976), and the shadow's.
+    const KEYS: &[(&str, i64)] = &[
+        ("alert_actions", 7742613875324599285),
+        ("ch_sync", 7742613876423907721),
+        ("disk_watchdog", 7742613875057875917),
+        ("dq_digest", 7742613878825572941),
+        ("dq_integrity_check", 7742613877101404996),
+        ("dq_mirror_landing", 7742613876109671456),
+        ("dq_reconciliation", 7742613876719724862),
+        ("full_sync_weekly", 7742613876347978940),
+        ("ga4_capture", 7742613874993923949),
+        ("halfwritten_repair", 7742613877477184747),
+        ("incremental_sync", 7742613875706779467),
+        ("inventory_snapshot", 7742613877362378803),
+        ("manager_stats", 7742613877195084763),
+        ("meilisearch_sync", 7742613876109406894),
+        ("memory_monitor", 7742613878325278635),
+        ("month_goal_freeze", 7742613877473294374),
+        ("order_gap_backfill", 7742613877649258658),
+        ("order_status_refresh", 7742613877560310231),
+        ("pg_warehouse_derive", 7742613875993716834),
+        ("promo_weekly_ask", 7742613875420199029),
+        ("replicate_operational", 7742613876369124644),
+        ("revenue_prediction_train", 7742613877779862472),
+        ("seasonality_calc", 7742613875041819525),
+        ("traffic_report", 7742613876789932374),
+        ("weekly_report", 7742613874721754958),
+        ("ch_sync:shadow", 7742613876521340087),
+    ];
+
+    #[test]
+    fn every_scheduler_job_has_k0s_key() {
+        for (name, key) in KEYS {
+            assert_eq!(lease_key(name), *key, "{name}");
+        }
+        assert_eq!(KEYS.len(), 26);
+    }
+}
