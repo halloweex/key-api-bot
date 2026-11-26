@@ -50,14 +50,6 @@ class TestTheRoutedBodies:
             assert "{" not in rendered and "}" not in rendered, (
                 f"line {lineno} unrendered for {POSTGRES.name}")
 
-    def test_momentum_keeps_golds_grain(self):
-        """Gold's rows carry the name *as sold*, so a product sold under two
-        names is two rows there. Dropping `product_name` from the key would
-        merge them and change a number the page has always shown."""
-        text = next(t for _l, t in self._statements() if "current_period" in t)
-        assert "GROUP BY l.product_id, l.product_name" in text
-        assert "NOT l.is_return AND l.is_active_source" in text
-
     # Columns that cannot tie within their own result, so a single-key sort on
     # one of them is already deterministic. `sort_order` is a CASE over six
     # buckets and is grouped on, so there is exactly one row per value — the

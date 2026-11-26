@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 import pytest
 import pytest_asyncio
 
+from core.duckdb_constants import OWN_ENTITY_BUYER_IDS
 from core.store import AnalyticsStore
 from tests.integration.pg_tab_seed import (
     call_key, comparable, derive, golden, seed, tab_in_postgres,
@@ -197,3 +198,40 @@ async def test_a_product_sold_under_two_names_stays_two_rows(in_postgres):
         if m["productId"] == 100:
             assert m["currentRevenue"] < 2500, (
                 "the two names-as-sold were merged into one row", m)
+
+
+# Orders that are not sales, each carrying product 100 under the name it is
+# sold as: a return and an Opencart order in each window, and a sale to the
+# company's own legal entity in the current one. Momentum is revenue, so none
+# of them may move it. (order_id, days_ago, source_id, status_id, buyer_id)
+OWN_ENTITY = OWN_ENTITY_BUYER_IDS[0]
+NOT_SALES = [
+    (101, 3, 1, 19, 101),                 # a return: KeyCRM's lost/cancel group
+    (102, 4, 3, 1, 102),                  # Opencart, a retired source
+    (103, 5, 1, 1, OWN_ENTITY),           # a sale to ourselves
+    (104, PREV_DAYS, 1, 19, 104),         # the previous period's return
+    (105, PREV_DAYS + 1, 3, 1, 105),      # and its Opencart order
+]
+
+
+async def _populate_with_orders_that_are_not_sales(conn, pool):
+    await seed(
+        conn, categories=CATEGORIES, products=PRODUCTS,
+        orders=[(oid, 1, 1, total, _ordered_at(days), oid, None, None)
+                for oid, days, total in ORDERS]
+        + [(oid, source, status, 1000.0, _ordered_at(days), buyer, None, None)
+           for oid, days, source, status, buyer in NOT_SALES],
+        lines=[(l, o, p, n, q, pr) for l, o, p, q, pr, n in LINES]
+        + [(oid, oid, 100, "Serum", 2, 500.0) for oid, *_ in NOT_SALES])
+    await derive(pool)
+
+
+@pytest.mark.asyncio
+async def test_momentum_counts_only_sales(tmp_path, monkeypatch):
+    """With a return, an Opencart order and a sale to ourselves carrying the
+    Serum beside the fixture's, momentum is the fixture's answer still: Serum
+    ₴2 000 now against ₴1 500 before, Serum (promo) ₴500."""
+    store = AnalyticsStore()
+    async with tab_in_postgres(DSN, monkeypatch, _populate_with_orders_that_are_not_sales):
+        out = await _answer(store, "get_product_momentum", {"limit": 5})
+    assert comparable(out) == GOLDEN[call_key("get_product_momentum", {"limit": 5})]
