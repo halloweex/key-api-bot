@@ -1,11 +1,10 @@
 """The `/expenses` statements, the history gate, and the fan-out the port found.
 
 The numbers are `tests/integration/test_expenses_two_engines.py`'s job,
-against a real Postgres; that `_expenses_run` asks Postgres and nothing else
-since step 14's S14-07 is `tests/unit/test_tab_routers_postgres_only.py`'s
-(the flag, every method on an empty DuckDB and the DuckDB branch's
-offloading went with that PR). What is proved here is the statements, the
-history gate — an explicit refusal, reading `bronze.expenses` by its name —
+against a real Postgres; that every `/expenses` route answers 503 naming
+`expenses` when Postgres fails is the sweep's in
+`tests/unit/test_read_fallback_http.py`. What is proved here is the
+statements, the history gate — through the routes, over Postgres, below —
 the shared parse, and one defect that was live on production before this
 port touched anything:
 

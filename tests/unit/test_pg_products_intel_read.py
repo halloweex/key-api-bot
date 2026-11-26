@@ -3,9 +3,9 @@
 The numbers are `tests/integration/test_products_intel_two_engines.py`'s job,
 against a real Postgres, which calls every method for real — `/margin` taught
 that a method which parses can still be one PostgreSQL cannot execute, and
-that a fallback turns that into a silent success. That the router asks
-Postgres and nothing else since step 14's S14-05 is
-`tests/unit/test_read_routers_postgres_only.py`'s. Here: the holes and the ties.
+that a fallback turns that into a silent success. That the tab's routes
+answer 503 naming `products_intel` when Postgres fails is the sweep's in
+`tests/unit/test_read_fallback_http.py`. Here: the holes and the ties.
 """
 from __future__ import annotations
 
