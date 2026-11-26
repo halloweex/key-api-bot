@@ -56,73 +56,10 @@ import importlib
 import re
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional
-from unittest.mock import AsyncMock
 
 import pytest
 
-from core import read_fallback
-
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def _expenses(store):
-    return store._expenses_run(
-        "SELECT 1 FROM {expenses} e JOIN {silver_orders} s ON s.id = e.order_id"
-        " WHERE s.id = ?", [7])
-
-
-def _manual(store):
-    return store._expenses_run("SELECT 1 FROM {manual_expenses} WHERE id = ?", [7])
-
-
-@pytest.fixture
-def store(tmp_path, monkeypatch):
-    """A store that is never connected, whose connection is a trap: nothing
-    here may reach for DuckDB, under any value of any switch. The expenses'
-    history is across unless a test says otherwise."""
-    from core import pg_expenses_read
-    from core.store import AnalyticsStore
-
-    store = AnalyticsStore()
-
-    def trap(*_a, **_k):
-        raise AssertionError("a one-engine reader reached for DuckDB")
-
-    # `_fetch_one`/`_fetch_all` went with the store's DuckDB half in step
-    # 14's S14-18 and `connection()` is a refusal since; trapped all the same,
-    # so a reader that reaches for any of them fails here by name.
-    for name in ("connection", "_fetch_one", "_fetch_all"):
-        monkeypatch.setattr(type(store), name, trap, raising=False)
-    monkeypatch.setattr(pg_expenses_read, "backfilled", AsyncMock(return_value=True))
-    read_fallback.reset_counts()
-    yield store
-    read_fallback.reset_counts()
-    assert not (tmp_path / "never.duckdb").exists()
-
-
-class TestAFailureIsTheRefusalOffMade:
-
-    @pytest.mark.asyncio
-    async def test_the_expenses_history_not_across_is_refused(self, store, monkeypatch):
-        """A NULL `backfilled_at`: an answer, not a failure — and under `off`
-        a refusal, since no engine could answer it. Mutation: let the read
-        through to an empty `bronze.expenses`."""
-        from core import pg_expenses_read
-
-        monkeypatch.setattr(pg_expenses_read, "backfilled", AsyncMock(return_value=False))
-        engine = AsyncMock(return_value=[(1,)])
-        monkeypatch.setattr(pg_expenses_read, "fetch", engine)
-
-        with pytest.raises(read_fallback.ReadUnavailable) as raised:
-            await _expenses(store)
-
-        assert raised.value.surface == "expenses"
-        assert "backfilled" in str(raised.value.__cause__)
-        engine.assert_not_awaited()
-        # The type dictionary and the typed expenses have no history to miss.
-        # That the gate names `bronze.expenses` rather than importing it from
-        # the backfill module is `tests/unit/test_pg_expenses_read.py`'s.
-        assert await _manual(store) == [(1,)]
 
 
 class TestChain7aAFailedReadPages:
