@@ -48,6 +48,7 @@ from scripts.utm_reclassify_dryrun import (
 )
 from tests.write_audit import run_main_audited
 from tests.helpers.dryrun_guards import POISONED_PG_DSN, UNSEEN_WRITERS
+from tests.integration.pg_tab_seed import needs_postgres
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "utm_reclassify_dryrun.py"
@@ -96,38 +97,57 @@ class TestTheWindow:
 
 # ─── the fallback is the tab's ────────────────────────────────────────────────
 
+SOURCES = (1, 2, 3, 4, 5, 7, None)
+# A row naming one of the two columns, and one naming both.
+PARTIAL = (("paid_confirmed", None), (None, "facebook"), ("organic", "email"))
+
+
+async def _where_the_tab_places(cases):
+    """`(traffic_type, platform)` for each `(source_id, traffic_type,
+    platform)`, as the tab's two fallback expressions place it — evaluated by
+    Postgres, the engine the tab reads. Imported here and not at the top: the
+    audited runs import this module, and may not load the pool."""
+    import os
+
+    import asyncpg
+
+    from core.repositories.traffic import TrafficMixin
+
+    conn = await asyncpg.connect(os.environ["KS_PG_DSN"])
+    try:
+        placed = {}
+        for case in cases:
+            source_id, traffic_type, platform = case
+            row = await conn.fetchrow(
+                f"SELECT {TrafficMixin._TRAFFIC_TYPE_EXPR} AS traffic_type, "
+                f"       {TrafficMixin._PLATFORM_EXPR} AS platform "
+                "FROM (SELECT $1::text AS traffic_type, $2::text AS platform) u, "
+                "     (SELECT $3::int AS source_id) s",
+                traffic_type, platform, source_id)
+            placed[case] = (row["traffic_type"], row["platform"])
+        return placed
+    finally:
+        await conn.close()
+
+
+@needs_postgres
 class TestTheFallbackIsTheTabs:
     """`fallback_verdict` is a Python spelling of two SQL expressions on the
-    mixin. Held to them by evaluating the SQL, not by reading it."""
+    mixin. Held to them by Postgres evaluating the SQL, not by reading it."""
 
-    @staticmethod
-    def _sql(source_id, traffic_type=None, platform=None):
-        import duckdb
+    @pytest.mark.asyncio
+    async def test_no_row_is_placed_where_the_tab_places_it(self):
+        tab = await _where_the_tab_places([(s, None, None) for s in SOURCES])
+        placed = {s: tab[(s, None, None)] for s in SOURCES}
+        assert {s: fallback_verdict(s) for s in SOURCES} == placed
+        assert {s: shown_verdict(None, s) for s in SOURCES} == placed
+        assert {s: shown_verdict(NULL_ROW, s) for s in SOURCES} == placed
 
-        from core.repositories.traffic import TrafficMixin
-
-        row = duckdb.connect().execute(
-            f"SELECT {TrafficMixin._TRAFFIC_TYPE_EXPR}, {TrafficMixin._PLATFORM_EXPR} "
-            "FROM (SELECT CAST(? AS VARCHAR) AS traffic_type, "
-            "             CAST(? AS VARCHAR) AS platform) u, "
-            "     (SELECT CAST(? AS INTEGER) AS source_id) s",
-            [traffic_type, platform, source_id],
-        ).fetchone()
-        return tuple(row)
-
-    @pytest.mark.parametrize("source_id", [1, 2, 3, 4, 5, 7, None])
-    def test_no_row_is_placed_where_the_tab_places_it(self, source_id):
-        assert fallback_verdict(source_id) == self._sql(source_id)
-        assert shown_verdict(None, source_id) == self._sql(source_id)
-        assert shown_verdict(NULL_ROW, source_id) == self._sql(source_id)
-
-    @pytest.mark.parametrize("traffic_type, platform", [
-        ("paid_confirmed", None), (None, "facebook"), ("organic", "email"),
-    ])
-    @pytest.mark.parametrize("source_id", [1, 4])
-    def test_each_column_falls_back_on_its_own(self, source_id, traffic_type, platform):
-        assert shown_verdict(verdict_row(traffic_type, platform), source_id) \
-            == self._sql(source_id, traffic_type, platform)
+    @pytest.mark.asyncio
+    async def test_each_column_falls_back_on_its_own(self):
+        cases = [(s, t, p) for s in SOURCES for t, p in PARTIAL]
+        tab = await _where_the_tab_places(cases)
+        assert {c: shown_verdict(verdict_row(c[1], c[2]), c[0]) for c in cases} == tab
 
 
 # ─── the diff ─────────────────────────────────────────────────────────────────
