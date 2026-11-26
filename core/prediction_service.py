@@ -29,6 +29,7 @@ of its failures. What it replaced, and why each part went:
 import asyncio
 import os
 import logging
+import time
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
@@ -38,6 +39,8 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+
+from core.black_friday import black_friday_date
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,12 @@ _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 def _today_kyiv() -> date:
     """Get today's date in Kyiv timezone (matches Gold layer dates)."""
     return datetime.now(_KYIV_TZ).date()
+
+
+def _monotonic() -> float:
+    """The clock `OUTLOOK_TTL_S` is measured by; a name of its own so a
+    test can move it without moving the event loop's."""
+    return time.monotonic()
 
 
 def _trained_on(stamp: Optional[datetime]) -> Optional[str]:
@@ -95,6 +104,54 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
 # How far ahead to predict (days)
 FORECAST_HORIZON_DAYS = 60
 
+# The one sales type trained — by the Mon/Thu job, at a start and by
+# `POST /api/revenue/forecast/train` — and the one the month's outlook is
+# said for: `train` refuses any other.
+TRAINED_SALES_TYPE = "retail"
+
+# The month's 80% range and Black Friday line beside the forecast
+# (`core/forecast_range.py`, 2026-11-18), and a planned promotion's typical
+# effect (revision 0039). One computation per Kyiv day, sales type and stored
+# forecast, kept an hour at most so a read just after midnight, before
+# yesterday's last orders are derived, is not the whole day's; a computation
+# waiting longer than the timeout for the one ML thread (a training on it) is
+# dropped from the queue and the keys are null.
+OUTLOOK_TTL_S = 3600.0
+OUTLOOK_TIMEOUT_S = 10.0
+
+
+async def _planned_promotions(today: date, typical) -> Optional[List[Dict[str, Any]]]:
+    """`planned_promotions` of `/api/revenue/forecast`: the promotions planned
+    now whose days overlap today..the month's end, by first day; `extra` for
+    `kind = other` is `typical`'s (a `forecast_range.TypicalPromotion`, or
+    None), and null for Black Friday, whose own line says what it adds.
+    None when the calendar cannot be read."""
+    try:
+        from core import forecast_range, promotions
+
+        planned = await promotions.current(today, forecast_range.month_end(today))
+    except Exception as e:
+        logger.warning(f"The planned promotions are unavailable: {e!r}", exc_info=True)
+        return None
+    extra = round(typical.extra, 2) if typical is not None else None
+    return [{
+        "id": p.id,
+        "name": p.data.name,
+        "starts_on": p.data.starts_on.isoformat(),
+        "ends_on": p.data.ends_on.isoformat(),
+        "kind": p.data.kind,
+        "extra": extra if p.data.kind == "other" else None,
+    } for p in planned]
+
+
+def _outlook_on_thread(rows, today: date, left: float):
+    """The range and Black Friday line, and a planned promotion's typical
+    effect, from one read of the history and one set of its weekday tables
+    and norms (`forecast_range.outlook`) — on the ML thread."""
+    from core import forecast_range
+
+    return forecast_range.outlook(rows, today, left)
+
 # A11-6 model-validation gate: reject a freshly trained model whose holdout
 # WAPE is implausibly bad rather than let it overwrite a working model and feed
 # the forecast. Known-good WAPE is ~27.66%; the worst naive baseline is ~low
@@ -121,12 +178,6 @@ def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
         2029: date(2029, 4, 8),  2030: date(2030, 4, 28),
     }
 
-    def _black_friday(year: int) -> date:
-        """Last Friday of November."""
-        nov_last = date(year, 11, monthrange(year, 11)[1])
-        offset = (nov_last.weekday() - 4) % 7  # Friday = 4
-        return nov_last - timedelta(days=offset)
-
     def _build_events_for_year(year: int):
         """Return (holidays_set, high_sales_set, all_events_list) for a year."""
         holidays = {
@@ -142,15 +193,15 @@ def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
         if year in _ORTHODOX_EASTER:
             holidays.add(_ORTHODOX_EASTER[year])
 
-        bf = _black_friday(year)
+        bf = black_friday_date(year)  # the badge's line maps last year's by it too
         cm = bf + timedelta(days=3)  # Cyber Monday
         high_sales = {
-            date(year, 1, 22),   # Owner's Birthday
+            date(year, 1, 22),   # discount day
             date(year, 2, 14),   # Valentine's Day
             date(year, 3, 8),    # Women's Day
             date(year, 3, 9),    # KoreanStory Birthday (discount day)
             date(year, 11, 11),  # Singles' Day (11.11)
-            date(year, 12, 14),  # Second Owner's Birthday (discount day)
+            date(year, 12, 14),  # discount day
             date(year, 12, 26),  # LaLa Recipe brand day
             date(year, 12, 27),  # LaLa Recipe brand day
             bf,                  # Black Friday
@@ -1054,6 +1105,13 @@ class PredictionService:
         # refused by Postgres under chain 7b-3 — or by DuckDB — showed nowhere
         # but the log. `_train_impl` publishes it as `predictions_stored`.
         self._last_store_ok: Optional[bool] = None
+        # `get_forecast`'s range and Black Friday line, and the typical
+        # effect a planned promotion's `extra` is: one entry, keyed by (Kyiv
+        # day, sales type, the forecast's `created_at`), with the monotonic
+        # time it was computed (`OUTLOOK_TTL_S`). The planned promotions
+        # themselves are read on every request (`_month_outlook`).
+        self._outlook_cache: Dict[Tuple[date, str, Optional[datetime]],
+                                  Tuple[float, Dict[str, Any], Any]] = {}
 
     @property
     def is_ready(self) -> bool:
@@ -1151,7 +1209,21 @@ class PredictionService:
         }
 
     async def train(self, sales_type: str = "retail") -> Dict[str, Any]:
-        """Train model on historical daily revenue data from DuckDB."""
+        """Train the model on the daily revenue in Postgres' Gold.
+
+        Retail's alone (`TRAINED_SALES_TYPE`). Another sales type is refused
+        with a `ValidationError`, which web answers 400, before anything is
+        read: there is one model, in memory and in `MODEL_PATH`, so
+        `POST /api/revenue/forecast/train?sales_type=b2b` replaced retail's
+        with one fitted to b2b's history until the next training, and stored
+        a b2b forecast nobody trains (the forecast review, 2026-11-20)."""
+        if sales_type != TRAINED_SALES_TYPE:
+            from core.exceptions import ValidationError
+
+            raise ValidationError(
+                "sales_type",
+                f"only {TRAINED_SALES_TYPE} is trained: the model is one, and a "
+                f"training on another sales type would replace it", sales_type)
         if self._training_lock.locked():
             return {"status": "already_training"}
 
@@ -1343,6 +1415,14 @@ class PredictionService:
         every restart, the full in-memory dict — sixty validation days with
         it — after a training in the same process. One answer now, and one
         any process can give.
+
+        `month_range` and `black_friday` (2026-11-18) are what the month's
+        badge says beside its point: the 80% range of the month total and
+        what last year's Black Friday would add (`core/forecast_range.py`,
+        `_month_outlook`). `planned_promotions` (revision 0039) are the
+        promotions the calendar holds for the rest of the month, each with
+        what a past noticeable one added. Retail only, and null whenever they
+        cannot be said — never a reason for this answer to fail.
         """
         from core.store import get_store
         store = await get_store()
@@ -1370,6 +1450,7 @@ class PredictionService:
 
         predicted_remaining = sum(p['predicted_revenue'] for p in predictions)
         predicted_total = actual_to_date + predicted_remaining
+        outlook = await self._month_outlook(sales_type, today, predictions, trained_at)
 
         return {
             "actual_to_date": round(actual_to_date, 2),
@@ -1381,7 +1462,102 @@ class PredictionService:
             "month_start": month_start.isoformat(),
             "month_end": month_end.isoformat(),
             "forecast_end": forecast_end.isoformat(),
+            "month_range": outlook["month_range"],
+            "black_friday": outlook["black_friday"],
+            "planned_promotions": outlook["planned_promotions"],
         }
+
+    async def _month_outlook(
+        self,
+        sales_type: str,
+        today: date,
+        predictions: List[Dict[str, Any]],
+        trained_at: Optional[datetime],
+    ) -> Dict[str, Any]:
+        """The month's 80% range, Black Friday line and planned promotions,
+        or nulls.
+
+        The range is K + F × [q10, q90]: K the month's actual through
+        yesterday, F the stored forecast from today to the month's end, and
+        the two ratios simulated from the days before today
+        (`_range_and_lines`, kept for the day, the sales type and the
+        training that made `predictions`).
+
+        `planned_promotions` (revision 0039) lists the promotions planned now
+        whose days overlap today..the month's end, each with `extra`: for
+        `kind = other` what a past noticeable promotion of 2 days and more
+        added (`forecast_range.typical_promotion`, kept with the range), null
+        for `black_friday`, whose own line covers it, and null for every one
+        when the range could not be made — no forecast of the whole month to
+        read the history for, or a failure. The list is read on every
+        request, one small query, so a save shows on the next one and never
+        costs the range a recomputation. Until the forecast review of
+        2026-11-20 the cache keyed on the promotions' latest save: every save
+        threw away the 900-day simulation, and while the list could not be
+        read every request read Gold and simulated again on the one ML
+        thread. Neither the point nor the range moves with it.
+
+        Retail only: it is the one sales type trained. A failure of the
+        range is logged, nulls the range and the line, and is not kept, so
+        the next request tries again; a failure of the list's read nulls
+        `planned_promotions` alone. The forecast itself is answered all the
+        same.
+        """
+        if sales_type != TRAINED_SALES_TYPE:
+            return {"month_range": None, "black_friday": None, "planned_promotions": None}
+        made = await self._range_and_lines(sales_type, today, predictions, trained_at)
+        outlook, typical = made if made is not None else (
+            {"month_range": None, "black_friday": None}, None)
+        return {**outlook, "planned_promotions": await _planned_promotions(today, typical)}
+
+    async def _range_and_lines(
+        self,
+        sales_type: str,
+        today: date,
+        predictions: List[Dict[str, Any]],
+        trained_at: Optional[datetime],
+    ) -> Optional[Tuple[Dict[str, Any], Any]]:
+        """`month_range` and `black_friday`, and a planned promotion's
+        typical effect (a `forecast_range.TypicalPromotion`, or None), or
+        None when they could not be made.
+
+        Both lines and the effect come from one read — 900 days of Gold
+        through yesterday, the history the simulation needs, by the training
+        frame's own reader — and one set of its weekday tables and norms, on
+        the ML thread, and are kept per (Kyiv day, sales type, the forecast's
+        `created_at`) for at most `OUTLOOK_TTL_S`. A failure is logged and
+        not kept."""
+        key = (today, sales_type, trained_at)
+        cached = self._outlook_cache.get(key)
+        now = _monotonic()
+        if cached is not None and now - cached[0] < OUTLOOK_TTL_S:
+            return cached[1], cached[2]
+
+        try:
+            from core import forecast_range, pg_forecast_read
+
+            left = forecast_range.forecast_left(predictions, today)
+            typical = None
+            if left is None:
+                outlook: Dict[str, Any] = {"month_range": None, "black_friday": None}
+            else:
+                frame = await pg_forecast_read.fetch_frame(
+                    today - timedelta(days=forecast_range.HISTORY_DAYS), today,
+                    sales_type, exclude_today=True)
+                rows = list(zip(frame["date"].dt.date,
+                                frame["revenue"].astype(float)))
+                loop = asyncio.get_running_loop()
+                outlook, typical = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _outlook_on_thread, rows, today, left),
+                    OUTLOOK_TIMEOUT_S)
+        except Exception as e:
+            logger.warning(
+                f"The month's range and Black Friday line are unavailable "
+                f"({sales_type}): {e!r}", exc_info=True)
+            return None
+
+        self._outlook_cache = {key: (now, outlook, typical)}
+        return outlook, typical
 
     async def _query_daily_revenue(
         self, store: Any, sales_type: str, days_back: int,

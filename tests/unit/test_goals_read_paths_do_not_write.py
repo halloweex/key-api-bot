@@ -55,46 +55,21 @@ import pytest_asyncio
 from tests.integration.pg_tab_seed import (
     derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
-from tests.unit.test_read_fallback_http import (  # noqa: F401, F811 — fixtures
-    _request_for,
-    no_network,
-    sweep_client,
-    swept_routes,
+from tests.helpers.goals_history import _seed_history_pg
+from tests.helpers.route_sweep import (  # noqa: F401, F811 — fixtures
+    _request_for, no_network, sweep_client, swept_routes,
 )
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-    fresh_read_fallback,
-)
+from tests.helpers.app_client import ConnectionPerAcquire
 
 
 REPO = Path(__file__).resolve().parents[2]
 KYIV = ZoneInfo("Europe/Kyiv")
 DSN = os.getenv("KS_PG_DSN")
 
-# Every table a goal computation stores, or a goal read reads back.
+# Every table a goal computation stores, or a goal read reads back — the
+# frozen month goals (revision 0037) among them, which only the job writes.
 GOAL_TABLES = ("app.seasonal_indices", "app.growth_metrics", "app.weekly_patterns",
-               "app.revenue_predictions", "app.revenue_goals")
-
-
-class _ConnectPerAcquire:
-    """`core.pg.get_pool`'s answer for an app served by `TestClient`: every
-    acquire opens a connection of its own in whichever loop asks, so the
-    client's portal loop and the test's never share one, and nothing is left
-    bound to a loop that has closed."""
-
-    def __init__(self, dsn):
-        self._dsn = dsn
-
-    @asynccontextmanager
-    async def acquire(self, *_a, **_k):
-        import asyncpg
-
-        conn = await asyncpg.connect(self._dsn)
-        try:
-            yield conn
-        finally:
-            await conn.close()
+               "app.revenue_predictions", "app.revenue_goals", "app.frozen_month_goals")
 
 
 async def _fingerprint(pool) -> dict:
@@ -141,9 +116,9 @@ async def _history_and_goal_tables(conn, pool) -> None:
 @pytest_asyncio.fixture
 async def served(tmp_path, monkeypatch):
     """The history and the goal tables in Postgres, served to an app under
-    `TestClient` (`_ConnectPerAcquire`): yields the pool to read them with."""
+    `TestClient` (`ConnectionPerAcquire`): yields the pool to read them with."""
     async with tab_in_postgres(DSN, monkeypatch, _history_and_goal_tables) as pool:
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_ConnectPerAcquire(DSN))), \
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=ConnectionPerAcquire(DSN))), \
                 patch("core.pg.require_revision", new=AsyncMock()):
             yield pool
 
@@ -172,9 +147,10 @@ def _switched_on(endpoint) -> dict:
 # ─── The sweep ────────────────────────────────────────────────────────────
 
 def _writers_recorded(monkeypatch) -> list:
-    """Chain 7b-3's two Postgres writers, and chain 7a's, replaced by
-    recorders that raise: a GET that reached one is named."""
-    from core import pg_forecast_write, pg_goals_write
+    """Chain 7b-3's two Postgres writers, chain 7a's, and the month goal
+    freeze's (revision 0037), replaced by recorders that raise: a GET that
+    reached one is named. A month a GET reads unfrozen stays unfrozen."""
+    from core import goal_freeze, pg_forecast_write, pg_goals_write
 
     reached = []
 
@@ -186,7 +162,9 @@ def _writers_recorded(monkeypatch) -> list:
 
     for module, name in ((pg_forecast_write, "persist_goal_tables"),
                          (pg_forecast_write, "store_predictions"),
-                         (pg_goals_write, "set_goal")):
+                         (pg_goals_write, "set_goal"),
+                         (goal_freeze, "freeze_month"),
+                         (goal_freeze, "_keep")):
         monkeypatch.setattr(module, name, recorder(f"{module.__name__}.{name}"))
     return reached
 

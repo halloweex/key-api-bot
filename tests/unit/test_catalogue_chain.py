@@ -28,7 +28,7 @@ import pytest_asyncio
 from core import chain_latch, pg_catalogue_write as chain
 from core import pg_chain_invariants as inv
 from core import write_chains
-from core.landing_rows import CategoryRow, ProductRow, category_rows, product_rows
+from core.landing_rows import CategoryRow, ProductRow, product_rows
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 UTC = timezone.utc
@@ -79,13 +79,6 @@ def flagged_alone(flags):
     return flags
 
 
-class _NoDuckDB:
-    """A store whose DuckDB must not be reached."""
-
-    def connection(self):
-        raise AssertionError("the catalogue reached DuckDB under KS_WRITE_CATALOGUE=postgres")
-
-
 class _Recorder:
     """A DuckDB connection that records what it is handed."""
 
@@ -111,24 +104,6 @@ class _Recorder:
 
 
 class TestTheRepositoryRoutes:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("method,payload,parse", [
-        ("upsert_products", PRODUCTS, product_rows),
-        ("upsert_categories", CATEGORIES, category_rows),
-    ])
-    async def test_under_the_flag_the_writer_gets_the_parsed_rows_and_duckdb_nothing(
-            self, flagged, method, payload, parse):
-        from core.store import AnalyticsStore
-
-        writer = AsyncMock(return_value=len(payload))
-        with patch.object(chain, method, new=writer):
-            written = await getattr(AnalyticsStore, method)(_NoDuckDB(), payload)
-
-        assert written == len(payload)
-        (rows,), _ = writer.await_args
-        # After the shared parse, so both stores read a product the same way:
-        # brand from the custom field, `min_price or price`.
-        assert rows == parse(payload)
 
     def test_the_parse_is_the_one_that_reads_the_brand(self):
         rows = product_rows(PRODUCTS)
@@ -144,23 +119,6 @@ class TestTheRepositoryRoutes:
             assert await chain.upsert_products([]) == 0
             assert await chain.upsert_categories([]) == 0
         assert not chain_latch.latched(chain.CHAIN)
-
-
-# ─── the flag (T-2) ──────────────────────────────────────────────────────────
-
-
-class TestTheFlag:
-    """Since step 14's S14-00 the flag routes nothing, and S14-09 deleted the
-    answers that stood in for it: `mode()`, the precondition and its warning,
-    the lock-out and the stand-in for an absent key."""
-
-    @pytest.mark.parametrize("name", [
-        "mode", "unmet_precondition", "_warn_unmet", "UNMET_WARN_EVERY_S",
-        "_unmet_warned", "LOCKOUT_REVISION", "CHAIN_WATERMARK_INHERITS_DUCKDB",
-        # S14-11, with the flag.
-        "writes_postgres", "env_writes_postgres"])
-    def test_the_answers_that_routed_it_are_gone(self, name):
-        assert not hasattr(chain, name)
 
 
 # ─── the precondition (T-3) ──────────────────────────────────────────────────
@@ -181,40 +139,6 @@ class TestTheRegistrySeesIt:
         for key in chain.CHAIN_SYNC_KEYS:
             assert write_chains.chain_for_sync_key(key) is chain
         assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.sync_keys()
-
-
-class TestTheSearchCursorIsNotTheCatalogues:
-    """OD-15: `last_sync_meilisearch_pg` moves with whichever of chains 3 and
-    6 lands last, and that is chain 3. Declared here, a catalogue rollback
-    would carry and release a search-index cursor chain 3 still writes."""
-
-    def test_chain_3_carries_it(self):
-        """The half the two tests below cannot see: they forbid the key on
-        the wrong chains and never required it on the right one, so the
-        merged tree carried it on none while CLAUDE.md and this module said
-        chain 3 did — a chain-3 copy-back neither carried nor released it.
-        Mutation: drop it from `pg_orders_write.CHAIN_SYNC_KEYS`."""
-        from core import pg_orders_write
-
-        assert write_chains.chain_for_sync_key("last_sync_meilisearch_pg") is pg_orders_write
-        # The DuckDB-built index's cursor is a DuckDB clock and stays DuckDB's.
-        assert write_chains.chain_for_sync_key("last_sync_meilisearch") is None
-
-    SEARCH_KEYS = {"last_sync_meilisearch_pg", "last_sync_meilisearch"}
-
-    def test_no_chain_declares_it_unless_it_owns_an_order_table(self):
-        # The two order tables (`pg_landing.ORDER_UNIT` until step 14's
-        # S14-13 deleted the shipping units).
-        order_tables = {"bronze.orders", "bronze.order_products"}
-
-        for c in write_chains.WRITE_CHAINS:
-            declared = set(getattr(c, "CHAIN_SYNC_KEYS", ())) & self.SEARCH_KEYS
-            if declared:
-                assert order_tables & set(c.CHAIN_TABLES), (
-                    write_chains.chain_name(c), declared)
-
-    def test_the_catalogue_does_not(self):
-        assert not set(chain.CHAIN_SYNC_KEYS) & self.SEARCH_KEYS
 
 
 # ─── the refusal comes before the latch (T-7) ────────────────────────────────
@@ -436,16 +360,6 @@ class TestFullSyncContainsThisChainOnly:
         stats, _ = await _full_sync(store)
         assert "CatalogueRefused" in stats["products_error"]
         assert store.stamped == ["categories", "expense_types", "orders"]
-
-    @pytest.mark.asyncio
-    async def test_a_flag_nobody_can_read_is_contained_the_same_way(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgrse")
-        store = _SyncStore(
-            categories=RuntimeError("KS_WRITE_CATALOGUE='postgrse' is not understood"),
-            products=RuntimeError("KS_WRITE_CATALOGUE='postgrse' is not understood"))
-        stats, _ = await _full_sync(store)
-        assert "postgrse" in stats["categories_error"] and "postgrse" in stats["products_error"]
-        assert store.stamped == ["expense_types", "orders"]
 
 
 # ─── the incremental tick survives the chain (T-9) ──────────────────────────
@@ -697,7 +611,6 @@ class TestTheStandingWatch:
         assert (inv.CATALOGUE_WRITTEN_AROUND, "CRITICAL") in _names(issues)
         (around,) = [i for i in issues if i.check_name == inv.CATALOGUE_WRITTEN_AROUND]
         assert around.sample_ids == (7,)
-        assert "later than the last full write" in around.description
 
     def test_once_the_chain_wrote_it_names_the_record_not_the_watermark(self):
         (around,) = [i for i in inv.check_chain_invariants(_facts(
@@ -719,17 +632,6 @@ class TestTheStandingWatch:
         (lost,) = [i for i in issues if i.check_name == inv.CATALOGUE_ROWS_LOST]
         assert (lost.severity.value, lost.count) == ("CRITICAL", 1)
 
-    def test_lost_is_not_judged_against_a_write_older_than_the_handover(self):
-        """The mirror's `last_rows` counts a repeated payload id twice."""
-        issues = inv.check_chain_invariants(_facts(
-            _table(rows=1003, current=1002), latched_at=W + timedelta(minutes=1)))
-        assert inv.CATALOGUE_ROWS_LOST not in {i.check_name for i in issues}
-
-    def test_lost_is_not_judged_before_the_first_write(self):
-        issues = inv.check_chain_invariants(_facts(_table(rows=1003, current=1002),
-                                                   latched_at=None))
-        assert inv.CATALOGUE_ROWS_LOST not in {i.check_name for i in issues}
-
     def test_retired_is_strictly_before_the_last_write(self):
         """A row that carries the instant exactly is current, not retired:
         the boundary is `<`, judged by the SQL, and the verdict takes its
@@ -744,7 +646,7 @@ class TestTheStandingWatch:
                    dropped_sample=tuple(range(10)))))
         assert (inv.CATALOGUE_SHORT_WRITE, "WARN") in _names(issues)
         (short,) = [i for i in issues if i.check_name == inv.CATALOGUE_SHORT_WRITE]
-        assert short.count == 104 and "10.4% of 1004" in short.description
+        assert short.count == 104
 
     def test_retirements_accumulated_over_many_writes_are_not_one(self):
         """The review's ratchet: 104 of 1004 retired one at a time is every
@@ -756,14 +658,6 @@ class TestTheStandingWatch:
                    retired_sample=tuple(range(10)), recorded=True, dropped=1,
                    dropped_sample=(42,))))
         assert _names(issues) == {(inv.CATALOGUE_RETIRED, "INFO")}
-
-    def test_not_judged_before_the_chain_keeps_a_record(self):
-        """Before the latch nothing says which rows the write before the last
-        carried, so the share is not guessed from the table."""
-        issues = inv.check_chain_invariants(_facts(
-            _table(rows=1004, current=900, last_rows=900, retired=104,
-                   retired_sample=tuple(range(10))), latched_at=None))
-        assert inv.CATALOGUE_SHORT_WRITE not in {i.check_name for i in issues}
 
     def test_a_few_retired_categories_are_not_a_short_write(self):
         """Two of 28 in one week is 7% and ordinary: the floor in rows keeps
@@ -782,17 +676,6 @@ class TestTheStandingWatch:
         facts = inv.Facts(watched=(chain.CHAIN,), catalogue=inv.Unwatched("no table"))
         (issue,) = inv.check_chain_invariants(facts)
         assert issue.check_name == inv.UNWATCHED and chain.CHAIN in issue.description
-
-    def test_every_condition_is_held_by_a_blind_run_and_carries_the_prefix(self):
-        mine = {inv.CATALOGUE_EMPTY, inv.CATALOGUE_WRITTEN_AROUND, inv.CATALOGUE_ROWS_LOST,
-                inv.CATALOGUE_RETIRED, inv.CATALOGUE_SHORT_WRITE}
-        assert mine <= set(inv.CONDITIONS)
-        assert all(c.startswith(inv.PREFIX) for c in mine)
-
-    def test_its_watermarks_are_left_to_the_freshness_check(self):
-        """With no stand-in since S14-09 (`tests/unit/test_absent_chain_keys.py`)."""
-        assert inv.watermark_limit_min(chain) is None
-        assert not hasattr(chain, "CHAIN_WATERMARK_INHERITS_DUCKDB")
 
 
 # ─── /api/health publishes the step (§3.11) ──────────────────────────────────

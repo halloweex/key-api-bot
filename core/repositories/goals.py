@@ -121,6 +121,27 @@ _FORECAST_PREDICTED_SQL = """
       AND prediction_date <= ?
 """
 
+# How many days of a window the stored forecast holds: the month goal freeze
+# keeps no answer whose ML signal summed fewer days than the month has left
+# (`core/goal_freeze.py`). The same table, filter and window as the signal.
+_FORECAST_DAYS_SQL = """
+    SELECT COUNT(DISTINCT prediction_date)
+    FROM {revenue_predictions}
+    WHERE sales_type = ?
+      AND prediction_date >= ?
+      AND prediction_date <= ?
+"""
+
+# The month's automatic goal as it was frozen (revision 0037,
+# `core/goal_freeze.py`): `generate_smart_goals`' answer, whole, and when. One
+# row or none — the key is (year, month, sales_type). No table hole: DuckDB
+# never had the table, and nothing renders this for any engine but Postgres.
+_FROZEN_GOAL_SQL = """
+    SELECT smart, frozen_at
+    FROM app.frozen_month_goals
+    WHERE year = ? AND month = ? AND sales_type = ?
+"""
+
 # What a smart goal reads of the three shared goal tables, in ONE statement:
 # their writer stores them in one transaction, so one statement reads one
 # committed set in either engine — what a single hold of DuckDB's store lock
@@ -386,6 +407,14 @@ def _first_of_next_month(d: date) -> date:
     return date(d.year + (d.month == 12), d.month % 12 + 1, 1)
 
 
+def _frozen_stamp(frozen_at: Optional[datetime]) -> Optional[str]:
+    """When a month's goal was frozen, written as `calculatedAt` is — ISO, in
+    Kyiv — or None for a goal computed live."""
+    if frozen_at is None:
+        return None
+    return frozen_at.astimezone(DEFAULT_TZ).isoformat()
+
+
 # ─── The three shared goal tables ───────────────────────────────────────────
 #
 # `seasonal_indices`, `growth_metrics` and `weekly_patterns` carry no
@@ -403,6 +432,12 @@ GOAL_TABLES_SALES_TYPE = "retail"
 
 # Default: slightly more revenue in weeks 1-4, less in week 5.
 _DEFAULT_WEEKLY_WEIGHTS = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
+
+# A smart goal's `calculationMethod` when the sales type has no history of
+# its own to build one from, and so no automatic goal: `goal` is None in all
+# three periods (the owner's decision of 2026-11-19; see
+# `generate_smart_goals`).
+NO_HISTORY = "no_history"
 
 
 def _recency_weighted(rates: List[float]) -> float:
@@ -839,6 +874,12 @@ class GoalsMixin:
     # 7b-4 each had a second body — the DN-12 bridge over DuckDB `orders` —
     # chosen by `KS_GOALS_HISTORY`, and until step 14's S14-07 each asked that
     # variable first, to refuse any value but unset and `silver`.
+    #
+    # Since revision 0037 a month's answer is also frozen, once, on its 1st
+    # (`core/goal_freeze.py`, the owner's decision of 2026-11-18), and the two
+    # GETs read it through `smart_goals_of_month`: the frozen answer for a
+    # month that has one, `generate_smart_goals` computed now for a month that
+    # has none. Freezing is a job's alone; neither GET freezes anything.
 
     async def calculate_seasonality_indices(
         self, sales_type: str = "retail",
@@ -1014,6 +1055,16 @@ class GoalsMixin:
             _FORECAST_ACTUAL_SQL.replace("{sales_filter}", sales_filter), params)
         return float(rows[0][0]) if rows and rows[0][0] is not None else 0.0
 
+    async def forecast_days_stored(self, sales_type: str, start: date, end: date) -> int:
+        """How many days of `start`..`end` the stored forecast holds for
+        `sales_type`. The month goal freeze asks it of an answer whose ML
+        signal is not 0 before keeping it (`core/goal_freeze.py`): the signal
+        sums whatever rows there are, so a forecast that stops short of the
+        month's end makes it, and the goal, too low. Read as the signal is,
+        through `_goals_run`; a refusal passes through."""
+        rows = await self._goals_run(_FORECAST_DAYS_SQL, [sales_type, start, end])
+        return int(rows[0][0] or 0) if rows else 0
+
     async def _get_ml_forecast_total(
         self, target_year: int, target_month: int, sales_type: str = "retail"
     ) -> float:
@@ -1148,6 +1199,14 @@ class GoalsMixin:
         3. Adjust using seasonality index
         4. Calculate weekly breakdown using weekly patterns
 
+        A sales type with no history of its own has no automatic goal (the
+        owner's decision of 2026-11-19): no last year's month, no recent
+        complete month with 25 days of sales, no forecast — and no month
+        average from the shared tables, which are retail's. Its answer
+        carries `goal` None in all three periods, an empty breakdown and
+        `calculationMethod` `NO_HISTORY`; the other fields are what was
+        read. Retail falls back on its own month average as before.
+
         Args:
             target_year: Year to generate goals for
             target_month: Month (1-12) to generate goals for
@@ -1228,6 +1287,7 @@ class GoalsMixin:
         if ml_forecast_goal > 0:
             signals["ml"] = ml_forecast_goal
 
+        monthly_goal: Optional[float]
         if signals:
             # Redistribute unavailable signal weights proportionally
             available_weight = sum(base_weights[k] for k in signals)
@@ -1239,18 +1299,26 @@ class GoalsMixin:
             dominant = max(blend_weights, key=lambda k: blend_weights[k] * signals[k])
             method_map = {"yoy": "yoy_growth", "recent": "recent_trend", "ml": "ml_forecast"}
             calculation_method = method_map[dominant]
-        elif historical_avg > 0:
+        elif historical_avg > 0 and sales_type == GOAL_TABLES_SALES_TYPE:
+            # The month's average over the years, from the shared tables —
+            # which hold retail's history (`GOAL_TABLES_SALES_TYPE`), and so
+            # are a sales type's own history for retail alone.
             monthly_goal = historical_avg * (1 + growth_rate)
             calculation_method = "historical_avg"
             blend_weights = {}
         else:
-            monthly_goal = 3000000  # 3M UAH default
-            growth_rate = dynamic_cap
-            calculation_method = "fallback"
+            # No history of its own, so no automatic goal (the owner's
+            # decision of 2026-11-19): no month a year earlier, no complete
+            # month with 25 days of sales, no forecast, and no month average
+            # of its own. Until then a sales type here took retail's month
+            # average × growth from the shared tables: November 2026 froze
+            # ₴5.7M for the offline store, open since the 12th, and for the
+            # exhibition, six days in September 2025, beside retail's ₴4.7M.
+            # Retail itself arrives here only with no history at all, where
+            # a ₴3M default stood ("fallback") — invented the same way.
+            monthly_goal = None
+            calculation_method = NO_HISTORY
             blend_weights = {}
-
-        # Round to nice number
-        monthly_goal = round(monthly_goal / 100000) * 100000
 
         if weekly_patterns:
             weekly_weights = {int(row[0]): float(row[1]) for row in weekly_patterns}
@@ -1262,25 +1330,35 @@ class GoalsMixin:
         if total_weight > 0:
             weekly_weights = {k: v / total_weight for k, v in weekly_weights.items()}
 
-        # Calculate weekly goals with residual adjustment
-        weekly_goals = {
-            week: round(monthly_goal * weight / 10000) * 10000
-            for week, weight in weekly_weights.items()
-        }
-        # Distribute residual so weekly goals sum exactly to monthly
-        residual = monthly_goal - sum(weekly_goals.values())
-        if residual != 0 and weekly_goals:
-            # Add residual to the largest week
-            largest_week = max(weekly_goals, key=lambda k: weekly_goals[k])
-            weekly_goals[largest_week] += residual
-
         # Fix: use calendar.monthrange for correct days (handles leap years)
         days_in_month = calendar.monthrange(target_year, target_month)[1]
-        daily_goal = round(monthly_goal / days_in_month / 10000) * 10000
 
-        # Calculate weekly goal (monthly / actual weeks)
-        weeks_in_month = days_in_month / 7.0
-        weekly_goal = round(monthly_goal / weeks_in_month / 50000) * 50000
+        # No goal for the month is no goal for its weeks and days either:
+        # None in all three, and no breakdown.
+        weekly_goals: Dict[int, float] = {}
+        daily_goal: Optional[int] = None
+        weekly_goal: Optional[int] = None
+        if monthly_goal is not None:
+            # Round to nice number
+            monthly_goal = round(monthly_goal / 100000) * 100000
+
+            # Calculate weekly goals with residual adjustment
+            weekly_goals = {
+                week: round(monthly_goal * weight / 10000) * 10000
+                for week, weight in weekly_weights.items()
+            }
+            # Distribute residual so weekly goals sum exactly to monthly
+            residual = monthly_goal - sum(weekly_goals.values())
+            if residual != 0 and weekly_goals:
+                # Add residual to the largest week
+                largest_week = max(weekly_goals, key=lambda k: weekly_goals[k])
+                weekly_goals[largest_week] += residual
+
+            daily_goal = round(monthly_goal / days_in_month / 10000) * 10000
+
+            # Calculate weekly goal (monthly / actual weeks)
+            weeks_in_month = days_in_month / 7.0
+            weekly_goal = round(monthly_goal / weeks_in_month / 50000) * 50000
 
         return {
             "targetYear": target_year,
@@ -1316,6 +1394,50 @@ class GoalsMixin:
             }
         }
 
+    async def smart_goals_of_month(
+        self,
+        target_year: int,
+        target_month: int,
+        sales_type: str = "retail",
+    ) -> Tuple[Dict[str, Any], Optional[datetime]]:
+        """The month's automatic goal, and when it was frozen.
+
+        The answer `core.goal_freeze` kept for the month, or — for a month
+        with no row: every month before revision 0037, and one whose freeze
+        has not run yet — `generate_smart_goals` computed now, with None.
+        Reads only (OD-14 (i)): a month nobody froze is answered live and
+        stays unfrozen. The frozen row is read through `_goals_run`, as
+        `generate_smart_goals` reads, so a failure is the refusal naming
+        `goals`, as for every other goal read.
+
+        One door for `/api/goals/smart` and `/api/goals/forecast`, so the two
+        cannot give one month two goals.
+        """
+        rows = await self._goals_run(
+            _FROZEN_GOAL_SQL, [target_year, target_month, sales_type])
+        if rows:
+            from core.goal_freeze import decode
+
+            stored, frozen_at = rows[0]
+            return decode(stored), frozen_at
+        smart = await self.generate_smart_goals(target_year, target_month, sales_type)
+        return smart, None
+
+    async def get_month_goal(
+        self,
+        target_year: int,
+        target_month: int,
+        sales_type: str = "retail",
+    ) -> Dict[str, Any]:
+        """`generate_smart_goals`' answer for the month, as `/api/goals/forecast`
+        serves it: the frozen one once the month is frozen
+        (`smart_goals_of_month`), and `monthly.frozenAt` saying which — when
+        it was frozen, or None for an answer computed now."""
+        smart, frozen_at = await self.smart_goals_of_month(
+            target_year, target_month, sales_type)
+        smart["monthly"]["frozenAt"] = _frozen_stamp(frozen_at)
+        return smart
+
     async def get_smart_goals(
         self,
         sales_type: str = "retail",
@@ -1324,6 +1446,14 @@ class GoalsMixin:
     ) -> Dict[str, Dict[str, Any]]:
         """
         Get smart goals for a specific or current month using seasonality.
+
+        The month's automatic goal is the frozen one once the month is frozen
+        — on its 1st, by `core.goal_freeze` (revision 0037) — and is computed
+        live for a month that is not; `monthly.frozenAt` says which. A goal
+        typed on /goals overrides either, as before. A sales type with no
+        history of its own has none (`calculationMethod` `NO_HISTORY`):
+        `amount` and `suggestedAmount` are None in every period no typed
+        goal fills.
 
         Args:
             sales_type: 'retail', 'b2b', or 'all'
@@ -1337,8 +1467,9 @@ class GoalsMixin:
         target_year = year if year is not None else now.year
         target_month = month if month is not None else now.month
 
-        # Generate smart goals for target month
-        smart = await self.generate_smart_goals(target_year, target_month, sales_type)
+        # The month's automatic goal: frozen if the month is, else live.
+        smart, frozen_at = await self.smart_goals_of_month(
+            target_year, target_month, sales_type)
 
         # Check for custom overrides
         # The same body as `get_goals`, narrowed in Python rather than in SQL:
@@ -1381,6 +1512,9 @@ class GoalsMixin:
                 "calculationMethod": smart["monthly"]["calculationMethod"],
                 "mlForecastGoal": smart["monthly"]["mlForecastGoal"],
                 "blendWeights": smart["monthly"]["blendWeights"],
+                # When the month's automatic goal was frozen, or None while it
+                # is computed live. Daily and weekly come from the same answer.
+                "frozenAt": _frozen_stamp(frozen_at),
             },
             "metadata": smart["metadata"]
         }

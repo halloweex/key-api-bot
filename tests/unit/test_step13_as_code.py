@@ -43,38 +43,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = ("core", "web", "bot", "scripts", "deploy")
 
-DELETED_MODULES = ("core.warehouse_cutover", "core.pg_order_utm")
-# Names that left production in S14-15, by where they lived — the store's
-# under `core.store`, its own name since the final stage deleted the shim
-# `core.duckdb_store`.
-DELETED_ATTRS = {
-    "core.store": ("GOLD_REVENUE_SELECT_SQL", "DUCKDB_GOLD_COLUMNS",
-                   "GOLD_SOURCE_MEASURES", "gold_select_items",
-                   "MAX_VALIDATION_RETRIES", "STUCK_REBUILD_COOLDOWN_SECONDS",
-                   "UTM_DATE_LOOKUP_LIMIT"),
-    "core.pg_derivation": ("ENV", "PIGGYBACK", "OWN", "configure_mode", "mode",
-                           "mode_error", "owns", "mark_if_owned"),
-    "core.pg_utm_parse": ("ENV", "DUCKDB", "POSTGRES", "configure_mode", "mode",
-                          "mode_error", "parses_in_postgres"),
-    "core.pg_landing": ("enabled", "mirror_on"),
-    "core.alerting": ("mark_delivered", "delivered_marked"),
-    "core.data_quality": ("REMEDIATION_UTM_PARSED_IN_POSTGRES",),
-    "core.mirror_reconciliation": ("_ORDER_UTM_LEVER_REASONS_POSTGRES",),
-    "bot.canary": ("check_derivation_mode", "check_warehouse_writer_mode",
-                   "check_warehouse_preconditions", "check_warehouse_way_back_refused",
-                   "check_warehouse_hold", "check_utm_parse_mode",
-                   "WAREHOUSE_HOLD_WARN_S"),
-}
-DELETED_STORE_METHODS = (
-    "refresh_warehouse_layers", "get_warehouse_status", "mark_warehouse_dirty",
-    "peek_warehouse_dirty", "clear_warehouse_dirty", "consume_warehouse_dirty",
-    "_claim_stuck_rebuild_slot", "_count_consecutive_refresh_failures",
-    "refresh_utm_silver_layer", "_parse_utm_into_silver",
-)
-DELETED_SCHEDULER_METHODS = (
-    "_settle_warehouse_writer", "_run_warehouse_refresh",
-    "_rebuild_postgres_layers", "_rebuild_pg_layers",
-)
 # The conditions the switch paged under. Out of the registry and the canary's
 # tables; the names are not reused (rule 15).
 RETIRED_CONDITIONS = (
@@ -84,7 +52,6 @@ RETIRED_CONDITIONS = (
 )
 STOPPED_READING = ("KS_WRITE_WAREHOUSE", "KS_UTM_PARSE", "KS_PG_DERIVE",
                    "KS_MIRROR_LANDING")
-JUNK = ("", "postgress", "duckdb", "piggyback", "off", "0", "\x7f", "x" * 300)
 
 
 def _trees():
@@ -103,53 +70,6 @@ def _unwrap(fn):
 
 
 class TestWhatIsGone:
-    @pytest.mark.parametrize("module", DELETED_MODULES)
-    def test_the_module_is_deleted(self, module):
-        path = REPO / Path(*module.split(".")).with_suffix(".py")
-        assert not path.exists(), path
-        with pytest.raises(ImportError):
-            __import__(module)
-
-    @pytest.mark.parametrize("module, names", sorted(DELETED_ATTRS.items()))
-    def test_the_names_are_deleted(self, module, names):
-        import importlib
-
-        mod = importlib.import_module(module)
-        left = [n for n in names if hasattr(mod, n)]
-        assert left == [], f"{module} still has {left}"
-
-    def test_the_store_and_the_scheduler_lost_their_methods(self):
-        from core.store import AnalyticsStore
-        from core.scheduler import BackgroundScheduler
-
-        assert [m for m in DELETED_STORE_METHODS if hasattr(AnalyticsStore, m)] == []
-        assert [m for m in DELETED_SCHEDULER_METHODS
-                if hasattr(BackgroundScheduler, m)] == []
-
-    def test_nothing_in_production_calls_or_imports_them(self):
-        """By attribute and by bare name, anywhere under the production roots:
-        `store.refresh_warehouse_layers(...)` is a call `test_imports_resolve`
-        cannot see. `scripts/compact_duckdb.py` mentions one in its docstring
-        (do-not-touch, gone in S14-18); a docstring is not a call."""
-        names = (set(DELETED_STORE_METHODS) | set(DELETED_SCHEDULER_METHODS)
-                 | {"settle_writer", "note_utm_reparsed_in_postgres",
-                    "ship_order_utm", "ship_after_reparse", "duckdb_derives",
-                    "mark_if_owned", "parses_in_postgres", "mark_delivered",
-                    "delivered_marked"})
-        found = []
-        for rel, tree in _trees():
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call):
-                    func = node.func
-                    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-                    if name in names:
-                        found.append((rel, node.lineno, name))
-                elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                    mods = ([a.name for a in node.names] if isinstance(node, ast.Import)
-                            else [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names])
-                    if any(m in DELETED_MODULES for m in mods):
-                        found.append((rel, node.lineno, "import"))
-        assert found == [], found
 
     def test_no_production_code_names_the_marker_or_the_record_for_a_write(self):
         """Both stay on disk for an image from before step 14. Nothing here
@@ -179,30 +99,6 @@ class TestWhatIsGone:
 
 
 class TestTheVariablesNoLongerRead:
-    @pytest.mark.parametrize("value", JUNK)
-    def test_configure_modes_neither_reads_nor_minds_them(self, monkeypatch, value):
-        from core.runtime_modes import configure_modes
-
-        for name in STOPPED_READING:
-            monkeypatch.setenv(name, value)
-        modes = configure_modes()
-        # `KS_READ_FALLBACK` left the mapping in step 14's S14-16, and
-        # `KS_DUCKDB`, the last, in S14-18.
-        assert modes == {}, modes
-
-    @pytest.mark.parametrize("value", ("", "postgress", "duckdb", "piggyback"))
-    def test_the_derivation_is_registered_whatever_they_say(self, monkeypatch, value):
-        from core.scheduler import BackgroundScheduler
-
-        for name in STOPPED_READING:
-            monkeypatch.setenv(name, value)
-        sched = BackgroundScheduler()
-        ids = []
-        monkeypatch.setattr(sched, "_add_job", lambda **kw: ids.append(kw["job_id"]))
-        asyncio.run(sched._register_jobs())
-        assert "pg_warehouse_derive" in ids
-        assert "warehouse_refresh" not in ids
-        assert "warehouse_refresh" not in BackgroundScheduler._HEAVY_JOBS
 
     def test_web_imports_in_a_fresh_interpreter_with_junk_in_them(self, tmp_path):
         env = {"PATH": os.environ.get("PATH", ""), "TZ": "UTC",
@@ -225,30 +121,6 @@ class TestTheVariablesNoLongerRead:
 
 
 class TestHealthAndTheCanary:
-    def test_the_model_carries_neither_block(self):
-        from web.schemas import HealthResponse
-
-        fields = set(HealthResponse.model_fields)
-        assert not fields & {"warehouse_writer_mode", "utm_parse"}
-        assert "derivation" in fields and "mirrors" in fields
-
-    def test_the_derivation_block_has_no_mode(self, monkeypatch):
-        from web.routes.api import health
-
-        async def nothing_read():
-            return dict(health._NOT_ASKED)
-
-        monkeypatch.setattr(health, "_dropped_marks", nothing_read)
-        block = asyncio.run(health._derivation_block())
-        assert set(block) == {"signal_unreadable_ticks", "marks_dropped_unhealed",
-                              "last_mark_drop_age_s"}
-
-    def test_the_handler_builds_neither_block(self):
-        src = (REPO / "web" / "routes" / "api" / "health.py").read_text()
-        tree = ast.parse(src)
-        keys = {node.value for node in ast.walk(tree)
-                if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-        assert not keys & {"warehouse_writer_mode", "utm_parse"}
 
     def test_the_mirrors_watch_the_derived_tables_and_the_utm_table(self, monkeypatch):
         """Unconditionally since S14-15, with their own limits."""
@@ -392,30 +264,3 @@ class TestTheMarksSurviveTheGate:
         AlertGate(state_path=path).note_delivered_conditions(["y"], "g")
         again = AlertGate(state_path=path)
         assert again._delivered["x"]["marks"] == ["m"]
-
-
-class TestTheResolveNote:
-    """`resolve_group(note=...)`: one more line under the list. Its one caller
-    was step 13's settle, which closed the `warehouse` group once on the
-    switch; kept as the Gate's own behaviour (moved here from the deleted
-    `tests/unit/test_warehouse_writer.py`, on a condition still registered:
-    the `warehouse:` ones it used went with DuckDB's validator)."""
-
-    def test_it_is_one_more_line_under_the_list(self):
-        from core.alerting import _gate, resolve_group
-
-        _gate.note_delivered_conditions(["warehouse_pg:derive_failed"], "warehouse_pg")
-        with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=True)), \
-             patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
-            asyncio.run(resolve_group("warehouse_pg", note="retired"))
-        text = send.await_args.args[0]
-        assert text.startswith("✅ Resolved:") and text.endswith("\nretired")
-
-    def test_without_it_nothing_changes(self):
-        from core.alerting import _gate, resolve_group
-
-        _gate.note_delivered_conditions(["warehouse_pg:derive_failed"], "warehouse_pg")
-        with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=True)), \
-             patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
-            asyncio.run(resolve_group("warehouse_pg"))
-        assert send.await_args.args[0].splitlines()[-1].startswith("• warehouse_pg:")

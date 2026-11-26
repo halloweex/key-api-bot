@@ -9,8 +9,8 @@ side, that contention took a path from 124 req/s to 38.
 
 WHY THE WRITER MOVES WITH THE READER
 
-`replicate_bot_state` and `replicate_sms` (until step 14's S14-13) copy a
-table and let the reader switch later. That shape is wrong here. `_resolve_session` re-reads status and
+`replicate_bot_state` (until 2026-11-19) and `replicate_sms` (until step 14's
+S14-13) copied a table and let the reader switch later. That shape is wrong here. `_resolve_session` re-reads status and
 role on **every** request, and that read *is* revocation: the session cookie is
 a stateless signed token that cannot be withdrawn, so taking access away means
 the next request finds the account no longer approved. Reading an hourly

@@ -30,7 +30,7 @@ import textwrap
 
 import pytest
 
-from core import pg, write_chains
+from core import write_chains
 from tests import migration_replay as replay
 
 # The chains registered before this rule existed. Each was registered before
@@ -44,31 +44,6 @@ REGISTERED_BEFORE_THE_RULE = frozenset({
     "pg_expense_types_write", "pg_buyers_write",
 })
 
-# Each chain registered from #280 on and the revision that locks out the
-# images built before it — what its `LOCKOUT_REVISION` said until step 14
-# deleted the constants (S14-09 chains 3 and 6, S14-11 the six left).
-# Frozen: a table added to one of these chains needs a new revision, which
-# a later chain of its own would name here.
-LOCKOUT = {
-    "pg_orders_write": "0035_batch_e_chains",
-    "pg_catalogue_write": "0035_batch_e_chains",
-    "pg_managers_write": "0035_batch_e_chains",
-    "pg_forecast_write": "0035_batch_e_chains",
-    "pg_dq_journal_write": "0035_batch_e_chains",
-    "pg_watchdog_write": "0035_batch_e_chains",
-    "pg_weekly_ledger_write": "0035_batch_e_chains",
-    "pg_traffic_ledger_write": "0035_batch_e_chains",
-}
-
-
-NEW_REVISION = (
-    "Never edit an applied revision to make this pass: alembic does not re-run "
-    "it, so production keeps the old comment while CI's freshly migrated "
-    "database and the replay agree with the edit. Write a new revision that "
-    "comments the chain's tables (revision 0035's shape), move "
-    "REQUIRED_REVISION to it, and point the chain's entry in LOCKOUT at it."
-)
-
 
 def _chains():
     return {write_chains.chain_name(chain): chain for chain in write_chains.WRITE_CHAINS}
@@ -78,72 +53,10 @@ def _ruled():
     return sorted(name for name in _chains() if name not in REGISTERED_BEFORE_THE_RULE)
 
 
-def _revision_number(revision: str) -> int:
-    """The four digits every revision id starts with — what
-    `chain_latch._revision_number` read until S14-11."""
-    head = revision.split("_", 1)[0]
-    assert len(head) == 4 and head.isdigit(), revision
-    return int(head)
-
-
-def _lineage_ids(head: str):
-    return [module.revision for module in replay.lineage(head)]
-
-
 def _before(revision: str) -> str:
     """The revision a build required just before `revision` shipped — what
     #280's build required of the eight chains' lock-out."""
     return replay.revisions()[revision].down_revision
-
-
-class TestEveryChainNamesItsLockout:
-    def test_the_chains_before_the_rule_stay_held_by_0034(self):
-        """Kills: the head moved onto a line that no longer descends from
-        0034, which is what refuses every image without the five."""
-        assert REGISTERED_BEFORE_THE_RULE <= set(_chains())
-        assert "0034_buyer_chain" in _lineage_ids(pg.REQUIRED_REVISION)
-
-    def test_every_chain_registered_since_has_one(self):
-        """Kills: a chain registered with no lock-out — an image built before
-        it would start against its tables. Name the revision that refuses
-        them in `LOCKOUT`. And no chain carries the constant any more: the
-        literal is the one place it is said."""
-        assert set(_ruled()) == set(LOCKOUT), sorted(set(_ruled()) ^ set(LOCKOUT))
-        for name in _chains():
-            assert not hasattr(_chains()[name], "LOCKOUT_REVISION"), (
-                f"{name}'s lock-out is the literal here since S14-11")
-
-    @pytest.mark.parametrize("name", _ruled())
-    def test_a_lockout_in_force_is_a_revision_that_knows_the_chain(self, name):
-        """As of the lock-out every table the chain owns carries a comment
-        naming the chain's module: the revision was written knowing what the
-        chain owns. Kills: a lock-out named by a revision older than the
-        chain, and a table the chain gained after its lock-out shipped — an
-        image between the two does not know the chain owns it."""
-        chain = _chains()[name]
-        lockout = LOCKOUT[name]
-        assert _revision_number(lockout) <= _revision_number(pg.REQUIRED_REVISION)
-        assert lockout in _lineage_ids(pg.REQUIRED_REVISION), lockout
-        comments = replay.comments_at(lockout)
-        for table in chain.CHAIN_TABLES:
-            assert f"core/{name}.py" in (comments.get(table) or ""), (
-                f"as of {lockout}, {table}'s comment does not name "
-                f"core/{name}.py: the revision that locks the older images out "
-                f"was written before {name} owned it. {NEW_REVISION}")
-
-    def test_revision_numbers_are_the_ancestry(self):
-        """"This revision or a later one" is read off the four digits every
-        id starts with (the lock-out above, and every image before step 14,
-        whose `lockout_unmet` read it so). Kills: a branch, a reused number,
-        or an id whose number disagrees with its file."""
-        mods = replay.revisions()
-        for revision, module in mods.items():
-            number = _revision_number(revision)
-            assert module.__file__.rsplit("/", 1)[-1].startswith(f"{number:04d}_"), revision
-        line = _lineage_ids(pg.REQUIRED_REVISION)
-        assert set(line) == set(mods), "a revision off the line to the head"
-        numbers = [_revision_number(r) for r in line]
-        assert numbers == sorted(set(numbers)), numbers
 
 
 class TestTheWritersAskTheRevisionBeforeTheLatch:

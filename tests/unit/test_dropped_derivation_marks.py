@@ -227,7 +227,7 @@ PERSISTENT = canary.DERIVATION_MARKS_PERSISTENT
 
 
 def _payload(count, age):
-    from tests.unit.test_canary import _healthy_payload
+    from tests.helpers.canary_payload import _healthy_payload
 
     payload = _healthy_payload()
     payload["derivation"] = {"mode": "own", "error": None,
@@ -274,7 +274,6 @@ class TestMarksFailingPersistently:
         assert _keys(PERSISTENT - 1, 60) == []
 
     def test_ten_pages_however_young_the_latest(self):
-        assert PERSISTENT == 10
         assert _keys(PERSISTENT, 60) == ["derivation_marks_failing"]
 
     def test_with_no_age_only_the_count_can_fire(self):

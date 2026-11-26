@@ -30,7 +30,12 @@
         var data = res.data || {};
         if (res.ok && data.success) {
             // Cookie was set server-side with HttpOnly — JS doesn't touch it.
-            window.location.href = '/';
+            // Back to the page that sent us here: `data-next` is the server's
+            // checked `?next=` (`safe_next`), empty when there was none. The
+            // #fragment came along through the redirect to /login, and
+            // Telegram's launch data rides in it.
+            var next = loadingDiv && loadingDiv.getAttribute('data-next');
+            window.location.href = next ? next + window.location.hash : '/';
             return;
         }
 

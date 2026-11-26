@@ -24,15 +24,20 @@ pub enum Reason {
     Session,
     /// Input the page never sends: Python's parsing answers it.
     Input,
+    /// A statement this service's own role stopped: its `statement_timeout`
+    /// or `lock_timeout` (`deploy/rust/ks_rust_api.sql`). The Python app's
+    /// role has neither limit, so its read may well finish.
+    Timeout,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 5] = [
+    pub const ALL: [Reason; 6] = [
         Reason::Revision,
         Reason::Database,
         Reason::Pool,
         Reason::Session,
         Reason::Input,
+        Reason::Timeout,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -42,6 +47,7 @@ impl Reason {
             Reason::Pool => "pool",
             Reason::Session => "session",
             Reason::Input => "input",
+            Reason::Timeout => "timeout",
         }
     }
 
@@ -52,6 +58,7 @@ impl Reason {
             Reason::Pool => "no connection came within the pool's wait",
             Reason::Session => "the session could not be read",
             Reason::Input => "the page never sends this input",
+            Reason::Timeout => "a statement ran past this service's own time limit",
         }
     }
 }
@@ -62,5 +69,17 @@ pub fn of(error: &sqlx::Error, otherwise: Reason) -> Reason {
     match error {
         sqlx::Error::PoolTimedOut => Reason::Pool,
         _ => otherwise,
+    }
+}
+
+/// A statement the role's own limits stopped: `statement_timeout` cancels it
+/// (SQLSTATE 57014), `lock_timeout` gives up waiting for a lock (55P03) —
+/// behind a migration's DDL, say. Python reads as a role with neither, so
+/// such a read hands the request over rather than answer the 503 a failed
+/// statement is.
+pub fn stopped_by_own_limit(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(e) => matches!(e.code().as_deref(), Some("57014" | "55P03")),
+        _ => false,
     }
 }

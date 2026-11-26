@@ -14,16 +14,13 @@ from __future__ import annotations
 
 import ast
 import inspect
-import pathlib
 import textwrap
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from core.data_quality import _freshness_check, check_internal_integrity
-from core.store import AnalyticsStore
 
-CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 ENTITIES = ("orders", "products", "buyers", "offers", "stocks",
             "managers", "categories", "expense_types")
 
@@ -69,14 +66,6 @@ def _moved(now, **overrides):
         else:
             out[key] = value
     return out
-
-
-class TestWhichKeysHaveMoved:
-    def test_the_inventory_chain_takes_its_two(self, flags):
-        """Since step 14's S14-00 every chain's keys have moved, a constant;
-        chain 1's two are among them whatever its flag says."""
-        from core.write_chains import sync_keys as stood_down_sync_keys
-        assert stood_down_sync_keys() >= frozenset({"last_sync_offers", "last_sync_stocks"})
 
 
 class TestTheFreshnessCheckFollowsTheWatermarks:
@@ -163,33 +152,3 @@ class TestTheWiringHasOneHome:
                 and c.func.id == "check_internal_integrity"]
         assert scan and all(
             any(k.arg == "chain_watermarks" for k in c.keywords) for c in scan)
-
-    def test_the_store_goes_to_postgres_on_both_sides_asking_no_chain(self):
-        """Both go to `meta.chain_watermarks`, so they cannot disagree about
-        where a watermark lives (revision 0032). Since step 14's S14-11
-        neither asks the key's chain where it writes (`writes_postgres`, gone
-        with the flags); the getter asks the registry only whether an absent
-        key inherits DuckDB's frozen stamp."""
-        sides = {"get_last_sync_time": "get_value", "set_last_sync_time": "set_value"}
-        for fn in (AnalyticsStore.get_last_sync_time, AnalyticsStore.set_last_sync_time):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-            called = {getattr(n.func, "id", getattr(n.func, "attr", None))
-                      for n in ast.walk(tree) if isinstance(n, ast.Call)}
-            assert sides[fn.__name__] in called, fn.__name__
-            assert not called & {"writes_postgres", "connection", "chain_modes"}, (
-                f"{fn.__name__} still routes")
-
-    def test_nothing_copies_or_compares_the_new_table(self):
-        """`meta.chain_watermarks` is safe only because no copy out of DuckDB
-        reaches it. A string naming it in the shipper or the comparison is the
-        first step to the hourly rollback this table exists to escape."""
-        # `pg_operational.py` and `pg_replication.py`, the copies, were two
-        # more until step 14's S14-13 deleted them.
-        for name in ("mirror_reconciliation.py",):
-            tree = ast.parse((CORE / name).read_text(encoding="utf-8"))
-            docstrings = {id(n.value) for n in ast.walk(tree)
-                          if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}
-            named = [n.value for n in ast.walk(tree)
-                     if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                     and id(n) not in docstrings and "chain_watermarks" in n.value]
-            assert named == [], f"{name} names meta.chain_watermarks: {named}"

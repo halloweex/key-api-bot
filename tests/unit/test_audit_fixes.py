@@ -8,14 +8,13 @@ Covers:
 from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock
 
-import numpy as np
-import pandas as pd
 import pytest
 
 from core.data_quality import _freshness_check, Severity
 from tests.integration.pg_tab_seed import (
     DSN, derive, needs_postgres, seed, tab_in_postgres,
 )
+from tests.helpers.training_frames import _valid_training_df
 
 
 # A5-1 / F3, the DuckDB warehouse refresh's self-heal and its consecutive-
@@ -102,14 +101,6 @@ class TestFreshnessCheck:
 
 
 # ─────────────────────────── A11-6 ───────────────────────────
-
-def _valid_training_df(n: int = 120) -> pd.DataFrame:
-    start = date(2025, 1, 1)
-    dates = [start + timedelta(days=i) for i in range(n)]
-    return pd.DataFrame({
-        "date": dates,
-        "revenue": np.linspace(10000, 20000, n),
-    })
 
 
 class TestModelValidationGate:

@@ -28,7 +28,8 @@ type NativeProps = Omit<
 >
 
 interface InputProps extends NativeProps {
-  type?: 'text' | 'number' | 'date' | 'search' | 'email' | 'password' | 'tel'
+  /** `time` holds `HH:MM` — the phone's own time picker. */
+  type?: 'text' | 'number' | 'date' | 'time' | 'search' | 'email' | 'password' | 'tel'
   size?: Size
   width?: Width
   value: string | number

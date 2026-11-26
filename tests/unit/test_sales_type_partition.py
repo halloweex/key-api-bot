@@ -221,44 +221,10 @@ class TestSalesTypeCaseSpeaksOnlyKnownTypes:
                 "checksum and appear on no page"
             )
 
-    def test_both_engines_produce_the_same_types(self):
-        by_dialect = self._results_by_dialect()
-        assert by_dialect["duckdb"] == by_dialect["postgres"]
-
     def test_every_known_type_is_produced(self):
         """All four are reachable today; a known type no branch yields is dead."""
         for dialect, (results, _) in self._results_by_dialect().items():
             assert set(results) == set(KNOWN_SALES_TYPES), dialect
-
-
-class TestOrderStatusRefreshIsOffTheCompactionInstant:
-    """The host cron stops the containers at 05:00:01–05:00:39 Kyiv on Sundays.
-
-    A CronTrigger due at that instant does not exist when it is due — the
-    scheduler comes back at 05:00:51 and sets the next fire a day out. That
-    cost order_status_refresh every Sunday for six weeks running.
-    """
-
-    def test_it_is_not_due_in_the_forbidden_window(self):
-        import re
-        from pathlib import Path
-
-        source = (
-            Path(__file__).resolve().parents[2] / "core" / "scheduler.py"
-        ).read_text(encoding="utf-8")
-
-        block = source.split('job_id="order_status_refresh"', 1)[1][:600]
-        match = re.search(r"CronTrigger\(hour=(\d+), minute=(\d+)\)", block)
-        assert match, "order_status_refresh no longer registers a CronTrigger"
-
-        hour, minute = int(match.group(1)), int(match.group(2))
-        assert not (hour == 5 and minute <= 5), (
-            f"order_status_refresh is due at {hour:02d}:{minute:02d} Kyiv, inside "
-            "the window the weekly compaction has the containers stopped"
-        )
-        assert (hour, minute) != (5, 30), (
-            "05:30 Kyiv already belongs to dq_reconciliation"
-        )
 
 
 class TestSilverHasOneDefinition:
@@ -269,28 +235,6 @@ class TestSilverHasOneDefinition:
     duplicate and was checking for exactly this. Running that endpoint would
     have silently reverted the fix and dropped 178 orders back out of revenue.
     """
-
-    def test_the_rebuild_endpoint_restates_nothing(self):
-        from pathlib import Path
-
-        source = (
-            Path(__file__).resolve().parents[2]
-            / "web" / "routes" / "api" / "admin.py"
-        ).read_text(encoding="utf-8")
-
-        for fragment, what in (
-            ("WHEN o.manager_id", "the sales_type CASE"),
-            # `AS is_active_source`, not the bare name: reading the column in
-            # a WHERE clause is what it is for. Only defining it is a copy.
-            ("AS is_active_source", "the revenue-source list"),
-            ("AS source_name", "the source_name CASE"),
-            ("is_new_customer = CASE", "the is_new_customer rule"),
-            ("CREATE TABLE silver_orders", "the silver_orders DDL"),
-        ):
-            assert fragment not in source, (
-                f"admin.py restates {what} instead of importing it from "
-                "core/warehouse_sql.py. That duplicate drifted once already."
-            )
 
     def test_every_revenue_source_is_a_synced_source(self):
         from core.duckdb_constants import REVENUE_SOURCE_IDS, SYNCED_SOURCE_IDS

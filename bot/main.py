@@ -366,6 +366,15 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(
         handlers.alert_action_callback, pattern=ALERT_ACTION_PATTERN))
 
+    # [Немає] and [Інших немає] on the Monday question about promotions
+    # (`core/promo_asks.py`). Standalone for the same reason: a recipient
+    # parked mid-report must still be able to answer. It asks approval itself
+    # rather than through `@authorized`, which would rewrite the question.
+    from core.promo_asks import CALLBACK_PATTERN as PROMO_ASK_PATTERN
+
+    application.add_handler(CallbackQueryHandler(
+        handlers.promo_ask_callback, pattern=PROMO_ASK_PATTERN))
+
     application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_request_again, pattern=r"^auth_request_again$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_approve_user, pattern=r"^auth_approve_\d+$"))

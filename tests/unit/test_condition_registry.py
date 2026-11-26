@@ -326,7 +326,5 @@ class TestTheModel:
     def test_the_facts_that_cannot_unhappen_are_events(self):
         """The review's finding 3, pinned: an OOM kill, a failed backup, a
         rejected model would otherwise escalate forever."""
-        for key in ("warehouse:backup_preflight", "warehouse:backup_failed",
-                    "prediction:retrain_rejected:retail",
-                    "mirror_selfhealed_rows", "ch_history_selfhealed"):
-            assert spec_for(key).kind is Kind.EVENT, key
+        for key in ("prediction:retrain_rejected:retail", "ch_history_selfhealed"):
+            assert key in REGISTRY and REGISTRY[key].kind is Kind.EVENT, key

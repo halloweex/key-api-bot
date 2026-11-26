@@ -28,15 +28,16 @@ Two kinds, declared and never inferred:
 What this module deliberately is NOT yet:
 
 - It does not route, throttle, or send — the Gate (step 02) will consume it.
-- DQ finding keys carry no table subject: ``mirror_missing_rows`` on
-  ``bronze.products`` and on ``bronze.orders`` are one key today. The ledger
-  stores the subject as its own column, so refining the series grain there
-  does not change this vocabulary.
+- DQ finding keys carry no table subject: ``chain_watermark_stale`` on two
+  chains' keys is one key today. The ledger stores the subject as its own
+  column, so refining the series grain there does not change this
+  vocabulary.
 - The canary's ``mirror_failing:bronze.orders`` and the daily comparison's
-  ``mirror_failing`` are two names for the same underlying condition, found
-  by two watchers in two processes. They stay distinct strings here (each is
-  what its emitter can actually produce) and are unified at the ledger,
-  where cross-process dedup lives.
+  ``mirror_failing`` were two names for the same underlying condition, found
+  by two watchers in two processes, kept as distinct strings (each what its
+  emitter could actually produce) and unified at the ledger, where
+  cross-process dedup lives. The daily one went on 2026-11-19 with
+  `compare_table`, its emitter.
 - Reconciliation *discrepancies* (MISSING_IN_DK and friends) are not reified
   as condition keys anywhere in the code yet; they enter the registry when
   the Gate starts reifying them (step 02).
@@ -151,6 +152,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_* not understood, a latch against its flag (DN-06) and a
     # chain's own condition for moving unmet (DN-26). No flag is read since,
     # so none of the three has an emitter.
+    # The Rust pilot, probed from the bot where KS_RUST_API_URL says where it
+    # is (bot/canary.py, check_rust_api): its container, its readiness, and
+    # the share of its window it handed to Python for a reason of its own.
+    "rust_api_unreachable": _c("the next probe reaches ks-rust-api"),
+    "rust_api_not_ready": _c("ks-rust-api's /readyz answers 200"),
+    "rust_api_handover_share": _c("the window's share of hand-overs falls under the limit"),
     # What the host's backup scripts last proved, judged from `/api/health`'s
     # `backups` block at `core/backup_evidence.py`'s limits: a PITR drill or
     # an off-site restore drill older than eight days, an off-site shipment
@@ -230,15 +237,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "turbosms:webhook:event_rebound": _EVENT,
 
     # ── data-quality findings: the landing mirror against DuckDB ──
-    "mirror_missing_rows": _c("the hourly ids-diff re-ships the rows"),
-    "mirror_orphan_rows": _c("the rows are retired or restored"),
-    "mirror_row_values": _c("the next full shipment overwrites the drift"),
-    "mirror_retired_rows": _c("the source serves the row again, or never"),
-    # INFO and counted, never a page: a row that aged out of DuckDB between
-    # the copy and the check is the retention sweep working. The count is
-    # what matters — a sweep that suddenly takes far more than usual is the
-    # one thing this cannot tell apart from a loss.
-    "mirror_pruned_rows": _c("the next full replace removes them"),
+    # `mirror_missing_rows`, `mirror_orphan_rows`, `mirror_row_values`,
+    # `mirror_retired_rows`, `mirror_pruned_rows`, `mirror_never_shipped` and
+    # `mirror_failing` were `compare_table`'s: the comparisons against DuckDB
+    # until step 14's S14-12, then `reconcile_bot_state` alone, which stood
+    # down under `KS_BOT_STORE=postgres`. They went with it on 2026-11-19 and
+    # are never reused.
     # Not a data defect: the writer moved and its watchdog did not. It
     # clears when the check is ported or the flag goes back to duckdb.
     "inventory_continuity_unwatched": _c(
@@ -249,11 +253,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the freshness check reads the moved watermarks, or the flag goes back"),
     # A check that raised reported nothing; its findings are absent, not clean.
     "integrity_check_raised": _c("every integrity check completes again"),
-    "mirror_never_shipped": _c("the table's first successful shipment"),
     "mirror_backfill_pending": _c("the table's history is restored, backfilled_at set"),
     # `mirror_buckets_disagree` and `mirror_disabled` were the comparisons'
     # against DuckDB, deleted with them in step 14's S14-12.
-    "mirror_failing": _c("failures_since_ok back to zero"),
     # `mirror_stood_down`, `order_owner_row_without_marker` and
     # `owner_row_without_marker` were the daily comparisons' answers for a
     # table a write chain owns, `chain_shipper_overwrote` (E1) and

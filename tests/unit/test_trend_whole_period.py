@@ -24,7 +24,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 from web.services.dashboard_service import fit_trend, last_day_of_period
 
 KYIV = ZoneInfo("Europe/Kyiv")

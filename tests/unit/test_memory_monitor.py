@@ -79,16 +79,6 @@ class TestPageCacheIsNotUsage:
 
 
 class TestThresholds:
-    def test_duckdbs_own_ceiling_is_not_an_alert(self):
-        """DUCKDB_MEMORY_LIMIT is 4 GB against a 7 GB cap. An engine using its
-        whole configured allowance is behaving, not failing."""
-        assert evaluate_memory(
-            working_set_bytes=4 * GB,
-            page_cache_bytes=500 * MB,
-            limit_bytes=LIVE_LIMIT,
-            oom_kills=0,
-            previous_oom_kills=0,
-        ) is None
 
     def test_warn_at_the_threshold(self):
         alert = evaluate_memory(

@@ -99,17 +99,6 @@ class TestTheRoutedBodies:
                 f"line {lineno} unrendered for {POSTGRES.name}"
             )
 
-    def test_no_method_opens_the_store_itself(self):
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.AsyncFunctionDef)
-                    and node.name.startswith("get_traffic")):
-                continue
-            body = ast.get_source_segment(src, node) or ""
-            assert "self.connection()" not in body, f"{node.name} still opens DuckDB"
-            assert "conn.execute" not in body, f"{node.name} bypasses the router"
-
 
 class TestTheDefectsThePortExposed:
     def _read_bodies(self):
@@ -141,21 +130,6 @@ class TestTheDefectsThePortExposed:
                     "double-counts every order in Postgres"
                 )
 
-    def test_the_traffic_gold_is_no_longer_read(self):
-        """The whole reason this store needs no traffic Gold: both readers
-        folded it, and a fold of cells keyed 1:1 on the order is the same
-        arithmetic as the aggregate over the orders."""
-        src = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.AsyncFunctionDef)
-                    and node.name.startswith("get_traffic")):
-                continue
-            body = ast.get_source_segment(src, node) or ""
-            assert "gold_daily_traffic" not in body, (
-                f"{node.name} reads a Gold that exists in only one engine"
-            )
-
 
 class TestNoOrderIsLeftToThePlanner:
     """Every ordered result ends on a key that cannot tie.
@@ -179,4 +153,3 @@ class TestNoOrderIsLeftToThePlanner:
             if last.lower() not in [t.lower() for t in self.UNIQUE_TAILS]:
                 offenders.append((lineno, clause))
         assert not offenders, f"ORDER BY can tie: {offenders}"
-

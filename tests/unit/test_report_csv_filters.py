@@ -23,7 +23,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.store import AnalyticsStore
-from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 WINDOW = (date(2026, 10, 1), date(2026, 10, 31))
 FILTERS = {"source_id": 1, "category_id": 7, "brand": "BrandA"}

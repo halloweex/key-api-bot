@@ -15,20 +15,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from web.main import app
-from web.routes.auth import (
-    SESSION_COOKIE,
-    create_session_data,
-    require_admin,
-    session_serializer,
-)
+from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
 from core.permissions import ADMIN_USER_IDS
 
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 
 LIST_PATH = "/api/managers"
 SET_PATH = "/api/managers/34/retail-status"
-# The router registers the template, not the concrete id.
-SET_ROUTE = "/api/managers/{manager_id}/retail-status"
 
 
 def _make_cookie(user_id: int, role: str = "admin") -> str:
@@ -43,35 +36,6 @@ def _make_cookie(user_id: int, role: str = "admin") -> str:
         role=role,
     )
     return session_serializer.dumps(data)
-
-
-def _all_dep_calls(dependant) -> set:
-    calls = set()
-    for d in dependant.dependencies:
-        if d.call is not None:
-            calls.add(d.call)
-        calls |= _all_dep_calls(d)
-    return calls
-
-
-def _route(path: str, method: str = "GET"):
-    # `app.routes` is no longer flat — see tests/routes_helper.
-    from tests.routes_helper import find_route
-
-    return find_route(app, path, method)
-
-
-def _deps(path: str, method: str = "GET") -> set:
-    """Every dependency callable applying to an endpoint.
-
-    Takes the path rather than a route object: on the fastapi production runs,
-    `require_admin` is attached at `include_router(...)` and lives in the
-    include context, not on the route's own `dependant`. Reading only the
-    dependant would report every admin endpoint as unprotected.
-    """
-    from tests.routes_helper import route_dependencies
-
-    return set(route_dependencies(app, path, method))
 
 
 class _FakeStore:
@@ -142,13 +106,7 @@ class TestAuthorization:
     def test_setting_requires_a_session(self, client):
         assert client.post(f"{SET_PATH}?is_retail=true").status_code == 401
 
-    @pytest.mark.parametrize("path,method", [(LIST_PATH, "GET"), (SET_ROUTE, "POST")])
-    def test_admin_dependency_is_present(self, path, method):
-        assert _route(path, method) is not None, \
-            f"{method} {path} is not registered"
-        assert require_admin in _deps(path, method)
-
-    def test_viewer_cannot_reclassify(self, client, monkeypatch, store):
+    def test_a_viewer_can_neither_list_nor_reclassify(self, client, monkeypatch, store):
         viewer_id = 555_000_333
         assert viewer_id not in ADMIN_USER_IDS
 
@@ -158,6 +116,7 @@ class TestAuthorization:
         monkeypatch.setattr("web.routes.auth._resolve_session", _fake_resolve)
         client.cookies.set(SESSION_COOKIE, _make_cookie(viewer_id, role="viewer"))
 
+        assert client.get(LIST_PATH).status_code == 403
         assert client.post(f"{SET_PATH}?is_retail=true").status_code == 403
         assert store.set_calls == []
 

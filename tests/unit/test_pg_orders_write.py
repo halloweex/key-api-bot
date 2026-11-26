@@ -67,67 +67,6 @@ def met(flags):
     return flags
 
 
-# ─── G1: the flag, the latch, the declaration ────────────────────────────────
-
-
-class TestTheRoutingIsGone:
-    """S14-09 deleted what routed the chain: the flag's answer as a decision,
-    the preconditions, the start hold, the preflight, `mode()` and DuckDB's
-    own order writers. Kills: any of them put back, which would make a later
-    reader believe the chain could still be on DuckDB."""
-
-    @pytest.mark.parametrize("name", [
-        "unmet_precondition", "unmet_reasons", "settle_hold", "_held", "HELD_KEY",
-        "preflight", "LOCKOUT_REVISION", "mode", "ChainOwnsOrders",
-        "UNMET_WARN_EVERY_S", "_unmet_warned", "_warn_unmet", "_BACKFILLED"])
-    def test_the_chain_module_carries_none_of_it(self, name):
-        assert not hasattr(pow_, name)
-
-    @pytest.mark.parametrize("name", ["upsert_orders", "upsert_expenses_batch"])
-    def test_the_store_has_no_order_writer_of_its_own(self, name):
-        from core.store import AnalyticsStore
-
-        assert not hasattr(AnalyticsStore, name)
-
-    @pytest.mark.parametrize("name", ["writes_postgres", "env_writes_postgres"])
-    def test_and_s14_11_took_what_stayed(self, name):
-        """`writes_postgres` stayed for the registry's sync-key routing and
-        `env_writes_postgres` for its published `error` until S14-11, which
-        deleted both with the flags."""
-        assert not hasattr(pow_, name)
-
-
-class TestTheDeclaration:
-    def test_the_four_tables_and_the_two_keys(self):
-        """Mutation: drop `app.order_backfill_misses` — `replicate_operational`
-        would go on replacing it out of a frozen DuckDB every hour, rolling
-        back every miss the chain recorded. And the search index's Postgres
-        cursor (OD-15, `TestTheSearchCursorMovesWithTheChain`)."""
-        assert pow_.CHAIN == "pg_orders_write"
-        assert pow_.WRITE_ENV == "KS_WRITE_ORDERS"
-        assert pow_.CHAIN_TABLES == ("bronze.orders", "bronze.order_products",
-                                     "bronze.expenses", "app.order_backfill_misses")
-        assert pow_.CHAIN_SYNC_KEYS == ("last_sync_orders", "last_sync_meilisearch_pg")
-        assert pow_.CHAIN_WATERMARK_MAX_AGE_MIN is None
-        # The order step's window starts at this key (the chain-3 review;
-        # `TestTheFirstTickAfterTheFlip`), kept by S14-09
-        # (`tests/unit/test_absent_chain_keys.py`).
-        assert pow_.CHAIN_WATERMARK_INHERITS_DUCKDB is True
-
-    def test_the_archive_is_not_a_chain_table(self):
-        """`app.order_versions` has one writer in both modes and no DuckDB
-        copy (declaring it made the copy-back's `chain_specs` raise, until
-        step 14's S14-04 deleted it)."""
-        assert "app.order_versions" not in pow_.CHAIN_TABLES
-        assert "bronze.expense_types" not in pow_.CHAIN_TABLES   # chain 6a's
-
-    def test_registered_and_found_by_its_sync_key(self):
-        """It was resolved by its short name too, by the copy-back that step
-        14's S14-04 deleted."""
-        assert pow_ in write_chains.WRITE_CHAINS
-        assert write_chains.chain_for_sync_key("last_sync_orders") is pow_
-
-
 # ─── G2: the preconditions ───────────────────────────────────────────────────
 
 
@@ -283,66 +222,10 @@ class TestWhatPostgresWouldRefuse:
         assert not chain_latch.marker_path(pow_.CHAIN).exists()
 
 
-# ─── G5: the routing ─────────────────────────────────────────────────────────
-
-
-class TestTheRouting:
-    @pytest.mark.asyncio
-    async def test_the_sync_s_one_write_goes_to_postgres(self, met, duck):
-        """The sync's one order write is the chain's, and DuckDB is handed
-        nothing. Mutation: hand `_upsert_orders_with_expenses` anything but
-        the chain's writer."""
-        from core.pg_orders_write import UpsertResult
-        from core.sync_service import SyncService
-
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        writer = AsyncMock(return_value=(UpsertResult(
-            count=1, changed_ids=[1], skipped_unchanged=0, failed=0), 1))
-        met.setattr(pow_, "upsert_orders_with_expenses", writer)
-        out: list = []
-        counts = await SyncService(duck)._upsert_orders_with_expenses(
-            [_payload(1, expenses=[9])], force_update=True, skip_products=True,
-            changed_ids_out=out)
-        assert counts == (1, 1) and out == [1]
-        writer.assert_awaited_once()
-        assert writer.await_args.kwargs == {"force_update": True, "skip_products": True}
-
-    @pytest.mark.asyncio
-    async def test_the_misses_go_where_the_scans_read_them(self, met, duck):
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        writer = AsyncMock(return_value=2)
-        met.setattr(pow_, "record_backfill_misses", writer)
-        assert await duck.record_backfill_misses({1: "gone", 2: "empty"}) == 2
-        writer.assert_awaited_once_with({1: "gone", 2: "empty"})
-
-
 # ─── G8: the selections follow the writes ────────────────────────────────────
 
 
 class TestTheSelectionsFollow:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("method,reader,args,answer", [
-        ("find_order_id_gaps", "order_id_gaps", (50,), [7]),
-        ("find_backdated_order_ids", "backdated_order_ids", (T0.date(), 5), [8]),
-        ("get_latest_order_time", "latest_order_time", (), T0),
-        ("find_halfwritten_orders", "halfwritten_candidates", (10,), [9]),
-        ("halfwritten_among", "halfwritten_among", ([9, 10],), [9]),
-        ("orders_held", "order_count", (), 46_000),
-    ])
-    async def test_each_reads_postgres_under_the_chain(
-            self, met, duck, method, reader, args, answer):
-        """A selection read from a frozen DuckDB never sees the repair it
-        caused: the gap scan would re-fetch the same 200 ids every hour.
-        Mutation: route one reader at DuckDB — its row fails."""
-        from core import pg_orders_read
-
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        read = AsyncMock(return_value=answer)
-        met.setattr(pg_orders_read, reader, read)
-        met.setattr(duck, "connection",
-                    MagicMock(side_effect=AssertionError("DuckDB read")), raising=False)
-        assert await getattr(duck, method)(*args) == answer
-        read.assert_awaited_once()
 
 
     @pytest.mark.asyncio
@@ -728,25 +611,6 @@ class TestTheCanary:
             (key, message), = found
             assert key == "orders_sync_failing" and says in message
 
-    @pytest.mark.parametrize("mode", ["duckdb", None])
-    def test_whatever_an_entry_says_of_its_mode(self, mode):
-        """Since step 14's S14-11 the step is judged on its own: chain 3 is
-        the only writer of orders, a constant, and no entry publishes a
-        `mode` (until then one that said duckdb was not judged). Mutation:
-        gate the check on `mode` again."""
-        from bot.canary import check_orders_sync_chain
-
-        (key, _), = check_orders_sync_chain(self._payload(mode, consecutive_failures=9))
-        assert key == "orders_sync_failing"
-        assert check_orders_sync_chain({}) == []
-
-    def test_the_text_never_reaches_the_page(self):
-        from bot.canary import check_orders_sync_chain
-
-        (_, message), = check_orders_sync_chain(self._payload(
-            consecutive_failures=3, last_error_class="InterfaceError"))
-        assert "InterfaceError" in message
-
     def test_it_is_a_critical_with_a_lever(self):
         from bot import canary
         from core.alerting import REGISTRY
@@ -755,32 +619,12 @@ class TestTheCanary:
         assert any(prefix == "orders_sync_failing" for prefix, _ in canary._ACTIONS)
 
 
-class TestThePreflight:
-    """Chain 3's preflight went in step 14's S14-09 and chains 1's and 5's
-    in S14-11, with the bound they shared. What stays is the order step
-    under the chain's entry, which the canary judges."""
+def _quiet_steps(monkeypatch):
+    from web.routes.api import health
 
-    @staticmethod
-    def _quiet_steps(monkeypatch):
-        from web.routes.api import health
-
-        monkeypatch.setattr(health, "_inventory_sync_step", AsyncMock(return_value=None))
-        monkeypatch.setattr(health, "_managers_sync_step", AsyncMock(return_value=None))
-        monkeypatch.setattr(health, "_catalogue_sync_step", AsyncMock(return_value=None))
-
-    @pytest.mark.asyncio
-    async def test_health_publishes_the_step_and_no_preflight_under_the_entry(
-            self, flags, monkeypatch):
-        """Mutation: a preflight put back under chain 3's entry, or the step
-        taken away — the canary would no longer judge the only writer of
-        orders (`orders_sync_failing`)."""
-        from web.routes.api import health
-
-        self._quiet_steps(monkeypatch)
-        monkeypatch.setattr(health, "_orders_sync_step", AsyncMock(
-            return_value={"consecutive_failures": 0}))
-        block = await health._write_chains_block()
-        assert block["pg_orders_write"] == {"sync_step": {"consecutive_failures": 0}}
+    monkeypatch.setattr(health, "_inventory_sync_step", AsyncMock(return_value=None))
+    monkeypatch.setattr(health, "_managers_sync_step", AsyncMock(return_value=None))
+    monkeypatch.setattr(health, "_catalogue_sync_step", AsyncMock(return_value=None))
 
 
 class TestTheCanaryReadsWhatHealthNowPublishes:
@@ -797,7 +641,7 @@ class TestTheCanaryReadsWhatHealthNowPublishes:
         from core import sync_service as sync_mod
         from web.routes.api import health
 
-        TestThePreflight._quiet_steps(monkeypatch)
+        _quiet_steps(monkeypatch)
         service = SimpleNamespace(orders_step_health=step_state.published)
         monkeypatch.setattr(sync_mod, "get_sync_service", AsyncMock(return_value=service))
         return {"write_chains": await health._write_chains_block()}
@@ -834,7 +678,7 @@ class TestTheCanaryReadsWhatHealthNowPublishes:
         from core import sync_service as sync_mod
         from web.routes.api import health
 
-        TestThePreflight._quiet_steps(monkeypatch)
+        _quiet_steps(monkeypatch)
         monkeypatch.setattr(sync_mod, "get_sync_service",
                             AsyncMock(side_effect=RuntimeError("no store")))
         payload = {"write_chains": await health._write_chains_block()}

@@ -34,10 +34,7 @@ import pytest
 
 from core.filters import MAX_RANGE_DAYS
 from tests.routes_helper import iter_endpoints
-from tests.unit.test_read_fallback_http import _request_for
-from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    admin_client,
-)
+from tests.helpers.route_sweep import _request_for
 from web.main import app
 
 # The routers step 14's S14-05 to S14-07 left on Postgres alone, by the
@@ -149,7 +146,7 @@ def ga4_faked(monkeypatch, tmp_path):
     import httpx
 
     from core import ga4
-    from tests.unit.test_ga4_funnel import INFO, _Google
+    from tests.helpers.ga4_funnel_fakes import INFO, _Google
     from web.services import ga4_funnel_service
 
     key = tmp_path / "ga4-reader.json"

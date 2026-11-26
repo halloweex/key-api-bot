@@ -61,33 +61,6 @@ class TestItRefusesBeforeReading:
         assert "KS_PG_DSN is not set" in err, err
         assert ("--fixture" in err) is hint, err
 
-    @pytest.mark.parametrize("value", ["duckdb", "postgress", ""])
-    @pytest.mark.parametrize("report", ["sales", "traffic"])
-    def test_the_retired_switches_change_nothing(self, monkeypatch, report, value):
-        """A laptop `.env` still naming an engine — or garbage — is not read:
-        with the address set the preview is ready. Mutation: ask
-        `pg_weekly_read`/`pg_traffic_read` for a switch again."""
-        _no_switches(monkeypatch)
-        monkeypatch.setenv("KS_PG_DSN", FAKE_DSN)
-        monkeypatch.setenv("KS_READ_WEEKLY", value)
-        monkeypatch.setenv("KS_READ_TRAFFIC", value)
-        assert preview.postgres_unready(report) is None
-
-
-class TestTheStoreItHandsTheReaders:
-    def test_it_has_no_connection_and_creates_no_file(self, tmp_path, monkeypatch):
-        """The store has no DuckDB half since step 14's S14-18, and no
-        `connection()` at all since the final stage (it refused with
-        `StoreRemoved` until then): nothing is opened or created. Mutation:
-        hand the readers anything with a `connection()`."""
-        from core.store import AnalyticsStore
-
-        monkeypatch.chdir(tmp_path)
-        store = preview._store()
-        assert isinstance(store, AnalyticsStore)
-        assert not hasattr(store, "connection")
-        assert list(tmp_path.iterdir()) == []
-
 
 class TestItReadsWhatTheJobReads:
     def test_the_sales_report_is_the_jobs_build_report(self):
@@ -152,40 +125,6 @@ class TestItReadsWhatTheJobReads:
 
 
 class TestTheTrafficReport:
-    def test_it_builds_the_week_on_the_refusing_store_and_sends_it(self, monkeypatch):
-        """`send_traffic` hands the traffic report's builder the store that
-        refuses to connect, and sends what it built to the one chat.
-
-        Mutation: build the week on a store with a `connection()` — the
-        shape this script had before S14-03 opened (and created) the file.
-        The store the builder was handed has none, as `_store()`'s has none
-        since the final stage (it refused with `StoreRemoved` from step 14's
-        S14-18 until then).
-        """
-        from core import telegram_alerts, traffic_report
-        from core.store import AnalyticsStore
-
-        handed = {}
-
-        async def build(store, today, sales_type=traffic_report.TRAFFIC_SALES_TYPE):
-            handed["store"], handed["today"] = store, today
-            return traffic_report.TrafficReport(
-                start=date(2026, 8, 31), end=date(2026, 9, 6), sales_type="retail",
-                revenue=1000.0, orders=4, previous_revenue=800.0, previous_orders=3)
-
-        monkeypatch.setattr(traffic_report, "build_report", build)
-        sent = AsyncMock(return_value=1)
-        monkeypatch.setattr(telegram_alerts, "send_rich_message_http", sent)
-
-        asyncio.run(preview.send_traffic(7, "en", None, today=date(2026, 9, 7)))
-
-        assert handed["today"] == date(2026, 9, 7)
-        store = handed["store"]
-        assert isinstance(store, AnalyticsStore)
-        assert not hasattr(store, "connection")
-        assert sent.await_count == 1
-        assert sent.await_args.kwargs["chat_ids"] == [7]
-        assert "31.08" in sent.await_args.args[0], sent.await_args.args[0]
 
     def test_main_sends_the_traffic_week_once_postgres_is_configured(self, monkeypatch):
         """`--report traffic` past the up-front check reaches `send_traffic`
@@ -200,10 +139,3 @@ class TestTheTrafficReport:
         assert preview.main(["--chat-id", "9", "--report", "traffic", "--lang", "uk"]) == 0
         chat_id, lang, _url = traffic.await_args.args
         assert (chat_id, lang) == (9, "uk")
-
-
-def test_the_script_names_no_database_file():
-    """No `--db`, no DUCKDB_PATH: the preview has no file to be pointed at."""
-    text = (ROOT / "scripts" / "weekly_report_preview.py").read_text(encoding="utf-8")
-    assert '"--db"' not in text and "DUCKDB_PATH" not in text
-    assert "duckdb" not in vars(preview)

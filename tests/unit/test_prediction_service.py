@@ -53,19 +53,6 @@ def trained():
 # ---------------------------------------------------------------------------
 
 class TestBuildFeatures:
-    def test_no_is_weekend_column(self):
-        """is_weekend was removed as a dead feature."""
-        from core.prediction_service import _build_features
-        df = _make_daily_df(n_days=60, spike_days=0)
-        result = _build_features(df)
-        assert "is_weekend" not in result.columns
-
-    def test_no_log_trend_index_column(self):
-        """log_trend_index was removed as a dead feature."""
-        from core.prediction_service import _build_features
-        df = _make_daily_df(n_days=60, spike_days=0)
-        result = _build_features(df)
-        assert "log_trend_index" not in result.columns
 
     def test_feature_columns_present(self):
         """Every FEATURE_COLUMNS entry is in the built frame."""
@@ -174,6 +161,69 @@ class TestTrainModel:
         ps._train_model(df)
         n = len(ps._training_rows(df.assign(date=pd.to_datetime(df["date"]))))
         assert sizes == [n - ps.VALIDATION_DAYS, n]
+
+    def test_the_gate_judges_a_twin_scored_on_days_it_never_saw(self, monkeypatch):
+        """The WAPE the gate judges, and every validation day stored beside
+        the forecast, are those of a twin fitted without the last
+        VALIDATION_DAYS rows and scored on them: a fit made here, by
+        LightGBM itself, on the same rows gives the same numbers, and the
+        model that saw those days gives others. Kills: the gate scored
+        in-sample, by the model trained on every row, which the count of
+        rows each fit got cannot tell from the right thing (the forecast
+        review, 2026-11-20)."""
+        import lightgbm as lgb
+
+        import core.prediction_service as ps
+
+        monkeypatch.setattr(ps, "NUM_BOOST_ROUND", 60)
+        df = _make_daily_df(n_days=260, spike_days=8)
+        _model, metrics = ps._train_model(df)
+
+        rows = ps._training_rows(df.assign(date=pd.to_datetime(df["date"])))
+        X, y = rows[ps.FEATURE_COLUMNS].to_numpy(), rows["revenue"].to_numpy()
+        cut = len(X) - ps.VALIDATION_DAYS
+
+        def scored_on_the_last_days(fitted_rows):
+            model = lgb.train(ps._build_lgb_params(),
+                              lgb.Dataset(X[:fitted_rows], label=y[:fitted_rows],
+                                          feature_name=ps.FEATURE_COLUMNS),
+                              num_boost_round=60)
+            pred = np.maximum(model.predict(X[cut:]), 0)
+            return round(float(np.abs(y[cut:] - pred).sum() / y[cut:].sum() * 100), 2), pred
+
+        held_out, pred = scored_on_the_last_days(cut)
+        in_sample, _ = scored_on_the_last_days(len(X))
+        assert metrics["wape"] == held_out
+        assert [d["predicted"] for d in metrics["validation_days"]] == [
+            round(float(p), 0) for p in pred]
+        assert in_sample != held_out          # the check tells the two apart
+
+    def test_the_targets_reach_both_fits_unclipped(self, monkeypatch):
+        """Both fits get the revenue as it was, promotion days ×4 included.
+        Kills: the P95 clip back in `_train_model` (it erased Black Friday),
+        which `_training_rows`' test below cannot see (the forecast review,
+        2026-11-20)."""
+        import core.prediction_service as ps
+
+        targets = []
+        real = ps._fit_booster
+
+        def spy(X, y, params=None):
+            targets.append(np.array(y, copy=True))
+            return real(X, y, params)
+
+        monkeypatch.setattr(ps, "_fit_booster", spy)
+        monkeypatch.setattr(ps, "NUM_BOOST_ROUND", 10)
+        df = _make_daily_df(n_days=200, spike_days=10, spike_factor=4.0)
+        ps._train_model(df)
+
+        rows = ps._training_rows(df.assign(date=pd.to_datetime(df["date"])))
+        original = dict(zip(pd.to_datetime(df["date"]), df["revenue"]))
+        revenue = np.array([original[d] for d in rows["date"]])
+        twin, model = targets
+        np.testing.assert_array_equal(model, revenue)
+        np.testing.assert_array_equal(twin, revenue[:-ps.VALIDATION_DAYS])
+        assert model.max() > np.percentile(model, 95)
 
     def test_promotions_are_not_winsorised(self):
         """Huber loss replaced the P95 clip, which erased Black Friday."""
@@ -323,6 +373,51 @@ class TestPredictionServiceInit:
         assert not hasattr(svc, "_clip_ratio") and not hasattr(svc, "_dow_corrections")
 
 
+class TestOnlyRetailIsTrained:
+    """There is one model, in memory and in `MODEL_PATH`, and it is retail's.
+    `POST /api/revenue/forecast/train?sales_type=b2b` replaced it with one
+    fitted to b2b's history until the next training, and stored a b2b
+    forecast the dashboard then showed (the forecast review, 2026-11-20).
+    Refused now, before anything is read or fitted."""
+
+    @pytest.fixture
+    def service(self, monkeypatch):
+        import core.prediction_service as ps
+
+        svc = ps.PredictionService()
+
+        async def never(sales_type):
+            raise AssertionError(f"a training on {sales_type} started")
+
+        monkeypatch.setattr(svc, "_train_impl", never)
+        monkeypatch.setattr(ps, "_service", svc)
+        return svc
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", ["b2b", "internal", "exhibition", "offline", "all"])
+    async def test_any_other_sales_type_is_refused(self, service, sales_type):
+        from core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError) as refused:
+            await service.train(sales_type)
+        assert refused.value.field == "sales_type" and refused.value.value == sales_type
+
+    @pytest.mark.asyncio
+    async def test_retail_trains(self, service, monkeypatch):
+        async def trained(sales_type):
+            return {"status": "success", "sales_type": sales_type}
+
+        monkeypatch.setattr(service, "_train_impl", trained)
+        assert await service.train("retail") == {"status": "success", "sales_type": "retail"}
+
+    def test_the_route_answers_400(self, service, admin_client):  # noqa: F811
+        """Kills: the refusal let out as a 500, or the route reaching a
+        training before it."""
+        response = admin_client.post("/api/revenue/forecast/train", params={"sales_type": "b2b"})
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"].startswith("sales_type: only retail is trained")
+
+
 # ---------------------------------------------------------------------------
 # The trend's forecast is the stored one
 # ---------------------------------------------------------------------------
@@ -365,9 +460,16 @@ class TestTheRangeForecastIsTheStoredOne:
         def never(*args, **kwargs):
             raise AssertionError("the model ran on a request")
 
+        async def no_history(*args, **kwargs):
+            # The month's range reads Gold (`TestTheMonthOutlook`); here it
+            # has none, and never reaches a pool.
+            return pd.DataFrame({"date": pd.to_datetime([]), "revenue": []})
+
         monkeypatch.setattr(ps, "_today_kyiv", lambda: self.TODAY)
         monkeypatch.setattr(ps, "_predict_future", never)
         monkeypatch.setattr("core.store.get_store", store)
+        monkeypatch.setattr("core.pg_forecast_read.fetch_frame", no_history)
+        _no_promotions(monkeypatch)
         svc = ps.PredictionService()
         monkeypatch.setattr(svc, "_query_daily_revenue", never)
         assert not svc.is_ready
@@ -448,6 +550,15 @@ async def _value(value):
     return value
 
 
+def _no_promotions(monkeypatch):
+    """An empty calendar, read without a pool: `get_forecast` asks it for
+    `planned_promotions` (revision 0039)."""
+    async def current(first, last, include_cancelled=False):
+        return []
+
+    monkeypatch.setattr("core.promotions.current", current)
+
+
 class TestTrainedOn:
     """`last_trained` is the Kyiv day of the stored stamp, ISO."""
 
@@ -465,3 +576,312 @@ class TestTrainedOn:
         from core.prediction_service import _trained_on
         assert _trained_on(datetime(2026, 11, 2, 1, 30)) == "2026-11-02"
         assert _trained_on(datetime(2026, 11, 1, 22, 30)) == "2026-11-02"
+
+
+# ---------------------------------------------------------------------------
+# The month's range and Black Friday line beside the forecast
+# ---------------------------------------------------------------------------
+
+class TestTheMonthOutlook:
+    """`/api/revenue/forecast` carries `month_range` and `black_friday`
+    (2026-11-18): the range K + F × [q10, q90] of `core/forecast_range.py`
+    over 900 days of Gold through yesterday, F the stored forecast of the
+    days left. Computed on the ML thread, kept per Kyiv day, sales type and
+    training, and never a reason for the forecast to fail. The series is the
+    synthetic shop of `tests/unit/test_forecast_range.py`, whose Black
+    Friday was 2024-11-29..12-01."""
+
+    TODAY = date(2025, 11, 20)
+    TRAINED = datetime(2025, 11, 17, 0, 30, tzinfo=timezone.utc)
+
+    @pytest.fixture
+    def service(self, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+
+        import core.prediction_service as ps
+        from tests.helpers.forecast_range_series import REVENUE
+
+        state = {"trained": self.TRAINED, "missing": None, "fail": None, "reads": [],
+                 "revenue": REVENUE, "promotions": [], "list_fail": None, "listed": []}
+
+        class Store:
+            async def get_stored_forecast(self, start_date, end_date, sales_type="retail"):
+                rows = [{"date": (start_date + timedelta(days=i)).isoformat(),
+                         "predicted_revenue": 125_000.0,
+                         "model_mae": 1.0, "model_mape": 2.0, "model_wape": 3.0}
+                        for i in range((end_date - start_date).days + 1)]
+                return [r for r in rows if r["date"] != state["missing"]], state["trained"]
+
+        async def store():
+            return Store()
+
+        async def fetch_frame(start, today, sales_type, exclude_today):
+            state["reads"].append((start, today, sales_type, exclude_today))
+            if state["fail"] is not None:
+                raise state["fail"]
+            revenue = state["revenue"]
+            days = sorted(d for d in revenue if start <= d < today)
+            return pd.DataFrame({"date": pd.to_datetime(days),
+                                 "revenue": [revenue[d] for d in days]})
+
+        async def current(first, last, include_cancelled=False):
+            state["listed"].append((first, last, include_cancelled))
+            if state["list_fail"] is not None:
+                raise state["list_fail"]
+            return state["promotions"]
+
+        async def actual(*args, **kwargs):
+            return 2_000_000.0
+
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
+        monkeypatch.setattr(ps, "_executor", executor)
+        monkeypatch.setattr(ps, "_today_kyiv", lambda: self.TODAY)
+        monkeypatch.setattr("core.store.get_store", store)
+        monkeypatch.setattr("core.pg_forecast_read.fetch_frame", fetch_frame)
+        monkeypatch.setattr("core.promotions.current", current)
+        svc = ps.PredictionService()
+        monkeypatch.setattr(svc, "_get_actual_month_revenue", actual)
+        yield svc, state
+        executor.shutdown(wait=True)
+
+    def _expected(self):
+        from core import forecast_range as fr
+        from tests.helpers.forecast_range_series import REVENUE
+
+        rows = [(d, v) for d, v in sorted(REVENUE.items()) if d < self.TODAY]
+        return fr.month_outlook(rows, self.TODAY, 11 * 125_000.0)
+
+    @pytest.mark.asyncio
+    async def test_the_month_carries_its_range_and_black_friday_line(self, service):
+        from core.forecast_range import HISTORY_DAYS
+
+        svc, state = service
+        out = await svc.get_forecast("retail")
+        expected = self._expected()
+
+        assert out["month_range"] == expected["month_range"]
+        assert out["black_friday"] == expected["black_friday"]
+        assert out["month_range"]["days_left"] == 11 and out["month_range"]["coverage"] == 0.8
+        assert out["black_friday"]["last_year_start"] == "2024-11-29"
+        # Gold through yesterday, 900 days of it, by the training frame's reader.
+        assert state["reads"] == [(self.TODAY - timedelta(days=HISTORY_DAYS), self.TODAY,
+                                   "retail", True)]
+        # The rest of the answer is what it was.
+        assert out["actual_to_date"] == 2_000_000.0
+        assert out["month_end"] == "2025-11-30"
+
+    @pytest.mark.asyncio
+    async def test_it_runs_on_the_ml_thread(self, service, monkeypatch):
+        import threading
+
+        from core import forecast_range as fr
+
+        svc, _state = service
+        threads = []
+        original = fr.outlook
+
+        def recorded(*args):
+            threads.append(threading.current_thread().name)
+            return original(*args)
+
+        monkeypatch.setattr(fr, "outlook", recorded)
+        await svc.get_forecast("retail")
+        assert len(threads) == 1 and threads[0].startswith("ml-train")
+
+    @pytest.mark.asyncio
+    async def test_once_per_day_and_training(self, service, monkeypatch):
+        import core.prediction_service as ps
+
+        svc, state = service
+        first = await svc.get_forecast("retail")
+        assert (await svc.get_forecast("retail"))["month_range"] == first["month_range"]
+        assert len(state["reads"]) == 1
+
+        state["trained"] = self.TRAINED + timedelta(days=3)     # Thursday's training
+        await svc.get_forecast("retail")
+        assert len(state["reads"]) == 2
+
+        later = ps._monotonic() + ps.OUTLOOK_TTL_S + 1      # an hour on: read again
+        monkeypatch.setattr(ps, "_monotonic", lambda: later)
+        await svc.get_forecast("retail")
+        assert len(state["reads"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_failure_is_nulls_and_the_forecast_stands(self, service, caplog):
+        svc, state = service
+        state["fail"] = ConnectionError("gold is not answering")
+        with caplog.at_level("WARNING", logger="core.prediction_service"):
+            out = await svc.get_forecast("retail")
+        assert out["month_range"] is None and out["black_friday"] is None
+        assert out["predicted_total"] > 0 and len(out["daily_predictions"]) == 61
+        assert "gold is not answering" in caplog.text
+        # The calendar is its own read: what is planned is still said.
+        assert out["planned_promotions"] == []
+        # Not kept: the next request tries again, and answers.
+        state["fail"] = None
+        assert (await svc.get_forecast("retail"))["month_range"] == self._expected()["month_range"]
+        assert len(state["reads"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_computation_stuck_behind_training_is_dropped(self, service, monkeypatch):
+        import time as _time
+
+        import core.prediction_service as ps
+        from core import forecast_range as fr
+
+        svc, state = service
+        monkeypatch.setattr(ps, "OUTLOOK_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(fr, "outlook", lambda *a: _time.sleep(0.5) or ({}, None))
+        out = await svc.get_forecast("retail")
+        assert out["month_range"] is None and out["black_friday"] is None
+        assert out["predicted_total"] > 0
+
+    @pytest.mark.asyncio
+    async def test_an_incomplete_forecast_of_the_month_has_no_range(self, service):
+        svc, state = service
+        state["missing"] = "2025-11-25"
+        out = await svc.get_forecast("retail")
+        assert out["month_range"] is None and out["black_friday"] is None
+        assert state["reads"] == []
+
+    @pytest.mark.asyncio
+    async def test_only_retail_has_one(self, service):
+        """Training is retail's alone; a forecast of anything else, were one
+        ever stored, gets no range."""
+        svc, state = service
+        out = await svc.get_forecast("b2b")
+        assert out["month_range"] is None and out["black_friday"] is None
+        assert out["planned_promotions"] is None
+        assert state["reads"] == [] and state["listed"] == []
+
+    @pytest.mark.asyncio
+    async def test_the_trend_overlay_is_not_touched(self, service):
+        """The trend's forecast is `get_range_forecast`, mirrored by the Rust
+        read API: no new keys there, and no Gold read."""
+        svc, state = service
+        week = await svc.get_range_forecast(self.TODAY, self.TODAY + timedelta(days=6))
+        assert set(week) == {"predicted_remaining", "predicted_total", "daily_predictions",
+                             "model_metrics", "last_trained"}
+        assert state["reads"] == []
+
+    # ── planned_promotions (revision 0039) ──────────────────────────────────
+
+    def _promotion(self, pid, name, first, last, kind):
+        from core import promotions
+
+        return promotions.Promotion(
+            id=pid, version=1, status="planned", recorded_at=self.TRAINED,
+            recorded_by=1, created_at=self.TRAINED,
+            data=promotions.PromotionIn(name=name, starts_on=first, ends_on=last,
+                                        kind=kind, scope="store"))
+
+    def _calendar(self, state):
+        """Two promotions this month — one ordinary, one Black Friday — over
+        the typical-promotion test's shop, whose runs give a typical effect
+        (`tests/unit/test_typical_promotion.py`)."""
+        from tests.helpers.typical_promotion_series import REVENUE as SHOP
+
+        state["revenue"] = SHOP
+        state["promotions"] = [
+            self._promotion(12, "Весняний розпродаж", date(2025, 11, 22),
+                            date(2025, 11, 23), "other"),
+            self._promotion(13, "Чорна п'ятниця", date(2025, 11, 28), date(2025, 11, 30),
+                            "black_friday"),
+        ]
+        rows = [(d, v) for d, v in sorted(SHOP.items()) if d < self.TODAY]
+        typical = fr_promotion_outlook(rows, self.TODAY)
+        assert typical is not None
+        return round(typical.extra, 2)
+
+    @pytest.mark.asyncio
+    async def test_the_month_lists_what_is_planned_with_the_typical_effect(self, service):
+        """`extra` for an ordinary promotion is the typical one, computed from
+        the range's own read on the ML thread; Black Friday's is null, its own
+        line covers it; the calendar is asked for today to the month's end.
+        Kills: the wrong window, an extra on Black Friday, or an extra that is
+        not `typical_promotion`'s."""
+        svc, state = service
+        extra = self._calendar(state)
+        out = await svc.get_forecast("retail")
+        assert out["planned_promotions"] == [
+            {"id": 12, "name": "Весняний розпродаж", "starts_on": "2025-11-22",
+             "ends_on": "2025-11-23", "kind": "other", "extra": extra},
+            {"id": 13, "name": "Чорна п'ятниця", "starts_on": "2025-11-28",
+             "ends_on": "2025-11-30", "kind": "black_friday", "extra": None},
+        ]
+        assert state["listed"] == [(self.TODAY, date(2025, 11, 30), False)]
+        assert len(state["reads"]) == 1
+        # The point and the range do not move with it.
+        assert out["month_range"] is not None
+        assert out["predicted_total"] == 2_000_000.0 + 61 * 125_000.0
+
+    @pytest.mark.asyncio
+    async def test_nothing_planned_is_an_empty_list(self, service):
+        svc, state = service
+        out = await svc.get_forecast("retail")
+        assert out["planned_promotions"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_save_shows_on_the_next_request_and_simulates_nothing(self, service):
+        """The list is read on every request; the range, the Black Friday
+        line and the typical effect once a day and training. Kills: the list
+        kept with the range — a promotion added at 10:00 missing from the
+        badge until 11:00 — and, the forecast review's repro of 2026-11-20,
+        a cache keyed on the promotions' latest save, which threw away the
+        900-day read and simulation at every save."""
+        svc, state = service
+        extra = self._calendar(state)
+        first = await svc.get_forecast("retail")
+        assert [p["id"] for p in first["planned_promotions"]] == [12, 13]
+
+        state["promotions"] = state["promotions"][1:]            # one cancelled
+        after = await svc.get_forecast("retail")
+        assert [p["id"] for p in after["planned_promotions"]] == [13]
+
+        state["promotions"] = state["promotions"] + [self._promotion(
+            14, "Знижка тижня", date(2025, 11, 25), date(2025, 11, 26), "other")]
+        later = await svc.get_forecast("retail")
+        assert [(p["id"], p["extra"]) for p in later["planned_promotions"]] == [
+            (13, None), (14, extra)]
+        assert later["month_range"] == first["month_range"]
+        assert len(state["listed"]) == 3 and len(state["reads"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_calendar_nulls_its_key_alone(self, service):
+        """The range and Black Friday stand, read once; `planned_promotions`
+        is null while the list cannot be read, and the next request that can
+        lists it. Kills: a failure of the calendar costing the badge its
+        range or kept for an hour, and — the review's repro — every request
+        reading Gold and simulating again on the one ML thread while the
+        list could not be read (the outlook kept under an "unreadable" key
+        the next request missed)."""
+        svc, state = service
+        self._calendar(state)
+        state["list_fail"] = ConnectionError("calendar down")
+        for _ in range(3):
+            out = await svc.get_forecast("retail")
+            assert out["planned_promotions"] is None
+            assert out["month_range"] is not None and out["black_friday"] is not None
+
+        state["list_fail"] = None
+        later = await svc.get_forecast("retail")
+        assert [p["id"] for p in later["planned_promotions"]] == [12, 13]
+        assert len(state["reads"]) == 1 and len(state["listed"]) == 4
+
+    @pytest.mark.asyncio
+    async def test_without_a_forecast_of_the_month_the_list_has_no_extra(self, service):
+        """No forecast of every day left: no history read, so no typical
+        effect — the promotions are still said."""
+        svc, state = service
+        self._calendar(state)
+        state["missing"] = "2025-11-25"
+        out = await svc.get_forecast("retail")
+        assert [(p["id"], p["extra"]) for p in out["planned_promotions"]] == [
+            (12, None), (13, None)]
+        assert state["reads"] == []
+
+
+def fr_promotion_outlook(rows, origin):
+    from core import forecast_range
+
+    return forecast_range.promotion_outlook(rows, origin)

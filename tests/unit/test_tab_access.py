@@ -9,6 +9,7 @@ actually take from the admin page and must not be folded into the first.
 from __future__ import annotations
 
 import inspect
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -597,18 +598,6 @@ class TestBroadcastsRespectTheTabSet:
         ) == 1
 
 
-class TestTheRevenueEventIsScoped:
-    def test_goal_progress_names_its_tab(self):
-        """The audit's finding, pinned: a broadcast carrying money must say
-        which tab it belongs to."""
-        import inspect
-        import web.main as main
-
-        source = inspect.getsource(main._register_event_handlers)
-        block = source[source.index("GOAL_PROGRESS"):]
-        assert 'feature="dashboard"' in block[:400]
-
-
 # ─── the bot hands out the same numbers ──────────────────────────────────────
 
 
@@ -636,6 +625,14 @@ class _StoreWithTabs:
         class _Access:
             def approved(inner):
                 return [{"user_id": uid} for uid in self._approved]
+
+            def status(inner, uid):
+                if uid not in self._approved:
+                    return None
+                return {"user_id": uid, "status": "approved"}
+
+            def touch(inner, uid):
+                pass
 
         class _Prefs:
             def get(inner, uid):
@@ -717,6 +714,123 @@ class TestTheBotAsksTheSameQuestion:
             use_bot_store(previous)
 
 
+class _Telegram:
+    """What a handler sent, and to which chat: `(kind, chat_id, text)`.
+
+    An `edit` or an `alert` lands in the chat the button was pressed in; a
+    `message` in the chat it names; a `file` is the Excel export, which the
+    report service uploads to `chat_id` itself."""
+
+    CHAT = 555
+
+    def __init__(self):
+        self.sent = []
+
+        async def edit_message_text(text, **_):
+            self.sent.append(("edit", self.CHAT, text))
+
+        async def answer(text=None, **_):
+            if text:  # a bare answer() only stops the button's spinner
+                self.sent.append(("alert", self.CHAT, text))
+
+        async def send_message(*, chat_id, text, **_):
+            self.sent.append(("message", chat_id, text))
+
+        self.query = SimpleNamespace(
+            data="report", answer=answer, edit_message_text=edit_message_text,
+        )
+        self.bot = SimpleNamespace(token="123456:test", send_message=send_message)
+
+
+class _Figures:
+    """The report service the bot is handed at start: every figure a report
+    carries comes from here, and the Excel file leaves from here."""
+
+    ORDERS = 737  # in every report built from these figures, and nowhere else
+
+    def __init__(self, telegram):
+        self._telegram = telegram
+
+    def aggregate_sales_data(self, **_):
+        n = self.ORDERS
+        return {1: {"Essence": n}}, {1: n}, n, {1: n * 10.0}, {}
+
+    def calculate_top10_products(self, **_):
+        return [("Essence", self.ORDERS, 100.0)], self.ORDERS
+
+    def generate_excel_report(self, *, chat_id, **_):
+        self._telegram.sent.append(("file", chat_id, None))
+        return True
+
+
+def _reports_in(sent):
+    """What reached a chat carrying the report's data."""
+    return [(kind, chat) for kind, chat, text in sent
+            if kind == "file" or str(_Figures.ORDERS) in text]
+
+
+# Every report the bot builds, and the tab its numbers belong to: the summary
+# and TOP-10 are the dashboard's, the Excel export is the reports tab's.
+_REPORT_PRODUCERS = [
+    ("generate_summary_report", "dashboard"),
+    ("generate_top10_report", "dashboard"),
+    ("generate_excel_report", "reports"),
+]
+
+
+@pytest.mark.asyncio
+class TestAReportReachesOnlyItsTab:
+    """The three handlers where data actually leaves the bot, each asked
+    directly, the way its button reaches it. Gating only the /report entry
+    point would let the menu's other branches through."""
+
+    PERSON = 4242
+
+    async def _ask(self, handlers, monkeypatch, name, tabs):
+        from core.bot_store import use_bot_store
+
+        telegram = _Telegram()
+        monkeypatch.setattr(handlers, "is_admin", lambda uid: False)
+        monkeypatch.setattr(handlers, "report_service", _Figures(telegram))
+        handlers.create_user_session(self.PERSON, {
+            "start_date": date(2026, 11, 2), "end_date": date(2026, 11, 8),
+        })
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(
+                id=self.PERSON, username="p", first_name="P", last_name=None),
+            effective_chat=SimpleNamespace(id=_Telegram.CHAT),
+            callback_query=telegram.query,
+            message=None,
+        )
+        previous = use_bot_store(
+            _StoreWithTabs(_Tabs(tabs), approved=[self.PERSON]))
+        try:
+            await getattr(handlers, name)(update, SimpleNamespace(bot=telegram.bot))
+        finally:
+            use_bot_store(previous)
+            handlers.user_data.pop(self.PERSON, None)
+        return telegram.sent
+
+    @pytest.mark.parametrize("name, tab", _REPORT_PRODUCERS)
+    async def test_without_its_tab_the_report_reaches_nobody(
+        self, handlers, monkeypatch, name, tab,
+    ):
+        sent = await self._ask(handlers, monkeypatch, name, _matrix(traffic=True))
+        assert _reports_in(sent) == []
+        assert sent, "the person is told, not left with a button that does nothing"
+
+    @pytest.mark.parametrize("name, tab", _REPORT_PRODUCERS)
+    async def test_with_its_tab_the_report_reaches_the_chat(
+        self, handlers, monkeypatch, name, tab,
+    ):
+        """The control: the same approved person and the same store with the
+        one tab added, so the refusal above is the tab's doing."""
+        sent = await self._ask(handlers, monkeypatch, name, _matrix(**{tab: True}))
+        assert _reports_in(sent)
+        assert {chat for _, chat in _reports_in(sent)} == {_Telegram.CHAT}
+        assert [kind for kind, _, _ in sent if kind == "alert"] == []
+
+
 class TestEverySurfaceNamesItsTab:
     def test_the_map_only_names_real_tabs(self):
         assert set(perm.BOT_SURFACES.values()) <= set(perm.TAB_FEATURE_KEYS)
@@ -742,28 +856,6 @@ class TestEverySurfaceNamesItsTab:
         assert used, "no handler is gated on a surface at all"
         unknown = used - set(perm.BOT_SURFACES)
         assert not unknown, f"{unknown} is not in BOT_SURFACES, so it gates nothing"
-
-    def test_the_report_producers_are_all_gated(self):
-        """The three handlers where data actually leaves the bot. Gating only
-        the /report entry point would let the menu's other branches through."""
-        import ast
-        import pathlib
-
-        source = pathlib.Path("bot/handlers_legacy.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        gated = {}
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for dec in node.decorator_list:
-                if (isinstance(dec, ast.Call)
-                        and getattr(dec.func, "id", None) == "authorized"):
-                    for kw in dec.keywords:
-                        if kw.arg == "surface":
-                            gated[node.name] = kw.value.value
-        for name in ("generate_summary_report", "generate_excel_report",
-                     "generate_top10_report"):
-            assert name in gated, f"{name} produces data without a tab"
 
     def test_the_weekly_report_audience_asks_too(self):
         from core.bot_prefs import read_approved_user_ids
@@ -838,53 +930,6 @@ class TestTheBotSaysWhenItCannotEnforce:
         with caplog.at_level(logging.INFO):
             main._warn_if_tab_access_is_off()
         assert "tab enforcement in the bot is off" in caplog.text
-
-    @pytest.mark.parametrize("user_store", ["postgres", "duckdb", "", "junk"])
-    def test_the_user_store_variable_is_not_asked(self, monkeypatch, caplog,
-                                                  user_store):
-        """Whatever `KS_USER_STORE` holds — production keeps `postgres` for the
-        images before step 14 — a bot on Postgres enforces the tab set and has
-        nothing to say about it."""
-        import logging
-
-        import bot.main as main
-
-        monkeypatch.setenv("KS_BOT_STORE", "postgres")
-        monkeypatch.setenv("KS_USER_STORE", user_store)
-        with caplog.at_level(logging.INFO):
-            main._warn_if_tab_access_is_off()
-        assert not caplog.records, caplog.text
-
-    @pytest.mark.parametrize("user_store", ["postgres", "duckdb", "", "junk"])
-    def test_the_postgres_adapter_always_reaches_the_dashboards_list(
-            self, monkeypatch, user_store):
-        """`DashboardTabs.available()` answers what `KS_BOT_STORE` answered by
-        choosing the adapter: the Postgres one reaches `app.dashboard_users`,
-        and `KS_USER_STORE` — any value, junk included — is not asked."""
-        import ast
-        import inspect
-        import textwrap
-
-        from bot.store_postgres import PostgresDashboardTabs
-
-        monkeypatch.setenv("KS_USER_STORE", user_store)
-        assert PostgresDashboardTabs(None, None).available() is True
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(PostgresDashboardTabs.available)))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
-            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        assert "user_store_is_postgres" not in names
-
-    def test_agreement_is_silent(self, monkeypatch, caplog):
-        import logging
-
-        import bot.main as main
-
-        monkeypatch.setenv("KS_BOT_STORE", "postgres")
-        monkeypatch.setenv("KS_USER_STORE", "postgres")
-        with caplog.at_level(logging.INFO):
-            main._warn_if_tab_access_is_off()
-        assert not caplog.records, caplog.text
 
     def test_it_runs_before_the_store_is_touched(self):
         """After `init_database()` it would be a note attached to whatever the

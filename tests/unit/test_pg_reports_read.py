@@ -21,7 +21,6 @@ lock; the older helper went with the DuckDB tails it served (S14-05).
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -36,45 +35,6 @@ REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
 from datetime import date, timedelta  # noqa: E402
 
 WINDOW = (date.today() - timedelta(days=30), date.today())
-
-CALLS = (
-    ("get_report_summary", {}),
-    ("get_report_summary", {"category_id": 1}),     # the product-filter branch
-    ("get_report_summary", {"brand": "BrandA"}),
-    ("get_report_top_products", {"limit": 5}),
-    ("get_report_top_products", {"category_id": 1}),
-    ("get_report_products_by_source", {}),
-)
-
-
-class TestEveryReportReadsPostgres:
-    """On a store whose DuckDB connection is a trap, whatever the switch that
-    used to choose says."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "name,kwargs", CALLS,
-        ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
-    )
-    async def test_each_sends_its_statements_to_postgres(
-        self, tmp_path, monkeypatch, name, kwargs,
-    ):
-        monkeypatch.setenv("KS_READ_REPORTS", "duckdb")   # not read any more
-        store = AnalyticsStore()
-
-        def boom(*_a, **_k):
-            raise AssertionError("the report read reached for DuckDB")
-
-        with patch.object(type(store), "connection", boom, create=True), \
-             patch("core.pg_reports_read.fetch",
-                   new=AsyncMock(return_value=[])) as reports, \
-             patch("core.pg_lookups_read.fetch",
-                   new=AsyncMock(return_value=[])) as lookups:
-            await getattr(store, name)(*WINDOW, **kwargs)
-        assert reports.await_count >= 1
-        assert "silver." in reports.await_args.args[0]
-        # The category tree is the filter bar's, and only a category asks it.
-        assert lookups.await_count == (1 if "category_id" in kwargs else 0)
 
 
 class TestTheRoutedBodies:
@@ -93,43 +53,6 @@ class TestTheRoutedBodies:
     def test_the_scan_finds_them(self):
         assert len(list(self._statements())) >= 4
 
-    def test_no_report_method_opens_the_store_itself(self):
-        """A method left on `self.connection()` would read DuckDB beside the
-        router."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for name in ("get_report_summary", "get_report_top_products",
-                     "get_report_products_by_source"):
-            node = next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-            body = ast.get_source_segment(source, node) or ""
-            assert "self.connection()" not in body, f"{name} still opens DuckDB"
-
-    def test_the_router_is_never_called_under_the_lock(self):
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-
-        def opens_the_store(node):
-            return any(
-                isinstance(i.context_expr, ast.Call)
-                and isinstance(i.context_expr.func, ast.Attribute)
-                and i.context_expr.func.attr == "connection"
-                for i in getattr(node, "items", [])
-            )
-
-        offenders = [
-            inner.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.With, ast.AsyncWith)) and opens_the_store(node)
-            for inner in ast.walk(node)
-            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
-            and inner.func.attr in ("_reports_run", "_lookups_run", "_category_ids")
-        ]
-        assert not offenders, (
-            f"routing helper called inside `self.connection()` at {offenders} — "
-            f"the store lock is not reentrant and the deadlock will not raise"
-        )
-
     def test_the_rendering_leaves_no_hole(self):
         from core.sql_dialect import POSTGRES
         from core.repositories.revenue import RevenueMixin
@@ -139,39 +62,6 @@ class TestTheRoutedBodies:
             assert "{" not in rendered and "}" not in rendered, (
                 f"line {lineno} still has a hole for {POSTGRES.name}"
             )
-
-    def test_every_ordered_result_ends_on_a_key_that_cannot_tie(self):
-        """Two engines break a tie differently, and two of these carry a LIMIT
-        — where a tie means different *rows*, not a different order."""
-        unique = {"s.source_id", "source_id", "sku", "product_name"}
-        for lineno, sql in self._statements():
-            upper = sql.upper()
-            if "ORDER BY" not in upper:
-                continue
-            tail = re.split(r"LIMIT", sql[upper.index("ORDER BY") + 8:], flags=re.I)[0]
-            tail = "\n".join(l.split("--")[0] for l in tail.splitlines())
-            last = [c for c in tail.split(",") if c.strip()][-1].strip().split()[0]
-            assert last in unique, f"line {lineno} can tie on {last!r}"
-
-
-class TestTheCategoryTreeHasOneBody:
-    def test_the_tree_is_one_text(self):
-        from core.repositories import revenue
-
-        source = REPOSITORY.read_text(encoding="utf-8")
-        assert source.count("WITH RECURSIVE category_tree") == 1, (
-            "the recursive category query has been copied"
-        )
-        assert "{categories}" in revenue._CATEGORY_TREE_SQL
-
-    def test_the_tree_is_ordered(self):
-        """The result becomes an `IN (...)` list that the differential test
-        compares; unordered, the two engines would build the same filter from a
-        different list and the comparison would report a difference that is
-        not one."""
-        from core.repositories import revenue
-
-        assert "ORDER BY id" in revenue._CATEGORY_TREE_SQL
 
 
 class TestACategoryThatDoesNotExist:

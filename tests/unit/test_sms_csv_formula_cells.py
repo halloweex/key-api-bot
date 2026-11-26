@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from web.csv_cells import text_cell
 from web.main import app
-from tests.integration.test_sms_audience_api import _FakeStore, _customer, _headers
+from tests.helpers.sms_api import _FakeStore, _customer, _headers
 
 CSV_PATH = "/api/customers/sms-segments/export/csv"
 

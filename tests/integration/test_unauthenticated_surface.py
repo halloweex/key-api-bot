@@ -440,11 +440,20 @@ class TestWsStatsStaysViewerReadable:
 
 class TestPageRoutesRequireASession:
 
-    @pytest.mark.parametrize("path", ["/", "/v2", "/v2/reports", "/admin/users", "/whatever"])
-    def test_anonymous_is_redirected_to_login(self, client, store, path):
+    @pytest.mark.parametrize("path,location", [
+        ("/", "/login"),
+        ("/v2", "/login?next=%2Fv2"),
+        ("/v2/reports", "/login?next=%2Fv2%2Freports"),
+        ("/admin/users", "/login?next=%2Fadmin%2Fusers"),
+        ("/whatever", "/login?next=%2Fwhatever"),
+        ("/marketing?x=1", "/login?next=%2Fmarketing%3Fx%3D1"),
+    ])
+    def test_anonymous_is_redirected_to_login(self, client, store, path, location):
+        """And names the page it asked for, so the sign-in returns there
+        (`safe_next`); the root needs no name."""
         response = client.get(path, follow_redirects=False)
         assert response.status_code == 302
-        assert response.headers["location"] == "/login"
+        assert response.headers["location"] == location
 
     def test_the_catch_all_does_not_shadow_the_api(self, client, store):
         """The pages router is included last and owns `/{path:path}`. An /api
@@ -480,6 +489,201 @@ class TestPageRoutesRequireASession:
             client.get("/admin/users", headers=headers).content
             == client.get("/", headers=headers).content
         )
+
+
+def _next_cookies(response) -> list:
+    return [c for c in response.headers.get_list("set-cookie")
+            if c.startswith("ks_login_next=")]
+
+
+def _cleared(cookie: str) -> bool:
+    """A Set-Cookie that removes `ks_login_next` where the widget reads it."""
+    return ("Max-Age=0" in cookie or "expires=" in cookie.lower()) \
+        and "Path=/auth/telegram" in cookie
+
+
+class TestTheSignInGoesBackToThePage:
+    """`?next=` (2026-11-19): the bot's «Додати» opens /marketing#promotions,
+    and after a session expired the sign-in used to land on `/`. The page
+    asked for now rides to /login and back; only a path on this site is ever
+    followed (`safe_next`). The Mini App's sign-in keeps the #fragment, the
+    Login Widget's loses it."""
+
+    @pytest.mark.parametrize("value", [
+        "/marketing", "/marketing?tab=1", "/v2/reports", "/%2F%2Fexample.org",
+    ])
+    def test_a_page_of_this_site_is_kept(self, value):
+        from web.routes.auth import safe_next
+        assert safe_next(value) == value
+
+    @pytest.mark.parametrize("value", [
+        None, "", "/", "//attacker.example", "/\\attacker.example", "https://attacker.example",
+        "javascript:alert(1)", "marketing", "/login", "/login?next=%2Fx", "/logout",
+        "/auth/telegram/callback", "/marketing\r\nSet-Cookie: x=1", "/" + "a" * 600,
+        # Not ASCII: a cookie is latin-1, and Cyrillic answered /login with a 500.
+        "/тест", "/marketing?q=акція", "/café",
+        # An asset, which a browser asks for by itself.
+        "/favicon.ico", "/apple-touch-icon-180x180.png", "/site.webmanifest",
+        "/assets/index.js", "/marketing/logo.SVG",
+    ])
+    def test_anything_else_is_dropped(self, value):
+        """Kills: an open redirect (a host, a backslash read as one, a
+        scheme), a header split, a loop through the sign-in itself, a value a
+        cookie cannot carry, or an asset to return to."""
+        from web.routes.auth import safe_next
+        assert safe_next(value) is None
+
+    def test_the_login_page_carries_a_checked_next(self, client, store):
+        response = client.get("/login?next=%2Fmarketing", follow_redirects=False)
+        assert response.status_code == 200
+        assert 'data-next="/marketing"' in response.text
+        cookie = response.headers["set-cookie"]
+        assert "ks_login_next=" in cookie and "/marketing" in cookie
+        assert "Path=/auth/telegram" in cookie and "HttpOnly" in cookie
+
+    def test_an_unsafe_next_reaches_neither_the_page_nor_a_cookie(self, client, store):
+        """The cookie is cleared rather than set to it."""
+        response = client.get("/login?next=%2F%2Fattacker.example", follow_redirects=False)
+        assert response.status_code == 200
+        assert 'data-next=""' in response.text
+        (cookie,) = _next_cookies(response)
+        assert _cleared(cookie) and "attacker" not in cookie
+
+    @pytest.mark.parametrize("asked", [
+        "/login?next=%2F%D1%82%D0%B5%D1%81%D1%82",      # /login?next=/тест
+        "/login?next=%2Fmarketing%3Fq%3D%D0%B0",        # a Cyrillic query
+    ])
+    def test_a_next_that_is_not_ascii_is_dropped_not_a_500(self, client, store, asked):
+        """`set_cookie` encodes latin-1, so `/тест` raised on the way out.
+        Kills: the 500 for a link with a Cyrillic page in it."""
+        response = client.get(asked, follow_redirects=False)
+        assert response.status_code == 200
+        assert 'data-next=""' in response.text
+        (cookie,) = _next_cookies(response)
+        assert _cleared(cookie)
+
+    @pytest.mark.parametrize("path", [
+        "/%D0%BF%D1%80%D0%B8%D0%B2%D1%96%D1%82",        # /привіт
+        "/marketing/caf%C3%A9",
+    ])
+    def test_an_anonymous_page_that_is_not_ascii_signs_in_without_a_500(
+            self, client, store, path):
+        page = client.get(path, follow_redirects=False)
+        assert (page.status_code, page.headers["location"]) == (302, "/login")
+        assert client.get("/login", follow_redirects=False).status_code == 200
+
+    @pytest.mark.parametrize("path", [
+        "/favicon.ico", "/FAVICON.ICO", "/apple-touch-icon-180x180.png",
+        "/apple-touch-icon-120x120-precomposed.png", "/site.webmanifest",
+        "/browserconfig.xml", "/assets/index-abc123.js", "/v2/assets/app.css",
+        "/admin/logo.svg",
+    ])
+    def test_an_anonymous_asset_is_a_404_not_the_sign_in(self, client, store, path):
+        """A browser on /login asks for /favicon.ico and the like by itself.
+        Redirected, the probe went through /login, whose answer rewrote the
+        way back. Kills: the redirect, or `next` naming the asset."""
+        response = client.get(path, follow_redirects=False)
+        assert response.status_code == 404
+        assert "location" not in response.headers
+        assert _next_cookies(response) == []
+
+    def test_a_probe_from_the_login_page_leaves_the_way_back_alone(
+            self, client, store, monkeypatch):
+        """The whole sequence a browser makes: the page, its sign-in, the
+        favicon probe, the widget's callback. Kills: the callback landing on
+        /favicon.ico — a 404 — instead of the page."""
+        page = client.get("/marketing", follow_redirects=False)
+        login = client.get(page.headers["location"], follow_redirects=False)
+        (cookie,) = _next_cookies(login)
+        assert "/marketing" in cookie and not _cleared(cookie)
+        probe = client.get("/favicon.ico", follow_redirects=False)
+        assert probe.status_code == 404 and _next_cookies(probe) == []
+
+        callback = self._callback(client, monkeypatch, cookie="/marketing")
+        assert callback.headers["location"] == "/marketing"
+
+    def test_a_plain_sign_in_clears_a_way_back_left_from_before(
+            self, client, store, monkeypatch):
+        """An abandoned /login?next=/sms, then a plain /login: the cookie is
+        cleared where the widget reads it, so the sign-in lands on `/`, not
+        on /sms for the rest of the ten minutes. Kills: a stale cookie
+        winning a later plain sign-in."""
+        left = client.get("/login?next=%2Fsms", follow_redirects=False)
+        assert "/sms" in _next_cookies(left)[0]
+        plain = client.get("/login", follow_redirects=False)
+        (cookie,) = _next_cookies(plain)
+        assert _cleared(cookie) and "HttpOnly" in cookie
+
+    @staticmethod
+    def _callback(client, monkeypatch, *, cookie=None, verified=True, authorized=True):
+        async def _access(uid, auth_data=None):
+            if authorized:
+                return {"authorized": True, "role": "viewer", "status": "approved"}
+            return {"authorized": False, "status": "denied"}
+
+        monkeypatch.setattr("web.routes.auth.verify_telegram_auth", lambda data: verified)
+        monkeypatch.setattr("web.routes.auth.check_user_access_async", _access)
+        headers = {"Cookie": f'ks_login_next="{cookie}"'} if cookie else {}
+        return client.get(
+            f"/auth/telegram/callback?id={VIEWER_ID}&first_name=Test&auth_date=1&hash=x",
+            headers=headers, follow_redirects=False)
+
+    @pytest.mark.parametrize("verified,authorized,location", [
+        (False, True, "/login?error=Invalid+authentication+data&next=%2Fmarketing"),
+        (True, False, "/login?status=denied&next=%2Fmarketing"),
+    ])
+    def test_a_refused_callback_keeps_the_way_back(
+            self, client, store, monkeypatch, verified, authorized, location):
+        """Back on /login after a refusal, the page to return to rides along:
+        a /login without `next` clears the cookie, so a second attempt would
+        otherwise land on `/`. Kills: the way back lost to one failed try."""
+        response = self._callback(client, monkeypatch, cookie="/marketing",
+                                  verified=verified, authorized=authorized)
+        assert (response.status_code, response.headers["location"]) == (302, location)
+        again = client.get(location, follow_redirects=False)
+        (cookie,) = _next_cookies(again)
+        assert "/marketing" in cookie and not _cleared(cookie)
+
+    def test_a_refused_callback_without_a_way_back_names_none(
+            self, client, store, monkeypatch):
+        response = self._callback(client, monkeypatch, verified=False)
+        assert response.headers["location"] == "/login?error=Invalid+authentication+data"
+
+    def test_a_signed_in_visitor_goes_straight_back(self, client, store, monkeypatch):
+        monkeypatch.setattr("web.routes.auth.check_user_access", lambda uid: {"authorized": True})
+        headers = _cookie_header()
+        back = client.get("/login?next=%2Fmarketing", headers=headers, follow_redirects=False)
+        assert (back.status_code, back.headers["location"]) == (302, "/marketing")
+        home = client.get("/login?next=%2F%2Fattacker.example", headers=headers,
+                          follow_redirects=False)
+        assert (home.status_code, home.headers["location"]) == (302, "/")
+
+    @pytest.mark.parametrize("cookie,location", [
+        ("/marketing", "/marketing"),
+        (None, "/?welcome=Test"),
+        ("//attacker.example", "/?welcome=Test"),
+    ])
+    def test_the_widget_callback_returns_to_the_cookies_page(
+        self, client, store, monkeypatch, cookie, location,
+    ):
+        """The Login Widget signs every query parameter of its callback, so
+        `next` waits in a cookie scoped to the callback, and is spent there."""
+        async def _access(uid, auth_data=None):
+            return {"authorized": True, "role": "viewer", "status": "approved"}
+
+        monkeypatch.setattr("web.routes.auth.verify_telegram_auth", lambda data: True)
+        monkeypatch.setattr("web.routes.auth.check_user_access_async", _access)
+        headers = {"Cookie": f'ks_login_next="{cookie}"'} if cookie else {}
+        response = client.get(
+            f"/auth/telegram/callback?id={VIEWER_ID}&first_name=Test&auth_date=1&hash=x",
+            headers=headers, follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers["location"] == location
+        set_cookies = response.headers.get_list("set-cookie")
+        assert any(c.startswith(f"{SESSION_COOKIE}=") for c in set_cookies)
+        if cookie:
+            spent = [c for c in set_cookies if c.startswith("ks_login_next=")]
+            assert spent and ("Max-Age=0" in spent[0] or "expires=" in spent[0].lower())
 
 
 class TestTheCatchAllCannotReadOutsideTheBuild:

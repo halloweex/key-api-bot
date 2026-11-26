@@ -48,3 +48,14 @@ export const WithPrefix: Story = {
   args: { value: '', onChange: () => {} },
   render: () => <Controlled type="number" prefix="₴" placeholder="0.00" width="narrow" />,
 }
+
+/** A date and a time, each with the phone's own picker (the promotions form). */
+export const DateAndTime: Story = {
+  args: { value: '', onChange: () => {} },
+  render: () => (
+    <Wrapper dir="row" gap="md" wrap>
+      <Controlled type="date" aria-label="date" />
+      <Controlled type="time" step={60} aria-label="time" />
+    </Wrapper>
+  ),
+}

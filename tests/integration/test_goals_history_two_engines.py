@@ -37,11 +37,7 @@ import pytest_asyncio
 from tests.integration.pg_tab_seed import (
     call_key, comparable, golden, store_that_never_reaches_duckdb, tab_in_postgres,
 )
-from tests.unit.test_goals_off_duckdb_silver import (
-    TIMEOUT_S,
-    _seed_history_pg,
-    _without_clock,
-)
+from tests.helpers.goals_history import TIMEOUT_S, _seed_history_pg, _without_clock
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -115,35 +111,18 @@ class TestTheLiteral:
         await history.recalculate_goal_tables(include_weekly=True)
         smart = _without_clock(await asyncio.wait_for(
             history.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
-        tables = await history._compute_goal_tables(include_weekly=True)
 
         assert smart["monthly"]["lastYearRevenue"] > 0
         assert _as_recorded(smart) == GOLDEN[
             call_key("generate_smart_goals", [2026, 10, sales_type])]
-        assert _as_recorded(tables) == GOLDEN[call_key("_compute_goal_tables", [sales_type])]
+        if sales_type == "retail":
+            # One set of tables whatever the sales type: the shared tables
+            # hold retail's history (`GOAL_TABLES_SALES_TYPE`).
+            tables = await history._compute_goal_tables(include_weekly=True)
+            assert _as_recorded(tables) == GOLDEN[call_key("_compute_goal_tables", ["retail"])]
 
     def test_every_literal_is_asked(self):
         assert set(GOLDEN) == (
             {call_key("_history_answers", [s]) for s in ("retail", "b2b", "all")}
             | {call_key("generate_smart_goals", [2026, 10, s]) for s in ("retail", "b2b")}
-            | {call_key("_compute_goal_tables", [s]) for s in ("retail", "b2b")})
-
-
-class TestMetByConstruction:
-    """Every goal computation, the Monday job included, on a store whose
-    DuckDB connection is a trap."""
-
-    @pytest.mark.asyncio
-    async def test_nothing_reads_duckdb(self, history, monkeypatch):
-        from core.scheduler import BackgroundScheduler
-
-        async def _get_store():
-            return history
-
-        monkeypatch.setattr("core.store.get_store", _get_store)
-        for sales_type in ("retail", "b2b", "all"):
-            await _history_answers(history, sales_type)
-            await asyncio.wait_for(
-                history.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S)
-        result = await BackgroundScheduler()._run_seasonality_calc()
-        assert result["retail_months"] == 12
+            | {call_key("_compute_goal_tables", ["retail"])})

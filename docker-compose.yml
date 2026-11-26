@@ -297,13 +297,13 @@ services:
       - .env
     environment:
       - TZ=Europe/Kyiv
-      # Step 03: the bot's own state moves to Postgres. `app.*` has held
-      # an hourly copy of data/bot.db since revision 0009; this is what
-      # makes the bot read and write it instead.
+      # Step 03: the bot's own state moves to Postgres. `app.*` held an
+      # hourly copy of data/bot.db from revision 0009 until the switch;
+      # this is what makes the bot read and write it instead.
       #
       # Removing KS_BOT_STORE rolls back to SQLite, but anything written
-      # to Postgres in between does not come back: the copy is one-way and
-      # stands down while this is set.
+      # to Postgres in between does not come back: nothing copies between
+      # the two (the one-way copy out of SQLite was deleted on 2026-11-19).
       - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
       - KS_BOT_STORE=postgres
       # Who signs every outbound Telegram. Set here rather than left to the
@@ -314,6 +314,11 @@ services:
       # Names this process's slice of shared state (both containers mount
       # ./data): the alert gate's decision file is alert-gate-{role}.json.
       - KS_ROLE=bot
+      # The Rust pilot's watchdog (bot/canary.py, check_rust_api): where the
+      # canary asks its /readyz and /stats, on the `default` network both are
+      # on. The pilot runs in the `rust` profile, started by the deploy's Rust
+      # step; a container that is not there is a warning, after two probes.
+      - KS_RUST_API_URL=http://ks-rust-api:8090
     depends_on:
       # The bot checks `REQUIRED_REVISION` in `initialise()` and refuses to
       # start against an older schema — correct, and until this was added it
@@ -506,8 +511,15 @@ services:
   # compose 2.23 before relying on it: a plain `up -d` leaves a running
   # profiled container alone, and a plain `pull` skips its image.
   #
-  # It reads Postgres as `ks_readonly`, so "the pilot writes nothing" is held
-  # by the grants and not only by the code. No `ports:` (rule 12): nginx
+  # It reads Postgres as `ks_rust_api` (deploy/rust/ks_rust_api.sql): SELECT
+  # on the six tables it reads and nothing else, and a statement or a lock
+  # wait past the role's limits handed to Python. So "the pilot writes
+  # nothing" is held by the grants and not only by the code. The role is
+  # created by hand on the owner's yes; until then, or with no
+  # KS_RUST_API_PASSWORD in .env, it cannot sign in, `/readyz` says so, the
+  # container stays unhealthy and the deploy's Rust step stops there — the
+  # empty default rather than `:?`, which would fail every compose command,
+  # Python's deploy among them. No `ports:` (rule 12): nginx
   # reaches it over `default`, the network web is on. Not on `ks-data` —
   # nothing outside this project has a reason to.
   #
@@ -525,7 +537,7 @@ services:
     logging: *default-logging
     networks: [default]
     environment:
-      KS_PG_DSN: postgresql://ks_readonly:${KS_READONLY_PASSWORD:?set it in .env}@postgres:5432/ks
+      KS_PG_DSN: postgresql://ks_rust_api:${KS_RUST_API_PASSWORD:-}@postgres:5432/ks
       # max_connections is 40 for everyone this Postgres serves; a request
       # here holds one connection at a time.
       KS_PG_POOL_MAX: "3"
@@ -545,13 +557,14 @@ services:
     cpus: 0.5
     healthcheck:
       # Readiness, not liveness (rule 13): `/readyz` reads the schema revision
-      # as ks_readonly. An image older than the schema refuses every session,
+      # as ks_rust_api. An image older than the schema refuses every session,
       # and this is where that shows — before a route is switched to it.
       test: ["CMD", "/usr/local/bin/ks-api", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
   # The bound of the /api request log, declared beside the mount that creates
   # the log, so the one cannot ship without the other. Every five minutes
   # nginx/api-log/rotate.sh cuts the file at midnight UTC or past 32 MiB and

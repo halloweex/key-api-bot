@@ -30,12 +30,6 @@ class TestCheckInternalIntegrity:
             chain_stamps={}, frozen_sync_rows={})
         assert issues == []
 
-    def test_it_takes_no_connection(self):
-        """Mutation: give the scan a DuckDB connection back."""
-        import inspect
-
-        assert "conn" not in inspect.signature(check_internal_integrity).parameters
-
 
 # ─── summarize_issues ─────────────────────────────────────────────────────────
 

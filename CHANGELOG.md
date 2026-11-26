@@ -2,6 +2,64 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.361
+
+- Compare each order's discount with KeyCRM in the 05:30 reconciliation
+
+
+## 3.0.360
+
+- docs, promotions: groups B's and C's notes, the train route retail only, no promotions stamp
+- fix(forecast): Black Friday a year on, one outlook a day, and a freeze that waits for the derivation
+- fix(promotions,auth): the review's group A — sign-in, the API, the SMS link, the bot
+- fix(promotions): a write is seen by the page that made it (review of #397, group B)
+
+
+## 3.0.359
+
+- fix(auth): the sign-in returns to the page that asked for it
+- feat(promotions): the promotions calendar, phase 1 — backend and bot (revision 0039)
+- feat(marketing): the promotions calendar, phase 1 frontend
+
+
+## 3.0.358
+
+- ci: run the frontend's tests and build on every PR
+
+
+## 3.0.357
+
+- fix(goals): a sales type with no history of its own has no automatic goal
+
+
+## 3.0.356
+
+- docs: say when compare_table last ran
+- chore: delete the second Ark's one-off shipment and its tests
+- chore: delete the copy of bot.db into Postgres, its comparison and compare_table
+- chore: delete validate_date_range and the date checks no caller reaches
+- chore: delete KeyCRMPaginator, which nothing called
+
+
+## 3.0.355
+
+- feat(orders): land KeyCRM's discount with the order and its lines (revision 0037)
+
+
+## 3.0.354
+
+- fix(goals): a goal resting on part of a forecast waits; the freeze runs hourly
+- feat(goals): freeze the month's automatic goal on the 1st (revision 0037)
+- docs: the test baseline after the tombstone cleanup
+- test: delete DuckDB-exit tombstone tests
+
+
+## 3.0.353
+
+- fix(forecast): the Black Friday line counts the days still ahead
+- feat(forecast): the month badge says its 80% range and a Black Friday line
+
+
 ## 3.0.352
 
 - forecast: train the revenue LightGBM with the fixed procedure

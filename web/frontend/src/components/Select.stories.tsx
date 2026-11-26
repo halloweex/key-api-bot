@@ -42,3 +42,9 @@ export const WithPlaceholder: Story = {
   args: { options: OPTIONS, value: null, onChange: () => {} },
   render: () => <Controlled options={OPTIONS} placeholder="Add a brand…" />,
 }
+
+/** Beside a form's full-width inputs, at every width. */
+export const FullWidth: Story = {
+  args: { options: OPTIONS, value: null, onChange: () => {} },
+  render: () => <Controlled options={OPTIONS} fullWidth emptyLabel="All sources" />,
+}

@@ -114,14 +114,15 @@ one secret that cannot ride along with the thing it decrypts.
 cd /opt/key-api-bot
 cp deploy/backup.env.example deploy/backup.env
 $EDITOR deploy/backup.env      # BACKUP_REMOTE, BACKUP_SSH_KEY, BACKUP_ENV_PASSFILE,
-                               # BACKUP_RESTORE_IMAGE, BACKUP_ARK_IMAGE
+                               # BACKUP_RESTORE_IMAGE
 ```
 
-`BACKUP_RESTORE_IMAGE` and `BACKUP_ARK_IMAGE` are the image the restore drill,
-the nightly snapshot and the Ark run in, and since step 14 (S14-02) they have
-no default: a pinned tag on this host carrying DuckDB 1.5.5, which is
-`keycrm-web:rollback-step14` — the last image before step 14, pinned at
-S14-00's deploy. `:latest` loses DuckDB at step 14's S14-19, and each script
+`BACKUP_RESTORE_IMAGE` is the image the restore drill runs in (the nightly
+snapshot did until step 14's S14-18, and `BACKUP_ARK_IMAGE` was the second
+Ark's until its shipping script was deleted on 2026-11-19), and since step 14
+(S14-02) it has no default: a pinned tag on this host carrying DuckDB 1.5.5,
+which is `keycrm-web:rollback-step14` — the last image before step 14, pinned
+at S14-00's deploy. `:latest` loses DuckDB at step 14's S14-19, and the drill
 refuses it (exit 2) along with an unset variable, a missing image or another
 DuckDB version (`deploy/archive_image.sh`).
 

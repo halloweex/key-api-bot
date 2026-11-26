@@ -309,6 +309,11 @@ def _differs(py, rs, ported: bool) -> Optional[str]:
         return f"status {py.status_code} against {rs.status_code}: {py.text[:120]!r} | {rs.text[:120]!r}"
     if py.headers.get("content-type") != rs.headers.get("content-type"):
         return f"content-type {py.headers.get('content-type')} against {rs.headers.get('content-type')}"
+    # GZipMiddleware's `Vary: Accept-Encoding`, which the app's stack puts on
+    # every answer with a body and the pilot sets without compressing (`vary`
+    # in its http.rs).
+    if py.headers.get("vary") != rs.headers.get("vary"):
+        return f"vary {py.headers.get('vary')!r} against {rs.headers.get('vary')!r}"
     if py.status_code == 307:
         where = [urlsplit(r.headers.get("location", "")) for r in (py, rs)]
         if (where[0].path, where[0].query) != (where[1].path, where[1].query):

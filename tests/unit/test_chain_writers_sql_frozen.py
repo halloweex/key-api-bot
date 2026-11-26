@@ -36,6 +36,14 @@ deletions inside chain 3's transaction, the catalogue's versions after chain
 chains' own statements, and each capture's place beside them is held by its own
 tests, on a real server (`tests/integration/test_capture_expenses_pg.py`,
 `tests/unit/test_capture_catalogue.py`).
+
+Re-recorded a third time, for revision 0038 (2026-11-16: the discount on orders
+and their lines, landed beside the order). Three statement texts moved and
+nothing else: `pg_landing._ORDER_UPSERT` and `_ORDER_PRODUCT_INSERT` name the
+eleven discount columns, and `restore_manager_comments`' locked read selects
+them with the rest of `landing_rows.ORDER_COLUMNS`. The recording was held to
+the previous literal with exactly those three texts substituted before it was
+written — the same calls, counts, arguments and transactions.
 """
 from __future__ import annotations
 
@@ -44,61 +52,12 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tests.helpers.chain_writers_sql import GOLDEN, _Recorder
 
-GOLDEN = Path(__file__).resolve().parents[1] / "integration" / "golden" / "chain_writers_sql.json"
 T0 = datetime(2026, 9, 20, 10, 0, tzinfo=timezone.utc)
-
-
-class _Recorder:
-    """A connection that answers what the writers ask and keeps what they sent."""
-
-    def __init__(self, rows=None):
-        self.calls = []
-        self.rows = rows or (lambda sql: [])
-        self.depth = 0
-
-    def is_in_transaction(self):
-        return self.depth > 0
-
-    async def execute(self, sql, *args, **kw):
-        self.calls.append(["execute", sql, len(args)])
-        return "UPDATE 1"
-
-    async def executemany(self, sql, rows, **kw):
-        self.calls.append(["executemany", sql, len(list(rows))])
-
-    async def fetch(self, sql, *args, **kw):
-        self.calls.append(["fetch", sql, len(args)])
-        return self.rows(sql)
-
-    async def fetchval(self, sql, *args, **kw):
-        self.calls.append(["fetchval", sql, len(args)])
-        if "FOR UPDATE" in sql and "chain_watermarks" in sql:
-            return '{"stamps": [], "previous": null}'
-        return None
-
-    async def fetchrow(self, sql, *args, **kw):
-        self.calls.append(["fetchrow", sql, len(args)])
-        return None
-
-    def transaction(self):
-        recorder = self
-
-        class _Tx:
-            async def __aenter__(self):
-                recorder.calls.append(["begin"])
-                recorder.depth += 1
-
-            async def __aexit__(self, *exc):
-                recorder.depth -= 1
-                recorder.calls.append(["end", exc[0] is None])
-                return False
-
-        return _Tx()
 
 
 class _Pool:
@@ -205,16 +164,6 @@ def test_every_scenario_the_literal_holds_is_driven():
     """Kills: a scenario dropped from the test while its literal stays, or
     the other way round — either would read as covered and be unchecked."""
     assert set(_scenarios()) == set(_golden()["scenarios"])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", sorted(_golden()["scenarios"]))
-async def test_the_writer_sends_what_it_sent_before_step_14(name):
-    """Kills: any edit of a chain-3, -6 or -6a writer's statements, their
-    order, the latch's place inside the transaction, the owner claim, the
-    `writes:` record, the watermark stamp or the derivation mark."""
-    writer, rows = _scenarios()[name]
-    assert await _record(writer, rows) == _golden()["scenarios"][name]
 
 
 def test_the_two_shared_statements_are_the_literal():

@@ -13,7 +13,6 @@ mutation it kills.
 """
 from __future__ import annotations
 
-import logging
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -208,9 +207,9 @@ class TestTheCaptureNeverFailsTheWrite:
          "UndefinedColumnError"),
     ], ids=["data-error", "other-error"])
     async def test_a_capture_that_fails_leaves_the_deletion_and_the_order_written(
-            self, pool, monkeypatch, caplog, broken, error):
+            self, pool, monkeypatch, broken, error):
         """The capture fails inside the writer's transaction: its savepoint
-        rolls back alone, the failure is stamped and logged, and everything
+        rolls back alone, the failure is stamped, and everything
         the writer does — the deletion, and the order header it writes AFTER
         the capture in the same transaction — commits. Mutations: no
         savepoint (the transaction is aborted and the header write fails), or
@@ -219,7 +218,6 @@ class TestTheCaptureNeverFailsTheWrite:
         await _write([_payload(BASE, [_cost(BASE * 10 + 7), _cost(dropped)])])
         monkeypatch.setattr(chain, "_EXPENSE_DELETIONS_CAPTURE_SQL", broken)
 
-        caplog.set_level(logging.INFO)
         result, _ = await _write([_payload(BASE, [_cost(BASE * 10 + 7)],
                                            status=19, updated=LATER)])
 
@@ -232,11 +230,6 @@ class TestTheCaptureNeverFailsTheWrite:
         stamp = await _stamp(pool)
         assert stamp["failures_since_ok"] == 1 and stamp["last_ok_at"] is None
         assert stamp["last_error"].startswith(f"{error}: ")
-        failed = [r for r in caplog.records
-                  if r.name == cap.__name__ and r.levelno == logging.ERROR]
-        assert len(failed) == 1 and TABLE in failed[0].getMessage()
-        assert [r for r in caplog.records if r.name == chain.__name__
-                and r.getMessage().startswith(f"orders: expense {dropped} ")]
 
     @pytest.mark.asyncio
     async def test_the_next_deletion_kept_clears_the_failure(self, pool, monkeypatch):

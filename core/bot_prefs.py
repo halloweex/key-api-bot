@@ -13,8 +13,8 @@ day the bot switched to Postgres (2026-08-27): the file froze at that day's
 contents, so the weekly report kept going to people revoked since, never
 reached people approved since, ignored notifications muted since, and a
 language chosen on the dashboard reached nothing the bot reads. `BOT_DB_PATH`
-stays here only as the file's location, for the replication and comparison
-that copy it while SQLite is still the engine.
+stayed here as the file's location for the copy into Postgres and its
+comparison until 2026-11-19, when both were deleted.
 
 Readers are forgiving on purpose: a store that cannot be reached yields nobody
 or the default language, and the caller falls back to the admins. A report
@@ -26,18 +26,11 @@ the bug it replaced.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from core.i18n import DEFAULT_LANGUAGE, EN, UK, normalize
 
 logger = logging.getLogger(__name__)
-
-# Where the bot's SQLite lives, resolved from this file so it holds in the
-# container (/app/data/bot.db) and in a checkout alike. Not read here any more;
-# `core/pg_bot_state.py` and the bot-state comparison import it to copy the
-# file while SQLite is the engine.
-BOT_DB_PATH = Path(__file__).parent.parent / "data" / "bot.db"
 
 
 def _store():

@@ -195,6 +195,164 @@ def classify_expense_discrepancies(
         fields=EXPENSE_FIELDS, money_fields=frozenset(), max_ids=max_ids)
 
 
+# ─── The order's discount (revision 0038) ────────────────────────────────────
+#
+# Revision 0038 lands KeyCRM's discount with every order, and nothing else
+# watches it: `app.order_versions` compares none of its columns, on purpose,
+# so a figure that drifts from KeyCRM — moved there without `updated_at`, or
+# left stale or NULL here by a writer — is seen by this comparison or by
+# nothing. It starts after the backfill landed every stored order's figures
+# (2026-11-19, none NULL), so a NULL that reads here is one a writer left.
+#
+# Three figures per order, each against KeyCRM's own field, and the repair
+# that re-fetches the order by id rewrites them all:
+#   * `products_total` and `total_discount`, the header's money: the lines'
+#     sum before the order's discount, and that discount;
+#   * `line_discount`, the lines' discount in money: the sum of each line's
+#     `total_discount` (per unit) times its `quantity`, NULL when any line's
+#     is NULL. The header's figures cannot stand in for it. The 05:15 refresh
+#     rewrites headers only, so a line's discount lands only when its order is
+#     written whole. An image below revision 0038 — a rollback target — deletes
+#     an order's lines and inserts them back without the six discount columns
+#     (NULL), while its header upsert keeps the header's figures as they were,
+#     so after such a rollback the header comparison alone would see nothing.
+#
+# Not compared: how a discount was entered — the order's `discount_amount`,
+# `discount_percent` and `discount_data`, a line's `price`, percent, typed
+# amount, loyalty and individual figures. Every writer lands them in the same
+# statement as the money, from the same payload, so a store that lost them
+# lost the money too and this comparison names the order; and the re-fetch
+# rewrites them with it. What KeyCRM does with them over time was not
+# measured, and five of them are not in its published API spec, so none is
+# worth a morning's WARN. Nor `products_total - total_discount = grand_total`:
+# it is KeyCRM's data, broken on 81 of 50 723 orders, and a gift certificate's
+# redemption is an order discount there. Each figure is compared with KeyCRM's
+# own, never with another.
+#
+# KeyCRM's side is the payload as chain 3 would store it: it goes through the
+# writer's own parse (`landing_rows.landed_orders`), so `_discount`'s rounding
+# — to the column's scale, half away from zero — and its NULL for a value the
+# column cannot hold are on both sides, and the figures compare exactly, as
+# Decimals. A figure the payload does not carry is not compared: a snapshot
+# without the key must not read as every discount gone, nor send the repair to
+# overwrite what the backfill landed. Nor is the discount of an order chain 3
+# refuses whole (`pg_orders_write.payload_refusal`): no re-fetch could write it
+# (C2R-2's rule for expenses).
+HEADER_DISCOUNT_FIELDS = ("products_total", "total_discount")
+DISCOUNT_FIELDS = HEADER_DISCOUNT_FIELDS + ("line_discount",)
+
+# The per-order fields whose difference moves no revenue figure (revenue reads
+# `grand_total`): an order's expenses and its discount. The 05:30 repair
+# re-fetches them last, behind every missing order and every drift.
+REPAIRED_LAST = EXPENSE_FIELDS + DISCOUNT_FIELDS
+
+
+def line_discount(lines: Iterable[Any]) -> Optional[Decimal]:
+    """An order's lines' discount in money: each line's `total_discount`, per
+    unit, times its `quantity`, summed as Decimal; 0 for no lines, and None
+    when any line's `total_discount` is None. `lines` are parsed rows
+    (`landing_rows.OrderProductRow`)."""
+    total = Decimal(0)
+    for line in lines:
+        if line.total_discount is None:
+            return None
+        total += line.total_discount * int(line.quantity)
+    return total
+
+
+def keycrm_discount_facts(payload: Dict[str, Any]) -> Dict[str, object]:
+    """The `DISCOUNT_FIELDS` of one KeyCRM order as chain 3 would store them,
+    each only when the payload carries it; {} when it carries none, or when
+    the parse cannot read the order.
+
+    A header figure is carried when its key is in the payload, null included:
+    it compares as the None its column then holds. `line_discount` is carried
+    when the payload has a `products` list and every line in it has the
+    `total_discount` key. Asked only of an order chain 3 writes."""
+    from core.landing_rows import landed_orders
+
+    landed = landed_orders([payload], with_products=True)
+    if landed.refused or len(landed.orders) != 1:
+        return {}
+    (row,) = landed.orders
+    facts: Dict[str, object] = {
+        f: getattr(row, f) for f in HEADER_DISCOUNT_FIELDS if f in payload}
+    lines = payload.get("products")
+    if isinstance(lines, list) and all(
+            isinstance(p, dict) and "total_discount" in p for p in lines):
+        facts["line_discount"] = line_discount(landed.products)
+    return facts
+
+
+def carries_discounts(kc: OrderFacts, among: Iterable[int]) -> List[int]:
+    """The ids of `among` whose KeyCRM facts carry a discount field — the
+    orders asked of Postgres."""
+    return sorted(oid for oid in set(among)
+                  if oid in kc and any(f in kc[oid] for f in DISCOUNT_FIELDS))
+
+
+# The stored figures, `line_discount` in the same expression as KeyCRM's side:
+# a NULL `total_discount` on any line makes the order's NULL (`n_null`), and an
+# order with no lines sums to 0. `SUM` of NUMERIC(12,4) times an integer is
+# exact.
+_DISCOUNTS_SQL = """
+    SELECT o.id, o.products_total, o.total_discount,
+           li.n_null, li.amount
+    FROM bronze.orders o
+    LEFT JOIN (
+        SELECT order_id,
+               COUNT(*) FILTER (WHERE total_discount IS NULL) AS n_null,
+               SUM(total_discount * quantity) AS amount
+        FROM bronze.order_products
+        WHERE order_id = ANY($1::int[])
+        GROUP BY order_id
+    ) li ON li.order_id = o.id
+    WHERE o.id = ANY($1::int[])
+"""
+
+
+async def postgres_discounts_of(pool, order_ids: Iterable[int]) -> OrderFacts:
+    """`{order id: {products_total, total_discount, line_discount}}` as
+    `bronze.orders` and `bronze.order_products` hold them, for every id asked
+    that Postgres holds. Money as the Decimals asyncpg reads."""
+    ids = sorted({int(i) for i in order_ids})
+    if not ids:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_DISCOUNTS_SQL, ids)
+    out: OrderFacts = {}
+    for r in rows:
+        if r["n_null"]:
+            lines: Optional[Decimal] = None
+        else:
+            lines = Decimal(r["amount"]) if r["amount"] is not None else Decimal(0)
+        out[int(r["id"])] = {"products_total": r["products_total"],
+                             "total_discount": r["total_discount"],
+                             "line_discount": lines}
+    return out
+
+
+def classify_discount_discrepancies(
+    dk: OrderFacts, kc: OrderFacts, *, max_ids: int = 50,
+) -> List[Discrepancy]:
+    """The orders whose discount differs, as `VALUE_MISMATCH` on
+    `products_total`, `total_discount` or `line_discount` — WARN, grouped like
+    every per-order finding: a discount moves no revenue figure.
+
+    Each field on its own: an order is compared on a field only when its
+    KeyCRM facts carry it, and only an order on both sides (one on one side
+    only is the header comparison's MISSING_IN_DK or MISSING_IN_KC). With no
+    tolerance: Decimal against Decimal, and None equals only None."""
+    out: List[Discrepancy] = []
+    for field in DISCOUNT_FIELDS:
+        comparable = {oid: kc[oid] for oid in sorted(set(dk) & set(kc))
+                      if field in kc[oid]}
+        out += classify_order_discrepancies(
+            {oid: dk[oid] for oid in comparable}, comparable,
+            fields=(field,), money_fields=frozenset(), max_ids=max_ids)
+    return out
+
+
 # The header-only slice of the order facts: what ClickHouse's silver can answer
 # for. Silver is order-grain by design — no line items — so the third arm
 # compares everything except n_lines/qty/line_amount, and says so rather than
@@ -552,13 +710,17 @@ def _process_batch(
             "qty": qty,
             "line_amount": round(line_amount, 2),
         }
-        # Only when the payload carried them (O3 (a)): absent, the order's
-        # expenses are not compared rather than read as none. And only for an
-        # order chain 3 writes (C2R-2): one it refuses whole is not written,
-        # and its listing deletes none of its expenses, so no re-fetch could
-        # put them right. It is left to the header comparison, as any refused
-        # order is.
-        if isinstance(o.get("expenses"), list) and payload_refusal(o) is None:
-            expense_facts = keycrm_expense_facts(o["expenses"], oid)
-            if expense_facts is not None:
-                orders[int(oid)].update(expense_facts)
+        # Only for an order chain 3 writes (C2R-2): one it refuses whole is
+        # not written, and its listing deletes none of its expenses, so no
+        # re-fetch could put them, or its discount, right. It is left to the
+        # header comparison, as any refused order is.
+        if payload_refusal(o) is None:
+            # Only when the payload carried them (O3 (a)): absent, the order's
+            # expenses are not compared rather than read as none.
+            if isinstance(o.get("expenses"), list):
+                expense_facts = keycrm_expense_facts(o["expenses"], oid)
+                if expense_facts is not None:
+                    orders[int(oid)].update(expense_facts)
+            # Its discount the same way (revision 0038): each figure only
+            # when the payload carried it.
+            orders[int(oid)].update(keycrm_discount_facts(o))

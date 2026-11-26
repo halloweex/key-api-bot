@@ -7,8 +7,33 @@ used across both bot and web services.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from enum import IntEnum
 from typing import Optional, List, Dict, Any
+
+
+def optional_decimal(value: Any) -> Optional[Decimal]:
+    """A KeyCRM number as a Decimal, or None when it is not one.
+
+    For the discount figures (revision 0038), which are facts beside the
+    order, never the order itself: a value that cannot be read costs that
+    value and nothing else, where `float(grand_total)` raises and refuses the
+    order. A number arrives as a JSON number or as text ("409.00"); `str`
+    first, so 0.1 stays 0.1 instead of its binary expansion. A boolean is not
+    a number here, and neither is an infinity or NaN.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        number = value
+    elif isinstance(value, (int, float, str)):
+        try:
+            number = Decimal(str(value).strip())
+        except (InvalidOperation, ValueError):
+            return None
+    else:
+        return None
+    return number if number.is_finite() else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -262,6 +287,20 @@ class OrderProduct:
     quantity: int
     price_sold: float
     offer: Optional[ProductOffer] = None
+    # The line's discount, as KeyCRM serves it (revision 0038). `price` is the
+    # price before any discount and `price_sold` the price after it, both per
+    # unit; `total_discount` is the discount PER UNIT too (980 → 591 is 389),
+    # so a line's discount in money is `total_discount * quantity`.
+    # `discount_percent`/`discount_amount` are the line's own discount as
+    # typed, `loyalty_discount` the loyalty programme's percent and
+    # `individual_discount` the buyer's individual one. None when KeyCRM sent
+    # nothing readable (`optional_decimal`).
+    price: Optional[Decimal] = None
+    total_discount: Optional[Decimal] = None
+    discount_percent: Optional[Decimal] = None
+    discount_amount: Optional[Decimal] = None
+    loyalty_discount: Optional[Decimal] = None
+    individual_discount: Optional[Decimal] = None
 
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> "OrderProduct":
@@ -271,6 +310,12 @@ class OrderProduct:
             quantity=int(data.get("quantity", 1)),
             price_sold=float(data.get("price_sold", 0)),
             offer=ProductOffer.from_api(data.get("offer")),
+            price=optional_decimal(data.get("price")),
+            total_discount=optional_decimal(data.get("total_discount")),
+            discount_percent=optional_decimal(data.get("discount_percent")),
+            discount_amount=optional_decimal(data.get("discount_amount")),
+            loyalty_discount=optional_decimal(data.get("loyalty_discount")),
+            individual_discount=optional_decimal(data.get("individual_discount")),
         )
 
     @property
@@ -302,6 +347,18 @@ class Order:
     products: List[OrderProduct] = field(default_factory=list)
     manager_comment: Optional[str] = None  # Contains UTM data for Shopify orders
     promocode: Optional[str] = None  # Discount promo code applied to order
+    # The order's discount, as KeyCRM serves it (revision 0038).
+    # `products_total` is the lines' sum before the order-level discount and
+    # `total_discount` that discount in money (4085 with −10 % is 409, and
+    # `grand_total` 3676); `discount_percent`/`discount_amount` are the
+    # discount as typed. `discount_data` is KeyCRM's own object as it came —
+    # a dict with a `loyalty` key, an empty list or None. None when KeyCRM
+    # sent nothing readable (`optional_decimal`).
+    products_total: Optional[Decimal] = None
+    total_discount: Optional[Decimal] = None
+    discount_amount: Optional[Decimal] = None
+    discount_percent: Optional[Decimal] = None
+    discount_data: Any = None
 
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> "Order":
@@ -361,6 +418,11 @@ class Order:
             products=products,
             manager_comment=data.get("manager_comment"),
             promocode=data.get("promocode") or None,
+            products_total=optional_decimal(data.get("products_total")),
+            total_discount=optional_decimal(data.get("total_discount")),
+            discount_amount=optional_decimal(data.get("discount_amount")),
+            discount_percent=optional_decimal(data.get("discount_percent")),
+            discount_data=data.get("discount_data"),
         )
 
     @property

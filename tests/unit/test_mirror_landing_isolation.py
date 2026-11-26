@@ -1,10 +1,11 @@
-"""One check that raises must not silence the other six.
+"""One check that raises must not silence the other five.
 
-`dq_mirror_landing` runs seven checks in one job — the UTM verdicts'
-completeness, Gold's two grains, the bot's state, the order archive, the
-buyers' completeness, ClickHouse and its archive. (Seventeen until step 14's
-S14-12 deleted the comparisons against DuckDB; eight until the owner's
-decision O6 of 2026-11-11 stopped checking the vitrina.) It used to wrap all
+`dq_mirror_landing` runs six checks in one job — the UTM verdicts'
+completeness, Gold's two grains, the order archive, the buyers'
+completeness, ClickHouse and its archive. (Seventeen until step 14's S14-12
+deleted the comparisons against DuckDB; eight until the owner's decision O6
+of 2026-11-11 stopped checking the vitrina; seven until the bot's state, its
+copy and comparison deleted on 2026-11-19.) It used to wrap all
 of them in ONE try, so an exception anywhere skipped every check after it, and
 the alert gate's `and not error_message` then withheld the page for any
 CRITICAL already found above the failure.
@@ -22,23 +23,13 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.data_quality import IntegrityIssue, Severity
+from tests.helpers.mirror_landing import CHECKS_BY_MODULE, _run
 
 
-# Every check, in the order the job runs it, named as it is imported.
-CHECKS_BY_MODULE = {
-    "core.mirror_reconciliation": [
-        "reconcile_order_utm_completeness", "pg_gold_internal_check",
-        "reconcile_bot_state", "reconcile_order_versions",
-        "reconcile_buyer_completeness",
-    ],
-    "core.ch_silver": ["reconcile_clickhouse"],
-    "core.ch_history": ["reconcile_ch_history"],
-}
 ALL_CHECKS = [c for names in CHECKS_BY_MODULE.values() for c in names]
 
 
@@ -63,22 +54,9 @@ def check_order() -> list:
 
 
 class TestEveryCheckIsIsolated:
-    def test_all_seven_run_through_check_and_each_exactly_once(self):
+    def test_all_six_run_through_check_and_each_exactly_once(self):
         assert check_order() == ALL_CHECKS
-        assert len(check_order()) == len(set(check_order())) == 7
-
-    def test_nothing_reads_duckdb(self):
-        """The comparisons against DuckDB went in step 14's S14-12; the job
-        asks the store for nothing."""
-        from core.scheduler import BackgroundScheduler
-
-        tree = ast.parse(textwrap.dedent(
-            inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        names |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        modules = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
-        assert not {"get_store", "store"} & names
-        assert not {m for m in modules if m and "duckdb" in m}
+        assert len(check_order()) == len(set(check_order())) == 6
 
 
 def _critical(name):
@@ -87,74 +65,6 @@ def _critical(name):
         severity=Severity.CRITICAL, count=1, sample_ids=(55716,),
         description="a movement Postgres does not hold",
     )
-
-
-async def _run(outcomes, mocks=None, held=None, hook=None, returned=None):
-    """Run the real job with every check stubbed to `outcomes[name]`.
-
-    An outcome is a list of issues, or an Exception to raise. Returns what the
-    job persisted, what it paged, and whether it announced a recovery. Pass a
-    dict as `mocks` to get each check's stub back by name, to ask how the job
-    called it, a list as `held` to collect the conditions each resolution
-    was told it could not re-examine (`unverified`), and a callable as `hook`
-    to break something after the stubs are in place and before the job runs,
-    and a list as `returned` to get what the job returned.
-    """
-    from core.scheduler import BackgroundScheduler
-
-    persisted, paged, resolved = {}, [], []
-
-    # What the job hands the journal's door. Until step 14's S14-10 this
-    # module routed chain 9 back to DuckDB and caught DuckDB's `persist_run`
-    # behind the door instead.
-    async def _journal_run(**kw):
-        persisted.update(kw)
-        return 1
-
-    patches = [
-        patch("core.mirror_reconciliation.configured", return_value=True),
-        patch("core.dq_journal.journal_run", new=_journal_run),
-        patch("core.data_quality.machine_attempts_note", return_value=None),
-        patch("core.data_quality.evidence_for_agent", return_value={}),
-    ]
-    for module, names in CHECKS_BY_MODULE.items():
-        for name in names:
-            outcome = outcomes.get(name, [])
-            mock = (AsyncMock(side_effect=outcome) if isinstance(outcome, Exception)
-                    else AsyncMock(return_value=list(outcome)))
-            if mocks is not None:
-                mocks[name] = mock
-            patches.append(patch(f"{module}.{name}", new=mock))
-
-    scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
-
-    async def _page(layer, message, key=None, conditions=(), evidence=None):
-        paged.append(list(conditions))
-        return True
-
-    async def _resolve(layer, issues, error_message, unverified=()):
-        # The real method returns early on error_message; record whether it
-        # would have announced anything.
-        if held is not None:
-            held.append(list(unverified))
-        if not error_message:
-            resolved.append([i.check_name for i in issues])
-
-    scheduler._send_dq_alert_throttled = _page
-    scheduler._resolve_dq_layer = _resolve
-
-    for p_ in patches:
-        p_.start()
-    try:
-        if hook is not None:
-            hook()
-        result = await scheduler._run_dq_mirror_landing()
-        if returned is not None:
-            returned.append(result)
-    finally:
-        for p_ in reversed(patches):
-            p_.stop()
-    return persisted, paged, resolved
 
 
 class TestOneRaisingCheckSilencesNothing:
@@ -171,12 +81,12 @@ class TestOneRaisingCheckSilencesNothing:
     @pytest.mark.asyncio
     async def test_the_run_is_still_failed_and_names_every_check_that_raised(self):
         persisted, _, _ = await _run({
-            "reconcile_bot_state": RuntimeError("data/bot.db is gone"),
+            "reconcile_buyer_completeness": RuntimeError("bronze.buyers is gone"),
             "pg_gold_internal_check": ValueError("gold.daily_revenue is gone"),
         })
         message = persisted["error_message"]
         assert message and message.startswith("2 check(s) raised")
-        assert "reconcile_bot_state: RuntimeError" in message
+        assert "reconcile_buyer_completeness: RuntimeError" in message
         assert "pg_gold_internal_check: ValueError" in message
 
     @pytest.mark.asyncio

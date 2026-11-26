@@ -33,7 +33,7 @@ from core import data_quality as dq
 from core import pg_chain_invariants as inv
 from core import pg_warehouse_dq as twins
 from core.data_quality import DigestSection, IntegrityIssue, Severity
-from tests.unit.test_pg_warehouse_dq import _facts
+from tests.helpers.warehouse_dq_facts import _facts
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -135,9 +135,6 @@ class TestTheChainsLookedAtNothing:
         facts = inv.Facts(watched=self.WATCHED, **parts)
         assert any(i.check_name == inv.UNWATCHED for i in inv.judge(facts))
         assert not self._judged(facts)
-
-    def test_nothing_watched_is_nothing_to_see(self):
-        assert self._judged(inv.Facts(watched=()))
 
 
 # ─── The job ─────────────────────────────────────────────────────────────────

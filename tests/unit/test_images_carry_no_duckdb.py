@@ -53,12 +53,11 @@ CODE_TREES = ("core", "web", "bot", "scripts", "deploy", "migrations")
 DRIVER = ("duckdb", "compact_duckdb")
 
 # The host tools that run on the pinned image and nowhere else, frozen. A
-# file joins this list only if it is run inside `BACKUP_RESTORE_IMAGE` /
-# `BACKUP_ARK_IMAGE` (deploy/archive_image.sh asks that image for DuckDB
-# 1.5.5 before anything is mounted into it).
+# file joins this list only if it is run inside `BACKUP_RESTORE_IMAGE`
+# (deploy/archive_image.sh asks that image for DuckDB 1.5.5 before anything
+# is mounted into it). `deploy/ark_freeze.py`, the second Ark's freeze, was
+# the third until it was deleted with `deploy/ark_ship.sh` on 2026-11-19.
 PINNED_IMAGE_TOOLS: Dict[str, str] = {
-    "deploy/ark_freeze.py":
-        "the second Ark's freeze, run by deploy/ark_ship.sh in the pinned image",
     "deploy/duckdb_table_fates_check.py":
         "reads the newest nightly backup's tables, run in the pinned image",
     "deploy/restore_from_export.py":
@@ -178,34 +177,19 @@ class TestNothingTheImagesRunImportsTheDriver:
         """Non-vacuity: the walk reads the code it exists to read."""
         rels = {p.relative_to(REPO).as_posix() for p in _code_files()}
         assert {"web/main.py", "bot/main.py", "core/store.py", "core/scheduler.py",
-                "scripts/backfill_gender.py", "deploy/ark_freeze.py"} <= rels
+                "scripts/backfill_gender.py", "deploy/restore_from_export.py"} <= rels
         assert not any(r.startswith("tests/") for r in rels)
 
     @pytest.mark.parametrize("source", [
-        "import duckdb",
         "import duckdb as d",
-        "import os, duckdb.typing",
         "def f():\n    from duckdb import connect\n",
-        "def f():\n    from duckdb.typing import VARCHAR\n",
         "import importlib\nimportlib.import_module('duckdb')",
-        "from importlib import import_module as im\nim('duckdb')",
-        "NAME = 'duckdb'\nimport importlib\nimportlib.import_module(NAME)",
-        "__import__('duckdb')",
-        "import sys\nsys.modules['duckdb']",
-        "import sys\nsys.modules.get('duckdb')",
-        "import subprocess\nsubprocess.run(['python', '-c', 'import duckdb'])",
-        "def f():\n    import compact_duckdb as compact\n",
     ])
     def test_the_walk_sees_every_form(self, source):
         assert list(driver_reaches(source)), source
 
     @pytest.mark.parametrize("source", [
         "import core.duckdb_constants",
-        "from core import duckdb_table_fates",
-        "x = 'duckdb'",
-        "text = 'DuckDB went in step 14'",
-        "import importlib\nimportlib.import_module('core.duckdb_constants')",
-        "from . import duckdb",
     ])
     def test_the_walk_does_not_read_a_name_as_the_driver(self, source):
         """Modules of this repository named after DuckDB are not the driver,

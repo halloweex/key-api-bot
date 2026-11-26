@@ -29,12 +29,14 @@ def _issue(check_name: str, count: int = 1) -> IntegrityIssue:
 
 class TestRemediationLookup:
     def test_longest_prefix_wins(self):
-        """`mirror_never_shipped` has its own answer — "wait for Sunday" —
-        which is the opposite of the generic mirror advice."""
-        generic = remediation_for(["mirror_missing_rows"])[0]
-        specific = remediation_for(["mirror_never_shipped"])[0]
+        """`ch_history_` has its own answer — a human decides — which is the
+        opposite of the generic ClickHouse advice to wait for the next sync.
+        (`mirror_never_shipped` against `mirror_` was the pair until both were
+        retired with `compare_table` on 2026-11-19.)"""
+        generic = remediation_for(["ch_silver_roundtrip"])[0]
+        specific = remediation_for(["ch_history_buckets"])[0]
         assert generic != specific
-        assert "Sunday" in specific
+        assert "a human decides" in specific
 
     def test_generated_check_names_are_matched_by_prefix(self):
         """Half the check names are built at runtime; an exact-name table
@@ -88,14 +90,6 @@ class TestRemediationLookup:
             assert "\n" not in line, prefix
             assert len(line) <= self.ARROW_LINE_MAX, (prefix, len(line))
 
-    def test_the_utm_line_is_the_postgres_parsers(self):
-        """One line since step 14's S14-15, which removed the `KS_UTM_PARSE`
-        swap (`REMEDIATION_UTM_PARSED_IN_POSTGRES`): the line production
-        published under `postgres`, byte for byte."""
-        assert remediation_for(["pg_order_utm_missing"]) == [
-            "Read meta.mirror_state for silver.order_utm: the parse writes its "
-            "error there. Then POST /api/traffic/refresh or /api/warehouse/refresh"]
-
 
 class TestMachineAttemptsNote:
     """One ledger since step 14's S14-13: the ClickHouse archive's. The
@@ -131,10 +125,10 @@ class TestMachineAttemptsNote:
 class TestTheAlertBody:
     def test_critical_carries_a_lever(self):
         msg = format_alert_message(
-            "mirror_landing", Severity.CRITICAL, [_issue("mirror_missing_rows")], [],
+            "mirror_landing", Severity.CRITICAL, [_issue("order_versions_stalled")], [],
         )
         assert "→ " in msg
-        assert "meta.mirror_state" in msg
+        assert "the archive is the only chronicle" in msg
 
     def test_the_lever_is_last_because_it_is_what_gets_acted_on(self):
         msg = format_alert_message(

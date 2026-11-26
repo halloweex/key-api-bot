@@ -99,6 +99,8 @@ from bot.handlers_legacy import (
     check_and_broadcast_milestones,
     # The button on an alert
     alert_action_callback,
+    # The Monday question about promotions
+    promo_ask_callback,
 )
 
 __all__ = [
@@ -184,4 +186,5 @@ __all__ = [
     "check_and_broadcast_milestones",
     # The button on an alert
     "alert_action_callback",
+    "promo_ask_callback",
 ]

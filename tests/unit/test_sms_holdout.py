@@ -38,18 +38,6 @@ class TestItIsStable:
         ).stdout.strip()
         assert out == str([holdout_bucket(b, "aug-sale") for b in range(20)])
 
-    def test_it_does_not_depend_on_the_engine_that_asked(self):
-        """The whole reason this left SQL: DuckDB's `hash()` has no PostgreSQL
-        equivalent, so the arm has to be decided before either store is
-        involved. Nothing here can reach a database — pinned by import."""
-        import core.sms_holdout as module
-
-        source = module.__file__
-        with open(source, encoding="utf-8") as handle:
-            text = handle.read()
-        for forbidden in ("duckdb", "asyncpg", "SELECT", "core.pg"):
-            assert forbidden not in text
-
 
 class TestItIsRedrawnPerCampaign:
     def test_the_same_person_is_not_always_the_one_withheld(self):

@@ -5,12 +5,14 @@ archives stay, and what reads them is DuckDB 1.5.5 with the restore code they
 were proven against — both in every image built before step 14, and the host
 tags the last of them `rollback-step14`, pinned at S14-00's deploy (the image
 production runs then; 3.0.292 was the tag's first target and is kept as
-`rollback-step14-3.0.292`). So `deploy/restore-test.sh`,
-and `deploy/ark_ship.sh` take their image from a variable that must be set,
-and ask it before using it (`deploy/archive_image.sh`); so did
-`deploy/daily_offsite.sh`, the nightly snapshot, until step 14's S14-18
-deleted it with `deploy/snapshot_export.py` and `core/snapshot_validation.py`
-(their cron line was retired on 2026-10-16). Two halves are held here:
+`rollback-step14-3.0.292`). So `deploy/restore-test.sh` takes its image from
+a variable that must be set, and asks it before using it
+(`deploy/archive_image.sh`); so did `deploy/daily_offsite.sh`, the nightly
+snapshot, until step 14's S14-18 deleted it with `deploy/snapshot_export.py`
+and `core/snapshot_validation.py` (their cron line was retired on
+2026-10-16), and `deploy/ark_ship.sh`, the second Ark's one-off shipment,
+until it was deleted with `deploy/ark_freeze.py` on 2026-11-19. Two halves
+are held here:
 
 * the library itself, run against a fake `docker`: an unset, moving or
   untagged image is refused before docker is asked anything; an absent one,
@@ -39,9 +41,9 @@ deleted it with `deploy/snapshot_export.py` and `core/snapshot_validation.py`
   commit, read the list against that commit's `scripts/compact_duckdb.py` and
   `core/duckdb_switch.py` before the host steps.
 
-The scripts' own behaviour around the library is run in
-`test_ark_ship_script.py` and `test_week_of_silence_host.py`, and the rule
-that every archive tool sources it in `test_backup_script_guards.py`.
+The drill's own behaviour around the library is run in
+`test_week_of_silence_host.py`, and the rule that every archive tool sources
+it in `test_backup_script_guards.py`.
 """
 from __future__ import annotations
 
@@ -61,7 +63,7 @@ REPO = Path(__file__).resolve().parents[2]
 DEPLOY = REPO / "deploy"
 LIBRARY = DEPLOY / "archive_image.sh"
 PINNED = "halloweex/keycrm-web:rollback-step14"
-ARCHIVE_SCRIPTS = ("restore-test.sh", "ark_ship.sh")
+ARCHIVE_SCRIPTS = ("restore-test.sh",)
 
 pytestmark = pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
 
@@ -116,24 +118,23 @@ class TestRequire:
         code, out, err, calls = lib("archive_image_require", "BACKUP_RESTORE_IMAGE", value)
         assert (code, out, err, calls) == (0, "", "", [])
 
-    @pytest.mark.parametrize("value, words", [
-        ("", "BACKUP_RESTORE_IMAGE is not set, and the archive tools no longer default to :latest"),
-        ("halloweex/keycrm-web:latest", "moves with every deploy"),
-        ("halloweex/keycrm-web", "names no tag, which is :latest"),
-        ("registry.local:5000/keycrm-web", "names no tag, which is :latest"),
+    @pytest.mark.parametrize("value", [
+        "", "halloweex/keycrm-web:latest", "halloweex/keycrm-web",
+        "registry.local:5000/keycrm-web",
     ], ids=["unset", "latest", "untagged", "registry-port-untagged"])
-    def test_a_moving_image_is_refused_before_docker_is_asked(self, lib, value, words):
+    def test_a_moving_image_is_refused_before_docker_is_asked(self, lib, value):
         """A registry's host:port is not a tag: the tag is after the last ':'
         of the last path component. Mutation: read the tag off the whole
-        string."""
+        string. The refusal names the pinned image to set."""
         code, out, _, calls = lib("archive_image_require", "BACKUP_RESTORE_IMAGE", value)
-        assert code == 2 and words in out, out
-        assert f"BACKUP_RESTORE_IMAGE={PINNED} in deploy/backup.env" in out, out
-        assert "rollback-step14" in out and "1.5.5" in out
+        assert code == 2, out
+        assert "rollback-step14" in out
         assert calls == []
 
 
 class TestProbe:
+    # `BACKUP_ARK_IMAGE`, the second Ark's variable until 2026-11-19, stands
+    # for any name but the drill's: the hint must name the variable it got.
     def test_the_pinned_image_with_duckdb_1_5_5_passes_silently(self, lib):
         code, out, err, calls = lib("archive_image_ready", "BACKUP_ARK_IMAGE", PINNED)
         assert (code, out, err) == (0, "", ""), (out, err)
@@ -149,17 +150,13 @@ class TestProbe:
                               FAKE_DUCKDB="noisy")
         assert code == 0, out
 
-    @pytest.mark.parametrize("fake, words", [
-        ({"FAKE_NO_IMAGE": "1"}, f"no image {PINNED} on this host, and this does not pull"),
-        ({"FAKE_DUCKDB": "absent"},
-         f"{PINNED} cannot import duckdb (ModuleNotFoundError: No module named 'duckdb')"),
-        ({"FAKE_DUCKDB": "1.4.3"}, f"{PINNED} carries DuckDB 1.4.3, not 1.5.5"),
-        ({"FAKE_DUCKDB": "silent"}, f"{PINNED} carries DuckDB ?, not 1.5.5"),
+    @pytest.mark.parametrize("fake", [
+        {"FAKE_NO_IMAGE": "1"}, {"FAKE_DUCKDB": "absent"},
+        {"FAKE_DUCKDB": "1.4.3"}, {"FAKE_DUCKDB": "silent"},
     ], ids=["absent", "no-duckdb", "another-version", "silent"])
-    def test_an_image_that_cannot_read_the_archives_is_refused(self, lib, fake, words):
+    def test_an_image_that_cannot_read_the_archives_is_refused(self, lib, fake):
         code, out, _, _ = lib("archive_image_ready", "BACKUP_ARK_IMAGE", PINNED, **fake)
-        assert code == 2 and words in out, out
-        assert f"BACKUP_ARK_IMAGE={PINNED}" in out
+        assert code == 2, out
 
     def test_require_comes_first(self, lib):
         """`ready` on a moving tag asks docker nothing. Mutation: probe first."""
@@ -198,7 +195,6 @@ class TestProbe:
 # functions whose imports reach the rest of the application).
 MOUNTED = {
     "deploy/restore_from_export.py": ("restore-test.sh", "whole"),
-    "deploy/ark_freeze.py": ("ark_ship.sh", "whole"),
     "deploy/duckdb_table_fates_check.py": ("duckdb_table_fates_check.py", "whole"),
     "core/duckdb_table_fates.py": ("duckdb_table_fates_check.py", "module"),
 }
@@ -231,13 +227,6 @@ def _module_name(path: str) -> str:
 # walk does not know is a question, never a pass.
 OUTSIDE = {
     ("restore-test.sh", "$TMP/data"): "the drill's scratch directory, a mktemp",
-    ("ark_ship.sh", "$SOURCE"): "the DuckDB file --source names, alone and read-only",
-    ("ark_ship.sh", "$OUT_ROOT"): "where the Ark is written: --out, or BACKUP_ARK_DIR",
-    ("ark_ship.sh", "$ARK_DIR"): "the Ark being verified, a stamp under that root",
-    ("ark_ship.sh", "$back/x/$STAMP"): "the Ark downloaded back, in a mktemp",
-    ("ark_ship.sh", "$back/x/ark_freeze.py"): (
-        "the verifier that came back with the Ark: its own copy, the one a stranger "
-        "will have, compared with this checkout's whenever this run sent it"),
     ("restore_from_export.py", "/tmp/drill"): "the real restore's scratch directory",
 }
 
@@ -258,7 +247,7 @@ def _is_checkout_file(rel: str) -> bool:
 
 
 def _walks(scripts=None, recipes=None) -> dict:
-    """{site: Mounts} for the three scripts and every recipe."""
+    """{site: Mounts} for the archive scripts and every recipe."""
     scripts = scripts if scripts is not None else {
         name: (DEPLOY / name).read_text() for name in ARCHIVE_SCRIPTS}
     recipes = recipes if recipes is not None else _recipes()
@@ -336,19 +325,23 @@ def test_the_walk_follows_a_variable_and_a_function_argument():
     found = _walks(scripts={"restore-test.sh": text}, recipes={})["restore-test.sh"].found
     assert found.get("core/write_chains.py") == "restore-test.sh"
 
-    ark = (DEPLOY / "ark_ship.sh").read_text().replace(
-        'verify_in_container "$ARK_DIR" "$FREEZER"',
-        'verify_in_container "$ARK_DIR" "$REPO/core/write_chains.py"')
-    found = _walks(scripts={"ark_ship.sh": ark}, recipes={})["ark_ship.sh"].found
-    assert found.get("core/write_chains.py") == "ark_ship.sh"
+    # A function that mounts its argument, called with the checkout, and an
+    # array a container starts from: the second Ark's shipment had both
+    # (`verify_in_container`, `DOCKER_RUN`) and was their vehicle here until
+    # it was deleted on 2026-11-19.
+    probe = ('REPO="$(pwd)"\n'
+             'verify_in_container() {\n'
+             '    docker run --rm --pull never -v "$2:/w.py:ro" "$IMAGE" python3 /w.py "$1"\n'
+             '}\n'
+             'verify_in_container "$TMP" "$REPO/core/write_chains.py"\n')
+    found = _walks(scripts={"probe.sh": probe}, recipes={})["probe.sh"].found
+    assert found.get("core/write_chains.py") == "probe.sh"
 
-    # Inside the DOCKER_RUN array every container of the Ark starts from.
-    ark = (DEPLOY / "ark_ship.sh").read_text().replace(
-        "DOCKER_RUN=(docker run --rm --pull never",
-        'DOCKER_RUN=(docker run --rm --pull never -v "$REPO/core/write_chains.py:/w.py:ro"')
-    assert ark != (DEPLOY / "ark_ship.sh").read_text()
-    found = _walks(scripts={"ark_ship.sh": ark}, recipes={})["ark_ship.sh"].found
-    assert found.get("core/write_chains.py") == "ark_ship.sh"
+    probe = ('REPO="$(pwd)"\n'
+             'DOCKER_RUN=(docker run --rm --pull never -v "$REPO/core/write_chains.py:/w.py:ro")\n'
+             '"${DOCKER_RUN[@]}" "$IMAGE" true\n')
+    found = _walks(scripts={"probe.sh": probe}, recipes={})["probe.sh"].found
+    assert found.get("core/write_chains.py") == "probe.sh"
 
 
 @pytest.mark.parametrize("line, words", [

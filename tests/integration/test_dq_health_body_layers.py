@@ -12,7 +12,7 @@ import pytest
 
 from core import dq_journal
 from core.data_quality import WATCHED_LAYERS
-from tests.integration.test_dq_journal_pg import DSN, NOW, _kwargs, pool  # noqa: F401
+from tests.helpers.dq_journal_pg import DSN, NOW, _kwargs, pool  # noqa: F401
 
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 

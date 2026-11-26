@@ -46,6 +46,7 @@ Skipped without the pilot or without a Postgres; the pilot's own workflow
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -69,7 +70,9 @@ DSN = os.getenv("KS_PG_DSN")
 REPORT = os.getenv("KS_RUST_PILOT_REPORT")
 
 pytestmark = [
-    pytest.mark.skipif(not PILOT, reason="needs the Rust pilot service at KS_RUST_PILOT_URL"),
+    pytest.mark.skipif(not (PILOT or os.getenv("KS_TREND_GOLDEN")), reason=(
+        "needs the Rust pilot service at KS_RUST_PILOT_URL (or KS_TREND_GOLDEN, for "
+        "the drift sensor alone)")),
     pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN"),
 ]
 
@@ -335,7 +338,10 @@ def seeded():
 
 
 @pytest_asyncio.fixture
-async def services(seeded, monkeypatch):
+async def python_app(seeded, monkeypatch):
+    """The Python app in-process, as a hardcoded admin, on the seed; and the
+    session cookie, which the pilot's client sends too. The drift sensor
+    (below) asks it alone."""
     from core import read_fallback
     from core.permissions import ADMIN_USER_IDS
     from web.main import app
@@ -358,13 +364,23 @@ async def services(seeded, monkeypatch):
     try:
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
             async with httpx.AsyncClient(transport=transport, base_url="http://python",
-                                         cookies={SESSION_COOKIE: cookie}) as python, \
-                    httpx.AsyncClient(base_url=PILOT, timeout=60,
-                                      cookies={SESSION_COOKIE: cookie}) as rust:
-                yield python, rust
+                                         cookies={SESSION_COOKIE: cookie}) as python:
+                yield python, cookie
     finally:
         _Clock.pinned = None
         await pool.close()
+
+
+@pytest_asyncio.fixture
+async def services(python_app):
+    from web.routes.auth import SESSION_COOKIE
+
+    if not PILOT:
+        pytest.skip("needs the Rust pilot service at KS_RUST_PILOT_URL")
+    python, cookie = python_app
+    async with httpx.AsyncClient(base_url=PILOT, timeout=60,
+                                 cookies={SESSION_COOKIE: cookie}) as rust:
+        yield python, rust
 
 
 # A client key per request, and per run: the pilot's limiter outlives a test
@@ -410,6 +426,11 @@ def _differs(py, rs) -> Optional[str]:
         return f"status {py.status_code} against {rs.status_code}: {rs.text[:200]}"
     if py.headers.get("content-type") != rs.headers.get("content-type"):
         return f"content-type {py.headers.get('content-type')} against {rs.headers.get('content-type')}"
+    # GZipMiddleware's `Vary: Accept-Encoding`, which the app's stack puts on
+    # every answer with a body and the pilot sets without compressing (`vary`
+    # in its http.rs).
+    if py.headers.get("vary") != rs.headers.get("vary"):
+        return f"vary {py.headers.get('vary')!r} against {rs.headers.get('vary')!r}"
     try:
         a, b = json.loads(py.content), json.loads(rs.content)
     except ValueError:
@@ -569,3 +590,88 @@ async def test_what_the_page_sends(services):
         + json.dumps(mismatches[:5], ensure_ascii=False, indent=1))
     assert sum(handed.values()) == (len(PAGE_INSTANTS) * len(views) * len(fc.sales_types())
                                     * len(fc.compare_types()) * len(PAGE_FILTERS)), handed
+
+
+# ─── The drift sensor ─────────────────────────────────────────────────────────
+#
+# The drift sensor (the Rust plan, revision 3, step 2): a Python change that
+# moves the trend's answer fails CI, in the pull request that made it.
+#
+# The Rust pilot answers `GET /api/revenue/trend` byte for byte as the Python
+# app does, and its harness proves that on every pull request that builds the
+# pilot. This asks less and needs no Rust: Python's own answers to the
+# harness's matrix, on the harness's seed and frozen instants, against the
+# digests recorded in `golden/rust_trend_answers.json` — one per request, of
+# the status, the content type, `Vary` and the body. A change anywhere in what
+# the trend answers from — the route, `parse_period`, the validators, the Gold
+# reader, the stored forecast, FastAPI's and pydantic's error bodies, the GZip
+# header — that moves one answer fails here, naming the requests it moved.
+#
+# What to do then: port the change to `rust/crates/ks-api` (the pilot's harness
+# proves the port), and record the answers again, on a Postgres nothing else
+# seeded:
+#
+#     KS_TREND_GOLDEN=write KS_PG_DSN=postgresql://... TZ=UTC pytest \\
+#         tests/integration/test_rust_pilot_trend.py::test_python_answers_the_trend_as_recorded
+#
+# It runs in the `drift` job of .github/workflows/rust-pilot.yml, and in the
+# harness job beside the pilot. Its own job, because Silver's
+# sales types read the managers table, and the main suite's tests may leave
+# rows there that would move an answer for no reason of the trend's. Anywhere
+# else it skips.
+
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden", "rust_trend_answers.json")
+GOLDEN_MODE = os.getenv("KS_TREND_GOLDEN", "")
+
+ABOUT = ("Python's answers to GET /api/revenue/trend, the Rust pilot's matrix "
+         "(tests/integration/test_rust_pilot_trend.py), one sha256 prefix per request "
+         "of its status, content type, Vary and body. Written by "
+         "KS_TREND_GOLDEN=write pytest tests/integration/test_rust_pilot_trend.py::test_python_answers_the_trend_as_recorded; read by "
+         "the drift job in .github/workflows/rust-pilot.yml.")
+
+
+def _digest(response) -> str:
+    head = (f"{response.status_code}\n{response.headers.get('content-type')}\n"
+            f"{response.headers.get('vary')}\n")
+    return hashlib.sha256(head.encode() + response.content).hexdigest()[:12]
+
+
+def _matrix(cases: List[Tuple[str, str]]) -> str:
+    return hashlib.sha256("\n".join(f"{now} {query}" for query, now in cases).encode()).hexdigest()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(GOLDEN_MODE not in ("check", "write"), reason=(
+    "the drift sensor compares with KS_TREND_GOLDEN=check (the drift and harness "
+    "jobs of .github/workflows/rust-pilot.yml)"))
+async def test_python_answers_the_trend_as_recorded(python_app):
+    python, _cookie = python_app
+    cases = _cases()
+    answers = []
+    for query, now in cases:
+        _Clock.pinned = datetime.fromisoformat(now)
+        response = await python.get(f"{ROUTE}?{query}",
+                                    headers={"X-Real-IP": f"drift-{_RUN}-{next(_CLIENTS)}"})
+        answers.append(_digest(response))
+
+    if GOLDEN_MODE == "write":
+        with open(GOLDEN, "w", encoding="utf-8") as out:
+            out.write(json.dumps({"about": ABOUT, "matrix": _matrix(cases),
+                                      "requests": len(cases), "answers": answers},
+                                 indent=1) + "\n")
+        return
+
+    with open(GOLDEN, encoding="utf-8") as recorded:
+        golden = json.load(recorded)
+    assert golden["matrix"] == _matrix(cases), (
+        "The harness's matrix changed, so the recorded answers no longer line up with "
+        "it. Record them again (KS_TREND_GOLDEN=write, see this module's docstring) in "
+        "the same pull request.")
+    moved = [{"query": query, "now": now, "recorded": old, "now_answers": new}
+             for (query, now), old, new in zip(cases, golden["answers"], answers) if old != new]
+    assert not moved, (
+        f"Python's trend now answers {len(moved)} of {len(cases)} requests differently "
+        "from what the Rust pilot was proven against. Port the change to "
+        "rust/crates/ks-api, then record the answers again (KS_TREND_GOLDEN=write, see "
+        "this module's docstring). First moved: "
+        + json.dumps(moved[:10], ensure_ascii=False, indent=1))

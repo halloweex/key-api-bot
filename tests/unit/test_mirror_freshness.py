@@ -110,7 +110,7 @@ class TestRunCanary:
     @staticmethod
     def _healthy():
         import httpx  # noqa: F401  (kept local; the module fixture builds one)
-        from tests.unit.test_canary import _healthy_payload
+        from tests.helpers.canary_payload import _healthy_payload
 
         payload = _healthy_payload()
         payload["mirrors"] = {"bronze.orders": _ok()}
