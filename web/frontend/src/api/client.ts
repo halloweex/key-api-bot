@@ -80,6 +80,7 @@ import type {
   SmsCampaignsResponse,
   TgBotActivityResponse,
   SmsCampaignResultsResponse,
+  SmsSendProgress,
   SmsSendResult,
   SmsTestSendResult,
   SmsChannel,
@@ -900,6 +901,14 @@ export const api = {
 
   getSmsCampaigns: (options?: FetchOptions) =>
     fetchApi<SmsCampaignsResponse>('/customers/sms-campaigns', undefined, options),
+
+  /** How far a send has got, polled by the send dialog while it runs. */
+  getSmsSendProgress: (campaign: string, options?: FetchOptions) =>
+    fetchApi<SmsSendProgress>(
+      `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send-progress`,
+      undefined,
+      options,
+    ),
 
   getSmsCampaignResults: (
     campaign: string, windowDays: number, deliveredOnly = false,

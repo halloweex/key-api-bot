@@ -70,9 +70,20 @@ _GSM7_BASIC = set(
 _GSM7_EXTENDED = set("^{}\\[~]|€")
 
 
-# The gateway refuses more than this in one call with 405
-# NOT_ALLOWED_RECIPIENTS_LIMIT, so a campaign larger than it has to be split.
-RECIPIENTS_PER_REQUEST = 5000
+# Recipients per call to the gateway. The gateway accepts up to 5 000 and
+# refuses more with 405 NOT_ALLOWED_RECIPIENTS_LIMIT. The batch is smaller than
+# that because of how long the gateway takes to answer.
+#
+# It answers about 4.5 s per 1 000 recipients. Measured on 2026-11-26: 1 000
+# took 4.4–4.8 s and 403 took 1.6 s. A full 5 000 takes about 22 s, longer than
+# the 20 s the client waited. That day the first 5 000 of an 8 403 roster timed
+# out: the gateway sent them, the answer was lost, and the other 3 403 never
+# left. The rest went out by hand in batches of 1 000.
+#
+# A smaller batch keeps each answer far inside `send_timeout`. The send route
+# also records each batch as it comes back, so a failure loses one batch's
+# answer, not the whole roster's.
+RECIPIENTS_PER_REQUEST = 1000
 
 
 class TurboSmsError(Exception):
@@ -274,6 +285,14 @@ class TurboSmsConfig:
         default_factory=lambda: float(os.getenv("TURBOSMS_PRICE_PER_PART", "1.28"))
     )
     timeout: float = 20.0
+    # How long one send request may take. It is separate from `timeout`,
+    # because a send is not a quick call: the gateway answers only once the
+    # whole batch is queued, about 4.5 s per 1 000 recipients. A read timeout
+    # here does not mean "nothing went". The batch was uploaded and the gateway
+    # may still send it, so a short wait turns a slow success into an unknown
+    # outcome. 120 s is over twenty times what one batch of
+    # RECIPIENTS_PER_REQUEST needs.
+    send_timeout: float = 120.0
 
     @property
     def configured(self) -> bool:
@@ -363,7 +382,10 @@ class TurboSmsClient:
             self._client = None
             self._owns_client = False
 
-    async def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _post(
+        self, path: str, payload: Dict[str, Any], timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """POST to the gateway. `timeout` overrides the client's own for this call."""
         if not self.config.configured:
             raise TurboSmsError(
                 "TurboSMS is not configured — set TURBOSMS_TOKEN and TURBOSMS_SENDER",
@@ -373,7 +395,10 @@ class TurboSmsClient:
             raise TurboSmsError("client used outside its context manager", unsent=True)
 
         try:
-            response = await self._client.post(path, json=payload)
+            response = await self._client.post(
+                path, json=payload,
+                timeout=httpx.USE_CLIENT_DEFAULT if timeout is None else timeout,
+            )
         except httpx.RequestError as e:
             raise TurboSmsError(
                 f"TurboSMS request failed: {type(e).__name__}: {e}",
@@ -447,7 +472,9 @@ class TurboSmsClient:
                 payload["viber"] = viber_payload
 
             try:
-                body = await self._post("/message/send.json", payload)
+                body = await self._post(
+                    "/message/send.json", payload, timeout=self.config.send_timeout,
+                )
             except TurboSmsError as e:
                 # Anything already away must survive the failure, or the retry
                 # messages those people a second time.

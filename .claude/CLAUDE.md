@@ -159,6 +159,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
 | `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit); `follow_up_of=X` freezes a follow-up |
 | `/api/customers/sms-campaigns/{c}/send` | Send through TurboSMS (POST, needs `sms` edit); requires `confirm_campaign`, refuses on balance or a recent overlap — see "What stops an SMS send" |
+| `/api/customers/sms-campaigns/{c}/send-progress` | How far a send has got, counts read off the roster (`sms` view); the send dialog polls it while the send runs |
 | `/api/customers/sms/channels` | Configured channels and tariff; `include_balance=true` adds the gateway's balance |
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
 | `/api/traffic/funnel` | The site's purchase funnel from GA4, live: the period, the one before and a year ago, by traffic type, channel group and device (tab `traffic`). `country=ua` (default: Ukraine and the visitors GA4 could not place; abroad is mostly bots) or `all`. 503 "not configured" without the key — see "Воронка сайта из GA4" |
@@ -1774,6 +1775,31 @@ gateway, and each refusal hands the claim back with nothing sent:
   a refusal, not a pass. Every refusal is a 409 whose JSON carries `reason`
   (`recent_campaign`, `balance_short`, `balance_unreadable`) and the figures.
 - **A guard that raises** releases the claim before the error goes out.
+
+**The send goes in batches of 1 000, each on record as it lands** (2026-11-26).
+The gateway takes up to 5 000 recipients a call, but it answers about 4.5 s per
+1 000. On 2026-11-26 the first 5 000 of an 8 403 roster outlived the client's
+20 s read timeout. The gateway sent them anyway. The route wrote its whole
+answer once, at the end, so nothing was recorded and the other 3 403 never
+left. They went out by hand, and the first half's message ids were mapped back
+through `/message/status.json`. What replaced that:
+
+- **Batches and timeouts.** `RECIPIENTS_PER_REQUEST` is 1 000. A send request
+  waits `send_timeout` (120 s), and every other gateway call waits 20 s.
+  nginx gives the send path 300 s.
+- **Each batch on record at once.** It is written as soon as it lands
+  (`record_sms_send(final=False)`). The final write fills only what is still
+  empty, so a delivery report that landed in between keeps its status.
+- **A batch with no answer is `OutcomeUnknown`.** That means a read timeout or a
+  5xx. Those members count as sent and in the cost, and are never swept to
+  `NotSent`. The batches after it are `NotSent`. The send answers 502
+  `gateway_outcome_unknown` with `accepted`, `uncertain` and `notSent`, and
+  the claim stays.
+- **Progress on screen.** The dialog polls `GET …/send-progress` (counts read
+  off the roster) and draws a bar. It says a failure in place, not only in a
+  toast, and then offers only "Close".
+- **Not built yet: a "send the rest" button.** It would send only to `NotSent`
+  and never to `OutcomeUnknown`.
 
 **Since step 14's S14-08 `/sms` has one store, Postgres**, and the guards are
 proved on it. `_sms_tx`, `_sms_run` and the audience lost their DuckDB

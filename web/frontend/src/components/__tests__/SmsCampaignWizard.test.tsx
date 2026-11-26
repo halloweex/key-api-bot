@@ -196,6 +196,7 @@ vi.mock('../../hooks/useApi', () => ({
   }),
   useSendTestSms: () => ({ mutate: vi.fn(), isPending: false }),
   useSendSmsCampaign: () => ({ mutate: vi.fn(), isPending: false }),
+  useSmsSendProgress: () => ({ data: undefined }),
   useSmsBalance: () => ({
     data: { sms: true, viber: false, smsSender: 'KoreanStory', viberSender: null,
             pricePerPart: 1.28, balance: 50_000 },
