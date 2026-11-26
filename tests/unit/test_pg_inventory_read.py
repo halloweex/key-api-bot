@@ -1,8 +1,8 @@
 """The `/inventory` statements: what no engine may be left to decide.
 
 The numbers are `tests/integration/test_inventory_two_engines.py`'s job,
-against a real Postgres; that the router asks Postgres and nothing else since
-step 14's S14-07 is `tests/unit/test_tab_routers_postgres_only.py`'s. What is
+against a real Postgres; that a failure of its engine is refused naming `inventory` is
+the route sweep in `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`)'s. What is
 proved here is the shape of the routed statements and of the methods around
 them: no ordered result left to the planner, and no routing call inside a
 `self.connection()` block — the store lock is not reentrant, and a nested
