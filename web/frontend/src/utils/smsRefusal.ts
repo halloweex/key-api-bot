@@ -64,7 +64,7 @@ function fill(body: Figures, t: T): Record<string, string | number> {
   out.parts = `${parts} ${plural(t, 'word.parts', parts)}`
   // A send that broke halfway: who is confirmed, who is in the batch that got
   // no answer, who was never sent.
-  for (const key of ['accepted', 'uncertain', 'notSent']) {
+  for (const key of ['accepted', 'uncertain', 'notSent', 'pending']) {
     out[key] = formatNumber(num(body[key]) ?? 0)
   }
 

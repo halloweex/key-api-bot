@@ -257,3 +257,156 @@ class TestTheProgress:
 
     def test_it_needs_a_session(self, client, store):
         assert client.get(PROGRESS).status_code in (401, 403)
+
+
+# ─── Sending the rest ───────────────────────────────────────────────────────
+
+REST = "/api/customers/sms-campaigns/bf/send-rest"
+
+
+class _RestStore(_Store):
+    """A campaign that went out with a text and left `not_sent` behind."""
+
+    def __init__(self, not_sent: int = 2 * RECIPIENTS_PER_REQUEST + 300,
+                 pending: int = 0, text: str | None = "BLACK FRIDAY -50%"):
+        super().__init__()
+        self.claimed = True                      # the first send's claim
+        self.text = text
+        self.not_sent = [t for t in self.targets[:not_sent]]
+        self.pending = pending
+        self.claims = 0
+
+    async def get_sms_campaign_message(self, campaign):
+        if campaign != "bf":
+            return None
+        return {"sentAt": "2026-11-26T19:52:36+02:00", "messageText": self.text,
+                "messageParts": 1}
+
+    async def get_sms_send_progress(self, campaign):
+        return {"campaign": campaign, "total": ROSTER, "done": ROSTER - self.pending,
+                "pending": self.pending, "accepted": ROSTER - len(self.not_sent),
+                "stoplisted": 0, "failed": 0, "uncertain": 0,
+                "notSent": len(self.not_sent), "sentAt": None}
+
+    async def claim_sms_resend(self, campaign):
+        self.claims += 1
+        taken, self.not_sent = self.not_sent, []
+        return taken
+
+
+@pytest.fixture
+def rest_store(monkeypatch):
+    fake = _RestStore()
+
+    async def _get_store():
+        return fake
+
+    monkeypatch.setattr("web.routes.api.customers.get_store", _get_store)
+    return fake
+
+
+def _rest(client, name="bf"):
+    return client.post(REST, params={"confirm_campaign": name}, headers=_headers())
+
+
+class TestSendingTheRest:
+    def test_only_the_never_sent_go_in_batches_with_the_campaigns_text(
+        self, client, rest_store, gateway,
+    ):
+        r = _rest(client)
+
+        assert r.status_code == 200, r.text
+        assert gateway.batches == [RECIPIENTS_PER_REQUEST, RECIPIENTS_PER_REQUEST, 300]
+        final = rest_store.final_write
+        assert final["resend"] is True, "recipients and cost add to the campaign's"
+        assert final["message_text"] == "BLACK FRIDAY -50%"
+        assert len(final["accepted"]) == 2 * RECIPIENTS_PER_REQUEST + 300
+        assert r.json()["unsent"] == 0
+
+    def test_the_name_typed_back_is_checked_before_anything_is_taken(
+        self, client, rest_store, gateway,
+    ):
+        r = _rest(client, name="other")
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "confirm_mismatch"
+        assert rest_store.claims == 0 and gateway.batches == []
+
+    def test_nothing_never_sent_is_nothing_to_send(self, client, rest_store, gateway):
+        rest_store.not_sent = []
+        r = _rest(client)
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "nothing_to_resend"
+        assert gateway.batches == []
+
+    def test_a_campaign_that_left_as_a_file_has_no_text_to_send(
+        self, client, rest_store, gateway,
+    ):
+        rest_store.text = None
+        r = _rest(client)
+
+        assert r.json()["reason"] == "nothing_to_resend"
+        assert rest_store.claims == 0
+
+    def test_not_while_a_send_of_it_is_still_running(self, client, rest_store, gateway):
+        rest_store.pending = 1000
+        r = _rest(client)
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "send_in_progress"
+        assert rest_store.claims == 0
+
+    def test_a_balance_short_of_the_rest_takes_nobody(
+        self, client, rest_store, gateway, monkeypatch,
+    ):
+        from core.turbosms import TurboSmsClient as Real
+        original = gateway.handler
+
+        def poor(request):
+            if request.url.path.strip("/") == "user/balance.json":
+                return httpx.Response(200, json={
+                    "response_code": 0, "response_status": "OK",
+                    "response_result": {"balance": 100.0},
+                })
+            return original(request)
+
+        config = TurboSmsConfig(token="test-token-not-real", sender="KoreanStory",
+                                price_per_part=1.28)
+        monkeypatch.setattr(
+            "web.routes.api.customers.TurboSmsClient",
+            lambda *a, **kw: Real(config, transport=httpx.MockTransport(poor)),
+        )
+        r = _rest(client)
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "balance_short"
+        assert rest_store.claims == 0 and gateway.batches == []
+
+    def test_a_batch_with_no_answer_is_uncertain_and_the_write_still_happens(
+        self, client, rest_store, gateway,
+    ):
+        gateway.fail_batch = 2
+        r = _rest(client)
+
+        assert r.status_code == 502
+        body = r.json()
+        assert body["reason"] == "gateway_outcome_unknown"
+        assert (body["accepted"], body["uncertain"], body["notSent"]) == (
+            RECIPIENTS_PER_REQUEST, RECIPIENTS_PER_REQUEST, 300)
+        final = rest_store.final_write
+        assert final["resend"] is True
+        assert len(final["uncertain"]) == RECIPIENTS_PER_REQUEST
+
+    def test_a_refused_first_batch_is_written_so_the_rest_is_sendable_again(
+        self, client, rest_store, gateway,
+    ):
+        """The final write is what puts the taken targets back to NotSent."""
+        gateway.fail_batch, gateway.failure = 1, "refuse"
+        r = _rest(client)
+
+        assert r.status_code == 502
+        assert r.json()["reason"] == "gateway_refused"
+        assert rest_store.final_write is not None
+        assert rest_store.final_write["accepted"] == {}
+        assert rest_store.releases == 0, "the first send's claim is never released"

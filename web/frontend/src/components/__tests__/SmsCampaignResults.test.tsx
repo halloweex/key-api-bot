@@ -91,7 +91,10 @@ describe('SmsCampaignResults', () => {
     const overall = screen.getAllByRole('row')[1]
     expect(within(overall).getByText('4.0%')).toBeTruthy()   // 40 / 1000 messaged
     expect(within(overall).getByText('3.3%')).toBeTruthy()   // 4 / 120 control
-    expect(within(overall).getByText('40 / 1,000')).toBeTruthy()
+    // Buyers out of the arm, said as such: "21 / 8 403" read as 21 recipients.
+    expect(within(overall).getByText('sms.boughtOf({"bought":"40","of":"1,000"})')).toBeTruthy()
+    // Each arm's own revenue, in both cells (the fixture gives both ₴90 000).
+    expect(within(overall).getAllByText('sms.armRevenue({"revenue":"₴90,000"})')).toHaveLength(2)
   })
 
   it('says the campaign is unmeasured when no interval clears zero', () => {
@@ -423,7 +426,7 @@ describe('the rows are segments', () => {
     const rows = screen.getAllByRole('row')
     expect(rows).toHaveLength(2)                       // header + the one arm
     expect(within(rows[1]).getByText('sms.tier.ALL')).toBeTruthy()
-    expect(within(rows[1]).getByText('40 / 3,635')).toBeTruthy()
+    expect(within(rows[1]).getByText('sms.boughtOf({"bought":"40","of":"3,635"})')).toBeTruthy()
     expect(screen.queryByText('sms.overall')).toBeNull()
     expect(screen.getAllByText('+1.1')).toHaveLength(1)
   })

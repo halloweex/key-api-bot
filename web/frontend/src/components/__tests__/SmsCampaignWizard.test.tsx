@@ -197,6 +197,7 @@ vi.mock('../../hooks/useApi', () => ({
   useSendTestSms: () => ({ mutate: vi.fn(), isPending: false }),
   useSendSmsCampaign: () => ({ mutate: vi.fn(), isPending: false }),
   useSmsSendProgress: () => ({ data: undefined }),
+  useSendRestOfSmsCampaign: () => ({ mutate: vi.fn(), isPending: false }),
   useSmsBalance: () => ({
     data: { sms: true, viber: false, smsSender: 'KoreanStory', viberSender: null,
             pricePerPart: 1.28, balance: 50_000 },
@@ -855,9 +856,9 @@ describe('the send dialog', () => {
 // ─── One numbering on the page ──────────────────────────────────────────────
 
 describe('SmsCampaignWizard, in the page it belongs to', () => {
-  it('is step one of the page, and says so', () => {
+  it('carries no "Step" label: the owner asked for them gone (2026-11-26)', () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
-    expect(screen.getByText(/sms\.step.*"n":1/)).toBeInTheDocument()
+    expect(screen.queryByText(/sms\.step/)).toBeNull()
   })
 
   it('numbers none of its own stages', () => {

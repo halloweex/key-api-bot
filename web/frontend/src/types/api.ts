@@ -1893,6 +1893,8 @@ export interface SmsSendProgress {
   uncertain: number
   notSent: number
   sentAt: string | null
+  /** Recipients per request to the gateway: what "batch N of M" counts in. */
+  batchSize?: number
 }
 
 /** Viber is registered separately from SMS, so availability differs. */

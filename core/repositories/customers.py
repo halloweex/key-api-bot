@@ -2361,6 +2361,7 @@ class CustomersMixin:
         *,
         uncertain: Sequence[int] = (),
         final: bool = True,
+        resend: bool = False,
     ) -> Dict[str, Any]:
         """
         Store the gateway's answer and stamp the campaign as sent.
@@ -2390,6 +2391,11 @@ class CustomersMixin:
         messaged" can reach someone who may already have the message. They
         count as recipients and in the cost: that reading cannot understate
         what was spent.
+
+        ``resend=True`` is the final write of sending the rest
+        (`send-rest`). Its recipients and cost are added to what the campaign
+        already recorded. The send time, text and tariff stay as the first send
+        wrote them: results are measured from the first send.
 
         Stoplisted buyers are also written to marketing_optouts: the provider
         already refuses to deliver to them, and without a record of our own they
@@ -2506,16 +2512,27 @@ class CustomersMixin:
                 if message_parts and price_per_part is not None
                 else None
             )
-            await tx.none(
-                """
-                UPDATE {campaigns}
-                SET sent_at = ?, message_text = ?, message_parts = ?,
-                    recipients_sent = ?, price_per_part = ?, cost_total = ?
-                WHERE campaign = ?
-                """,
-                [sent_at or datetime.now(), message_text, message_parts,
-                 sent, price_per_part, cost_total, campaign],
-            )
+            if resend:
+                await tx.none(
+                    """
+                    UPDATE {campaigns}
+                    SET recipients_sent = COALESCE(recipients_sent, 0) + ?,
+                        cost_total = COALESCE(cost_total, 0) + ?
+                    WHERE campaign = ?
+                    """,
+                    [sent, cost_total or 0, campaign],
+                )
+            else:
+                await tx.none(
+                    """
+                    UPDATE {campaigns}
+                    SET sent_at = ?, message_text = ?, message_parts = ?,
+                        recipients_sent = ?, price_per_part = ?, cost_total = ?
+                    WHERE campaign = ?
+                    """,
+                    [sent_at or datetime.now(), message_text, message_parts,
+                     sent, price_per_part, cost_total, campaign],
+                )
 
         return {
             "campaign": campaign,
@@ -2524,6 +2541,53 @@ class CustomersMixin:
             "failed": len(failed),
             "notSent": len(not_sent),
         }
+
+    async def get_sms_campaign_message(self, campaign: str) -> Optional[Dict[str, Any]]:
+        """When the campaign went out and with what text, or None if not frozen.
+
+        Sending the rest of a send that broke off reuses this text: one
+        campaign is one message, whoever received it in which batch.
+        """
+        row = await self._sms_run(
+            "SELECT sent_at, message_text, message_parts FROM {campaigns} "
+            "WHERE campaign = ?",
+            [campaign], mode="one",
+        )
+        if row is None:
+            return None
+        values = cast(Sequence[Any], row)
+        return {
+            "sentAt": values[0].isoformat() if values[0] else None,
+            "messageText": values[1],
+            "messageParts": values[2],
+        }
+
+    async def claim_sms_resend(self, campaign: str) -> List[Dict[str, Any]]:
+        """Take the targets a send never reached, to send them the rest.
+
+        One statement, so two presses cannot both take the same people. The
+        second finds nobody left at NotSent. The taken targets go back to
+        unanswered, as if a send had just started on them. The send's final
+        write then marks whoever still got no answer as NotSent again.
+        OutcomeUnknown is never taken: the gateway may already have sent
+        those people the message.
+        """
+        rows = await self._sms_run(
+            """
+            UPDATE {members}
+            SET delivery_status = NULL, delivered = NULL
+            WHERE campaign = ? AND assignment = 'target'
+              AND delivery_status = 'NotSent' AND message_id IS NULL
+            RETURNING buyer_id, phone
+            """,
+            [campaign],
+        )
+        # Ordered the way the first send ordered its roster.
+        taken = cast(List[Sequence[Any]], rows or [])
+        return sorted(
+            ({"buyerId": r[0], "phone": r[1]} for r in taken),
+            key=lambda t: t["buyerId"],
+        )
 
     async def get_sms_send_progress(self, campaign: str) -> Dict[str, Any]:
         """How far a send has got, read off the roster.

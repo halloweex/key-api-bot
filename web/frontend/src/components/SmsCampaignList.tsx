@@ -9,6 +9,7 @@ import { DataTable, Th, Td, Tr } from './DataTable'
 import { useSmsCampaigns, useMarkSmsCampaignSent } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { SmsSendDialog } from './SmsSendDialog'
+import { SmsSendShortfall } from './SmsSendShortfall'
 import { BarChart3, ChevronDown, ChevronRight } from 'lucide-react'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import { describeFrozenCriteria } from '../utils/smsConditionText'
@@ -46,7 +47,10 @@ export const SmsCampaignList = memo(function SmsCampaignList({
   const { data, isLoading } = useSmsCampaigns()
   const markSent = useMarkSmsCampaignSent()
   const { addToast } = useToast()
-  const [sending, setSending] = useState<SmsCampaignSummary | null>(null)
+  // The send, or the rest of one that broke off.
+  const [sending, setSending] = useState<
+    { campaign: SmsCampaignSummary; mode: 'send' | 'rest' } | null
+  >(null)
   const [open, setOpen] = useState<string | null>(null)
 
   const campaigns = data?.campaigns ?? []
@@ -67,7 +71,6 @@ export const SmsCampaignList = memo(function SmsCampaignList({
     <Card>
       <CardHeader>
         <div className="flex items-center gap-2">
-          <Badge tone="slate" shape="tag">{t('sms.step', { n: 2 })}</Badge>
           <CardTitle>{t('sms.campaignsTitle')}</CardTitle>
         </div>
         <p className="text-xs text-slate-500 mt-0.5">{t('sms.campaignsDesc')}</p>
@@ -134,9 +137,15 @@ export const SmsCampaignList = memo(function SmsCampaignList({
                     </Td>
                     <Td>
                       {c.sentAt ? (
-                        <span className="text-xs text-slate-600 whitespace-nowrap">
-                          {formatDateTime(c.sentAt)}
-                        </span>
+                        <>
+                          <span className="text-xs text-slate-600 whitespace-nowrap">
+                            {formatDateTime(c.sentAt)}
+                          </span>
+                          <SmsSendShortfall
+                            campaign={c.campaign}
+                            onSendRest={() => setSending({ campaign: c, mode: 'rest' })}
+                          />
+                        </>
                       ) : (
                         <Badge tone="orange">{t('sms.notSent')}</Badge>
                       )}
@@ -159,7 +168,7 @@ export const SmsCampaignList = memo(function SmsCampaignList({
                       )}
                       {!c.sentAt && (
                         <div className="flex justify-end gap-2">
-                          <Button size="sm" onClick={() => setSending(c)}>
+                          <Button size="sm" onClick={() => setSending({ campaign: c, mode: 'send' })}>
                             {t('sms.send')}
                           </Button>
                           {/* Kept for the manual path: a file handed to the
@@ -245,7 +254,11 @@ export const SmsCampaignList = memo(function SmsCampaignList({
       </CardContent>
 
       {sending && (
-        <SmsSendDialog campaign={sending} onClose={() => setSending(null)} />
+        <SmsSendDialog
+          campaign={sending.campaign}
+          mode={sending.mode}
+          onClose={() => setSending(null)}
+        />
       )}
     </Card>
   )
