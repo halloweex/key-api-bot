@@ -23,7 +23,6 @@ right is a question about the business and it is not settled here.
 
 import pytest
 
-from core.pg_warehouse_dq import KNOWN_STATUS_IDS
 from core.models import (
     LEGACY_STATUS_NAMES,
     LOST_STATUS_GROUP_ID,
@@ -100,19 +99,10 @@ class TestTheListMatchesTheSource:
         assert 20 not in {int(s) for s in OrderStatus.return_statuses()}
         assert MEASURED_GROUPS[20] != LOST_STATUS_GROUP_ID
 
-    @pytest.mark.parametrize("status_id", sorted(MEASURED_GROUPS))
-    def test_every_live_status_is_known_to_the_domain_check(self, status_id):
-        assert status_id in KNOWN_STATUS_IDS
-
-    @pytest.mark.parametrize("status_id", [3, 4, 8, 10, 11, 18, 24])
-    def test_the_statuses_that_were_missing_are_registered(self, status_id):
-        """24 is «Зібрано для самовивозу» — an ordinary parcel awaiting pickup.
-        It would have been reported as an unknown status."""
-        assert status_id in KNOWN_STATUS_IDS
-
-    def test_every_excluded_status_is_also_a_known_one(self):
-        """18 was excluded from revenue and absent from the known set at once."""
-        assert {int(s) for s in OrderStatus.return_statuses()} <= KNOWN_STATUS_IDS
+    # Whether each status KeyCRM serves is known to the integrity layer's
+    # domain check is held over a real Postgres: `tests/integration/
+    # test_pg_warehouse_dq.py::TestTheLandingTwins::
+    # test_every_status_keycrm_serves_adds_nothing`.
 
 
 class TestOrderPrefersTheGroup:

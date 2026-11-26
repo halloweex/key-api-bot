@@ -305,6 +305,34 @@ class TestTheFindings:
         assert after["pg_own_entity_orders"].count == 5
         assert not [o for o in facts.own_entity.orders if o[4]]
 
+    @pytest.mark.asyncio
+    async def test_the_row_values_twin_recomputes_the_rule_the_rebuild_applied(self, own):
+        """The twin recomputes every Silver row from bronze and files each
+        stored row that differs. Recomputing without the entity's rule, it
+        would file every one of the entity's orders for ever. Landed three
+        hours before a rebuild, every row is one that rebuild held, so none is
+        waved through as in flight; and a stored row that does count the
+        entity as revenue is filed, by id."""
+        from core.pg_warehouse_dq import RowValues, check_pg_warehouse, read_facts
+
+        _store, pool = own
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE bronze.orders SET mirrored_at = now() - interval '3 hours'")
+        await derive(pool)
+
+        facts = await read_facts(pool=pool)
+        assert isinstance(facts.silver_row_values, RowValues), facts.silver_row_values
+        assert facts.silver_row_values.compared == len(ORDERS)
+        found = [i.check_name for i in check_pg_warehouse(facts)]
+        assert not [n for n in found if n.startswith("pg_silver_row_values")], found
+
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE silver.orders SET is_active_source = TRUE WHERE id = 9102")
+        facts = await read_facts(pool=pool)
+        issue = {i.check_name: i for i in check_pg_warehouse(facts)}["pg_silver_row_values"]
+        assert issue.sample_ids == (9102,)
+        assert facts.silver_row_values.columns == (("is_active_source", 1),)
+
 
 class TestTheNameRuleInPostgres:
     @pytest.mark.asyncio

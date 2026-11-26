@@ -24,7 +24,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from core import pg_orders_write
 from core.store import AnalyticsStore
+from tests.helpers.app_client import signed_in
+from tests.helpers.orders_sync import (
+    keycrm_serving_orders, order_payload, orders_held, orders_in_postgres, versions_of)
 from tests.pg_orders_seed import insert_orders, needs_pg, pg_orders  # noqa: F401 — the fixture
 
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -137,31 +141,30 @@ async def _refresh(store, client, upsert):
 class TestTheRefreshReachesThem:
     @needs_pg
     @pytest.mark.asyncio
-    async def test_a_status_moved_on_a_backdated_order_is_written(self, pg_orders):
-        """The review's reproduction, end to end: Postgres holds order 777 at
-        status 12, KeyCRM says 19, and only the by-id pass can see it."""
-        store, pool = pg_orders
-        created, ordered = _kyiv_noon(35), _kyiv_noon(5)
-        recent = _keycrm_order(1, created=_kyiv_noon(3), ordered=_kyiv_noon(3),
-                               status_id=12)
-        client = _KeyCRM([recent, _keycrm_order(777, created=created, ordered=ordered,
-                                                status_id=19)])
-        writes = []
+    async def test_a_status_moved_on_a_backdated_order_is_written(self, monkeypatch):
+        """The review's reproduction, end to end through the admin's door:
+        Postgres holds order 777 at status 12, KeyCRM says 19 under the same
+        `updated_at`, and the window's listing does not return it. KeyCRM is
+        asked for 777 alone, and the cancellation is written and archived
+        once; order 1, in the window and unchanged, gains no version."""
+        created, ordered, recent = _kyiv_noon(35), _kyiv_noon(5), _kyiv_noon(3)
+        async with orders_in_postgres(), signed_in("admin") as admin:
+            await pg_orders_write.upsert_orders_with_expenses([
+                order_payload(777, created=created, ordered=ordered),
+                order_payload(1, created=recent)])
+            served = keycrm_serving_orders(monkeypatch, [
+                order_payload(1, created=recent),
+                order_payload(777, created=created, ordered=ordered, status=19, group=6)])
 
-        async def upsert(orders, force_update=False, skip_products=False):
-            writes.append(([o["id"] for o in orders], force_update, skip_products))
-            return len(orders), 0
+            r = await admin.post("/api/sync/refresh-statuses",
+                                 params={"days": 30, "background": "false"})
 
-        await _insert(pool, 777, created=created, ordered=ordered)
-        await _insert(pool, 1, created=_kyiv_noon(3), ordered=_kyiv_noon(3))
-        stats = await _refresh(store, client, upsert)
-        # The window pass: headers only, and 777 is not in it.
-        assert writes[0] == ([1], True, True), writes
-        assert client.by_id == [777]
-        # Then 777 by id, whole, and forced: KeyCRM did not move updated_at.
-        assert writes[1] == ([777], True, False)
-        assert len(writes) == 2
-        assert stats["backdated"] == {"found": 1, "repaired": 1, "failed": 0}
+            assert r.status_code == 200, r.text
+            assert r.json()["stats"]["backdated"] == {"found": 1, "repaired": 1, "failed": 0}
+            assert served.by_id == [777]
+            assert (await orders_held())[777]["status"] == 19
+            assert await versions_of(777) == [("create", 12), ("change", 19)]
+            assert await versions_of(1) == [("create", 12)]
 
     @needs_pg
     @pytest.mark.asyncio
