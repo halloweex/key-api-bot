@@ -947,6 +947,16 @@ export const api = {
       { timeout: 10 * 60 * 1000 },
     ),
 
+  // The rest of a send that broke off: only the targets never handed to the
+  // gateway, with the campaign's own text. Same long wait as the send.
+  sendRestOfSmsCampaign: (campaign: string, confirmCampaign: string) =>
+    fetchApiMutation<SmsSendResult>(
+      `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send-rest`
+        + `?confirm_campaign=${encodeURIComponent(confirmCampaign)}`,
+      'POST',
+      { timeout: 10 * 60 * 1000 },
+    ),
+
   sendTestSms: (
     phone: string, text: string,
     channel: SmsChannel = 'sms', viber?: SmsViberOptions,

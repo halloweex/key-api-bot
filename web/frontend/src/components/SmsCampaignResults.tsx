@@ -3,7 +3,6 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Select } from './Select'
-import { Badge } from './Badge'
 import { Checkbox } from './Checkbox'
 import { EmptyState } from './EmptyState'
 import { SkeletonCard } from './Skeleton'
@@ -314,7 +313,6 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <Badge tone="slate" shape="tag">{t('sms.step', { n: 3 })}</Badge>
               <CardTitle>{t('sms.resultsTitle')}</CardTitle>
               <SmsResultsGuide />
             </div>

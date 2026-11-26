@@ -30,39 +30,57 @@ function json(status: number, body: unknown): Response {
   })
 }
 
-/** How far a send has got, a batch of 1 000 every ~4.5 s, as the roster says. */
-function fakeProgress(startedAt: number) {
+type Roster = { accepted: number; uncertain: number; notSent: number; failed: number }
+
+/** How far a send has got, a batch of 1 000 every ~4.5 s, as the roster says;
+ *  once it has answered, what it left behind (`after`). */
+function fakeProgress(startedAt: number, after: Roster | null) {
   const total = CAMPAIGN.target
+  if (after) {
+    return { campaign: CAMPAIGN.campaign, total, done: total, pending: 0, stoplisted: 0,
+             sentAt: null, batchSize: 1000, ...after }
+  }
   const done = Math.min(total, Math.floor((Date.now() - startedAt) / 4500) * 1000)
   return { campaign: CAMPAIGN.campaign, total, done, pending: total - done, accepted: done,
-           stoplisted: 0, failed: 0, uncertain: 0, notSent: 0, sentAt: null }
+           stoplisted: 0, failed: 0, uncertain: 0, notSent: 0, sentAt: null, batchSize: 1000 }
 }
 
-function installFakeApi(refusal: Record<string, unknown>, status: number) {
+function installFakeApi(refusal: Record<string, unknown>, status: number, after: Roster | null) {
   const real = window.fetch.bind(window)
   let startedAt = Date.now()
+  let answered = after !== null && status === 200
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input.toString(), window.location.origin)
     if (url.pathname === '/api/customers/sms/channels') {
       return json(200, { sms: true, viber: false, smsSender: 'KoreanStory', viberSender: null,
                          pricePerPart: 1.28, balance: 12_500 })
     }
-    if (url.pathname.endsWith('/send-progress')) return json(200, fakeProgress(startedAt))
+    if (url.pathname.endsWith('/send-progress')) {
+      return json(200, fakeProgress(startedAt, answered ? after : null))
+    }
+    if (url.pathname.endsWith('/send-rest')) {
+      const sent = after?.notSent ?? 0
+      after = after && { ...after, accepted: after.accepted + sent, notSent: 0 }
+      return json(200, { campaign: CAMPAIGN.campaign, channel: 'sms', accepted: sent,
+                         stoplisted: 0, failed: 0, notSent: 0, unsent: 0, partialError: null })
+    }
     if (url.pathname.endsWith('/send')) {
       startedAt = Date.now()
       // A send that never answers stays "under way", so the bar can be watched.
       if (status === 0) return new Promise<Response>(() => {})
+      answered = true
       return json(status, refusal)
     }
     return real(input, init)
   }
 }
 
-function Harness({ refusal, status = 409, children }: {
-  refusal: Record<string, unknown>; status?: number; children: ReactNode
+function Harness({ refusal, status = 409, after = null, children }: {
+  refusal: Record<string, unknown>; status?: number; after?: Roster | null
+  children: ReactNode
 }) {
   const [client] = useState(() => {
-    installFakeApi(refusal, status)
+    installFakeApi(refusal, status, after)
     return new QueryClient({ defaultOptions: { queries: { retry: false } } })
   })
   return (
@@ -124,11 +142,28 @@ export const Sending: Story = {
  */
 export const BrokeHalfway: Story = {
   render: (args) => (
-    <Harness status={502} refusal={{
+    <Harness status={502} after={{ accepted: 2000, uncertain: 1000, notSent: 635, failed: 0 }}
+             refusal={{
       detail: 'TurboSMS request failed: ReadTimeout. 2000 recipients are confirmed sent …',
       reason: 'gateway_outcome_unknown', error: 'TurboSMS request failed: ReadTimeout',
       accepted: 2000, uncertain: 1000, notSent: 635,
     }}>
+      <SmsSendDialog {...args} />
+    </Harness>
+  ),
+}
+
+/**
+ * Opened from the campaign list after a reload, for the rest of a send that
+ * broke off: the campaign's own text, only the never-sent, the name typed back.
+ */
+export const SendTheRest: Story = {
+  args: { mode: 'rest', campaign: { ...CAMPAIGN, sentAt: '2026-11-26T17:52:36Z',
+                                    messageText: '🖤BLACK FRIDAY до -50%! Лише до 30.11 на koreanstory.com.ua',
+                                    messageParts: 1 } },
+  render: (args) => (
+    <Harness status={200} refusal={{}}
+             after={{ accepted: 2000, uncertain: 1000, notSent: 635, failed: 0 }}>
       <SmsSendDialog {...args} />
     </Harness>
   ),

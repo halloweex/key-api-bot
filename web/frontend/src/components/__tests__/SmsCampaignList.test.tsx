@@ -25,10 +25,15 @@ vi.mock('react-i18next', () => ({
 }))
 
 const campaigns = vi.hoisted(() => ({ current: [] as Partial<SmsCampaignSummary>[] }))
+// What each sent campaign's roster says its send did not reach.
+const shortfall = vi.hoisted(() => ({
+  current: { notSent: 0, uncertain: 0 } as { notSent: number; uncertain: number },
+}))
 
 vi.mock('../../hooks/useApi', () => ({
   useSmsCampaigns: () => ({ data: { campaigns: campaigns.current }, isLoading: false }),
   useMarkSmsCampaignSent: () => ({ mutate: vi.fn(), isPending: false }),
+  useSmsSendProgress: () => ({ data: shortfall.current }),
 }))
 vi.mock('../Toast', () => ({ useToast: () => ({ addToast: vi.fn() }) }))
 vi.mock('../SmsSendDialog', () => ({ SmsSendDialog: () => null }))
@@ -89,5 +94,39 @@ describe('SmsCampaignList, as the way into a campaign', () => {
     expect(screen.queryByText('sms.viewResults')).not.toBeInTheDocument()
     await userEvent.click(screen.getByText('aug-summer-sale'))
     expect(screen.getByText('sms.detailsMessage')).toBeInTheDocument()
+  })
+})
+
+
+// ─── A send that broke off can be finished from the list ────────────────────
+
+describe('SmsCampaignList, after a send that broke off', () => {
+  it('says what the send did not reach and offers the rest', () => {
+    campaigns.current = [campaign({ campaign: 'black-friday' })]
+    shortfall.current = { notSent: 3403, uncertain: 1000 }
+    render(<SmsCampaignList onSelect={() => {}} />)
+
+    expect(screen.getByText(/sms\.shortfall\.notSent/)).toBeTruthy()
+    expect(screen.getByText(/sms\.shortfall\.uncertain/)).toBeTruthy()
+    expect(screen.getByText(/sms\.sendRest/)).toBeTruthy()
+  })
+
+  it('says nothing for a campaign sent whole', () => {
+    campaigns.current = [campaign()]
+    shortfall.current = { notSent: 0, uncertain: 0 }
+    render(<SmsCampaignList onSelect={() => {}} />)
+
+    expect(screen.queryByText(/sms\.shortfall/)).toBeNull()
+    expect(screen.queryByText(/sms\.sendRest/)).toBeNull()
+  })
+
+  it('offers no rest when only an unanswered batch is left', () => {
+    // The gateway may have sent those: they are never sent again.
+    campaigns.current = [campaign()]
+    shortfall.current = { notSent: 0, uncertain: 1000 }
+    render(<SmsCampaignList onSelect={() => {}} />)
+
+    expect(screen.getByText(/sms\.shortfall\.uncertain/)).toBeTruthy()
+    expect(screen.queryByText(/sms\.sendRest/)).toBeNull()
   })
 })
