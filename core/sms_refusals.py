@@ -32,6 +32,9 @@ REFUSAL_REASONS: Dict[str, str] = {
     "balance_short": "the gateway's balance does not cover the send",
     "gateway_refused": "the gateway refused the request; nothing left, the claim is released",
     "gateway_outcome_unknown": "the gateway's answer is unknown; the claim is kept",
+    # The rest of a send that broke off — POST /customers/sms-campaigns/{campaign}/send-rest
+    "nothing_to_resend": "no target is marked NotSent: there is no rest to send",
+    "send_in_progress": "a send of this campaign is still under way",
     # The freeze — POST /customers/sms-campaigns
     "name_placeholder": "the campaign is named 'default', the preview's placeholder",
     "roster_truncated": "the audience is larger than the limit and would freeze truncated",
