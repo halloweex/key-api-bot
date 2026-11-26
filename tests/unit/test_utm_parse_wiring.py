@@ -9,14 +9,16 @@ canary check went with them.
 
 What is pinned here: the router's two branches, the incremental under the
 layer lock, the derivation's last step and its isolation from the
-derivation's own faults, and that `/api/health` watches the table with a
-limit of its own which the canary judges. The doors' walks are in
-`tests/unit/test_utm_parse_doors.py`; the parse against a real Postgres in
+derivation's own faults — a parse fault over the test Postgres — and that
+`/api/health` watches the table with a limit of its own which the canary
+judges. The doors are in `tests/unit/test_utm_parse_doors.py`; the parse as
+the derivation's last step against a real Postgres also in
 `tests/integration/test_pg_own_derivation.py`.
 """
 from __future__ import annotations
 
 import asyncio
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -25,8 +27,16 @@ from core import pg_utm_parse
 # The derivation's own harness: one tick through `_run_pg_derivation` with
 # every Postgres step patched, and the fixtures it runs under.
 from tests.helpers.derivation import _derive, job, mode  # noqa: F401
+from tests.helpers.traffic_utm_derivation import (
+    ORDER_DAY,
+    ORDER_ID,
+    TOTAL,
+    derivation_over_postgres,
+)
+from tests.integration.pg_tab_seed import needs_postgres
 
 UTM = pg_utm_parse.UTM_TABLE
+DSN = os.getenv("KS_PG_DSN")
 
 
 def _bounded(coro, timeout=10):
@@ -208,17 +218,31 @@ class TestTheDerivationsLastStep:
         assert parse.await_count == 1
         assert result["order_utm"] == {"parsed": 1, "rows": 9}
 
-    def test_a_parse_fault_is_not_the_derivations(self, utm_postgres):
-        """Its failure is its own: in `silver.order_utm`'s watermark, written
-        by the parse, and judged by the canary from there. The derivation it
-        followed succeeded and says so."""
-        parse = AsyncMock(side_effect=RuntimeError("bad comment"))
-        result, mocks, alert = _derive_with_parse(utm_postgres, parse)
+
+@needs_postgres
+class TestAParseFaultOverPostgres:
+    @pytest.mark.asyncio
+    async def test_a_parse_fault_is_not_the_derivations(self, monkeypatch):
+        """The parser raising on every comment costs `silver.order_utm` its
+        run and nothing else: the derivation it follows rebuilt Silver and
+        Gold, validated them, journaled a clean run and settled the debt; the
+        failure is in the UTM table's own watermark, where the canary judges
+        it, and never the derivation's verdict."""
+        async with derivation_over_postgres(DSN, monkeypatch) as derivation:
+            with patch("core.pg_utm_parse.utm_columns",
+                       side_effect=RuntimeError("bad comment")):
+                result = await derivation.scheduler._run_pg_derivation()
+            state = await derivation.state()
+
         assert result["status"] == "success" and result["validation_passed"] is True
-        assert result["order_utm"] == {"status": "error",
-                                       "error": "RuntimeError: bad comment"}
-        assert mocks["record_failure"].await_count == 0
-        assert alert.await_count == 0
+        assert result["order_utm"]["status"] == "error"
+        assert state["journal"] == [(None, True)]
+        assert state["owed"] is False
+        assert state["silver"] == {ORDER_ID: TOTAL}
+        assert state["gold"] == {(ORDER_DAY, "retail"): TOTAL}
+        assert state["verdicts"] == 0
+        assert state["failures"] == {
+            "silver.orders": 0, "gold.daily_revenue": 0, UTM: 1}
 
 
 # ─── /api/health and the canary ───────────────────────────────────────────────
