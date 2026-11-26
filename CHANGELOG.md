@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.362
+
+- fix(sms): send in batches of 1 000, record each as it lands, show progress
+- tests: assert what the code does, not how it is written (batch 1)
+- tests: no test module imports another; a signed-in app client over Postgres
+
+
 ## 3.0.361
 
 - Compare each order's discount with KeyCRM in the 05:30 reconciliation
