@@ -347,7 +347,7 @@ class MarginMixin:
         params: list = [since, until]
         retail_where = self._margin_base_where("retail", params)
         params += [since, until]
-        return await self._margin_run(f"""
+        rows = await self._margin_run(f"""
             WITH RECURSIVE {_ROOT_CAT},
             retail AS (
                 SELECT l.sku, SUM(l.quantity) AS units, SUM(l.line_amount) AS revenue
@@ -375,6 +375,8 @@ class MarginMixin:
             WHERE s.quantity > 0
             ORDER BY s.offer_id
         """, params)
+        # `_margin_run` answers one row or a list; this is always the list.
+        return list(rows or [])
 
     async def get_margin_alerts(
         self,
