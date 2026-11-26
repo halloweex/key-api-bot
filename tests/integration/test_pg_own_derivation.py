@@ -8,6 +8,7 @@ validation, until the owner's decision O6 of 2026-11-11.)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -169,6 +170,26 @@ class TestTheJob:
         assert await scheduler._run_pg_derivation() == {"skipped": True, "reason": "floor"}
         assert await _signal(pool) == (2, 1)
 
+    @pytest.mark.asyncio
+    async def test_the_journal_alone_carries_the_floor_across_a_restart(self, own, monkeypatch):
+        """A new process has derived nothing and stamped nothing of its own;
+        the journal row the old one wrote is what keeps a deploy from
+        resetting the floor."""
+        from core.pg_landing import write_orders
+        from core.scheduler import BackgroundScheduler
+
+        pool, scheduler, _a = own
+        assert (await scheduler._run_pg_derivation())["status"] == "success"
+        BackgroundScheduler._pg_derive_ran = False          # the restart
+        BackgroundScheduler._pg_derive_started = None
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
+        await write_orders([_order(IDS[0])], [], replace_products=False)
+
+        assert await BackgroundScheduler()._run_pg_derivation() == {
+            "skipped": True, "reason": "floor"}
+        assert await _signal(pool) == (2, 1)
+        assert len(await _runs(pool)) == 1
+
 
 class TestAFailureLeavesTheRebuildOwed:
     @pytest.mark.asyncio
@@ -228,6 +249,70 @@ class TestEveryStageLeavesAWatermark:
         pool, scheduler, _a = own
         assert (await scheduler._run_pg_derivation())["status"] == "success"
         assert await _watermark(pool, "meta.derivation_runs") is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_fails_validation_still_clears_the_tail(self, own):
+        """Not passed is a finding, journalled and alerted as
+        `validation_failed`; the tail itself completed, so the failure an
+        earlier tail left is cleared."""
+        from core.pg_landing import _record_failure, write_orders
+
+        pool, scheduler, _a = own
+        await _record_failure("meta.derivation_runs", "RuntimeError: an earlier tail")
+        assert (await _watermark(pool, "meta.derivation_runs"))["failures_since_ok"] == 1
+        await write_orders([_order(IDS[0]), _order(IDS[1], days_ago=3)], [],
+                           replace_products=False)
+        with TestValidation._tamper(
+            "DELETE FROM gold.daily_revenue WHERE source_id IS NULL AND ctid IN"
+            " (SELECT ctid FROM gold.daily_revenue WHERE source_id IS NULL LIMIT 1)"):
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and result["validation_passed"] is False, result
+        state = await _watermark(pool, "meta.derivation_runs")
+        assert state["failures_since_ok"] == 0 and state["last_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_signal_read_failing_inside_the_lock_is_not_a_dropped_mark(
+            self, own, monkeypatch):
+        """The signal's row in meta.mirror_state counts dropped marks, and the
+        canary pages on it by that name; a failed read inside the lock is the
+        journal's and the alert's. Made real here: the signal's row is
+        removed while the tick, past its first read, waits for the layer
+        lock (as it waits behind the ClickHouse ship)."""
+        from core import pg_silver
+
+        pool, scheduler, _a = own
+        lock = asyncio.Lock()
+        monkeypatch.setattr(pg_silver, "PG_LAYER_LOCK", lock)
+        async with pool.acquire() as conn:
+            kept = await conn.fetchrow(
+                "SELECT * FROM meta.derivation_signal WHERE layer = 'warehouse'")
+        await lock.acquire()
+        tick = asyncio.ensure_future(scheduler._run_pg_derivation())
+        try:
+            for _ in range(1000):
+                if scheduler._heavy_job_lock.locked() or tick.done():
+                    break
+                await asyncio.sleep(0.01)
+            assert scheduler._heavy_job_lock.locked(), "the tick did not reach the layer lock"
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM meta.derivation_signal WHERE layer = 'warehouse'")
+        finally:
+            lock.release()
+            try:
+                result = await asyncio.wait_for(tick, 30)
+            finally:
+                columns = list(kept.keys())
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        f"INSERT INTO meta.derivation_signal ({', '.join(columns)}) VALUES "
+                        f"({', '.join(f'${i}' for i in range(1, len(columns) + 1))})"
+                        " ON CONFLICT (layer) DO NOTHING", *kept.values())
+
+        assert result["status"] == "error" and result["stage"] == "signal", result
+        assert await _signal_state(pool) is None
+        (run,) = await _runs(pool)
+        assert run["error"].startswith("signal:")
 
     @pytest.mark.asyncio
     async def test_an_unwritable_journal_does_not_lift_the_floor(self, own, monkeypatch):
