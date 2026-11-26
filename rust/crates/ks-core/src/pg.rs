@@ -5,7 +5,7 @@
 //!
 //! The pool opens lazily, as `get_pool()` does: a worker that never reaches
 //! Postgres never connects. Its connections carry `application_name`
-//! `ks-worker`, so `pg_stat_activity` tells the Rust worker from the Python
+//! `ks-rust-worker`, so `pg_stat_activity` tells the Rust worker from the Python
 //! app.
 
 use std::future::Future;
@@ -18,7 +18,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use crate::config;
 
 pub const DSN_ENV: &str = "KS_PG_DSN";
-pub const APPLICATION_NAME: &str = "ks-worker";
+pub const APPLICATION_NAME: &str = "ks-rust-worker";
 
 /// What a Postgres call can fail with.
 #[derive(Debug)]

@@ -6,17 +6,23 @@
 //! ks-worker run
 //! ```
 //!
-//! `ch-sync` is one run, its answer on stdout in Python's keys
-//! (`_run_ch_sync`'s result), exit 1 when either half failed. `--dump`
-//! writes every statement sent to ClickHouse (`statements.jsonl`) and every
-//! finding (`findings.jsonl`): what the harness compares with Python's.
+//! `ch-sync` is one run, its answer on stdout: Python's keys
+//! (`_run_ch_sync`'s result) when it ran, exit 1 when either half failed; or
+//! a skip record in К0's shape — `{"skipped": true, "reason": …}` — exit 0,
+//! because a skip is not an error. `--dump` writes every statement sent to
+//! ClickHouse (`statements.jsonl`) and every finding (`findings.jsonl`):
+//! what the harness compares with Python's.
+//!
+//! The live run (`--target live`) is the job's only when К0's switch says so:
+//! `meta.chain_watermarks['executor:ch_sync']` exactly `rust`. Anything else
+//! is `executed_by_python`, and nothing is sent anywhere. Either target then
+//! takes its lease — `ch_sync` for live, `ch_sync:shadow` for the shadow —
+//! and a lease another process holds is `lease_held`.
 //!
 //! `run` is the long-running worker: an hourly tick, as `IntervalTrigger(hours=1)`
-//! fires — the first an hour after the start. Each tick runs the live job
-//! only if the switch names Rust (`KS_EXECUTOR_CH_SYNC=rust`, the stand-in
-//! until К0's contract), and the shadow if `KS_WORKER_SHADOW` lists
-//! `ch_sync`; each under its own lease, a tick skipped when another process
-//! holds it. Nothing in К1 starts this process anywhere.
+//! fires — the first an hour after the start — each tick asking the switch
+//! afresh, and running the shadow too when `KS_WORKER_SHADOW` lists
+//! `ch_sync`. Nothing in К1 starts this process anywhere.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,7 +30,9 @@ use std::time::Duration;
 
 use ks_core::alert::{AlertSink, LogSink, MemorySink, Severity};
 use ks_core::ch::{ClickHouse, Recorder};
-use ks_core::lease::{EnvSwitch, Executor, ExecutorSwitch, JobLease, PgAdvisoryLease, lease_name};
+use ks_core::lease::{
+    ChainSwitch, Executor, ExecutorSwitch, JobLease, PgAdvisoryLease, lease_key, lease_name,
+};
 use ks_core::pg::PgSettings;
 use ks_core::{ch, config};
 use ks_worker::ch_sync::{self, ChSync, HISTORY_CHUNK, JOB_ID, Names, Target};
@@ -78,6 +86,7 @@ fn parse(args: &[String]) -> Result<Once, String> {
     })
 }
 
+/// Python's own stand-down, in Python's shape: no `KS_CH_URL`.
 fn stood_down(reason: &str) -> Value {
     json!({ "skipped": reason, "history": { "skipped": reason } })
 }
@@ -90,8 +99,8 @@ fn has_error(result: &Value) -> bool {
     result.get("error").is_some() || result["history"].get("error").is_some()
 }
 
-/// The job once, under its lease. `None` from `ClickHouse::from_env` is
-/// Python's stand-down: no `KS_CH_URL`, nothing touched.
+/// The job once, if it is this process's to run: the switch for the live
+/// tables, then the target's lease.
 async fn run_once(
     settings: &PgSettings,
     pool: &PgPool,
@@ -101,15 +110,20 @@ async fn run_once(
     alerts: &dyn AlertSink,
 ) -> Value {
     if target == Target::Live {
-        match EnvSwitch.executor(JOB_ID).await {
+        match ChainSwitch::new(pool.clone(), settings.timeout)
+            .executor(JOB_ID)
+            .await
+        {
             Ok(Executor::Rust) => {}
             Ok(Executor::Python) => {
-                return stood_down(&format!(
-                    "{} says python runs {JOB_ID}",
-                    EnvSwitch::variable(JOB_ID)
-                ));
+                return json!({ "skipped": true, "reason": "executed_by_python", "executor": "python" });
             }
-            Err(error) => return stood_down(&error.to_string()),
+            Err(error) => {
+                tracing::warn!(
+                    "{JOB_ID}: the switch could not be read, so the run is not Rust's: {error}"
+                );
+                return json!({ "skipped": true, "reason": "switch_unreadable", "detail": error.to_string() });
+            }
         }
     }
     let name = lease_name(JOB_ID, target == Target::Shadow);
@@ -118,7 +132,14 @@ async fn run_once(
         .await
     {
         Ok(Some(lease)) => lease,
-        Ok(None) => return stood_down(&format!("another process holds {name}")),
+        Ok(None) => {
+            return json!({
+                "skipped": true,
+                "reason": "lease_held",
+                "lease": name,
+                "lease_key": lease_key(&name).to_string(),
+            });
+        }
         Err(error) => return failed(&error.to_string()),
     };
     let result = ChSync {
@@ -255,8 +276,7 @@ async fn run() -> ExitCode {
                 continue;
             }
         };
-        let targets = [Target::Live, Target::Shadow];
-        for target in targets {
+        for target in [Target::Live, Target::Shadow] {
             if target == Target::Shadow && !shadow {
                 continue;
             }
@@ -269,7 +289,9 @@ async fn run() -> ExitCode {
                 &LogSink,
             )
             .await;
-            if result.get("skipped").is_none() {
+            if result["reason"] == "executed_by_python" {
+                tracing::debug!(?target, "ClickHouse sync: {result}");
+            } else {
                 tracing::info!(?target, "ClickHouse sync: {result}");
             }
         }

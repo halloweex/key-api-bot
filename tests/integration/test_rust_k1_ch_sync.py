@@ -118,12 +118,14 @@ async def _python(chunk: Optional[int] = None) -> Tuple[Dict[str, Any], Sent, fl
     return result, sent, time.perf_counter() - started
 
 
-def _rust(tmp_path, *args: str, env: Optional[Dict[str, str]] = None):
-    """The worker's shadow run: its answer, what it sent, what it found."""
+def _rust(tmp_path, *args: str, env: Optional[Dict[str, str]] = None,
+          target: str = "shadow"):
+    """The worker's run, the shadow unless told: its answer, what it sent,
+    what it found."""
     dump = tmp_path / f"rust-{uuid.uuid4().hex[:8]}"
     started = time.perf_counter()
     process = subprocess.run(
-        [os.environ["KS_RUST_WORKER_BIN"], "ch-sync", "--target", "shadow",
+        [os.environ["KS_RUST_WORKER_BIN"], "ch-sync", "--target", target,
          "--dump", str(dump), *args],
         capture_output=True, text=True, timeout=600, env={**os.environ, **(env or {})},
     )
@@ -357,3 +359,95 @@ async def test_an_empty_silver_ships_empty_the_same(stores, tmp_path):
     _assert_same_statements(_shadowed(python_sent), rust_sent)
     await _assert_same_tables()
     await _assert_same_states(stores)
+
+
+# К0's contract (`core/job_lease.py`): the key is computed by Postgres here,
+# from the formula's own text, and handed to a session that holds it, so the
+# worker refusing to run proves it asked for the same number.
+LEASE_KEY_SQL = (
+    "SELECT ('x' || '6b734a4c' || "
+    "left(encode(sha256(convert_to($1, 'UTF8')), 'hex'), 8))::bit(64)::bigint"
+)
+SWITCH_KEY = "executor:ch_sync"
+
+
+async def _switch(pool, value: Optional[str]) -> None:
+    async with pool.acquire() as conn:
+        if value is None:
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key = $1", SWITCH_KEY)
+        else:
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                SWITCH_KEY, value)
+
+
+async def _live_bytes() -> Dict[str, str]:
+    return {live: await _ch(
+        f"SELECT * FROM {live} ORDER BY {ORDER_BY[live]} FORMAT TabSeparated")
+        for live, _ in SHADOW}
+
+
+@pytest.mark.asyncio
+async def test_the_switch_and_the_lease_decide_who_writes_the_live_tables(stores, tmp_path):
+    """The live tables are the worker's only when `executor:ch_sync` is
+    exactly `rust`, and only under ch_sync's lease; the shadow's lease is its
+    own. Run live, Rust leaves the tables as Python's run left them."""
+    import asyncpg
+
+    await _fresh(stores)
+    try:
+        python, _, _ = await _python()
+        assert not _failed(python), python
+        live = await _live_bytes()
+        before = await _states(stores)
+
+        for value in (None, "Rust", "RUST", "rust ", " rust", "python", ""):
+            await _switch(stores, value)
+            result, sent, _, _ = _rust(tmp_path, target="live")
+            assert result == {"skipped": True, "reason": "executed_by_python",
+                              "executor": "python"}, (value, result)
+            assert sent == [], value
+        assert await _states(stores) == before
+
+        await _switch(stores, "rust")
+        async with stores.acquire() as conn:
+            key = await conn.fetchval(LEASE_KEY_SQL, "ch_sync")
+            shadow_key = await conn.fetchval(LEASE_KEY_SQL, "ch_sync:shadow")
+        assert (key, shadow_key) == (7742613876423907721, 7742613876521340087)
+
+        holder = await asyncpg.connect(os.environ["KS_PG_DSN"])
+        try:
+            assert await holder.fetchval("SELECT pg_try_advisory_lock($1)", key)
+            result, sent, _, _ = _rust(tmp_path, target="live")
+            assert result == {"skipped": True, "reason": "lease_held",
+                              "lease": "ch_sync", "lease_key": str(key)}, result
+            assert sent == []
+            # The shadow takes its own lease, so it runs while ch_sync's is held.
+            shadow, shadow_sent, _, _ = _rust(tmp_path)
+            assert "skipped" not in shadow and not _failed(shadow), shadow
+            assert shadow_sent
+            assert await holder.fetchval("SELECT pg_advisory_unlock($1)", key)
+            assert await holder.fetchval("SELECT pg_try_advisory_lock($1)", shadow_key)
+            result, sent, _, _ = _rust(tmp_path)
+            assert result == {"skipped": True, "reason": "lease_held",
+                              "lease": "ch_sync:shadow", "lease_key": str(shadow_key)}, result
+            assert sent == []
+            assert await holder.fetchval("SELECT pg_advisory_unlock($1)", shadow_key)
+        finally:
+            await holder.close()
+
+        rust, rust_sent, _, _ = _rust(tmp_path, target="live")
+        assert rust == {"silver_rows": python["silver_rows"], "gold_rows": python["gold_rows"],
+                        "history": {"appended": 0}}, rust
+        assert rust_sent and not any("_rust" in sql for sql, _ in rust_sent)
+        assert await _live_bytes() == live
+        after = await _states(stores)
+        for row, rows in (("clickhouse.silver_orders", python["silver_rows"]),
+                          ("clickhouse.gold_daily_revenue", python["gold_rows"]),
+                          ("clickhouse.order_versions", 0)):
+            assert after[row] == (0, False, rows, True), (row, after[row])
+        _report(test="switch_and_lease", lease_key=key, shadow_key=shadow_key,
+                switch_values_refused=7)
+    finally:
+        await _switch(stores, None)

@@ -17,6 +17,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
+sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "rust_decimal"] }
 tokio = { version = "1", features = ["time"] }
 tracing = "0.1"
