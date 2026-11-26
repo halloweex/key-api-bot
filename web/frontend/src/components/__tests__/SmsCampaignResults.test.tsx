@@ -296,6 +296,36 @@ describe('SmsCampaignResults, read by someone who is not a statistician', () => 
     expect(screen.getByText(/sms\.headlineShort/)).toBeInTheDocument()
   })
 
+  it('states no payback at all while the verdict is withheld', () => {
+    // 2026-11-26, an hour after the send: "did not pay back by ₴10 756" in
+    // red, the cost subtracted from a margin nobody had had time to make.
+    renderWith(response({
+      costTotal: 10756,
+      overall: {
+        target: stats({ converted: 3 }), holdout: stats({ contacts: 926, converted: 0 }),
+        comparison: comparison({ verdictReady: false, eventsTarget: 3, eventsHoldout: 0 }),
+      },
+    }))
+    expect(screen.queryByText(/sms\.headlineShort|sms\.headlinePaidBack/)).toBeNull()
+    expect(screen.getByText(/sms\.headlinePaybackPending/)).toBeInTheDocument()
+    expect(screen.getByText(/sms\.headlineSpent/)).toBeInTheDocument()
+  })
+
+  it('says nothing has been bought yet, instead of "₴0 above the control"', () => {
+    renderWith(response({
+      costTotal: 10756,
+      overall: {
+        target: stats({ converted: 0 }), holdout: stats({ contacts: 926, converted: 0 }),
+        comparison: comparison({
+          verdictReady: false, eventsTarget: 0, eventsHoldout: 0,
+          incrementalRevenueTotal: 0, incrementalMarginTotal: 0,
+        }),
+      },
+    }))
+    expect(screen.getByText(/sms\.headlineNothingYet/)).toBeInTheDocument()
+    expect(screen.queryByText(/sms\.headlineApparent/)).toBeNull()
+  })
+
   it('gives each arm its own money per person', () => {
     // The one comparison a reader makes unaided — ₴90 a head against ₴750 —
     // and it was on the page nowhere: arms carried a conversion rate only.

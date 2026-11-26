@@ -67,6 +67,7 @@ import type {
   SmsCampaignsResponse,
   TgBotActivityResponse,
   SmsCampaignResultsResponse,
+  SmsSendProgress,
   SmsSendResult,
   SmsTestSendResult,
   SmsChannel,
@@ -1256,6 +1257,21 @@ export function useSmsBalance() {
     queryFn: () => api.getSmsChannels(true),
     staleTime: 0,
     refetchOnMount: 'always',
+    retry: false,
+  })
+}
+
+/** How far a send has got, polled while it runs. The send is one request that
+ *  answers only at the end, about 4.5 s per 1 000 recipients, and it records
+ *  each batch on the roster as it lands. Polling the roster is how the dialog
+ *  shows it moving instead of "Sending…" for a minute. */
+export function useSmsSendProgress(campaign: string, enabled: boolean) {
+  return useQuery<SmsSendProgress>({
+    queryKey: ['smsSendProgress', campaign] as const,
+    queryFn: () => api.getSmsSendProgress(campaign),
+    enabled,
+    refetchInterval: enabled ? 1500 : false,
+    staleTime: 0,
     retry: false,
   })
 }

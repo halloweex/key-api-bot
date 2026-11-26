@@ -5,7 +5,7 @@ import { SmsCostLine } from './SmsCostLine'
 import { SmsChannelFields, composeSmsText } from './SmsChannelFields'
 import { SmsFollowUpNotice } from './SmsFollowUpNotice'
 import { SmsSendBudget } from './SmsSendBudget'
-import { useSendSmsCampaign, useSmsBalance } from '../hooks/useApi'
+import { useSendSmsCampaign, useSmsBalance, useSmsSendProgress } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { formatNumber } from '../utils/formatters'
 import { balanceIsShort, smsCost, type SmsBalanceReading } from '../utils/smsCost'
@@ -57,7 +57,14 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   // gets messaged twice — the server refuses the second attempt now, but the
   // control that produced the mistake belongs here too.
   const [attempted, setAttempted] = useState(false)
+  // What went wrong, said in the dialog itself and not only in a toast. A
+  // toast is gone in seconds, and on 2026-11-26 the dialog sat on "Sending…"
+  // with nothing on screen to say the send had broken halfway.
+  const [failure, setFailure] = useState<string | null>(null)
   const send = useSendSmsCampaign()
+  // The send answers only at the end, about 4.5 s per 1 000 recipients, and
+  // records each batch as it lands: the roster is the progress bar.
+  const progress = useSmsSendProgress(campaign.campaign, send.isPending)
   const { addToast } = useToast()
   const { data: gateway, isLoading: balanceLoading } = useSmsBalance()
   // On the stack of what "back" closes first — Telegram's BackButton — except
@@ -87,6 +94,9 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   const short = balanceIsShort(balance, campaign.target, cost.parts, price)
   const canSend = trimmed.length > 0 && smsText.length <= SMS_LIMIT && nameMatches
     && (!hybrid || buttonComplete) && !short && !send.isPending && !attempted
+  const sentTotal = progress.data?.total ?? campaign.target
+  const sentDone = Math.min(progress.data?.done ?? 0, sentTotal)
+  const sentPercent = sentTotal > 0 ? Math.round((sentDone / sentTotal) * 100) : 0
 
   function handleSend() {
     setAttempted(true)
@@ -126,11 +136,19 @@ export const SmsSendDialog = memo(function SmsSendDialog({
           // A refusal the server named — the balance, today's other campaign,
           // the name typed back — is said in the reader's language and is not
           // "the gateway refused": it never reached the gateway.
-          const named = refusalReason(error) != null
+          const reason = refusalReason(error)
+          const named = reason != null
+          const message = describeSmsError(error, t)
+          // "Not sent" is false for a send that broke off with some of it
+          // already on people's phones.
+          const title = reason === 'gateway_outcome_unknown'
+            ? t('sms.sendBroke')
+            : named ? t('sms.sendRefused') : t('sms.sendFailed')
+          setFailure(message ?? title)
           addToast({
             type: 'error',
-            title: named ? t('sms.sendRefused') : t('sms.sendFailed'),
-            message: describeSmsError(error, t),
+            title,
+            message,
             duration: named ? 20000 : undefined,
           })
         },
@@ -228,12 +246,38 @@ export const SmsSendDialog = memo(function SmsSendDialog({
             pricePerPart={price}
             balance={balance}
           />
+
+          {send.isPending && (
+            <div role="status" aria-live="polite" className="space-y-1.5">
+              <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-purple-500 transition-[width] duration-500"
+                  style={{ width: `${sentPercent}%` }}
+                />
+              </div>
+              <p className="text-xs text-slate-700 tabular-nums">
+                {t('sms.sendProgress', {
+                  done: formatNumber(sentDone), total: formatNumber(sentTotal),
+                })}
+              </p>
+              <p className="text-[11px] text-slate-500 leading-snug">
+                {t('sms.sendProgressHint')}
+              </p>
+            </div>
+          )}
+
+          {failure && !send.isPending && (
+            <p role="alert"
+               className="text-xs text-rose-800 bg-rose-50 rounded-md px-3 py-2 leading-snug">
+              {failure}
+            </p>
+          )}
         </div>
 
         <div className="px-5 py-4 border-t border-slate-100 flex justify-end gap-2">
           <Button variant="secondary" size="sm" onClick={onClose}
                   disabled={send.isPending}>
-            {t('sms.cancel')}
+            {attempted && !send.isPending ? t('sms.close') : t('sms.cancel')}
           </Button>
           <Button size="sm" onClick={handleSend} disabled={!canSend}>
             {send.isPending

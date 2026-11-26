@@ -143,38 +143,52 @@ function formatP(p: number): string {
  *
  *  The caveat is not a footnote here. Money that has not cleared the verdict is
  *  a plausible range with a loss in it, and this is the line most likely to be
- *  quoted at somebody, so the reason it might be wrong travels with it. */
+ *  quoted at somebody, so the reason it might be wrong travels with it.
+ *
+ *  While the verdict is withheld there is no payback figure at all, only what
+ *  was spent. An hour after a send the block said, in red, "did not pay back
+ *  by ₴10 756": it subtracted the cost from a margin nobody had had time to
+ *  make, and the owner read it as a loss (2026-11-26). With no purchase in
+ *  either arm yet, the lead says exactly that instead of "₴0 above the control". */
 function Headline({ comparison, costTotal }: {
   comparison: SmsComparison
   costTotal: number | null | undefined
 }) {
   const { t } = useTranslation()
   const proven = comparison.significant
+  const early = !comparison.verdictReady
+  const nothingYet = early && comparison.eventsTarget === 0 && comparison.eventsHoldout === 0
   const payback =
     costTotal != null ? comparison.incrementalMarginTotal - costTotal : null
 
   return (
     <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/70 p-4">
       <p className="text-sm leading-snug text-slate-800">
-        {t(proven ? 'sms.headlineProven' : 'sms.headlineApparent', {
-          revenue: formatCurrency(comparison.incrementalRevenueTotal),
-        })}
+        {nothingYet
+          ? t('sms.headlineNothingYet')
+          : t(proven ? 'sms.headlineProven' : 'sms.headlineApparent', {
+              revenue: formatCurrency(comparison.incrementalRevenueTotal),
+            })}
       </p>
 
       <p className="mt-1 text-xs text-slate-600 tabular-nums">
-        {t('sms.headlineMargin', {
+        {!nothingYet && t('sms.headlineMargin', {
           margin: formatCurrency(comparison.incrementalMarginTotal),
         })}
         {costTotal != null && (
           <>
-            {' · '}
+            {!nothingYet && ' · '}
             {t('sms.headlineSpent', { cost: formatCurrency(costTotal) })}
             {' · '}
-            <span className={payback! >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
-              {t(payback! >= 0 ? 'sms.headlinePaidBack' : 'sms.headlineShort', {
-                amount: formatCurrency(Math.abs(payback!)),
-              })}
-            </span>
+            {early ? (
+              <span className="text-slate-500">{t('sms.headlinePaybackPending')}</span>
+            ) : (
+              <span className={payback! >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
+                {t(payback! >= 0 ? 'sms.headlinePaidBack' : 'sms.headlineShort', {
+                  amount: formatCurrency(Math.abs(payback!)),
+                })}
+              </span>
+            )}
           </>
         )}
       </p>

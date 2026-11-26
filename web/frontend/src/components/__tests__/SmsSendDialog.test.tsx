@@ -26,9 +26,13 @@ const addToast = vi.fn()
 const gateway: { balance: number | null; isLoading: boolean } = {
   balance: 1_000_000, isLoading: false,
 }
+// Whether a send is under way, and how far the roster says it has got.
+const sending: { isPending: boolean } = { isPending: false }
+const progress: { data: { done: number; total: number } | undefined } = { data: undefined }
 
 vi.mock('../../hooks/useApi', () => ({
-  useSendSmsCampaign: () => ({ mutate, isPending: false }),
+  useSendSmsCampaign: () => ({ mutate, isPending: sending.isPending }),
+  useSmsSendProgress: () => progress,
   useSmsChannels: () => ({ data: { sms: true, viber: true } }),
   useSmsBalance: () => ({
     data: { sms: true, viber: true, smsSender: 'KoreanStory', viberSender: null,
@@ -58,10 +62,44 @@ function sendButton() {
 }
 
 beforeEach(() => {
-  mutate.mockClear()
+  mutate.mockReset()
   addToast.mockClear()
   gateway.balance = 1_000_000
   gateway.isLoading = false
+  sending.isPending = false
+  progress.data = undefined
+})
+
+describe('SmsSendDialog, while and after it sends', () => {
+  it('shows the send moving, read off the roster, instead of a bare "Sending…"', () => {
+    // 2026-11-26: a minute of "Sending…" with nothing else on screen.
+    sending.isPending = true
+    progress.data = { done: 2000, total: 5560 }
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+
+    const status = screen.getByRole('status')
+    expect(status.textContent).toContain('sms.sendProgress')
+    expect(status.querySelector('[style]')?.getAttribute('style')).toContain('width: 36%')
+  })
+
+  it('draws no progress until a send is under way', () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('says what went wrong in the dialog itself, and offers only to close it', async () => {
+    mutate.mockImplementation((_vars, opts) => opts.onError(new Error('gateway gave no answer')))
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, campaign.campaign)
+    fireEvent.click(sendButton())
+
+    // A toast is gone in seconds; the reason stays on the dialog.
+    expect(screen.getByRole('alert').textContent).toBe('gateway gave no answer')
+    expect(screen.getByRole('button', { name: 'sms.close' })).toBeEnabled()
+    expect(sendButton()).toBeDisabled()
+  })
 })
 
 describe('SmsSendDialog', () => {

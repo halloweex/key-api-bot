@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from core.turbosms import (
+    RECIPIENTS_PER_REQUEST,
     TurboSmsClient,
     TurboSmsConfig,
     TurboSmsError,
@@ -576,7 +577,8 @@ class TestSuccessCodes:
 
 @pytest.mark.asyncio
 async def test_a_roster_over_the_limit_is_split():
-    """The gateway refuses more than 5000 in one call with 405."""
+    """The gateway refuses more than 5000 in one call with 405, and answers
+    about 4.5 s per 1 000, so a roster goes in batches of RECIPIENTS_PER_REQUEST."""
     batches = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -587,11 +589,53 @@ async def test_a_roster_over_the_limit_is_split():
             "response_result": [],
         })
 
-    phones = [f"38096{i:07d}" for i in range(5550)]
+    phones = [f"38096{i:07d}" for i in range(2 * RECIPIENTS_PER_REQUEST + 550)]
     async with _client_with(handler) as c:
         await c.send(phones, "Sale")
 
-    assert batches == [5000, 550]
+    assert batches == [RECIPIENTS_PER_REQUEST, RECIPIENTS_PER_REQUEST, 550]
+
+
+def test_a_batch_answers_well_inside_the_send_timeout():
+    """2026-11-26: a 5 000 batch took ~22 s against a 20 s timeout, the gateway
+    sent it anyway, and the other 3 403 of the roster never left.
+
+    The slowest batch measured that day was 4.8 s per 1 000. A batch has to
+    answer in a tenth of the time the client waits, so the gateway can be
+    several times slower than that day before a send breaks again. Mutation:
+    put RECIPIENTS_PER_REQUEST back to 5000, or send_timeout back to 20.
+    """
+    slowest_seconds_per_thousand = 4.8
+    expected = RECIPIENTS_PER_REQUEST / 1000 * slowest_seconds_per_thousand
+    assert RECIPIENTS_PER_REQUEST <= 5000, "the gateway's own limit"
+    assert expected * 10 <= TurboSmsConfig().send_timeout
+
+
+@pytest.mark.asyncio
+async def test_a_send_waits_send_timeout_and_other_calls_do_not():
+    """The send is the slow call; the balance read must stay quick, because the
+    page waits on it before it can offer a send at all."""
+    waited = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        waited[request.url.path.strip("/")] = request.extensions["timeout"]["read"]
+        if request.url.path.endswith("balance.json"):
+            return httpx.Response(200, json={
+                "response_code": 0, "response_status": "OK",
+                "response_result": {"balance": 100.0},
+            })
+        return httpx.Response(200, json={
+            "response_code": 801, "response_status": "SUCCESS_MESSAGE_SENT",
+            "response_result": [],
+        })
+
+    config = _config(timeout=20.0, send_timeout=120.0)
+    async with TurboSmsClient(config, transport=httpx.MockTransport(handler)) as c:
+        await c.send(["380961111111"], "Sale")
+        await c.balance()
+
+    assert waited["message/send.json"] == 120.0
+    assert waited["user/balance.json"] == 20.0
 
 
 @pytest.mark.asyncio
@@ -636,13 +680,13 @@ async def test_a_failed_batch_does_not_discard_what_already_went():
             "response_result": [],
         })
 
-    phones = [f"38096{i:07d}" for i in range(5550)]
+    phones = [f"38096{i:07d}" for i in range(RECIPIENTS_PER_REQUEST + 550)]
     async with _client_with(handler) as c:
         with pytest.raises(PartialSendError) as excinfo:
             await c.send(phones, "Sale")
 
     error = excinfo.value
-    assert error.sent == 5000
+    assert error.sent == RECIPIENTS_PER_REQUEST
     assert error.unsent == 550
     assert [r.message_id for r in error.results] == ["aaa-111"]
 
@@ -676,7 +720,7 @@ async def test_every_batch_carries_the_same_viber_block():
             "response_result": [],
         })
 
-    phones = [f"38096{i:07d}" for i in range(5001)]
+    phones = [f"38096{i:07d}" for i in range(RECIPIENTS_PER_REQUEST + 1)]
     client = TurboSmsClient(
         _config(viber_sender="KoreanStoryViber"),
         transport=httpx.MockTransport(handler),

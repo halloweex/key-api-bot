@@ -1877,6 +1877,24 @@ export interface SmsSendResult {
   partialError: string | null
 }
 
+/** How far a campaign's send has got, read off its roster. The send writes
+ *  each batch's answer as it lands, so this moves while the send runs. Counts
+ *  only: no name or number is in it. */
+export interface SmsSendProgress {
+  campaign: string
+  total: number
+  /** Answered for, one way or another: what the progress bar fills to. */
+  done: number
+  pending: number
+  accepted: number
+  stoplisted: number
+  failed: number
+  /** A batch that went up with no answer back: the gateway may have sent it. */
+  uncertain: number
+  notSent: number
+  sentAt: string | null
+}
+
 /** Viber is registered separately from SMS, so availability differs. */
 export interface SmsChannelsResponse {
   sms: boolean

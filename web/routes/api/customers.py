@@ -10,7 +10,7 @@ from fastapi import APIRouter, Path, Query, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
-from typing import Annotated, List, Optional
+from typing import Annotated, Dict, List, Optional, Tuple
 
 from core.gender import CONFIDENCE_LADDER, GENDERS
 from core.validators import INT32_MAX
@@ -21,8 +21,8 @@ from core.repositories.customers import (
     SmsAudienceFilters, SmsAudienceGroup,
 )
 from core.turbosms import (
-    PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
-    ViberMessage, count_segments,
+    RECIPIENTS_PER_REQUEST, PartialSendError, SendResult, TurboSmsClient,
+    TurboSmsConfig, TurboSmsError, ViberMessage, count_segments,
 )
 from web.csv_cells import text_cell
 from web.routes.auth import has_permission, require_permission
@@ -1367,59 +1367,112 @@ async def send_sms_campaign(
         )
         return refusal
 
-    # A roster past the gateway's per-request limit is split, so a later batch
-    # can fail with earlier ones already delivered. Those have to be recorded
-    # anyway: a retry that did not know about them would message those people
-    # twice, spend the budget twice, and destroy the comparison the campaign
-    # exists to produce.
-    partial: Optional[PartialSendError] = None
-    try:
-        async with TurboSmsClient() as client:
-            results = await client.send(list(by_phone), text, viber=viber)
-    except PartialSendError as e:
-        logger.error(
-            "TurboSMS send partially failed: campaign=%s sent=%d unsent=%d error=%s",
-            campaign, e.sent, e.unsent, e,
-        )
-        results, partial = e.results, e
-    except TurboSmsError as e:
-        if e.unsent:
+    # The roster goes to the gateway one batch at a time, and each batch is
+    # written to the roster the moment its answer comes back. A batch can fail
+    # after earlier ones already went. Those have to be on record: a retry
+    # that did not know about them would message those people twice, spend the
+    # budget twice, and destroy the comparison the campaign exists to produce.
+    # The page also follows the send by reading the roster (`send-progress`),
+    # which moves only if each batch is written as it lands. Until 2026-11-26
+    # the whole answer was written once, at the end. That day the gateway
+    # took 5 000 recipients past the client's 20 s read timeout and sent them
+    # anyway. The roster said nothing about who had the message, and the
+    # other 3 403 never left.
+    phones = list(by_phone)
+    accepted: Dict[int, str] = {}
+    failed: Dict[int, str] = {}
+    stoplisted: List[int] = []
+    # The batch that went up with no answer back, if any.
+    uncertain: List[int] = []
+    # What stopped the send, and how many recipients from the start of the
+    # roster were answered for before it.
+    stop: Optional[TurboSmsError] = None
+    answered = 0
+
+    def _tally(
+        results: List[SendResult],
+    ) -> Tuple[Dict[int, str], List[int], Dict[int, str]]:
+        acc: Dict[int, str] = {}
+        stop_l: List[int] = []
+        fail: Dict[int, str] = {}
+        for r in results:
+            buyer_id = by_phone.get(r.phone)
+            if buyer_id is None:
+                continue
+            if r.accepted:
+                acc[buyer_id] = r.message_id or ""
+            elif r.stoplisted:
+                stop_l.append(buyer_id)
+            else:
+                fail[buyer_id] = r.status or f"code {r.code}"
+        return acc, stop_l, fail
+
+    async with TurboSmsClient() as client:
+        for start in range(0, len(phones), RECIPIENTS_PER_REQUEST):
+            chunk = phones[start:start + RECIPIENTS_PER_REQUEST]
+            results: List[SendResult] = []
+            try:
+                results = await client.send(chunk, text, viber=viber)
+            except PartialSendError as e:
+                # Part of this batch went and the rest did not.
+                results, stop, answered = e.results, e, start + e.sent
+            except TurboSmsError as e:
+                stop = e
+                if not e.unsent:
+                    # A read timeout, a 5xx or an unreadable body is an unknown
+                    # answer, not a negative one. The batch was uploaded, and
+                    # the gateway may be sending it right now.
+                    uncertain = [by_phone[p] for p in chunk]
+            else:
+                answered = start + len(chunk)
+
+            acc, stop_l, fail = _tally(results)
+            accepted.update(acc)
+            stoplisted.extend(stop_l)
+            failed.update(fail)
+            if acc or stop_l or fail:
+                # Best effort. The final write below repeats everything, so a
+                # failure here costs the progress bar, never the record.
+                try:
+                    await store.record_sms_send(campaign, acc, stop_l, fail, final=False)
+                except Exception:  # noqa: BLE001 — the send must go on
+                    logger.exception(
+                        "SMS batch not recorded, the final write will: campaign=%s",
+                        campaign,
+                    )
+            if stop is not None:
+                break
+
+    went = bool(accepted or stoplisted or failed or uncertain)
+    if stop is not None and not went:
+        if stop.unsent:
             # The gateway provably never took the request — refused connection,
             # upload never finished, a 4xx or an outright rejection — so hand
             # the campaign back; it can be retried once whatever the gateway
-            # objected to is fixed. Safe only on this branch: PartialSendError
-            # above keeps the claim, because messages did leave.
+            # objected to is fixed. Only when nothing at all has left: any
+            # earlier batch keeps the claim, because messages did leave.
             await store.release_sms_campaign(campaign)
-            logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
-            raise SmsRefusal(502, str(e), "gateway_refused", error=str(e))
-        # A read timeout, a 5xx or an unreadable body is an unknown answer, not
-        # a negative one: the whole batch was uploaded and the gateway may be
-        # delivering it right now. Releasing here is how the roster gets sent
-        # twice — the operator sees a 502, presses send again, and the claim
-        # no longer stops them. Keep it; being wrong this way costs one manual
-        # release after checking the panel, the other way costs a double send.
+            logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, stop)
+            raise SmsRefusal(502, str(stop), "gateway_refused", error=str(stop))
+
+    if uncertain and len(uncertain) == len(phones):
+        # The whole roster was one batch and its answer never came. There is
+        # nothing to record that the claim does not already say. Releasing here
+        # is how the roster gets sent twice: the operator sees a 502, presses
+        # send again, and the claim no longer stops them. Keep it. Being wrong
+        # this way costs one manual release after checking the panel. The
+        # other way costs a double send.
         logger.error(
             "TurboSMS send outcome unknown, claim kept: campaign=%s error=%s",
-            campaign, e,
+            campaign, stop,
         )
         raise SmsRefusal(
             502,
-            f"{e}. The gateway may have accepted the batch, so the campaign "
+            f"{stop}. The gateway may have accepted the batch, so the campaign "
             f"stays claimed — check the TurboSMS panel before releasing it.",
-            "gateway_outcome_unknown", error=str(e),
+            "gateway_outcome_unknown", error=str(stop),
+            accepted=0, uncertain=len(uncertain), notSent=0,
         )
-
-    accepted, failed, stoplisted = {}, {}, []
-    for r in results:
-        buyer_id = by_phone.get(r.phone)
-        if buyer_id is None:
-            continue
-        if r.accepted:
-            accepted[buyer_id] = r.message_id
-        elif r.stoplisted:
-            stoplisted.append(buyer_id)
-        else:
-            failed[buyer_id] = r.status or f"code {r.code}"
 
     # What it cost, from the message that went and the count the gateway took.
     billing = count_segments(text)
@@ -1428,24 +1481,71 @@ async def send_sms_campaign(
         message_text=text,
         message_parts=billing.parts,
         price_per_part=TurboSmsConfig().price_per_part,
+        uncertain=uncertain,
     )
+    unsent = len(phones) - answered - len(uncertain) if stop is not None else 0
 
     logger.info(
         "SMS campaign sent: user=%s campaign=%s channel=%s accepted=%d "
-        "stoplisted=%d failed=%d unsent=%d",
+        "stoplisted=%d failed=%d uncertain=%d unsent=%d",
         user.get("user_id"), campaign, channel,
         summary["accepted"], summary["stoplisted"], summary["failed"],
-        partial.unsent if partial else 0,
+        len(uncertain), unsent,
     )
+
+    if uncertain:
+        logger.error(
+            "TurboSMS send outcome unknown, claim kept: campaign=%s accepted=%d "
+            "uncertain=%d unsent=%d error=%s",
+            campaign, len(accepted), len(uncertain), unsent, stop,
+        )
+        raise SmsRefusal(
+            502,
+            f"{stop}. {len(accepted)} recipients are confirmed sent; a batch of "
+            f"{len(uncertain)} got no answer and the gateway may have sent it; "
+            f"{unsent} were never sent. The campaign stays claimed — do not send "
+            f"it again; check the TurboSMS panel.",
+            "gateway_outcome_unknown", error=str(stop),
+            accepted=len(accepted), uncertain=len(uncertain), notSent=unsent,
+        )
+
+    if stop is not None:
+        logger.error(
+            "TurboSMS send partially failed: campaign=%s accepted=%d unsent=%d error=%s",
+            campaign, len(accepted), unsent, stop,
+        )
     return {
         **summary,
         "channel": channel,
         # Non-zero means the roster is only partly messaged and cannot be
         # resent — the campaign is stamped, so say so rather than reporting a
         # clean success.
-        "unsent": partial.unsent if partial else 0,
-        "partialError": str(partial) if partial else None,
+        "unsent": unsent,
+        "partialError": str(stop) if stop is not None else None,
     }
+
+
+@router.get("/customers/sms-campaigns/{campaign}/send-progress")
+# The send dialog polls this every couple of seconds while a send is under
+# way. A large roster takes about a minute, so 120 a minute leaves room.
+@limiter.limit("120/minute")
+async def get_sms_send_progress(
+    request: Request,
+    campaign: str = Path(..., pattern=_CAMPAIGN_PATTERN),
+    user: dict = Depends(require_permission("sms", "view")),
+):
+    """
+    How far the campaign's send has got: counts read off the roster.
+
+    The send writes each batch's answer as it comes back, so this moves while
+    the send is still running. Counts only, so `sms` view is enough: no name
+    or number is in the answer.
+    """
+    store = await get_store()
+    try:
+        return await store.get_sms_send_progress(campaign)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 def _build_viber(
