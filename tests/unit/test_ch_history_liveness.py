@@ -37,6 +37,8 @@ class _Conn:
         return list(_buckets(min(self.pg_max, ceiling)).items())
 
     async def fetchrow(self, sql, arg):
+        if arg == ch_history.HEAL_ROW:
+            return None  # no heal recorded: the durable trace is its own tests'
         if "order_versions" in sql:
             waiting = max(0, self.pg_max - arg)
             return {"n": waiting, "oldest": self.oldest if waiting else None}
