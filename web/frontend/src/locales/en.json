@@ -474,7 +474,7 @@
   "marketing.ordersPct": "% Orders",
   "marketing.previousMonth": "Previous Month",
   "marketing.productFilterNote": "Selected brand or category only: revenue is the sum of its lines; orders and customers are those whose baskets contained it. The monthly goal is hidden.",
-  "marketing.returnRate": "Return Rate",
+  "marketing.returnRate": "Returning Customers %",
   "marketing.returningCustomers": "Returning Customers",
   "marketing.revenue": "Revenue (UAH)",
   "marketing.revenuePct": "% Revenue",
