@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.369
+
+- refactor(canary): the job is bot.canary.canary_job, and its test runs it
+
+
 ## 3.0.368
 
 - docs: comments name what holds their rule since batch 2
