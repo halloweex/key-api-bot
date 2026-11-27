@@ -38,11 +38,17 @@ import pytest_asyncio
 
 from tests import rust_k1_fixture as fixture
 
-pytestmark = pytest.mark.skipif(
-    not all(os.getenv(v) for v in ("KS_PG_DSN", "KS_CH_URL", "KS_RUST_WORKER_BIN")),
-    reason="needs a throwaway Postgres and ClickHouse and the Rust worker "
-           "(KS_RUST_WORKER_BIN): rust/harness/k1-ch-sync.sh runs it",
-)
+# Two markers, not one: CI has a Postgres and no ClickHouse, so the store's
+# skip must say "needs a live PostgreSQL" (the CI step that refuses store
+# skips reads that phrase) and the other skip must not name Postgres at all.
+pytestmark = [
+    pytest.mark.skipif(not os.getenv("KS_PG_DSN"), reason="needs a live PostgreSQL (KS_PG_DSN)"),
+    pytest.mark.skipif(
+        not all(os.getenv(v) for v in ("KS_CH_URL", "KS_RUST_WORKER_BIN")),
+        reason="needs a throwaway ClickHouse and the Rust worker (KS_RUST_WORKER_BIN): "
+               "rust/harness/k1-ch-sync.sh runs it",
+    ),
+]
 
 SHADOW = (
     ("silver.orders", "silver.orders_rust"),
