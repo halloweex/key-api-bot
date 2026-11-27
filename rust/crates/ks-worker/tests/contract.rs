@@ -90,6 +90,7 @@ fn the_names_are_pythons() {
     assert_eq!(live.silver_state, text(&states["silver"]));
     assert_eq!(live.gold_state, text(&states["gold"]));
     assert_eq!(live.history_state, text(&states["history"]));
+    assert_eq!(live.heal_state, text(&states["history_heal"]));
 }
 
 #[test]

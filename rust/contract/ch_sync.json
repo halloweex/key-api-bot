@@ -181,7 +181,8 @@
  "state_rows": {
   "silver": "clickhouse.silver_orders",
   "gold": "clickhouse.gold_daily_revenue",
-  "history": "clickhouse.order_versions"
+  "history": "clickhouse.order_versions",
+  "history_heal": "clickhouse.order_versions.heal"
  },
  "mark_ok_sql": "\n            INSERT INTO meta.mirror_state\n                   (table_name, last_attempted_at, last_ok_at,\n                    failures_since_ok, last_error, last_rows)\n            VALUES ($1, now(), now(), 0, NULL, $2)\n            ON CONFLICT (table_name) DO UPDATE SET\n                last_attempted_at = now(), last_ok_at = now(),\n                failures_since_ok = 0, last_error = NULL,\n                last_rows = EXCLUDED.last_rows\n            ",
  "mark_failed_sql": "\n                INSERT INTO meta.mirror_state\n                       (table_name, last_attempted_at, failures_since_ok, last_error)\n                VALUES ($1, now(), 1, $2)\n                ON CONFLICT (table_name) DO UPDATE SET\n                    last_attempted_at = now(),\n                    failures_since_ok = meta.mirror_state.failures_since_ok + 1,\n                    last_error = EXCLUDED.last_error\n                ",

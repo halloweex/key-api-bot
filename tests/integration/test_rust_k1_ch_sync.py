@@ -307,6 +307,11 @@ async def test_the_archive_appends_and_heals_the_same(stores, tmp_path):
     await _judge_the_shadow()
     healed = len(late) + len(lost)
     assert ch_history.last_heal.get("shipped") == healed
+    # The heal's durable trace (core.ch_history.HEAL_ROW), stamped by both.
+    states = await _states(stores)
+    heal = states.get(ch_history.HEAL_ROW)
+    assert heal == (0, False, healed, True), heal
+    assert states.get(SHADOW_STATE + ch_history.HEAL_ROW) == heal
     assert [(f["key"], f["count"]) for f in findings] == [("ch_history_selfhealed", healed)]
     inserts = sum(1 for sql, _ in rust_sent if sql.startswith("INSERT INTO history."))
     assert inserts == 1  # 390 versions: one chunk of 7 000

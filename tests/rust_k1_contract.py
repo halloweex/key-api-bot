@@ -179,6 +179,7 @@ def build() -> Dict[str, Any]:
             "silver": ch_silver.SILVER_STATE,
             "gold": ch_silver.GOLD_STATE,
             "history": ch_history.STATE_ROW,
+            "history_heal": ch_history.HEAL_ROW,
         },
         "mark_ok_sql": _statement(ch_common.mark_ok, "x", 1),
         "mark_failed_sql": _statement(ch_common.mark_failed, "x", "e"),

@@ -185,6 +185,8 @@ pub struct Names {
     pub silver_state: String,
     pub gold_state: String,
     pub history_state: String,
+    /// The heal's durable trace: `core.ch_history.HEAL_ROW`.
+    pub heal_state: String,
 }
 
 impl Names {
@@ -203,6 +205,7 @@ impl Names {
             silver_state: format!("{prefix}clickhouse.silver_orders"),
             gold_state: format!("{prefix}clickhouse.gold_daily_revenue"),
             history_state: format!("{prefix}clickhouse.order_versions"),
+            heal_state: format!("{prefix}clickhouse.order_versions.heal"),
         }
     }
 }
@@ -573,6 +576,15 @@ impl ChSync<'_> {
                 count: u64::try_from(healed).unwrap_or(u64::MAX),
                 message,
             });
+            // The heal's durable trace, as `ship_history` stamps it: the daily
+            // check reads the row, since it cannot read this process's memory.
+            // A trace that cannot be written costs the trace, not the ship.
+            let heal = &self.names.heal_state;
+            if let Err(error) =
+                watermark::mark_ok(self.pg, self.timeout, heal, rows_i64(healed)).await
+            {
+                tracing::warn!("ch_history: could not record the heal in {heal}: {error}");
+            }
         } else if shipped > 0 {
             tracing::info!("ch_history: appended {shipped} version(s) to {history}");
         }
@@ -596,6 +608,11 @@ mod tests {
         assert_eq!(
             shadow.gold_state,
             "rust_shadow.clickhouse.gold_daily_revenue"
+        );
+        assert_eq!(live.heal_state, "clickhouse.order_versions.heal");
+        assert_eq!(
+            shadow.heal_state,
+            "rust_shadow.clickhouse.order_versions.heal"
         );
         for (a, b) in [
             (&live.silver, &shadow.silver),
