@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 import { Check, Plus, X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Button } from './Button'
-import { Badge } from './Badge'
 import { Input } from './Input'
 import { Textarea } from './Textarea'
 import { Wrapper } from './Wrapper'
@@ -471,7 +470,6 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Badge tone="slate" shape="tag">{t('sms.step', { n: 1 })}</Badge>
             <CardTitle>{t('sms.wizardTitle')}</CardTitle>
           </div>
           <Button variant="secondary" size="sm" onClick={onClose}>
@@ -799,7 +797,6 @@ export const SmsWizardIntro = memo(function SmsWizardIntro({ onStart }: { onStar
       <CardHeader divider={false}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Badge tone="slate" shape="tag">{t('sms.step', { n: 1 })}</Badge>
             <CardTitle>{t('sms.wizardTitle')}</CardTitle>
           </div>
           <Button variant="primary" size="sm" onClick={onStart}>
