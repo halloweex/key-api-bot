@@ -592,18 +592,19 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 `external` and `slow` markers by default, so a bare `pytest` is the safe run —
 no paths to remember, nothing reaching the network.
 
-**Baseline as of 2026-11-26, after batch 2 of the test rewrite (the review
-of 2026-11-18), with the store up: 9 092 passed, 26 skipped** — measured in
+**Baseline as of 2026-11-27, after batch 2 of the test rewrite (the review
+of 2026-11-18), with the store up: 9 198 passed, 26 skipped** — measured in
 Docker as CI runs it (Python 3.14 with `requirements-dev.lock`, a throwaway
 Postgres 17.2, `TZ=UTC`); the skips are ClickHouse (18), "root lists a
 directory" (5), no real gpg (2) and one TIMESTAMPTZ case. Any change that
 lowers the passing count is a regression until explained; a batch of the
 rewrite explains its own drop, since it replaces brittle tests with fewer
-behavioural ones. (It was 9 221 on 2026-11-23, after batches 0 and 1; 9 378
-on 2026-11-19, with revision 0039; 9 045 on 2026-11-18, after the cleanup
-that deleted 1 300 tombstone cases — tests guarding the finished DuckDB exit
-— 10 344 just before it, 9 288 on 2026-11-05, 1 297 on 2026-08-14 without a
-store, and 3 771 with one on 2026-09-08.)
+behavioural ones. (It was 9 327 just before it, on 2026-11-27; 9 221 on
+2026-11-23, after batches 0 and 1; 9 378 on 2026-11-19, with revision 0039;
+9 045 on 2026-11-18, after the cleanup that deleted 1 300 tombstone cases —
+tests guarding the finished DuckDB exit — 10 344 just before it, 9 288 on
+2026-11-05, 1 297 on 2026-08-14 without a store, and 3 771 with one on
+2026-09-08.)
 
 **CI runs the suite against a real PostgreSQL** since 2026-09-08. Without one,
 every differential test — the ones proving DuckDB and Postgres answer the same
@@ -4492,4 +4493,4 @@ Ark's byte copy with `--file`, and every name in it was declared.
 
 ---
 
-*Last updated: 2026-11-26 (batch 2 of the test rewrite: the baseline and three references to tests it replaced; 2026-11-20: the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
+*Last updated: 2026-11-27 (batch 2 of the test rewrite: the baseline and three references to tests it replaced; 2026-11-20: the 05:30 reconciliation compares each order's discount with KeyCRM; 2026-11-19: revision 0039, the promotions calendar, phase 1 — its versions, the Monday question in the bot, `planned_promotions` on the forecast; before it the same day, revision 0038 and the dead-code cleanup)*
