@@ -69,9 +69,11 @@ class ReadUnavailable(Exception):
     Raised from the handler around a router's read with what `refuse`
     returns, and by nothing else. `web/main.py` maps it to a 503 carrying
     `surface`, so a handler between a route and a router must let it
-    through — the walk in `tests/unit/test_read_fallback_sites.py` requires
-    every handler around a router to say so, and
-    `GoalsMixin._get_ml_forecast_total` is the one that had to.
+    through. The route sweep in `tests/unit/test_read_fallback_http.py`
+    (`TestEveryRoute`) finds one that does not by what its GET route
+    answers: a 500, or an answer behind a counted refusal.
+    `GoalsMixin._get_ml_forecast_total` is the handler that had to let it
+    through (`tests/unit/test_read_fallback_sites.py`).
     """
 
     def __init__(self, surface: str):
@@ -98,8 +100,10 @@ def refuse(surface: str, exc: BaseException) -> ReadUnavailable:
     cause beside it, and caused by `exc` — what `raise ReadUnavailable(surface)
     from exc` makes: setting the cause suppresses the context, as `from` does
     — so `web/main.py` answers the 503 naming the surface. Returned rather
-    than raised: the handler says `raise` itself, which is what the walks in
-    `tests/unit/test_read_fallback_sites.py` read as a decision.
+    than raised: the handler says `raise` itself, so its reader sees at the
+    call that the branch ends there. That every GET route answers a refusal
+    with that 503 is held by the route sweep in
+    `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`).
 
     `surface` is the tab or consumer a reader would name (`dashboard`,
     `goals`, `cohorts`…), a literal, because it is a key in `/api/health`.

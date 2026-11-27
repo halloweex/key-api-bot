@@ -77,9 +77,9 @@ def swept_routes(app) -> List:
 @pytest.fixture
 def sweep_client(admin_client):
     """`admin_client`, answering a server error as a 500 rather than raising
-    it into the test — a route whose engine fails with no fallback (the
-    forecast's training input) answers 500, and that is not this sweep's
-    question."""
+    it into the test — a route that reads its store with no refusal (the
+    managers screen, /sms, the user list) answers 500, and that is not this
+    sweep's question."""
     from fastapi.testclient import TestClient
 
     from web.main import app

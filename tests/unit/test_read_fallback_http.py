@@ -25,7 +25,8 @@ What is proved here, through the real app and a Postgres pool that raises:
   with the engine failing, or with no address for it, any request that left
   a refusal counted answered 503 naming it, and every route of the tabs
   that read a store did so — never a 500, never an answer; and the goal
-  page's three writes the same way.
+  page's three writes and the model's tuning, none of them a GET, the same
+  way.
 
 That sweep replaced the static walks of the code that stood beside it until
 2026-11 (a handler naming the refusal must raise it; nothing in a tab's
@@ -293,7 +294,8 @@ FILTER_ROUTES = frozenset({
 })
 TABS: Dict[str, Union[str, FrozenSet[str]]] = {
     "dashboard": DASHBOARD_ROUTES,
-    "forecast": frozenset({"/api/revenue/forecast"}),
+    # The stored forecast, and the model's evaluation over its training frame.
+    "forecast": frozenset({"/api/revenue/forecast", "/api/revenue/forecast/evaluate"}),
     "traffic": "/api/traffic/",
     "margin": "/api/margin/",
     "products intelligence": "/api/products/intel/",
@@ -403,3 +405,17 @@ class TestEveryRoute:
         assert response.status_code == 503, response.text
         assert _surface(response) == "goals"
         assert read_fallback.refusals()["goals"]["count"] >= 1
+
+    @ENGINE_DOWN
+    def test_the_models_tuning_is_refused_too(self, engine_down, sweep_client):
+        """`evaluate`'s twin, a POST the sweep does not make: it reads the
+        same training frame, and a failed engine is the same 503 naming
+        `forecast`, never a 500."""
+        from web.ratelimit import limiter
+
+        read_fallback.reset_counts()
+        limiter.reset()
+        response = sweep_client.post("/api/revenue/forecast/tune")
+        assert response.status_code == 503, response.text
+        assert _surface(response) == "forecast"
+        assert read_fallback.refusals()["forecast"]["count"] == 1
