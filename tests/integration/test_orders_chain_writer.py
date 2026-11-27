@@ -141,14 +141,18 @@ class TestAPageLandsInOneTransaction:
                 f"SELECT xmin::text FROM {t} WHERE {k} = $1", v)
                 for t, k, v in (("bronze.orders", "id", BASE),
                                 ("bronze.order_products", "order_id", BASE),
-                                ("bronze.expenses", "id", BASE * 10))}
+                                ("bronze.expenses", "id", BASE * 10),
+                                ("app.order_versions", "order_id", BASE))}
             owners = {r["x"] for r in await conn.fetch(
                 "SELECT xmin::text AS x FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")}
             watermarks = {r["table_name"] for r in await conn.fetch(
                 "SELECT table_name FROM meta.mirror_state WHERE last_ok_at IS NOT NULL "
                 "AND table_name = ANY($1::text[])",
                 ["bronze.orders", "bronze.order_products", "bronze.expenses"])}
-        # One transaction: the header, its items, its costs and the claim.
+        # One transaction: the header, its items, its costs, its version and
+        # the claim. The archive has no backfill: a version written in a
+        # transaction of its own could be lost while the row it describes
+        # stays.
         assert len(xmins) == 1 and owners == xmins
         # The watermarks the canary and the liveness checks read keep moving.
         assert watermarks == {"bronze.orders", "bronze.order_products", "bronze.expenses"}
@@ -248,6 +252,24 @@ class TestWhatPostgresWouldRefuse:
             assert await conn.fetchval(
                 "SELECT count(*) FROM bronze.expenses WHERE order_id = $1", BASE + 1) == 0
         assert await _versions(pool, BASE + 2) == [("create", 12, "utm_source=ig")]
+
+    @pytest.mark.asyncio
+    async def test_an_order_refused_at_its_line_items_leaves_no_version(self, stores):
+        """The version is written after the header and before the line items,
+        on the same transaction: a line Postgres refuses takes the header and
+        its version back with it, and the batch it came in lands without it.
+        A version of an order nobody holds would be a transition that never
+        happened."""
+        store, pool, env = stores
+        env.setattr(chain, "product_refusal", lambda row: None)   # not pre-validated
+        poisoned = _payload(BASE + 1)
+        poisoned["products"][0]["name"] = "Товар\x00"
+        result, _ = await chain.upsert_orders_with_expenses([_payload(BASE), poisoned])
+
+        assert sorted(result.changed_ids) == [BASE] and result.failed == 1
+        assert await _header(pool, BASE + 1) is None
+        assert await _versions(pool, BASE + 1) == []
+        assert await _versions(pool, BASE) == [("create", 12, "utm_source=ig")]
 
 
 class TestAnIdleTickSpendsNoLatch:

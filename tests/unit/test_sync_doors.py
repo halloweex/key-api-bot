@@ -23,6 +23,7 @@ outright in S14-17: DuckDB's row counts, `off` since S14-00, read by nothing.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -88,31 +89,78 @@ def test_nginx_keeps_the_rollback_images_resync_slow_until_z3():
     assert any(re.match(rx, "/api/duckdb/resync") for rx in _long_timeout_locations())
 
 
+# What each door is posted with: the short windows, and the status refresh
+# inline, so its run is counted before the answer.
+PARAMS = {
+    "/api/sync/resync": {"days": 1},
+    "/api/sync/refresh-statuses": {"days": 1, "background": "false"},
+    "/api/sync/sync-buyers": {},
+    "/api/sync/sync-all-buyers": {},
+}
+# More requests than any door's limit lets through in its window.
+MAX_TRIES = 200
+
+
+def _levers(monkeypatch) -> dict:
+    """Each door's work stood in for where the door hands it over, counting
+    the runs it was asked for; every door answers as on a good day. The full
+    buyer sync runs detached, so its count is the request reaching the store
+    it hands to the run."""
+    from types import SimpleNamespace
+
+    from web.routes.api import admin
+
+    runs = dict.fromkeys(DOORS, 0)
+    stamp = datetime.now(timezone.utc)
+
+    async def force_resync(days_back):
+        runs["/api/sync/resync"] += 1
+        return {"orders": 0}
+
+    async def refresh_order_statuses(days_back):
+        runs["/api/sync/refresh-statuses"] += 1
+        return {"orders_checked": 0}
+
+    async def sync_missing_buyers(limit):
+        runs["/api/sync/sync-buyers"] += 1
+        return 0
+
+    service = SimpleNamespace(
+        refresh_order_statuses=refresh_order_statuses,
+        sync_missing_buyers=sync_missing_buyers,
+        buyer_sync_state=SimpleNamespace(last_ok_at=stamp, last_attempt_at=stamp))
+
+    async def get_sync_service():
+        return service
+
+    async def get_store():
+        runs["/api/sync/sync-all-buyers"] += 1
+        return SimpleNamespace()
+
+    async def every_buyer(_store):
+        return {"status": "done"}
+
+    monkeypatch.setattr("core.sync_service.force_resync", force_resync)
+    monkeypatch.setattr("core.sync_service.get_sync_service", get_sync_service)
+    monkeypatch.setattr(admin, "get_store", get_store)
+    monkeypatch.setattr(admin, "_sync_all_buyers", every_buyer)
+    return runs
+
+
 @pytest.mark.parametrize("door", DOORS)
-def test_every_doors_limit_is_one_counter_scoped_by_its_path(door):
-    """The `shared_limit` each door took while it had two names, scoped by its
-    path: one counter per lever. Mutation: drop a door's limit, or scope it
-    by another name."""
-    import inspect
+def test_a_spent_door_answers_429_and_starts_nothing(door, admin_client, monkeypatch):
+    """Every door that starts a sync from KeyCRM by hand is rate limited: once
+    its limit is spent it answers 429, and the refused request never reaches
+    the work. Each door counts on its own, so the others still answer."""
+    runs = _levers(monkeypatch)
 
-    from web.ratelimit import limiter
+    answers = []
+    while len(answers) < MAX_TRIES and 429 not in answers:
+        answers.append(admin_client.post(door, params=PARAMS[door]).status_code)
 
-    func = inspect.unwrap(_posts()[door].route.endpoint)
-    limits = limiter._route_limits.get(f"{func.__module__}.{func.__name__}")
-    assert limits, f"{door}: no rate limit registered"
-    assert {limit.scope for limit in limits} == {door.removeprefix("/api/")}, (
-        door, [(str(limit.limit), limit.scope) for limit in limits])
-
-
-def test_the_resync_still_allows_one_a_minute(admin_client):  # noqa: F811
-    """The limit survives the alias: the second resync in a minute is
-    refused, and the refused one never reaches the lever."""
-    from unittest.mock import AsyncMock, patch
-
-    with patch("core.sync_service.force_resync",
-               AsyncMock(return_value={"orders": 0})) as resync:
-        first = admin_client.post("/api/sync/resync", params={"days": 1})
-        second = admin_client.post("/api/sync/resync", params={"days": 1})
-    assert first.status_code == 200, first.text
-    assert second.status_code == 429, second.text
-    assert resync.await_count == 1
+    assert answers[-1] == 429, f"{door}: no 429 in {len(answers)} requests"
+    assert set(answers[:-1]) == {200}, answers
+    assert runs[door] == len(answers) - 1, "the refused request ran the lever"
+    for other in DOORS:
+        if other != door:
+            assert admin_client.post(other, params=PARAMS[other]).status_code == 200, other

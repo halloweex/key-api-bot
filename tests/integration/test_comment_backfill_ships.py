@@ -34,6 +34,7 @@ import pytest
 import pytest_asyncio
 
 from core.store import AnalyticsStore
+from tests.helpers.orders_sync import orders_in_postgres
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -82,15 +83,19 @@ async def stores(tmp_path, monkeypatch):
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
     await _clean(pool)
 
-    with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
-         patch("core.pg.require_revision", new=AsyncMock()):
-        from core.sync_service import SyncService
+    # The write latches chain 3 and stamps its watermarks, which later modules
+    # read (an owner row left behind reads as a chain with no local marker):
+    # `orders_in_postgres` puts them back as they were.
+    async with orders_in_postgres(DSN):
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            from core.sync_service import SyncService
 
-        await SyncService(store)._upsert_orders_with_expenses(
-            [_payload(i) for i in IDS])
-        yield store, pool
+            await SyncService(store)._upsert_orders_with_expenses(
+                [_payload(i) for i in IDS])
+            yield store, pool
 
-    await _clean(pool)
+        await _clean(pool)
     await pool.close()
 
 
@@ -132,7 +137,14 @@ class TestWhatTheLivenessChecksMakeOfIt:
         return [i for i in issues if i.check_name == "order_versions_flooding"]
 
     @pytest.mark.asyncio
-    async def test_a_backfill_of_fifteen_hundred_orders_is_not_a_flood(self, stores):
+    @pytest.mark.parametrize("kind", ["backfill", "baseline"])
+    async def test_fifteen_hundred_rows_of_a_kind_the_writer_never_writes_are_not_a_flood(
+            self, stores, kind):
+        """`backfill` is an operator's comment restore (OD-20 (b)); `baseline`
+        is revision 0010's seed, one row per order held, all stamped `now()` —
+        the first run of the check filed `order_versions_flooding` over it
+        (46,695 rows on production). Neither is the writer having stopped
+        telling a change from a re-write."""
         from core.mirror_reconciliation import (
             ORDER_VERSIONS_FLOOD_PER_DAY,
             ORDER_VERSIONS_RECENT_SQL,
@@ -148,7 +160,7 @@ class TestWhatTheLivenessChecksMakeOfIt:
             "another module left a day's worth of versions behind; this test "
             "measures a delta and cannot start above the threshold")
 
-        await self._insert(pool, "backfill", 1500)
+        await self._insert(pool, kind, 1500)
         assert not self._flooding(await reconcile_order_versions())
 
     @pytest.mark.asyncio

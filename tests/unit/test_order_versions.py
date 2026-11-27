@@ -82,27 +82,6 @@ def _declared_columns(ddl: str) -> set:
     return names
 
 
-def _mentions(items, attr: str) -> bool:
-    """Does any `async with` item call `.<attr>()`?"""
-    return any(
-        isinstance(n, ast.Attribute) and n.attr == attr
-        for item in items
-        for n in ast.walk(item.context_expr)
-    )
-
-
-def _calls(node, name: str) -> bool:
-    for n in ast.walk(node):
-        if not isinstance(n, ast.Call):
-            continue
-        fn = n.func
-        if isinstance(fn, ast.Name) and fn.id == name:
-            return True
-        if isinstance(fn, ast.Attribute) and fn.attr == name:
-            return True
-    return False
-
-
 def _sql_literals(path: Path):
     """Every string literal in a module that is not a docstring.
 
@@ -273,32 +252,13 @@ class TestItCannotLoseAVersionTheMirrorWouldHaveLost:
     row it describes. (The mirror and its backfill went in step 14's S14-13,
     and with them the test that the swallowing wrapper captured nothing.)"""
 
-    def test_capture_is_called_inside_the_transaction_block(self):
-        """Since chain 3's PR-1 the statements live in `_write_order_rows`,
-        which runs on its caller's transaction: `write_orders` opens it, and
-        chain 3's writer opens its own (`tests/unit/test_pg_own_derivation.py`
-        walks every caller for one that does not). So: the capture is in the
-        core, beside the header upsert, and `write_orders` calls the core
-        inside its transaction block. Mutation: move the capture out to
-        `mirror_orders`, or call the core before the transaction opens."""
-        from core import pg_landing
-
-        tree = ast.parse(inspect.getsource(pg_landing))
-
-        def fn(name):
-            return next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-
-        assert _calls(fn("_write_order_rows"), "capture_versions"), (
-            "capture_versions is not in the statements that write the header")
-        blocks = [
-            n for n in ast.walk(fn("write_orders"))
-            if isinstance(n, ast.AsyncWith) and _mentions(n.items, "transaction")
-        ]
-        assert blocks, "write_orders no longer opens a transaction"
-        assert any(
-            _calls(block, "_write_order_rows") for block in blocks
-        ), "the header and its version are not written inside the transaction"
+    # `test_capture_is_called_inside_the_transaction_block` stood here: it
+    # walked `pg_landing`'s tree for the capture inside `write_orders`'
+    # transaction. Over a real Postgres the version shares its header's
+    # transaction (`tests/integration/test_orders_chain_writer.py`,
+    # `test_headers_items_expenses_versions_and_owner_rows_together`), and an
+    # order Postgres refuses leaves none
+    # (`test_an_order_refused_at_its_line_items_leaves_no_version`).
 
     def test_it_takes_a_connection_and_never_a_pool(self):
         """A second connection would put the version outside the transaction
@@ -317,19 +277,11 @@ class TestTheSeedIsNotTheWritersOutput:
     necessarily contain the words a source-text search would look for, so a
     grep would have passed with the clause deleted."""
 
-    def test_the_daily_rate_excludes_both_kinds_by_name(self):
-        """Both literals, spelled out, because `ORDER_VERSIONS_RECENT_SQL` is
-        **rendered from** `NOT_THE_WRITER`. A loop over that tuple is a circle:
-        drop a kind and the statement loses the clause with it, so the loop
-        still passes on a check that no longer runs. Measured — the review
-        removed `BASELINE` from the tuple and the whole suite stayed green,
-        which is precisely the 46,695-row WARN this class was written about
-        coming back on the next fresh install."""
-        from core.mirror_reconciliation import ORDER_VERSIONS_RECENT_SQL
-
-        assert "captured_at >= $1" in ORDER_VERSIONS_RECENT_SQL
-        assert "kind NOT IN ('baseline', 'backfill')" in ORDER_VERSIONS_RECENT_SQL
-        assert f"'{CHANGE}'" not in ORDER_VERSIONS_RECENT_SQL
+    # `test_the_daily_rate_excludes_both_kinds_by_name` stood here, reading
+    # the clause in `ORDER_VERSIONS_RECENT_SQL`. That neither a baseline nor
+    # a backfill of 1,500 rows is a flood is run against a real archive:
+    # `tests/integration/test_comment_backfill_ships.py`
+    # (`test_fifteen_hundred_rows_of_a_kind_the_writer_never_writes_are_not_a_flood`).
 
     def test_both_kinds_are_in_the_tuple_the_statement_is_rendered_from(self):
         """The other half of the same claim, and the side a reader edits.

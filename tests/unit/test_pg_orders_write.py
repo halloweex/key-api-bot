@@ -224,30 +224,11 @@ class TestWhatPostgresWouldRefuse:
 
 # ─── G8: the selections follow the writes ────────────────────────────────────
 
-
-class TestTheSelectionsFollow:
-
-
-    @pytest.mark.asyncio
-    async def test_the_boot_does_not_pull_730_days_over_an_empty_duckdb(self, met, monkeypatch):
-        """A latched host with a fresh DuckDB: DuckDB's count is 0 for ever.
-        Mutation: gate the boot's full sync on `get_stats()["orders"]`."""
-        from core import sync_service as mod
-
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        store = MagicMock()
-        store.get_stats = AsyncMock(return_value={"orders": 0, "products": 0})
-        store.orders_held = AsyncMock(return_value=46_000)
-        store.refresh_sku_inventory_status = AsyncMock(return_value=0)
-        service = MagicMock()
-        service.full_sync = AsyncMock()
-        service.incremental_sync = AsyncMock()
-        monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
-        monkeypatch.setattr(mod, "get_sync_service", AsyncMock(return_value=service))
-        monkeypatch.setattr(mod, "init_meilisearch", AsyncMock(return_value=False))
-        await mod.init_and_sync()
-        service.full_sync.assert_not_awaited()
-        service.incremental_sync.assert_awaited_once()
+# `TestTheSelectionsFollow` stood here: the boot's choice between a full sync
+# and an incremental one, over mocks of the store and the service. The same
+# choice is made over the test Postgres, with KeyCRM faked at its transport,
+# by `tests/unit/test_web_boot.py::TestTheBootSync` (no orders held: 730 days
+# asked; orders held: asked from the order watermark).
 
 
 # ─── G7: the order step is contained under the chain ─────────────────────────

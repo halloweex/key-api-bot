@@ -32,14 +32,6 @@ class _Buyer:
         self.birthday = birthday
 
 
-class _DataError(Exception):
-    """Named like DuckDB's refusal of a value, which is how the step tells it
-    from a broken store without importing a driver."""
-
-
-_DataError.__name__ = "ConversionException"
-
-
 def _service(monkeypatch, *, upsert=None, getter=None):
     from core import sync_service as mod
     from core.sync_service import SyncService
@@ -130,14 +122,32 @@ class TestAFailedWriteIsContained:
         assert svc._buyers_retry_in() is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("refusal,recorded", [
+        ("every_buyer_skipped", "BuyersRefused"),
+        ("asyncpg_data_error", "NumericValueOutOfRangeError"),
+    ])
     async def test_a_data_error_is_recorded_but_does_not_count_as_a_failure(
-            self, monkeypatch):
-        svc, _, _ = _service(monkeypatch, upsert=AsyncMock(side_effect=_DataError("x")))
+            self, monkeypatch, refusal, recorded):
+        """A batch whose values Postgres refuses fails the same way until the
+        data changes in KeyCRM: recorded and backed off, never counted toward
+        the page. The two shapes the store has: chain 4 skips by id every
+        buyer it would refuse (the step names that `BuyersRefused`), and a
+        value no check foresaw reaches asyncpg as a `DataError`."""
+        import asyncpg
+
+        async def upsert(buyers, skipped_out=None):
+            if refusal == "every_buyer_skipped":
+                skipped_out.extend(b.id for b in buyers)
+                return 0
+            raise asyncpg.exceptions.NumericValueOutOfRangeError("out of range")
+
+        svc, store, _ = _service(monkeypatch, upsert=upsert)
         await svc.incremental_sync()
         state = svc.buyer_sync_state
-        assert state.last_error_class == "ConversionException"
+        assert state.last_error_class == recorded
         assert state.consecutive_failures == 0
         assert svc._buyers_retry_in() is not None     # but it still backs off
+        assert not _buyers_stamped(store)
 
 
 

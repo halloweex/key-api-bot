@@ -1,6 +1,4 @@
 """The last batch of the race audit's LOW findings, each with the guard it got."""
-import inspect
-
 import pytest
 
 
@@ -45,11 +43,50 @@ class TestTheUtmBackfillFlagIsAlwaysReleased:
 
 
 class TestTheRest:
-    def test_the_bot_sync_client_serialises_its_callers(self):
-        from core.keycrm import SyncKeyCRMClient
+    def test_the_bot_sync_client_serialises_its_callers(self, monkeypatch):
+        """The bot shares one client between worker threads (a report handler
+        and the nightly milestone job), each on an event loop of its own: the
+        inner client's pool and the circuit breaker's lock belong to one loop,
+        so two calls at once must reach KeyCRM one after the other. KeyCRM is
+        faked at its transport and counts the requests it serves at once."""
+        import threading
+        import time
 
-        assert "threading.Lock()" in inspect.getsource(SyncKeyCRMClient.__init__)
-        assert "with self._lock:" in inspect.getsource(SyncKeyCRMClient._run)
+        from core.keycrm import SyncKeyCRMClient
+        from tests.helpers.orders_sync import keycrm_serving_orders
+
+        counting = threading.Lock()
+        inside = most = 0
+
+        def slowly(_request):
+            nonlocal inside, most
+            with counting:
+                inside += 1
+                most = max(most, inside)
+            time.sleep(0.05)
+            with counting:
+                inside -= 1
+            return None          # then answered as KeyCRM answers
+
+        keycrm_serving_orders(monkeypatch, [], answer=slowly)
+        client = SyncKeyCRMClient(api_key="test-only")
+        answers, errors = [], []
+
+        def call():
+            try:
+                answers.append(client.get_orders({"limit": 50}))
+            except Exception as exc:  # noqa: BLE001 — reported by the assert below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=call) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert errors == []
+        assert answers == [{"data": []}, {"data": []}]
+        assert most == 1
 
     def test_utm_parse_stamps_the_updated_at_it_parsed(self):
         """The parse's own, in Postgres since step 13 and alone since step 14's

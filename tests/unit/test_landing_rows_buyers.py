@@ -7,15 +7,16 @@ store and failed the other, and a birthday DuckDB refuses rolled back the whole
 batch — once a minute, taking the offers and stocks syncs behind it along.
 
 Now both are handed `core.landing_rows.parse_buyers`, which makes them agree by
-construction. What these tests protect is that the parser changes no birthday
-DuckDB accepted before: every case below is judged against DuckDB 1.5.5's own
-CAST, run in this process, not against what somebody believes it does.
+construction. What these tests protect is the reading itself: a birthday a
+person could type becomes the date they meant, and one that cannot be a date
+becomes None — never an exception, which cost the batch and the syncs behind
+it. The rule was measured against DuckDB 1.5.5's own CAST when the parser was
+written (80 shapes, the parser's comment); the cases below state its answers.
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-import duckdb
 import pytest
 
 from core.landing_rows import (
@@ -37,69 +38,29 @@ class _Buyer:
             setattr(self, k, v)
 
 
-# Every shape probed against DuckDB while writing the parser, plus the ones a
-# person would type. Kept broad on purpose: a case added here is judged by
-# DuckDB, so it can only make the test stricter.
-DATE_CASES = [
-    "1990-01-05", "1990-1-5", " 1990-01-05 ", "1990-01-5 ", "1990-1-05",
-    "1990-01-05T10:00:00", "1990-01-05 10:00:00", "1990-01-05T10:00:00+03:00",
-    "1990-01-05Z", "1990-01-05T", "1990-01-05\t10:00", "1990-01-05\n",
-    "1990-01-05 garbage", "1990-01-05garbage", "1990-01-05x", "1990-01-05:",
-    "1990-1-5-", "1990-01-05 12", "1990-01-05+03", "1990-01-05.5",
-    "1990-01-05 BC", "1990-01-05\x00",
-    "1990/01/05", "1990 01 05", "1990\\01\\05",
-    "90-01-05", "19-01-05", "199-01-05", "1-1-1", "0001-01-01", "9999-12-31",
-    "2000-02-29",
-    # refused by DuckDB, or not representable in Python
-    "", "  ", "0000-00-00", "1990-02-30", "1900-02-29", "1990-13-01",
-    "1990-00-05", "1990-01-0", "1990-01-32", "05.01.1990", "1990.01.05",
-    "05-01-1990", "05/01/1990", "5-1-1990", "19900105", "1990-001-05",
-    "1990-01-051", "1990-01/05", "+1990-01-05", "-1990-01-05", "0000-01-01",
-    "12345-01-01", "1990-01-05 (BC)",
-    # Found by PR-1's review, each disagreeing with the first parser: the BC
-    # tail in any case and after exactly one ASCII space; `epoch`; leading
-    # zeros in the year; a NUL AFTER the day; Unicode spaces and digits DuckDB
-    # does not count as either.
-    "1990-01-05 (bc)", "1990-01-05 (Bc)", "1990-01-05(BC)", "1990-01-05  (BC)",
-    "1990-01-05\t(BC)", "1990-01-05\n(bc)", "1990-01-05\v(BC)", "1990-01-05\f(BC)",
-    "1990-01-05\r(BC)", "1990-01-05 (bc)x",
-    "epoch", "EPOCH", " epoch", "epoch ", "epochx",
-    "01990-01-05", "001990-01-05", "0000000001990-01-05",
-    "1990-01-05\x001", "1990-01-05\u0661", "\u0661990-01-05", "1990-0\u0661-05",
-    "\u00a01990-01-05", "1990-01-05\u00a0(BC)", "\u20031990-01-05",
-]
-
-# Where the parser disagrees with DuckDB on purpose, and why. Anything else
-# disagreeing fails.
-INTENDED = {
-    # A LEADING run of NULs is skipped, where DuckDB refuses it — the rule that
-    # strips NUL from every text value, applied only where it cannot change a
-    # date. No production birthday carries one.
-    "\x001990-01-05": date(1990, 1, 5),
-}
-
-
-def _duckdb_reads(text):
-    """DuckDB's CAST, reduced to what Python can hold: a date or None."""
-    conn = duckdb.connect()
-    try:
-        value = conn.execute("SELECT CAST(? AS DATE)", [text]).fetchone()[0]
-    except duckdb.Error:
-        return None
-    # A BC date comes back as a string such as '1991-01-05 (BC)', and a year
-    # past 9999 the same way: DuckDB can hold them, asyncpg and Python cannot.
-    return value if isinstance(value, date) else None
-
-
-class TestBirthdaysReadAsDuckDBReadsThem:
-    @pytest.mark.parametrize("text", DATE_CASES)
-    def test_every_case_matches_duckdb(self, text):
-        assert _as_date(text) == _duckdb_reads(text), text
-
-    @pytest.mark.parametrize("text,expected", sorted(INTENDED.items()))
-    def test_the_intended_differences_are_the_only_ones(self, text, expected):
-        assert _duckdb_reads(text) != expected   # still a difference…
-        assert _as_date(text) == expected        # …and still the one we chose
+class TestBirthdays:
+    @pytest.mark.parametrize("text,expected", [
+        # Read as the date a person meant.
+        ("1990-1-5", date(1990, 1, 5)),          # the incident: one store refused it
+        (" 1990-01-05 ", date(1990, 1, 5)),
+        ("1990-01-05T10:00", date(1990, 1, 5)),  # a time after the day
+        ("1990/01/05", date(1990, 1, 5)),        # another separator, used twice
+        ("01990-01-05", date(1990, 1, 5)),       # zeros in front of the year
+        ("epoch", date(1970, 1, 1)),
+        ("\x001990-01-05", date(1990, 1, 5)),    # a leading NUL is skipped
+        # Not a date Python, or Postgres through asyncpg, could hold.
+        ("1990-01-05 (BC)", None),
+        ("0000-01-01", None),                    # year 0
+        ("12345-01-01", None),                   # past 9999
+        # Not a date at all.
+        ("05-01-1990", None),                    # day first never reads as year 5
+        ("1990-01-051", None),                   # a digit after the day
+        ("\u0661990-01-05", None),               # ASCII digits only
+        ("\xa01990-01-05", None),                # a no-break space in front
+    ])
+    def test_a_birthday_reads_as_a_date_or_none(self, text, expected):
+        assert buyer_row(_Buyer(birthday=text)).birthday == expected
+        assert birthday_is_unreadable(text) is (expected is None)
 
     def test_a_date_or_datetime_passes_through(self):
         assert _as_date(date(1990, 1, 5)) == date(1990, 1, 5)
@@ -107,7 +68,7 @@ class TestBirthdaysReadAsDuckDBReadsThem:
         assert _as_date(None) is None
 
     @pytest.mark.parametrize("text", ["", "0000-00-00", "1990-02-30", "05.01.1990"])
-    def test_what_duckdb_refuses_is_unreadable_not_an_exception(self, text):
+    def test_an_unreadable_one_is_none_not_an_exception(self, text):
         assert _as_date(text) is None
         assert birthday_is_unreadable(text)
 
