@@ -148,6 +148,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/sales/by-source` | Sales breakdown by source |
 | `/api/products/top` | Top 10 products by quantity |
 | `/api/products/performance` | Top by revenue, category breakdown |
+| `/api/stock-margin` | The margin of every offer in stock now — price, cost, margin, the last 90 days (retail revenue; units out through every channel), days of supply, what to check — and the tiles: the last section of /margin. **The admin role only** (`require_admin` at its include, not the `margin` tab, which can be ticked for a non-admin). Gift certificates and testers or ₴1 giveaways are reported apart; a price of 0 is flagged as missing data (`core/stock_margin.py`) |
 | `/api/categories` | Root categories list |
 | `/api/categories/{id}/children` | Subcategories for parent |
 | `/api/brands` | All brands list |

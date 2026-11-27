@@ -76,6 +76,7 @@ import type {
   MarginTrendItem,
   MarginBrandCategoryItem,
   MarginAlertItem,
+  StockMarginResponse,
   SmsSegmentsResponse,
   SmsCampaignsResponse,
   TgBotActivityResponse,
@@ -890,6 +891,10 @@ export const api = {
 
   getMarginAlerts: (params: string, options?: FetchOptions) =>
     fetchApi<MarginAlertItem[]>('/margin/alerts', params, options),
+
+  // The margin of everything in stock — admins only (web/routes/api/stock_margin.py)
+  getStockMargin: (options?: FetchOptions) =>
+    fetchApi<StockMarginResponse>('/stock-margin', undefined, options),
 
   // Telegram bot activity (admin)
   getTgBotActivity: (days: number, options?: FetchOptions) =>
