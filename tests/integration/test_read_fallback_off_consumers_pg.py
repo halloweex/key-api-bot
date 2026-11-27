@@ -10,8 +10,9 @@ every unit test and stop both reports, with a deferral in the log that looks
 exactly like the designed one.
 
 So the three consumers whose reads go through a router that refuses are run
-here against a live Postgres at the current head:
-the pool is reached and nothing is refused. Then the same pool is closed — an
+here against a live Postgres at the current head: the traffic report goes
+out to the admins with the week's numbers and records the week, the goals
+job writes both tables, the tool answers. Then the same pool is closed — an
 outage asyncpg reports on its own — and each answers by name: the report
 defers with no ledger row, the goals job defers with nothing written, the
 tool returns `data_unavailable`. The consumers with no fallback at all
@@ -78,48 +79,140 @@ def _refused(surface: str) -> dict:
     return {"reason": read_fallback.READ_UNAVAILABLE, "surface": surface}
 
 
+def _the_reported_week():
+    """Monday–Sunday of the last complete week in Kyiv: the week the job
+    reports today."""
+    from datetime import datetime
+
+    from core.scheduler import SCHEDULER_TIMEZONE
+    from core.weekly_report import last_complete_week
+
+    return last_complete_week(datetime.now(SCHEDULER_TIMEZONE).date())
+
+
+def _midday(day):
+    from datetime import datetime, time
+    from zoneinfo import ZoneInfo
+
+    return datetime.combine(day, time(12), ZoneInfo("Europe/Kyiv"))
+
+
+async def _a_week_of_attributed_orders(conn, pool):
+    """Three retail orders in the reported week, the last on its Sunday so
+    the warehouse has reached the week's end, and one the week before; two
+    of them tagged as an ad, one placed as organic, and one with no tags
+    from Instagram, which the tab reads as organic. Bronze landed, Silver and
+    Gold derived, then the attribution rows the parse writes."""
+    from datetime import timedelta
+
+    from tests.integration.pg_tab_seed import derive, seed
+
+    start, end = _the_reported_week()
+    # (order_id, source_id, grand_total, day)
+    orders = [(1, 4, 1000.0, start), (2, 4, 500.0, start + timedelta(days=2)),
+              (3, 1, 300.0, end), (4, 4, 800.0, start - timedelta(days=6))]
+    await seed(conn, orders=[(oid, source, 1, total, _midday(day), oid, None, None)
+                             for oid, source, total, day in orders])
+    await derive(pool)
+    await conn.executemany(
+        "INSERT INTO silver.order_utm (order_id, utm_source, utm_medium, utm_campaign,"
+        " traffic_type, platform, parsed_at) VALUES ($1, $2, $3, $4, $5, $6, now())",
+        [(1, "fbads", "paid", "spring", "paid_confirmed", "facebook"),
+         (2, "instagram", "bio", None, "organic", "instagram"),
+         (4, "fbads", "paid", "spring", "paid_confirmed", "facebook")])
+
+
+_SENDS = "FROM app.traffic_report_sends WHERE week_start = $1 AND sales_type = 'retail'"
+_OWNER = "FROM meta.chain_watermarks WHERE key = 'owner:app.traffic_report_sends'"
+
+
+@pytest_asyncio.fixture
+async def traffic_ledger_left_as_found():
+    """The reported week unsent in chain 11b's ledger, and the ledger and its
+    owner row as they were once the test is over."""
+    start, _end = _the_reported_week()
+    conn = await asyncpg.connect(DSN)
+    try:
+        sends = await conn.fetch(f"SELECT * {_SENDS}", start)
+        owner = await conn.fetch(f"SELECT * {_OWNER}")
+        await conn.execute(f"DELETE {_SENDS}", start)
+    finally:
+        await conn.close()
+    yield start
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute(f"DELETE {_SENDS}", start)
+        for row in sends:
+            await conn.execute(
+                "INSERT INTO app.traffic_report_sends (week_start, sales_type, revenue,"
+                " orders, sent_at) VALUES ($1, $2, $3, $4, $5)",
+                row["week_start"], row["sales_type"], row["revenue"], row["orders"],
+                row["sent_at"])
+        if not owner:
+            await conn.execute(f"DELETE {_OWNER}")
+    finally:
+        await conn.close()
+
+
+def _deliveries(monkeypatch) -> list:
+    """Telegram, at the two transports the report sends through: each
+    message's form and recipient, every recipient reached."""
+    got: list = []
+
+    async def _rich(html, media=None, chat_ids=None, **kwargs):
+        got.extend(("rich", chat_id) for chat_id in chat_ids or [])
+        return len(chat_ids or [])
+
+    async def _text(body, chat_ids=None, **kwargs):
+        got.extend(("text", chat_id) for chat_id in chat_ids or [])
+        return len(chat_ids or [])
+
+    monkeypatch.setattr("core.telegram_alerts.send_rich_message_http", _rich)
+    monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _text)
+    return got
+
+
 class TestTheTrafficReport:
-    """The readiness gate reads Postgres' Gold since step 14's S14-07: seeded
-    there for the working case, and answered for the outage, whose refusal
-    under test is the tab's own read (the gate's failure is no refusal)."""
+    """The readiness gate and the tab's reads are Postgres' since step 14's
+    S14-07: seeded there for the working case, and the gate answered for the
+    outage, whose refusal under test is the tab's own read (the gate's
+    failure is no refusal)."""
 
-    @pytest_asyncio.fixture(autouse=True)
-    async def _gold_left_as_found(self, live):
-        pool, _get_pool = live
-        await self._empty_gold(pool)
-        yield
-        if not pool._closed:
-            await self._empty_gold(pool)
-
-    @staticmethod
-    async def _empty_gold(pool):
-        async with pool.acquire() as conn:
-            await conn.execute("TRUNCATE gold.daily_revenue")
-
-    async def _job(self, monkeypatch, tmp_path, *, gate_answers=False):
+    async def _job(self, monkeypatch, tmp_path):
         from tests.helpers.off_consumers import TrafficReportWiring
         from tests.helpers.off_consumers import _duck
-        from tests.helpers.traffic_report_job import _seed_gold
 
         store = await _duck(tmp_path)
-        if gate_answers:
-            week_start = TrafficReportWiring._the_warehouse_is_ready(monkeypatch)
-        else:
-            week_start = await _seed_gold(store)
+        week_start = TrafficReportWiring._the_warehouse_is_ready(monkeypatch)
         scheduler, sent = TrafficReportWiring()._wire(monkeypatch, store, tmp_path)
         return store, week_start, scheduler, sent
 
     @pytest.mark.asyncio
-    async def test_a_working_postgres_is_read_not_refused(
-        self, live, monkeypatch, tmp_path,
+    async def test_a_week_of_attributed_orders_is_sent_to_the_admins(
+        self, monkeypatch, tmp_path, traffic_ledger_left_as_found,
     ):
-        _pool, get_pool = live
-        store, _week_start, scheduler, _sent = await self._job(monkeypatch, tmp_path)
-        result = await scheduler._run_traffic_report()
+        """The report reads the tab's Postgres and goes out: the week's three
+        orders and ₴1 800, one message to each admin, the week recorded in
+        the ledger."""
+        from core.store import AnalyticsStore
+        from tests.helpers.off_consumers import TrafficReportWiring
+        from tests.integration.pg_tab_seed import tab_in_postgres
 
-        assert get_pool.await_count > 0, "the report never asked Postgres"
-        assert result.get("reason") != read_fallback.READ_UNAVAILABLE, result
-        assert read_fallback.refusals() == {}
+        week_start = traffic_ledger_left_as_found
+        async with tab_in_postgres(DSN, monkeypatch, _a_week_of_attributed_orders) as pool:
+            scheduler, _ = TrafficReportWiring()._wire(monkeypatch, AnalyticsStore(), tmp_path)
+            delivered = _deliveries(monkeypatch)
+            result = await scheduler._run_traffic_report()
+            async with pool.acquire() as conn:
+                recorded = await conn.fetchrow(f"SELECT orders, revenue {_SENDS}", week_start)
+
+        assert result["sent"] is True, result
+        assert result["week"] == week_start.isoformat()
+        assert (result["orders"], result["revenue"]) == (3, 1800.0)
+        assert sorted(chat_id for _form, chat_id in delivered) == sorted(
+            TrafficReportWiring.ADMINS)
+        assert recorded is not None, "the delivered week was not recorded"
+        assert (recorded["orders"], float(recorded["revenue"])) == (3, 1800.0)
 
     @pytest.mark.asyncio
     async def test_an_outage_defers_it_with_no_ledger_row(
@@ -128,8 +221,7 @@ class TestTheTrafficReport:
         from tests.helpers.off_consumers import _ledger_answers
 
         pool, _get_pool = live
-        store, week_start, scheduler, sent = await self._job(
-            monkeypatch, tmp_path, gate_answers=True)
+        store, week_start, scheduler, sent = await self._job(monkeypatch, tmp_path)
         # The ledger is chain 11b's, in Postgres since step 14's S14-00,
         # and asked first: answered here, so the refusal under test is the
         # report's own read rather than the ledger's.

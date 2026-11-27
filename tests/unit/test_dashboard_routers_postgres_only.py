@@ -32,9 +32,8 @@ without a database:
 
 The numbers are `tests/integration/test_dashboard_two_engines.py`'s, against a
 real Postgres and literals DuckDB answered before its side went; every route
-through the real app is `tests/unit/test_read_fallback_http.py`'s; that no
-engine call sits outside its `try` is `tests/unit/test_read_fallback_sites.py`'s
-rule 5, and that nothing in `revenue.py` but a router or a refusing helper
+through the real app, a failing engine answered 503 naming its tab, is
+`tests/unit/test_read_fallback_http.py`'s, and that nothing in `revenue.py` but a router or a refusing helper
 reaches an engine at all is `TestNothingGoesRoundARefusal`'s, below.
 """
 from __future__ import annotations
@@ -109,7 +108,7 @@ class TestNothingGoesRoundARefusal:
     `test_nothing_but_the_router_reaches_an_engine`: in the three tab modules
     whose every reader goes through one router, nothing but that router may
     reach an engine, because a reader calling Postgres itself answers an
-    engine failure with an uncounted 500 — rule 5 judges only routers and
+    engine failure with an uncounted 500 — the refusal rule judges only routers and
     functions that refuse, and the HTTP sweep only refusals. It left
     `revenue.py` to this PR. Here the dashboard's file meets the same walk,
     with the four helpers that refuse for themselves allowed an engine.
@@ -118,7 +117,7 @@ class TestNothingGoesRoundARefusal:
     MD2, `from core.pg_gold_read import fetch_series` and an `await
     fetch_series(...)` before `_pg_gold_summary`'s `try` — a 500 on
     `/api/summary?source_id=2` that the first form of the allowance dropped,
-    and that this and rule 5 each find now."""
+    and that this and the refusal rule each find now."""
 
     def test_the_dashboard_file(self):
         source = (ROOT / REVENUE).read_text(encoding="utf-8")
@@ -145,7 +144,7 @@ class TestNothingGoesRoundARefusal:
               "        except Exception as exc:\n"
               "            raise read_fallback.refuse('dashboard', exc)\n")
 
-    # The allowance is what rule 5 judges, in each spelling it reads: with
+    # The allowance is what the refusal rule judges, in each spelling it reads: with
     # the call inside the `try`, nothing is left to report.
     @pytest.mark.parametrize("helper", [
         HELPER,
@@ -157,7 +156,7 @@ class TestNothingGoesRoundARefusal:
                        "        import core.pg_gold_read\n"
                        "        try:\n"
                        "            await core.pg_gold_read.fetch_series(1)\n"),
-        # ClickHouse's modules, which rule 5 reads since step 14's S14-07:
+        # ClickHouse's modules, which the refusal rule reads since step 14's S14-07:
         # by the module, and by a name imported from it.
         HELPER.replace("        try:\n",
                        "        from core import ch_cohorts\n"
@@ -179,7 +178,7 @@ class TestNothingGoesRoundARefusal:
         HELPER.replace("        try:\n",
                        "        rows = await pg_gold_read.fetch_series(1)\n"
                        "        try:\n"),
-        # The merge review's MD2: rule 5 did not read a call by a name
+        # The merge review's MD2: the refusal rule did not read a call by a name
         # imported from `core.pg_*`, so it held the helper clean and the
         # allowance dropped what S14-05's walk had found.
         HELPER.replace("        try:\n",

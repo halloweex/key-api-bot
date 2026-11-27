@@ -6,6 +6,10 @@ missing local secret.
 """
 import hashlib
 import logging
+import os
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -143,10 +147,6 @@ class TestPayload:
         client.post(PATH, json=_signed("evt-1", "mid-1", "Sent"))
         assert store.calls[0]["delivered"] is None
 
-    def test_dlr_timestamp_is_parsed(self, client, store):
-        client.post(PATH, json=_signed("evt-1", "mid-1", "DELIVRD"))
-        assert store.calls[0]["delivered_at"].year == 2026
-
     def test_bad_timestamp_does_not_reject_the_report(self, client, store):
         payload = _signed("evt-1", "mid-1", "DELIVRD")
         payload["data"]["dlr_date"] = "not a date"
@@ -200,6 +200,53 @@ class TestPayload:
         assert webhooks._dlr_counts["accepted"] == 1
 
 
+# ─── A sent campaign on Postgres, for the tests that read the roster back ───
+
+def _member(buyer_id: int) -> dict:
+    return {
+        "buyerId": buyer_id, "phone": f"3809{buyer_id:08d}", "tier": "CORE",
+        "assignment": "target", "orders": 2, "revenueLtv": 5000.0,
+        "marginLtv": 3000.0, "recencyDays": 30,
+    }
+
+
+async def _sent_campaign(tmp_path, monkeypatch):
+    """A sent campaign with two recipients, and the webhook wired to it."""
+    store = pg_sms_seed.store(tmp_path, "dlr.duckdb")
+    await store.freeze_sms_campaign(
+        campaign="aug", customers=[_member(1), _member(2)],
+        criteria={}, ltv_basis="margin", sales_type="retail", holdout_pct=0,
+    )
+    await store.record_sms_send(
+        "aug", {1: "mid-attacker", 2: "mid-victim"}, [], {},
+    )
+
+    async def _get_store():
+        return store
+
+    monkeypatch.setattr("web.routes.api.webhooks.get_store", _get_store)
+    monkeypatch.setenv("TURBOSMS_WEBHOOK_SECRET", SECRET)
+    return store
+
+
+def _asgi_client():
+    # ASGITransport runs the app in this test's own event loop, so the
+    # store's asyncio lock is used from one loop throughout. TestClient
+    # builds a fresh loop per request unless entered as a context manager,
+    # and entering it would run the app's whole startup.
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+    )
+
+
+async def _row(store, message_id: str) -> tuple:
+    async with pg_sms_seed.pg_conn() as conn:
+        return pg_sms_seed.as_tuple(await conn.fetchrow(
+            "SELECT delivery_status, delivered FROM app.sms_campaign_members"
+            " WHERE message_id = $1", message_id,
+        ))
+
+
 class TestTheSignedIdIsBoundToItsMessage:
     """The signature proves the caller knew the secret; it says nothing about
     which message the callback is for.
@@ -225,60 +272,16 @@ class TestTheSignedIdIsBoundToItsMessage:
         async with pg_sms_seed.on_postgres(monkeypatch):
             yield
 
-    @staticmethod
-    def _member(buyer_id: int) -> dict:
-        return {
-            "buyerId": buyer_id, "phone": f"3809{buyer_id:08d}", "tier": "CORE",
-            "assignment": "target", "orders": 2, "revenueLtv": 5000.0,
-            "marginLtv": 3000.0, "recencyDays": 30,
-        }
-
-    async def _campaign(self, tmp_path, monkeypatch):
-        """A sent campaign with two recipients, and the webhook wired to it."""
-        store = pg_sms_seed.store(tmp_path, "dlr.duckdb")
-        await store.freeze_sms_campaign(
-            campaign="aug", customers=[self._member(1), self._member(2)],
-            criteria={}, ltv_basis="margin", sales_type="retail", holdout_pct=0,
-        )
-        await store.record_sms_send(
-            "aug", {1: "mid-attacker", 2: "mid-victim"}, [], {},
-        )
-
-        async def _get_store():
-            return store
-
-        monkeypatch.setattr("web.routes.api.webhooks.get_store", _get_store)
-        monkeypatch.setenv("TURBOSMS_WEBHOOK_SECRET", SECRET)
-        return store
-
-    @staticmethod
-    def _client():
-        # ASGITransport runs the app in this test's own event loop, so the
-        # store's asyncio lock is used from one loop throughout. TestClient
-        # builds a fresh loop per request unless entered as a context manager,
-        # and entering it would run the app's whole startup.
-        return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
-        )
-
-    @staticmethod
-    async def _row(store, message_id: str) -> tuple:
-        async with pg_sms_seed.pg_conn() as conn:
-            return pg_sms_seed.as_tuple(await conn.fetchrow(
-                "SELECT delivery_status, delivered FROM app.sms_campaign_members"
-                " WHERE message_id = $1", message_id,
-            ))
-
     @pytest.mark.asyncio
     async def test_a_captured_pair_cannot_be_repointed_at_another_message(
         self, tmp_path, monkeypatch,
     ):
         """The whole exploit in two calls: sign one event, then reuse that same
         signature for somebody else's message."""
-        store = await self._campaign(tmp_path, monkeypatch)
+        store = await _sent_campaign(tmp_path, monkeypatch)
         forged = _signed("evt-A", "mid-attacker", "Sent")
 
-        async with self._client() as ac:
+        async with _asgi_client() as ac:
             first = await ac.post(PATH, json=forged)
             # Same id, same signature — only the object reference is swapped.
             forged["data"]["message_id"] = "mid-victim"
@@ -287,7 +290,7 @@ class TestTheSignedIdIsBoundToItsMessage:
 
         assert first.status_code == 200
         assert second.status_code != 200, "a re-pointed pair must not be accepted"
-        assert await self._row(store, "mid-victim") == ("Accepted", None), (
+        assert await _row(store, "mid-victim") == ("Accepted", None), (
             "the victim's delivery state is what the campaign's lift is "
             "computed from, and a callback that never referred to them "
             "must not touch it"
@@ -300,10 +303,10 @@ class TestTheSignedIdIsBoundToItsMessage:
         """A burst of these is either a replay or the gateway reusing ids
         across messages, and the alert is how anyone hears of it — under its
         own condition, not as a wrong secret."""
-        await self._campaign(tmp_path, monkeypatch)
+        await _sent_campaign(tmp_path, monkeypatch)
         forged = _signed("evt-A", "mid-attacker", "Sent")
 
-        async with self._client() as ac:
+        async with _asgi_client() as ac:
             assert (await ac.post(PATH, json=forged)).status_code == 200
             forged["data"]["message_id"] = "mid-victim"
             for _ in range(webhooks._ALERT_AT):
@@ -322,16 +325,16 @@ class TestTheSignedIdIsBoundToItsMessage:
         for good. A legitimate retry carries the same id and the same data —
         it must never look like a replay.
         """
-        store = await self._campaign(tmp_path, monkeypatch)
+        store = await _sent_campaign(tmp_path, monkeypatch)
         retry = _signed("evt-A", "mid-victim", "DELIVRD")
 
-        async with self._client() as ac:
+        async with _asgi_client() as ac:
             for attempt in range(9):
                 r = await ac.post(PATH, json={**retry, "try": attempt + 1})
                 assert r.status_code == 200, f"retry {attempt + 1} refused"
                 assert r.json() == {"ok": True, "matched": True}
 
-        assert await self._row(store, "mid-victim") == ("DELIVRD", True)
+        assert await _row(store, "mid-victim") == ("DELIVRD", True)
         assert webhooks._dlr_counts["accepted"] == 9
 
     @pytest.mark.asyncio
@@ -340,14 +343,59 @@ class TestTheSignedIdIsBoundToItsMessage:
     ):
         """Sent then DELIVRD are two events about one message. Binding the id
         to the message must not turn the second one into a replay."""
-        store = await self._campaign(tmp_path, monkeypatch)
+        store = await _sent_campaign(tmp_path, monkeypatch)
 
-        async with self._client() as ac:
+        async with _asgi_client() as ac:
             await ac.post(PATH, json=_signed("evt-A", "mid-victim", "Sent"))
             r = await ac.post(PATH, json=_signed("evt-B", "mid-victim", "DELIVRD"))
 
         assert r.status_code == 200
-        assert await self._row(store, "mid-victim") == ("DELIVRD", True)
+        assert await _row(store, "mid-victim") == ("DELIVRD", True)
+
+
+@pytest.fixture
+def kyiv_process_clock():
+    """The process clock production runs: the web container is started with
+    TZ=Europe/Kyiv (docker-compose.yml). The gateway's `dlr_date` carries no
+    offset, and the time it is parsed into is stored in the process's zone."""
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/Kyiv"
+    time.tzset()
+    yield
+    if before is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = before
+    time.tzset()
+
+
+class TestTheReportLandsOnTheRoster:
+    """What an accepted report writes, read back out of Postgres."""
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _postgres(self, monkeypatch):
+        if not pg_sms_seed.DSN:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+        async with pg_sms_seed.on_postgres(monkeypatch):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_the_delivery_time_is_the_kyiv_instant_the_gateway_named(
+        self, tmp_path, monkeypatch, kyiv_process_clock,
+    ):
+        """TurboSMS writes `dlr_date` as Kyiv wall time: 09:05 on 10 August is
+        06:05 UTC, and that instant is when the message was delivered."""
+        await _sent_campaign(tmp_path, monkeypatch)
+
+        async with _asgi_client() as ac:
+            r = await ac.post(PATH, json=_signed("evt-1", "mid-victim", "DELIVRD"))
+
+        assert r.status_code == 200
+        async with pg_sms_seed.pg_conn() as conn:
+            delivered_at = await conn.fetchval(
+                "SELECT delivered_at FROM app.sms_campaign_members WHERE message_id = $1",
+                "mid-victim")
+        assert delivered_at == datetime(2026, 8, 10, 9, 5, tzinfo=ZoneInfo("Europe/Kyiv"))
 
 
 def _without_an_id(client, monkeypatch, i):

@@ -205,6 +205,23 @@ class TestTheIncrementalParse:
         assert (await rows(conn))[106] == (106, *(None,) * 12, UPDATED)
 
     @pytest.mark.asyncio
+    async def test_every_column_the_table_has_is_written(self, conn):
+        """A column the table has and the parse does not write would read NULL
+        for ever. The row is read back whole (`SELECT *`), not through the
+        parse's own column list, so a later migration's `ADD COLUMN` that the
+        parse never learned to fill fails here."""
+        await order(conn, 114, comment=(
+            "UTM: utm_source: fbads; utm_medium: cpc; utm_campaign: spring; "
+            "utm_content: c1; utm_term: t1; utm_lang: uk; "
+            "_fbp: fb.1.2.3; _fbc: fb.1.2.abc; ttp: xyz; fbclid: abc"))
+
+        await parse.parse_incremental()
+
+        row = await conn.fetchrow(f"SELECT * FROM {UTM_TABLE} WHERE order_id = 114")
+        assert row is not None
+        assert [column for column, value in row.items() if value is None] == []
+
+    @pytest.mark.asyncio
     async def test_zero_rows_still_stamp_the_watermark(self, conn):
         """A quiet night is not a dead parser. The watermark measures that the
         parse ran, so the ~90-minute canary limit does not page every night.

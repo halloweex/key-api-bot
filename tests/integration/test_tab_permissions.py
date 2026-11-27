@@ -20,9 +20,15 @@ from fastapi.testclient import TestClient
 from web.main import app
 from core.permissions import ACCESS_PRESETS, ADMIN_USER_IDS, TAB_FEATURE_KEYS
 from web.services import dashboard_service
+from tests.helpers.access_lists import (
+    access_lists_empty, bot_store_on_postgres, dashboard_row, dashboard_user,
+    execute, pending_request, rows,
+)
+from tests.helpers.app_client import signed_in
 from tests.helpers.tab_permissions import (  # noqa: F401
     PLAIN_ID, _FakeStore, _cookie, _fresh_permissions, _install_store,
 )
+from tests.integration.pg_sms_seed import needs_postgres
 
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 assert PLAIN_ID not in ADMIN_USER_IDS
@@ -125,10 +131,32 @@ class TestNoOverrideChangesNothing:
 
 
 class TestAnEmptySetIsNotNoSet:
+    """Every tab is enforced on the server: nothing ticked is a 403 on each
+    tab's endpoint, and ticking that tab alone opens it. A tab added to
+    `TAB_FEATURES` and the sidebar but gated nowhere would be a checkbox that
+    hides a link and protects nothing, and fails here."""
+
+    def test_every_tab_has_an_endpoint_here(self):
+        assert set(TAB_ENDPOINTS) == set(TAB_FEATURE_KEYS)
+
     @pytest.mark.parametrize("path", sorted(TAB_ENDPOINTS.values()))
     def test_nothing_ticked_means_nothing_at_all(self, client, monkeypatch, path):
         headers = _login(monkeypatch, allowed_features=[])
         assert client.get(path, headers=headers).status_code == 403
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", sorted(TAB_ENDPOINTS))
+    async def test_ticking_one_tab_opens_its_endpoint(self, monkeypatch, key):
+        # A real row holding that one tab, over the test Postgres. The gate is
+        # the subject, not the data: over an empty database an endpoint may
+        # answer zeros or a 503, never a refused session or a 403.
+        async with access_lists_empty(monkeypatch):
+            async with signed_in("viewer", tabs=key,
+                                 raise_server_exceptions=False) as viewer:
+                r = await viewer.get(TAB_ENDPOINTS[key])
+        assert r.status_code not in (401, 403), \
+            f"the {key!r} tab does not open {TAB_ENDPOINTS[key]}: {r.status_code}"
 
 
 # ─── what the page is told ───────────────────────────────────────────────────
@@ -162,101 +190,110 @@ class TestWhatMeReports:
 # ─── setting them from the admin page ────────────────────────────────────────
 
 
+@needs_postgres
 class TestTheAdminEndpoint:
-    def _admin(self, monkeypatch):
-        store = _FakeStore("admin", None)
-        _install_store(monkeypatch, store)
-        return store, _cookie(ADMIN_ID, "admin")
+    """`PATCH /api/admin/users/{id}/features` as the hardcoded admin, over the
+    test Postgres. The column has three states and they must not collapse:
+    NULL is "as the role", '' is "nothing ticked", and a list is exactly
+    those tabs, in the sidebar's order."""
 
-    def test_a_list_is_stored_in_tab_order(self, client, monkeypatch):
-        store, headers = self._admin(monkeypatch)
-        response = client.patch(
-            "/api/admin/users/77/features",
-            headers=headers, json={"features": ["sms", "traffic"]},
-        )
-        assert response.status_code == 200
-        assert response.json()["allowed_features"] == ["traffic", "sms"]
-        assert store.written[1] == ["traffic", "sms"]
+    PERSON = 7_000_000_501
 
-    def test_a_preset_is_expanded_here_not_on_the_page(self, client, monkeypatch):
-        store, headers = self._admin(monkeypatch)
-        response = client.patch(
-            "/api/admin/users/77/features",
-            headers=headers, json={"preset": "traffic_only"},
-        )
-        assert response.status_code == 200
-        assert response.json()["allowed_features"] == ["traffic"]
+    @staticmethod
+    async def _stored(user_id):
+        row = await dashboard_row(user_id)
+        return row and row["allowed_features"]
 
-    def test_null_clears_the_override(self, client, monkeypatch):
-        store, headers = self._admin(monkeypatch)
-        response = client.patch(
-            "/api/admin/users/77/features", headers=headers, json={"features": None},
-        )
-        assert response.status_code == 200
-        assert response.json()["allowed_features"] is None
-        assert store.written[1] is None
+    async def _patch(self, monkeypatch, user_id, body, *, seeded="unset"):
+        """Seed the person's row (unless `seeded` is None: no row), PATCH as
+        the hardcoded admin, and return (response, the column after)."""
+        async with access_lists_empty(monkeypatch):
+            if seeded is not None:
+                await dashboard_user(user_id, allowed_features=(
+                    None if seeded == "unset" else seeded))
+            async with signed_in("admin") as admin:
+                r = await admin.patch(f"/api/admin/users/{user_id}/features", json=body)
+            exists = await dashboard_row(user_id) is not None
+            return r, (await self._stored(user_id) if exists else "no row")
 
-    def test_an_empty_list_is_accepted_as_a_decision(self, client, monkeypatch):
-        store, headers = self._admin(monkeypatch)
-        response = client.patch(
-            "/api/admin/users/77/features", headers=headers, json={"features": []},
-        )
-        assert response.status_code == 200
-        assert response.json()["allowed_features"] == []
-        assert store.written[1] == []
+    @pytest.mark.asyncio
+    async def test_a_list_is_stored_in_tab_order(self, monkeypatch):
+        r, stored = await self._patch(monkeypatch, self.PERSON, {"features": ["sms", "traffic"]})
+        assert r.status_code == 200
+        assert r.json()["allowed_features"] == ["traffic", "sms"]
+        assert stored == "traffic,sms"
 
-    def test_an_unknown_tab_is_refused_rather_than_dropped(self, client, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_a_preset_is_expanded_here_not_on_the_page(self, monkeypatch):
+        r, stored = await self._patch(monkeypatch, self.PERSON, {"preset": "traffic_only"})
+        assert r.status_code == 200
+        assert r.json()["allowed_features"] == ["traffic"]
+        assert stored == "traffic"
+
+    @pytest.mark.asyncio
+    async def test_null_clears_the_override(self, monkeypatch):
+        r, stored = await self._patch(monkeypatch, self.PERSON, {"features": None},
+                                      seeded="traffic")
+        assert r.status_code == 200
+        assert r.json()["allowed_features"] is None
+        assert stored is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_list_is_accepted_as_a_decision(self, monkeypatch):
+        r, stored = await self._patch(monkeypatch, self.PERSON, {"features": []})
+        assert r.status_code == 200
+        assert r.json()["allowed_features"] == []
+        assert stored == ""
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_tab_is_refused_rather_than_dropped(self, monkeypatch):
         """Dropping it would answer 200 having stored something else, and the
         admin would read the checklist as saved."""
-        _, headers = self._admin(monkeypatch)
-        response = client.patch(
-            "/api/admin/users/77/features",
-            headers=headers, json={"features": ["traffic", "user_management"]},
-        )
-        assert response.status_code == 400
+        r, stored = await self._patch(
+            monkeypatch, self.PERSON, {"features": ["traffic", "user_management"]},
+            seeded="marketing")
+        assert r.status_code == 400
+        assert stored == "marketing"
 
-    def test_an_unknown_preset_is_refused(self, client, monkeypatch):
-        _, headers = self._admin(monkeypatch)
-        response = client.patch(
-            "/api/admin/users/77/features", headers=headers, json={"preset": "nope"},
-        )
-        assert response.status_code == 400
+    @pytest.mark.asyncio
+    async def test_an_unknown_preset_is_refused(self, monkeypatch):
+        r, stored = await self._patch(monkeypatch, self.PERSON, {"preset": "nope"},
+                                      seeded="marketing")
+        assert r.status_code == 400
+        assert stored == "marketing"
 
-    def test_a_missing_user_is_404(self, client, monkeypatch):
-        _, headers = self._admin(monkeypatch)
-        response = client.patch(
-            "/api/admin/users/404/features",
-            headers=headers, json={"features": ["traffic"]},
-        )
-        assert response.status_code == 404
+    @pytest.mark.asyncio
+    async def test_a_missing_user_is_404(self, monkeypatch):
+        r, stored = await self._patch(monkeypatch, self.PERSON, {"features": ["traffic"]},
+                                      seeded=None)
+        assert r.status_code == 404
+        assert stored == "no row"
 
-    def test_a_hardcoded_admin_cannot_be_given_a_tab_set(self, client, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_a_hardcoded_admin_cannot_be_given_a_tab_set(self, monkeypatch):
         """Those ids open every tab whatever is stored, so storing one would
         report a change that does not happen — `_refuse_if_ineffective`'s
         lesson, applied to the column it did not exist for."""
-        _, headers = self._admin(monkeypatch)
-        response = client.patch(
-            f"/api/admin/users/{ADMIN_ID}/features",
-            headers=headers, json={"features": ["traffic"]},
-        )
-        assert response.status_code == 409
+        r, stored = await self._patch(monkeypatch, ADMIN_ID, {"features": ["traffic"]})
+        assert r.status_code == 409
+        assert stored is None
 
-    def test_but_it_can_be_put_back_to_as_the_role(self, client, monkeypatch):
-        store, headers = self._admin(monkeypatch)
-        response = client.patch(
-            f"/api/admin/users/{ADMIN_ID}/features",
-            headers=headers, json={"features": None},
-        )
-        assert response.status_code == 200
-        assert store.written[1] is None
+    @pytest.mark.asyncio
+    async def test_but_it_can_be_put_back_to_as_the_role(self, monkeypatch):
+        r, stored = await self._patch(monkeypatch, ADMIN_ID, {"features": None},
+                                      seeded="traffic")
+        assert r.status_code == 200
+        assert stored is None
 
-    def test_a_viewer_cannot_set_anybody_s_tabs(self, client, monkeypatch):
-        headers = _login(monkeypatch, allowed_features=None)
-        response = client.patch(
-            "/api/admin/users/77/features",
-            headers=headers, json={"features": ["traffic"]},
-        )
-        assert response.status_code == 403
+    @pytest.mark.asyncio
+    async def test_a_viewer_cannot_set_anybody_s_tabs(self, monkeypatch):
+        async with access_lists_empty(monkeypatch):
+            await dashboard_user(self.PERSON, allowed_features="marketing")
+            async with signed_in("viewer") as viewer:
+                r = await viewer.patch(f"/api/admin/users/{self.PERSON}/features",
+                                       json={"features": ["traffic"]})
+            assert r.status_code == 403
+            assert await self._stored(self.PERSON) == "marketing"
 
 
 # ─── what happens when the store cannot be read ──────────────────────────────
@@ -417,80 +454,7 @@ class TestTheSessionIsResolvedOncePerRequest:
         assert store.reads == 2   # one per request, not one per process
 
 
-# ─── structural: a tab nobody enforces is decoration ─────────────────────────
-
-
-class TestEveryTabIsEnforcedSomewhere:
-    @pytest.mark.parametrize("feature", sorted(TAB_FEATURE_KEYS))
-    def test_at_least_one_route_is_gated_on_it(self, feature):
-        """Adding a tab to `TAB_FEATURES` and to the sidebar, and forgetting
-        the server, gives an admin a checkbox that hides a link and protects
-        nothing. This fails in that case."""
-        from tests.routes_helper import route_dependencies, iter_endpoints
-
-        for endpoint in iter_endpoints(app):
-            for dep in endpoint.dependencies:
-                if getattr(dep, "__name__", "") not in ("check_permission", "check_any"):
-                    continue
-                for cell in dep.__closure__ or ():
-                    value = cell.cell_contents
-                    if value == feature or (
-                        isinstance(value, (list, tuple)) and feature in value
-                    ):
-                        return
-        raise AssertionError(f"no route is gated on the {feature!r} tab")
-
-
 # ─── the request itself, in the UI ───────────────────────────────────────────
-
-
-class _FakeAccessControl:
-    """The bot's list, in memory. Only what the endpoints touch."""
-
-    def __init__(self, rows=None):
-        self.rows = rows if rows is not None else [
-            {"user_id": 7001, "username": "asker", "first_name": "Ask",
-             "last_name": "Er", "requested_at": "2026-09-08 05:00:00",
-             "denial_count": 0, "status": "pending"},
-        ]
-        self.approved_calls = []
-        self.denied_calls = []
-        self.decided = False
-
-    def pending(self):
-        return list(self.rows)
-
-    def status(self, user_id):
-        for row in self.rows:
-            if row["user_id"] == user_id:
-                return row
-        return None
-
-    def approve(self, user_id, admin_id, *, expected_status=None):
-        if self.decided:
-            return False
-        self.decided = True
-        self.approved_calls.append((user_id, admin_id, expected_status))
-        return True
-
-    def deny(self, user_id, admin_id, *, expected_status=None):
-        if self.decided:
-            return False, False
-        self.decided = True
-        self.denied_calls.append((user_id, admin_id, expected_status))
-        return True, False
-
-
-class _GrantingStore(_FakeStore):
-    def __init__(self):
-        super().__init__("admin", None)
-        self.granted = None
-
-    async def grant_access(self, user_id, reviewed_by, features=None,
-                           username=None, first_name=None, last_name=None,
-                           role=None):
-        self.granted = (user_id, reviewed_by, features)
-        return True
 
 
 class TestTheAccessRequestQueue:
@@ -501,93 +465,137 @@ class TestTheAccessRequestQueue:
     These endpoints are the missing door. They do not merge the two lists: they
     read the bot's queue and write exactly the two rows the bot's own Approve
     button writes.
+
+    Over the test Postgres with the bot's store there (`KS_BOT_STORE=postgres`):
+    the queue is `app.authorized_users`, the grant `app.dashboard_users`. The
+    message to the person is caught at the HTTP transport the route sends it
+    through, and what is checked is to whom it went.
     """
 
-    def _admin(self, monkeypatch, access=None, store=None):
-        import bot.database as database
+    ASKER = 7_000_000_401
 
-        access = access or _FakeAccessControl()
-        store = store or _GrantingStore()
-
-        class _Store:
-            def __init__(self, a):
-                self.access = a
-
-        monkeypatch.setattr(
-            "core.bot_store.get_bot_store", lambda: _Store(access))
-        monkeypatch.setattr(database, "get_bot_store", lambda: _Store(access))
-        monkeypatch.setattr(database, "get_user_language", lambda uid: "uk")
-        _install_store(monkeypatch, store)
-
+    @pytest.fixture
+    def told(self, monkeypatch):
+        """Who the route wrote to on Telegram, one entry per message."""
         sent = []
 
         async def _send(text, *a, chat_ids=None, **k):
-            sent.append((chat_ids, text))
+            sent.append(chat_ids)
             return 1
 
         monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _send)
-        return access, store, sent, _cookie(ADMIN_ID, "admin")
+        return sent
 
-    def test_the_queue_is_listed(self, client, monkeypatch):
-        _, _, _, headers = self._admin(monkeypatch)
-        body = client.get("/api/admin/access-requests", headers=headers).json()
-        assert body["count"] == 1
-        assert body["requests"][0]["username"] == "asker"
+    async def _bot_row(self):
+        found = await rows("SELECT status, reviewed_by, denial_count "
+                           "FROM app.authorized_users WHERE user_id = $1", self.ASKER)
+        return found[0] if found else None
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_the_queue_is_listed(self, monkeypatch, tmp_path):
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await pending_request(self.ASKER, username="asker")
+            await execute("INSERT INTO app.authorized_users (user_id, username, status) "
+                          "VALUES ($1, 'decided', 'approved')", self.ASKER + 1)
+            async with signed_in("admin") as admin:
+                r = await admin.get("/api/admin/access-requests")
+
+        assert r.status_code == 200
+        assert r.json()["count"] == 1
+        assert [(q["user_id"], q["username"]) for q in r.json()["requests"]] == [
+            (self.ASKER, "asker")]
 
     def test_a_viewer_cannot_see_the_queue(self, client, monkeypatch):
         headers = _login(monkeypatch, allowed_features=None)
         assert client.get(
             "/api/admin/access-requests", headers=headers).status_code == 403
 
-    def test_approving_writes_both_rows_and_says_so(self, client, monkeypatch):
-        access, store, sent, headers = self._admin(monkeypatch)
-        response = client.post(
-            "/api/admin/access-requests/7001/approve",
-            headers=headers, json={"preset": "traffic_only"},
-        )
-        assert response.status_code == 200
-        assert response.json()["allowed_features"] == ["traffic"]
-        # the bot's list, conditionally — two admins must not both win
-        assert access.approved_calls == [(7001, ADMIN_ID, "pending")]
-        # the dashboard's list, with the tabs chosen here
-        assert store.granted == (7001, ADMIN_ID, ["traffic"])
-        # and the person is told, in their own language
-        assert sent and sent[0][0] == [7001]
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_approving_writes_both_rows_and_says_so(self, monkeypatch, tmp_path, told):
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await pending_request(self.ASKER)
+            async with signed_in("admin") as admin:
+                r = await admin.post(f"/api/admin/access-requests/{self.ASKER}/approve",
+                                     json={"preset": "traffic_only"})
 
-    def test_omitting_the_body_grants_the_default(self, client, monkeypatch):
-        from core.permissions import ACCESS_PRESETS, DEFAULT_PRESET
+            assert r.status_code == 200
+            assert r.json()["allowed_features"] == ["traffic"]
+            # the bot's list
+            assert await self._bot_row() == {
+                "status": "approved", "reviewed_by": ADMIN_ID, "denial_count": 0}
+            # the dashboard's list, with the tabs chosen here
+            assert await dashboard_row(self.ASKER) == {
+                "user_id": self.ASKER, "role": "viewer", "status": "approved",
+                "allowed_features": "traffic", "denial_count": 0,
+                "reviewed_by": ADMIN_ID}
+        # and the person is told, and nobody else
+        assert told == [[self.ASKER]]
 
-        _, store, _, headers = self._admin(monkeypatch)
-        response = client.post(
-            "/api/admin/access-requests/7001/approve", headers=headers, json={},
-        )
-        assert response.status_code == 200
-        assert store.granted[2] == list(ACCESS_PRESETS[DEFAULT_PRESET])
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_omitting_the_body_grants_the_default(self, monkeypatch, tmp_path, told):
+        from core.permissions import ACCESS_PRESETS, DEFAULT_PRESET, parse_features
 
-    def test_a_request_already_decided_is_refused(self, client, monkeypatch):
-        access, _, _, headers = self._admin(monkeypatch)
-        access.decided = True
-        assert client.post(
-            "/api/admin/access-requests/7001/approve", headers=headers, json={},
-        ).status_code == 409
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await pending_request(self.ASKER)
+            async with signed_in("admin") as admin:
+                r = await admin.post(f"/api/admin/access-requests/{self.ASKER}/approve",
+                                     json={})
 
-    def test_denying_writes_no_dashboard_row(self, client, monkeypatch):
-        access, store, sent, headers = self._admin(monkeypatch)
-        response = client.post(
-            "/api/admin/access-requests/7001/deny", headers=headers,
-        )
-        assert response.status_code == 200
-        assert access.denied_calls == [(7001, ADMIN_ID, "pending")]
-        assert store.granted is None, "a refusal is not a decision about a row"
-        assert sent and sent[0][0] == [7001]
+            assert r.status_code == 200
+            stored = (await dashboard_row(self.ASKER))["allowed_features"]
+        assert parse_features(stored) == list(ACCESS_PRESETS[DEFAULT_PRESET])
 
-    def test_an_unknown_tab_is_refused(self, client, monkeypatch):
-        _, store, _, headers = self._admin(monkeypatch)
-        assert client.post(
-            "/api/admin/access-requests/7001/approve",
-            headers=headers, json={"features": ["user_management"]},
-        ).status_code == 400
-        assert store.granted is None
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_a_request_already_decided_is_refused(self, monkeypatch, tmp_path, told):
+        """Two admins answering the same request: the second is refused by the
+        conditional write on the bot's list, and nothing it asked is stored."""
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await pending_request(self.ASKER)
+            async with signed_in("admin") as admin:
+                first = await admin.post(f"/api/admin/access-requests/{self.ASKER}/approve",
+                                         json={"preset": "traffic_only"})
+                second = await admin.post(f"/api/admin/access-requests/{self.ASKER}/approve",
+                                          json={"preset": "standard"})
+                deny = await admin.post(f"/api/admin/access-requests/{self.ASKER}/deny")
+
+            assert (first.status_code, second.status_code, deny.status_code) == (200, 409, 409)
+            assert (await self._bot_row())["status"] == "approved"
+            assert (await dashboard_row(self.ASKER))["allowed_features"] == "traffic"
+        assert told == [[self.ASKER]]
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_denying_writes_no_dashboard_row(self, monkeypatch, tmp_path, told):
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await pending_request(self.ASKER)
+            async with signed_in("admin") as admin:
+                r = await admin.post(f"/api/admin/access-requests/{self.ASKER}/deny")
+
+            assert r.status_code == 200
+            assert r.json()["frozen"] is False
+            assert await self._bot_row() == {
+                "status": "denied", "reviewed_by": ADMIN_ID, "denial_count": 1}
+            assert await dashboard_row(self.ASKER) is None, \
+                "a refusal is not a decision about a row"
+        assert told == [[self.ASKER]]
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_an_unknown_tab_is_refused(self, monkeypatch, tmp_path, told):
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await pending_request(self.ASKER)
+            async with signed_in("admin") as admin:
+                r = await admin.post(f"/api/admin/access-requests/{self.ASKER}/approve",
+                                     json={"features": ["user_management"]})
+
+            assert r.status_code == 400
+            assert (await self._bot_row())["status"] == "pending"
+            assert await dashboard_row(self.ASKER) is None
+        assert told == []
 
 
 class TestThePageIsToldWhatInheritingMeans:

@@ -13,9 +13,15 @@ Each guard names the mutation it catches.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
+
+from tests.integration.pg_sms_seed import needs_postgres
 
 
 def _start(monkeypatch, init_and_sync):
@@ -78,34 +84,119 @@ class TestTheStartup:
         assert "Serving with the boot sync failed" not in _said(main.logger.warning)
 
 
+KYIV = ZoneInfo("Europe/Kyiv")
+
+
+@asynccontextmanager
+async def _keycrm(monkeypatch):
+    """KeyCRM faked at the HTTP transport under the real client: every list
+    is empty, and orders are refused, which ends the sync once it has asked
+    for them. Yields (path, query) of every request, in order."""
+    import httpx
+
+    from core import keycrm
+    from core.resilience import CircuitBreaker
+
+    asked = []
+
+    def handler(request):
+        asked.append((request.url.path, dict(request.url.params)))
+        if request.url.path.rstrip("/").endswith("/order"):
+            return httpx.Response(400, json={"message": "the test stops here"})
+        return httpx.Response(200, json={"data": []})
+
+    client = keycrm.KeyCRMClient(api_key="test-only")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(keycrm, "_client_instance", client)
+    monkeypatch.setattr(keycrm, "_circuit_breaker",
+                        CircuitBreaker(config=keycrm.CIRCUIT_BREAKER_CONFIG))
+    try:
+        yield asked
+    finally:
+        await client._client.aclose()
+
+
+@asynccontextmanager
+async def _orders_held(monkeypatch, watermark):
+    """The test Postgres holding no orders (`watermark` None), or one order
+    and the order watermark at `watermark`. The watermarks the sync stamps
+    are put back as they were afterwards."""
+    from tests.integration.pg_sms_seed import on_postgres
+
+    async with on_postgres(monkeypatch, ("bronze.orders",), what="the boot sync") as pool:
+        async with pool.acquire() as conn:
+            kept = [tuple(r) for r in await conn.fetch(
+                "SELECT key, value, updated_at FROM meta.chain_watermarks")]
+            if watermark is not None:
+                await conn.execute(
+                    "INSERT INTO bronze.orders (id, source_id, status_id, grand_total, "
+                    "ordered_at, created_at, updated_at) VALUES (1, 4, 1, 100, $1, $1, $1)",
+                    watermark)
+                await conn.execute(
+                    "INSERT INTO meta.chain_watermarks (key, value) "
+                    "VALUES ('last_sync_orders', $1) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    watermark.isoformat())
+        try:
+            yield
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM meta.chain_watermarks")
+                await conn.executemany(
+                    "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                    "VALUES ($1, $2, $3)", kept)
+
+
+def _first_order_window(asked):
+    """The (from, to) of the first order request."""
+    for path, query in asked:
+        if path.rstrip("/").endswith("/order"):
+            start, end = query["filter[created_between]"].split(", ")
+            return start, end
+    raise AssertionError(f"no order was asked for: {[path for path, _ in asked]}")
+
+
+@needs_postgres
 class TestTheBootSync:
-    """`init_and_sync` asks the store the orders are written to whether it
-    holds any; none is the 730-day full sync, any is the incremental one."""
+    """A store that holds no orders is filled with the whole history: the
+    boot asks KeyCRM for orders from `full_sync_days` back. A store that
+    holds some asks only from its order watermark on.
 
-    def _boot(self, monkeypatch, held):
-        from core import sync_service as mod
+    Over the test Postgres, with KeyCRM faked at its HTTP transport; what is
+    asserted is the window the first order request asked for. The search
+    index, the one other service the boot reaches, answers "not available"."""
 
-        store = MagicMock()
-        store.orders_held = AsyncMock(return_value=held)
-        store.refresh_sku_inventory_status = AsyncMock(return_value=0)
-        service = MagicMock()
-        service.full_sync = AsyncMock()
-        service.incremental_sync = AsyncMock()
-        monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
-        monkeypatch.setattr(mod, "get_sync_service", AsyncMock(return_value=service))
-        monkeypatch.setattr(mod, "init_meilisearch", AsyncMock(return_value=False))
-        asyncio.run(mod.init_and_sync(full_sync_days=730))
-        store.orders_held.assert_awaited_once()
-        return service
+    @pytest.fixture(autouse=True)
+    def _no_search_index(self, monkeypatch):
+        monkeypatch.setattr("core.sync_service.init_meilisearch",
+                            AsyncMock(return_value=False))
 
-    def test_no_history_is_a_full_sync(self, monkeypatch):
-        """Mutation: never take the full-sync branch (`if held == 0`)."""
-        service = self._boot(monkeypatch, held=0)
-        service.full_sync.assert_awaited_once_with(days_back=730)
-        service.incremental_sync.assert_not_awaited()
+    @pytest.mark.asyncio
+    async def test_no_history_is_a_full_sync(self, monkeypatch):
+        """Mutation: never take the full-sync branch, or not with the days given."""
+        from core.exceptions import KeyCRMError
+        from core.sync_service import init_and_sync
 
-    def test_history_held_is_an_incremental_sync(self, monkeypatch):
+        async with _orders_held(monkeypatch, None), _keycrm(monkeypatch) as asked:
+            days_back = {(datetime.now(KYIV) - timedelta(days=730)).date().isoformat()}
+            with contextlib.suppress(KeyCRMError):
+                await init_and_sync(full_sync_days=730)
+            days_back.add((datetime.now(KYIV) - timedelta(days=730)).date().isoformat())
+
+        start, _ = _first_order_window(asked)
+        assert start in days_back
+
+    @pytest.mark.asyncio
+    async def test_history_held_is_an_incremental_sync(self, monkeypatch):
         """Mutation: always take the full-sync branch."""
-        service = self._boot(monkeypatch, held=46_000)
-        service.incremental_sync.assert_awaited_once()
-        service.full_sync.assert_not_awaited()
+        from core.exceptions import KeyCRMError
+        from core.sync_service import init_and_sync
+
+        watermark = (datetime.now(timezone.utc) - timedelta(days=2)).replace(microsecond=0)
+        async with _orders_held(monkeypatch, watermark), _keycrm(monkeypatch) as asked:
+            with contextlib.suppress(KeyCRMError):
+                await init_and_sync(full_sync_days=730)
+
+        start, _ = _first_order_window(asked)
+        start = datetime.strptime(start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KYIV)
+        assert watermark - timedelta(days=2) <= start <= watermark

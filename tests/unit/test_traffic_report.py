@@ -11,11 +11,12 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 
+from core.duckdb_constants import B2B_MANAGER_ID
 from core.traffic_report import (
     CAMPAIGN_FLOOR,
     RECIPIENTS_ENV,
@@ -72,16 +73,91 @@ async def _report(store=None, today=date(2026, 9, 8)):
     return await build_report(store or FakeStore(), today)
 
 
+# Two weeks of orders in Postgres for the report to read: retail, and the b2b
+# and internal orders the tab's default leaves out. 2026-09-08 is a Tuesday,
+# so the report's week is 31.08–06.09 and the one before it 24.08–30.08.
+# (id, source_id, grand_total, day, manager_id, verdict) — the verdict is
+# `(traffic_type, platform, utm_campaign)`, or None for an order with no UTM
+# row, which the tab places by its source (Instagram, Telegram: organic).
+B2B, INTERNAL = B2B_MANAGER_ID, 99            # 99: a manager on no retail list
+TWO_WEEKS = (
+    # retail, the reported week
+    (101, 4, 12_000, date(2026, 8, 31), None, ("paid_confirmed", "facebook", "spring")),
+    (102, 1, 2_500, date(2026, 9, 2), None, None),
+    (103, 4, 1_500, date(2026, 9, 6), None, ("pixel_only", "unattributed", None)),
+    # retail, the week before
+    (104, 4, 4_000, date(2026, 8, 24), None, ("paid_confirmed", "facebook", "spring")),
+    (105, 2, 800, date(2026, 8, 30), None, None),
+    # retail, either side of the two weeks
+    (106, 4, 7_000, date(2026, 9, 7), None, ("paid_confirmed", "facebook", "spring")),
+    (107, 4, 6_000, date(2026, 8, 23), None, ("paid_confirmed", "facebook", "spring")),
+    # wholesale, in both weeks, under a campaign of its own
+    (201, 2, 50_000, date(2026, 9, 1), B2B, ("paid_confirmed", "facebook", "wholesale")),
+    (202, 2, 30_000, date(2026, 8, 25), B2B, ("paid_confirmed", "facebook", "wholesale")),
+    # internal, the reported week
+    (301, 1, 9_000, date(2026, 9, 3), INTERNAL, None),
+)
+
+
+async def _two_weeks(conn, pool):
+    """Bronze landed, Silver and Gold derived from it, then the UTM rows."""
+    from tests.integration.pg_tab_seed import derive, seed
+
+    await seed(conn, orders=[
+        (oid, source, 1, total,
+         datetime(day.year, day.month, day.day, 9, tzinfo=timezone.utc),  # midday, Kyiv
+         oid, manager, None)
+        for oid, source, total, day, manager, _verdict in TWO_WEEKS])
+    await derive(pool)
+    await conn.executemany(
+        "INSERT INTO silver.order_utm (order_id, traffic_type, platform, utm_campaign,"
+        " parsed_at) VALUES ($1, $2, $3, $4, now())",
+        [(oid, *verdict) for oid, *_rest, verdict in TWO_WEEKS if verdict])
+
+
 class TestItAsksWhatTheTabAsks:
+    @needs_postgres
     @pytest.mark.asyncio
-    async def test_two_windows_and_the_tab_s_sales_type(self):
-        store = FakeStore()
-        await _report(store)
-        windows = {(kind, str(a), str(b)) for kind, a, b, _ in store.calls}
-        assert ("analytics", "2026-08-31", "2026-09-06") in windows
-        assert ("analytics", "2026-08-24", "2026-08-30") in windows
-        assert ("campaigns", "2026-08-31", "2026-09-06") in windows
-        assert {sales_type for *_, sales_type in store.calls} == {"retail"}
+    async def test_the_two_weeks_are_the_tabs_retail(self, monkeypatch):
+        """The report counts what the traffic tab counts by default: retail,
+        in the last complete week and the one before it. Counted with b2b it
+        would set ₴50 000 of wholesale beside ₴16 000 of retail and put a
+        wholesale campaign at the head of the movers; and the tab, asked for
+        the same two weeks, answers the same totals."""
+        from core.store import AnalyticsStore
+        from tests.helpers.app_client import signed_in
+        from tests.integration.pg_tab_seed import tab_in_postgres
+
+        async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _two_weeks):
+            report = await build_report(AnalyticsStore(), date(2026, 9, 8))
+            async with signed_in("viewer", tabs="traffic") as viewer:
+                week = await viewer.get("/api/traffic/analytics", params={
+                    "start_date": "2026-08-31", "end_date": "2026-09-06"})
+                before = await viewer.get("/api/traffic/analytics", params={
+                    "start_date": "2026-08-24", "end_date": "2026-08-30"})
+
+        assert (report.start, report.end, report.sales_type) == (
+            date(2026, 8, 31), date(2026, 9, 6), "retail")
+        assert (report.orders, report.revenue) == (3, 16_000.0)
+        assert (report.previous_orders, report.previous_revenue) == (2, 4_800.0)
+        assert {b.name: (b.orders, b.revenue, b.previous_orders, b.previous_revenue)
+                for b in report.buckets} == {
+            "paid": (1, 12_000.0, 1, 4_000.0),
+            "organic": (1, 2_500.0, 1, 800.0),
+            "pixel_only": (1, 1_500.0, 0, 0.0),
+        }
+        assert [(p.name, p.revenue, p.previous_revenue) for p in report.platforms] == [
+            ("facebook", 12_000.0, 4_000.0),
+            ("instagram", 2_500.0, 0.0),
+            ("unattributed", 1_500.0, 0.0),
+        ]
+        assert [(m.campaign, m.current, m.previous) for m in report.movers] == [
+            ("spring", 12_000.0, 4_000.0)]
+
+        assert week.status_code == before.status_code == 200
+        assert week.json()["totals"] == {"orders": report.orders, "revenue": report.revenue}
+        assert before.json()["totals"] == {
+            "orders": report.previous_orders, "revenue": report.previous_revenue}
 
     @pytest.mark.asyncio
     async def test_it_reports_the_last_complete_week(self):
