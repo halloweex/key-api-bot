@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.371
+
+- feat(rust): the worker stamps the archive's heal where the daily check reads it
+- compose: the worker's memory limit is 512m, its first run measured at 320 MB
+- deploy/rust: the worker role's password comes from the environment, as the pilot's does
+- feat(rust): K1's shadow judged at night, the worker's image, service and logins
+- test(rust): K1's harness skips Postgres and ClickHouse under separate reasons
+- test(rust): every scheduler job's lease key as K0's own lease_key computes it
+- feat(rust): K1 follows K0's contract for the switch and the lease
+- feat(rust): core K1, ch_sync in Rust, in the shadow
+
+
 ## 3.0.370
 
 - fix(ch_history): the archive's heal leaves a durable trace
