@@ -353,13 +353,14 @@ class TestTheSignedIdIsBoundToItsMessage:
         assert await _row(store, "mid-victim") == ("DELIVRD", True)
 
 
-@pytest.fixture
-def kyiv_process_clock():
-    """The process clock production runs: the web container is started with
-    TZ=Europe/Kyiv (docker-compose.yml). The gateway's `dlr_date` carries no
-    offset, and the time it is parsed into is stored in the process's zone."""
+@pytest.fixture(params=["UTC", "Europe/Kyiv"])
+def process_clock(request):
+    """The process's own zone, both ways: UTC, as CI runs, and Europe/Kyiv, as
+    the web container does (docker-compose.yml). asyncpg reads a naive time in
+    the process's zone, so a parse that returned one was right in production
+    only by that setting, and three hours late under UTC."""
     before = os.environ.get("TZ")
-    os.environ["TZ"] = "Europe/Kyiv"
+    os.environ["TZ"] = request.param
     time.tzset()
     yield
     if before is None:
@@ -381,10 +382,11 @@ class TestTheReportLandsOnTheRoster:
 
     @pytest.mark.asyncio
     async def test_the_delivery_time_is_the_kyiv_instant_the_gateway_named(
-        self, tmp_path, monkeypatch, kyiv_process_clock,
+        self, tmp_path, monkeypatch, process_clock,
     ):
         """TurboSMS writes `dlr_date` as Kyiv wall time: 09:05 on 10 August is
-        06:05 UTC, and that instant is when the message was delivered."""
+        06:05 UTC, and that instant is when the message was delivered, in
+        whatever zone the process runs."""
         await _sent_campaign(tmp_path, monkeypatch)
 
         async with _asgi_client() as ac:
