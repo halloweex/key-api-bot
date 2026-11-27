@@ -1464,7 +1464,10 @@ def machine_attempts_note(now: Optional[datetime] = None) -> Optional[str]:
     hourly ids-diffs had usually already re-shipped rows by the time the
     07:30 comparison spoke.
 
-    Reads the in-process heal ledger of the ClickHouse archive. Returns None
+    Reads the ClickHouse archive's heal ledger as this process knows it —
+    its own heals at once, another process's (the Rust worker's, once it ships
+    the archive) from the daily comparison's read of `ch_history.HEAL_ROW`
+    on. Returns None
     when it has not run, which is the common case and must not produce an
     empty line. The buyers' ledger (`core.pg_buyers`, the buyers ids-diff)
     was the other until step 14's S14-13 deleted the diff with the module.
