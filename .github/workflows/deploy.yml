@@ -384,7 +384,7 @@ jobs:
             docker compose --profile rust pull rust-api
             docker compose --profile rust up -d --no-deps rust-api
             # Healthy, not merely started: the healthcheck reads the schema
-            # revision as ks_readonly, so an image older than the schema fails
+            # revision as ks_rust_api, so an image older than the schema fails
             # here rather than after a route reaches it.
             if ! timeout 120 sh -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" ks-rust-api 2>/dev/null)" = healthy ]; do sleep 3; done'; then
               echo "::error::ks-rust-api is not healthy"

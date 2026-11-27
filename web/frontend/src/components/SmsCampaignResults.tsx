@@ -3,7 +3,6 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Select } from './Select'
-import { Badge } from './Badge'
 import { Checkbox } from './Checkbox'
 import { EmptyState } from './EmptyState'
 import { SkeletonCard } from './Skeleton'
@@ -60,7 +59,11 @@ interface ResultRow {
 
 /** Rate over the arm, the counts it came from, and what one person was worth.
  *
- *  The per-person line is the whole reason this cell has three rows. An arm's
+ *  "21 / 8 403" under "Got the SMS" read as 21 people having received it
+ *  (2026-11-26). The line names what it counts, buyers out of the arm, and the
+ *  arm's own revenue sits beside it.
+ *
+ *  The per-person line is the whole reason this cell has its last row. An arm's
  *  own money only ever appeared here as a conversion percentage, and the
  *  incremental figure two columns over is a difference — so "₴22 a head against
  *  ₴7 a head" , the one comparison anybody reads without training, was on the
@@ -75,10 +78,15 @@ function RateCell({ stats }: { stats: SmsGroupStats }) {
   return (
     <>
       <div className="font-medium text-slate-800">{rate.toFixed(1)}%</div>
-      <div className="text-[11px] text-slate-500">
-        {formatNumber(stats.converted)} / {formatNumber(stats.contacts)}
+      <div className="text-[11px] text-slate-500 tabular-nums">
+        {t('sms.boughtOf', {
+          bought: formatNumber(stats.converted), of: formatNumber(stats.contacts),
+        })}
       </div>
-      <div className="text-[11px] text-slate-600 mt-0.5">
+      <div className="text-[11px] text-slate-600 mt-0.5 tabular-nums">
+        {t('sms.armRevenue', { revenue: formatCurrency(stats.revenue) })}
+      </div>
+      <div className="text-[11px] text-slate-600 tabular-nums">
         {formatCurrency(perPerson)} <span className="text-slate-400">{t('sms.perPerson')}</span>
       </div>
     </>
@@ -143,38 +151,52 @@ function formatP(p: number): string {
  *
  *  The caveat is not a footnote here. Money that has not cleared the verdict is
  *  a plausible range with a loss in it, and this is the line most likely to be
- *  quoted at somebody, so the reason it might be wrong travels with it. */
+ *  quoted at somebody, so the reason it might be wrong travels with it.
+ *
+ *  While the verdict is withheld there is no payback figure at all, only what
+ *  was spent. An hour after a send the block said, in red, "did not pay back
+ *  by ₴10 756": it subtracted the cost from a margin nobody had had time to
+ *  make, and the owner read it as a loss (2026-11-26). With no purchase in
+ *  either arm yet, the lead says exactly that instead of "₴0 above the control". */
 function Headline({ comparison, costTotal }: {
   comparison: SmsComparison
   costTotal: number | null | undefined
 }) {
   const { t } = useTranslation()
   const proven = comparison.significant
+  const early = !comparison.verdictReady
+  const nothingYet = early && comparison.eventsTarget === 0 && comparison.eventsHoldout === 0
   const payback =
     costTotal != null ? comparison.incrementalMarginTotal - costTotal : null
 
   return (
     <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/70 p-4">
       <p className="text-sm leading-snug text-slate-800">
-        {t(proven ? 'sms.headlineProven' : 'sms.headlineApparent', {
-          revenue: formatCurrency(comparison.incrementalRevenueTotal),
-        })}
+        {nothingYet
+          ? t('sms.headlineNothingYet')
+          : t(proven ? 'sms.headlineProven' : 'sms.headlineApparent', {
+              revenue: formatCurrency(comparison.incrementalRevenueTotal),
+            })}
       </p>
 
       <p className="mt-1 text-xs text-slate-600 tabular-nums">
-        {t('sms.headlineMargin', {
+        {!nothingYet && t('sms.headlineMargin', {
           margin: formatCurrency(comparison.incrementalMarginTotal),
         })}
         {costTotal != null && (
           <>
-            {' · '}
+            {!nothingYet && ' · '}
             {t('sms.headlineSpent', { cost: formatCurrency(costTotal) })}
             {' · '}
-            <span className={payback! >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
-              {t(payback! >= 0 ? 'sms.headlinePaidBack' : 'sms.headlineShort', {
-                amount: formatCurrency(Math.abs(payback!)),
-              })}
-            </span>
+            {early ? (
+              <span className="text-slate-500">{t('sms.headlinePaybackPending')}</span>
+            ) : (
+              <span className={payback! >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
+                {t(payback! >= 0 ? 'sms.headlinePaidBack' : 'sms.headlineShort', {
+                  amount: formatCurrency(Math.abs(payback!)),
+                })}
+              </span>
+            )}
           </>
         )}
       </p>
@@ -300,7 +322,6 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <Badge tone="slate" shape="tag">{t('sms.step', { n: 3 })}</Badge>
               <CardTitle>{t('sms.resultsTitle')}</CardTitle>
               <SmsResultsGuide />
             </div>

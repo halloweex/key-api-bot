@@ -26,9 +26,24 @@ const addToast = vi.fn()
 const gateway: { balance: number | null; isLoading: boolean } = {
   balance: 1_000_000, isLoading: false,
 }
+// Whether a send is under way, and how far the roster says it has got.
+const sending: { isPending: boolean } = { isPending: false }
+const restMutate = vi.fn()
+type Progress = {
+  total: number; done: number; pending: number; accepted: number; failed: number
+  stoplisted: number; uncertain: number; notSent: number; batchSize?: number
+}
+const progress: { data: Progress | undefined } = { data: undefined }
+
+function roster(over: Partial<Progress>): Progress {
+  return { total: 5560, done: 0, pending: 0, accepted: 0, failed: 0, stoplisted: 0,
+           uncertain: 0, notSent: 0, batchSize: 1000, ...over }
+}
 
 vi.mock('../../hooks/useApi', () => ({
-  useSendSmsCampaign: () => ({ mutate, isPending: false }),
+  useSendSmsCampaign: () => ({ mutate, isPending: sending.isPending }),
+  useSmsSendProgress: () => progress,
+  useSendRestOfSmsCampaign: () => ({ mutate: restMutate, isPending: false }),
   useSmsChannels: () => ({ data: { sms: true, viber: true } }),
   useSmsBalance: () => ({
     data: { sms: true, viber: true, smsSender: 'KoreanStory', viberSender: null,
@@ -58,10 +73,102 @@ function sendButton() {
 }
 
 beforeEach(() => {
-  mutate.mockClear()
+  mutate.mockReset()
+  restMutate.mockReset()
   addToast.mockClear()
   gateway.balance = 1_000_000
   gateway.isLoading = false
+  sending.isPending = false
+  progress.data = undefined
+})
+
+describe('SmsSendDialog, while and after it sends', () => {
+  it('shows the send moving, read off the roster, instead of a bare "Sending…"', () => {
+    // 2026-11-26: a minute of "Sending…" with nothing else on screen.
+    sending.isPending = true
+    progress.data = roster({ done: 2000, accepted: 2000, pending: 3560 })
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+
+    const status = screen.getByRole('status')
+    expect(status.textContent).toContain('sms.breakdown.running')
+    expect(status.querySelector('[data-part="accepted"]')?.getAttribute('style'))
+      .toContain('width: 35.97')
+  })
+
+  it('after a send that broke off, offers to send only the rest', async () => {
+    mutate.mockImplementation((_vars, opts) => {
+      progress.data = roster({ done: 5560, accepted: 3000, uncertain: 1000, notSent: 1560 })
+      opts.onError(new Error('gateway gave no answer'))
+    })
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, campaign.campaign)
+    fireEvent.click(sendButton())
+
+    // Who got it, who may have it and who never got it, apart.
+    expect(screen.getByText('sms.breakdown.uncertain')).toBeTruthy()
+    expect(screen.getByText('sms.breakdown.notSent')).toBeTruthy()
+    const rest = screen.getByRole('button', { name: 'sms.sendRest' })
+    fireEvent.click(rest)
+    expect(restMutate).toHaveBeenCalledWith(
+      { campaign: campaign.campaign, confirmCampaign: campaign.campaign },
+      expect.anything(),
+    )
+  })
+
+  it('opened for the rest, sends the campaign\'s own text to the never-sent only', async () => {
+    progress.data = roster({ done: 5560, accepted: 2157, notSent: 3403 })
+    render(<SmsSendDialog campaign={{ ...campaign, messageText: 'BLACK FRIDAY -50%' }}
+                          mode="rest" onClose={() => {}} />)
+
+    expect(screen.getByText('BLACK FRIDAY -50%')).toBeTruthy()
+    // No text to edit: one campaign is one message.
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+    const rest = screen.getByRole('button', { name: 'sms.sendRest' })
+    expect(rest).toBeDisabled()
+    await userEvent.type(screen.getByRole('textbox'), campaign.campaign)
+    expect(rest).toBeEnabled()
+    fireEvent.click(rest)
+    expect(restMutate).toHaveBeenCalledTimes(1)
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
+  it('keeps the dialog open on a partial send, with the rest one press away', async () => {
+    const onClose = vi.fn()
+    mutate.mockImplementation((_vars, opts) => {
+      progress.data = roster({ done: 5560, accepted: 4560, notSent: 1000 })
+      opts.onSuccess({ campaign: campaign.campaign, channel: 'sms', accepted: 4560,
+                       stoplisted: 0, failed: 0, unsent: 1000, partialError: '405' })
+    })
+    render(<SmsSendDialog campaign={campaign} onClose={onClose} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, campaign.campaign)
+    fireEvent.click(sendButton())
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'sms.sendRest' })).toBeEnabled()
+  })
+
+  it('draws no progress until a send is under way', () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('says what went wrong in the dialog itself, and offers only to close it', async () => {
+    mutate.mockImplementation((_vars, opts) => opts.onError(new Error('gateway gave no answer')))
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, campaign.campaign)
+    fireEvent.click(sendButton())
+
+    // A toast is gone in seconds; the reason stays on the dialog.
+    expect(screen.getByRole('alert').textContent).toBe('gateway gave no answer')
+    expect(screen.getByRole('button', { name: 'sms.close' })).toBeEnabled()
+    expect(sendButton()).toBeDisabled()
+  })
 })
 
 describe('SmsSendDialog', () => {

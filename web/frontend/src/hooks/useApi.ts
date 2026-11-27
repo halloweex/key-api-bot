@@ -67,6 +67,7 @@ import type {
   SmsCampaignsResponse,
   TgBotActivityResponse,
   SmsCampaignResultsResponse,
+  SmsSendProgress,
   SmsSendResult,
   SmsTestSendResult,
   SmsChannel,
@@ -1182,8 +1183,11 @@ export function useSendSmsCampaign() {
       queryClient.invalidateQueries({ queryKey: ['smsSegments'] })
     },
     // Spent or not — a refusal may be the balance itself — the figure on
-    // screen is no longer the one to trust.
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['smsBalance'] }),
+    // screen is no longer the one to trust. The roster's counts moved too.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['smsBalance'] })
+      queryClient.invalidateQueries({ queryKey: ['smsSendProgress'] })
+    },
   })
 }
 
@@ -1257,6 +1261,38 @@ export function useSmsBalance() {
     staleTime: 0,
     refetchOnMount: 'always',
     retry: false,
+  })
+}
+
+/** How far a send has got, polled while it runs. The send is one request that
+ *  answers only at the end, about 4.5 s per 1 000 recipients, and it records
+ *  each batch on the roster as it lands. Polling the roster is how the dialog
+ *  shows it moving instead of "Sending…" for a minute. */
+export function useSmsSendProgress(
+  campaign: string,
+  { enabled = true, poll = false }: { enabled?: boolean; poll?: boolean } = {},
+) {
+  return useQuery<SmsSendProgress>({
+    queryKey: ['smsSendProgress', campaign] as const,
+    queryFn: () => api.getSmsSendProgress(campaign),
+    enabled,
+    refetchInterval: poll ? 1500 : false,
+    staleTime: poll ? 0 : 30_000,
+    retry: false,
+  })
+}
+
+/** Send the rest of a send that broke off (`send-rest`). */
+export function useSendRestOfSmsCampaign() {
+  const queryClient = useQueryClient()
+  return useMutation<SmsSendResult, Error, { campaign: string; confirmCampaign: string }>({
+    mutationFn: ({ campaign, confirmCampaign }) =>
+      api.sendRestOfSmsCampaign(campaign, confirmCampaign),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
+      queryClient.invalidateQueries({ queryKey: ['smsSendProgress'] })
+      queryClient.invalidateQueries({ queryKey: ['smsBalance'] })
+    },
   })
 }
 

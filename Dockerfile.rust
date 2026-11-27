@@ -1,6 +1,7 @@
 # The Rust pilot (rust/README.md): one endpoint and the access layer in
-# front of every route, never deployed. Nothing in docker-compose.yml or the
-# deploy workflow builds or runs this image.
+# front of every route. The deploy workflow builds it and runs it in the
+# `rust` profile; nginx routes it nothing until nginx/rust/routes.conf names
+# a route.
 #
 # Built with `rust/` as the context, not the repository root:
 #

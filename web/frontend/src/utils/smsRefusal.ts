@@ -62,6 +62,11 @@ function fill(body: Figures, t: T): Record<string, string | number> {
   out.recipients = `${formatNumber(recipients)} ${plural(t, 'word.recipients', recipients)}`
   const parts = num(body.parts) ?? 1
   out.parts = `${parts} ${plural(t, 'word.parts', parts)}`
+  // A send that broke halfway: who is confirmed, who is in the batch that got
+  // no answer, who was never sent.
+  for (const key of ['accepted', 'uncertain', 'notSent', 'pending']) {
+    out[key] = formatNumber(num(body[key]) ?? 0)
+  }
 
   // Who else was messaged today, and why that stops this send — one sentence
   // per arm, because the two are different rules.

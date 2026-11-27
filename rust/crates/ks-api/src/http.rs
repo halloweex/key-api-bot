@@ -492,7 +492,7 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
 
 /// What the pilot answered and handed over (`crate::stats`): the last
 /// `stats::WINDOW_MINUTES` minutes and the totals since start, for the
-/// watchdog in `bot/canary.py`. The pilot's, not the app's, as `/healthz` is.
+/// watch in `core/rust_api_watch.py`. The pilot's, not the app's, as `/healthz` is.
 async fn stats(State(state): State<Arc<AppState>>) -> Response {
     json(StatusCode::OK, &state.stats.snapshot())
 }

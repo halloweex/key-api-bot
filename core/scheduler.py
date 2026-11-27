@@ -2012,7 +2012,14 @@ class BackgroundScheduler:
                 capture_facts = analytics_captures.Facts(
                     unwatched=f"{type(e).__name__}: {e}")
             capture_issues = analytics_captures.judge(capture_facts)
-            issues = issues + pg_issues + chain_issues + capture_issues
+            # The Rust pilot's watch (core/rust_api_watch.py): WARN at most, a
+            # line in the 09:00 digest and never a page (the owner's decision
+            # of 2026-11-25). It asks nothing where KS_RUST_API_URL is unset,
+            # and never raises: a pilot that does not answer is its finding.
+            from core import rust_api_watch
+
+            rust_issues = rust_api_watch.judge(await rust_api_watch.read_facts())
+            issues = issues + pg_issues + chain_issues + capture_issues + rust_issues
 
             # A run in which the twins and the chain invariants could look at
             # nothing is journalled failed (O10 (a), 2026-11-11), the way the
@@ -2055,7 +2062,9 @@ class BackgroundScheduler:
             # would enter its bullets and its Gate bucket, and a capture
             # stamping between two runs would deliver a standing CRITICAL
             # again as a new incident.
-            paged = [i for i in issues if not analytics_captures.is_capture_finding(i)]
+            # The Rust pilot's watch is digested, never paged, for the same reason.
+            paged = [i for i in issues if not analytics_captures.is_capture_finding(i)
+                     and not rust_api_watch.is_watch_finding(i)]
             if sev == Severity.CRITICAL and (
                     not error_message or pg_critical or chain_critical):
                 msg = format_alert_message(

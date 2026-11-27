@@ -80,6 +80,7 @@ import type {
   SmsCampaignsResponse,
   TgBotActivityResponse,
   SmsCampaignResultsResponse,
+  SmsSendProgress,
   SmsSendResult,
   SmsTestSendResult,
   SmsChannel,
@@ -901,6 +902,14 @@ export const api = {
   getSmsCampaigns: (options?: FetchOptions) =>
     fetchApi<SmsCampaignsResponse>('/customers/sms-campaigns', undefined, options),
 
+  /** How far a send has got, polled by the send dialog while it runs. */
+  getSmsSendProgress: (campaign: string, options?: FetchOptions) =>
+    fetchApi<SmsSendProgress>(
+      `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send-progress`,
+      undefined,
+      options,
+    ),
+
   getSmsCampaignResults: (
     campaign: string, windowDays: number, deliveredOnly = false,
     options?: FetchOptions,
@@ -935,6 +944,16 @@ export const api = {
       // 10s the request aborted while the send carried on server-side, and
       // the failure on screen invited a second press — which sent the roster
       // twice.
+      { timeout: 10 * 60 * 1000 },
+    ),
+
+  // The rest of a send that broke off: only the targets never handed to the
+  // gateway, with the campaign's own text. Same long wait as the send.
+  sendRestOfSmsCampaign: (campaign: string, confirmCampaign: string) =>
+    fetchApiMutation<SmsSendResult>(
+      `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send-rest`
+        + `?confirm_campaign=${encodeURIComponent(confirmCampaign)}`,
+      'POST',
       { timeout: 10 * 60 * 1000 },
     ),
 

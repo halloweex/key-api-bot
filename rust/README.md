@@ -211,19 +211,19 @@ hand.
   `gzip_vary` covers only what it would compress, a 200, 403 or 404 of 256
   bytes and up. Both harnesses compare the header; the first port, by GZip's
   500-byte minimum, differed on 11 140 answers.
-- **The watchdog**, in the bot's canary (`check_rust_api` in
-  `bot/canary.py`), every 15 minutes where `KS_RUST_API_URL` says where the
-  pilot is (`http://ks-rust-api:8090` in compose). It asks `/readyz` and the
-  pilot's own `/stats` — every answer of the last 15 minutes and since
-  start, each 501 by the branch it names (`src/stats.rs`) — and warns when
-  the container does not answer (`rust_api_unreachable`), is not ready
-  (`rust_api_not_ready`, the reason named), or handed more than 5% of at
-  least 20 requests to Python for a reason of its own: revision, database,
-  pool, session, timeout (`rust_api_handover_share`). Hand-overs by design —
-  a route not ported, a filter left to Python — are not counted. A warning,
-  not an outage: nginx answers from Python meanwhile. The first two wait for
-  a second probe, as `health_*` does, because a deploy recreates the
-  container.
+- **The watchdog**, a line in the 09:00 digest and never a page (the owner's
+  decision of 2026-11-25): `core/rust_api_watch.py`, asked by the integrity job
+  (01, 07, 13 and 19 Kyiv) where `KS_RUST_API_URL` says where the pilot is
+  (`http://ks-rust-api:8090` in compose). It reads `/readyz` and the pilot's
+  own `/stats` — every answer of the last 24 hours and since start, each 501 by
+  the branch it names (`src/stats.rs`) — and files a WARN when the container
+  does not answer (`rust_pilot_unreachable`), is not ready
+  (`rust_pilot_not_ready`, the reason named), does not publish its counts
+  (`rust_pilot_unwatched`), or handed more than 5% of at least 20 requests to
+  Python for a reason of its own: revision, database, pool, session, timeout
+  (`rust_pilot_handover_share`). Hand-overs by design — a route not ported, a
+  filter left to Python — are not counted. Nobody loses an answer meanwhile:
+  nginx answers from Python.
 - **The drift sensor**: `test_python_answers_the_trend_as_recorded` in
   `tests/integration/test_rust_pilot_trend.py`, the `drift` job of
   `.github/workflows/rust-pilot.yml`. Python's answers to the
