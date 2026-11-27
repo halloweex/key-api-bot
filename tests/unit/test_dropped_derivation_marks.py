@@ -327,7 +327,10 @@ class TestRunCanary:
 
         assert list(inspect.signature(canary.check_derivation_marks).parameters) == ["payload"]
         assert "previous_marks_dropped" not in inspect.signature(canary.run_canary).parameters
-        tree = ast.parse((REPO / "bot/main.py").read_text(encoding="utf-8"))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        # The job is `bot.canary.canary_job` since 2026-11-27, and bot/main.py
+        # only registers it: both are read, so state carried in either shows.
+        names = {n.id for path in ("bot/canary.py", "bot/main.py")
+                 for n in ast.walk(ast.parse((REPO / path).read_text(encoding="utf-8")))
+                 if isinstance(n, ast.Name)}
         assert {name for name in names if name.startswith("canary_prev_")} == {
             "canary_prev_failures"}
