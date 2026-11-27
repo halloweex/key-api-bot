@@ -36,6 +36,7 @@ from .users import router as users_router
 from .reports import router as reports_router
 from .products_intel import router as products_intel_router
 from .margin import router as margin_router
+from .stock_margin import router as stock_margin_router
 from .me import router as me_router
 from .webhooks import router as webhooks_router
 from .tg_bot import router as tg_bot_router
@@ -70,6 +71,10 @@ router.include_router(
 router.include_router(
     margin_router, dependencies=[Depends(require_permission("margin"))],
 )
+# The margin of every offer in stock, purchase price per offer included. The
+# admin role and nobody else (owner's decision, 2026-11-26) — not `margin`,
+# which can be ticked for a person who is not an admin (stock_margin.py).
+router.include_router(stock_margin_router, dependencies=[Depends(require_admin)])
 router.include_router(me_router)
 # The customer bot's activity counts, asked of the bot itself (tg_bot.py).
 # A tab since the owner opened it to the marketers; admins hold every tab.

@@ -241,8 +241,10 @@ async def get_customer_insights(
     sales_type: str = "retail",
     promocode: Optional[str] = None,
     granularity: str = "daily",
+    category_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Get customer insights: new vs returning, AOV trend, repeat rate."""
+    """Get customer insights: new vs returning, AOV trend, repeat rate —
+    over the slice the filters select, when any is set."""
     start, end = _parse_dates(start_date, end_date)
     store = await get_store()
     return await store.get_customer_insights(
@@ -252,6 +254,7 @@ async def get_customer_insights(
         sales_type=sales_type,
         promocode=promocode,
         granularity=granularity,
+        category_id=category_id,
     )
 
 
@@ -275,11 +278,21 @@ async def get_product_performance(
     )
 
 
-async def get_brand_analytics(start_date: str, end_date: str, sales_type: str = "retail") -> Dict[str, Any]:
+async def get_brand_analytics(
+    start_date: str,
+    end_date: str,
+    sales_type: str = "retail",
+    source_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None,
+    promocode: Optional[str] = None,
+) -> Dict[str, Any]:
     """Get brand analytics: top brands by revenue and quantity."""
     start, end = _parse_dates(start_date, end_date)
     store = await get_store()
-    return await store.get_brand_analytics(start, end, sales_type=sales_type)
+    return await store.get_brand_analytics(
+        start, end, source_id=source_id, sales_type=sales_type,
+        category_id=category_id, brand=brand, promocode=promocode)
 
 
 async def get_promocode_analytics(start_date: str, end_date: str, sales_type: str = "retail") -> Dict[str, Any]:

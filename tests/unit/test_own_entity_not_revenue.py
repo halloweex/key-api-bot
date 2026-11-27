@@ -209,9 +209,12 @@ def _capture():
 
 
 class TestTheProfit:
-    def test_the_profit_leaves_the_entity_out(self):
-        """Its revenue and the costs joined to it. Mutation: drop the clause
-        from `get_profit_analysis`'s WHERE."""
+    def test_the_profit_reads_the_column_that_carries_the_entity(self):
+        """Its revenue and the costs joined to it leave with the entity:
+        since 2026-11-27 the chart reads the orders that count as revenue,
+        the column `TestTheColumn` holds to the rule, where it spelled the
+        entity out and so kept Opencart. Mutation: drop the clause from
+        `get_profit_analysis`'s WHERE, or put the spelled-out one back."""
         from core.repositories.expenses import ExpensesMixin
 
         seen, run = _capture()
@@ -224,7 +227,27 @@ class TestTheProfit:
                                                     sales_type=sales_type))
         assert len(seen) == 2
         for sql in seen:
-            assert not_own_entity("s") in sql
+            assert "s.is_active_source" in sql
+            assert not_own_entity("s") not in sql
+
+    def test_the_tab_total_reads_the_same_orders(self):
+        """`get_expense_summary`, the tab's total, counts the costs of the
+        orders the chart subtracts — every one of its three reads."""
+        from core.repositories.expenses import ExpensesMixin
+
+        seen: list = []
+
+        async def run(sql, params=None, *args, mode=None, **kwargs):
+            seen.append(sql)
+            return (0, 0, 0) if mode == "one" else []
+
+        class Probe(ExpensesMixin):
+            _expenses_run = staticmethod(run)
+
+        asyncio.run(Probe().get_expense_summary(date(2026, 11, 1), date(2026, 11, 2)))
+        assert len(seen) == 3
+        for sql in seen:
+            assert "s.is_active_source" in sql
 
 
 class TestTheSubcategories:

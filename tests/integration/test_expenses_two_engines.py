@@ -178,6 +178,42 @@ def _key(name, args, kwargs):
     return call_key(name, [[a.isoformat() for a in args], kwargs])
 
 
+# The profit chart since 2026-11-27 (the owner's decision after reconciling the
+# dashboard against KeyCRM): the orders that count as revenue, and every cost
+# on them, returns included — the orders and the costs the tab's total
+# (`get_expense_summary`) counts, so the tab says one figure. The literals stay
+# as recorded (rule 9); what the decision moves is named here. Order 5 is a
+# return with a delivery of 60 on 09.09: that 60 is a cost now, so the day
+# reads 0 − 60 and the period's costs grow by 60, to the summary's total.
+PROFIT_SINCE_2026_11_27 = {
+    _key("get_profit_analysis", W, {}): {
+        "day": ("09.09", 0.0, 60.0, -60.0),
+        "metrics": {"totalRevenue": 3500.0, "totalExpenses": 505.0,
+                    "grossProfit": 2995.0, "profitMargin": 85.6},
+    },
+    _key("get_profit_analysis", W, {"sales_type": "all"}): {
+        "day": ("09.09", 0.0, 60.0, -60.0),
+        "metrics": {"totalRevenue": 12500.0, "totalExpenses": 1005.0,
+                    "grossProfit": 11495.0, "profitMargin": 92.0},
+    },
+}
+
+
+def _expected(key):
+    """The recorded literal, with the values the decision moved."""
+    import copy
+
+    expected = copy.deepcopy(GOLDEN[key])
+    moved = PROFIT_SINCE_2026_11_27.get(key)
+    if moved:
+        label, revenue, cost, profit = moved["day"]
+        i = expected["chart"]["labels"].index(label)
+        for dataset, value in zip(expected["chart"]["datasets"], (revenue, cost, profit)):
+            dataset["data"][i] = value
+        expected["metrics"] = dict(moved["metrics"])
+    return expected
+
+
 class TestPostgresAnswersWhatDuckDBAnswered:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -186,11 +222,16 @@ class TestPostgresAnswersWhatDuckDBAnswered:
     )
     async def test_the_whole_result_is_the_literal(self, in_postgres, name, args, kwargs):
         answer = await getattr(in_postgres, name)(*args, **kwargs)
-        assert comparable(answer) == GOLDEN[_key(name, args, kwargs)], (
+        assert comparable(answer) == _expected(_key(name, args, kwargs)), (
             f"{name}{args}{kwargs}: {answer!r}")
 
     def test_every_literal_is_a_call_and_every_call_has_one(self):
         assert set(GOLDEN) == {_key(n, a, k) for n, a, k in CALLS}
+
+    def test_every_departure_moves_a_recorded_value(self):
+        """A departure equal to the literal would hide a stale entry."""
+        for key in PROFIT_SINCE_2026_11_27:
+            assert _expected(key) != GOLDEN[key], key
 
 
 @pytest.mark.asyncio
@@ -208,11 +249,15 @@ async def test_revenue_is_not_multiplied_by_the_expense_count(in_postgres):
 
 @pytest.mark.asyncio
 async def test_the_expense_total_survives_the_fix(in_postgres):
-    """Folding the expenses before the join must not lose any of them."""
+    """Folding the expenses before the join must not lose any of them — and
+    the chart's costs are the tab's own total, the return's delivery included
+    (2026-11-27): the tab showed two totals for one period until then."""
     out = await in_postgres.get_profit_analysis(*W)
-    retail_ids = {o[0] for o in ORDERS if o[5] is None and o[4] != 19}
+    retail_ids = {o[0] for o in ORDERS if o[5] is None}
     expected = round(sum(a for _, o, _, a in EXPENSES if o in retail_ids), 2)
     assert round(sum(out["chart"]["datasets"][1]["data"]), 2) == expected
+    summary = await in_postgres.get_expense_summary(*W)
+    assert summary["metrics"]["totalExpenses"] == expected
 
 
 @pytest.mark.asyncio

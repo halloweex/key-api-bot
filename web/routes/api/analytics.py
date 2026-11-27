@@ -399,17 +399,31 @@ async def get_brand_analytics(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    source_id: Optional[int] = Query(None),
+    category_id: Optional[int] = Query(None),
+    brand: Optional[str] = Query(None),
+    promocode: Optional[str] = Query(None),
     _gate=Depends(require_any_permission(["dashboard", "marketing"])),
 ):
-    """Get brand analytics: top brands by revenue and quantity."""
+    """Get brand analytics: top brands by revenue and quantity.
+
+    The header's filters narrow it like the product charts beside it
+    (2026-11-27): it took none, so under a source or a category it showed
+    every brand of the whole shop."""
     try:
         validate_period(period)
+        validate_source_id(source_id)
+        validate_category_id(category_id)
+        brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
         start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    return await dashboard_service.get_brand_analytics(start, end, sales_type=sales_type)
+    return await dashboard_service.get_brand_analytics(
+        start, end, sales_type=sales_type, source_id=source_id,
+        category_id=category_id, brand=brand, promocode=promocode)
 
 
 @router.get("/promocodes/analytics")
