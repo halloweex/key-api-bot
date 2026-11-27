@@ -160,6 +160,12 @@ class _Scheduler:
         self._heavy_job_lock = asyncio.Lock()
         self.derived = []
 
+    async def claim_job_run(self, job_id):
+        """No leases: every job runs here (`core/job_lease.py`)."""
+        from core import job_lease
+
+        return job_lease.unguarded(job_id)
+
     async def _run_pg_derivation(self, *, trigger=None, force=False):
         self.derived.append((trigger, force))
         return {"status": "success", "trigger": trigger}
