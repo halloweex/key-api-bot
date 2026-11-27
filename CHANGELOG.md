@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.365
+
+- fix(dashboard): every block follows the header's filters; one expense total
+
+
 ## 3.0.364
 
 - test(margin): the margin repository runs seven statements now
