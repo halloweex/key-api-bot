@@ -54,6 +54,10 @@ async def _clean(pool):
         await conn.execute("DELETE FROM bronze.offers")
         await conn.execute("DELETE FROM app.inventory_sku_history WHERE date = $1", DAY)
         await conn.execute("DELETE FROM app.inventory_history WHERE date = $1", DAY)
+        # The photograph also captures each offer's cost and stamps it.
+        await conn.execute("DELETE FROM app.offer_cost_daily WHERE date = $1", DAY)
+        await conn.execute(
+            "DELETE FROM meta.mirror_state WHERE table_name = 'capture.app.offer_cost_daily'")
         await conn.execute("DELETE FROM meta.chain_watermarks")
 
 
