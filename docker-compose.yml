@@ -612,10 +612,12 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    # Measured in the К1 harness on a production-sized fixture (~41 000
-    # orders, ~45 000 versions): see rust_worker_max_rss_kb in its report.
-    mem_limit: 256m
-    memswap_limit: 256m
+    # 320 MB at its peak in the К1 harness's first run (rust_worker_max_rss_kb
+    # in its report): ~40 000 orders and the whole archive, ~44 000 versions,
+    # inherited in one chunk, as the first shadow run on production will. An
+    # hourly run after it ships Silver and the day's versions, far less.
+    mem_limit: 512m
+    memswap_limit: 512m
     cpus: 0.5
 
   # The bound of the /api request log, declared beside the mount that creates
