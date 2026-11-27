@@ -12,21 +12,20 @@ ONE ENGINE SINCE STEP 14 (S14-07). Every goal read is Postgres'
 (`GoalsMixin._goals_run`), so what is proved here runs against Postgres —
 Bronze seeded, Silver derived from it by Postgres itself, the production path
 (`tests.integration.pg_tab_seed`) — and asks a store whose DuckDB connection
-is a trap. Skipped without `KS_PG_DSN`, which CI supplies; the walks of the
-module and of the tree need no server. The literal half is
-`tests/integration/test_goals_history_two_engines.py`.
+is a trap. Skipped without `KS_PG_DSN`, which CI supplies. The literal half
+is `tests/integration/test_goals_history_two_engines.py`.
 
   * **the orders Silver selects** (T9) — on every branch of the sales-type
     CASE, for every sales type, the order ids written out here: KeyCRM's
     status group decides a return before the status list, and a source-3
     order — the 2024 website — is counted;
-  * **met by construction** (T10) — no statement any calculator, the smart
-    goal or the Monday job sends Postgres names `bronze.orders`,
-    `bronze.managers` or `app.manager_classifications`, the tables the
-    deleted bridge read in DuckDB;
-  * **the window** (T12) — no Silver body bounds a window with the server's
-    clock, none filters `is_active_source`, none names a bridge table — read
-    off the module, never listed;
+  * **Silver is what is read** (T10) — emptied, Silver answers nothing while
+    Bronze still holds every order: no calculator reads `bronze.orders`, the
+    table the deleted bridge read in DuckDB;
+  * **the window and the source** (T12) — with Python's clock frozen inside
+    the history, the YoY's full years and the last three complete months end
+    at that Kyiv day, not the server's; and retail orders on Opencart move
+    every baseline by what they hold, so no body filters `is_active_source`;
   * **the retired switch** (T13) — nothing in the code reads
     `KS_GOALS_HISTORY`, any value imports and answers alike, and its
     condition `goals_history_mode_invalid` stays retired (step 14's rule 15).
@@ -35,10 +34,8 @@ Each guard names the mutation that bites it.
 """
 from __future__ import annotations
 
-import ast
-import re
-from datetime import timedelta
-from pathlib import Path
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -50,19 +47,9 @@ from tests.integration.pg_tab_seed import (
     derive, needs_postgres, seed, store_that_never_reaches_duckdb, tab_in_postgres,
 )
 from tests.helpers.goals_history import (
-    ALL_IDS, DSN, EXPECTED, INTERVALS, MANAGERS, ORDERS, _calculators,
-    _seed_history_pg,
+    ALL_IDS, DSN, EXPECTED, INTERVALS, KYIV, MANAGERS, ORDERS, _calculators,
+    _history_rows, _seed_history_pg,
 )
-
-REPO = Path(__file__).resolve().parents[2]
-GOALS = REPO / "core" / "repositories" / "goals.py"
-
-# The three tables the deleted DN-12 bridge read out of DuckDB, as SQL names,
-# and their Postgres homes: a goal read naming any of them is reading the
-# orders or the classification around Silver.
-BRIDGE_TABLES = ("orders", "managers", "manager_classifications")
-_BRIDGE_TABLE = re.compile(
-    r"(?<![\w.])(" + "|".join(BRIDGE_TABLES) + r")(?![\w])", re.IGNORECASE)
 
 
 # ─── T9: the orders Silver selects ─────────────────────────────────────────
@@ -249,53 +236,119 @@ class TestSilverIsWhatIsRead:
         assert caps == [0.35] * 12
 
 
-# ─── T12: the window and the row set, read off the module ─────────────────
+# ─── T12: the window is Kyiv's, and the source is any ─────────────────────
 
-def _silver_bodies() -> dict:
-    """Every module-level statement in goals.py that reads `{silver_orders}`
-    — parsed, so a body added tomorrow is held to these rules the day it is
-    written."""
-    tree = ast.parse(GOALS.read_text(encoding="utf-8"))
-    return {node.targets[0].id: node.value.value
-            for node in tree.body
-            if isinstance(node, ast.Assign) and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-            and "{silver_orders}" in node.value.value}
+# Half past midnight on New Year's Day in Kyiv, inside the history: the UTC
+# clock still reads 2024-12-31, and the server's own today is past the
+# history's end.
+FROZEN = datetime(2025, 1, 1, 0, 30, tzinfo=KYIV)
 
 
-SERVER_CLOCKS = re.compile(
-    r"CURRENT_DATE|CURRENT_TIMESTAMP|LOCALTIMESTAMP|\bnow\s*\(|\btoday\s*\(",
-    re.IGNORECASE)
+class _FrozenClock(datetime):
+    """`datetime` with `now()` at FROZEN, in whatever zone is asked."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN.astimezone(tz) if tz else FROZEN.replace(tzinfo=None)
 
 
-class TestTheBodies:
-    """Mutation M15: write `DATE_TRUNC('month', CURRENT_DATE)` back into the
-    recent-months body — the engines disagree about that day for three hours
-    out of twenty-four — and it fails here, named."""
+def _retail(year: int, month: int = 0) -> Decimal:
+    """The history's retail revenue in a Kyiv year, or one of its months:
+    its one retail order a day (no manager; the returns carry status 19)."""
+    return sum((Decimal(str(total)) for _id, _src, status, total, when, manager
+                in _history_rows()
+                if manager is None and status == 1 and when.year == year
+                and month in (0, when.month)), Decimal(0))
 
-    def test_the_walk_finds_the_history_bodies(self):
-        found = set(_silver_bodies())
-        history = {name for name in found if name.startswith("_SILVER_")}
-        assert {"_SILVER_SEASONALITY_SQL", "_SILVER_YEARLY_SQL",
-                "_SILVER_MONTHLY_YOY_SQL", "_SILVER_BOUNDS_SQL",
-                "_SILVER_WEEKLY_SQL", "_SILVER_GROWTH_CAP_SQL",
-                "_SILVER_LAST_YEAR_SQL", "_SILVER_RECENT_MONTHS_SQL"} <= history
 
-    @pytest.mark.parametrize("name", sorted(_silver_bodies()))
-    def test_no_body_reads_the_servers_clock(self, name):
-        body = _silver_bodies()[name]
-        # `TODAY_IN_KYIV` is spliced in at the read, never written here.
-        assert not SERVER_CLOCKS.search(body), (name, SERVER_CLOCKS.search(body))
+class TestTheWindowIsKyivs:
+    """The two windows the history bounds by today — the YoY's full years,
+    never the running one, and the last three complete months — end at
+    Python's Kyiv day, here frozen at FROZEN. A bound read off the server's
+    clock answers for today, a year and more past the history; one read in
+    UTC, for 2024-12-31. Mutation M15: write `DATE_TRUNC('month',
+    CURRENT_DATE)` back into the recent-months body."""
 
-    @pytest.mark.parametrize("name", sorted(
-        n for n in _silver_bodies() if n.startswith("_SILVER_")))
-    def test_no_history_body_filters_the_source_or_names_the_bridge(self, name):
-        body = _silver_bodies()[name]
-        assert "is_active_source" not in body, (
-            f"{name} drops the 2024 website from the growth baseline (OQ-1)")
-        assert not _BRIDGE_TABLE.search(body), name
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_the_windows_end_at_the_kyiv_day(self, history_pg, monkeypatch):
+        store, _pool = history_pg
+        monkeypatch.setattr(goals_module, "datetime", _FrozenClock)
+
+        recent = await store._recent_three_month_average("retail")
+        assert recent == pytest.approx(
+            float(sum(_retail(2024, month) for month in (10, 11, 12)) / 3))
+
+        # 2025 is running and 2023 held one month: one full year, no pair.
+        yoy = await store.calculate_yoy_growth("retail")
+        assert [row["year"] for row in yoy["yearly_data"]] == [2024]
+        assert yoy["yearly_data"][0]["revenue"] == pytest.approx(float(_retail(2024)))
+        assert yoy["sample_size"] == 0
+
+
+class TestTheWebsiteOnOpencartCounts:
+    """OQ-1: the 2024 website sold on Opencart (source 3), which is not a
+    revenue source, and a growth baseline counts it: retail orders on
+    source 3 move every baseline by what they hold. Mutation M11: add
+    `AND s.is_active_source` to any history body."""
+
+    # One Opencart order a day through the first week of October 2024, so
+    # the month's first week gains a share as well as money.
+    DAYS = range(1, 8)
+    EACH = Decimal("100.00")
+
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_a_retail_order_on_opencart_moves_every_baseline(
+            self, history_pg, monkeypatch):
+        from tests.helpers.goals_history import _kyiv_noon
+
+        store, pool = history_pg
+        monkeypatch.setattr(goals_module, "datetime", _FrozenClock)
+
+        async def baselines():
+            seasonality = await store.calculate_seasonality_indices("retail")
+            yoy = await store.calculate_yoy_growth("retail")
+            weekly = await store.calculate_weekly_patterns("retail")
+            return {
+                "october": seasonality[10]["avg_revenue"],
+                "year_2024": yoy["yearly_data"][0]["revenue"],
+                "a_year_before": await store._last_year_month_revenue(2025, 10, "retail"),
+                "recent": await store._recent_three_month_average("retail"),
+                "october_yoy": yoy["monthly_yoy"][10],
+                "october_cap": await store._dynamic_growth_cap(10, "retail"),
+                "october_week_1": weekly[10][1],
+            }
+
+        before = await baselines()
+        async with pool.acquire() as conn:
+            await seed(conn, orders=[
+                (900_000 + day, 3, 1, float(self.EACH), _kyiv_noon(date(2024, 10, day)),
+                 1, None, None)
+                for day in self.DAYS])
+        await derive(pool)
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT COUNT(*) FROM silver.orders WHERE source_id = 3 "
+                "AND sales_type = 'retail' AND NOT is_active_source") == len(self.DAYS)
+        after = await baselines()
+
+        added = self.EACH * len(self.DAYS)
+        moved = {key: after[key] - before[key] for key in
+                 ("october", "year_2024", "a_year_before", "recent")}
+        assert moved == pytest.approx({
+            "october": float(added / 2),     # two Octobers in the history
+            "year_2024": float(added),
+            "a_year_before": float(added),
+            "recent": float(added / 3),      # October to December 2024
+        }), moved
+
+        # One pair of Octobers: their growth, and the cap is that growth.
+        october_2024 = _retail(2024, 10) + added
+        growth = float((_retail(2025, 10) - october_2024) / october_2024)
+        assert after["october_yoy"] == pytest.approx(growth, abs=5e-5)
+        assert after["october_cap"] == pytest.approx(growth)
+        assert after["october_week_1"] > before["october_week_1"]
 
 
 # ─── T13: the retired switch ───────────────────────────────────────────────

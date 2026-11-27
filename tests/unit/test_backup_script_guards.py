@@ -26,11 +26,22 @@ pipefail` is a statement about a process, so a file that is `source`d is
 outside it. The other two are statements about what a file may *do*, and being
 sourced changes nothing about that — which is why `deploy/pg_offsite_lib.sh`,
 where the remote deletion primitive lives, is inside them.
+
+One promise is run rather than read: the PITR drill leaves its evidence
+marker only once every check has passed, in a scratch root against a fake
+`docker`.
 """
 from __future__ import annotations
 
+import gzip
+import os
 import re
+import shutil
+import subprocess
+import tarfile
 from pathlib import Path
+
+import pytest
 
 from tests.archive_mounts import walk as walk_mounts
 
@@ -228,17 +239,10 @@ def test_the_shipper_holds_a_lock_it_does_not_wait_for():
     assert re.search(r"flock -n\b", text), text[:0] or "pg_offsite.sh takes no non-blocking flock"
 
 
-def test_the_shipper_writes_its_marker_only_after_verifying():
-    """The marker is what deploy/offsite_check.sh reads, so writing it before
-    the uploaded bytes have been read back and hashed would make the alarm
-    swear to a copy nobody has checked."""
-    text = (REPO / "deploy" / "pg_offsite.sh").read_text()
-    verify = text.index('step "verify the remote copy"')
-    marker = text.index('step "write marker"')
-    assert verify < marker, "the marker is written before the verification step"
-    # And retention comes last of all: pruning ahead of the marker would delete
-    # an old copy on a run that never proved the new one arrived.
-    assert marker < text.index('step "prune off-site"')
+# That the shipper writes its marker, and prunes, only after the copy came
+# back whole is run, not read: test_pg_offsite_scripts.py's
+# `test_a_file_that_arrived_damaged_refuses_and_leaves_no_marker` and
+# `test_a_night_whose_copy_did_not_verify_prunes_nothing`.
 
 
 def test_the_plaintext_the_shipper_makes_to_check_is_removed_where_it_is_made():
@@ -268,20 +272,94 @@ def test_the_plaintext_the_shipper_makes_to_check_is_removed_where_it_is_made():
     )
 
 
-def test_the_pitr_drill_vouches_only_after_every_check():
+# ── the PITR drill, run ───────────────────────────────────────────────────────
+
+# The recovering container, as the drill asks it: `docker logs` prints
+# FAKE_LOGS and every row count answers FAKE_ROWS; `run`, `rm` and
+# `pg_isready` succeed. `chown` is faked because the drill hands the restored
+# files to the container's uid 70, which only root may do.
+FAKE_PITR_DOCKER = r"""#!/usr/bin/env bash
+case "$1" in
+    logs) printf '%s\n' "${FAKE_LOGS:-}" ;;
+    exec) case " $* " in *" psql "*) printf '%s\n' "${FAKE_ROWS:-0}" ;; esac ;;
+esac
+exit 0
+"""
+FAKE_CHOWN = "#!/usr/bin/env bash\nexit 0\n"
+needs_bash = pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
+
+PITR_BASE = "20260831-084000"
+# What Postgres logs when recovery fetched a segment out of the archive.
+REPLAYED = ('LOG:  restored log file "000000010000000000000002" from archive\n'
+            'LOG:  consistent recovery state reached')
+
+
+@pytest.fixture
+def pitr_drill(tmp_path):
+    """deploy/pg_pitr_drill.sh in a scratch repository root, with one base
+    backup and one WAL segment on disk. `run(**env)` is `(code, output,
+    marker path)`."""
+    root = tmp_path / "repo"
+    (root / "deploy").mkdir(parents=True)
+    for name in ("pg_pitr_drill.sh", "notify.sh"):
+        shutil.copy(REPO / "deploy" / name, root / "deploy" / name)
+    # The kill switch: a failing drill's notify() returns before Telegram.
+    (root / ".env").write_text("KS_ALERTS_DISABLED=1\n")
+
+    base = root / "backups" / "postgres" / "base" / PITR_BASE
+    base.mkdir(parents=True)
+    (tmp_path / "PG_VERSION").write_text("17\n")
+    with tarfile.open(base / "base.tar.gz", "w:gz") as tar:
+        tar.add(tmp_path / "PG_VERSION", arcname="PG_VERSION")
+    (base / "START_WAL").write_text("000000010000000000000001\n")
+    wal = root / "backups" / "pg_wal"
+    wal.mkdir(parents=True)
+    with gzip.open(wal / "000000010000000000000002.gz", "wb") as segment:
+        segment.write(b"WAL")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("docker", FAKE_PITR_DOCKER), ("chown", FAKE_CHOWN)):
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+
+    def run(**fakes):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("FAKE_", "BACKUP_", "KS_"))}
+        env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}", **fakes})
+        done = subprocess.run(["bash", str(root / "deploy" / "pg_pitr_drill.sh")],
+                              env=env, capture_output=True, text=True, timeout=60)
+        return done.returncode, done.stdout + done.stderr, root / "data" / ".pg_pitr_drill_last_ok"
+
+    return run
+
+
+@needs_bash
+def test_the_pitr_drill_vouches_once_every_check_passed(pitr_drill):
     """Chain 3's flip reads `data/.pg_pitr_drill_last_ok`
-    (`core/backup_evidence.py`). Written anywhere but at the end — after the
-    last `fail` the drill can reach — it would vouch for a recovery that had
-    not been proved. Mutation: move the marker block above the row counts."""
-    text = (REPO / "deploy" / "pg_pitr_drill.sh").read_text()
-    lines = [(i, line) for i, line in enumerate(text.splitlines())
-             if not line.lstrip().startswith("#")]
-    write = max(i for i, line in lines if "pg_pitr_drill_last_ok" in line)
-    last_fail = max(i for i, line in lines if re.search(r"\bfail \"", line))
-    assert last_fail < write
-    assert text.index("PITR is real") < text.index("pg_pitr_drill_last_ok")
-    # Through a rename, so the web container never reads half a line.
-    assert 'mv -f "$MARKER.tmp" "$MARKER"' in text
+    (`core/backup_evidence.py`): a drill that replayed the archive and found
+    rows leaves it, whole, naming the base it restored."""
+    from core.backup_evidence import read_markers
+
+    code, out, marker = pitr_drill(FAKE_LOGS=REPLAYED, FAKE_ROWS="3")
+    assert code == 0, out
+    evidence = read_markers(marker.parent)[0]
+    assert evidence is not None and evidence.labels == {"base": PITR_BASE}, out
+    assert not list(marker.parent.glob("*.tmp"))
+
+
+@needs_bash
+@pytest.mark.parametrize("logs, rows", [
+    ("LOG:  consistent recovery state reached", "3"),
+    (REPLAYED, "0"),
+], ids=["the-base-alone-came-up", "restored-empty"])
+def test_a_pitr_drill_that_fails_a_check_vouches_for_nothing(pitr_drill, logs, rows):
+    """A marker written before the last check would vouch for a recovery
+    that had not been proved. Mutation: move the marker block above the
+    replay check or the row counts."""
+    code, out, marker = pitr_drill(FAKE_LOGS=logs, FAKE_ROWS=rows)
+    assert code != 0, out
+    assert not marker.exists(), out
 
 
 def test_the_remote_drill_vouches_only_after_pass():

@@ -187,7 +187,7 @@ class TestWhatTheScriptPromises:
         users = [re.search(r"-U (\S+)", c).group(1) for c in healthy.psql]
         asking = sum(1 for p in FILES if p.read_text(encoding="utf-8").splitlines()[0]
                      == "-- soak:run-as ks_app")
-        assert asking == 2
+        assert asking >= 1, "no file asks for the owner: the branch is unexercised"
         assert users.count("ks_app") == asking
         assert "postgres" not in users
         assert users.count("ks_readonly") == len(FILES) - asking

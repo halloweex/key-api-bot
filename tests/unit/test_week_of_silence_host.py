@@ -300,20 +300,18 @@ class TestTheRestoreDrill:
         assert "import duckdb" in calls[1] and "--network none" in calls[1], calls
         assert calls[2].startswith("sftp "), calls
 
-    @pytest.mark.parametrize("image, extra, words", [
-        ("", {}, "BACKUP_RESTORE_IMAGE is not set"),
-        ("halloweex/keycrm-web:latest", {}, "moves with every deploy"),
-        (PINNED, {"FAKE_NO_IMAGE": "1"}, "this does not pull"),
-        (PINNED, {"FAKE_DUCKDB": "absent"}, "cannot import duckdb"),
-        (PINNED, {"FAKE_DUCKDB": "1.4.3"}, "carries DuckDB 1.4.3, not 1.5.5"),
-    ], ids=["unset", "latest", "no-image", "no-duckdb", "another-version"])
-    def test_a_drill_without_the_pinned_image_refuses(self, drill, image, extra, words):
+    @pytest.mark.parametrize("image, extra", [
+        ("", {}),
+        (PINNED, {"FAKE_DUCKDB": "absent"}),
+    ], ids=["unset", "no-duckdb"])
+    def test_a_drill_without_the_pinned_image_refuses(self, drill, image, extra):
         """It used to default to :latest, which after step 14's S14-19 has no
-        DuckDB to rebuild with. Exit 2 — refused, not failed — naming the tag
-        to use, and nothing fetched. Mutation: put the default back."""
+        DuckDB to rebuild with. Exit 2 — refused, not failed — and nothing
+        fetched or rebuilt. Each reason the image is refused is
+        `tests/unit/test_archive_image.py`'s. Mutation: default to the pinned
+        tag, or carry on past the refusal."""
         code, out, calls = drill("KS_DUCKDB=off\n", BACKUP_RESTORE_IMAGE=image, **extra)
         assert code == 2, out
-        assert words in out and "rollback-step14" in out, out
         assert not [c for c in calls if c.startswith("sftp")], calls
         assert not [c for c in calls if "restore_from_export.py" in c], calls
 

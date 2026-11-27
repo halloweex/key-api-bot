@@ -389,11 +389,27 @@ def test_every_margin_route_is_live_while_margin_costs_at_todays_price():
 
 
 def test_the_cookie_is_the_one_the_app_reads():
-    """Spelled in the script because the host cannot import the app."""
-    tree = ast.parse((REPO / "web" / "routes" / "auth.py").read_text())
-    [value] = [n.value.value for n in tree.body if isinstance(n, ast.Assign)
-               and any(getattr(t, "id", None) == "SESSION_COOKIE" for t in n.targets)]
-    assert fp.SESSION_COOKIE == value
+    """Spelled in the script because the host cannot import the app: a
+    session sent under the script's cookie name signs the visitor in, and the
+    same session under any other name is nobody. Mutation: misspell either
+    name."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    from tests.sessions import hardcoded_admin, session_cookie
+    from web.routes.auth import get_current_user
+
+    admin = hardcoded_admin()
+    token = session_cookie(admin, "admin").partition("=")[2]
+
+    def visitor(cookie_name):
+        header = f"{cookie_name}={token}".encode()
+        return asyncio.run(get_current_user(
+            Request({"type": "http", "headers": [(b"cookie", header)]})))
+
+    assert visitor(fp.SESSION_COOKIE)["user_id"] == admin
+    assert visitor(f"{fp.SESSION_COOKIE}_old") is None
 
 
 def test_it_needs_nothing_but_the_standard_library():
