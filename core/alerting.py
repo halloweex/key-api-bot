@@ -409,6 +409,15 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_silver_unreachable": _c("ClickHouse answers again"),
     "ch_silver_sync_failed": _c("the next hourly ship succeeds"),
     "ch_silver_roundtrip": _c("the copy reads back equal"),
+    # The Rust worker's shadow of ch_sync, judged at night (core/ch_rust_shadow.py):
+    # WARN only, read in the digest, never a page.
+    "rust_shadow_silver_differs": _c("a night's comparison finds the shadow's Silver equal"),
+    "rust_shadow_gold_differs": _c("a night's comparison finds the shadow's Gold equal"),
+    "rust_shadow_history_differs": _c("a night's comparison finds the shadow archive equal"),
+    "rust_shadow_live_differs": _c("the live copy and the shadow read back equal"),
+    "rust_shadow_stale": _c("the worker ships the shadow hourly again"),
+    "rust_shadow_failing": _c("the shadow's next ship succeeds"),
+    "rust_shadow_unwatched": _c("a night compares the whole shadow"),
     # Gold's copy mode (step 4) filed five more until the owner's decision
     # O11 (a) (2026-11-11) deleted it from `core/ch_gold.py`: step 5's
     # derivation had superseded it and nothing ran it. `ch_gold_unreachable`,
