@@ -33,6 +33,7 @@ from __future__ import annotations
 import ast
 import importlib
 import os
+import sys
 import types
 from pathlib import Path
 
@@ -58,8 +59,8 @@ def _sources():
                 yield path.relative_to(ROOT).as_posix(), path
 
 
-def _ours(module: str) -> bool:
-    return module.split(".", 1)[0] in PACKAGES
+def _ours(module: str, packages=PACKAGES) -> bool:
+    return module.split(".", 1)[0] in packages
 
 
 # Only a handler that names the import failure itself says the import was
@@ -107,8 +108,9 @@ class _Walk(ast.NodeVisitor):
     and the names bound by anything else; then judges every read attribute of
     a name that resolves to a module."""
 
-    def __init__(self, rel: str):
+    def __init__(self, rel: str, packages=PACKAGES):
         self.rel = rel
+        self.packages = packages
         self.problems: list[str] = []
         self.parents: list[ast.AST] = []
         # scope node -> {name: module dotted name}
@@ -184,7 +186,7 @@ class _Walk(ast.NodeVisitor):
             return
         scope = self.scope_stack[-1]
         for alias in node.names:
-            if not _ours(alias.name):
+            if not _ours(alias.name, self.packages):
                 self.others[scope].add((alias.asname or alias.name).split(".")[0])
                 continue
             self._check_module(alias.name, node)
@@ -195,7 +197,7 @@ class _Walk(ast.NodeVisitor):
                 self.imports[scope][top] = top
 
     def visit_ImportFrom(self, node):
-        if node.level or not node.module or not _ours(node.module):
+        if node.level or not node.module or not _ours(node.module, self.packages):
             scope = self.scope_stack[-1]
             for alias in node.names:
                 self.others[scope].add(alias.asname or alias.name)
@@ -236,7 +238,7 @@ class _Walk(ast.NodeVisitor):
         if (name == "import_module" and node.args
                 and isinstance(node.args[0], ast.Constant)
                 and isinstance(node.args[0].value, str)
-                and _ours(node.args[0].value)
+                and _ours(node.args[0].value, self.packages)
                 and not _expects_failure(node, self.parents)):
             self._check_module(node.args[0].value, node)
         self.generic_visit(node)
@@ -305,9 +307,9 @@ class _Walk(ast.NodeVisitor):
                     break
 
 
-def _problems(rel: str, path: Path) -> list[str]:
+def _problems(rel: str, path: Path, packages=PACKAGES) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-    walk = _Walk(rel)
+    walk = _Walk(rel, packages)
     walk.visit(tree)
     walk.judge()
     return walk.problems
@@ -321,73 +323,61 @@ def test_every_import_of_ours_resolves():
 
 
 # ─── The guard sees what it is for ───────────────────────────────────────────
+#
+# Shown a package of the test's own, so that what the walker is judged on never
+# depends on which modules the application holds today.
 
-@pytest.mark.parametrize("source, found", [
-    ("from core import no_such_module_s14\n", "no such name"),
-    ("from core.read_fallback import no_such_name_s14\n", "no such name"),
-    ("import core.no_such_module_s14\n", "no such module"),
-    ("def f():\n    from core import read_fallback\n    return read_fallback.hold\n",
-     "has no 'hold'"),
-    ("from core import read_fallback as sw\nsw.no_such_attr_s14()\n",
-     "has no 'no_such_attr_s14'"),
-    ("import core.read_fallback\ncore.read_fallback.no_such_attr_s14\n",
-     "has no 'no_such_attr_s14'"),
-    ("import importlib\nimportlib.import_module('core.duckdb_off')\n",
-     "no such module"),
-    # The "never raises" shape: a lazy import inside `except Exception`, a
-    # bare `except:` or `except BaseException`. The first is the block S14-00
-    # removed from the scheduler; the last is `/api/health`'s import of a
-    # name `core.config` never had, which published `sync: null` from
-    # 2026-02-12 to 2026-10-21.
-    ("def f(found):\n    try:\n        from core import duckdb_off, read_fallback\n"
-     "        if not read_fallback.refusals():\n"
-     "            duckdb_off.note_history_reported(found)\n"
-     "    except Exception:\n        pass\n",
-     "from core import duckdb_off — no such name"),
-    ("def f():\n    try:\n        from core import read_fallback\n"
-     "        read_fallback.hold(['x'])\n    except Exception:\n        pass\n",
-     "has no 'hold'"),
-    ("try:\n    from core.duckdb_off import settle\nexcept:\n    settle = None\n",
-     "core.duckdb_off — no such module"),
-    ("def f():\n    try:\n        import core.no_such_module_s14\n"
-     "    except BaseException:\n        pass\n",
-     "no such module"),
-    ("def f():\n    try:\n        from core.config import DEFAULT_TZ\n"
-     "    except (ValueError, Exception):\n        return None\n",
-     "from core.config import DEFAULT_TZ — no such name"),
-    ("import importlib\ntry:\n    importlib.import_module('core.duckdb_off')\n"
-     "except Exception:\n    pass\n",
-     "no such module"),
-])
-def test_it_finds(tmp_path, source, found):
-    """Mutation: each shape step 14 could leave behind — a deleted module,
-    a deleted name, a deleted attribute read lazily or under another name,
-    a module asked for by string, any of them inside a `try` that swallows
-    `Exception` — is reported."""
-    path = tmp_path / "probe.py"
+PROBE = "ks_imports_probe"
+
+
+@pytest.fixture
+def probe(tmp_path, monkeypatch):
+    """`ks_imports_probe`, holding one module with one name, importable for
+    the test and forgotten after it."""
+    package = tmp_path / PROBE
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "present.py").write_text("name = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    yield tmp_path
+    for module in [m for m in sys.modules if m == PROBE or m.startswith(PROBE + ".")]:
+        del sys.modules[module]
+
+
+def _judged(root: Path, source: str) -> list[str]:
+    path = root / "probe_source.py"
     path.write_text(source)
-    problems = _problems("probe.py", path)
-    assert any(found in p for p in problems), problems
+    return _problems("probe_source.py", path, packages=(PROBE,))
 
 
-@pytest.mark.parametrize("source", [
-    "from core import read_fallback\nread_fallback.refuse\n",
-    "from core import read_fallback\ndef f(read_fallback):\n    return read_fallback.anything\n",
-    "from core import read_fallback\nread_fallback.no_such_attr_s14 = 1\n",
-    "import pytest\nwith pytest.raises(ImportError):\n    from core import gone_s14\n",
-    "try:\n    from core import gone_s14\nexcept ImportError:\n    pass\n",
-    "try:\n    from core import gone_s14\nexcept (ModuleNotFoundError, OSError):\n    pass\n",
-    "import builtins\ntry:\n    from core import gone_s14\nexcept builtins.ImportError:\n    pass\n",
-    # An import written to fail still binds its name, so a read through it
-    # is not judged against the module-level import of the same name.
-    "from core import read_fallback\ndef f():\n    try:\n"
-    "        from bot import read_fallback\n    except ImportError:\n        return\n"
-    "    return read_fallback.anything_s14\n",
-])
-def test_it_leaves_alone(tmp_path, source):
-    """What is not a read of a deleted name: a name that exists, a parameter
-    shadowing the module, an assignment, an import written to fail (and a
-    read through the name it binds)."""
-    path = tmp_path / "probe.py"
-    path.write_text(source)
-    assert _problems("probe.py", path) == []
+@pytest.mark.parametrize("source, line, missing", [
+    (f"import {PROBE}.gone\n", 1, f"{PROBE}.gone"),
+    # The "never raises" shape: a lazy import inside `except Exception`, as
+    # `/api/health`'s import of a name `core.config` never had, which
+    # published `sync: null` from 2026-02-12 to 2026-10-21.
+    (f"def f():\n    try:\n        from {PROBE}.present import gone\n"
+     "    except Exception:\n        return None\n", 3, "gone"),
+    (f"from {PROBE} import present as p\np.gone()\n", 2, "gone"),
+    (f"import importlib\nimportlib.import_module('{PROBE}.gone')\n", 2, f"{PROBE}.gone"),
+], ids=["module", "lazy_name_under_except_exception", "attribute_through_alias",
+        "module_by_string"])
+def test_it_finds(probe, source, line, missing):
+    """Mutation: each shape step 14 could leave behind — a deleted module, a
+    deleted name imported lazily where an exception is swallowed, a deleted
+    attribute read under another name, a module asked for by string — is
+    reported, at its line."""
+    problems = _judged(probe, source)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(f"probe_source.py:{line}:") and missing in problems[0], problems
+
+
+def test_it_leaves_alone(probe):
+    """What is not a read of a missing name: a name that exists, a parameter
+    shadowing the module, an assignment, an import written to fail."""
+    assert _judged(probe, (
+        f"from {PROBE} import present\n"
+        "present.name\n"
+        "def f(present):\n    return present.anything\n"
+        "present.assigned = 1\n"
+        f"try:\n    from {PROBE} import gone\nexcept ImportError:\n    gone = None\n"
+    )) == []

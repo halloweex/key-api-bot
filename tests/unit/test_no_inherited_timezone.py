@@ -42,9 +42,8 @@ by reading it. `TestAnInstantOnTheWireIsNormalised` is the guard.
 """
 from __future__ import annotations
 
-import ast
-import re
-from pathlib import Path
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -54,10 +53,24 @@ from core.sql_dialect import (
     inventory_view_selects, sms_segments_select,
 )
 from core.repositories.customers import SmsAudienceFilters
+from tests.integration.pg_tab_seed import DSN, needs_postgres
 from tests.sql_helper import strip_comments_and_literals
 
 # Spellings that ask the engine what day it is.
 INHERITED = ("CURRENT_DATE", "CURRENT_DATE()", "today()", "curdate()")
+
+
+def _days_it_inherits(sql: str) -> list:
+    """The spellings in `sql` that ask the engine what day it is."""
+    code = strip_comments_and_literals(sql)
+    return [spelling for spelling in INHERITED if spelling in code]
+
+
+def _reads_the_clock_without_its_zone(sql: str) -> bool:
+    """A body may legitimately not mention today at all, but one that reads
+    the clock must say whose day it means."""
+    return "now()" in strip_comments_and_literals(sql) and DISPLAY_TIMEZONE not in sql
+
 
 SMS_FRAGMENTS = dict(
     ltv_column="revenue_ltv",
@@ -90,6 +103,13 @@ def _rendered_bodies():
         yield f"manager_sales_365d:{dialect.name}", render_tables(
             _MANAGER_SALES_365D_SQL, dialect)
 
+    # The audience's content filter, spliced into the audience above: "bought
+    # within N days" counts back from today.
+    sql, _params = SmsAudienceFilters(
+        brands=("BrandA",), bought_within_days=30,
+    ).predicate("revenue_ltv", "retail")
+    yield "sms_audience_filter:bought_within_days", sql
+
     import core.sql_dialect as dialects
     cohort_bodies = (
         "cohort_retention_select", "enhanced_cohort_retention_select",
@@ -117,22 +137,16 @@ def test_the_scan_finds_the_bodies_at_all():
 
 @pytest.mark.parametrize("label,sql", BODIES, ids=[b[0] for b in BODIES])
 def test_no_shared_body_asks_the_engine_what_day_it_is(label, sql):
-    code = strip_comments_and_literals(sql)
-    for spelling in INHERITED:
-        assert spelling not in code, (
-            f"{label} takes its day from whichever timezone the engine happens "
-            f"to be in; name the zone instead"
-        )
+    assert _days_it_inherits(sql) == [], (
+        f"{label} takes its day from whichever timezone the engine happens "
+        f"to be in; name the zone instead"
+    )
 
 
 @pytest.mark.parametrize("label,sql", BODIES, ids=[b[0] for b in BODIES])
 def test_every_body_that_needs_today_names_the_zone(label, sql):
-    """The other half: a body may legitimately not mention today at all, but
-    one that does must say whose."""
-    code = strip_comments_and_literals(sql)
-    if "now()" not in code:
-        return
-    assert DISPLAY_TIMEZONE in sql, f"{label} uses a clock without naming the zone"
+    assert not _reads_the_clock_without_its_zone(sql), (
+        f"{label} uses a clock without naming the zone")
 
 
 class TestTheTwoSpellingsStayApart:
@@ -154,38 +168,81 @@ class TestTheTwoSpellingsStayApart:
         assert DISPLAY_TIMEZONE in CLICKHOUSE_ANALYTICS.today
 
 
+class _Recorded:
+    """`core.pg.get_pool`'s answer that writes down every statement sent
+    through it, then sends it on to `pool`."""
+
+    _SENDS = ("fetch", "fetchrow", "fetchval", "execute", "executemany")
+
+    def __init__(self, pool, sent: list):
+        self._pool, self._sent = pool, sent
+
+    @asynccontextmanager
+    async def acquire(self, *args, **kwargs):
+        async with self._pool.acquire(*args, **kwargs) as conn:
+            yield _Recorded(conn, self._sent)
+
+    def __getattr__(self, name):
+        attr = getattr(self._pool, name)
+        if name not in self._SENDS:
+            return attr
+
+        async def send(sql, *args, **kwargs):
+            self._sent.append(sql)
+            return await attr(sql, *args, **kwargs)
+        return send
+
+
+# Values for path parameters, where the route checks them.
+PATH_VALUES = {"abc_class": "A"}
+# Queries a route sends only when asked for something other than its
+# defaults: one request per entry, beside the one with none.
+VARIANTS = {"/api/stocks/trend": [{"granularity": "monthly"}]}
+
+
+async def _what_the_inventory_tab_sends() -> list:
+    """(route, statement) for every statement every GET route of the
+    inventory tab sends Postgres, asked as an admin."""
+    import re
+
+    from tests.helpers.app_client import ConnectionPerAcquire, signed_in
+    from tests.routes_helper import iter_endpoints
+    from web.main import app
+
+    routes = sorted(e.path for e in iter_endpoints(app) if "GET" in e.methods
+                    and e.route.endpoint.__module__ == "web.routes.api.inventory")
+    sent: list = []
+    found = []
+    async with signed_in("admin") as admin:
+        with patch("core.pg.get_pool", new=AsyncMock(
+                return_value=_Recorded(ConnectionPerAcquire(DSN), sent))):
+            for route in routes:
+                url = re.sub(r"\{(\w+)\}", lambda m: PATH_VALUES[m.group(1)], route)
+                for params in [{}, *VARIANTS.get(route, [])]:
+                    before = len(sent)
+                    response = await admin.get(url, params=params)
+                    assert response.status_code == 200, (
+                        url, params, response.status_code, response.text[:300])
+                    found += [(route, sql) for sql in sent[before:]]
+    return found
+
+
 class TestTheRoutedQueriesToo:
-    """The view bodies are not the only thing that reaches two engines: the
-    repository's own routed queries do as well."""
+    """The view bodies are not the only SQL that needs today: the inventory
+    tab's routes send queries of their own. Every statement they send is held
+    to the same two rules, read off the connection rather than out of the
+    source, so a query that moves to another method is still seen."""
 
-    def test_no_routed_inventory_query_inherits_a_day(self):
-        source = Path("core/repositories/inventory.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        offenders = []
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in ("_inventory_rows", "_inventory_batch")):
-                continue
-            for literal in ast.walk(node):
-                if (isinstance(literal, ast.Constant)
-                        and isinstance(literal.value, str)
-                        and "SELECT" in literal.value.upper()):
-                    code = strip_comments_and_literals(literal.value)
-                    if re.search(r"\bCURRENT_DATE\b", code):
-                        offenders.append(literal.lineno)
-        assert not offenders, (
-            f"routed query takes its day from the engine at line(s) {offenders}"
-        )
-
-    def test_the_sms_audience_filter_names_the_zone(self):
-        from core.repositories.customers import SmsAudienceFilters
-
-        sql, _params = SmsAudienceFilters(
-            brands=("Cosrx",), bought_within_days=30,
-        ).predicate("revenue_ltv", "retail")
-        assert TODAY_IN_KYIV in sql
-        assert "CURRENT_DATE" not in strip_comments_and_literals(sql)
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_no_query_the_inventory_tab_sends_inherits_a_day(self):
+        sent = await _what_the_inventory_tab_sends()
+        assert sent, "the inventory tab sent nothing: has it moved?"
+        inherits = [(route, _days_it_inherits(sql)) for route, sql in sent
+                    if _days_it_inherits(sql)]
+        assert inherits == [], f"routed queries take their day from the engine: {inherits}"
+        unnamed = [route for route, sql in sent if _reads_the_clock_without_its_zone(sql)]
+        assert unnamed == [], f"routed queries read the clock without naming the zone: {unnamed}"
 
 
 class TestAnInstantOnTheWireIsNormalised:

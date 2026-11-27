@@ -25,8 +25,12 @@ reading the service in isolation:
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import pytest
 import yaml
+
+from tests.helpers.ci_bot_scheduler_tools import FakeTools, absolute_calls
 
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE = yaml.safe_load((REPO / "docker-compose.yml").read_text())
@@ -151,41 +155,62 @@ class TestTheDeployReadsTheExitCode:
     So a revision that failed would deploy green, which is precisely the
     301-redirect gate's disease, in the same pipeline, three PRs after that
     one was fixed.
+
+    Run, not read: what the remote script does after `docker compose up -d`
+    is run under bash with `docker`, `curl` and `timeout` faked
+    (`tests/helpers/ci_bot_scheduler_tools.py`), the migration container
+    having exited 0, exited 1, or never been made.
     """
 
+    # What the migration said, as `docker logs` prints it.
+    SAID = "alembic: the migration's own last words"
+
     @staticmethod
-    def _script() -> str:
+    def _after_up() -> str:
+        """The remote script from the line after its `docker compose up -d`,
+        under the shell options it starts with."""
         step = next(
             s for s in WORKFLOW["jobs"]["deploy"]["steps"]
             if "script" in (s.get("with") or {})
         )
-        return step["with"]["script"]
+        lines = step["with"]["script"].splitlines()
+        up = max(i for i, line in enumerate(lines) if line.strip() == "docker compose up -d")
+        options = [line for line in lines[:up] if line.startswith("set -")]
+        return "\n".join(options + lines[up + 1:]) + "\n"
 
-    def test_it_waits_for_the_migration_container(self):
-        assert "docker wait ks-migrate" in self._script()
+    @pytest.mark.parametrize("exit_code", ["0", "1", None], ids=["migrated", "failed", "missing"])
+    def test_the_deploy_reaches_the_health_check_only_after_a_clean_migration(
+            self, tmp_path, exit_code):
+        """A non-zero exit fails the run, and so does a missing container:
+        the service is declared, so `up -d` was supposed to produce it. The
+        migration's log is printed before giving up, so whoever is on call
+        need not go to the host to read it. And nothing asks the health
+        endpoint first, which would answer 200 either way."""
+        script = self._after_up()
+        assert absolute_calls(script, ("docker", "curl")) == [], (
+            "the deploy names docker or curl by a path the fakes cannot stand in for")
+        # The container `up -d` leaves behind for the migration.
+        container = SERVICES["migrate"]["container_name"]
+        tools = FakeTools(tmp_path, ("docker", "curl", "timeout"))
+        if exit_code is not None:
+            tools.answer("docker", "wait", container, stdout=f"{exit_code}\n")
+            tools.answer("docker", "logs", stdout=f"{self.SAID}\n")
+        tools.answer("docker", "wait", exit=1, stderr="Error: No such container\n")
+        tools.answer("docker", "logs", exit=1, stderr="Error: No such container\n")
+        tools.answer("curl", stdout="200")
 
-    def test_a_non_zero_exit_fails_the_run(self):
-        script = self._script()
-        assert 'MIGRATE_RC" != "0"' in script
-        assert "exit 1" in script
+        result = tools.run_text(script)
 
-    def test_a_missing_container_is_a_failure_too(self):
-        """The service is declared, so `up -d` was supposed to produce it.
-        Absent means something is wrong, not that there was nothing to do."""
-        assert "echo missing" in self._script()
-
-    def test_the_logs_are_printed_before_giving_up(self):
-        """An exit code alone sends whoever is on call to the host to find
-        out what it said."""
-        assert "docker logs" in self._script()
-
-    def test_the_gate_runs_before_the_health_check(self):
-        """No point asking whether the app serves when its schema did not
-        apply — and the health endpoint would answer 200 either way."""
-        script = self._script()
-        assert script.index("docker wait ks-migrate") < script.index(
-            "ksanalytics.duckdns.org/api/health"
-        )
+        health = [c for c in tools.calls("curl")
+                  if any(urlsplit(a).path == "/api/health" for a in c.argv)]
+        if exit_code == "0":
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert health, "a clean migration never reaches the health check"
+            return
+        assert result.returncode != 0, "a migration that did not apply deployed green"
+        assert tools.calls("curl") == []
+        if exit_code is not None:
+            assert self.SAID in result.stdout + result.stderr
 
 
 class TestTheImageIsActuallyBuilt:

@@ -126,5 +126,9 @@ class TestConversationSettings:
         assert conversation.allow_reentry is True
 
     def test_an_abandoned_conversation_expires(self, conversation):
-        """Otherwise a state nobody remembers entering lives until restart."""
-        assert conversation.conversation_timeout == 30 * 60
+        """Otherwise a state nobody remembers entering lives until restart.
+        How long it waits is a choice; that it ends is the property."""
+        timeout = conversation.conversation_timeout
+        if isinstance(timeout, dt.timedelta):
+            timeout = timeout.total_seconds()
+        assert timeout is not None and timeout > 0

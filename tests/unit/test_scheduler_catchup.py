@@ -21,6 +21,25 @@ from core.scheduler import (
     BackgroundScheduler,
 )
 from tests.helpers.fake_scheduler import _FakeScheduler, _scheduler_with
+from tests.integration.pg_tab_seed import needs_postgres
+
+
+class _ReconcilingScheduler:
+    """The scheduler the reconcile lever reaches: no leases, and a
+    reconciliation that records the window it was asked for instead of
+    calling KeyCRM."""
+
+    def __init__(self, ran):
+        self.ran = ran
+
+    async def claim_job_run(self, job_id):
+        from core import job_lease
+
+        return job_lease.unguarded(job_id)
+
+    async def _run_dq_reconciliation(self, window_days=90):
+        self.ran.append(window_days)
+        return {"run_id": 1, "discrepancies_count": 0}
 
 
 def _ages(recon_s, integrity_s):
@@ -119,15 +138,26 @@ class TestReconciliationWindowIsAParameter:
         sig = inspect.signature(BackgroundScheduler._run_dq_reconciliation)
         assert sig.parameters["window_days"].default == 90
 
-    def test_the_endpoint_is_admin_only(self):
-        from web.main import app
-        from web.routes.auth import require_admin
+    @needs_postgres
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("role, status, windows", [
+        ("viewer", 403, []), ("editor", 403, []), ("admin", 200, [7]),
+    ])
+    async def test_only_an_admin_starts_it(self, monkeypatch, role, status, windows):
+        """About one KeyCRM call per twenty orders, for minutes: the lever is
+        an admin's. Anyone else is refused before the reconciliation runs."""
+        from tests.helpers.app_client import signed_in
 
-        from tests.routes_helper import find_route, route_dependencies
+        ran = []
+        monkeypatch.setattr("core.scheduler.get_scheduler",
+                            lambda: _ReconcilingScheduler(ran))
 
-        assert find_route(app, "/api/reconcile", "POST") is not None, \
-            "POST /api/reconcile is not registered"
-        assert require_admin in route_dependencies(app, "/api/reconcile", "POST")
+        async with signed_in(role) as visitor:
+            res = await visitor.post("/api/reconcile",
+                                     params={"days": 7, "background": "false"})
+
+        assert res.status_code == status, res.text
+        assert ran == windows
 
 
 class TestReconcileEndpointDoesNotHoldTheRequestOpen:
