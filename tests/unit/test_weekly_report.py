@@ -44,7 +44,17 @@ from core.weekly_report import (
     share_of,
     warehouse_max_date,
 )
+from core.i18n import LANGUAGES, t
 from tests.helpers.weekly_report_job import WeeklyReportJob, _gold_day, _silver_order, _store
+
+
+def _language_of(text: str) -> str:
+    """The language a delivered report is in, read off its title: the
+    translation table's entry, whatever case, markup or emoji stands round it."""
+    found = [lang for lang in LANGUAGES
+             if t("report.title", lang).casefold() in text.casefold()]
+    assert len(found) == 1, found
+    return found[0]
 
 
 @pytest.fixture(autouse=True)
@@ -537,9 +547,8 @@ class TestSchedulerJob(WeeklyReportJob):
         result = await scheduler._run_weekly_report()
 
         assert result["delivered"] == 2
-        by_recipient = {tuple(ids): caption for caption, ids in calls}
-        assert by_recipient[(111,)].startswith("📊 <b>Тижневий звіт</b>")
-        assert by_recipient[(222,)].startswith("📊 <b>Weekly report</b>")
+        assert {tuple(ids): _language_of(caption) for caption, ids in calls} == {
+            (111,): "uk", (222,): "en"}
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -558,7 +567,7 @@ class TestSchedulerJob(WeeklyReportJob):
         calls = []
 
         async def _photo(data, caption="", chat_ids=None, **kwargs):
-            calls.append((caption.split("\n")[0], sorted(chat_ids or [])))
+            calls.append((caption, sorted(chat_ids or [])))
             return len(chat_ids or [])
 
         monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
@@ -568,10 +577,8 @@ class TestSchedulerJob(WeeklyReportJob):
         assert result["recipients"] == 5
         assert result["delivered"] == 5
 
-        by_head = {head: ids for head, ids in calls}
-        assert by_head["📊 <b>Weekly report</b>"] == self.ADMINS
-        assert by_head["📊 <b>Тижневий звіт</b>"] == [301, 302]
-        assert by_head["📊 <b>Недельный отчёт</b>"] == [303]
+        assert {_language_of(caption): ids for caption, ids in calls} == {
+            "en": self.ADMINS, "uk": [301, 302], "ru": [303]}
 
     @needs_postgres
     @pytest.mark.asyncio
@@ -919,13 +926,9 @@ class TestTheRichFormIsWhatTheJobSends:
 
         await scheduler._run_weekly_report()
 
-        by_recipient = {tuple(c["chat_ids"]): c for c in rich}
         assert len(rich) == 2, "one render per language"
-        uk = next(c for c in rich if c["chat_ids"] == [333])
-        assert "ТИЖНЕВИЙ ЗВІТ" in uk["html"]
-        assert 333 not in sum(
-            (c["chat_ids"] for c in rich if c is not uk), [],
-        ), "nobody is written to twice"
+        assert {_language_of(c["html"]): sorted(c["chat_ids"]) for c in rich} == {
+            "en": sorted(self.ADMINS), "uk": [333]}, "nobody is written to twice"
         assert all(c["media"] for c in rich), "each language gets its own pictures"
 
 

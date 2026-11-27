@@ -605,16 +605,31 @@ def _in_kyiv() -> CronTrigger:
 
 class TestTheSchedule:
 
-    def test_it_is_registered_daily_at_0240(self):
+    def test_the_registered_job_runs_the_capture(self, monkeypatch):
+        """What the scheduler fires as `ga4_capture` is the capture, and it
+        answers with the capture's result. Kills: the job left unregistered,
+        or wired to another body."""
+        async def fake():
+            return {"captured": 3}
+
+        monkeypatch.setattr(gc, "run_capture", fake)
         job = _registered()._scheduler.get_job("ga4_capture")
         assert job is not None
-        assert isinstance(job.trigger, CronTrigger)
-        fields = {f.name: str(f) for f in job.trigger.fields}
-        assert (fields["hour"], fields["minute"], fields["day_of_week"], fields["day"]) == (
-            "2", "40", "*", "*")
-        # One time: the backlog's slack counts its runs from `RUN_AT`.
-        assert (fields["hour"], fields["minute"]) == (str(gc.RUN_AT.hour), str(gc.RUN_AT.minute))
-        assert job.func.__wrapped__.__name__ == "_run_ga4_capture"
+        assert asyncio.run(job.func()) == {"captured": 3}
+
+    def test_the_backlog_counts_its_nights_from_the_jobs_own_firings(self):
+        """The slack's next night is the night the job next fires on, just
+        before its minute and just after it, the clock-change days included.
+        Kills: the trigger and the watch's run time drifting apart, a night
+        off every morning."""
+        from core.scheduler import SCHEDULER_TIMEZONE
+
+        trigger = _in_kyiv()
+        for day in (date(2026, 3, 29), date(2026, 10, 25), date(2026, 11, 14)):
+            run = datetime.combine(day, gc.RUN_AT, tzinfo=SCHEDULER_TIMEZONE)
+            for now in (run - timedelta(seconds=1), run + timedelta(seconds=1)):
+                fires = trigger.get_next_fire_time(None, now).astimezone(SCHEDULER_TIMEZONE)
+                assert fires.date() == gc.first_night(now), now
 
     def test_a_year_of_firings_misses_every_busy_window(self):
         """Read in Kyiv across both clock changes. Kills: a time moved into a
@@ -645,11 +660,3 @@ class TestTheSchedule:
         assert spec.max_age is not None and autumn < spec.max_age.total_seconds()
         assert spec.writer == gc.__name__
 
-    def test_the_job_is_the_capture(self, monkeypatch):
-        from core.scheduler import BackgroundScheduler
-
-        async def fake():
-            return {"captured": 3}
-
-        monkeypatch.setattr(gc, "run_capture", fake)
-        assert asyncio.run(BackgroundScheduler()._run_ga4_capture()) == {"captured": 3}

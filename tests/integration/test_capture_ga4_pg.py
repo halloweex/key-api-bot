@@ -220,14 +220,14 @@ class TestFailure:
         assert stamp["failures_since_ok"] == 1
         assert stamp["last_error"].startswith("GA4Unavailable: GA4 answered 429")
 
-        found = cap.judge(await cap.read_facts(pool=pool))
-        mine = [i for i in found if i.table_name == gc.TABLE]
+        facts = await cap.read_facts(pool=pool)
+        mine = [i for i in cap.judge(facts) if i.table_name == gc.TABLE]
         # One period kept: the next oldest, the day 2025-09-15, leaves GA4's
         # window on the 15th and only the next run can keep it.
         assert [(i.check_name, i.severity) for i in mine] == [
             (f"capture_failed:{gc.TABLE}", Severity.WARN),
             (cap.GA4_AT_RISK, Severity.WARN)]
-        assert "only 0 night(s) to spare" in mine[1].description
+        assert facts.ga4_backlog.slack().spare == 0
 
         await _an_hour_ago(pool)
         retry = FakeGA4()
@@ -271,7 +271,7 @@ class TestTheBacklog:
         assert facts.ga4_backlog.first_night == TODAY + timedelta(days=1)
         (issue,) = [i for i in cap.judge(facts) if i.check_name == cap.GA4_BACKFILL]
         assert (issue.severity, issue.count) == (Severity.INFO, len(overdue) - gc.PERIODS_PER_RUN)
-        assert "19 nights to spare" in issue.description
+        assert facts.ga4_backlog.slack().spare == 19
 
     @pytest.mark.asyncio
     async def test_the_period_that_fell_due_today_is_not_counted(self, pool):

@@ -144,13 +144,29 @@ class TestTheCustomers:
         assert both["total_customers"] == 2, "buyer 51 counted once per day"
 
 
-def test_the_tools_keep_their_names_and_arguments():
-    """A22 changes what two tools answer, not how the model calls them."""
-    from core import chat_tools
+@pytest.mark.asyncio
+async def test_every_tool_the_model_is_offered_is_dispatched(monkeypatch):
+    """The model calls a tool by the name `TOOLS` offers it under, and
+    `execute_tool` must answer that name as a tool, not as an unknown one.
+    The stores refuse, so nothing is read or written: what is compared is
+    only each answer against the answer a name nobody declared gets."""
+    import json
 
-    names = {t["name"] for t in chat_tools.TOOLS}
-    assert {"get_revenue_summary", "get_customer_insights",
-            "get_revenue_by_dates"} <= names
-    insights = next(t for t in chat_tools.TOOLS if t["name"] == "get_customer_insights")
-    assert set(insights["input_schema"]["properties"]) == {"period"}
+    from core import chat_tools, read_fallback
+    from core.meilisearch_client import MeiliClient
+
+    async def no_pool():
+        raise RuntimeError("no store in this test")
+
+    monkeypatch.setattr("core.pg.get_pool", no_pool)
+    monkeypatch.setattr("core.meilisearch_client._meili_client",
+                        MeiliClient(url="http://127.0.0.1:1", master_key="test-only"))
+    undeclared = "no_tool_is_called_this"
+    unknown = json.dumps(await chat_tools.execute_tool(undeclared, {}))
+    try:
+        for name in [tool["name"] for tool in chat_tools.TOOLS]:
+            answer = await chat_tools.execute_tool(name, {})
+            assert answer != json.loads(unknown.replace(undeclared, name)), name
+    finally:
+        read_fallback.reset_counts()
 

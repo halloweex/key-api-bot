@@ -9,8 +9,8 @@ it catches.
 """
 from __future__ import annotations
 
-import ast
-import pathlib
+import importlib.util
+import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -20,7 +20,6 @@ import pytest_asyncio
 
 from core import pg_traffic_ledger_write, pg_weekly_ledger_write, report_ledger
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
 WEEK = date(2026, 9, 21)
 
 
@@ -168,14 +167,21 @@ class TestTheDoor:
             "week_start": "2026-09-21", "sales_type": "retail", "revenue": "1234.57",
             "orders": 7, "sent_at": "2026-09-28T06:30:01.000005+00:00"}
 
-    def test_the_spool_dir_is_the_data_dirs(self):
+    def test_the_spool_dir_is_the_data_dirs(self, monkeypatch):
         """`./data` is the directory both containers mount and the web
-        container can write; the suite moves it to a tmp dir, so the module's
-        own assignment is read. Mutation: move the spool anywhere else."""
-        tree = ast.parse((ROOT / "core" / "report_ledger.py").read_text(encoding="utf-8"))
-        (value,) = [ast.unparse(n.value) for n in tree.body
-                    if isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "SPOOL_DIR"]
-        assert value == "DATA_DIR / 'report-ledger-pending'"
+        container can write: a spool anywhere else is lost with the container,
+        and a spooled week then reads as unsent and goes out twice. The suite
+        moves the spool to a tmp dir, so the module is loaded once more, as
+        it imports, beside the one the suite patched. Mutation: move the spool
+        anywhere else."""
+        from core.paths import DATA_DIR
+
+        name = "_report_ledger_as_imported"
+        spec = importlib.util.spec_from_file_location(name, report_ledger.__file__)
+        as_imported = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, as_imported)  # its dataclasses look it up
+        spec.loader.exec_module(as_imported)
+        assert as_imported.SPOOL_DIR.parent == DATA_DIR
 
     @pytest.mark.asyncio
     async def test_a_value_either_store_reads_two_ways_is_refused_before_the_latch(

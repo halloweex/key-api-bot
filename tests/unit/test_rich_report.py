@@ -12,6 +12,7 @@ import importlib
 import json
 import re
 from datetime import date
+from html.parser import HTMLParser
 
 import os
 
@@ -19,6 +20,7 @@ import pytest
 import pytest_asyncio
 
 from core import telegram_alerts
+from core.i18n import LANGUAGES, t
 from core.telegram_alerts import sign_html_for, signature_line
 from tests.integration.pg_tab_seed import needs_postgres
 from core.weekly_report import (
@@ -55,12 +57,101 @@ def _report(**overrides) -> WeeklyReport:
     return WeeklyReport(**fields)
 
 
-class TestFormatReportRich:
-    def test_uses_only_documented_tags(self):
-        html = format_report_rich(_report(), "https://x.example", "en", card_id="card")
-        tags = set(re.findall(r"</?([a-z][a-z0-9-]*)", html))
-        assert tags <= SUPPORTED_TAGS, tags - SUPPORTED_TAGS
+class _Read(HTMLParser):
+    """A rich message as Telegram reads it: its tags, the pictures it names,
+    its tables' rows (cell texts) and its text."""
 
+    def __init__(self, html_text: str):
+        super().__init__()
+        self.tags: set = set()
+        self.photos: list = []
+        self.rows: list = []
+        self.text = ""
+        self._cell = None
+        self.feed(html_text)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.add(tag)
+        if tag == "img":
+            src = dict(attrs).get("src") or ""
+            self.photos.append(src[len("tg://photo?id="):]
+                               if src.startswith("tg://photo?id=") else src)
+        elif tag == "tr":
+            self.rows.append([])
+        elif tag in ("td", "th"):
+            self._cell = ""
+
+    def handle_endtag(self, tag):
+        self.tags.add(tag)
+        if tag in ("td", "th") and self._cell is not None:
+            self.rows[-1].append(self._cell.strip())
+            self._cell = None
+
+    def handle_data(self, data):
+        self.text += data
+        if self._cell is not None:
+            self._cell += data
+
+
+_DAYS = [DayTotals(date(2026, 8, 31), 1, 1)]
+# (report overrides, the pictures handed to the formatter)
+SHAPES = {
+    "bare": ({}, {}),
+    "no_previous_week": (dict(previous=None), {}),
+    "every_section_and_picture": (
+        dict(days=_DAYS, previous_days=_DAYS, channels=[ChannelTotals("Shopify", 1, 1, 1)]),
+        {"card": "card", "days": "days", "why": "why", "channels": "channels"}),
+}
+
+LEVER_CLAUSES = ("report.lever_orders_down", "report.lever_orders_up",
+                 "report.lever_check_down", "report.lever_check_up")
+
+
+class TestTelegramTakesIt:
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    @pytest.mark.parametrize("shape", sorted(SHAPES))
+    def test_documented_tags_and_exactly_the_pictures_it_is_handed(self, shape, lang):
+        """Bot API 10.1 answers a tag it does not document with a 400, and the
+        report falls back to the caption. A picture the message names and was
+        not sent is a 400 too, and one sent and not named is never seen. In
+        every language (a translation carrying markup counts), with no week
+        to compare against, and with every section and picture present."""
+        overrides, figures = SHAPES[shape]
+        read = _Read(format_report_rich(
+            _report(**overrides), "https://x.example", lang, figures=figures))
+        assert read.tags <= SUPPORTED_TAGS, read.tags - SUPPORTED_TAGS
+        assert sorted(read.photos) == sorted(figures.values())
+
+
+class TestTheLever:
+    @pytest.mark.parametrize("current, previous, named", [
+        (None, None, "report.lever_orders_down"),
+        (WeekTotals(revenue=1_000_000, orders=400), WeekTotals(revenue=800_000, orders=400),
+         "report.lever_check_up"),
+        (WeekTotals(revenue=880_000, orders=422), WeekTotals(revenue=800_000, orders=400),
+         None),
+    ], ids=["fewer_orders_steady_basket", "same_orders_bigger_basket", "split_55_45"])
+    def test_the_summary_names_the_effect_that_carried_the_move(
+            self, current, previous, named):
+        """Named only when one effect carries 60 % of the move or more; a
+        55/45 split moved both, and calling it either is a guess."""
+        overrides = {} if current is None else dict(current=current, previous=previous)
+        text = _Read(format_report_rich(_report(**overrides), None, "en")).text
+        assert {k for k in LEVER_CLAUSES if t(k, "en") in text} == (
+            {named} if named else set())
+        assert (t("report.why_both", "en") in text) is (named is None)
+
+    def test_each_effect_carries_its_share_of_the_move(self):
+        """(433−336)·2 589.85 ≈ −251 215 of −315 616: the order count carries
+        four fifths of the move, the basket the rest."""
+        rows = _Read(format_report_rich(_report(), None, "en")).rows
+        share = {row[0]: row[-1] for row in rows if row}
+        assert share[t("report.effect_orders_down", "en")] == "80%"
+        assert share[t("report.effect_check_down", "en")] == "20%"
+
+
+class TestFormatReportRich:
     def test_columns_are_a_table_not_padding(self):
         html = format_report_rich(_report(), None, "uk")
         assert "<table" in html
@@ -70,12 +161,6 @@ class TestFormatReportRich:
         # The caption form padded labels with runs of spaces; the table must
         # not carry that habit across.
         assert "   " not in html
-
-    def test_card_is_referenced_only_when_given(self):
-        with_card = format_report_rich(_report(), None, "ru", card_id="card")
-        without = format_report_rich(_report(), None, "ru")
-        assert '<img src="tg://photo?id=card"/>' in with_card
-        assert "<img" not in without and "<figure" not in without
 
     def test_product_names_are_escaped(self):
         """A bare ampersand is a 400 from Telegram, same as in the caption."""
@@ -88,12 +173,6 @@ class TestFormatReportRich:
         assert '<tg-button type="url" style="primary" url="https://x.example/?a=1&amp;b=2">' in html
         assert "<tg-button-row>" in html
 
-    @pytest.mark.parametrize("lang", ["en", "uk", "ru"])
-    def test_renders_in_every_language(self, lang):
-        html = format_report_rich(_report(), "https://x.example", lang, card_id="c")
-        assert html.startswith("<h1>")
-        assert "<details open>" in html
-
     def test_one_emoji_per_screen_and_headings_in_upper_case(self):
         """The shop bot's voice rules, carried over: one emoji, as a pointer
         (the verdict's), and no long dash in a sentence. Headings upper case
@@ -103,25 +182,6 @@ class TestFormatReportRich:
         visible = re.sub(r"<[^>]+>", "", html.split("<tg-reference")[0])
         assert visible.count("✅") == 1 and "📊" not in visible
         assert " — " not in visible
-
-    def test_no_previous_week_means_no_what_moved(self):
-        html = format_report_rich(_report(previous=None), None, "en")
-        assert "<h3>" not in html
-        assert "<table" in html
-
-    def test_the_lever_is_marked_and_the_effects_carry_their_share(self):
-        html = format_report_rich(_report(), None, "en")
-        assert "Mainly, <b>there were fewer orders</b>, and the average check barely moved." in html
-        # (433−336)·2 589.85 ≈ −251 215 of −315 616, and the rest is basket.
-        assert "<tr><td>fewer orders</td>" in html and '<td align="right">80%</td>' in html
-        assert "<tr><td>lower average check</td>" in html and '<td align="right">20%</td>' in html
-
-    def test_a_basket_led_week_names_the_basket(self):
-        cur = WeekTotals(revenue=1_000_000, orders=400, new_customer_orders=200, repeat_orders=200)
-        prev = WeekTotals(revenue=800_000, orders=400, new_customer_orders=200, repeat_orders=200)
-        html = format_report_rich(_report(current=cur, previous=prev), None, "en")
-        assert "<b>the average check rose</b>, and the number of orders barely moved." in html
-        assert "<tr><td>higher average check</td>" in html
 
     def test_summary_speaks_plainly_and_links_the_footnote(self):
         html = format_report_rich(_report(), None, "en")
@@ -179,15 +239,6 @@ class TestFormatReportRich:
         assert "<td><b>Sun</b></td>" in html
         assert '<td align="right">59%</td>' in html  # Shopify's share of the two
         assert '<td align="right">₴ 721,544</td>' in html  # last week's Shopify
-
-    def test_tags_stay_documented_with_every_section_present(self):
-        days = [DayTotals(date(2026, 8, 31), 1, 1)]
-        html = format_report_rich(
-            _report(days=days, previous_days=days,
-                    channels=[ChannelTotals("Shopify", 1, 1, 1)]),
-            "https://x.example", "ru", card_id="card")
-        tags = set(re.findall(r"</?([a-z][a-z0-9-]*)", html))
-        assert tags <= SUPPORTED_TAGS, tags - SUPPORTED_TAGS
 
 
 class TestFigures:

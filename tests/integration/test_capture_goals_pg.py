@@ -29,6 +29,7 @@ and `reset_goal_to_auto` are what `POST` and `DELETE /api/goals` call.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -49,10 +50,14 @@ HISTORY = pg_goals_write.CAPTURE_TABLE
 STAMP = cap.state_row(HISTORY)
 CHAIN = pg_goals_write.CHAIN
 COLUMNS = "period_type, goal_amount, is_custom, calculated_goal, growth_factor"
+# A constraint only new rows must meet: the server refusing one version for
+# a test (`_history_refuses`), dropped by it and by `_clean`.
+REFUSED = "test_capture_goals_refused"
 
 
 async def _clean(pool):
     async with pool.acquire() as conn:
+        await conn.execute(f"ALTER TABLE {HISTORY} DROP CONSTRAINT IF EXISTS {REFUSED}")
         await conn.execute(f"DELETE FROM {GOALS}")
         await conn.execute(f"DELETE FROM {HISTORY} WHERE period_type = ANY($1::text[])",
                            list(pg_goals_write.PERIOD_TYPES))
@@ -107,6 +112,19 @@ def _values(row):
 
 def _at(hour: int) -> datetime:
     return datetime(2026, 11, 13, hour, 0, tzinfo=timezone.utc)
+
+
+@contextlib.asynccontextmanager
+async def _history_refuses(pool, amount: int):
+    """While inside, the server refuses any version of a goal of `amount`."""
+    async with pool.acquire() as conn:
+        await conn.execute(f"ALTER TABLE {HISTORY} ADD CONSTRAINT {REFUSED} "
+                           f"CHECK (goal_amount <> {int(amount)}) NOT VALID")
+    try:
+        yield
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(f"ALTER TABLE {HISTORY} DROP CONSTRAINT IF EXISTS {REFUSED}")
 
 
 class TestEveryKindIsKeptAsWhatItWas:
@@ -277,22 +295,20 @@ class TestTheVersionLandsWithItsGoal:
 
 class TestACaptureThatFailsNeverFailsTheGoal:
     @pytest.mark.asyncio
-    async def test_the_goal_is_written_and_the_failure_is_a_warn(self, stores, monkeypatch):
-        """The server refuses the version (a NULL `set_at`, the shape of the
-        design's T8). Kills: no savepoint — the goal would roll back with the
-        capture — a raise into the writer, an earlier version touched, a
-        failure left unstamped, and a finding that pages."""
+    async def test_the_goal_is_written_and_the_failure_is_a_warn(self, stores):
+        """The server refuses the new goal's version (the shape of the
+        design's T8, a row the history will not take). Kills: no savepoint —
+        the goal would roll back with the capture — a raise into the writer,
+        an earlier version touched, a failure left unstamped, and a finding
+        that pages."""
         from core.data_quality import Severity
 
         _store, pool, _env = stores
         await pg_goals_write.set_goal("monthly", 1_000_000.0, True, 900_000.0, 1.1, _at(8))
 
-        good = pg_goals_write._GOAL_HISTORY_SQL
-        broken = good.replace("$2, updated_at", "$2, NULL::timestamptz")
-        assert broken != good
-        monkeypatch.setattr(pg_goals_write, "_GOAL_HISTORY_SQL", broken)
-        row = await pg_goals_write.set_goal(
-            "monthly", 2_000_000.0, True, 900_000.0, 1.1, _at(9))
+        async with _history_refuses(pool, 2_000_000):
+            row = await pg_goals_write.set_goal(
+                "monthly", 2_000_000.0, True, 900_000.0, 1.1, _at(9))
 
         assert row[1] == Decimal("2000000.00")
         live = await _live(pool, "monthly")
@@ -302,14 +318,13 @@ class TestACaptureThatFailsNeverFailsTheGoal:
             Decimal("1000000.00")]
         stamp = await _stamp(pool)
         assert stamp["failures_since_ok"] == 1
-        assert stamp["last_error"].startswith("NotNullViolationError")
+        assert stamp["last_error"].startswith("CheckViolationError")
 
         findings = [i for i in cap.judge(await cap.read_facts(pool=pool))
                     if i.table_name == HISTORY]
         assert [(i.check_name, i.severity) for i in findings] == [
             (cap.condition(cap.FAILED, HISTORY), Severity.WARN)]
 
-        monkeypatch.setattr(pg_goals_write, "_GOAL_HISTORY_SQL", good)
         await pg_goals_write.set_goal("monthly", 3_000_000.0, True, 900_000.0, 1.1, _at(10))
 
         # The goal whose version failed is kept by the next write, as the goal
@@ -411,25 +426,23 @@ class TestTheGoalInForceIsKeptBeforeItIsOverwritten:
             _at(8), _at(9), _at(10)]
 
     @pytest.mark.asyncio
-    async def test_a_goal_in_force_that_cannot_be_kept_holds_its_failure(
-            self, stores, monkeypatch):
-        """The new goal's version is not attempted after it: its ok stamp
-        would clear the failure. The next write keeps both, the goal in force
-        being the one this write stored. Kills: the failure cleared within the
-        same write."""
+    async def test_a_goal_in_force_that_cannot_be_kept_holds_its_failure(self, stores):
+        """The server refuses the goal in force (stored before 0036) and
+        would take the new one. The new goal's version is not attempted after
+        the refusal: its ok stamp would clear the failure. The next write
+        keeps both, the goal in force being the one this write stored. Kills:
+        the failure cleared within the same write."""
         _store, pool, _env = stores
         await _store_before_0036(pool, "monthly", Decimal("2500000"), True, _at(1))
-        good = pg_goals_write._GOAL_IN_FORCE_SQL
-        monkeypatch.setattr(pg_goals_write, "_GOAL_IN_FORCE_SQL",
-                            good.replace("COALESCE(g.updated_at, now())", "NULL::timestamptz"))
 
-        await pg_goals_write.set_goal("monthly", 3_000_000.0, True, 2_400_000.0, 1.10, _at(9))
+        async with _history_refuses(pool, 2_500_000):
+            await pg_goals_write.set_goal(
+                "monthly", 3_000_000.0, True, 2_400_000.0, 1.10, _at(9))
 
         assert (await _live(pool, "monthly"))["goal_amount"] == Decimal("3000000.00")
         assert await _versions(pool, "monthly") == []
         assert (await _stamp(pool))["failures_since_ok"] == 1
 
-        monkeypatch.setattr(pg_goals_write, "_GOAL_IN_FORCE_SQL", good)
         await pg_goals_write.set_goal("monthly", 3_500_000.0, True, 2_400_000.0, 1.10, _at(10))
 
         assert [(v["goal_amount"], v["set_at"]) for v in await _versions(pool, "monthly")] == [

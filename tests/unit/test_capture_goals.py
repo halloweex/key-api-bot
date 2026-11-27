@@ -20,7 +20,7 @@ here:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -110,18 +110,24 @@ class TestTheRoutesSayWhatTheyWrote:
 class TestAnUnknownKindIsRefusedBeforeTheLatch:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("kind", ["edited", "SET", "reset"])
-    async def test_nothing_is_reached(self, monkeypatch, kind):
+    async def test_nothing_is_reached(self, monkeypatch, tmp_path, kind):
         """The latch is permanent (`_fits`' reason): an argument the writer
-        refuses must be refused before it, and before the pool."""
-        pool = AsyncMock()
-        latch = MagicMock()
-        monkeypatch.setattr(pg_goals_write, "_pool", pool)
-        monkeypatch.setattr(pg_goals_write, "_latch", latch)
+        refuses must be refused before it, and before the database. Kills:
+        the kind checked after the marker is written, or after a connection
+        is asked for."""
+        from core import chain_latch
+
+        markers = tmp_path / "write-chain-owners"
+        monkeypatch.setattr(chain_latch, "MARKER_DIR", markers)
+
+        async def no_database():
+            raise AssertionError("the writer asked for a connection")
+
+        monkeypatch.setattr("core.pg.get_pool", no_database)
 
         with pytest.raises(ValueError, match="change_kind"):
             await pg_goals_write.set_goal(
                 "monthly", 1_000_000.0, True, 900_000.0, 1.1,
                 datetime(2026, 11, 13, 9, 0, tzinfo=timezone.utc), kind)
 
-        pool.assert_not_awaited()
-        latch.assert_not_called()
+        assert not markers.exists() or not any(markers.iterdir())

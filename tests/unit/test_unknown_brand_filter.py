@@ -91,12 +91,6 @@ class TestThePredicateHasOneHome:
         assert params == [], "a bucket is not a value to bind"
         assert "IS NULL" in sql and "TRIM" in sql
 
-    @pytest.mark.parametrize("spelling", ["Unknown", "unknown", "UNKNOWN", "  UnKnOwN  "])
-    def test_the_bucket_is_recognised_however_it_is_spelled(self, spelling):
-        params: list = []
-        assert "IS NULL" in brand_where(spelling, params)
-        assert params == []
-
     def test_the_alias_is_honoured(self):
         """Three aliases are in use — `l` for the line, `g` for Gold, `s`
         where the line level stands in for the order. Passing the wrong one
@@ -145,10 +139,13 @@ class TestTheBucketIsOfferedInTheFilter:
 @needs_postgres
 class TestSelectingItReturnsTheGoods:
     @pytest.mark.asyncio
-    async def test_the_bucket_holds_both_spellings_of_absent(self, goods):
+    @pytest.mark.parametrize("asked", [UNKNOWN_BRAND, "unknown", "UNKNOWN", "  UnKnOwN  "],
+                             ids=["as_listed", "lower", "upper", "mixed_and_padded"])
+    async def test_the_bucket_holds_both_spellings_of_absent(self, goods, asked):
+        """However the bucket's name is typed, it is the bucket."""
         store = goods
         r = await store.get_revenue_trend(
-            *WINDOW, sales_type="retail", brand=UNKNOWN_BRAND,
+            *WINDOW, sales_type="retail", brand=asked,
         )
         assert r["measure"] == "goods_value"
         assert _total(r) == 2000.00, "the NULL-brand product and the ''-brand one"
