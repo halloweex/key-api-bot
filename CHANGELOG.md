@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.366
+
+- feat(scheduler): who executes each job, and a lease that keeps it to one process
+
+
 ## 3.0.365
 
 - fix(dashboard): every block follows the header's filters; one expense total
