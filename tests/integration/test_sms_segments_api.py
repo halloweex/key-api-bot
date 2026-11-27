@@ -268,6 +268,10 @@ SMS_ROUTES = [
     # Marking a campaign sent sets where every measurement window starts.
     ("POST", "/api/customers/sms-campaigns/{campaign}/sent", {}, "edit"),
     ("POST", "/api/customers/sms-campaigns/{campaign}/send", {"text": "hi"}, "edit"),
+    # Sending the rest of a send that broke off spends money as the send does.
+    ("POST", "/api/customers/sms-campaigns/{campaign}/send-rest", {"text": "hi"}, "edit"),
+    # The progress bar the send dialog polls: counts, no names or numbers.
+    ("GET", "/api/customers/sms-campaigns/{campaign}/send-progress", {}, "view"),
     ("POST", "/api/customers/sms-campaigns/optout",
      {"buyer_id": 1, "phone": "0961111111"}, "edit"),
     ("GET", "/api/customers/sms/channels", {}, "view"),

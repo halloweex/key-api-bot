@@ -822,22 +822,25 @@ class TestTheGuardsOverAPostgresStore:
     async def test_a_batch_refused_mid_roster_records_what_went_and_keeps_the_claim(
         self, aclient, real_store, gateway,
     ):
-        """The gateway takes at most 5 000 recipients a request, so a bigger
-        roster goes in batches. When a later batch is refused, the earlier
-        ones are on people's phones: their message ids are kept, the rest are
-        marked unsent, and the campaign cannot be sent again."""
-        members = [_member(i) for i in range(1, 5002)]
+        """A roster goes to the gateway in batches of `RECIPIENTS_PER_REQUEST`.
+        When a later batch is refused, the earlier ones are on people's
+        phones: their message ids are kept, the rest are marked unsent, and
+        the campaign cannot be sent again. One batch and one more recipient,
+        whatever the batch size is."""
+        from core.turbosms import RECIPIENTS_PER_REQUEST as batch
+
+        members = [_member(i) for i in range(1, batch + 2)]
         await _frozen(real_store, "big", members)
         gateway.send_failures = [None, 405]
 
         r = await _send_to(aclient, "big", confirm="big")
 
         assert r.status_code == 200, r.text
-        assert (r.json()["accepted"], r.json()["unsent"]) == (5000, 1)
+        assert (r.json()["accepted"], r.json()["unsent"]) == (batch, 1)
         assert r.json()["partialError"], "a partial send does not read as a clean one"
         assert gateway.sends == 2
         went = set(gateway.sent[0])
-        assert len(went) == 5000
+        assert len(went) == batch
         assert await _roster("big") == {
             m["buyerId"]: ((f"m-{m['phone']}", "Accepted") if m["phone"] in went
                            else (None, "NotSent"))
@@ -848,7 +851,7 @@ class TestTheGuardsOverAPostgresStore:
         again = await _send_to(aclient, "big", confirm="big")
 
         assert (again.status_code, again.json()["reason"]) == (409, "already_sent")
-        assert gateway.sends == 2, "nobody of the first 5 000 is messaged twice"
+        assert gateway.sends == 2, "nobody of the first batch is messaged twice"
 
     @pytest.mark.asyncio
     async def test_a_send_the_gateway_refused_hands_the_claim_back(
