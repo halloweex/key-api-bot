@@ -7,12 +7,15 @@ the transport counter is process-local truth judged from the other container.
 """
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from core import alert_archive, telegram_alerts
 from core.alerting import AlertGate
+from tests.helpers.alerts_journal_pg import alert_ledger, settle
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
+from tests.integration.pg_tab_seed import needs_postgres
 
 # Bound at import, before conftest's autouse guard replaces the transport
 # with a stub: the self-watch test needs the real sender's accounting.
@@ -78,30 +81,27 @@ class TestArchiveWriter:
 
         assert asyncio.run(main()) is None
 
+    @needs_postgres
     @pytest.mark.asyncio
     async def test_raise_alert_archives_only_delivered_sends(self, monkeypatch):
-        from core.alerting import raise_alert, reset_gate
+        """A fired event is a message somebody received: a repeat the Gate
+        held and a send every admin refused leave no row."""
+        from core.alerting import raise_alert
 
-        reset_gate()
-        recorded = []
-        monkeypatch.setattr(
-            "core.alert_archive.record_fired",
-            lambda conditions, **kw: recorded.append((list(conditions), kw)),
-        )
-        with patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)):
-            await raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN")
-            await raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN")
-        # Second raise was gate-suppressed: one archive record, not two.
-        assert len(recorded) == 1
-        assert recorded[0][0] == ["disk:WARN"]
-        assert recorded[0][1]["delivered"] == 2
+        telegram = telegram_at_the_transport(monkeypatch)
+        async with alert_ledger(monkeypatch) as ledger:
+            await raise_alert("disk 80%", conditions=["disk:WARN"], bucket="disk:WARN")
+            await raise_alert("disk 80%", conditions=["disk:WARN"], bucket="disk:WARN")
+            telegram.status = 403
+            await raise_alert("disk 92%", conditions=["disk:CRITICAL"],
+                              bucket="disk:CRITICAL")
+            await settle()
+            events = await ledger.events()
+            series = await ledger.series()
 
-        with patch("bot.main.send_admin_message", new=AsyncMock(return_value=0)):
-            from core.alerting import _gate
-
-            _gate.reset()
-            await raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN")
-        assert len(recorded) == 1  # undelivered → unarchived
+        assert len(telegram.attempts) == 2 * len(ADMINS)
+        assert events == [("disk:WARN", "fired", len(ADMINS))]
+        assert series == [("disk:WARN", "firing", 1)]
 
 
 class TestGateStateFile:

@@ -20,6 +20,7 @@ from core.telegram_alerts import (
     clamp_message,
     reset_throttle,
 )
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
 
 bot_main = __import__("importlib").import_module("bot.main")
 
@@ -183,12 +184,31 @@ class TestDeliveredCount:
 
 
 class TestTheFourthTransportIsGone:
-    def test_no_raw_telegram_post_in_scheduler(self):
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("switch, reaches", [
+        pytest.param("1", False, id="alerts switched off: nothing leaves"),
+        pytest.param("0", True, id="alerts on: each admin is reached"),
+    ])
+    async def test_the_memory_watchdog_obeys_the_kill_switch(self, monkeypatch,
+                                                             switch, reaches):
         """The memory monitor used to hold a private transport that bypassed
         the kill switch, the throttle stack and the signature — the exact
-        phantom-from-a-laptop scenario. It now rides the shared path."""
-        import pathlib
+        phantom-from-a-laptop scenario. Over a CRITICAL reading, an instance
+        that switched alerts off makes no request at all."""
+        from core import memory_monitor, watchdog_samples
+        from core.scheduler import BackgroundScheduler
 
-        src = pathlib.Path("core/scheduler.py").read_text()
-        assert "api.telegram.org" not in src
-        assert "_send_admin_telegram" not in src
+        monkeypatch.setenv(telegram_alerts.DISABLE_ENV, switch)
+        monkeypatch.delenv("KS_PG_DSN", raising=False)  # no archive: not this test's subject
+        telegram = telegram_at_the_transport(monkeypatch)
+        limit = 7 * 1024 ** 3
+        monkeypatch.setattr(memory_monitor, "read_cgroup_memory", lambda: {
+            "working_set": int(0.95 * limit), "page_cache": 0, "limit": limit,
+            "oom_kills": 0})
+        monkeypatch.setattr(watchdog_samples, "memory_tick", AsyncMock(
+            return_value={"last": {"oom_kills": 0}, "peak_24h": None}))
+
+        result = await BackgroundScheduler()._run_memory_monitor()
+
+        assert result["alert_sent"] == "CRITICAL"
+        assert len(telegram.calls) == (len(ADMINS) if reaches else 0)

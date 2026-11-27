@@ -2,6 +2,8 @@
 
 Every test here defends one sentence: the agent names a key, never a command.
 """
+import asyncio
+
 import pytest
 
 from core.alert_actions import (
@@ -12,6 +14,18 @@ from core.alert_actions import (
     callback_for,
     parse_callback,
 )
+
+
+def _registered():
+    """A scheduler with every production job registered and none started."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from core.scheduler import SCHEDULER_TIMEZONE, BackgroundScheduler
+
+    s = BackgroundScheduler()
+    s._scheduler = AsyncIOScheduler(timezone=SCHEDULER_TIMEZONE)
+    asyncio.run(s._register_jobs())
+    return s
 
 
 class TestTheRegistryIsTheBoundary:
@@ -110,15 +124,21 @@ class TestTheSubjectResolvesToAJobNotAString:
         assert job_for("dq_recheck", "not_a_layer") is None
         assert job_for("something_else", "mirror_landing") is None
 
-    def test_the_job_ids_exist_in_the_scheduler(self):
-        """The registry is the whitelist — `trigger_job` raises on an id it
-        does not hold, so a typo here would surface only on a tap."""
-        import inspect
-        from core.alert_actions import DQ_JOB_FOR_LAYER
-        import core.scheduler as sch
-        src = inspect.getsource(sch)
-        for job_id in DQ_JOB_FOR_LAYER.values():
-            assert f'job_id="{job_id}"' in src, job_id
+    def test_every_tap_triggers_a_job_the_scheduler_holds(self):
+        """The executor runs `trigger_job(job_for(...))`, and `trigger_job`
+        raises on an id the scheduler does not hold — a typo in the table
+        would surface only on a tap, as 'queued' and then nothing."""
+        from core.alert_actions import ACTIONS, job_for
+
+        scheduler = _registered()
+        layers = ACTIONS["dq_recheck"].subjects
+
+        async def tap_each():
+            return [await scheduler.trigger_job(job_for("dq_recheck", layer))
+                    for layer in layers]
+
+        answers = asyncio.run(tap_each())
+        assert [a["status"] for a in answers] == ["triggered"] * len(layers)
 
 
 class TestTheHandlerIsTheAuthorisationBoundary:

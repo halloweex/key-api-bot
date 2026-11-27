@@ -7,11 +7,14 @@ CRITICAL against a flat 30-minute cooldown is 48 messages a day for weeks
 longer news; it becomes one daily reminder that says how long and how many
 repeats it stands for.
 """
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.alerting import AlertGate, raise_alert, reset_gate
+from core.telegram_alerts import reset_throttle
+from tests.helpers.alerts_telegram import ADMINS, telegram_at_the_transport
 
 
 class TestTheEscalatingCooldown:
@@ -156,14 +159,21 @@ class TestRaiseAlert:
         reset_gate()
 
     @pytest.mark.asyncio
-    async def test_delivers_through_the_shared_channel_pre_throttled(self):
-        with patch("bot.main.send_admin_message",
-                   new=AsyncMock(return_value=2)) as send:
-            delivered = await raise_alert(
-                "боль", conditions=["disk:WARN"], bucket="disk:WARN",
-            )
-        assert delivered == 2
-        assert send.await_args.kwargs["pre_throttled"] is True
+    async def test_the_channel_does_not_throttle_what_the_gate_admitted(self, monkeypatch):
+        """One text in two buckets: the Gate admits both, and the channel's
+        30-minute text throttle must not hold the second — the Gate already
+        decided (`pre_throttled`)."""
+        monkeypatch.delenv("KS_PG_DSN", raising=False)  # no archive: not this test's subject
+        telegram = telegram_at_the_transport(monkeypatch)
+        reset_throttle()
+        try:
+            first = await raise_alert("боль", conditions=["disk:WARN"], bucket="disk:WARN")
+            second = await raise_alert("боль", conditions=["disk:CRITICAL"],
+                                       bucket="disk:CRITICAL")
+        finally:
+            reset_throttle()
+        assert (first, second) == (len(ADMINS), len(ADMINS))
+        assert telegram.chats() == sorted(ADMINS * 2)
 
     @pytest.mark.asyncio
     async def test_no_bucket_means_no_dedup(self):
@@ -335,34 +345,32 @@ class TestTheEmitterSetsTheRhythm:
 
 
 class TestRaiseAlertHearsTheRhythm:
-    def teardown_method(self):
-        reset_gate()
-
     @pytest.mark.asyncio
-    async def test_the_cadence_in_context_reaches_the_gate(self):
-        from core.alerting import ALERT_CADENCE_S, _gate
+    @pytest.mark.parametrize("cadence_s, second", [
+        pytest.param(6 * 3600.0, 0, id="a six-hour job: its next pass is a standing repeat"),
+        pytest.param(None, len(ADMINS), id="outside a job: six quiet hours are news"),
+    ])
+    async def test_six_quiet_hours_are_news_only_to_a_raise_with_no_rhythm(
+            self, monkeypatch, cadence_s, second):
+        """The cadence a scheduled run carries (`ALERT_CADENCE_S`) is what the
+        Gate measures quiet by: a six-hourly emitter's next pass is the same
+        incident, held, while a raise from no job, six hours on, is new."""
+        from core.alerting import ALERT_CADENCE_S
 
-        token = ALERT_CADENCE_S.set(21600.0)
+        monkeypatch.delenv("KS_PG_DSN", raising=False)  # no archive: not this test's subject
+        telegram_at_the_transport(monkeypatch)
+        clock = [1_800_000_000.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        token = ALERT_CADENCE_S.set(cadence_s) if cadence_s else None
         try:
-            with patch.object(_gate, "decide",
-                              wraps=_gate.decide) as decide, \
-                 patch("bot.main.send_admin_message",
-                       new=AsyncMock(return_value=1)):
-                await raise_alert("x", conditions=["disk:WARN"],
-                                  bucket="disk:WARN")
+            assert await raise_alert(
+                "x", conditions=["disk:WARN"], bucket="disk:WARN") == len(ADMINS)
+            clock[0] += 6 * 3600
+            assert await raise_alert(
+                "x", conditions=["disk:WARN"], bucket="disk:WARN") == second
         finally:
-            ALERT_CADENCE_S.reset(token)
-        assert decide.call_args.kwargs["cadence_s"] == 21600.0
-
-    @pytest.mark.asyncio
-    async def test_outside_a_job_there_is_no_cadence(self):
-        from core.alerting import _gate
-
-        with patch.object(_gate, "decide", wraps=_gate.decide) as decide, \
-             patch("bot.main.send_admin_message",
-                   new=AsyncMock(return_value=1)):
-            await raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN")
-        assert decide.call_args.kwargs["cadence_s"] is None
+            if token is not None:
+                ALERT_CADENCE_S.reset(token)
 
 
 class TestAResolveEndsTheIncident:
