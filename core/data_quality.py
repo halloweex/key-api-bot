@@ -1407,6 +1407,13 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "ch_silver_roundtrip": "ClickHouse copy differs",
     "ch_reconcile_pending": "ClickHouse copy lagging",
     "gold_values_unwatched": "Gold not re-checked by a second engine",
+    "rust_shadow_silver_differs": "Rust shadow's Silver ≠ Postgres",
+    "rust_shadow_gold_differs": "Rust shadow's Gold differs",
+    "rust_shadow_history_differs": "Rust shadow's archive differs",
+    "rust_shadow_live_differs": "live ClickHouse copy ≠ Rust shadow",
+    "rust_shadow_stale": "Rust shadow not shipping",
+    "rust_shadow_failing": "Rust shadow ships failing",
+    "rust_shadow_unwatched": "Rust shadow not compared tonight",
     "freshness_orders": "orders not arriving",
     "chain_managers_empty": "no managers in Postgres",
     "chain_manager_open_interval": "a manager without exactly one classification in force",
@@ -1464,7 +1471,10 @@ def machine_attempts_note(now: Optional[datetime] = None) -> Optional[str]:
     hourly ids-diffs had usually already re-shipped rows by the time the
     07:30 comparison spoke.
 
-    Reads the in-process heal ledger of the ClickHouse archive. Returns None
+    Reads the ClickHouse archive's heal ledger as this process knows it —
+    its own heals at once, another process's (the Rust worker's, once it ships
+    the archive) from the daily comparison's read of `ch_history.HEAL_ROW`
+    on. Returns None
     when it has not run, which is the common case and must not produce an
     empty line. The buyers' ledger (`core.pg_buyers`, the buyers ids-diff)
     was the other until step 14's S14-13 deleted the diff with the module.
@@ -1792,6 +1802,9 @@ DIGEST_MAX_AGE_HOURS = {
     # that an arm which stopped cannot hide behind a fresh sibling.
     "reconciliation_ch": 30,
     "reconciliation_pg": 30,
+    # The Rust shadow's nightly verdict (core/ch_rust_shadow.py), in the
+    # digest only while KS_WORKER_SHADOW lists ch_sync: a night plus grace.
+    "rust_shadow": 30,
 }
 
 # How long a standing finding may go unmentioned before the digest says it

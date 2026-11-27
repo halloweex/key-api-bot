@@ -157,6 +157,8 @@ class _FakePool:
                 # The archive's liveness reads (L2-02): nothing waiting above
                 # the copy's ceiling, and a ship that succeeded just now.
                 async def fetchrow(sql, *args):
+                    if args and args[0] == ch_history.HEAL_ROW:
+                        return None  # no heal recorded (test_ch_history_heal_trace)
                     if "order_versions" in sql:
                         return {"n": 0, "oldest": None}
                     return {"last_ok_at": datetime.now(timezone.utc),

@@ -566,6 +566,60 @@ services:
       retries: 3
       start_period: 10s
 
+  # ── The core's worker (the Rust plan, revision 4, К1): ch_sync in Rust ────
+  #
+  # NOTHING STARTS IT. Profile `rust-worker`, its own: neither the Python
+  # deploy's plain `up -d` nor the Rust deploy's `--profile rust` reaches it.
+  # Started once by hand, on the owner's yes —
+  #
+  #   docker compose --profile rust-worker up -d rust-worker
+  #
+  # — and from then on the Rust deploy brings it each new image, while a
+  # worker nobody started stays not started (deploy.yml, `deploy-rust`).
+  #
+  # Running, it asks every hour whose job ch_sync is: `executor:ch_sync` in
+  # meta.chain_watermarks, Python's unless the value is exactly `rust` — so
+  # as started it writes nothing live. With KS_WORKER_SHADOW listing ch_sync
+  # it ships the shadow: the `*_rust` tables in ClickHouse and the
+  # `rust_shadow.*` rows in meta.mirror_state, which only the nightly judge
+  # reads (core/ch_rust_shadow.py, layer `rust_shadow`). The same variable,
+  # from the same .env, turns that judge on in web.
+  #
+  # Its own logins, both created by hand on the owner's yes, until then it
+  # cannot sign in and its log says so: Postgres `ks_rust_worker`, SELECT on
+  # what ch_sync reads and the writes of meta.mirror_state
+  # (deploy/rust/ks_rust_worker.sql), and ClickHouse `ks_rust_worker`, rights
+  # on the shadow's tables only (deploy/rust/ks_rust_worker_clickhouse.sql).
+  # Switching ch_sync to Rust needs the live tables granted too: that file's
+  # second half, a yes of its own. No `ports:` (rule 12); `ks-data` is how it
+  # reaches ks-clickhouse, as web does.
+  rust-worker:
+    image: halloweex/keycrm-rust-worker:latest
+    container_name: ks-rust-worker
+    profiles: [rust-worker]
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [default, ks-data]
+    environment:
+      KS_PG_DSN: postgresql://ks_rust_worker:${KS_RUST_WORKER_PASSWORD:-}@postgres:5432/ks
+      # A run holds one pooled connection and the lease's own.
+      KS_PG_POOL_MAX: "2"
+      KS_CH_URL: ${KS_CH_URL:-}
+      KS_CH_USER: ks_rust_worker
+      KS_CH_PASSWORD: ${KS_RUST_WORKER_CH_PASSWORD:-}
+      KS_CH_HISTORY_DB: ${KS_CH_HISTORY_DB:-}
+      KS_WORKER_SHADOW: ${KS_WORKER_SHADOW:-}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # 320 MB at its peak in the К1 harness's first run (rust_worker_max_rss_kb
+    # in its report): ~40 000 orders and the whole archive, ~44 000 versions,
+    # inherited in one chunk, as the first shadow run on production will. An
+    # hourly run after it ships Silver and the day's versions, far less.
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 0.5
+
   # The bound of the /api request log, declared beside the mount that creates
   # the log, so the one cannot ship without the other. Every five minutes
   # nginx/api-log/rotate.sh cuts the file at midnight UTC or past 32 MiB and
