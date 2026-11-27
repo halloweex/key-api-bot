@@ -16,13 +16,15 @@ Features:
 - Job execution history
 - Prevents job pile-up (max_instances=1)
 - Graceful shutdown
+- Who executes each job, Python or a Rust process, and a lease in Postgres
+  that keeps one job to one process at a time (`core/job_lease.py`, K0)
 """
 import asyncio
 import functools
 import os
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Callable, Sequence
+from typing import Optional, Dict, Any, List, Callable, Sequence, cast
 from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
@@ -41,6 +43,8 @@ from core.observability import get_logger, correlation_context
 # The data-quality journal's one door (chain 9, OD-02 (c)): every check
 # job journals its run through it, and the digest reads through it.
 from core import dq_journal
+# Who executes a job and the lease that keeps it to one process (K0).
+from core import job_lease
 # The application's data directory, `/app/data`: what the disk watchdog
 # samples and where it leaves the heartbeat host cron reads (S14-01).
 from core.paths import DATA_DIR, DUCKDB_FILE_NAME
@@ -181,6 +185,17 @@ def discrepancy_conditions(layer: str, discrepancies) -> List[str]:
 # next tick asks again.
 DERIVE_LOCK_WAIT_S = 60
 
+# How the daily ClickHouse comparison waits for `ch_sync`'s lease (K0, for
+# K1). Its ship writes `ch_sync`'s tables — Silver's staging and EXCHANGE,
+# Gold's derivation — which `PG_LAYER_LOCK` keeps apart from the hourly ship
+# inside this process only; `ch_sync` running in another process (the Rust
+# worker) is kept apart by the lease, held for the ship and the comparison
+# whoever the switch names. A few tries over two minutes, never a blocking
+# wait: a ship takes seconds, so a lease still held after them is a run that
+# is stuck, and the comparison says so instead of queueing behind it.
+CH_SYNC_LEASE_ATTEMPTS = 5
+CH_SYNC_LEASE_RETRY_S = 30
+
 
 async def _acquire_within(lock: asyncio.Lock, timeout: float) -> bool:
     """Take `lock` within `timeout` s, or report False holding nothing.
@@ -264,6 +279,9 @@ class JobStatus(Enum):
     SUCCESS = "success"
     FAILED = "failed"
     MISSED = "missed"
+    # Not run in this process: the switch gives the job to Rust, or its lease
+    # is held by another process (`core/job_lease.py`). Not a failure.
+    SKIPPED = "skipped"
 
 
 @dataclass
@@ -357,6 +375,13 @@ class BackgroundScheduler:
         "revenue_prediction_train", "meilisearch_sync",
     })
 
+    # This process's job leases (`core/job_lease.py`), opened by `start()`.
+    # None — every run made here, no switch read, no lease taken — for a
+    # scheduler nobody started (an instance made without `__init__`, as some
+    # tests make one, included), `KS_JOB_LEASES=off`, or a process without
+    # Postgres.
+    _leases: Optional[job_lease.JobLeases] = None
+
     def __init__(self):
         self._scheduler: Optional[AsyncIOScheduler] = None
         self._job_history: Dict[str, List[JobExecution]] = {}
@@ -407,6 +432,10 @@ class BackgroundScheduler:
         from core.runtime_modes import configure_modes
 
         configure_modes()
+
+        # Before any job can fire: every run, the catch-ups' included, asks
+        # its switch and takes its lease through these.
+        self._leases = job_lease.from_environment()
 
         # Register jobs
         await self._register_jobs()
@@ -1070,6 +1099,17 @@ class BackgroundScheduler:
 
             requested = job_id in self._requested_runs
             self._requested_runs.discard(job_id)
+            # Who executes, and the lease (`core/job_lease.py`). Taken here,
+            # in the one wrapper every run of the job goes through — its
+            # schedule, a catch-up and a manual trigger alike — and before
+            # the body, so `_heavy_job_lock` and the order it keeps stay
+            # inside. A run the switch gives to Rust, or that another process
+            # is making, is not made: the decision is returned in place of
+            # the job's result, and the history records it as `skipped`.
+            claim = await self._claim(job_id)
+            if isinstance(claim, job_lease.NotRunHere):
+                job_lease.log_not_run(claim)
+                return claim
             token = ALERT_CADENCE_S.set(cadence_s)
             req_token = ALERT_REQUESTED.set(requested)
             try:
@@ -1077,6 +1117,7 @@ class BackgroundScheduler:
             finally:
                 ALERT_REQUESTED.reset(req_token)
                 ALERT_CADENCE_S.reset(token)
+                await claim.release()
 
         self._scheduler.add_job(
             _at_cadence,
@@ -1104,6 +1145,47 @@ class BackgroundScheduler:
                 self._job_info[job_id].next_run = job.next_run_time
         except Exception:
             pass  # next_run_time will be updated when scheduler starts
+
+    async def _claim(self, job_id: str) -> job_lease.Claim:
+        """The switch and the lease for one run of `job_id`; a run made here
+        with nothing taken while this scheduler has no leases."""
+        leases = self._leases
+        if leases is None:
+            return job_lease.unguarded(job_id)
+        return await leases.claim(job_id)
+
+    async def claim_job_run(self, job_id: str) -> job_lease.Lease:
+        """The switch and the lease for a door that runs a job's body itself,
+        outside the schedule — an admin lever calling `_run_pg_derivation` or
+        `_run_dq_reconciliation` — exactly as a scheduled run takes them.
+
+        Raises `job_lease.RunsElsewhere` when the job is Rust's or running in
+        another process; the caller answers that (a 409) rather than run it.
+        Release the lease after the body, in a `finally`.
+        """
+        claim = await self._claim(job_id)
+        if isinstance(claim, job_lease.NotRunHere):
+            job_lease.log_not_run(claim)
+            raise job_lease.RunsElsewhere(claim)
+        return claim
+
+    async def claim_job_lease(self, job_id: str) -> job_lease.Lease:
+        """`job_id`'s lease alone, whoever the switch names: for Python code
+        that writes what the job writes without being the job — the daily
+        ClickHouse comparison's ship beside `ch_sync` — so that it never runs
+        beside the job in another process.
+
+        A try, never a wait. Raises `job_lease.RunsElsewhere` (`lease_held`,
+        naming the holder) when another process holds it; with no leases, or
+        none reachable, an unguarded lease, as a scheduled run gets. Logs
+        nothing: what the caller does next is its own line.
+        """
+        leases = self._leases
+        claim = (job_lease.unguarded(job_id) if leases is None
+                 else await leases.claim_lease(job_id))
+        if isinstance(claim, job_lease.NotRunHere):
+            raise job_lease.RunsElsewhere(claim)
+        return claim
 
     # ═══════════════════════════════════════════════════════════════════════════
     # JOB IMPLEMENTATIONS
@@ -2090,6 +2172,50 @@ class BackgroundScheduler:
             logger.info("DQ Layer-1 integrity scan complete", extra=result)
             return result
 
+    async def _under_ch_sync_lease(self, reconcile) -> List[Any]:
+        """`reconcile()` — `ch_silver.reconcile_clickhouse` — holding
+        `ch_sync`'s lease, so that its ship never interleaves with a `ch_sync`
+        run in another process: two EXCHANGEs crossing can swap an empty
+        staging table into place under a fresh watermark (`core/pg_silver.py`,
+        `PG_LAYER_LOCK`, which sees this process only).
+
+        Taken whoever the switch names (`claim_job_lease`), and tried
+        `CH_SYNC_LEASE_ATTEMPTS` times `CH_SYNC_LEASE_RETRY_S` apart. A lease
+        still held after the last try ships and compares nothing and files
+        `gold_values_unwatched` naming the holder, which holds the comparison's
+        conditions as they were. With nothing switched, `ch_sync` runs in this
+        process, whose session holds the lease re-entrantly, so the first try
+        always succeeds and the run is the one it was before the leases.
+        """
+        held: Optional[job_lease.NotRunHere] = None
+        for attempt in range(1, CH_SYNC_LEASE_ATTEMPTS + 1):
+            try:
+                lease = await self.claim_job_lease("ch_sync")
+            except job_lease.RunsElsewhere as exc:
+                held = exc.decision
+                logger.info(
+                    "ClickHouse comparison: ch_sync's lease is held by pid %s "
+                    "(%s), try %d of %d", held.detail.get("holder_pid"),
+                    held.detail.get("holder_application"), attempt,
+                    CH_SYNC_LEASE_ATTEMPTS)
+                if attempt < CH_SYNC_LEASE_ATTEMPTS:
+                    await asyncio.sleep(CH_SYNC_LEASE_RETRY_S)
+                continue
+            try:
+                return await reconcile()
+            finally:
+                await lease.release()
+
+        from core.ch_silver import gold_values_unwatched
+
+        detail = held.detail if held is not None else {}
+        return [gold_values_unwatched(
+            f"ch_sync held its lease through {CH_SYNC_LEASE_ATTEMPTS} tries "
+            f"over {(CH_SYNC_LEASE_ATTEMPTS - 1) * CH_SYNC_LEASE_RETRY_S} s "
+            f"(pid {detail.get('holder_pid')}, "
+            f"{detail.get('holder_application') or 'no application_name'}), "
+            f"so nothing was shipped or compared")]
+
     async def _run_dq_mirror_landing(self) -> Dict[str, Any]:
         """The `mirror_landing` layer: the Postgres-alone completeness and
         liveness checks and ClickHouse against Postgres
@@ -2234,8 +2360,11 @@ class BackgroundScheduler:
                 # still stands down without KS_CH_URL.
                 from core.ch_history import reconcile_ch_history
                 from core.ch_silver import reconcile_clickhouse
+                # Under `ch_sync`'s lease, whoever the switch names: its ship
+                # writes `ch_sync`'s tables (`_under_ch_sync_lease`).
                 gold_compared = await check(
-                    "reconcile_clickhouse", lambda: reconcile_clickhouse())
+                    "reconcile_clickhouse",
+                    lambda: self._under_ch_sync_lease(reconcile_clickhouse))
                 history_compared = await check(
                     "reconcile_ch_history", lambda: reconcile_ch_history())
             except Exception as e:
@@ -3970,6 +4099,21 @@ class BackgroundScheduler:
                 return
 
             info = self._job_info[job_id]
+            retval = getattr(event, "retval", None)
+            if isinstance(retval, job_lease.NotRunHere):
+                # Not a run: `last_run` and `run_count` stay the last real
+                # run's, and the entry carries why (`get_job_history`).
+                info.last_status = JobStatus.SKIPPED
+                job = self._scheduler.get_job(job_id) if self._scheduler else None
+                if job and job.next_run_time:
+                    info.next_run = job.next_run_time
+                now = datetime.now(SCHEDULER_TIMEZONE)
+                self._add_execution(job_id, JobExecution(
+                    job_id=job_id, started_at=now, finished_at=now,
+                    status=JobStatus.SKIPPED, result=retval.as_result(),
+                ))
+                return
+
             info.last_run = datetime.now(SCHEDULER_TIMEZONE)
             info.last_status = JobStatus.SUCCESS
             info.run_count += 1
@@ -4113,13 +4257,21 @@ class BackgroundScheduler:
                 return []
             history = list(self._job_history[job_id][-limit:])
 
-        return [{
-            "started_at": e.started_at.isoformat() if e.started_at else None,
-            "finished_at": e.finished_at.isoformat() if e.finished_at else None,
-            "status": e.status.value,
-            "duration_ms": e.duration_ms,
-            "error": e.error,
-        } for e in reversed(history)]
+        entries = []
+        for e in reversed(history):
+            entry: Dict[str, Any] = {
+                "started_at": e.started_at.isoformat() if e.started_at else None,
+                "finished_at": e.finished_at.isoformat() if e.finished_at else None,
+                "status": e.status.value,
+                "duration_ms": e.duration_ms,
+                "error": e.error,
+            }
+            # A skip says why, and only a skip carries a result: every other
+            # entry is what it was before the leases.
+            if e.status is JobStatus.SKIPPED:
+                entry["result"] = e.result
+            entries.append(entry)
+        return entries
 
     async def run_job_now(self, job_id: str) -> Dict[str, Any]:
         """Manually trigger a job to run immediately."""
@@ -4164,6 +4316,9 @@ class BackgroundScheduler:
             self._scheduler.shutdown(wait=wait)
             self._started = False
             logger.info("Background scheduler stopped")
+        # Postgres releases every lease the session held.
+        if self._leases is not None:
+            self._leases.terminate()
 
     @property
     def is_running(self) -> bool:
@@ -4184,6 +4339,24 @@ def get_scheduler() -> BackgroundScheduler:
     if _scheduler is None:
         _scheduler = BackgroundScheduler()
     return _scheduler
+
+
+async def registered_job_ids() -> List[str]:
+    """Every job id `_register_jobs` registers, in its order, with nothing
+    scheduled or started: what `scripts/job_executor.py` accepts a switch
+    for, so a mistyped id is refused rather than silently switching nothing."""
+
+    class _Recorder:
+        def add_job(self, *_args, **_kwargs) -> None:
+            return None
+
+        def get_job(self, _job_id):
+            return None
+
+    probe = BackgroundScheduler()
+    probe._scheduler = cast(Any, _Recorder())
+    await probe._register_jobs()
+    return list(probe._job_info)
 
 
 async def start_scheduler() -> BackgroundScheduler:
