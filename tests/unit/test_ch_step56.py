@@ -9,7 +9,7 @@ comparison has to.
 """
 from __future__ import annotations
 
-import re
+import os
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -26,6 +26,8 @@ from core.ch_silver import (
     render_tsv,
 )
 from core.data_quality import Severity
+from tests.helpers.recon_chains_ddl import declared_columns
+from tests.integration.pg_tab_seed import needs_postgres
 
 
 def _silver_row(**overrides):
@@ -81,13 +83,11 @@ class TestSilverWireFormat:
         assert "+00" not in line
         assert "2026-08-27 12:30:05" in line
 
-    def test_ddl_declares_exactly_the_shipped_columns_in_order(self):
-        declared = re.findall(
-            r"^\s{4}(\w+)\s+(?:Int32|Decimal|Nullable|Date\b|Bool|"
-            r"LowCardinality|String)",
-            _SILVER_DDL, re.MULTILINE,
-        )
-        assert tuple(declared) == SILVER_COLUMNS
+    def test_the_table_declares_exactly_the_shipped_columns(self):
+        """The ship inserts SILVER_COLUMNS by name into the table this DDL
+        creates, and the round trip reads them back by name. A set, so the
+        statement's layout, types and column order stay its own."""
+        assert declared_columns(_SILVER_DDL.format(name="silver.orders")) == set(SILVER_COLUMNS)
 
 
 class TestNoThirdDialect:
@@ -230,18 +230,41 @@ class TestTheColumnListsHaveOneHome:
     """The review's finding: the copies restated their column lists, so a
     revision 0012 adding a column to Postgres would silently never reach
     ClickHouse while every round-trip check stayed green — the copy would be
-    verifying itself against its own stale list. Identity, not equality: the
-    modules must share the object, not agree today."""
+    verifying itself against its own stale list. So what is shipped and
+    compared is held to the tables Postgres holds, as migrated."""
 
-    def test_silver_copy_shares_the_projection_write_order(self):
-        from core import ch_silver, pg_silver
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_every_column_postgres_holds_is_shipped_and_compared(self):
+        import asyncpg
 
-        assert ch_silver.SILVER_COLUMNS is pg_silver.SILVER_COLUMNS
+        from core import ch_gold
 
-    def test_gold_copy_shares_the_cell_shape(self):
-        from core import ch_gold, pg_gold
+        conn = await asyncpg.connect(os.environ["KS_PG_DSN"])
+        try:
+            rows = await conn.fetch(
+                "SELECT table_schema || '.' || table_name AS t, column_name "
+                "FROM information_schema.columns "
+                "WHERE table_schema || '.' || table_name = ANY($1::text[])",
+                ["silver.orders", "gold.daily_revenue"])
+        finally:
+            await conn.close()
+        held = {}
+        for r in rows:
+            held.setdefault(r["t"], set()).add(r["column_name"])
+        # Silver: what the ship reads out of Postgres and inserts.
+        assert held["silver.orders"] == set(ch_silver.SILVER_COLUMNS)
+        # Gold: what ClickHouse's derivation writes and the comparison reads,
+        # and the columns its codec parses.
+        assert held["gold.daily_revenue"] == set(ch_silver.GOLD_COLUMNS) == set(ch_gold.COLUMNS)
 
-        assert ch_gold.COLUMNS is pg_gold.GOLD_COLUMNS
+    def test_clickhouse_s_gold_is_parsed_in_the_order_it_is_selected(self):
+        """The read-back SELECTs ch_silver's Gold columns and parses the
+        answer with ch_gold's codec, by position: a copy in another order
+        would read every cell into the wrong column."""
+        from core import ch_gold
+
+        assert tuple(ch_gold.COLUMNS) == tuple(ch_silver.GOLD_COLUMNS)
 
     def test_type_maps_cover_exactly_the_shared_columns(self):
         from core import ch_history, ch_silver

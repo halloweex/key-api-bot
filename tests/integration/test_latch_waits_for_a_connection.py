@@ -20,7 +20,10 @@ caller actually reaches:
   claim is in the writer's transaction, not beside it;
 - a chain's first write that succeeds takes the marker and claims every owner
   row in the transaction that writes the row: the owner rows and the row carry
-  one `xmin`.
+  one `xmin`;
+- and, latch or no latch, a writer behind the schema — `require_revision()`
+  refusing, as for a web deployed ahead of `migrate` — raises and never takes
+  a connection, so it writes nothing.
 
 Only the writer's own acquire is interfered with. Anything the store reaches
 first — `set_goal` computes a suggestion before it writes — gets the live pool,
@@ -54,6 +57,7 @@ from core import (  # noqa: E402 — the shadow chains' block
     pg_weekly_ledger_write,
 )
 from core import pg_forecast_write
+from core.pg import SchemaVersionError
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -573,6 +577,67 @@ class TestAnAcquireThatFailsLeavesTheChainUnlatched:
         chain_latch._latched = None                 # read the disk, not the cache
         assert not chain_latch.latched(chain.CHAIN)
         assert await chain_latch.read_owners(live) == {}
+
+
+class _BehindTheSchema:
+    """`core.pg.require_revision` as a web deployed ahead of `migrate` meets
+    it, refusing the chain's writer module alone: a read the store makes on
+    the way passes, so a test cannot pass for a failure upstream of the
+    writer."""
+
+    def __init__(self, writer: str):
+        self._writer = writer
+        self.refused = 0
+
+    async def __call__(self, *_args, **_kwargs):
+        if _caller() != self._writer:
+            return
+        self.refused += 1
+        raise SchemaVersionError("the database is not at the revision this code requires")
+
+
+class _CountsTheWriter:
+    """The live pool, counting the connections the writer's module takes."""
+
+    def __init__(self, live, writer: str):
+        self._live, self._writer = live, writer
+        self.handed = 0
+
+    def acquire(self, *args, **kwargs):
+        if _caller() == self._writer:
+            self.handed += 1
+        return self._live.acquire(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._live, name)
+
+
+class TestAWriterBehindTheSchemaWritesNothing:
+    """A web that came up ahead of `migrate`, or behind it, must not write
+    into a schema it does not know: every writer asks the revision before it
+    takes a connection, and a refusal is the writer's error, with nothing
+    sent to Postgres. Through the call every caller makes. Mutation: take
+    the connection, or write, before `require_revision()`."""
+
+    @pytest.mark.parametrize("writer", list(WRITERS))
+    @pytest.mark.asyncio
+    async def test_it_raises_and_takes_no_connection(self, stores, writer):
+        store, live, _env = stores
+        chain, call = WRITERS[writer]
+        pool = _CountsTheWriter(live, chain.__name__)
+        behind = _BehindTheSchema(chain.__name__)
+
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+                patch("core.pg.require_revision", new=behind):
+            if writer in NEVER_RAISES:
+                result = await call(store)
+                assert result["error_class"] == "SchemaVersionError", result
+            else:
+                with pytest.raises(SchemaVersionError):
+                    await call(store)
+
+        assert behind.refused == 1, f"{writer} never asked the revision"
+        assert pool.handed == 0, f"{writer} took a connection behind the schema"
 
 
 class TestAClaimRollsBackWithItsWrite:

@@ -132,29 +132,23 @@ class TestOnlyWhatChain3Stores:
     (`expense_refusal`) counted, the order read VALUE_MISMATCH every morning
     and was re-fetched every morning, and the re-fetch is refused the same
     way. Mutation killed by every case: count `len(list)`, or sum every
-    amount the list carries."""
+    amount the list carries.
+
+    One case for each way the comparison treats an entry it does not count;
+    why the writer refuses an entry is the writer's rule, held by
+    `tests/unit/test_pg_orders_write.py::TestWhatPostgresWouldRefuse` and by
+    `test_it_is_the_writer_s_choice_not_a_copy` below."""
 
     @pytest.mark.parametrize("entry, left", [
+        # Refused under an id: that stored row is left as it is.
         ({"id": 2, "expense_type_id": 1, "amount": None}, {2}),
+        # Dropped, no id: nothing could name a stored row.
         ({"expense_type_id": 1, "amount": "5.00"}, set()),
-        ({"id": None, "expense_type_id": 1, "amount": "5.00"}, set()),
-        ({"id": 2, "expense_type_id": 1, "amount": "5.00", "description": "a\x00b"}, {2}),
-        ({"id": 2, "expense_type_id": 1, "amount": "5.00", "status": "paid\x00"}, {2}),
-        ({"id": 2, "expense_type_id": 1, "amount": "10000000000.00"}, {2}),
-        ({"id": 2, "expense_type_id": 1, "amount": "-9999999999.995"}, {2}),
-        ({"id": 2, "expense_type_id": 1, "amount": "ten"}, {2}),
-        ({"id": 2, "expense_type_id": 1, "amount": True}, {2}),
-        ({"id": 2, "expense_type_id": 1, "amount": "NaN"}, {2}),
-        ({"id": 2, "expense_type_id": 1, "amount": "Infinity"}, {2}),
-        ({"id": "abc", "expense_type_id": 1, "amount": "5.00"}, set()),
+        # An id KeyCRM sends as text names the row it would be.
         ({"id": "2", "expense_type_id": 1, "amount": "5.00"}, {2}),
-        ({"id": 2 ** 31, "expense_type_id": 1, "amount": "5.00"}, {2 ** 31}),
-        ({"id": 2, "expense_type_id": "x", "amount": "5.00"}, {2}),
-    ], ids=["amount null", "id absent", "id null", "NUL in description",
-            "NUL in status", "amount out of range", "amount rounds out of range",
-            "amount is text", "amount is a boolean", "amount NaN",
-            "amount infinite", "id is text", "id is a numeric string",
-            "id past int32", "type id not an integer"])
+        # An id that is no number names none.
+        ({"id": "abc", "expense_type_id": 1, "amount": "5.00"}, set()),
+    ], ids=["refused with an id", "no id", "id is a numeric string", "id is text"])
     def test_an_entry_the_chain_does_not_write_is_left_out(self, entry, left):
         facts = keycrm_expense_facts([_OK, entry], 7)
         assert _counted(facts) == (1, Decimal("10.50"))
@@ -235,16 +229,12 @@ class TestAnOrderTheChainRefusesWhole:
 
     @pytest.mark.parametrize("over", [
         {"manager_comment": "utm\x00"},
-        {"promocode": "SALE\x00"},
-        {"status_id": "twelve"},
-        {"grand_total": "not a number"},
-        {"products": [dict(_LINE, name="Тов\x00ар")]},
-        {"products": [dict(_LINE, name=None)]},
-        {"products": [_LINE, dict(_LINE, quantity=2 ** 31)]},
-    ], ids=["NUL in manager_comment", "NUL in promocode", "status not an integer",
-            "total the parse cannot read", "NUL in a line's name",
-            "a line without a name", "a line's quantity past int32"])
+        {"products": [_LINE, dict(_LINE, name=None)]},
+    ], ids=["its header refused", "one of its lines refused"])
     def test_its_expenses_are_not_compared(self, over):
+        """Which headers and lines the chain refuses is the writer's rule
+        (`order_refusal`, `product_refusal`), held at the writer and by
+        `test_it_is_the_writer_s_check_not_a_copy` below."""
         orders = _snapshot(_order(1, expenses=[_OK], **over))
         # The header is still compared, as for any order.
         assert 1 in orders

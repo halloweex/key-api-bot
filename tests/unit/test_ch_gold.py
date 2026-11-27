@@ -10,7 +10,6 @@ decided by hand.
 """
 from __future__ import annotations
 
-import re
 from datetime import date
 from decimal import Decimal
 
@@ -20,6 +19,7 @@ from core.ch_gold import (
     parse_tsv,
     render_tsv,
 )
+from tests.helpers.recon_chains_ddl import declared_columns
 
 
 def _row(**overrides):
@@ -70,11 +70,12 @@ class TestTheWireFormat:
 
 
 class TestTheDDLAndTheColumnListAgree:
-    """Structure, not prose: the DDL is parsed, not grepped for a comment."""
+    """The derivation inserts COLUMNS by name into the table this DDL creates,
+    live and staging, and the comparison reads them back by name: a column
+    the DDL lacks fails every hourly derivation, one only the DDL has is
+    written by nothing. Compared as a set, so the statement's layout, types
+    and column order stay its own. On a real ClickHouse the whole path runs
+    in `tests/integration/test_own_entity_not_revenue.py::TestClickHouse`."""
 
-    def test_ddl_declares_exactly_the_shipped_columns_in_order(self):
-        declared = re.findall(
-            r"^\s{4}(\w+)\s+(?:Date|LowCardinality|Nullable|Decimal|Int32)",
-            _TABLE_DDL, re.MULTILINE,
-        )
-        assert tuple(declared) == COLUMNS
+    def test_the_table_declares_exactly_the_shipped_columns(self):
+        assert declared_columns(_TABLE_DDL.format(name="gold.daily_revenue")) == set(COLUMNS)

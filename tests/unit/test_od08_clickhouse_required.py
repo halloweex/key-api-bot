@@ -25,8 +25,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from core import ch_silver
+from core import ch_history, ch_silver
 from core.data_quality import IntegrityIssue, Severity
+from tests.helpers.recon_chains_mirror_landing import run_mirror_landing
 
 
 UNWATCHED = "gold_values_unwatched"
@@ -166,24 +167,20 @@ class TestTheJobFilesWhatTheComparisonCannotReturn:
     async def test_after_step_13_a_raise_pages_although_the_run_failed(
         self, postgres_alone,
     ):
-        from tests.helpers.mirror_landing import _run
-
-        persisted, paged, _ = await _run(
+        run = await run_mirror_landing(
             {"reconcile_clickhouse": RuntimeError("lock wait")})
-        assert _unwatched(persisted["issues"]).severity is Severity.CRITICAL
-        assert paged == [[UNWATCHED]]
+        assert _unwatched(run.persisted["issues"]).severity is Severity.CRITICAL
+        assert run.pages == [[UNWATCHED]]
 
     @pytest.mark.asyncio
     async def test_a_job_that_never_reached_the_comparison(self, duckdb_derives):
-        from tests.helpers.mirror_landing import _run
-
         def break_the_import():
             # `from core.ch_silver import reconcile_clickhouse` now raises
             # between the checks, where only `setup:` can catch it.
             del ch_silver.reconcile_clickhouse
 
-        persisted, _, _ = await _run({}, hook=break_the_import)
-        issue = _unwatched(persisted["issues"])
+        run = await run_mirror_landing({}, hook=break_the_import)
+        issue = _unwatched(run.persisted["issues"])
         assert issue is not None
         assert "never reached the comparison" in issue.description
         assert "setup: ImportError" in issue.description
@@ -194,67 +191,44 @@ class TestTheJobFilesWhatTheComparisonCannotReturn:
     ):
         """What the comparison returned is the verdict — the job adds nothing,
         clean or not."""
-        from tests.helpers.mirror_landing import _run
-
-        persisted, _, _ = await _run({})
-        assert persisted["issues"] == []
-        persisted, paged, _ = await _run(
+        run = await run_mirror_landing({})
+        assert run.persisted["issues"] == []
+        run = await run_mirror_landing(
             {"reconcile_clickhouse": [_critical("ch_engines_gold_mismatch")]})
-        assert _names(persisted["issues"]) == ["ch_engines_gold_mismatch"]
-        assert paged == [["ch_engines_gold_mismatch"]]
+        assert _names(run.persisted["issues"]) == ["ch_engines_gold_mismatch"]
+        assert run.pages == [["ch_engines_gold_mismatch"]]
+
+
+# What only each comparison re-examines — the CRITICALs each files today —
+# named here, so the holds below say what they hold.
+# `TestTheHeldConditionsAreEveryCritical` holds the job's hold to every
+# CRITICAL the comparisons actually file.
+GOLD_HELD = {"ch_silver_roundtrip", "ch_engines_gold_missing",
+             "ch_engines_gold_extra", "ch_engines_gold_mismatch"}
+ARCHIVE_HELD = {"ch_history_buckets", "ch_history_stalled"}
 
 
 class TestABlindRunResolvesNothingItDidNotSee:
     """Mutation: resolve the layer without `unverified` and a delivered
     `ch_engines_gold_mismatch` would be announced resolved by the first run
-    that could not look."""
+    that could not look. Read where the job hands it over: what the layer's
+    `resolve_group` keeps firing."""
 
     @pytest.mark.asyncio
-    async def test_blind_run_holds_the_comparisons_conditions(
-        self, monkeypatch, duckdb_derives,
-    ):
+    async def test_blind_run_holds_the_comparisons_conditions(self, monkeypatch):
         """KS_CH_URL set, so the archive half counted its buckets and only
         the Gold half's conditions are held."""
-        from tests.helpers.mirror_landing import _run
-
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
-        held = []
-        await _run({"reconcile_clickhouse": [ch_silver.gold_values_unwatched("x")]},
-                   held=held)
-        assert held == [list(ch_silver.GOLD_WATCH_CONDITIONS)]
+        run = await run_mirror_landing(
+            {"reconcile_clickhouse": [ch_silver.gold_values_unwatched("x")]})
+        assert GOLD_HELD <= run.held
+        assert not ARCHIVE_HELD & run.held
 
     @pytest.mark.asyncio
-    async def test_a_run_that_compared_holds_nothing(self, monkeypatch, duckdb_derives):
-        from tests.helpers.mirror_landing import _run
-
+    async def test_a_run_that_compared_holds_nothing(self, monkeypatch):
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
-        held = []
-        await _run({}, held=held)
-        assert held == [[]]
-
-    def test_the_held_conditions_are_the_comparisons_own(self):
-        """Derived from what `reconcile_clickhouse` and `compare_gold_cells`
-        actually emit, so a check added there cannot be left unheld."""
-        import ast
-        import inspect
-
-        tree = ast.parse(inspect.getsource(ch_silver))
-        emitted = set()
-        for fn in ast.walk(tree):
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in (
-                "reconcile_clickhouse", "compare_gold_cells",
-            ):
-                for node in ast.walk(fn):
-                    if isinstance(node, ast.Call):
-                        for kw in node.keywords:
-                            if kw.arg == "check_name" and isinstance(kw.value, ast.Constant):
-                                emitted.add(kw.value.value)
-        # The WARNs about ClickHouse itself clear on their own; what the
-        # comparison alone re-examines is every CRITICAL it can file.
-        criticals = {"ch_silver_roundtrip", "ch_engines_gold_missing",
-                     "ch_engines_gold_extra", "ch_engines_gold_mismatch"}
-        assert criticals <= emitted
-        assert set(ch_silver.GOLD_WATCH_CONDITIONS) == criticals
+        run = await run_mirror_landing({})
+        assert run.held == set()
 
 
 class TestABlindArchiveRunResolvesNothingEither:
@@ -281,53 +255,35 @@ class TestABlindArchiveRunResolvesNothingEither:
     }
 
     @pytest.mark.asyncio
-    async def test_an_unreadable_copy_holds_the_archive_page(
-        self, monkeypatch, postgres_alone,
-    ):
+    async def test_an_unreadable_copy_holds_the_archive_page(self, monkeypatch):
         """The reviewer's scenario, after step 13."""
-        from tests.helpers.mirror_landing import _run
-
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         outage = dict(self.OUTAGE)
         outage["reconcile_clickhouse"] = outage["reconcile_clickhouse"] + [
             ch_silver.gold_values_unwatched("a read-back failed (ConnectError)")]
-        held = []
-        await _run(outage, held=held)
-        assert "ch_history_buckets" in held[0]
-        assert set(ch_silver.GOLD_WATCH_CONDITIONS) <= set(held[0])
+        run = await run_mirror_landing(outage)
+        assert ARCHIVE_HELD | GOLD_HELD <= run.held
 
     @pytest.mark.asyncio
-    async def test_without_ks_ch_url_the_archive_page_is_held(
-        self, monkeypatch, duckdb_derives,
-    ):
+    async def test_without_ks_ch_url_the_archive_page_is_held(self, monkeypatch):
         """No KS_CH_URL: the archive half returns [], which is not a count."""
-        from tests.helpers.mirror_landing import _run
-
         monkeypatch.delenv("KS_CH_URL", raising=False)
-        held = []
-        await _run({"reconcile_clickhouse": [
-            ch_silver.gold_values_unwatched("KS_CH_URL is not set")]}, held=held)
-        assert "ch_history_buckets" in held[0]
+        run = await run_mirror_landing({"reconcile_clickhouse": [
+            ch_silver.gold_values_unwatched("KS_CH_URL is not set")]})
+        assert ARCHIVE_HELD <= run.held
 
     @pytest.mark.asyncio
-    async def test_a_counted_archive_holds_nothing_of_its_own(
-        self, monkeypatch, duckdb_derives,
-    ):
+    async def test_a_counted_archive_holds_nothing_of_its_own(self, monkeypatch):
         """KS_CH_URL set and the buckets counted: a delivered
         `ch_history_buckets` that the count no longer finds does resolve.
         Mutation: hold it unconditionally and this fails."""
-        from tests.helpers.mirror_landing import _run
-
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
-        held = []
-        await _run({"reconcile_ch_history": []}, held=held)
-        assert "ch_history_buckets" not in held[0]
+        run = await run_mirror_landing({"reconcile_ch_history": []})
+        assert not ARCHIVE_HELD & run.held
 
     def test_a_comparison_that_raised_or_was_never_reached_holds(self, monkeypatch):
         """`compared` False: the job's `check` caught a raise, or the job never
         got that far. Mutation: drop `not compared` and this fails."""
-        from core import ch_history
-
         monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         # `ch_history_stalled` beside the buckets since L2-02 (A17).
         assert ch_history.history_unverified_conditions([], compared=False) == [
@@ -340,8 +296,6 @@ class TestABlindArchiveRunResolvesNothingEither:
     ):
         """The hold reads a check name; this proves it is the name the
         comparison actually files when ClickHouse does not answer."""
-        from core import ch_history
-
         monkeypatch.setattr(ch_history, "configured", lambda: True)
         monkeypatch.setattr(ch_history, "_ch_max_id", AsyncMock(
             side_effect=httpx.ConnectError("connection refused")))
@@ -350,26 +304,108 @@ class TestABlindArchiveRunResolvesNothingEither:
         assert ch_history.history_unverified_conditions(issues, compared=True) == [
             "ch_history_buckets", "ch_history_stalled"]
 
-    def test_the_held_conditions_are_every_critical_the_archive_files(self):
-        """Derived from what `reconcile_ch_history` emits, so a CRITICAL
-        added there cannot be left unheld."""
-        import ast
-        import inspect
-        from core import ch_history
 
-        # And `_stall`, which it calls for `ch_history_stalled` (L2-02).
-        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history)
-                         + "\n" + inspect.getsource(ch_history._stall))
-        critical = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                kws = {k.arg: k.value for k in node.keywords}
-                name, sev = kws.get("check_name"), kws.get("severity")
-                if (isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute)
-                        and sev.attr == "CRITICAL"):
-                    critical.add(name.value)
-        assert critical == {"ch_history_buckets", "ch_history_stalled"}
-        assert set(ch_history.HISTORY_WATCH_CONDITIONS) == critical
+# ─── What each comparison files, one run per cause ──────────────────────────
+
+
+async def _gold_findings(monkeypatch):
+    """Every finding `reconcile_clickhouse` files, one run per cause: the four
+    ways it does not compare, and each thing a comparison that ran can find."""
+    runs = []
+    monkeypatch.setattr(ch_silver, "configured", lambda: False)
+    runs.append(await ch_silver.reconcile_clickhouse())
+    for wire in (
+        dict(pg_cells=[_cell(1)], ch_cells=[_cell(1)], ship=RuntimeError("Code: 241.")),
+        dict(pg_cells=[_cell(1)], ch_cells=[_cell(1)],
+             readback=httpx.ConnectError("connection refused")),
+        dict(pg_cells=[], ch_cells=[]),
+        dict(pg_cells=[_cell(1)], ch_cells=[]),
+        dict(pg_cells=[], ch_cells=[_cell(1)]),
+        dict(pg_cells=[_cell(1)], ch_cells=[_cell(1, "100.01")]),
+    ):
+        _stub_the_wire(monkeypatch, **wire)
+        runs.append(await ch_silver.reconcile_clickhouse())
+    # An order Postgres shipped that the copy does not give back.
+    _stub_the_wire(monkeypatch, pg_cells=[_cell(1)], ch_cells=[_cell(1)])
+    monkeypatch.setattr(ch_silver, "_fetch_pg_silver", AsyncMock(return_value=[(1001,)]))
+    runs.append(await ch_silver.reconcile_clickhouse())
+    return [issue for run in runs for issue in run]
+
+
+class _ArchivePool:
+    """Postgres's side of the archive comparison: the id-buckets below the
+    copy's ceiling, nothing waiting above it, and the archive's state row,
+    which `fetchrow` is asked for by its name."""
+
+    def __init__(self, buckets, *, last_ok_at):
+        self._buckets, self._last_ok_at = buckets, last_ok_at
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def fetch(self, _sql, *_args):
+        return list(self._buckets.items())
+
+    async def fetchrow(self, _sql, arg):
+        if isinstance(arg, str):
+            return {"last_ok_at": self._last_ok_at, "failures_since_ok": 0}
+        return {"n": 0, "oldest": None}
+
+
+async def _history_findings(monkeypatch):
+    """Every finding `reconcile_ch_history` files, one run per cause."""
+    import core.pg
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(ch_history, "configured", lambda: True)
+    runs = []
+    # (the copy's MAX(id), or its refusal; its buckets; Postgres's; the last
+    # good ship; the hourly ids-diff's last heal)
+    for max_id, copy, pg, last_ok, heal in (
+        (httpx.ConnectError("connection refused"), "", {}, now, None),  # unreachable
+        (20000, "1\t9999\n", {1: 10000}, now, None),                   # a short bucket
+        (20000, "1\t10000\n", {1: 10000}, now - timedelta(hours=25), None),  # stalled
+        (20000, "1\t10000\n", {1: 10000}, now, {"at": now, "shipped": 3}),   # self-healed
+    ):
+        monkeypatch.setattr(ch_history, "_ch_max_id", AsyncMock(
+            side_effect=max_id) if isinstance(max_id, Exception)
+            else AsyncMock(return_value=max_id))
+        monkeypatch.setattr(ch_history, "_execute", AsyncMock(return_value=copy))
+        monkeypatch.setattr(ch_history, "last_heal", heal)
+        monkeypatch.setattr(core.pg, "get_pool", AsyncMock(
+            return_value=_ArchivePool(pg, last_ok_at=last_ok)))
+        runs.append(await ch_history.reconcile_ch_history())
+    return [issue for run in runs for issue in run]
+
+
+def _critical_names(issues):
+    return {i.check_name for i in issues if i.severity is Severity.CRITICAL}
+
+
+class TestTheHeldConditionsAreEveryCritical:
+    """What a blind run holds is every CRITICAL its comparison can file, and
+    nothing it cannot: a CRITICAL left out would be announced resolved by
+    the first run that could not look. Read off the findings the comparisons
+    file, cause by cause. Mutation: drop a name from either hold, or add a
+    CRITICAL the hold does not name."""
+
+    @pytest.mark.asyncio
+    async def test_the_gold_half(self, monkeypatch):
+        # `gold_values_unwatched` is the blindness itself: every run asks it
+        # again, so it holds itself and is not held for anything.
+        criticals = _critical_names(await _gold_findings(monkeypatch)) - {UNWATCHED}
+        assert criticals == set(ch_silver.GOLD_WATCH_CONDITIONS)
+
+    @pytest.mark.asyncio
+    async def test_the_archive(self, monkeypatch):
+        criticals = _critical_names(await _history_findings(monkeypatch))
+        assert criticals == set(ch_history.HISTORY_WATCH_CONDITIONS)
 
 
 # ─── A ClickHouse that stays down keeps paging (OD-08 review) ───────────────
@@ -549,30 +585,23 @@ class TestTheAgentReadsTheClickHouseRunbook:
     ClickHouse guidance at all. Mutation: drop `gold_values_unwatched` from
     the mirror line of `family_for` and the first test fails."""
 
-    @staticmethod
-    def _emitted_by_the_clickhouse_comparisons():
-        import ast
-        import inspect
-        from core import ch_history
+    @pytest.mark.asyncio
+    async def test_every_clickhouse_condition_reaches_the_mirror_runbook(self, monkeypatch):
+        """Every name the two ClickHouse comparisons file, cause by cause,
+        the 05:30 arm's gate, and the canary's three keys for the arm."""
+        from bot import canary
 
-        names = set()
-        for module in (ch_silver, ch_history):
-            for node in ast.walk(ast.parse(inspect.getsource(module))):
-                if isinstance(node, ast.Call):
-                    for kw in node.keywords:
-                        if kw.arg == "check_name" and isinstance(kw.value, ast.Constant):
-                            names.add(kw.value.value)
-        return names
-
-    def test_every_clickhouse_condition_reaches_the_mirror_runbook(self):
-        """Derived: every check name the two ClickHouse comparisons file, and
-        the canary's three keys for the arm."""
-        emitted = self._emitted_by_the_clickhouse_comparisons()
-        assert UNWATCHED in emitted and "ch_history_buckets" in emitted
-        keys = sorted(emitted | {f"dq_{kind}:reconciliation_ch"
-                                 for kind in ("stale", "never", "missing")}
-                      | {"ch_reconcile_pending"})
-        families = _family_for(*keys)
+        filed = {i.check_name for i in await _gold_findings(monkeypatch)
+                 + await _history_findings(monkeypatch)}
+        assert UNWATCHED in filed and "ch_history_buckets" in filed
+        gated, _ = await _arm(timedelta(hours=25, minutes=30))
+        filed |= set(_names(gated["issues"]))
+        absent = _ch_layer_aged(3600)
+        del absent["data_quality"]["reconciliation_ch"]
+        for payload in (_ch_layer_aged(31 * 3600), _ch_layer_aged(None), absent):
+            failures, _ = canary.check_dq_freshness(payload)
+            filed |= {key for key, _ in failures}
+        families = _family_for(*sorted(filed))
         assert {k: f for k, f in families.items() if f != "mirror"} == {}
 
     def test_the_mirror_runbook_no_longer_calls_clickhouse_optional(self):

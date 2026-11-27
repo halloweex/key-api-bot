@@ -177,23 +177,24 @@ def _names(issues):
 
 
 class TestTheFreshnessCheck:
-    def test_under_off_the_copy_is_the_rows_and_conn_is_never_read(
-            self, flags, duckdb_off):
-        """Every chain latched, Postgres holding all but the inherited key
-        (chain 3's; chains 6 and 6a inherited too until step 14's S14-09):
-        the copy stands in for it, at the same threshold. (Until step 14's
-        S14-14 the check was also handed a DuckDB connection it must not
-        read under off; it takes none since.)"""
-        _latch_every_chain()
-        inherited = ("orders",)
+    @pytest.mark.parametrize("copied, filed", [
+        (FRESH, []),
+        (timedelta(hours=7), [("freshness_orders", 7)]),
+    ], ids=["a fresh copy", "a copy 7 h old"])
+    def test_the_inherited_key_is_judged_by_the_copy(self, copied, filed):
+        """Postgres holding every key but the inherited one (chain 3's;
+        chains 6 and 6a inherited too until step 14's S14-09): the copy's
+        stamp stands in for it, at the same threshold — a fresh one is quiet
+        and one 7 h old is a stall of 7 h, CRITICAL as orders are. Mutation:
+        drop the stand-in, and the key reads "never synced" (a count of 1)
+        however fresh the copy."""
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS
-                              if e not in inherited})
-        frozen = _rows(**{**ALL_FRESH, "orders": timedelta(hours=7)})
+                              if e != "orders"})
+        frozen = _rows(**{**ALL_FRESH, "orders": copied})
         issues = dq._freshness_check(NOW, chain_watermarks=watermarks,
                                      frozen_rows=frozen)
-        assert _names(issues) == ["freshness_orders"]
-        assert "as Postgres copied it" in issues[0].description
-        _untouched(duckdb_off)
+        assert [(i.check_name, i.count) for i in issues] == filed
+        assert all(i.severity is dq.Severity.CRITICAL for i in issues)
 
     def test_under_off_chains_6_and_6a_are_never_synced_without_their_key(
             self, flags, duckdb_off):

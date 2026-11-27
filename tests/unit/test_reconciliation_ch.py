@@ -23,14 +23,62 @@ def _facts(status=12, source=1, manager=4, buyer=7, total=100.0,
             "buyer_id": buyer, "grand_total": total, "order_date": d}
 
 
-class TestHeaderComparison:
-    def test_the_fields_are_the_header_slice_and_nothing_line_level(self):
-        assert "n_lines" not in CH_HEADER_FIELDS
-        assert "qty" not in CH_HEADER_FIELDS
-        assert "line_amount" not in CH_HEADER_FIELDS
-        assert "grand_total" in CH_HEADER_FIELDS
-        assert "status_id" in CH_HEADER_FIELDS
+# One KeyCRM order with a line, as the snapshot fetches it.
+ORDER = {"id": 1, "source_id": 1, "status_id": 12,
+         "ordered_at": "2026-08-01T09:00:00+00:00",
+         "updated_at": "2026-08-01T09:00:00+00:00", "grand_total": "100.00",
+         "manager": {"id": 4}, "buyer": {"id": 7},
+         "products": [{"name": "Товар", "quantity": 2, "price_sold": "50.00",
+                       "offer": {"product_id": 701}}]}
 
+
+class TestTheCopyHasNoLines:
+    """ClickHouse's silver is order-grain, while the KeyCRM snapshot's facts
+    carry the lines too (`n_lines`, `qty`, `line_amount`): set against them,
+    every order the copy holds would read as differing. Driven through the
+    arm, with the snapshot built by its own parse and ClickHouse's answer
+    read by the arm's own extractor. Mutation: compare every field the
+    snapshot carries."""
+
+    async def _compare(self, monkeypatch, copy_total: str):
+        from core.reconciliation_io import _process_batch
+        from core.scheduler import BackgroundScheduler
+
+        monkeypatch.setenv("KS_CH_URL", "http://ch:8123")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
+        kc, inflight = {}, set()
+        _process_batch([ORDER], kc, datetime(2026, 8, 4, tzinfo=timezone.utc),
+                       date(2026, 8, 1), date(2026, 8, 29), inflight)
+        assert kc[1]["n_lines"] == 1          # the snapshot does carry the lines
+        fresh = datetime.now(timezone.utc) - timedelta(minutes=20)
+        copy = f"1\t12\t1\t4\t7\t{copy_total}\t2026-08-01\n"
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+             patch("core.mirror_reconciliation.fetch_watermarks",
+                   new=AsyncMock(return_value={
+                       "clickhouse.silver_orders": {"last_ok_at": fresh}})), \
+             patch("core.reconciliation_io.pg_ids_updated_since",
+                   new=AsyncMock(return_value=set())), \
+             patch("core.ch_common.execute", new=AsyncMock(return_value=copy)):
+            return await BackgroundScheduler()._reconcile_clickhouse(
+                kc, window_start=date(2026, 8, 1), window_end=date(2026, 8, 29),
+                as_of=datetime.now(timezone.utc) - timedelta(hours=2),
+                inflight_ids=inflight)
+
+    @pytest.mark.asyncio
+    async def test_the_lines_the_copy_does_not_hold_are_not_compared(self, monkeypatch):
+        result = await self._compare(monkeypatch, "100")
+        assert result["error"] is None
+        assert result["discrepancies"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_hryvnia_on_the_header_is_a_finding(self, monkeypatch):
+        result = await self._compare(monkeypatch, "99")
+        [d] = result["discrepancies"]
+        assert (d.diff_class, d.field, d.order_ids) == (
+            DiscrepancyClass.VALUE_MISMATCH, "grand_total", (1,))
+
+
+class TestHeaderComparison:
     def test_identical_sides_are_clean(self):
         ch = {1: _facts(), 2: _facts(total=50)}
         kc = {1: _facts(), 2: _facts(total=50)}

@@ -17,6 +17,10 @@ What these pin, and what they deliberately do not change:
 - the run is still failed — `error_message` is set — so run age, the digest's
   delta and alert resolution treat it exactly as before;
 - a CRITICAL found by a check that completed still pages.
+
+Pages and resolutions are read where the job hands them over,
+`core.alerting.raise_alert` and `resolve_group`
+(`tests/helpers/recon_chains_mirror_landing.py`).
 """
 from __future__ import annotations
 
@@ -27,10 +31,7 @@ import textwrap
 import pytest
 
 from core.data_quality import IntegrityIssue, Severity
-from tests.helpers.mirror_landing import CHECKS_BY_MODULE, _run
-
-
-ALL_CHECKS = [c for names in CHECKS_BY_MODULE.values() for c in names]
+from tests.helpers.recon_chains_mirror_landing import ALL_CHECKS, run_mirror_landing
 
 
 def check_order() -> list:
@@ -72,19 +73,19 @@ class TestOneRaisingCheckSilencesNothing:
     async def test_the_checks_after_it_still_run_and_their_findings_are_kept(self):
         """The shape that used to lose them: an early check raises, and a
         stalled archive is found three checks later."""
-        persisted, _, _ = await _run({
+        run = await run_mirror_landing({
             "reconcile_order_utm_completeness": RuntimeError("silver.order_utm is gone"),
             "reconcile_order_versions": [_critical("order_versions_stalled")],
         })
-        assert [i.check_name for i in persisted["issues"]] == ["order_versions_stalled"]
+        assert [i.check_name for i in run.persisted["issues"]] == ["order_versions_stalled"]
 
     @pytest.mark.asyncio
     async def test_the_run_is_still_failed_and_names_every_check_that_raised(self):
-        persisted, _, _ = await _run({
+        run = await run_mirror_landing({
             "reconcile_buyer_completeness": RuntimeError("bronze.buyers is gone"),
             "pg_gold_internal_check": ValueError("gold.daily_revenue is gone"),
         })
-        message = persisted["error_message"]
+        message = run.persisted["error_message"]
         assert message and message.startswith("2 check(s) raised")
         assert "reconcile_buyer_completeness: RuntimeError" in message
         assert "pg_gold_internal_check: ValueError" in message
@@ -93,35 +94,40 @@ class TestOneRaisingCheckSilencesNothing:
     async def test_a_critical_from_a_completed_check_still_pages(self):
         """Withholding it because an unrelated check raised is exactly how one
         flaky round-trip used to silence a lost row."""
-        _, paged, _ = await _run({
+        run = await run_mirror_landing({
             "reconcile_order_utm_completeness": RuntimeError("transient"),
             "reconcile_order_versions": [_critical("order_versions_stalled")],
         })
-        assert paged == [["order_versions_stalled"]]
+        assert run.pages == [["order_versions_stalled"]]
 
     @pytest.mark.asyncio
     async def test_a_run_with_any_unverified_check_announces_no_recovery(self):
         """Unchanged, and it must stay unchanged: a check that did not run proves
-        nothing, so the run cannot clear a page it never re-examined."""
-        _, _, resolved = await _run({"reconcile_buyer_completeness": RuntimeError("down")})
-        assert resolved == []
+        nothing, so the run cannot clear a page it never re-examined — the
+        layer is not resolved at all. Mutation: drop the early return on
+        `error_message` in `_resolve_dq_layer`."""
+        run = await run_mirror_landing({"reconcile_buyer_completeness": RuntimeError("down")})
+        assert run.held is None
 
     @pytest.mark.asyncio
-    async def test_a_clean_run_is_exactly_what_it_was(self):
-        persisted, paged, resolved = await _run({})
-        assert persisted["error_message"] is None
-        assert persisted["issues"] == [] and paged == []
-        assert resolved == [[]]
+    async def test_a_clean_run_is_exactly_what_it_was(self, monkeypatch):
+        """With ClickHouse configured, so the archive half counted too: the
+        layer is resolved with nothing held."""
+        monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
+        run = await run_mirror_landing({})
+        assert run.persisted["error_message"] is None
+        assert run.persisted["issues"] == [] and run.pages == []
+        assert run.held == set()
 
     @pytest.mark.asyncio
     async def test_clickhouse_raising_files_gold_unwatched(self):
         """OD-08: a raise leaves the comparison nothing to return, so the job
         files `gold_values_unwatched` itself — CRITICAL, it pages."""
-        persisted, paged, _ = await _run(
+        run = await run_mirror_landing(
             {"reconcile_clickhouse": RuntimeError("ClickHouse refused")})
-        assert [i.check_name for i in persisted["issues"]] == ["gold_values_unwatched"]
-        assert persisted["issues"][0].severity is Severity.CRITICAL
-        assert paged == [["gold_values_unwatched"]]
+        assert [i.check_name for i in run.persisted["issues"]] == ["gold_values_unwatched"]
+        assert run.persisted["issues"][0].severity is Severity.CRITICAL
+        assert run.pages == [["gold_values_unwatched"]]
 
 
 class TestTheUtmCompletenessCheckRunsAsProductionRunsIt:
@@ -134,19 +140,17 @@ class TestTheUtmCompletenessCheckRunsAsProductionRunsIt:
 
     @pytest.mark.asyncio
     async def test_its_finding_reaches_the_run_and_it_is_called_with_nothing(self):
-        mocks = {}
         missing = IntegrityIssue(
             check_name="pg_order_utm_missing", table_name="silver.order_utm",
             severity=Severity.CRITICAL, count=1, sample_ids=(301,),
             description="an order with a comment and no verdict",
         )
-        persisted, paged, _ = await _run(
-            {"reconcile_order_utm_completeness": [missing]}, mocks=mocks)
+        run = await run_mirror_landing({"reconcile_order_utm_completeness": [missing]})
 
-        assert [i.check_name for i in persisted["issues"]] == ["pg_order_utm_missing"]
-        assert persisted["error_message"] is None
-        assert paged == [["pg_order_utm_missing"]]
-        mocks["reconcile_order_utm_completeness"].assert_awaited_once_with()
+        assert [i.check_name for i in run.persisted["issues"]] == ["pg_order_utm_missing"]
+        assert run.persisted["error_message"] is None
+        assert run.pages == [["pg_order_utm_missing"]]
+        run.checks["reconcile_order_utm_completeness"].assert_awaited_once_with()
 
 
 class TestTheGoldRollUpIsAskedEveryRun:
@@ -157,23 +161,21 @@ class TestTheGoldRollUpIsAskedEveryRun:
 
     @pytest.mark.asyncio
     async def test_it_is_asked_once_and_its_finding_pages(self):
-        mocks = {}
         mismatch = IntegrityIssue(
             check_name="gold_rollup_mismatch", table_name="gold.daily_revenue",
             severity=Severity.CRITICAL, count=1, description="fine rows do not add up",
         )
-        persisted, paged, _ = await _run(
-            {"pg_gold_internal_check": [mismatch]}, mocks=mocks)
-        mocks["pg_gold_internal_check"].assert_awaited_once_with()
-        assert [i.check_name for i in persisted["issues"]] == ["gold_rollup_mismatch"]
-        assert paged == [["gold_rollup_mismatch"]]
+        run = await run_mirror_landing({"pg_gold_internal_check": [mismatch]})
+        run.checks["pg_gold_internal_check"].assert_awaited_once_with()
+        assert [i.check_name for i in run.persisted["issues"]] == ["gold_rollup_mismatch"]
+        assert run.pages == [["gold_rollup_mismatch"]]
 
     @pytest.mark.asyncio
     async def test_it_raising_fails_the_run_like_any_other_check(self):
-        persisted, _, resolved = await _run(
+        run = await run_mirror_landing(
             {"pg_gold_internal_check": RuntimeError("gold.daily_revenue is gone")})
-        assert "pg_gold_internal_check: RuntimeError" in persisted["error_message"]
-        assert resolved == []
+        assert "pg_gold_internal_check: RuntimeError" in run.persisted["error_message"]
+        assert run.held is None
 
 
 class TestTheRunSaysWhichChecksItAsked:
@@ -184,15 +186,17 @@ class TestTheRunSaysWhichChecksItAsked:
 
     @pytest.mark.asyncio
     async def test_it_names_every_check_in_order(self):
-        returned = []
-        await _run({}, returned=returned)
-        assert returned[0]["checks_run"] == check_order() == ALL_CHECKS
+        """And each named check was asked, once. Mutation: leave a check out
+        of the run, or out of `checks_run`."""
+        run = await run_mirror_landing({})
+        assert run.result["checks_run"] == ALL_CHECKS
+        assert {name: stub.await_count for name, stub in run.checks.items()} == \
+            dict.fromkeys(ALL_CHECKS, 1)
 
     @pytest.mark.asyncio
     async def test_a_check_that_raised_was_still_asked(self):
-        returned = []
-        await _run({"pg_gold_internal_check": ValueError("boom")}, returned=returned)
-        assert "pg_gold_internal_check" in returned[0]["checks_run"]
+        run = await run_mirror_landing({"pg_gold_internal_check": ValueError("boom")})
+        assert "pg_gold_internal_check" in run.result["checks_run"]
 
     def test_it_is_on_the_completion_line(self):
         """`extra=result` is how the formatter puts it on the line; a key a
