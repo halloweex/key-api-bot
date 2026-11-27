@@ -593,13 +593,13 @@ for (m, p), n in c.most_common(): print(n, m, p)'
 no paths to remember, nothing reaching the network.
 
 **Baseline as of 2026-11-27, after batch 2 of the test rewrite (the review
-of 2026-11-18), with the store up: 9 198 passed, 26 skipped** — measured in
+of 2026-11-18), with the store up: 9 259 passed, 26 skipped** — measured in
 Docker as CI runs it (Python 3.14 with `requirements-dev.lock`, a throwaway
 Postgres 17.2, `TZ=UTC`); the skips are ClickHouse (18), "root lists a
 directory" (5), no real gpg (2) and one TIMESTAMPTZ case. Any change that
 lowers the passing count is a regression until explained; a batch of the
 rewrite explains its own drop, since it replaces brittle tests with fewer
-behavioural ones. (It was 9 327 just before it, on 2026-11-27; 9 221 on
+behavioural ones. (It was 9 388 just before it, on 2026-11-27; 9 221 on
 2026-11-23, after batches 0 and 1; 9 378 on 2026-11-19, with revision 0039;
 9 045 on 2026-11-18, after the cleanup that deleted 1 300 tombstone cases —
 tests guarding the finished DuckDB exit — 10 344 just before it, 9 288 on
