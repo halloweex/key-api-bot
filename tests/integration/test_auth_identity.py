@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from web.main import app
+from tests.helpers.access_api_startup import run_startup
 from tests.helpers.access_lists import bot_store_on_postgres, execute, rows
 from tests.helpers.app_client import signed_in
 from tests.integration.pg_sms_seed import needs_postgres
@@ -469,17 +470,19 @@ class TestSessionSigningKeyIsNotTheBotToken:
         self._config_with(monkeypatch, "http://localhost:8080", None)
         validate_config(require_bot=False, require_api=True, require_secret_key=True)
 
-    def test_the_web_startup_asks_for_the_guard(self, monkeypatch):
-        """The guard is opt-in per service; the web app is the service that
-        signs sessions, so it is the one that must pass require_secret_key.
-        """
-        import inspect
-        import web.main
+    def test_the_web_start_refuses_without_a_dedicated_key(self, monkeypatch, tmp_path):
+        """The guard is opt-in per service; web signs the sessions, so web's
+        start must ask for it, and end the process on it before anything
+        starts — a refusal logged and ignored would serve on the fallback key.
+        Run through web's real `startup_event`, whatever it would start
+        faked (tests/helpers/access_api_startup.py)."""
+        self._config_with(monkeypatch, "https://dashboard.invalid", None)
+        started = []
+        with pytest.raises(SystemExit) as exit_:
+            run_startup(monkeypatch, tmp_path, started)
 
-        source = inspect.getsource(web.main)
-        assert "require_secret_key=True" in source
-        assert "SystemExit(1)" in source, \
-            "a logged-and-ignored ConfigurationError would boot with the fallback key"
+        assert exit_.value.code not in (0, None), "the process must end as failed"
+        assert started == [], "the start went on past the refused configuration"
 
 
 class TestSessionCookieAttributes:

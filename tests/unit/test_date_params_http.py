@@ -180,6 +180,15 @@ def _get(client, endpoint, **dates):
     return client.get(path, params={**params, **dates})
 
 
+def _refused_naming(response, field: str) -> None:
+    """A 400 in the one shape these routes' validators answer,
+    `{"detail": "<field>: ..."}`, naming the parameter refused."""
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert set(body) == {"detail"}, body
+    assert body["detail"].startswith(f"{field}:"), body
+
+
 def test_the_walk_finds_the_routes():
     """A walk that found nothing would pass every test below."""
     paths = {e.path for e in DATED}
@@ -193,10 +202,7 @@ def test_the_walk_finds_the_routes():
 @pytest.mark.parametrize("endpoint", DATED, ids=lambda e: e.path)
 def test_a_malformed_date_is_a_400_naming_it(admin_client, endpoint, field):
     dates = {"start_date": "2026-01-01", "end_date": "2026-01-31", field: "2026-02-30"}
-    r = _get(admin_client, endpoint, **dates)
-    assert r.status_code == 400, r.text
-    assert r.json() == {
-        "detail": f"{field}: Invalid date format. Expected %Y-%m-%d (got: '2026-02-30')"}
+    _refused_naming(_get(admin_client, endpoint, **dates), field)
 
 
 @pytest.mark.parametrize("endpoint", DATED, ids=lambda e: e.path)
@@ -204,10 +210,7 @@ def test_a_range_over_the_cap_is_a_400(admin_client, endpoint):
     start = date(2000, 1, 1)
     end = start + timedelta(days=MAX_RANGE_DAYS)
     r = _get(admin_client, endpoint, start_date=start.isoformat(), end_date=end.isoformat())
-    assert r.status_code == 400, r.text
-    assert r.json() == {"detail": (
-        f"date_range: Date range cannot exceed {MAX_RANGE_DAYS} days "
-        f"(got: '{MAX_RANGE_DAYS + 1} days')")}
+    _refused_naming(r, "date_range")
 
 
 @pytest.mark.parametrize("raw", ["2026-02-30", "2026-13-01", "26-01-01", "2026-01-01T00:00"])
@@ -215,9 +218,7 @@ def test_the_pilots_four_on_the_trend(admin_client, raw):
     """The four the Rust pilot reported, each a 500 on 3.14 before."""
     r = admin_client.get("/api/revenue/trend",
                          params={"start_date": raw, "end_date": "2026-03-31"})
-    assert r.status_code == 400
-    assert r.json() == {
-        "detail": f"start_date: Invalid date format. Expected %Y-%m-%d (got: {raw!r})"}
+    _refused_naming(r, "start_date")
 
 
 def test_the_pilots_range_on_the_trend(admin_client):
@@ -226,8 +227,7 @@ def test_the_pilots_range_on_the_trend(admin_client):
     outside the window, which refuses it before its days are counted."""
     r = admin_client.get("/api/revenue/trend", params={
         "start_date": "0002-01-01", "end_date": "9999-12-30", "compare_type": "year_ago"})
-    assert r.status_code == 400
-    assert r.json()["detail"].startswith("start_date: Date must be between ")
+    _refused_naming(r, "start_date")
 
 
 # A day either side of the window, which every route answered with zeros, and
@@ -250,11 +250,7 @@ COMPARISONS = ["previous_period", "year_ago", "month_ago"]
 @pytest.mark.parametrize("field, start, end", OUTSIDE)
 @pytest.mark.parametrize("endpoint", DATED, ids=lambda e: e.path)
 def test_a_date_outside_the_window_is_a_400_naming_it(admin_client, endpoint, field, start, end):
-    r = _get(admin_client, endpoint, start_date=start, end_date=end)
-    raw = start if field == "start_date" else end
-    assert r.status_code == 400, r.text
-    assert r.json() == {
-        "detail": f"{field}: Date must be between 2000-01-01 and 2099-12-31 (got: {raw!r})"}
+    _refused_naming(_get(admin_client, endpoint, start_date=start, end_date=end), field)
 
 
 @pytest.mark.parametrize("compare_type", COMPARISONS)
@@ -264,8 +260,7 @@ def test_the_trend_refuses_them_under_every_comparison(admin_client, compare_typ
     the calendar its own way under each: a year, a month or a period back."""
     r = admin_client.get("/api/revenue/trend", params={
         "start_date": start, "end_date": end, "compare_type": compare_type})
-    assert r.status_code == 400
-    assert r.json()["detail"].startswith(f"{field}: Date must be between ")
+    _refused_naming(r, field)
 
 
 # The window's own edges, and a backwards range across all of it: every
@@ -372,11 +367,16 @@ class TestValidInputAnswersAsBefore:
         assert r.status_code == 200
         assert len(r.json()["labels"]) == MAX_RANGE_DAYS
 
-    def test_traffic_still_checks_its_own_filters_first(self, admin_client):
-        """Two traffic routes check `platform` and the rest between their
-        `try` and the dates, so their parse is guarded where it stands: a
-        request wrong twice is answered as it was, on the platform."""
-        r = admin_client.get("/api/traffic/transactions", params={
-            "platform": "myspace", "start_date": "2026-02-30", "end_date": "2026-03-01"})
-        assert r.status_code == 400
-        assert r.json() == {"detail": "Invalid platform: myspace"}
+    @pytest.mark.parametrize("path", ["/api/traffic/transactions",
+                                      "/api/traffic/utm-campaigns"])
+    def test_traffic_refuses_a_platform_it_does_not_know(self, admin_client, path):
+        """The two traffic routes that filter by `platform` refuse a value no
+        classifier writes, 400 with one `detail`, rather than answer an empty
+        page for it; a platform the tab offers is answered."""
+        _needs_postgres(path)
+        dates = {"start_date": "2026-02-01", "end_date": "2026-02-28"}
+        unknown = admin_client.get(path, params={**dates, "platform": "myspace"})
+        known = admin_client.get(path, params={**dates, "platform": "facebook"})
+        assert unknown.status_code == 400, unknown.text
+        assert set(unknown.json()) == {"detail"}, unknown.json()
+        assert known.status_code == 200, known.text

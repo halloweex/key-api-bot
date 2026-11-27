@@ -69,12 +69,13 @@ class TestConnectionManager:
 
     @pytest.mark.asyncio
     async def test_disconnect_cleans_up_empty_rooms(self, manager, mock_websocket):
-        """Test that empty rooms are cleaned up after disconnect."""
+        """A room whose last connection left is gone from the stats /ws/stats
+        serves, not listed with a count of zero."""
         conn_info = await manager.connect(mock_websocket, room="test_room")
-        assert "test_room" in manager._rooms
+        assert "test_room" in manager.get_stats()["rooms"]
 
         await manager.disconnect(conn_info)
-        assert "test_room" not in manager._rooms
+        assert "test_room" not in manager.get_stats()["rooms"]
 
     @pytest.mark.asyncio
     async def test_broadcast_sends_to_all_in_room(self, manager):
@@ -159,28 +160,18 @@ class TestConnectionManager:
         assert manager.connection_count("dashboard") == 1
 
     @pytest.mark.asyncio
-    async def test_handle_ping_message(self, manager, mock_websocket):
-        """Test that ping messages are handled with pong response."""
+    @pytest.mark.parametrize("message", ["ping", '{"action": "ping"}'],
+                             ids=["plain", "json"])
+    async def test_a_ping_is_answered_with_one_pong(self, manager, mock_websocket, message):
+        """The keep-alive, in either form a client sends it: the socket
+        receives exactly one message back, and it is a pong."""
         conn_info = await manager.connect(mock_websocket, room="dashboard")
         mock_websocket.send_text.reset_mock()
 
-        await manager.handle_message(conn_info, "ping")
+        await manager.handle_message(conn_info, message)
 
-        # Should have sent a pong response
-        mock_websocket.send_text.assert_called()
-        sent = json.loads(mock_websocket.send_text.call_args[0][0])
-        assert sent["event"] == "pong"
-
-    @pytest.mark.asyncio
-    async def test_handle_json_message(self, manager, mock_websocket):
-        """Test that JSON messages are parsed correctly."""
-        conn_info = await manager.connect(mock_websocket, room="dashboard")
-        mock_websocket.send_text.reset_mock()
-
-        # Send a JSON ping
-        await manager.handle_message(conn_info, '{"action": "ping"}')
-
-        mock_websocket.send_text.assert_called()
+        sent = [json.loads(c.args[0]) for c in mock_websocket.send_text.call_args_list]
+        assert [m["event"] for m in sent] == ["pong"]
 
     @pytest.mark.asyncio
     async def test_connection_count(self, manager):

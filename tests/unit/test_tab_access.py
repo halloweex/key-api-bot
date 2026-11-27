@@ -8,15 +8,15 @@ actually take from the admin page and must not be folded into the first.
 """
 from __future__ import annotations
 
-import inspect
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 
 from core import permissions as perm
+from tests.helpers.access_api_bot import handler_for, start_the_bot, tap
 
 
 # ─── the rule ────────────────────────────────────────────────────────────────
@@ -420,108 +420,126 @@ class TestTheSharedSqlRuns:
 
 
 class TestTheHandlersAreReachable:
-    def test_every_tab_callback_is_registered(self):
+    def test_every_button_of_the_checklist_reaches_its_handler(
+        self, handlers, monkeypatch, tmp_path,
+    ):
         """A handler nobody routed to is a button that does nothing, which is
-        exactly how a keyboard fails silently."""
-        import bot.main as main
+        exactly how a keyboard fails silently. The bot is started as its
+        container starts it (tests/helpers/access_api_bot.py) and every
+        button of the checklist is tapped: the handler that takes the tap is
+        the one that acts on that button. Mutation: a pattern that misses a
+        tab key, or a handler registered before it that swallows the tap."""
+        import bot.handlers as facade
 
-        source = inspect.getsource(main)
-        for name, pattern in (
-            ("auth_toggle_tab", "atab:"),
-            ("auth_apply_preset", "apre:"),
-            ("auth_tabs_done", "adone:"),
-        ):
-            assert f"handlers.{name}" in source, name
-            assert pattern in source, pattern
+        acts_on = {"atab": facade.auth_toggle_tab, "apre": facade.auth_apply_preset,
+                   "adone": facade.auth_tabs_done}
+        bot = start_the_bot(monkeypatch, tmp_path)
+        markup = handlers._tabs_keyboard(9_999_999_999, ["traffic"], "en")
+
+        for button in (b for row in markup.inline_keyboard for b in row):
+            taken_by = handler_for(bot, tap(button.callback_data))
+            assert taken_by is not None, f"nothing takes {button.callback_data}"
+            assert taken_by.callback is acts_on[button.callback_data.split(":")[0]], \
+                button.callback_data
 
 
 # ─── what the permission cache costs ─────────────────────────────────────────
 
 
-class _MatrixStore:
-    def __init__(self, rows):
-        self.rows = rows
-        self.seeds = 0
-        self.reads = 0
-
-    async def seed_default_permissions(self):
-        self.seeds += 1
-
-    async def get_role_permissions(self, role):
-        self.reads += 1
-        return self.rows
+_CELL_SQL = """
+    INSERT INTO app.role_permissions (role, feature, can_view, can_edit, can_delete)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (role, feature) DO UPDATE SET
+        can_view = excluded.can_view, can_edit = excluded.can_edit,
+        can_delete = excluded.can_delete
+"""
 
 
 @pytest.mark.asyncio
-class TestTheRoleMatrixIsReadOnce:
-    """Every miss is two acquisitions of DuckDB's process-wide store lock —
-    one to seed, one to read. That was affordable while `expenses` and `sms`
-    were the only gated features; per-user tabs put a permission dependency on
-    roughly 120 of the 140 endpoints.
+class TestTheRoleMatrixIsCached:
+    """The role matrix behind ~120 of the 140 endpoints' permission checks is
+    read from `app.role_permissions` once per role and held until the cache
+    is cleared: by a permission written through the admin page
+    (`set_permission_async`), or by `invalidate_permissions_cache`.
+
+    Over the test Postgres: each case writes the table directly, under the
+    cache, and reads what the cache answers. A viewer's stored `traffic`
+    row says edit, which the hardcoded matrix does not, so a stored answer
+    and the hardcoded fallback are told apart. Skipped without `KS_PG_DSN`.
     """
 
-    def setup_method(self):
-        perm.invalidate_permissions_cache()
+    STORED = {"view": True, "edit": True, "delete": False}
 
-    def teardown_method(self):
-        perm.invalidate_permissions_cache()
+    @pytest_asyncio.fixture
+    async def matrix(self, monkeypatch):
+        """Writes one cell of `app.role_permissions`, emptied before and
+        after; the cache starts and ends empty."""
+        from tests.integration import pg_sms_seed
 
-    async def _ask_twice(self, monkeypatch, rows):
-        store = _MatrixStore(rows)
+        if not pg_sms_seed.DSN:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+        async with pg_sms_seed.on_postgres(
+                monkeypatch, ("app.role_permissions",), what="the role matrix") as pool:
 
-        async def get_store():
-            return store
+            async def store_cell(role, feature, view, edit, delete):
+                async with pool.acquire() as conn:
+                    await conn.execute(_CELL_SQL, role, feature, view, edit, delete)
 
-        monkeypatch.setattr("core.store.get_store", get_store)
+            perm.invalidate_permissions_cache()
+            try:
+                yield store_cell
+            finally:
+                perm.invalidate_permissions_cache()
+
+    async def test_a_stored_answer_is_held_until_the_cache_is_cleared(self, matrix):
+        await matrix("viewer", "traffic", True, True, False)
         first = await perm.get_permissions_for_role_async("viewer")
-        second = await perm.get_permissions_for_role_async("viewer")
-        assert first == second
-        return store, first
+        assert first["traffic"] == self.STORED
 
-    async def test_a_populated_matrix_is_read_once(self, monkeypatch):
-        rows = {"traffic": {"view": True, "edit": False, "delete": False}}
-        store, result = await self._ask_twice(monkeypatch, rows)
-        assert (store.seeds, store.reads) == (1, 1)
-        assert result["traffic"]["view"] is True
+        await matrix("viewer", "traffic", True, False, False)
+        assert await perm.get_permissions_for_role_async("viewer") == first
 
-    async def test_an_empty_matrix_is_read_once_too(self, monkeypatch):
-        """It used to be read on *every* call: the cache was only written when
-        the table had rows, so an empty one meant a seed and a read per
-        request, forever."""
-        store, result = await self._ask_twice(monkeypatch, {})
-        assert (store.seeds, store.reads) == (1, 1)
-        # And what it serves is the hardcoded matrix, unchanged.
-        assert result == perm.get_permissions_for_role("viewer")
+        perm.invalidate_permissions_cache()
+        changed = await perm.get_permissions_for_role_async("viewer")
+        assert changed["traffic"] == {"view": True, "edit": False, "delete": False}
 
-    async def test_an_error_is_not_cached(self, monkeypatch):
-        """An error is not an answer — the next request may get one."""
+    async def test_a_role_with_nothing_stored_is_held_too(self, matrix):
+        """A stored `marketer` (a level until revision 0023) is a role the
+        seed writes no rows for: the hardcoded matrix answers, and that
+        answer is held like a stored one. It used to be read again on every
+        request."""
+        first = await perm.get_permissions_for_role_async("marketer")
+        assert first == perm.get_permissions_for_role("marketer")
 
-        class Broken(_MatrixStore):
-            async def get_role_permissions(self, role):
-                self.reads += 1
-                raise RuntimeError("store is down")
+        await matrix("marketer", "traffic", True, False, False)
+        assert await perm.get_permissions_for_role_async("marketer") == first
 
-        store = Broken({})
+        perm.invalidate_permissions_cache()
+        stored = await perm.get_permissions_for_role_async("marketer")
+        assert stored["traffic"] == {"view": True, "edit": False, "delete": False}
 
-        async def get_store():
-            return store
+    async def test_an_error_is_not_held(self, matrix):
+        """An error is not an answer: with Postgres down the hardcoded matrix
+        answers, and the next request, Postgres back, gets the stored row."""
+        await matrix("viewer", "traffic", True, True, False)
+        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("Postgres is down"))):
+            down = await perm.get_permissions_for_role_async("viewer")
+        assert down == perm.get_permissions_for_role("viewer")
 
-        monkeypatch.setattr("core.store.get_store", get_store)
-        await perm.get_permissions_for_role_async("viewer")
-        await perm.get_permissions_for_role_async("viewer")
-        assert store.reads == 2
+        back = await perm.get_permissions_for_role_async("viewer")
+        assert back["traffic"] == self.STORED
 
-    async def test_the_store_is_not_touched_on_a_hit(self, monkeypatch):
-        """The cache used to be checked *after* `get_store()`, so a broken
-        store could not even serve an answer already held."""
-        store, _ = await self._ask_twice(
-            monkeypatch, {"traffic": {"view": True, "edit": False, "delete": False}})
+    @pytest.mark.parametrize("broken", ["core.pg.get_pool", "core.store.get_store"])
+    async def test_a_held_answer_is_served_with_the_store_down(self, matrix, broken):
+        """The cache used to be checked after `get_store()`, so a store that
+        could not be reached could not even serve an answer already held."""
+        await matrix("viewer", "traffic", True, True, False)
+        first = await perm.get_permissions_for_role_async("viewer")
+        assert first != perm.get_permissions_for_role("viewer")
 
-        async def explode():
-            raise AssertionError("get_store must not be called on a cache hit")
-
-        monkeypatch.setattr("core.store.get_store", explode)
-        await perm.get_permissions_for_role_async("viewer")
+        with patch(broken, new=AsyncMock(side_effect=OSError("the store is down"))):
+            held = await perm.get_permissions_for_role_async("viewer")
+        assert held == first
 
 
 # ─── the push side ───────────────────────────────────────────────────────────

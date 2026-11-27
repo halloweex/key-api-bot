@@ -15,6 +15,7 @@ are forged for a hardcoded admin id, whose auth path does not touch the DB.
 """
 import hashlib
 import hmac
+import re
 import time
 
 import pytest
@@ -27,11 +28,9 @@ from web.main import app
 from web.routes.auth import (
     session_serializer,
     create_session_data,
-    api_gate,
     require_user,
     require_admin,
     get_current_user_ws,
-    PUBLIC_API_PATHS,
     SESSION_COOKIE,
 )
 from core.permissions import ADMIN_USER_IDS
@@ -65,16 +64,6 @@ def _cookie_header(value: str) -> dict:
     return {"Cookie": f"{SESSION_COOKIE}={value}"}
 
 
-def _all_dep_calls(dependant) -> set:
-    """Flatten every callable in a route's resolved dependency tree."""
-    calls = set()
-    for d in dependant.dependencies:
-        if d.call is not None:
-            calls.add(d.call)
-        calls |= _all_dep_calls(d)
-    return calls
-
-
 def _route(path: str, method: str = "GET"):
     # `app.routes` is no longer flat — see tests/routes_helper.
     from tests.routes_helper import find_route
@@ -103,47 +92,106 @@ def client():
 
 # ─── #1 / #2  API surface requires authentication ─────────────────────────────
 
+# The routes under /api answered without a session, by design. /api/health is
+# polled by Docker, nginx and the uptime monitor. /api/webhooks/turbosms is
+# called by the SMS gateway, which cannot hold a session; it checks a SHA1
+# signature over a shared secret and fails closed without one
+# (tests/integration/test_turbosms_webhook.py). Any other route answering
+# without a session is a hole; adding one here is a decision.
+OPEN_WITHOUT_A_SESSION = {
+    ("GET", "/api/health"),
+    ("POST", "/api/webhooks/turbosms"),
+}
+
+# Routes the walk must reach — one on the API's own router, one behind the
+# admin router's include, one on the chat router's include — so that a walk
+# that lost the nested routers cannot pass by finding nothing to refuse.
+REACHED_BY_THE_WALK = {
+    ("GET", "/api/summary"),
+    ("GET", "/api/jobs"),
+    ("POST", "/api/chat"),
+}
+
+
+def _every_api_request():
+    """(method, path template, url) of every endpoint under /api, read off
+    the app, each `{parameter}` filled with 1."""
+    from tests.routes_helper import iter_endpoints
+
+    for endpoint in sorted(iter_endpoints(app), key=lambda e: e.path):
+        if not endpoint.path.startswith("/api/"):
+            continue
+        url = re.sub(r"\{[^}]*\}", "1", endpoint.path)
+        for method in sorted(endpoint.methods):
+            yield method, endpoint.path, url
+
+
+@pytest.fixture
+def gate_sweep(monkeypatch):
+    """The two open routes answer without reaching anything outside the
+    process: Postgres refuses, so /api/health answers its blocks empty; the
+    webhook has no secret, so it refuses before it reads a payload. The
+    webhook's rejection counters and the rate limiter start and end empty."""
+    from unittest.mock import AsyncMock
+
+    from web.ratelimit import limiter
+    from web.routes.api import webhooks
+
+    monkeypatch.setattr("core.pg.get_pool",
+                        AsyncMock(side_effect=OSError("Postgres is not reached from this test")))
+    monkeypatch.delenv("TURBOSMS_WEBHOOK_SECRET", raising=False)
+    webhooks._dlr_counts.clear()
+    limiter.reset()
+    yield
+    limiter.reset()
+    webhooks._dlr_counts.clear()
+
+
 class TestApiRequiresAuth:
-    """Every data/mutation endpoint must reject unauthenticated callers."""
+    """Every endpoint under /api is behind the gate: without a session it
+    answers nothing, and below admin it answers nothing of
+    `sales_type=internal`."""
 
-    PROTECTED_GETS = [
-        "/api/summary",
-        "/api/categories",
-        "/api/customers/insights",
-        "/api/expenses/summary",
-        "/api/margin/overview",
-        "/api/stocks/summary",
-        "/api/products/intel/summary",
-        "/api/reports/marketing-summary",
-        "/api/health/detailed",
-        # The health router's only public path is /api/health itself; the three
-        # operational reads beside it must each still refuse an anonymous
-        # caller. What they disclose to an *approved* one is a separate
-        # question, answered in tests/integration/test_health_router_disclosure.py.
-        "/api/health/data-quality",
-        "/api/metrics",
-        "/ws/stats",
-    ]
+    def test_every_api_route_refuses_an_anonymous_caller(self, gate_sweep):
+        """Every route under /api, every method, asked with no cookie: 401,
+        but for the routes open by design. The gate answers before the
+        route's parameters or body are read, so nothing else runs. Mutation:
+        include a router without the gate, or add a path to the open set."""
+        client = TestClient(app, raise_server_exceptions=False)
+        answers = {(method, path): client.request(method, url).status_code
+                   for method, path, url in _every_api_request()}
 
-    PROTECTED_POSTS = [
-        "/api/revenue/forecast/train",
-        "/api/revenue/forecast/tune",
-        "/api/expenses",
-        "/api/stocks/snapshot/refresh",
-        # The sync levers (step 14's S14-17). Their aliases under
-        # /api/duckdb/ went at the final stage; what those paths answer now
-        # is held in tests/unit/test_sync_doors.py.
-        "/api/sync/sync-buyers",
-        "/api/sync/resync",
-    ]
+        assert REACHED_BY_THE_WALK <= answers.keys()
+        assert {route for route, status in answers.items() if status != 401} \
+            == OPEN_WITHOUT_A_SESSION
 
-    @pytest.mark.parametrize("path", PROTECTED_GETS)
-    def test_protected_get_returns_401_without_session(self, client, path):
-        assert client.get(path).status_code == 401
+    def test_every_api_route_refuses_internal_to_a_viewer(self, gate_sweep, monkeypatch):
+        """The gate's other half: `sales_type=internal` is the admin's on
+        every route, so an approved viewer asking for it is refused, 403,
+        everywhere but the routes that never ask who is calling. A router
+        that checks the session itself instead of through the gate answers
+        an anonymous caller 401 all the same; this is where it shows.
 
-    @pytest.mark.parametrize("path", PROTECTED_POSTS)
-    def test_protected_post_returns_401_without_session(self, client, path):
-        assert client.post(path, json={}).status_code == 401
+        The viewer's session is resolved without reading the user list, as
+        `admin_client` in tests/conftest.py resolves its admin: what is
+        asked here is the gate on every route, and resolving a session is
+        tests/integration/test_auth_identity.py's."""
+        viewer = 555_000_111
+        assert viewer not in ADMIN_USER_IDS
+
+        async def _resolve(session):
+            return {"user_id": viewer, "role": "viewer", "allowed_features": None}
+
+        monkeypatch.setattr("web.routes.auth._resolve_session", _resolve)
+        client = TestClient(app, raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE, _make_cookie(viewer, role="viewer"))
+        answers = {(method, path): client.request(
+                       method, url, params={"sales_type": "internal"}).status_code
+                   for method, path, url in _every_api_request()}
+
+        assert REACHED_BY_THE_WALK <= answers.keys()
+        assert {route for route, status in answers.items() if status != 403} \
+            == OPEN_WITHOUT_A_SESSION
 
     def test_malformed_session_cookie_rejected(self, client):
         r = client.get("/api/summary", headers=_cookie_header("not-a-valid-token"))
@@ -156,85 +204,47 @@ class TestApiRequiresAuth:
         assert r.status_code == 401
 
 
-# ─── #10  Admin router is admin-only; /api/health stays public ────────────────
+# ─── #10  The admin and ops routes are the admin's ────────────────────────────
 
-class TestAuthorizationStructure:
-    """Structural checks on the resolved dependency tree (DB-free, deterministic)."""
+# The ops surface, and the three forecast levers that each hold the single ML
+# thread for minutes. `evaluate` was gated on the dashboard tab until
+# 2026-11-04, so any viewer could start a walk-forward cross-validation five
+# times an hour.
+ADMIN_OPS_ROUTES = [
+    ("GET", "/api/jobs"),
+    ("GET", "/api/sync/stats"),
+    ("GET", "/api/warehouse/status"),
+    ("POST", "/api/revenue/forecast/train"),
+    ("POST", "/api/revenue/forecast/tune"),
+    ("GET", "/api/revenue/forecast/evaluate"),
+]
 
-    def test_health_is_listed_public(self):
-        # The single source of truth for what's reachable without a session.
-        #
-        # /api/health          — polled by Docker, nginx and uptime monitors.
-        # /api/webhooks/turbosms — called by the SMS gateway, which cannot hold
-        #   a session; it authenticates with a SHA1 signature over a shared
-        #   secret and fails closed when the secret is unset. Signature
-        #   behaviour is pinned in tests/integration/test_turbosms_webhook.py.
-        assert PUBLIC_API_PATHS == {"/api/health", "/api/webhooks/turbosms"}, \
-            "PUBLIC_API_PATHS drifted — every entry must be a deliberate, audited exception"
 
-    def test_every_api_route_is_under_api_gate(self):
-        """Iterate ALL registered /api/* routes and assert each carries api_gate.
+@needs_postgres
+class TestAdminOpsAreAdminOnly:
 
-        Previously this was a hand-curated path list of 6 spot-checks; a new
-        endpoint added on a router that escapes the include-level gate (the
-        chat router was such a case) would not be caught. Now we walk the
-        live route table — every /api/* route must have api_gate in its
-        resolved dependency tree, period.
-        """
-        from tests.routes_helper import iter_endpoints
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,path", ADMIN_OPS_ROUTES)
+    async def test_an_approved_viewer_is_refused(self, monkeypatch, method, path):
+        """A viewer approved in `app.dashboard_users` gets 403, and no model
+        work starts: the forecast service is one that records what it is
+        asked. Mutation: drop `require_admin` from the route or its include."""
+        from types import SimpleNamespace
 
-        leaked = []
-        for endpoint in iter_endpoints(app):
-            if not endpoint.path.startswith("/api/"):
-                continue
-            # `api_gate` is applied at the `/api` include, so it is inherited
-            # rather than present on the route's own dependant.
-            if api_gate not in endpoint.dependencies:
-                methods = ",".join(sorted(endpoint.methods or {"?"}))
-                leaked.append(f"{methods} {endpoint.path}")
-        assert not leaked, \
-            "audit-invariant drift — /api/* routes outside api_gate:\n  " + "\n  ".join(leaked)
+        asked = []
 
-    # `/api/bronze/stats` stood here until 2026-09-14. It went with the H3
-    # staging-merge subsystem, whose table had been empty since 2026-05-19.
-    # The remaining three are the admin-ops surface this invariant is about.
-    @pytest.mark.parametrize(
-        "path", ["/api/jobs", "/api/sync/stats", "/api/warehouse/status"])
-    def test_admin_ops_endpoints_require_admin(self, path):
-        route = _route(path)
-        assert route is not None
-        assert require_admin in _deps(path), \
-            f"{path} dropped require_admin — admin→user downgrade regression"
+        async def _work(sales_type="retail"):
+            asked.append(sales_type)
+            return {}
 
-    @pytest.mark.parametrize("method,path", [
-        ("POST", "/api/revenue/forecast/train"),
-        ("POST", "/api/revenue/forecast/tune"),
-        ("GET", "/api/revenue/forecast/evaluate"),
-    ])
-    def test_the_forecast_levers_require_admin(self, method, path):
-        """Each holds the single ML thread for minutes. `evaluate` was gated
-        on the dashboard tab until 2026-11-04, so any viewer could start a
-        walk-forward cross-validation five times an hour."""
-        assert require_admin in _deps(path, method), \
-            f"{method} {path} is not admin-only"
+        monkeypatch.setattr(
+            "core.prediction_service.get_prediction_service",
+            lambda: SimpleNamespace(train=_work, tune=_work, evaluate=_work))
+        async with signed_in("viewer") as viewer:
+            r = await viewer.request(method, path)
 
-    def test_admin_endpoint_403_for_non_admin(self, client, monkeypatch):
-        """A logged-in viewer (not a hardcoded admin) is forbidden from /api/jobs."""
-        viewer_id = 555_000_111
-        assert viewer_id not in ADMIN_USER_IDS
-
-        class _Store:
-            async def get_user(self, uid):
-                return {"status": "approved", "role": "viewer"}
-
-        async def _fake_get_store():
-            return _Store()
-
-        # _resolve_session imports get_store from core.duckdb_store at call time
-        monkeypatch.setattr("core.store.get_store", _fake_get_store)
-
-        r = client.get("/api/jobs", headers=_cookie_header(_make_cookie(viewer_id, role="viewer")))
-        assert r.status_code == 403
+        assert r.status_code == 403, f"{method} {path} answered a viewer with {r.status_code}"
+        assert asked == [], f"{method} {path} started the model's work for a viewer"
 
 
 # ─── Customer PII is admin-only ───────────────────────────────────────────────
