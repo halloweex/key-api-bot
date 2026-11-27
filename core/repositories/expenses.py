@@ -6,7 +6,6 @@ from datetime import date, timedelta
 from typing import Optional, List, Dict, Any
 
 from core import read_fallback
-from core.duckdb_constants import not_own_entity
 
 logger = logging.getLogger(__name__)
 
@@ -102,12 +101,19 @@ class ExpensesMixin:
         expense_type_id: Optional[int] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get expense summary for a date range."""
+        """Get expense summary for a date range.
+
+        The expenses of the orders that count as revenue (`is_active_source`),
+        returns included — the same orders and the same costs the profit chart
+        subtracts (`get_profit_analysis`), so the tab says one total
+        (2026-11-27). Until then this read also counted the costs of Opencart
+        orders and of sales to the company's own entity.
+        """
         params: List[Any] = [start_date, end_date]
         # `s.order_date` rather than `_date_in_kyiv(o.ordered_at)`: Silver
         # stores the Kyiv date, computed by the same expression, so reading
         # the column is the same answer without converting per row.
-        where_clauses = ["s.order_date BETWEEN ? AND ?"]
+        where_clauses = ["s.order_date BETWEEN ? AND ?", "s.is_active_source"]
 
         # The classification as a column, not an EXISTS against Silver from
         # raw orders. `_build_sales_type_filter` was already reading Silver
@@ -234,16 +240,23 @@ class ExpensesMixin:
         # 47,338 orders, zero disagreements — so this is a rename, not a
         # redefinition.
         #
-        # A sale to the company's own legal entity is not revenue (the
-        # owner's decision of 2026-11-14), so it is not profit either: its
-        # money and its costs both leave, because the costs are joined to
-        # the orders kept. Spelled out rather than read off
-        # `is_active_source`, which carries it, because this read has always
-        # counted Opencart too, and that is not what the decision moved.
+        # ONE SET OF ORDERS FOR BOTH SIDES, AND IT IS THE DASHBOARD'S
+        # (owner's decision, 2026-11-27, after a reconciliation of the whole
+        # dashboard against KeyCRM). The orders are those that count as
+        # revenue — `is_active_source`: a revenue source, and not a sale to
+        # the company's own legal entity. Revenue is theirs less the returns,
+        # Gold's measure, so the chart's revenue is the summary card's. The
+        # costs are every expense on those orders, returns included: delivery
+        # paid for a parcel that came back is spent all the same, and it is
+        # what `get_expense_summary` — the tab's own total — always counted.
+        #
+        # Until then this read counted Opencart's 2024 sales as revenue, which
+        # no other figure of the dashboard does, and dropped the costs of the
+        # returned orders, so the tab showed two different expense totals for
+        # one period.
         where_clauses = [
             "s.order_date BETWEEN ? AND ?",
-            "NOT s.is_return",
-            not_own_entity("s"),
+            "s.is_active_source",
         ]
         if sales_type != "all":
             where_clauses.append("s.sales_type = ?")
@@ -273,7 +286,7 @@ class ExpensesMixin:
         results = await self._expenses_run(f"""
             SELECT
                 s.order_date as day,
-                SUM(s.grand_total) as revenue,
+                COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total END), 0) as revenue,
                 COALESCE(SUM(x.amount), 0) as expenses
             FROM {{silver_orders}} s
             LEFT JOIN (

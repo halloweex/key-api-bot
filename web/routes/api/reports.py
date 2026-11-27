@@ -168,7 +168,9 @@ async def export_marketing_csv(
         ("К-сть клієнтів", "customers", lambda v: f"{v:,}", False),
         ("Нові клієнти", "new_customers", lambda v: f"{v:,}", False),
         ("Клієнти, що повернулись", "returning_customers", lambda v: f"{v:,}", False),
-        ("% повернення", "return_rate", lambda v: f"{v:.0f}%", False),
+        # The returning customers' share of the period's customers — not the
+        # returned orders, which `/reports` calls `return_rate` (2026-11-27).
+        ("% клієнтів, що повернулись", "return_rate", lambda v: f"{v:.0f}%", False),
     ]
     for label, key, fmt, show_goal in general_rows:
         cur = report["general_sales"]["current"][key]
