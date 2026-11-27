@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.370
+
+- fix(ch_history): the archive's heal leaves a durable trace
+
+
 ## 3.0.369
 
 - refactor(canary): the job is bot.canary.canary_job, and its test runs it
