@@ -148,11 +148,12 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition", "offline")
 | `/api/sales/by-source` | Sales breakdown by source |
 | `/api/products/top` | Top 10 products by quantity |
 | `/api/products/performance` | Top by revenue, category breakdown |
+| `/api/stock-margin` | The margin of every offer in stock now — price, cost, margin, the last 90 days (retail revenue; units out through every channel), days of supply, what to check — and the tiles: the last section of /margin. **The admin role only** (`require_admin` at its include, not the `margin` tab, which can be ticked for a non-admin). Gift certificates and testers or ₴1 giveaways are reported apart; a price of 0 is flagged as missing data (`core/stock_margin.py`) |
 | `/api/categories` | Root categories list |
 | `/api/categories/{id}/children` | Subcategories for parent |
 | `/api/brands` | All brands list |
-| `/api/brands/analytics` | Top brands by revenue and quantity |
-| `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
+| `/api/brands/analytics` | Top brands by revenue and quantity; the header's source, category, brand and promocode narrow it like the product charts (since 2026-11-27) |
+| `/api/customers/insights` | New vs returning, AOV trend, repeat rate. Under a source, brand, category or promocode every figure is the filtered slice's, measured as the cards above measure it — a source or promocode by whole orders' `grand_total`, a brand or category by the matching lines (`insights_filter_scope`); the lifetime figures are that slice over the whole history. It read only the promocode, and only for the period's buyers, until 2026-11-27 |
 | `/api/goals/smart` | The month's goals — monthly, weekly, daily — for `year`/`month` (default: this Kyiv month). The automatic goal is the one frozen on the 1st once the month is frozen, else computed now; `monthly.frozenAt` says which; a goal typed on /goals overrides either; a sales type with no history of its own has none (`calculationMethod` `no_history`, every `amount` null) — see "Revenue goals: the month's goal is frozen on the 1st" |
 | `/api/goals/forecast` | `generate_smart_goals`' whole answer for any month, through the same door: the frozen one for a frozen month (`monthly.frozenAt`), else computed now |
 | `/api/customers/sms-segments` | Campaign audience — one arm or one per value level, one or more groups ORed (`or_groups`) (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
@@ -3983,6 +3984,19 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 движок больше не выбирает, сбой — отказ 503 `surface=expenses`, и пустой
 `backfilled_at` у `bronze.expenses` — тоже явный отказ, а не нули. Ниже —
 история переноса.
+
+**С 27.11.2026 у вкладки один итог расходов и выручка дашборда** (решение
+владельца после сверки всего дашборда с KeyCRM). Итог расходов
+(`get_expense_summary`) и график прибыли (`get_profit_analysis`) читают одни
+заказы — те, что считаются выручкой (`is_active_source`: источник выручки и
+не продажа своей юрлице). Выручка графика — их без возвратов, мера Gold, то
+есть карточки дашборда; расходы — все расходы этих заказов, возвраты
+включительно: доставка вернувшейся посылки оплачена так же. До этого график
+считал выручкой продажи Opencart 2024 года, которых не считает ни одна другая
+цифра дашборда, и не вычитал расходы возвратов, поэтому за один период
+вкладка показывала два разных итога расходов. Тесты:
+`test_expenses_two_engines.py` (`PROFIT_SINCE_2026_11_27`, итог графика =
+итогу карточки) и `test_own_entity_not_revenue.py`.
 
 `KS_READ_EXPENSES=postgres` переводит шесть читающих методов, и они делятся
 надвое. **Три** (`list_expenses`, `get_ad_spend_by_platform`,

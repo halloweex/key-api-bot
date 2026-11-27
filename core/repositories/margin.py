@@ -42,8 +42,9 @@ class MarginMixin:
 
     # ─── What answers `/margin` ──────────────────────────────────────────
     #
-    # Six methods, three tables, all in Postgres: `silver.order_lines` (a
-    # view), `bronze.offer_stocks` and `bronze.categories`.
+    # Seven methods, four tables, all in Postgres: `silver.order_lines` (a
+    # view), `bronze.offer_stocks`, `bronze.categories`, and for the stock
+    # block (admins only) `app.sku_inventory_status`.
 
     async def _margin_run(
         self, sql: str, params: "list | None" = None, *, mode: str = "all",
@@ -331,6 +332,51 @@ class MarginMixin:
                 "coverage_pct": round(100.0 * costed_rev / total_rev, 1) if total_rev > 0 else 0,
             })
         return result
+
+    async def get_stock_margin_rows(self, since: date, until: date) -> List[tuple]:
+        """Every offer in stock now, with what `core.stock_margin` needs.
+
+        The block at the bottom of `/margin`, admins only. One row per
+        `sku_inventory_status` row with stock — the table the `/inventory`
+        cards read, so both show the same shelf. The window's retail units and
+        revenue come through the line predicate every page applies; the units
+        that left the stock come without its source and sales-type clauses,
+        because a wholesale, offline or exhibition sale empties the same
+        shelf. Joined by SKU, as every margin query here joins cost.
+        """
+        params: list = [since, until]
+        retail_where = self._margin_base_where("retail", params)
+        params += [since, until]
+        rows = await self._margin_run(f"""
+            WITH RECURSIVE {_ROOT_CAT},
+            retail AS (
+                SELECT l.sku, SUM(l.quantity) AS units, SUM(l.line_amount) AS revenue
+                FROM {{order_lines}} l
+                WHERE {retail_where} AND l.sku IS NOT NULL
+                GROUP BY l.sku
+            ),
+            moved AS (
+                SELECT l.sku, SUM(l.quantity) AS units
+                FROM {{order_lines}} l
+                WHERE l.order_date BETWEEN ? AND ? AND NOT l.is_return
+                  AND l.sku IS NOT NULL
+                GROUP BY l.sku
+            )
+            SELECT s.offer_id, s.product_id, s.sku, s.name, s.brand,
+                   c.name, rc.root_name,
+                   s.quantity, s.reserve, s.price, s.purchased_price,
+                   COALESCE(r.units, 0), COALESCE(r.revenue, 0), COALESCE(m.units, 0),
+                   s.last_sale_date, s.updated_at
+            FROM {{sku_inventory_status}} s
+            LEFT JOIN {{categories}} c ON c.id = s.category_id
+            LEFT JOIN root_cat rc ON rc.id = s.category_id
+            LEFT JOIN retail r ON r.sku = s.sku
+            LEFT JOIN moved m ON m.sku = s.sku
+            WHERE s.quantity > 0
+            ORDER BY s.offer_id
+        """, params)
+        # `_margin_run` answers one row or a list; this is always the list.
+        return list(rows or [])
 
     async def get_margin_alerts(
         self,

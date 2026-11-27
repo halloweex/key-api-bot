@@ -1,8 +1,10 @@
 """Margin analysis service layer."""
 import logging
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 
+from core import stock_margin
 from core.store import get_store
 from core.filters import parse_period as _parse_period_core
 
@@ -51,3 +53,15 @@ async def get_margin_alerts(start_date: str, end_date: str, sales_type: str = "r
     start, end = _parse_dates(start_date, end_date)
     store = await get_store()
     return await store.get_margin_alerts(start, end, sales_type=sales_type, margin_floor=margin_floor)
+
+
+async def get_stock_margin(today: Optional[date] = None) -> Dict[str, Any]:
+    """The margin of everything in stock now (`/api/stock-margin`, admins only).
+
+    The window is the last `stock_margin.WINDOW_DAYS` Kyiv days, today included.
+    """
+    today = today or datetime.now(ZoneInfo("Europe/Kyiv")).date()
+    since = today - timedelta(days=stock_margin.WINDOW_DAYS - 1)
+    store = await get_store()
+    rows = await store.get_stock_margin_rows(since, today)
+    return stock_margin.build(rows)
