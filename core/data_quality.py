@@ -1320,6 +1320,12 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("gold_values_unwatched",
      "Set KS_CH_URL, or clear the ch_* finding beside it; then "
      "POST /api/jobs/dq_mirror_landing/trigger to re-check Gold"),
+    # The Rust pilot's watch (`core/rust_api_watch.py`): WARN in the digest,
+    # never a page (the owner's decision of 2026-11-25). Nobody lost an
+    # answer: nginx hands the pilot's routes to web while it is down.
+    ("rust_pilot_",
+     "docker logs ks-rust-api, its /stats names the reasons; every route back: "
+     "empty nginx/rust/routes.conf, nginx -s reload"),
     # The analysts' captures (revision 0036, `core/analytics_captures.py`):
     # WARN in the digest, never a page (D8 (b)). A capture failing never
     # touched its writer's write; what is missing is a stretch of a history.
@@ -1416,6 +1422,11 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
 from core import analytics_captures as _captures  # noqa: E402
 
 HUMAN_CHECK_NAMES.update(_captures.human_names())
+
+# The Rust pilot's watch, named by the module that files it.
+from core import rust_api_watch as _rust_watch  # noqa: E402
+
+HUMAN_CHECK_NAMES.update(_rust_watch.HUMAN_NAMES)
 
 
 def human_check_name(name: str) -> str:

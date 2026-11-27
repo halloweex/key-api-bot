@@ -492,6 +492,14 @@ _CAPTURE_CLEARS = {
 for _key in _captures.conditions():
     REGISTRY[_key] = _c(_CAPTURE_CLEARS[_key.split(":", 1)[0]])
 
+# The Rust pilot's watch (core/rust_api_watch.py): four conditions on the
+# integrity layer, WARN, a line in the 09:00 digest and never a page (the
+# owner's decision of 2026-11-25). Read off the module that files them.
+from core import rust_api_watch as _rust_watch  # noqa: E402
+
+for _key in _rust_watch.CONDITIONS:
+    REGISTRY[_key] = _c(_rust_watch.CLEARS[_key])
+
 
 # Channel messages that ride the same throttle machinery but are not
 # conditions: the digest is a scheduled report. (canary:recovery lived here
