@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.364
+
+- test(margin): the margin repository runs seven statements now
+- fix(margin): get_stock_margin_rows returns the list it promises
+- feat(margin): live margin of every offer in stock, for admins only
+
+
 ## 3.0.363
 
 - fix(sms): results name the buyers line and show each arm's revenue

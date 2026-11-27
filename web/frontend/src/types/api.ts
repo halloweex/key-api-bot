@@ -1481,6 +1481,106 @@ export interface MarginAlertItem {
   impact: number
 }
 
+// ─── Stock margin: every offer in stock (/api/stock-margin, admins only) ─────
+// The server decides every figure (core/stock_margin.py). Ratios are fractions
+// (0.25, not 25), money is hryvnia, and null means "no data", never zero.
+
+export type StockMarginKind = 'goods' | 'certificate' | 'promo'
+
+export type StockMarginFlag =
+  | 'no_price'
+  | 'no_cost'
+  | 'cost_over_price'
+  | 'high_margin'
+  | 'sold_below_cost'
+  | 'only_free'
+  | 'slow'
+  | 'reserved'
+
+export interface StockMarginItem {
+  offer_id: number
+  product_id: number | null
+  sku: string
+  name: string
+  brand: string | null
+  category: string | null
+  root_category: string | null
+  kind: StockMarginKind
+  quantity: number
+  reserve: number
+  available: number
+  price: number | null
+  cost: number | null
+  /** Goods with a sale and a purchase price: the only rows with a margin. */
+  costed: boolean
+  margin: number | null
+  markup: number | null
+  unit_profit: number | null
+  retail_value: number | null
+  cost_value: number | null
+  profit: number | null
+  /** Retail, returns excluded, the last `window_days`. */
+  units_90d: number
+  revenue_90d: number
+  avg_price_90d: number | null
+  discount_90d: number | null
+  realized_margin_90d: number | null
+  /** What left the stock in the same days through every channel. */
+  moved_90d: number
+  days_of_supply: number | null
+  slow: boolean
+  last_sale_date: string | null
+  flags: StockMarginFlag[]
+}
+
+export interface StockMarginBucket {
+  /** Lower edge, included; null is open. */
+  from: number | null
+  /** Upper edge, excluded; null is open. */
+  to: number | null
+  count: number
+}
+
+export interface StockMarginGoods {
+  positions: number
+  costed: number
+  reserved: number
+  retail_all: number
+  retail: number
+  cost: number
+  profit: number
+  margin: number | null
+  markup: number | null
+  median_margin: number | null
+  sold: number
+  revenue_90d: number
+  list_90d: number
+  cogs_90d: number
+  discount_90d: number | null
+  list_margin_90d: number | null
+  realized_margin_90d: number | null
+  slow: number
+  slow_profit: number
+  problem_items: number
+  problems: Partial<Record<StockMarginFlag, number>>
+  buckets: StockMarginBucket[]
+}
+
+export interface StockMarginExcluded {
+  positions: number
+  available: number
+  retail_value: number
+}
+
+export interface StockMarginResponse {
+  snapshot_at: string | null
+  window_days: number
+  thresholds: { low_margin: number; high_margin: number; slow_days: number }
+  goods: StockMarginGoods
+  excluded: { certificate: StockMarginExcluded; promo: StockMarginExcluded }
+  items: StockMarginItem[]
+}
+
 export interface MomentumProduct {
   productId: number | null
   productName: string

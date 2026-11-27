@@ -21,6 +21,7 @@ import pytest
 
 from core.permissions import ACCESS_PRESETS, Role, TAB_FEATURE_KEYS
 from core.sms_refusals import REFUSAL_REASONS
+from core.stock_margin import FLAGS as STOCK_MARGIN_FLAGS, KINDS as STOCK_MARGIN_KINDS
 from core.ga4 import COLUMNS as FUNNEL_STEPS
 from core.utm_classify import FIRST_CHANNEL_OTHER, ORGANIC_CHANNELS
 from web.services.ga4_funnel_service import (
@@ -43,6 +44,11 @@ def _keys_for(prefix: str, vocabulary) -> list[str]:
 
 
 VOCABULARIES = {
+    # `t(`margin.stock.flag.${flag}`)` on a row of the stock-margin table and
+    # `…flagLong.` in its panel; `t(`margin.stock.kind.${kind}`)` beside them.
+    "margin.stock.flag.": list(STOCK_MARGIN_FLAGS),
+    "margin.stock.flagLong.": list(STOCK_MARGIN_FLAGS),
+    "margin.stock.kind.": list(STOCK_MARGIN_KINDS),
     # `t(`access.tab.${tab}`)` in the checklist, the summary and the row.
     "access.tab.": list(TAB_FEATURE_KEYS),
     # `t(`access.preset.${preset.key}`)` on the preset buttons. This is the one

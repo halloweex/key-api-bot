@@ -40,8 +40,9 @@ class TestTheRoutedBodies:
                     if "SELECT" in text.upper():
                         yield node.lineno, text
 
-    def test_the_scan_finds_all_six(self):
-        assert len(list(self._statements())) == 6
+    def test_the_scan_finds_all_seven(self):
+        # The six of /margin's tab, and the stock block's (admins only).
+        assert len(list(self._statements())) == 7
 
     def test_every_hole_survived_the_f_string(self):
         """`{order_lines}` inside an f-string is an expression that Python
