@@ -1,0 +1,7 @@
+# Pinned the way `Dockerfile.web` pins Python: one compiler everywhere.
+# `Dockerfile.rust` builds on the image of this exact version, and the CI
+# workflow fails if the two disagree.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
