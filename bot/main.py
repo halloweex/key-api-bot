@@ -21,7 +21,7 @@ from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.services import ReportService
 from bot import handlers, handlers_legacy
 from bot import database
-from bot.canary import format_alert, run_canary
+from bot.canary import canary_job
 from bot.heartbeat import BEAT_INTERVAL_SECONDS, beat_job
 from core.config import validate_config, ConfigurationError
 
@@ -418,84 +418,6 @@ def main() -> None:
         if revoked_count > 0:
             logger.info(f"Revoked {revoked_count} inactive users (45+ days)")
 
-    # Internal canary: probe the public dashboard from the bot every 15 min.
-    # Runs in a separate container, so it catches outages a self-check would
-    # miss. Since step 07 its policy is the shared Gate — CanaryState, the
-    # sixth and last private throttle, is gone: the compound bucket gives the
-    # same "a new problem is never masked by an old one's cooldown" (a changed
-    # failure set is a new bucket, which fires immediately), the Gate adds the
-    # standing-condition decay CanaryState never had, and recovery is the
-    # standard per-key "✅ Resolved" — which announces partial recoveries,
-    # something the old all-or-nothing transition never could.
-
-    canary_prev_failures: set = set()
-
-    async def canary_job(context):
-        nonlocal canary_prev_failures
-        try:
-            result = await run_canary(DASHBOARD_URL)
-        except Exception as exc:
-            logger.error("Canary job crashed: %s", exc, exc_info=True)
-            return
-
-        from bot.canary import defer_flaky
-        from core.alerting import raise_alert, resolve_group
-
-        # The week of silence's watch (`watch:duckdb_switch`, OD-17 (a)) was
-        # written here on every probe that read the switch block, until step
-        # 14's S14-18 deleted the switch; the watch over reads answered from
-        # DuckDB (`watch:read_fallbacks`) until S14-16. Both rows stay in
-        # `app.alert_series` as history, and nothing writes them.
-
-        defer, canary_prev_failures = defer_flaky(
-            list(result.failure_keys), canary_prev_failures,
-        )
-        if result.failures and defer:
-            # A first-probe health blip: the 05:15 freeze window, a nginx
-            # reload, a GC pause. Confirmed by the next probe or forgotten.
-            logger.warning(
-                "Canary blip, confirming next tick: %s", result.failures,
-            )
-        elif result.failures:
-            logger.warning("Canary alerting: %s", result.failures)
-            keys = list(result.failure_keys or ["unkeyed"])
-            await raise_alert(
-                format_alert(result, DASHBOARD_URL),
-                conditions=keys,
-                bucket="canary:" + ",".join(sorted(keys)),
-                group="canary",
-            )
-        else:
-            logger.debug(
-                "Canary OK: cert_days=%s sync_age=%s dq_ages=%s",
-                result.cert_days_remaining, result.sync_seconds_since,
-                result.dq_ages,
-            )
-
-        # Every tick, not only the clean ones: with still_firing excluded,
-        # a problem that dropped out of the failing set announces its own
-        # recovery even while its siblings still burn. What this probe could
-        # not judge — the OD-07 keys when web did not answer — is kept: a
-        # probe that read nothing cannot say they cleared.
-        try:
-            await resolve_group(
-                "canary",
-                still_firing=[*result.failure_keys, *result.unjudged_keys],
-            )
-        except Exception as exc:
-            logger.warning("Canary resolve failed: %s", exc)
-
-        # Step 05: the escalator rides the same tick, judging the archive for
-        # standing unacknowledged conditions. Gated on what this very probe
-        # just measured — a dead web is already its own page, and every
-        # series goes stale together during one.
-        try:
-            from core.alert_escalator import escalate_due
-
-            await escalate_due(web_alive=(result.http_code == 200))
-        except Exception as exc:
-            logger.warning("Escalator failed on canary tick: %s", exc)
-
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
 
@@ -528,8 +450,6 @@ def main() -> None:
     # Run inactive user revocation daily (86400 seconds = 24 hours)
     application.job_queue.run_repeating(revoke_inactive_users, interval=86400, first=300)
 
-    # Run canary every 15 minutes; first probe 90s after startup so the web
-    # container has time to come up after a co-deploy.
     # The bot watching its own 512 MB — the container nobody was watching
     # until 29.08: the web monitor reads its own cgroup, and this limit is
     # fourteen times smaller. Same evaluator, own JSON persistence.
@@ -541,6 +461,9 @@ def main() -> None:
     application.job_queue.run_repeating(
         bot_memory_job, interval=1800, first=120, name="bot_memory_watch",
     )
+    # The internal canary (bot/canary.py's `canary_job`): every 15 minutes,
+    # the first probe 90s after startup so the web container has time to
+    # come up after a co-deploy.
     application.job_queue.run_repeating(
         canary_job, interval=900, first=90, name="dashboard_canary"
     )

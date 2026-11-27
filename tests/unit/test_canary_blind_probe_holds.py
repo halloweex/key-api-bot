@@ -20,8 +20,7 @@ import pytest
 
 from bot import canary
 from bot.canary import (
-    BLOCK_KEY_PREFIXES, JUDGED_WITHOUT_PAYLOAD, defer_flaky, format_alert,
-    run_canary, unjudged_keys,
+    BLOCK_KEY_PREFIXES, JUDGED_WITHOUT_PAYLOAD, run_canary, unjudged_keys,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -131,8 +130,9 @@ class TestThroughTheJob:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("second", ["blip", "null-blocks"])
     async def test_a_blind_probe_neither_resolves_nor_repages(self, second):
-        """The reviewer's three probes, through `canary_job`'s own logic: a
-        standing page, a blind probe, the same page again."""
+        """The reviewer's three probes, through `canary_job` itself: a
+        standing page, a blind probe, the same page again. Mutation: drop
+        `*result.unjudged_keys` from the job's resolve."""
         import core.alerting as alerting
 
         gate = alerting.AlertGate(state_path=None)
@@ -146,29 +146,32 @@ class TestThroughTheJob:
         partial["data_quality"] = None
         partial["mirrors"] = None
         probes = [_ok(31 * 3600), None if second == "blip" else partial, _ok(31 * 3600)]
-        previous: set = set()
+        answers = iter(probes)
+
+        async def probe(url):
+            """The real `run_canary` (imported above, before the patch), on a
+            dashboard that answers the next of `probes`; None is no answer."""
+            answer = next(answers)
+
+            def handler(request):
+                if answer is None:
+                    raise httpx.ConnectError("refused")
+                return httpx.Response(200, json=answer)
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                return await run_canary(url, client=client)
+
         with patch.object(alerting, "_gate", gate), \
              patch("bot.main.send_admin_message", new=send), \
              patch("core.alert_archive.write_resolved_now", new=AsyncMock(return_value=True)), \
              patch("core.alert_archive.record_fired", return_value=None), \
-             patch.object(canary, "check_cert_expiry", new=AsyncMock(return_value=(90, None))):
-            for answer in probes:
-                def handler(request, answer=answer):
-                    if answer is None:
-                        raise httpx.ConnectError("refused")
-                    return httpx.Response(200, json=answer)
-
-                result = await run_canary(
-                    "http://dash.invalid",
-                    client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-                defer, previous = defer_flaky(list(result.failure_keys), previous)
-                if result.failures and not defer:
-                    keys = list(result.failure_keys)
-                    await alerting.raise_alert(
-                        format_alert(result, "http://dash.invalid"), conditions=keys,
-                        bucket="canary:" + ",".join(sorted(keys)), group="canary")
-                await alerting.resolve_group(
-                    "canary", still_firing=[*result.failure_keys, *result.unjudged_keys])
+             patch("core.alert_escalator.escalate_due", new=AsyncMock()), \
+             patch.object(canary, "check_cert_expiry", new=AsyncMock(return_value=(90, None))), \
+             patch.object(canary, "DASHBOARD_URL", "http://dash.invalid"), \
+             patch.object(canary, "canary_prev_failures", set()), \
+             patch.object(canary, "run_canary", new=probe):
+            for _ in probes:
+                await canary.canary_job(None)
 
         resolved = [t for t in sent if t.startswith("✅")]
         assert not any("dq_stale:mirror_landing" in t for t in resolved), resolved

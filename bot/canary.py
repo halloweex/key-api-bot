@@ -9,8 +9,9 @@ sync stalls, partial failures) and against silent cert lapses like the
 12-hour outage on May 4 2026.
 
 The check logic lives here as plain async functions with no Telegram
-coupling so it can be unit-tested. Wiring + alert sending lives in
-bot/main.py.
+coupling so it can be unit-tested, and so does the job that runs them,
+`canary_job`: what a probe pages, what it resolves and what it holds.
+bot/main.py registers the job; the messages go out through core.alerting.
 """
 from __future__ import annotations
 
@@ -25,6 +26,8 @@ from typing import Optional, Sequence
 from urllib.parse import urlparse
 
 import httpx
+
+from bot.config import DASHBOARD_URL
 
 logger = logging.getLogger(__name__)
 
@@ -1243,3 +1246,90 @@ def format_alert(result: CanaryResult, dashboard_url: str) -> str:
     if extras:
         lines.append("<i>" + html.escape(" · ".join(extras)) + "</i>")
     return "\n".join(lines)
+
+
+# ─── The job ────────────────────────────────────────────────────────────────
+
+# The failure keys of the probe before, which `defer_flaky` compares with: the
+# one thing the job carries from one tick to the next. One set per process,
+# as when the job was a closure inside `bot.main.main()` (until 2026-11-27):
+# bot/main.py registers one job.
+canary_prev_failures: set[str] = set()
+
+
+async def canary_job(context) -> None:
+    """The `job_queue` job: probe the public dashboard from the bot, every 15
+    minutes (bot/main.py registers it).
+
+    Runs in a separate container, so it catches outages a self-check would
+    miss. Since step 07 its policy is the shared Gate — CanaryState, the
+    sixth and last private throttle, is gone: the compound bucket gives the
+    same "a new problem is never masked by an old one's cooldown" (a changed
+    failure set is a new bucket, which fires immediately), the Gate adds the
+    standing-condition decay CanaryState never had, and recovery is the
+    standard per-key "✅ Resolved" — which announces partial recoveries,
+    something the old all-or-nothing transition never could.
+    """
+    global canary_prev_failures
+    try:
+        result = await run_canary(DASHBOARD_URL)
+    except Exception as exc:
+        logger.error("Canary job crashed: %s", exc, exc_info=True)
+        return
+
+    from core.alerting import raise_alert, resolve_group
+
+    # The week of silence's watch (`watch:duckdb_switch`, OD-17 (a)) was
+    # written here on every probe that read the switch block, until step
+    # 14's S14-18 deleted the switch; the watch over reads answered from
+    # DuckDB (`watch:read_fallbacks`) until S14-16. Both rows stay in
+    # `app.alert_series` as history, and nothing writes them.
+
+    defer, canary_prev_failures = defer_flaky(
+        list(result.failure_keys), canary_prev_failures,
+    )
+    if result.failures and defer:
+        # A first-probe health blip: the 05:15 freeze window, a nginx
+        # reload, a GC pause. Confirmed by the next probe or forgotten.
+        logger.warning(
+            "Canary blip, confirming next tick: %s", result.failures,
+        )
+    elif result.failures:
+        logger.warning("Canary alerting: %s", result.failures)
+        keys = list(result.failure_keys or ["unkeyed"])
+        await raise_alert(
+            format_alert(result, DASHBOARD_URL),
+            conditions=keys,
+            bucket="canary:" + ",".join(sorted(keys)),
+            group="canary",
+        )
+    else:
+        logger.debug(
+            "Canary OK: cert_days=%s sync_age=%s dq_ages=%s",
+            result.cert_days_remaining, result.sync_seconds_since,
+            result.dq_ages,
+        )
+
+    # Every tick, not only the clean ones: with still_firing excluded,
+    # a problem that dropped out of the failing set announces its own
+    # recovery even while its siblings still burn. What this probe could
+    # not judge — the OD-07 keys when web did not answer — is kept: a
+    # probe that read nothing cannot say they cleared.
+    try:
+        await resolve_group(
+            "canary",
+            still_firing=[*result.failure_keys, *result.unjudged_keys],
+        )
+    except Exception as exc:
+        logger.warning("Canary resolve failed: %s", exc)
+
+    # Step 05: the escalator rides the same tick, judging the archive for
+    # standing unacknowledged conditions. Gated on what this very probe
+    # just measured — a dead web is already its own page, and every
+    # series goes stale together during one.
+    try:
+        from core.alert_escalator import escalate_due
+
+        await escalate_due(web_alive=(result.http_code == 200))
+    except Exception as exc:
+        logger.warning("Escalator failed on canary tick: %s", exc)
