@@ -334,11 +334,12 @@ async def _gold_findings(monkeypatch):
 
 class _ArchivePool:
     """Postgres's side of the archive comparison: the id-buckets below the
-    copy's ceiling, nothing waiting above it, and the archive's state row,
-    which `fetchrow` is asked for by its name."""
+    copy's ceiling, nothing waiting above it, the archive's state row and the
+    heal's durable trace (`ch_history.HEAL_ROW`), which `fetchrow` is asked
+    for by their names."""
 
-    def __init__(self, buckets, *, last_ok_at):
-        self._buckets, self._last_ok_at = buckets, last_ok_at
+    def __init__(self, buckets, *, last_ok_at, heal=None):
+        self._buckets, self._last_ok_at, self._heal = buckets, last_ok_at, heal
 
     def acquire(self):
         return self
@@ -353,6 +354,8 @@ class _ArchivePool:
         return list(self._buckets.items())
 
     async def fetchrow(self, _sql, arg):
+        if arg == ch_history.HEAL_ROW:
+            return self._heal
         if isinstance(arg, str):
             return {"last_ok_at": self._last_ok_at, "failures_since_ok": 0}
         return {"n": 0, "oldest": None}
@@ -366,20 +369,21 @@ async def _history_findings(monkeypatch):
     monkeypatch.setattr(ch_history, "configured", lambda: True)
     runs = []
     # (the copy's MAX(id), or its refusal; its buckets; Postgres's; the last
-    # good ship; the hourly ids-diff's last heal)
+    # good ship; the heal's durable trace, as whoever shipped it stamped it)
     for max_id, copy, pg, last_ok, heal in (
         (httpx.ConnectError("connection refused"), "", {}, now, None),  # unreachable
         (20000, "1\t9999\n", {1: 10000}, now, None),                   # a short bucket
         (20000, "1\t10000\n", {1: 10000}, now - timedelta(hours=25), None),  # stalled
-        (20000, "1\t10000\n", {1: 10000}, now, {"at": now, "shipped": 3}),   # self-healed
+        (20000, "1\t10000\n", {1: 10000}, now, {"last_ok_at": now, "last_rows": 3}),  # self-healed
     ):
         monkeypatch.setattr(ch_history, "_ch_max_id", AsyncMock(
             side_effect=max_id) if isinstance(max_id, Exception)
             else AsyncMock(return_value=max_id))
         monkeypatch.setattr(ch_history, "_execute", AsyncMock(return_value=copy))
-        monkeypatch.setattr(ch_history, "last_heal", heal)
+        # This process healed nothing itself; a heal reaches it by the trace.
+        monkeypatch.setattr(ch_history, "last_heal", {})
         monkeypatch.setattr(core.pg, "get_pool", AsyncMock(
-            return_value=_ArchivePool(pg, last_ok_at=last_ok)))
+            return_value=_ArchivePool(pg, last_ok_at=last_ok, heal=heal)))
         runs.append(await ch_history.reconcile_ch_history())
     return [issue for run in runs for issue in run]
 
