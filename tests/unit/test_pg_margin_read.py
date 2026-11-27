@@ -1,9 +1,9 @@
 """The `/margin` statements, and the brace that would have broken them.
 
 The numbers are `tests/integration/test_margin_two_engines.py`'s job, against
-a real Postgres, which calls every method for real; that the router asks
-Postgres and nothing else since step 14's S14-05 is
-`tests/unit/test_read_routers_postgres_only.py`'s. What is proved here is the
+a real Postgres, which calls every method for real; that a failure of its
+engine is refused naming `margin` is the route sweep in `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`)'s.
+What is proved here is the
 statements, plus one mistake worth a permanent guard: the bodies
 are f-strings, so a table hole written `{order_lines}` is an f-string
 *expression*, not a hole. It parses, it passes a structural review, and it
@@ -40,8 +40,9 @@ class TestTheRoutedBodies:
                     if "SELECT" in text.upper():
                         yield node.lineno, text
 
-    def test_the_scan_finds_all_six(self):
-        assert len(list(self._statements())) == 6
+    def test_the_scan_finds_all_seven(self):
+        # The six of /margin's tab, and the stock block's (admins only).
+        assert len(list(self._statements())) == 7
 
     def test_every_hole_survived_the_f_string(self):
         """`{order_lines}` inside an f-string is an expression that Python

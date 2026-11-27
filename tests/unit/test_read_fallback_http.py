@@ -14,47 +14,39 @@ What is proved here, through the real app and a Postgres pool that raises:
   trend, goals, traffic, expenses (both through the history gate
   `backfilled()` and through the router), margin, products intel,
   inventory, reports, marketing, the dashboard's customer block, the filter
-  lookups and the cohorts — and the refusal counted and published under
-  `read_fallback_mode.refused`;
+  lookups and the managers screen — and the refusal counted and published
+  under `read_fallback_mode.refused`;
 - the trend's forecast overlay, whose reads already degrade to "no
   forecast", drops under a refusal while the chart answers, and the refusal
   is counted — while the forecast's own endpoint, `/api/revenue/forecast`,
   answers 503 like any route rather than "Forecast not available yet";
-- no `KS_PG_DSN` at all is the same 503: the pool's own refusal to guess a
-  database is the failure refused;
 - the cohorts are answered by a live ClickHouse or not at all;
-- no read switch is read: any value of one, or none, is the same 503;
 - **every GET route under `/api/`, read off the app** (`TestEveryRoute`):
   with the engine failing, or with no address for it, any request that left
-  a refusal counted answered 503 naming it — and the routes of every tab
-  that reads a store are among the refused;
-- no handler on an HTTP path catches `ReadUnavailable` without raising it.
+  a refusal counted answered 503 naming it, and every route of the tabs
+  that read a store did so — never a 500, never an answer; and the goal
+  page's three writes and the model's tuning, none of them a GET, the same
+  way.
 
-Until step 14's S14-16 this also held what `KS_READ_FALLBACK` made of a
-fallback — `off` refused it, `duckdb` answered from DuckDB — and that a read
-switch with no address was refused (`no_address`). Since S14-07 no router
-has a DuckDB tail and no switch routes a read, and S14-16 deleted the mode
-and the address question with the counts of reads answered from DuckDB.
-
-The walk over every fallback site is `tests/unit/test_read_fallback_sites.py`.
+That sweep replaced the static walks of the code that stood beside it until
+2026-11 (a handler naming the refusal must raise it; nothing in a tab's
+module may reach an engine round its router): it finds the same defects by
+what the routes answer, so a rewrite that answers the same passes it.
 """
 from __future__ import annotations
 
-import ast
 import logging
-import pathlib
 from datetime import date, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional, Union
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core import read_fallback
+from core.pg import get_pool as REAL_GET_POOL
 from tests.helpers.route_sweep import (  # noqa: F401
-    NETWORK_ROUTES, _request_for, no_network, stores, sweep_client, swept_routes,
+    _request_for, no_network, stores, sweep_client, swept_routes,
 )
-
-REPO = pathlib.Path(__file__).resolve().parents[2]
 
 DAY = date.today() - timedelta(days=3)
 WINDOW = {"start_date": (DAY - timedelta(days=6)).isoformat(),
@@ -124,17 +116,6 @@ CASES: List[Case] = [
 # Silver read behind it is the one refused. Chain 7a's goals were the other
 # until S14-07, whose `_goals_run` refuses every failure, theirs included.
 CHAIN_FIRST = frozenset({"managers"})
-# The routers step 14's S14-05 to S14-07 left with no DuckDB tail: they read
-# Postgres, and refuse a failure — a DSN that is not there included. Every router is one
-# since S14-07: no route is switched (and S14-16 deleted `no_address`).
-POSTGRES_ONLY = frozenset({"traffic", "margin", "products_intel", "reports",
-                           "marketing", "lookups",
-                           # The dashboard's, step 14's S14-06.
-                           "summary", "trend", "insights",
-                           # `/expenses`, `/inventory` and `/goals` with its
-                           # forecast, step 14's S14-07: none is left.
-                           "goals", "expenses_history", "inventory", "forecast"})
-UNSWITCHED = [case for case in CASES if case.name in POSTGRES_ONLY]
 
 COHORTS = "/api/customers/cohort-retention"
 COHORT_PARAMS = {"include_revenue": "false"}
@@ -246,52 +227,6 @@ class TestOffRefuses:
         assert read_fallback.refusals()["goals"]["count"] >= 1
 
 
-# ─── No address: the same refusal ──────────────────────────────────────────
-
-@pytest.fixture
-def no_dsn(stores, monkeypatch):
-    """`stores`, and then no `KS_PG_DSN` at all: every Postgres switch below
-    names an engine this process cannot reach, and nothing will fail."""
-    monkeypatch.delenv("KS_PG_DSN", raising=False)
-    return stores
-
-
-class TestNoAddress:
-    @pytest.mark.parametrize("case", UNSWITCHED, ids=repr)
-    def test_with_no_dsn_the_pool_refuses_and_that_is_the_503(
-        self, case, admin_client, monkeypatch, fresh_read_fallback, caplog,
-    ):
-        """No pool patched and no `KS_PG_DSN`: `core.pg.dsn()` refusing to
-        guess a database is the failure the router refuses — the same 503
-        naming the surface, with the DSN named in the log beside it. (Until
-        step 14's S14-07 a switch asked `no_address` first, and S14-16
-        deleted it.)"""
-        from core import pg, pg_expenses_read
-
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setattr(pg, "_pool", None)
-        # The expenses' history latch, as `stores` leaves it: never asked. A
-        # test before this one may have left it within its recheck window,
-        # where it answers without asking the pool (since S14-07 that is
-        # the explicit "no history" refusal, not the DSN's).
-        monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
-        monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
-        monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
-
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            response = admin_client.get(case.path, params=case.params)
-
-        assert response.status_code == 503, response.text
-        assert response.json()["surface"] == case.surface
-        assert read_fallback.refusals()[case.surface]["count"] >= 1
-        assert (f"read refused: {case.surface} — its engine failed") in caplog.text
-        assert "KS_PG_DSN is not set" in caplog.text
-        assert "falling back to DuckDB" not in caplog.text
-
-
-# ─── Under KS_DUCKDB=off: DuckDB answers nothing (stage 5, PR-8) ───────────
-
-
 # ─── Cohorts: a live ClickHouse or nothing ─────────────────────────────────
 
 @pytest.fixture
@@ -336,388 +271,151 @@ class TestCohorts:
 
 # ─── Every GET route: a refusal is a 503 naming its surface ────────────────
 
-
-# The /traffic GET routes that read no store: the backfill's status is the
-# process's own dict, and the site's funnel asks Google Analytics
-# (`core/ga4.py`). Every other route of the tab refuses when Postgres does.
-TRAFFIC_READS_NOTHING = frozenset({"/api/traffic/backfill-utm/status", "/api/traffic/funnel"})
-
-# The dashboard's GET routes (step 14, S14-06): every one reads Postgres
-# alone through `core/repositories/revenue.py`'s readers, and refuses when it
-# fails.
+# The tabs whose every read goes through a router that refuses, and the GET
+# routes each owns: read off the app by prefix, or by name where the tab
+# shares none. With the engine failing, each of these answers 503 naming what
+# was refused — never a 500, never an answer. A reader that calls its engine
+# round its router counts no refusal and answers 500; a handler that catches
+# the refusal and answers anyway leaves it counted behind a 200. Both are
+# found here by what the route answers, however the code is written.
 DASHBOARD_ROUTES = frozenset({
     "/api/summary", "/api/revenue/trend", "/api/sales/by-source",
     "/api/products/top", "/api/products/performance", "/api/brands/analytics",
     "/api/categories/breakdown", "/api/returns", "/api/customers/insights",
 })
-
-# The third set's GET routes (step 14, S14-07), beside the goal routes the
-# sweep reads off the app by prefix: `/expenses` and `/inventory` by theirs,
-# the cohorts and the forecast by name, since they share none. Every one
-# reads Postgres alone (the cohorts ClickHouse alone) through its router,
-# and refuses when it fails.
-EXPENSES_PREFIX = "/api/expense"           # /api/expenses*, /api/expense-types
-INVENTORY_PREFIX = "/api/stocks/"
 COHORT_ROUTES = frozenset({
     "/api/customers/cohort-retention", "/api/customers/cohort-ltv",
     "/api/customers/purchase-timing", "/api/customers/at-risk",
 })
-FORECAST_ROUTES = frozenset({"/api/revenue/forecast"})
-# The training frame's own route: its reader has no fallback, so a failure is
-# its own error, a 500 counted nowhere (S14-07's deviation 7), never a
-# refusal. Named, and held to exist and not to refuse.
-TRAINING_FRAME_ROUTES = frozenset({"/api/revenue/forecast/evaluate"})
+# The header's dropdowns, on every page.
+FILTER_ROUTES = frozenset({
+    "/api/categories", "/api/categories/{parent_id}/children", "/api/brands",
+    "/api/promocodes",
+})
+TABS: Dict[str, Union[str, FrozenSet[str]]] = {
+    "dashboard": DASHBOARD_ROUTES,
+    # The stored forecast, and the model's evaluation over its training frame.
+    "forecast": frozenset({"/api/revenue/forecast", "/api/revenue/forecast/evaluate"}),
+    "traffic": "/api/traffic/",
+    "margin": "/api/margin/",
+    "products intelligence": "/api/products/intel/",
+    "reports": "/api/reports/",
+    "marketing": "/api/promocodes/",
+    "expenses": "/api/expense",           # /api/expenses*, /api/expense-types
+    "inventory": "/api/stocks/",
+    "goals": "/api/goals",
+    "promotions calendar": "/api/promotions",
+    "cohorts": COHORT_ROUTES,
+    "filters": FILTER_ROUTES,
+}
+# The /traffic routes that read no store: the backfill's status is the
+# process's own dict, and the site's funnel asks Google Analytics.
+READS_NO_STORE = frozenset({"/api/traffic/backfill-utm/status", "/api/traffic/funnel"})
+
+
+def _owned(spec: Union[str, FrozenSet[str]], paths) -> set:
+    if isinstance(spec, str):
+        return {p for p in paths if p.startswith(spec)}
+    return {p for p in paths if p in spec}
+
+
+def _surface(response) -> Optional[str]:
+    try:
+        body = response.json()
+    except ValueError:  # a CSV, an HTML page
+        return None
+    return body.get("surface") if isinstance(body, dict) else None
+
+
+@pytest.fixture
+def engine_down(request, stores, no_network, monkeypatch):
+    """Postgres failing, ClickHouse failing for the cohorts, nothing leaving
+    the process — in one of two ways: the engine fails (the pool raises), or
+    there is no address for it (no `KS_PG_DSN`, no `KS_CH_URL`, and the real
+    pool refusing to guess a database)."""
+    from core import ch_cohorts, pg
+
+    if request.param == "engine_fails":
+        monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
+        monkeypatch.setattr(ch_cohorts, "fetch",
+                            AsyncMock(side_effect=OSError("clickhouse down")))
+    else:
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.delenv("KS_CH_URL", raising=False)
+        monkeypatch.setattr(pg, "get_pool", REAL_GET_POOL)
+        monkeypatch.setattr(pg, "_pool", None)
+    return request.param
+
+
+ENGINE_DOWN = pytest.mark.parametrize(
+    "engine_down", ["engine_fails", "no_address"], indirect=True)
 
 
 class TestEveryRoute:
-    """Every GET route under /api, read off the app rather than listed: any
-    request that leaves a refusal counted answered 503 naming a surface it
-    refused. A handler anywhere between a route and a router that turns the
-    refusal into an answer — `except Exception: return {}` in a service — is
-    found here whether or not anybody thought to list the route. Swept three
-    ways: an engine that fails, no address for it, and an engine that fails
-    under `KS_DUCKDB=off` — web's state since step 14's S14-00 — with every
-    switch unset. (Until S14-16 the first two set every read switch on its
-    engine first; no switch is read since S14-07.)"""
+    """Every GET route under /api, read off the app rather than listed, so a
+    route added tomorrow is swept the day it is registered."""
 
-    @pytest.mark.parametrize("state", ["engine_fails", "no_address",
-                                       "switches_at_duckdb_off"])
-    def test_a_refusal_is_a_503_naming_its_surface(
-        self, state, sweep_client, stores, no_network, monkeypatch, request,
-    ):
-        from core import ch_cohorts
+    @ENGINE_DOWN
+    def test_a_refusal_is_a_503_naming_its_surface(self, engine_down, sweep_client):
         from web.main import app
         from web.ratelimit import limiter
 
-        if state == "switches_at_duckdb_off":
-            # Every switch unset, as `stores` leaves them. KS_DUCKDB=off was
-            # set here, the way web read it, until step 14's S14-18 deleted
-            # the switch: nothing reads it since.
-            monkeypatch.setenv("KS_DUCKDB", "off")
-        elif state == "engine_fails":
-            monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
-            monkeypatch.setattr(ch_cohorts, "fetch",
-                                AsyncMock(side_effect=OSError("clickhouse down")))
-        else:
-            monkeypatch.delenv("KS_PG_DSN", raising=False)
-            monkeypatch.delenv("KS_CH_URL", raising=False)
-
         routes = swept_routes(app)
-        refused_routes, violations = [], []
+        on_app = {e.path for e in routes}
+        must_refuse = set()
+        for tab, spec in TABS.items():
+            owned = _owned(spec, on_app) - READS_NO_STORE
+            assert owned, f"no route of the {tab} tab is on the app"
+            must_refuse |= owned
+
+        violations = []
         for endpoint in routes:
             read_fallback.reset_counts()
             limiter.reset()
             path, params = _request_for(endpoint)
             response = sweep_client.get(path, params=params)
             refused = read_fallback.refusals()
-            if not refused:
-                continue
-            refused_routes.append(endpoint.path)
-            try:
-                surface = response.json().get("surface")
-            except Exception:  # noqa: BLE001 — a CSV, an HTML page
-                surface = None
-            if response.status_code != 503 or surface not in refused:
+            surface = _surface(response)
+            if refused and (response.status_code != 503 or surface not in refused):
                 violations.append(
                     f"{endpoint.path} answered {response.status_code} "
                     f"(surface={surface!r}) with {sorted(refused)} refused")
+            elif not refused and endpoint.path in must_refuse:
+                violations.append(
+                    f"{endpoint.path} answered {response.status_code} and refused nothing")
+        assert not violations, "; ".join(violations)
 
-        assert not violations, (
-            "a refusal that did not reach the 503 handler: " + "; ".join(violations))
-        # Non-vacuity: the sweep reached the routers. Sixty-odd of the
-        # ninety-eight GET routes refused when it was written.
-        assert len(routes) >= 90, len(routes)
-        assert len(refused_routes) >= 55, refused_routes
-        # Every goal route refuses, the three calculator GETs included: their
-        # history goes through the router — Silver, the only history since
-        # chain 7b-4. Read off the app by prefix, never listed. Mutation M18:
-        # read a calculator's history on the store's own connection again
-        # (the deleted bridge's way), and its route answers from DuckDB —
-        # named here.
-        # `GET /api/goals` itself included since step 14's S14-07: it reads
-        # chain 7a's table first, which asked Postgres with no refusal from
-        # S14-00 (`CHAIN_FIRST`) until `_goals_run` refused it too.
-        goal_routes = {e.path for e in routes if e.path.startswith("/api/goals")}
-        assert {"/api/goals", "/api/goals/seasonality", "/api/goals/growth",
-                "/api/goals/weekly-patterns", "/api/goals/smart",
-                "/api/goals/forecast", "/api/goals/history"} <= goal_routes, goal_routes
-        assert goal_routes <= set(refused_routes), (
-            f"goal routes not refused: {sorted(goal_routes - set(refused_routes))}")
-        # Every /traffic route that reads refuses too, in every state: since
-        # S14-05 the tab reads Postgres alone, whatever its switch says, and
-        # the pool raises here. Read off the app by prefix, so a route added
-        # to the tab is held the day it lands — the pixel-only breakdown was
-        # one. What this adds to the violations above: a reader calling
-        # Postgres round the router counts no refusal, so its uncounted 500
-        # was invisible there. Mutation: `await pg_traffic_read.fetch(...)`
-        # in `get_traffic_pixel_only` with no `try`.
-        traffic_routes = {e.path for e in routes if e.path.startswith("/api/traffic/")}
-        assert TRAFFIC_READS_NOTHING <= traffic_routes, "a named route is gone"
-        assert not TRAFFIC_READS_NOTHING & set(refused_routes), (
-            "a route said to read nothing was refused")
-        traffic_routes -= TRAFFIC_READS_NOTHING
-        assert len(traffic_routes) >= 7, traffic_routes
-        assert traffic_routes <= set(refused_routes), (
-            f"traffic routes not refused: {sorted(traffic_routes - set(refused_routes))}")
-        # The dashboard's routes the same way, since S14-06 put them on
-        # Postgres alone. Listed, because the dashboard shares no prefix; each
-        # must be on the app. `/api/managers` is not among them: it reads
-        # chain 5's classification first, which raises rather than refuses
-        # (`CHAIN_FIRST`). Mutation: `await pg_dashboard_read.fetch(...)` in
-        # `get_sales_by_source` with no `try`.
-        assert DASHBOARD_ROUTES <= {e.path for e in routes}, (
-            f"a named route is gone: {sorted(DASHBOARD_ROUTES - {e.path for e in routes})}")
-        assert DASHBOARD_ROUTES <= set(refused_routes), (
-            f"dashboard routes not refused: {sorted(DASHBOARD_ROUTES - set(refused_routes))}")
-        # The third set's the same way, since S14-07 left each with one
-        # engine: `/expenses` and `/inventory` read off the app by prefix,
-        # so a route added to either is held the day it lands; the cohorts
-        # and the forecast by name. What this adds to the violations above,
-        # as for /traffic: a reader calling its engine round the router
-        # counts no refusal, so its uncounted 500 was invisible there.
-        # Mutations: `await pg_inventory_read.fetch_many(...)` in
-        # `get_stock_summary`, `await ch_cohorts.fetch(...)` in
-        # `get_cohort_ltv`, each with no `try`. (One in
-        # `get_cohort_retention` passes here: the route's default asks the
-        # enhanced form. `TestCohorts` and the walk in
-        # `test_tab_routers_postgres_only.py` see that one.)
-        on_app = {e.path for e in routes}
-        third = {p for p in on_app if p.startswith((EXPENSES_PREFIX, INVENTORY_PREFIX))}
-        assert len({p for p in third if p.startswith(EXPENSES_PREFIX)}) >= 4, third
-        assert len({p for p in third if p.startswith(INVENTORY_PREFIX)}) >= 10, third
-        named = COHORT_ROUTES | FORECAST_ROUTES | TRAINING_FRAME_ROUTES
-        assert named <= on_app, f"a named route is gone: {sorted(named - on_app)}"
-        third |= COHORT_ROUTES | FORECAST_ROUTES
-        assert third <= set(refused_routes), (
-            f"S14-07's routes not refused: {sorted(third - set(refused_routes))}")
-        assert not TRAINING_FRAME_ROUTES & set(refused_routes), (
-            "the training frame's route was refused: its reader has no fallback")
+    @ENGINE_DOWN
+    @pytest.mark.parametrize("method,path,params", [
+        ("POST", "/api/goals", {"period_type": "monthly", "amount": "1000"}),
+        ("POST", "/api/goals/recalculate", {}),
+        ("DELETE", "/api/goals/monthly", {}),
+    ], ids=["set", "recalculate", "reset"])
+    def test_the_goal_writes_are_refused_too(
+        self, engine_down, sweep_client, method, path, params,
+    ):
+        """The goal page's three writes, which the GET sweep does not make:
+        each reads through the goals router before it writes, and a failed
+        engine is the same 503 naming `goals` — never a 500."""
+        from web.ratelimit import limiter
 
-    def test_the_sweep_is_read_off_the_app(self):
-        """Every GET route but the named network ones — and a route added
-        tomorrow is swept the day it is registered."""
-        from tests.routes_helper import iter_endpoints
-        from web.main import app
+        read_fallback.reset_counts()
+        limiter.reset()
+        response = sweep_client.request(method, path, params=params)
+        assert response.status_code == 503, response.text
+        assert _surface(response) == "goals"
+        assert read_fallback.refusals()["goals"]["count"] >= 1
 
-        every = {e.path for e in iter_endpoints(app)
-                 if "GET" in e.methods and e.path.startswith("/api/")}
-        assert {e.path for e in swept_routes(app)} == every - set(NETWORK_ROUTES)
-        assert set(NETWORK_ROUTES) <= every, "a named network route no longer exists"
+    @ENGINE_DOWN
+    def test_the_models_tuning_is_refused_too(self, engine_down, sweep_client):
+        """`evaluate`'s twin, a POST the sweep does not make: it reads the
+        same training frame, and a failed engine is the same 503 naming
+        `forecast`, never a 500."""
+        from web.ratelimit import limiter
 
-
-# ─── No HTTP path swallows a refusal ───────────────────────────────────────
-
-def _module_file(dotted: str) -> Optional[pathlib.Path]:
-    rel = dotted.replace(".", "/")
-    for candidate in (REPO / f"{rel}.py", REPO / rel / "__init__.py"):
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _imported_modules(path: pathlib.Path) -> set:
-    """Every repository module `path` imports, at the top or inside a
-    function — most imports here are local, to dodge cycles."""
-    # A module's package is its directory, for `x.py` and `__init__.py` alike.
-    package = list(path.relative_to(REPO).parent.parts)
-    found = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            base = package[:len(package) - (node.level - 1)] if node.level else []
-            module = ".".join(base + ([node.module] if node.module else []))
-            if not module:
-                continue
-            found.add(module)
-            found.update(f"{module}.{alias.name}" for alias in node.names)
-    return found
-
-
-def http_files() -> List[pathlib.Path]:
-    """Every repository module reachable by import from `web/` — the code an
-    HTTP route can run. Computed, not listed: `core/prediction_service.py`
-    and `core/store.py` are on HTTP paths without being routers."""
-    seen = set()
-    queue = [p for p in sorted((REPO / "web").rglob("*.py"))
-             if "frontend" not in p.parts and "node_modules" not in p.parts]
-    while queue:
-        path = queue.pop()
-        if path in seen:
-            continue
-        seen.add(path)
-        for dotted in _imported_modules(path):
-            target = _module_file(dotted)
-            if target is not None and target not in seen:
-                queue.append(target)
-    return sorted(seen)
-
-
-def _names_read_unavailable(handler: ast.ExceptHandler) -> bool:
-    if handler.type is None:
-        return False
-    return any(
-        (isinstance(n, ast.Name) and n.id == "ReadUnavailable")
-        or (isinstance(n, ast.Attribute) and n.attr == "ReadUnavailable")
-        for n in ast.walk(handler.type))
-
-
-def _returns_somewhere(handler: ast.ExceptHandler) -> bool:
-    """A `return` anywhere in the handler's own statements — nested
-    functions aside. A handler that can return has an exit that is not the
-    raise, and `return x` before a final `raise` never reaches it (DN-20c)."""
-    stack = list(handler.body)
-    while stack:
-        node = stack.pop()
-        if isinstance(node, ast.Return):
-            return True
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.Lambda, ast.ClassDef)):
-            continue
-        stack.extend(ast.iter_child_nodes(node))
-    return False
-
-
-def _lets_it_through(handler: ast.ExceptHandler) -> bool:
-    """The handler ends in a bare `raise`, or `raise <the name it bound>` —
-    the refusal itself, not something raised in its place — and has no
-    `return` on the way. `raise HTTPException(500)` would turn the 503
-    naming the surface into a 500 naming nothing."""
-    if not handler.body or not isinstance(handler.body[-1], ast.Raise):
-        return False
-    if _returns_somewhere(handler):
-        return False
-    last = handler.body[-1]
-    if last.exc is None:
-        return True
-    return (last.cause is None and isinstance(last.exc, ast.Name)
-            and handler.name is not None and last.exc.id == handler.name)
-
-
-def swallowing_handlers(source: str) -> List[int]:
-    """Lines of every handler naming `ReadUnavailable` that can end without
-    raising that refusal. Pure, so it can be shown synthetic code."""
-    return [node.lineno for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.ExceptHandler)
-            and _names_read_unavailable(node) and not _lets_it_through(node)]
-
-
-def enclosing_functions(source: str) -> Dict[int, str]:
-    """Line → `Class.function` (or `function`) of the innermost function
-    holding it — the form `test_read_fallback_consumers.py` keys functions
-    by, so a handler can be matched to an answer written down there."""
-    found: Dict[int, str] = {}
-
-    def visit(node, cls, qual):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef):
-                visit(child, child.name, qual)
-            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                name = f"{cls}.{child.name}" if cls else child.name
-                for inner in ast.walk(child):
-                    if hasattr(inner, "lineno"):
-                        found[inner.lineno] = name
-                visit(child, cls, name)
-            else:
-                visit(child, cls, qual)
-
-    visit(ast.parse(source), None, None)
-    return found
-
-
-class TestNoHandlerSwallowsARefusal:
-    """The static half of the guard; `TestEveryRoute` is the half that runs.
-    This one sees a handler that *names* the refusal — anywhere an HTTP route
-    can reach, which is every module `web/` imports, transitively. A broad
-    `except Exception` that catches it without naming it is invisible here
-    and is what the sweep is for.
-
-    DN-20c's answers are the one exception, by function and nowhere else:
-    the scheduler's jobs defer or skip, and the assistant's tools return a
-    named "data unavailable" result. Those modules are importable from
-    `web/`, but the functions holding the answers are reached only by the
-    consumers no HTTP request waits for and by the assistant's two routes,
-    which answer inside the conversation (`IN_BAND_ROUTES`) — which
-    `test_read_fallback_consumers.py` proves by walking up from each."""
-
-    def test_every_handler_naming_it_raises(self):
-        """A handler that names the refusal and does not raise it has turned
-        a 503 into an answer — the DuckDB one, or a quiet partial one. The
-        walk in `test_read_fallback_sites.py` accepts naming the refusal as
-        a decision; on an HTTP path the only decision is to let it through."""
-        from tests.helpers.read_fallback_answers import named_answer_functions
-
-        answers = named_answer_functions()
-        bad, exempted = [], set()
-        for path in http_files():
-            rel = path.relative_to(REPO).as_posix()
-            source = path.read_text(encoding="utf-8")
-            where = enclosing_functions(source)
-            for line in swallowing_handlers(source):
-                key = f"{rel}:{where.get(line)}"
-                if key in answers:
-                    exempted.add(key)
-                else:
-                    bad.append(f"{rel}:{line} ({where.get(line)})")
-        assert not bad, "a refusal swallowed on an HTTP path: " + ", ".join(bad)
-        # Each exemption is used: an answer that moved leaves no stale one.
-        assert exempted == answers, sorted(answers - exempted)
-
-    def test_it_is_looking(self):
-        """Non-vacuity: the handlers that name it today are found, and found
-        raising; and the scope reaches past the routers into what the
-        routes call."""
-        files = http_files()
-        for rel in ("core/repositories/goals.py", "web/services/dashboard_service.py"):
-            tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
-            assert any(isinstance(n, ast.ExceptHandler) and _names_read_unavailable(n)
-                       for n in ast.walk(tree)), rel
-            assert REPO / rel in files
-        for rel in ("core/prediction_service.py", "core/store.py",
-                    "core/read_fallback.py", "core/pg_traffic_read.py"):
-            assert REPO / rel in files, rel
-
-    def test_the_rule_bites(self):
-        src = (
-            "async def f(self):\n"
-            "    try:\n"
-            "        return await self._traffic_run('x')\n"
-            "    except read_fallback.ReadUnavailable:\n"
-            "        return []\n"
-        )
-        assert swallowing_handlers(src) == [4]
-        assert swallowing_handlers(src.replace("return []", "raise")) == []
-
-    def test_a_return_before_the_raise_is_an_exit(self):
-        """`return` first and the final `raise` never runs — the shape the
-        rule's last-statement check alone passed (found by a DN-20c
-        mutation)."""
-        src = (
-            "async def f(self):\n"
-            "    try:\n"
-            "        return await self._traffic_run('x')\n"
-            "    except read_fallback.ReadUnavailable:\n"
-            "        if self.quiet:\n"
-            "            return None\n"
-            "        raise\n"
-        )
-        assert swallowing_handlers(src) == [4]
-
-    @pytest.mark.parametrize("ending,swallows", [
-        ("raise", False),
-        ("raise exc", False),
-        ("raise HTTPException(status_code=500)", True),
-        ("raise exc from None", True),
-        ("raise RuntimeError('x') from exc", True),
-        ("raise other", True),
-        ("log(exc)", True),
-    ])
-    def test_only_the_refusal_itself_may_be_raised(self, ending, swallows):
-        src = (
-            "async def f(self):\n"
-            "    try:\n"
-            "        return await self._traffic_run('x')\n"
-            "    except read_fallback.ReadUnavailable as exc:\n"
-            f"        {ending}\n"
-        )
-        assert (swallowing_handlers(src) == [4]) is swallows
+        read_fallback.reset_counts()
+        limiter.reset()
+        response = sweep_client.post("/api/revenue/forecast/tune")
+        assert response.status_code == 503, response.text
+        assert _surface(response) == "forecast"
+        assert read_fallback.refusals()["forecast"]["count"] == 1

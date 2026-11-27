@@ -76,6 +76,10 @@ def collect_static_check_names() -> set:
     from core import analytics_captures
 
     names |= set(analytics_captures.conditions())
+    # The Rust pilot's watch, from the module constants its judgement files.
+    from core import rust_api_watch
+
+    names |= set(rust_api_watch.CONDITIONS)
     return names
 
 

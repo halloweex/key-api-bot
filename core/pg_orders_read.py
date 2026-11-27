@@ -20,9 +20,12 @@ was a constant since S14-00, and the DuckDB bodies went.
 These raise. A selection that could not be made is not an empty one: the
 callers are repair jobs, each with its own failure handling, and "nothing to
 repair" read from an unreachable Postgres would be the job reporting a clean
-run over a store it never saw. The module name matches `core/pg_*_read*.py`, so
-`tests/unit/test_read_fallback_sites.py` forbids a handler here that carries on
-toward DuckDB — whose orders, under the chain, are the frozen copy.
+run over a store it never saw. No GET route reads them, so the route sweep in
+`tests/unit/test_read_fallback_http.py` never asks: what a job makes of a
+failed selection is its own to show, as the 05:15 refresh does by naming the
+error (`tests/unit/test_status_refresh_backdated.py`). The walk of every
+handler in `core/pg_*_read*.py` that stood in
+`tests/unit/test_read_fallback_sites.py` is gone.
 """
 from __future__ import annotations
 

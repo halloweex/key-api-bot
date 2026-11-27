@@ -1121,16 +1121,32 @@ class PredictionService:
     def metrics(self) -> Dict[str, float]:
         return self._metrics
 
+    async def _admin_frame(self, sales_type: str) -> pd.DataFrame:
+        """The training frame for `evaluate` and `tune`, or the refusal.
+
+        Each is an admin's HTTP request and nothing else calls it, so a read
+        that fails is refused as `forecast`, which web answers 503 naming it,
+        as it does for any route whose engine fails. Until 2026-11-27 it was
+        a 500. `train` reads the same frame and does not come through here:
+        its failure is its own `status: error`, and the previous model stands
+        (`tests/unit/test_read_fallback_off_consumers.py`, `TestTraining`).
+        """
+        from core import read_fallback
+        from core.store import get_store
+
+        store = await get_store()
+        try:
+            return await self._query_daily_revenue(store, sales_type, days_back=780)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("forecast", exc)
+
     async def evaluate(self, sales_type: str = "retail") -> Dict[str, Any]:
         """Run walk-forward CV evaluation with baselines.
 
         Excludes today's incomplete data, uses last 6 complete months as folds.
         Returns detailed metrics, feature importance, and residual analysis.
         """
-        from core.store import get_store
-        store = await get_store()
-
-        df = await self._query_daily_revenue(store, sales_type, days_back=780)
+        df = await self._admin_frame(sales_type)
         if df.empty or len(df) < 120:
             return {"status": "insufficient_data", "rows": len(df)}
 
@@ -1147,10 +1163,7 @@ class PredictionService:
 
         Reports the best parameters; saves nothing (see `_tune_hyperparameters`).
         """
-        from core.store import get_store
-        store = await get_store()
-
-        df = await self._query_daily_revenue(store, sales_type, days_back=780)
+        df = await self._admin_frame(sales_type)
         if df.empty or len(df) < 120:
             return {"status": "insufficient_data", "rows": len(df)}
 

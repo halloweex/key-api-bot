@@ -4,7 +4,7 @@ Integration tests for the pre-launch security hardening.
 Covers the audit findings fixed on the `security-hardening` branch:
 - #1/#2  The /api/* surface requires an authenticated session
 - #3      WebSocket endpoints require a session
-- #4      A single shared rate-limiter instance is used everywhere
+- #4      One rate limiter, keyed per client, behind every limited route
 - #10     The admin/ops router is admin-only; /api/health stays public
 - #12     Telegram HMAC verification is constant-time and rejects tampering
 - #13     The SPA catch-all blocks path traversal
@@ -35,6 +35,11 @@ from web.routes.auth import (
     SESSION_COOKIE,
 )
 from core.permissions import ADMIN_USER_IDS
+from tests.helpers.access_lists import (
+    access_lists_empty, dashboard_row, dashboard_user, rows,
+)
+from tests.helpers.app_client import signed_in
+from tests.integration.pg_sms_seed import needs_postgres
 
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 
@@ -351,44 +356,6 @@ ADMIN_USER_ROUTES = [
 ]
 
 
-class _RecordingStore:
-    """A store that answers session resolution and records every write."""
-
-    def __init__(self, status: str = "approved", role: str = "viewer"):
-        self._status, self._role = status, role
-        self.writes = []
-
-    async def get_user(self, uid):
-        return {"user_id": uid, "status": self._status, "role": self._role}
-
-    async def list_users(self, **kwargs):
-        return []
-
-    async def update_user_role(self, user_id, role, changed_by):
-        self.writes.append(("role", user_id, role))
-        return True
-
-    async def update_user_status(self, user_id, status, reviewed_by):
-        self.writes.append(("status", user_id, status))
-        return True
-
-
-def _install_store(monkeypatch, store):
-    """Route both the session check and the handler bodies to `store`.
-
-    Two patch targets, not one: `_resolve_session` imports `get_store` from
-    `core.duckdb_store` at call time, but web/routes/api/users.py bound it into
-    its own namespace at import. Patching only the first leaves every handler
-    body reaching the real DuckDB file.
-    """
-    async def _fake():
-        return store
-
-    monkeypatch.setattr("core.store.get_store", _fake)
-    monkeypatch.setattr("web.routes.api.users.get_store", _fake)
-    return store
-
-
 class TestAdminUserManagementIsAdminOnly:
     """Unlike the PII routes above, these six carry `require_admin` in their own
     signatures rather than on the include — so a router reshuffle that moved
@@ -405,31 +372,40 @@ class TestAdminUserManagementIsAdminOnly:
             f"{method} {path} manages access for any approved viewer — " \
             f"admin→viewer downgrade"
 
-    def test_approved_viewer_is_forbidden_from_user_management(self, client, monkeypatch):
-        """The structural check reads the route table; this reads the answer."""
-        viewer_id = 555_000_111
-        assert viewer_id not in ADMIN_USER_IDS
+    @needs_postgres
+    @pytest.mark.asyncio
+    async def test_approved_viewer_is_forbidden_from_user_management(self, monkeypatch):
+        """The structural check reads the route table; this reads the answer,
+        and the rows a forbidden request must not have written."""
+        target = ADMIN_ID
+        async with access_lists_empty(monkeypatch):
+            await dashboard_user(target, role="admin")
+            urls = [
+                ("GET", "/api/admin/users"),
+                ("GET", f"/api/admin/users/{target}"),
+                ("PATCH", f"/api/admin/users/{target}/role?role=viewer"),
+                ("PATCH", f"/api/admin/users/{target}/status?status=denied"),
+                ("GET", "/api/admin/permissions"),
+                ("PATCH", "/api/admin/permissions?role=viewer&feature=sms"
+                          "&can_view=true&can_edit=true&can_delete=false"),
+            ]
+            async with signed_in("viewer") as viewer:
+                for method, url in urls:
+                    r = await viewer.request(method, url)
+                    assert r.status_code == 403, \
+                        f"{method} {url} answered a viewer with {r.status_code}"
 
-        store = _install_store(monkeypatch, _RecordingStore())
-        headers = _cookie_header(_make_cookie(viewer_id, role="viewer"))
-        target = sorted(ADMIN_USER_IDS)[0]
-
-        urls = [
-            ("GET", "/api/admin/users"),
-            ("GET", f"/api/admin/users/{target}"),
-            ("PATCH", f"/api/admin/users/{target}/role?role=admin"),
-            ("PATCH", f"/api/admin/users/{target}/status?status=denied"),
-            ("GET", "/api/admin/permissions"),
-            ("PATCH", "/api/admin/permissions?role=viewer&feature=sms"
-                      "&can_view=true&can_edit=true&can_delete=false"),
-        ]
-        for method, url in urls:
-            r = client.request(method, url, headers=headers)
-            assert r.status_code == 403, f"{method} {url} answered a viewer with {r.status_code}"
-        assert store.writes == [], \
-            f"a forbidden request still wrote: {store.writes}"
+            assert await dashboard_row(target) == {
+                "user_id": target, "role": "admin", "status": "approved",
+                "allowed_features": None, "denial_count": 0, "reviewed_by": None,
+            }, "a forbidden request still wrote the row"
+            granted = await rows(
+                "SELECT can_edit FROM app.role_permissions "
+                "WHERE role = 'viewer' AND feature = 'sms'")
+            assert granted in ([], [{"can_edit": False}]), granted
 
 
+@needs_postgres
 class TestHardcodedAdminAccessIsNotSilentlyRevocable:
     """`_resolve_session` short-circuits for the ids in `ADMIN_USER_IDS` before
     it looks at status or role, so for exactly those two accounts the stored
@@ -437,79 +413,79 @@ class TestHardcodedAdminAccessIsNotSilentlyRevocable:
     the admin page then showed "denied" beside an account with full access.
 
     The endpoints refuse instead. Enforcing the deny is the wrong fix: the
-    hardcoded set is the recovery path when the DuckDB row or the whole
+    hardcoded set is the recovery path when the users table or the whole
     permissions system is unusable, and honouring a stored status there would
     make it possible to lock every admin out with one click, recoverable only
     by editing source and redeploying.
+
+    Over the test Postgres: each case seeds `app.dashboard_users`, calls the
+    route as the hardcoded admin and reads the row back.
     """
 
-    def _admin_headers(self):
-        return _cookie_header(_make_cookie(ADMIN_ID, role="admin"))
+    ORDINARY = 7_000_000_301
 
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("status", ["denied", "frozen", "pending"])
-    def test_revoking_a_hardcoded_admin_is_refused(self, client, monkeypatch, status):
-        store = _install_store(monkeypatch, _RecordingStore(role="admin"))
-        r = client.patch(
-            f"/api/admin/users/{ADMIN_ID}/status?status={status}",
-            headers=self._admin_headers(),
-        )
-        assert r.status_code == 409, \
-            f"status={status} on a hardcoded admin answered {r.status_code}; " \
-            f"it does not remove access, so it must not report success"
-        assert store.writes == [], \
-            "refused, but the row was written anyway — the page would show a " \
-            f"status the session ignores: {store.writes}"
+    async def test_revoking_a_hardcoded_admin_is_refused(self, monkeypatch, status):
+        async with access_lists_empty(monkeypatch):
+            await dashboard_user(ADMIN_ID, role="admin")
+            before = await dashboard_row(ADMIN_ID)
+            async with signed_in("admin") as admin:
+                r = await admin.patch(f"/api/admin/users/{ADMIN_ID}/status?status={status}")
 
+            assert r.status_code == 409, \
+                f"status={status} on a hardcoded admin answered {r.status_code}; " \
+                f"it does not remove access, so it must not report success"
+            assert await dashboard_row(ADMIN_ID) == before, \
+                "refused, but the row was written anyway — the page would show a " \
+                "status the session ignores"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("role", ["viewer", "editor"])
-    def test_demoting_a_hardcoded_admin_is_refused(self, client, monkeypatch, role):
-        store = _install_store(monkeypatch, _RecordingStore(role="admin"))
-        r = client.patch(
-            f"/api/admin/users/{ADMIN_ID}/role?role={role}",
-            headers=self._admin_headers(),
-        )
-        assert r.status_code == 409, \
-            f"role={role} on a hardcoded admin answered {r.status_code}; " \
-            f"require_admin ignores the stored role for these ids"
-        assert store.writes == []
+    async def test_demoting_a_hardcoded_admin_is_refused(self, monkeypatch, role):
+        async with access_lists_empty(monkeypatch):
+            await dashboard_user(ADMIN_ID, role="admin")
+            before = await dashboard_row(ADMIN_ID)
+            async with signed_in("admin") as admin:
+                r = await admin.patch(f"/api/admin/users/{ADMIN_ID}/role?role={role}")
 
-    def test_the_truthful_values_are_still_writable(self, client, monkeypatch):
+            assert r.status_code == 409, \
+                f"role={role} on a hardcoded admin answered {r.status_code}; " \
+                f"require_admin ignores the stored role for these ids"
+            assert await dashboard_row(ADMIN_ID) == before
+
+    @pytest.mark.asyncio
+    async def test_the_truthful_values_are_still_writable(self, monkeypatch):
         """Refusing everything would strand a row this bug already corrupted.
 
         `approved`/`admin` are what the code enforces for these ids, so writing
         them makes the admin page agree with reality rather than diverge from it.
         """
-        store = _install_store(monkeypatch, _RecordingStore(role="admin"))
-        headers = self._admin_headers()
+        async with access_lists_empty(monkeypatch):
+            await dashboard_user(ADMIN_ID, role="viewer", status="denied")
+            async with signed_in("admin") as admin:
+                status = await admin.patch(f"/api/admin/users/{ADMIN_ID}/status?status=approved")
+                role = await admin.patch(f"/api/admin/users/{ADMIN_ID}/role?role=admin")
 
-        assert client.patch(
-            f"/api/admin/users/{ADMIN_ID}/status?status=approved", headers=headers
-        ).status_code == 200
-        assert client.patch(
-            f"/api/admin/users/{ADMIN_ID}/role?role=admin", headers=headers
-        ).status_code == 200
-        assert store.writes == [
-            ("status", ADMIN_ID, "approved"),
-            ("role", ADMIN_ID, "admin"),
-        ]
+            assert (status.status_code, role.status_code) == (200, 200)
+            row = await dashboard_row(ADMIN_ID)
+            assert (row["status"], row["role"], row["reviewed_by"]) == (
+                "approved", "admin", ADMIN_ID)
 
-    def test_ordinary_users_are_still_revocable(self, client, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_ordinary_users_are_still_revocable(self, monkeypatch):
         """The guard keys on the hardcoded set, not on 'is an admin'."""
-        ordinary = 555_000_222
-        assert ordinary not in ADMIN_USER_IDS
+        assert self.ORDINARY not in ADMIN_USER_IDS
+        async with access_lists_empty(monkeypatch):
+            await dashboard_user(self.ORDINARY, role="admin")
+            async with signed_in("admin") as admin:
+                status = await admin.patch(f"/api/admin/users/{self.ORDINARY}/status?status=denied")
+                role = await admin.patch(f"/api/admin/users/{self.ORDINARY}/role?role=viewer")
 
-        store = _install_store(monkeypatch, _RecordingStore(role="admin"))
-        headers = self._admin_headers()
-
-        assert client.patch(
-            f"/api/admin/users/{ordinary}/status?status=denied", headers=headers
-        ).status_code == 200
-        assert client.patch(
-            f"/api/admin/users/{ordinary}/role?role=viewer", headers=headers
-        ).status_code == 200
-        assert store.writes == [
-            ("status", ordinary, "denied"),
-            ("role", ordinary, "viewer"),
-        ]
+            assert (status.status_code, role.status_code) == (200, 200)
+            row = await dashboard_row(self.ORDINARY)
+            assert (row["status"], row["role"], row["reviewed_by"]) == (
+                "denied", "viewer", ADMIN_ID)
 
     @pytest.mark.asyncio
     async def test_a_denied_hardcoded_admin_still_resolves_as_admin(self, monkeypatch):
@@ -519,12 +495,12 @@ class TestHardcodedAdminAccessIsNotSilentlyRevocable:
         these ids, this fails — and the refusal above becomes the wrong answer
         and should be revisited with it.
         """
-        from web.routes.auth import _resolve_session
+        async with access_lists_empty(monkeypatch):
+            await dashboard_user(ADMIN_ID, role="viewer", status="denied")
+            async with signed_in("admin") as admin:
+                r = await admin.get("/api/admin/users")
 
-        _install_store(monkeypatch, _RecordingStore(status="denied", role="viewer"))
-        session = await _resolve_session(_make_cookie(ADMIN_ID, role="admin"))
-        assert session is not None, "a hardcoded admin lost access to a stored status"
-        assert session["role"] == "admin"
+        assert r.status_code == 200, "a hardcoded admin lost access to a stored status"
 
 
 # ─── #3  WebSocket endpoints require a session ────────────────────────────────
@@ -550,20 +526,48 @@ class TestWebSocketAuth:
 
 # ─── #4  Single shared rate-limiter instance ──────────────────────────────────
 
-class TestRateLimiterShared:
-    def test_one_limiter_instance_everywhere(self):
-        from web.ratelimit import limiter as shared
-        from web.main import limiter as main_limiter
-        from web.routes.api._deps import limiter as deps_limiter
-        from web.routes.chat import limiter as chat_limiter
+class TestRateLimitsAreEnforcedPerClient:
+    """One limiter behind every `@limiter.limit`, the chat router's and the
+    API's alike, keyed on the client's address (`X-Real-IP`, which nginx
+    sets: `web.ratelimit.client_key`). A route module with a `Limiter` of its
+    own would key on the TCP peer — nginx — and put every visitor in one
+    bucket, or never reach the app's 429 at all.
 
-        assert main_limiter is shared
-        assert deps_limiter is shared
-        assert chat_limiter is shared
+    Each case asks one route as one client until it is refused, then once as
+    another client, who must still get through. Neither route reaches
+    anything outside the app: the file name is refused before any send, and
+    a conversation nobody owns is refused before the assistant is asked.
+    """
 
-    def test_app_state_limiter_is_shared(self):
-        from web.ratelimit import limiter as shared
-        assert app.state.limiter is shared
+    MOST_TRIES = 100
+
+    @pytest.mark.parametrize("method,path,kwargs", [
+        ("POST", "/api/me/send-file",
+         {"json": {"filename": "not a csv", "content": "x"}}),
+        ("POST", "/api/chat",
+         {"json": {"message": "hi", "conversation_id": "nobody-owns-this"}}),
+    ], ids=["api-router", "chat-router"])
+    def test_one_client_is_limited_and_another_is_not(self, method, path, kwargs):
+        from web.ratelimit import limiter
+
+        client = TestClient(app)
+        cookie = _cookie_header(_make_cookie(ADMIN_ID))
+
+        def ask(address: str) -> int:
+            return client.request(method, path, headers={**cookie, "X-Real-IP": address},
+                                  **kwargs).status_code
+
+        limiter.reset()
+        try:
+            answers = []
+            while len(answers) < self.MOST_TRIES and 429 not in answers:
+                answers.append(ask("203.0.113.1"))
+            assert answers[-1] == 429, f"{path} never refused one client: {set(answers)}"
+            assert len(answers) > 1, f"{path} refused the first request"
+            assert ask("203.0.113.2") != 429, \
+                f"{path}: another client was refused with the first one's allowance"
+        finally:
+            limiter.reset()
 
 
 # ─── #12  Telegram HMAC verification ──────────────────────────────────────────

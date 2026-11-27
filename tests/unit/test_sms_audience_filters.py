@@ -353,61 +353,55 @@ async def test_one_arm_still_keeps_buyers_of_no_level(tmp_path):
 
 
 class TestGenderFilter:
-    """Inferred gender as an audience filter.
+    """Inferred gender as an audience filter, on the verdicts the classifier
+    left in `app.buyer_gender`.
 
-    AGGREGATE, not content: gender is a property of the person, not of anything
-    they bought. The content family is an `EXISTS` over order lines precisely so
-    that filtering on a brand does not recompute LTV from the matching lines
-    alone — a customer's value is not "what they spent on this brand". None of
-    that reasoning applies here, and routing gender through an EXISTS would make
-    the filter mean "bought something while being a woman", which is not a
-    sentence.
+    Five buyers, one verdict each: 1 f/certain, 2 f/medium, 3 m/high, 4 a
+    refused row (its gender NULL) and 5 with no row at all. A gendered
+    audience never reaches 4 or 5 — a campaign addressing somebody as a woman
+    must not reach a person nobody could decide — while an audience that does
+    not ask about gender keeps both. The confidence floor is a set of levels
+    that clear it, applied with or without a gender picked.
     """
 
-    def test_it_is_a_predicate_over_the_scored_row(self):
-        sql, params = SmsAudienceFilters(genders=("f",)).predicate(
-            "revenue_ltv", "retail",
-        )
-        assert "gender IN (?)" in sql
-        assert params == ["f"]
-        assert "EXISTS" not in sql, "gender was routed through the content family"
+    @staticmethod
+    async def _seed() -> None:
+        async with pg_conn() as conn:
+            await _catalogue(conn)
+            for buyer_id in (1, 2, 3, 4, 5):
+                await _buyer(conn, buyer_id, f"38096000000{buyer_id}")
+                await _order(conn, oid=buyer_id, buyer_id=buyer_id, days_ago=10 + buyer_id)
+            await insert(conn, "app.buyer_gender", [
+                dict(buyer_id=buyer_id, gender=gender, confidence=confidence,
+                     method=method, rules_version=1)
+                for buyer_id, gender, confidence, method in (
+                    (1, "f", "certain", "test"),
+                    (2, "f", "medium", "test"),
+                    (3, "m", "high", "test"),
+                    (4, None, None, "refused"),
+                )
+            ])
 
-    def test_both_values_can_be_asked_for_at_once(self):
-        sql, params = SmsAudienceFilters(genders=("f", "m")).predicate(
-            "revenue_ltv", "retail",
-        )
-        assert "gender IN (?, ?)" in sql
-        assert params == ["f", "m"]
-
-    def test_a_refused_row_can_never_be_selected(self):
-        """1.4% of buyers carry NULL, and NULL never satisfies `IN`.
-
-        That is the whole guarantee: there is no spelling of this filter that
-        addresses somebody as a woman when nobody could decide they are one.
-        """
-        sql, _ = SmsAudienceFilters(genders=("f", "m")).predicate(
-            "revenue_ltv", "retail",
-        )
-        assert "IS NULL" not in sql
-        assert "COALESCE(gender" not in sql
-
-    def test_the_confidence_floor_is_a_set_not_an_ordering(self):
-        """SQL has no ordering over these strings and inventing one with a CASE
-        would give the ladder a second home."""
-        sql, params = SmsAudienceFilters(gender_min_confidence="high").predicate(
-            "revenue_ltv", "retail",
-        )
-        assert "gender_confidence IN (?, ?)" in sql
-        assert params == ["certain", "high"]
-        assert "CASE" not in sql
-
-    def test_the_floor_stands_alone(self):
-        """"Everybody I am sure about" is a sentence, with no gender picked."""
-        sql, params = SmsAudienceFilters(gender_min_confidence="certain").predicate(
-            "revenue_ltv", "retail",
-        )
-        assert "gender_confidence IN (?)" in sql and params == ["certain"]
-        assert "gender IN" not in sql
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("filters,expected", [
+        ({}, {1, 2, 3, 4, 5}),
+        ({"genders": ("f",)}, {1, 2}),
+        ({"genders": ("m",)}, {3}),
+        ({"genders": ("f", "m")}, {1, 2, 3}),
+        ({"gender_min_confidence": "certain"}, {1}),
+        ({"gender_min_confidence": "high"}, {1, 3}),
+        ({"gender_min_confidence": "medium"}, {1, 2, 3}),
+        ({"genders": ("f",), "gender_min_confidence": "high"}, {1}),
+    ], ids=["no filter keeps the undecided", "f", "m",
+            "both never reach the undecided", "floor certain",
+            "floor high is certain and high", "floor medium is every verdict",
+            "f, high or better"])
+    async def test_the_audience_is_the_buyers_the_verdicts_name(
+        self, tmp_path, filters, expected,
+    ):
+        store = await _store(tmp_path)
+        await self._seed()
+        assert await _ids(store, **filters) == expected
 
     def test_an_unset_gender_filter_is_not_a_predicate(self):
         """An empty filter set has to select exactly what it selected before
@@ -415,10 +409,6 @@ class TestGenderFilter:
         empty = SmsAudienceFilters()
         assert empty.is_empty()
         assert empty.predicate("revenue_ltv", "retail") == ("TRUE", [])
-
-    def test_setting_only_gender_makes_the_filter_non_empty(self):
-        assert not SmsAudienceFilters(genders=("m",)).is_empty()
-        assert not SmsAudienceFilters(gender_min_confidence="high").is_empty()
 
     def test_it_is_frozen_with_the_campaign(self):
         """`as_dict` is what tells a reader six months later who was messaged."""

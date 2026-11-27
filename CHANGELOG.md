@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.367
+
+- rust: the access contract names the live stock margin route (#406)
+- deploy/rust: the role's password comes from the environment, never argv
+- rust: the access contract names the two SMS send routes (#404)
+- rust: the pilot's watch is a line in the 09:00 digest, never a page
+- rust: step 2's guards — Vary, the watchdog, the drift sensor, its own role
+- nginx: a route switched to Rust keeps /api/'s expires -1
+- rust: the access contract at 0039_promotions
+- feat(rust): the trend answers the offline store (#387)
+- chore(rust): the access contract requires 0036_analytics_captures
+- feat(rust): the trend draws the stored forecast and the whole period's comparison
+- WIP: the trend alone in the harnesses; its frontend contract; access for 3.0.345
+- WIP: the Rust trend reads period=all_time and granularity=monthly
+- WIP: narrow Rust trend branch cut from main (not built, not verified)
+
+
+## 3.0.366
+
+- feat(scheduler): who executes each job, and a lease that keeps it to one process
+
+
+## 3.0.365
+
+- fix(dashboard): every block follows the header's filters; one expense total
+
+
+## 3.0.364
+
+- test(margin): the margin repository runs seven statements now
+- fix(margin): get_stock_margin_rows returns the list it promises
+- feat(margin): live margin of every offer in stock, for admins only
+
+
 ## 3.0.363
 
 - fix(sms): results name the buyers line and show each arm's revenue

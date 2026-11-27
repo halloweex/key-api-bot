@@ -23,19 +23,23 @@ with the dashboard's list about **twelve of sixteen** approved people —
 bot access away was never a statement about their dashboard access. Pointing
 the session at it would have locked twelve people out, one of them an owner who
 survives only because their id is hardcoded. Hence a second table, and hence
-`test_the_two_lists_are_not_confused_for_each_other`.
+`TestTheTwoListsAreNotConfusedForEachOther`.
 """
 from __future__ import annotations
 
-import ast
-import pathlib
+import asyncio
 from pathlib import Path
 
 import pytest
 
+from tests.helpers.access_lists import (
+    access_lists_empty, bot_store_on_postgres, dashboard_row, execute,
+)
+from tests.helpers.app_client import signed_in
+from tests.integration.pg_sms_seed import needs_postgres
+
 REPO = Path(__file__).resolve().parents[2]
 MIGRATION = REPO / "migrations" / "versions" / "0016_dashboard_users.py"
-REPOSITORY = REPO / "core" / "repositories" / "users.py"
 
 
 # ─── the switch ──────────────────────────────────────────────────────────────
@@ -51,81 +55,66 @@ REPOSITORY = REPO / "core" / "repositories" / "users.py"
 # ─── the routed bodies ───────────────────────────────────────────────────────
 
 
-class TestNothingGoesRoundTheRouter:
+@needs_postgres
+class TestRefusalsAtOnceAreAllCounted:
+    """`deny_user` counts a refusal, and the fifth freezes the person. It was
+    a SELECT and then an UPDATE, safe only because DuckDB's lock made them one
+    acquisition; on a pool, two admins refusing the same person at once would
+    read the same count and lose a refusal on the way to the freeze."""
 
-    def test_denial_is_one_statement(self):
-        """It was a SELECT and then an UPDATE, safe only because DuckDB's lock
-        made them one acquisition. On a pool, two admins refusing the same
-        person would read the same count and lose a refusal on the way to the
-        freeze."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        deny = next(n for n in ast.walk(tree)
-                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "deny_user")
-        calls = [n for n in ast.walk(deny)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == "_users_run"]
-        assert len(calls) == 1, f"{len(calls)} statements, so the count can be lost"
+    PERSON, ADMIN = 7_000_000_701, 7_000_000_702
 
+    @pytest.mark.asyncio
+    async def test_concurrent_refusals_reach_the_freeze(self, monkeypatch):
+        from core.repositories.users import MAX_DENIAL_COUNT
+        from core.store import AnalyticsStore
 
-def _code_only(path) -> str:
-    """The module with its comments and docstrings removed — and nothing else.
+        at_once = 3
+        async with access_lists_empty(monkeypatch):
+            await execute(
+                "INSERT INTO app.dashboard_users (user_id, role, status, denial_count) "
+                "VALUES ($1, 'viewer', 'denied', $2)",
+                self.PERSON, MAX_DENIAL_COUNT - at_once)
+            store = AnalyticsStore()
+            answers = await asyncio.gather(
+                *(store.deny_user(self.PERSON, self.ADMIN) for _ in range(at_once)))
+            row = await dashboard_row(self.PERSON)
 
-    A plain grep over the source is satisfied by prose: a docstring that
-    *explains* which table the session reads fails an assertion about the
-    session *reading* it. That is `_migration_columns`' lesson one file over,
-    and it went green-to-red for exactly that reason once — a cache added to
-    `get_current_user` named `app.dashboard_users` in a sentence about why the
-    read is expensive, with no change to the code at all.
-
-    **Ordinary string literals are kept, deliberately.** A table name reaches
-    the database inside one, so dropping every STRING would blind the check to
-    the thing it exists to catch — a SQL statement written here instead of in
-    the repository. Docstrings are found through `ast`, which knows which
-    string expressions are documentation, and subtracted by position.
-    """
-    import io
-    import tokenize
-
-    source = pathlib.Path(path).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    docstrings = set()
-    for node in ast.walk(tree):
-        if not isinstance(
-            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
-        ):
-            continue
-        body = getattr(node, "body", None)
-        if not body:
-            continue
-        first = body[0]
-        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
-                and isinstance(first.value.value, str):
-            docstrings.add((first.value.lineno, first.value.col_offset))
-
-    kept = []
-    for token in tokenize.generate_tokens(io.StringIO(source).readline):
-        if token.type == tokenize.COMMENT:
-            continue
-        if token.type == tokenize.STRING and token.start in docstrings:
-            continue
-        kept.append(token.string)
-    return " ".join(kept)
+        assert (row["denial_count"], row["status"]) == (MAX_DENIAL_COUNT, "frozen")
+        # Each refusal was found, and exactly one of them froze the person.
+        assert sorted(answers) == [(True, False)] * (at_once - 1) + [(True, True)]
 
 
+@needs_postgres
 class TestTheTwoListsAreNotConfusedForEachOther:
-    def test_the_session_does_not_read_the_bots_list(self):
-        """Twelve of sixteen approved dashboard users were `denied` in
-        `app.authorized_users` on the day this moved. Reading it here would
-        have locked them out, and the one it would not lock out is an owner
-        whose id is hardcoded."""
-        code = _code_only(REPO / "web" / "routes" / "auth.py")
-        assert "authorized_users" not in code
-        assert "dashboard_users" not in code, (
-            "the session should reach the list through the store, not name a "
-            "table — the switch is what chooses the engine"
-        )
+    """Twelve of sixteen approved dashboard users were `denied` in
+    `app.authorized_users` on the day the session moved off DuckDB. Reading
+    the bot's list there would have locked them out, and the one it would not
+    have locked out is an owner whose id is hardcoded.
+
+    Over the test Postgres, with the bot's store there as production runs it:
+    each person is approved in one list and denied in the other, and the
+    session follows the dashboard's."""
+
+    APPROVED_HERE, DENIED_HERE = 7_000_000_601, 7_000_000_602
+
+    @pytest.mark.asyncio
+    async def test_the_session_follows_the_dashboards_list(self, monkeypatch, tmp_path):
+        async with bot_store_on_postgres(monkeypatch, tmp_path):
+            await execute(
+                "INSERT INTO app.authorized_users (user_id, status) "
+                "VALUES ($1, 'denied'), ($2, 'approved')",
+                self.APPROVED_HERE, self.DENIED_HERE)
+            async with signed_in("viewer", user_id=self.APPROVED_HERE) as visitor:
+                approved_here = await visitor.get("/api/me")
+            async with signed_in("viewer", user_id=self.DENIED_HERE) as visitor:
+                await execute("UPDATE app.dashboard_users SET status = 'denied' "
+                              "WHERE user_id = $1", self.DENIED_HERE)
+                denied_here = await visitor.get("/api/me")
+
+        assert approved_here.status_code == 200
+        assert approved_here.json()["user"]["id"] == self.APPROVED_HERE
+        assert denied_here.status_code == 401
 
 
 # ─── the matrix followed the list ────────────────────────────────────────────

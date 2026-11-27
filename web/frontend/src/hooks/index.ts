@@ -72,6 +72,7 @@ export {
   useMarginTrend,
   useMarginBrandCategory,
   useMarginAlerts,
+  useStockMargin,
   // Promotions calendar
   usePromotions,
   usePromotionVersions,

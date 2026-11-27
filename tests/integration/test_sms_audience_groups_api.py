@@ -8,42 +8,42 @@ the browser follows and `api_gate` reads `sales_type` from it.
 
 What these hold:
 
-* the preview, the CSV export and the freeze parse one query string into the
-  same groups, so the roster frozen is the roster that was on screen;
+* a query string selects the audience its groups describe, in either form —
+  flat for the first group, `or_groups` for the rest — on the fixture of
+  `tests/sms_audience_fixture.py` in Postgres, called as a signed-in visitor
+  (`tests/helpers/sms_audience_routes.py`);
+* the preview, the CSV export and the freeze answer one query string with one
+  roster, so the roster frozen is the roster that was on screen;
+* the level rules follow the widest group's window, and the reactivation
+  level keeps its 120 days however wide the window;
 * anything malformed is a 400 that names the group, never a group silently
-  dropped or a key silently ignored;
+  dropped or a key silently ignored (against a fake store, which also proves
+  the store was never reached);
 * a follow-up still refuses every parameter that shapes an audience;
 * the JSON form of a group cannot drift from the flat one — same keys, same
   bounds — because a filter added to one and not the other is a condition the
   page shows and the server never applies.
 """
+import csv
 import inspect
+import io
 import json
-from datetime import date
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
-from core.repositories.customers import (
-    MAX_AUDIENCE_GROUPS, SmsAudienceFilters, SmsAudienceGroup,
-)
+from core.repositories.customers import MAX_AUDIENCE_GROUPS
+from tests import sms_audience_fixture as fx
+from tests.helpers.app_client import signed_in
 from tests.helpers.sms_api import _FakeStore, _headers
+from tests.helpers.sms_audience_routes import (
+    BASE, CAMPAIGNS, EXPORT, SEGMENTS, arms, audience_on_postgres, buyer_ids,
+    frozen_campaign, frozen_members,
+)
+from tests.integration.pg_sms_seed import needs_postgres
 from web.main import app
 from web.routes.api import customers as api
-
-SEGMENTS = "/api/customers/sms-segments"
-EXPORT = "/api/customers/sms-segments/export/csv"
-CAMPAIGNS = "/api/customers/sms-campaigns"
-
-OWNER = {
-    # Group 1: two or more purchases since 1 January, in a window wide
-    # enough to hold the whole year.
-    "max_recency_days": 365,
-    "period_orders_min": 2,
-    "period_from": "2026-01-01",
-    # Group 2: anybody whose last order is within 92 days.
-    "or_groups": json.dumps([{"max_recency_days": 92}]),
-}
 
 
 @pytest.fixture(autouse=True)
@@ -71,31 +71,117 @@ def store(monkeypatch):
     return fake
 
 
+@pytest_asyncio.fixture
+async def admin(monkeypatch):
+    """A hardcoded admin, the audience fixture in Postgres."""
+    async with audience_on_postgres(monkeypatch):
+        async with signed_in("admin") as visitor:
+            yield visitor
+
+
 def _get(client, params, path=SEGMENTS):
     return client.get(path, params=params, headers=_headers())
 
 
-class TestTheGroupsReachTheStore:
-    def test_the_owners_campaign(self, client, store):
-        r = _get(client, OWNER)
+def _owner() -> dict:
+    """The owner's campaign as the page sends it. Group 1, flat: two or more
+    purchases since `fx.period_from()`, in a window that holds them. Group 2:
+    anybody whose last order is within 92 days. A function, because the date
+    is the query's today, not the collection's."""
+    return {"max_recency_days": 365, "period_orders_min": 2,
+            "period_from": fx.period_from().isoformat(),
+            "or_groups": json.dumps([{"max_recency_days": 92}])}
+
+
+# A first group nobody matches, so the audience is the second group's alone:
+# no buyer of the fixture has fifty orders.
+NOBODY = {"orders_min": 50}
+
+
+def _as_params(fields: dict) -> dict:
+    """A group's filter fields with dates as the wire writes them."""
+    return {k: v.isoformat() if hasattr(v, "isoformat") else v
+            for k, v in fields.items()}
+
+
+def _preview(visitor, **params):
+    return visitor.get(SEGMENTS, params={"grouping": "single",
+                                         "include_customers": "true", **params})
+
+
+# The period's shapes from the fixture, and one more the fixture does not
+# hold: no order up to a date, over all time — everybody whose first order is
+# after it. 2, 4 and 15 bought before it; 10 is opted out, 11 has no usable
+# phone, and 9 takes the number 8 shares.
+PERIOD_CASES = fx.PERIOD_CASES + [
+    ("none up to a date, all time", 3650,
+     lambda: dict(period_orders_max=0, period_to=fx.period_from()),
+     dict(in_period=lambda d: d <= fx.period_from(), at_most=0),
+     {1, 3, 5, 6, 7, 9, 12, 13, 14}),
+]
+
+
+@needs_postgres
+class TestAQueryStringSelectsItsGroups:
+    @pytest.mark.asyncio
+    async def test_the_owners_campaign(self, admin):
+        r = await _preview(admin, **_owner())
+
         assert r.status_code == 200, r.text
-        sent = store.calls[-1]
-        assert "filters" not in sent and "max_recency_days" not in sent
-        assert sent["groups"] == [
-            SmsAudienceGroup(365, SmsAudienceFilters(
-                period_orders_min=2, period_from=date(2026, 1, 1))),
-            SmsAudienceGroup(92, SmsAudienceFilters()),
+        assert buyer_ids(r) == fx.UNION
+        assert r.json()["groups"] == [
+            {"group": 1, "matched": len(fx.A_MATCHED),
+             "recipients": fx.A_RECIPIENTS, "onlyHere": fx.A_ONLY},
+            {"group": 2, "matched": len(fx.B_MATCHED),
+             "recipients": fx.B_RECIPIENTS, "onlyHere": fx.B_ONLY},
+        ]
+        assert r.json()["criteria"]["groups"] == [
+            {"maxRecencyDays": 365, "filters": {
+                "period_orders_min": 2, "period_from": fx.period_from().isoformat()}},
+            {"maxRecencyDays": 92, "filters": {}},
         ]
 
-    def test_one_group_is_asked_for_as_it_always_was(self, client, store):
-        r = _get(client, {"period_days": 92, "max_recency_days": 270})
-        assert r.status_code == 200, r.text
-        sent = store.calls[-1]
-        assert "groups" not in sent
-        assert sent["max_recency_days"] == 270
-        assert sent["filters"] == SmsAudienceFilters(period_days=92)
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label,window,fields,terms,answer", PERIOD_CASES,
+                             ids=[c[0] for c in PERIOD_CASES])
+    async def test_a_period_flat(self, admin, label, window, fields, terms, answer):
+        assert fx.recipients(fx.matched(window, **terms)) == answer, \
+            f"{label}: the oracle disagrees with the hand"
 
-    def test_every_filter_travels_inside_a_group(self, client, store):
+        r = await _preview(admin, max_recency_days=window, **_as_params(fields()))
+
+        assert r.status_code == 200, r.text
+        assert buyer_ids(r) == answer
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label,window,fields,terms,answer", PERIOD_CASES,
+                             ids=[c[0] for c in PERIOD_CASES])
+    async def test_a_period_inside_or_groups(self, admin, label, window, fields,
+                                             terms, answer):
+        group = dict(max_recency_days=window, **_as_params(fields()))
+
+        r = await _preview(admin, **NOBODY, or_groups=json.dumps([group]))
+
+        assert r.status_code == 200, r.text
+        assert buyer_ids(r) == answer
+        first, second = r.json()["groups"]
+        assert first["matched"] == 0
+        assert second["matched"] == len(fx.matched(window, **terms))
+
+    @pytest.mark.asyncio
+    async def test_an_empty_group_is_its_window(self, admin):
+        """`{}` is "everyone whose last order is inside 270 days" — the
+        owner's second group, said with no filter at all."""
+        r = await _preview(admin, **NOBODY, or_groups="[{}]")
+
+        assert r.status_code == 200, r.text
+        assert buyer_ids(r) == BASE
+
+    @pytest.mark.asyncio
+    async def test_a_group_is_recorded_as_the_filters_it_ran(self, admin):
+        """Every filter a group can carry, typed loosely: what is frozen with a
+        campaign is each one normalised — duplicates collapsed, case and
+        spacing forgiven — and none of them dropped on the way."""
         group = {
             "max_recency_days": 400, "recency_min": 10, "recency_max": 300,
             "orders_min": 1, "orders_max": 9, "ltv_min": 100, "ltv_max": 99999.5,
@@ -107,58 +193,95 @@ class TestTheGroupsReachTheStore:
             "bought_within_days": 180, "period_orders_min": 3,
             "period_orders_max": 5, "period_days": 60,
         }
-        r = _get(client, {"or_groups": json.dumps([group])})
+
+        r = await _preview(admin, or_groups=json.dumps([group]))
+
         assert r.status_code == 200, r.text
-        second = store.calls[-1]["groups"][1]
-        assert second.max_recency_days == 400
-        f = second.filters
-        assert (f.recency_min_days, f.recency_max_days) == (10, 300)
-        assert (f.orders_min, f.orders_max) == (1, 9)
-        assert (f.ltv_min, f.ltv_max, f.aov_min, f.aov_max) == (100, 99999.5, 50, 5000)
-        assert f.first_order_from == date(2025, 1, 1)
-        assert f.cities == ("Київ", "Lviv")
-        assert f.genders == ("f",) and f.gender_min_confidence == "high"
-        assert f.brands == ("Anua",)
-        assert f.category_ids == (10, 11) and f.source_ids == (1, 4)
-        assert f.promocode == "KS-AUG" and f.bought_within_days == 180
-        assert (f.period_orders_min, f.period_orders_max, f.period_days,
-                f.period_from, f.period_to) == (3, 5, 60, None, None)
-
-    def test_an_empty_group_is_its_window(self, client, store):
-        """`{}` is "everyone whose last order is inside 270 days" — the
-        owner's second group, said with no filter at all."""
-        r = _get(client, {"or_groups": "[{}]"})
-        assert r.status_code == 200, r.text
-        assert store.calls[-1]["groups"][1] == SmsAudienceGroup()
-
-    def test_the_level_rules_follow_the_widest_window(self, client, store):
-        """The reactivation window may not outlast the base window, and with
-        groups the base window is the widest of theirs — a 60-day first group
-        beside a 365-day second must not pin it to 60."""
-        wide = json.dumps([{"max_recency_days": 365}])
-        r = _get(client, {"max_recency_days": 60, "or_groups": wide})
-        assert r.status_code == 200, r.text
-        assert store.calls[-1]["reactivation_max_recency"] == 120
-
-        r = _get(client, {"max_recency_days": 60, "reactivation_max_recency": 300,
-                          "or_groups": wide})
-        assert r.status_code == 200, r.text
-        r = _get(client, {"max_recency_days": 60, "reactivation_max_recency": 400,
-                          "or_groups": wide})
-        assert r.status_code == 400
+        assert r.json()["criteria"]["groups"][1] == {"maxRecencyDays": 400, "filters": {
+            "recency_min_days": 10, "recency_max_days": 300,
+            "orders_min": 1, "orders_max": 9,
+            "ltv_min": 100, "ltv_max": 99999.5, "aov_min": 50, "aov_max": 5000,
+            "first_order_from": "2025-01-01", "first_order_to": "2026-06-30",
+            "cities": ["Київ", "Lviv"], "genders": ["f"],
+            "gender_min_confidence": "high", "brands": ["Anua"],
+            "category_ids": [10, 11], "source_ids": [1, 4], "promocode": "KS-AUG",
+            "bought_within_days": 180, "period_orders_min": 3,
+            "period_orders_max": 5, "period_days": 60,
+        }}
 
 
+@needs_postgres
 class TestPreviewExportAndFreezeAgree:
-    def test_one_query_string_one_audience(self, client, store):
-        params = dict(OWNER, grouping="single", campaign="owner-oct")
-        assert _get(client, params).status_code == 200
-        assert _get(client, params, EXPORT).status_code == 200
-        r = client.post(CAMPAIGNS, params=params, headers=_headers())
-        assert r.status_code == 200, r.text
-        preview, export, freeze = store.calls[-3:]
-        assert preview["groups"] == export["groups"] == freeze["groups"]
-        assert len(preview["groups"]) == 2
+    @pytest.mark.asyncio
+    async def test_one_query_string_one_roster(self, admin):
+        """What was on screen is what the file holds and what is frozen —
+        each person in the same arm."""
+        params = dict(_owner(), grouping="single", campaign="owner-oct",
+                      holdout_pct=50)
 
+        preview = await admin.get(SEGMENTS, params=dict(params, include_customers="true"))
+        export = await admin.get(EXPORT, params=dict(params, include_holdout="true"))
+        frozen = await admin.post(CAMPAIGNS, params=params)
+
+        assert preview.status_code == 200, preview.text
+        assert export.status_code == 200, export.text
+        assert frozen.status_code == 200, frozen.text
+        shown = arms(preview)
+        assert set(shown) == fx.UNION
+        assert 0 < list(shown.values()).count("holdout") < len(shown), \
+            "a real split, so the arms compared are not all one value"
+        rows = csv.DictReader(io.StringIO(export.content.decode("utf-8-sig")))
+        assert {int(row["buyer_id"]): row["assignment"] for row in rows} == shown
+        assert await frozen_members("owner-oct") == shown
+        stored = json.loads((await frozen_campaign("owner-oct"))["criteria"])
+        assert stored["groups"] == preview.json()["criteria"]["groups"]
+
+
+@needs_postgres
+class TestTheLevelsFollowTheWidestWindow:
+    """The reactivation level is one-order buyers of the last 120 days unless
+    the window is narrower — and with groups the window is the widest of
+    theirs. Under three levels (`tier=REACTIVATION` here) 9, 12 and 13 are
+    the fixture's one-order buyers inside 120 days."""
+
+    @pytest.mark.asyncio
+    async def test_a_narrow_first_group_does_not_pin_the_level(self, admin):
+        """A 60-day first group beside a 365-day second must not pin the
+        level to 60: 12 and 13, at 92 and 93 days, stay reactivation."""
+        wide = json.dumps([{"max_recency_days": 365}])
+
+        r = await admin.get(SEGMENTS, params={
+            "max_recency_days": 60, "or_groups": wide, "tier": "REACTIVATION",
+            "include_customers": "true"})
+
+        assert r.status_code == 200, r.text
+        assert buyer_ids(r) == {9, 12, 13}
+        ok = await admin.get(SEGMENTS, params={
+            "max_recency_days": 60, "reactivation_max_recency": 300, "or_groups": wide})
+        assert ok.status_code == 200, ok.text
+        too_wide = await admin.get(SEGMENTS, params={
+            "max_recency_days": 60, "reactivation_max_recency": 400, "or_groups": wide})
+        assert too_wide.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_an_all_time_window_keeps_reactivation_at_120_days(self, admin):
+        """15 bought once, 1000 days ago: inside the all-time window and in no
+        level. A typed reactivation window may go to 730 and no further."""
+        r = await admin.get(SEGMENTS, params={
+            "max_recency_days": 3650, "tier": "REACTIVATION",
+            "include_customers": "true"})
+
+        assert r.status_code == 200, r.text
+        assert buyer_ids(r) == {9, 12, 13}
+        assert (await admin.get(SEGMENTS, params={
+            "max_recency_days": 3650, "reactivation_max_recency": 730})
+                ).status_code == 200
+        assert (await admin.get(SEGMENTS, params={
+            "max_recency_days": 3650, "reactivation_max_recency": 731})
+                ).status_code == 422
+
+
+# ─── Refusals made before the store is read ───────────────────────────────
 
 class TestMalformedIsRefused:
     @pytest.mark.parametrize("raw,needle", [
@@ -259,57 +382,6 @@ class TestMalformedIsRefused:
         r = _get(client, params)
         assert r.status_code == 422, r.text
         assert store.calls == []
-
-
-class TestTheNewPeriodReachesTheStore:
-    def test_a_range_with_both_bounds_flat(self, client, store):
-        r = _get(client, {"period_from": "2026-01-01", "period_to": "2026-03-31",
-                          "period_orders_min": 2, "period_orders_max": 2})
-        assert r.status_code == 200, r.text
-        assert store.calls[-1]["filters"] == SmsAudienceFilters(
-            period_orders_min=2, period_orders_max=2,
-            period_from=date(2026, 1, 1), period_to=date(2026, 3, 31))
-
-    def test_up_to_a_date_with_none_in_it_inside_or_groups(self, client, store):
-        group = {"max_recency_days": 3650, "period_to": "2024-12-31",
-                 "period_orders_max": 0}
-        r = _get(client, {"or_groups": json.dumps([group])})
-        assert r.status_code == 200, r.text
-        assert store.calls[-1]["groups"][1] == SmsAudienceGroup(
-            3650, SmsAudienceFilters(period_orders_max=0, period_to=date(2024, 12, 31)))
-
-    def test_zero_is_not_unset(self, client, store):
-        """`period_orders_max=0` is a value; read as falsy anywhere on the way
-        it would become "at least one order in the period"."""
-        r = _get(client, {"period_days": 92, "period_orders_max": 0})
-        assert r.status_code == 200, r.text
-        assert store.calls[-1]["filters"].period_orders_max == 0
-
-
-class TestTheWindowReachesAllTime:
-    """3650 days is how the page says "all time" for a group with no time
-    condition; the cap was 730."""
-
-    def test_flat(self, client, store):
-        r = _get(client, {"max_recency_days": 3650})
-        assert r.status_code == 200, r.text
-        assert store.calls[-1]["max_recency_days"] == 3650
-
-    def test_inside_or_groups(self, client, store):
-        r = _get(client, {"or_groups": json.dumps([{"max_recency_days": 3650}])})
-        assert r.status_code == 200, r.text
-        assert store.calls[-1]["groups"][1].max_recency_days == 3650
-
-    def test_reactivation_keeps_its_default_and_its_cap(self, client, store):
-        """The reactivation level stays one-order buyers of the last 120 days
-        by default, however wide the window; a typed one may go to 730 and no
-        further."""
-        r = _get(client, {"max_recency_days": 3650})
-        assert store.calls[-1]["reactivation_max_recency"] == 120
-        r = _get(client, {"max_recency_days": 3650, "reactivation_max_recency": 730})
-        assert r.status_code == 200, r.text
-        r = _get(client, {"max_recency_days": 3650, "reactivation_max_recency": 731})
-        assert r.status_code == 422
 
 
 class TestAFollowUpRefusesGroupsToo:

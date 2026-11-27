@@ -118,16 +118,10 @@ class TestTheSilverRule:
         assert silver_select_sql(POSTGRES) == before
         assert "buyer_id NOT IN" not in before
 
-    def test_every_rendering_that_derives_silver_carries_it(self):
-        """The rebuild's statement and the row-values recompute say the rule
-        in one text: a twin recomputing the old rule would call every
-        own-entity row stale for ever."""
-        from core import pg_silver, pg_warehouse_dq
-        from core.warehouse_sql import silver_recompute_ctes
-
-        for sql in (pg_silver.insert_sql(), silver_recompute_ctes(POSTGRES),
-                    pg_warehouse_dq._row_values_sql()):
-            assert sql.count(f"AND {CLAUSE} AS is_active_source") == 1
+    # That the row-values twin recomputes the rule the rebuild applied — or it
+    # would call every own-entity row stale for ever — is held over a real
+    # Postgres: `tests/integration/test_own_entity_not_revenue.py::
+    # TestTheFindings::test_the_row_values_twin_recomputes_the_rule_the_rebuild_applied`.
 
     def test_gold_reads_the_column_never_the_rule(self):
         """Every Gold measure, in Postgres and ClickHouse, follows
@@ -209,9 +203,12 @@ def _capture():
 
 
 class TestTheProfit:
-    def test_the_profit_leaves_the_entity_out(self):
-        """Its revenue and the costs joined to it. Mutation: drop the clause
-        from `get_profit_analysis`'s WHERE."""
+    def test_the_profit_reads_the_column_that_carries_the_entity(self):
+        """Its revenue and the costs joined to it leave with the entity:
+        since 2026-11-27 the chart reads the orders that count as revenue,
+        the column `TestTheColumn` holds to the rule, where it spelled the
+        entity out and so kept Opencart. Mutation: drop the clause from
+        `get_profit_analysis`'s WHERE, or put the spelled-out one back."""
         from core.repositories.expenses import ExpensesMixin
 
         seen, run = _capture()
@@ -224,7 +221,27 @@ class TestTheProfit:
                                                     sales_type=sales_type))
         assert len(seen) == 2
         for sql in seen:
-            assert not_own_entity("s") in sql
+            assert "s.is_active_source" in sql
+            assert not_own_entity("s") not in sql
+
+    def test_the_tab_total_reads_the_same_orders(self):
+        """`get_expense_summary`, the tab's total, counts the costs of the
+        orders the chart subtracts — every one of its three reads."""
+        from core.repositories.expenses import ExpensesMixin
+
+        seen: list = []
+
+        async def run(sql, params=None, *args, mode=None, **kwargs):
+            seen.append(sql)
+            return (0, 0, 0) if mode == "one" else []
+
+        class Probe(ExpensesMixin):
+            _expenses_run = staticmethod(run)
+
+        asyncio.run(Probe().get_expense_summary(date(2026, 11, 1), date(2026, 11, 2)))
+        assert len(seen) == 3
+        for sql in seen:
+            assert "s.is_active_source" in sql
 
 
 class TestTheSubcategories:

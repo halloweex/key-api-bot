@@ -64,8 +64,10 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
 
 async def _reparse(*, force_ship: bool) -> None:
     """The re-parse the backfill ends on, and the one place this script hands
-    `--force-ship` on (`tests/unit/test_utm_parse_doors.py` holds it to
-    exactly one).
+    `--force-ship` on. `tests/unit/test_utm_parse_doors.py` runs the script as
+    an operator does (`TestTheBackfillCli`): it re-parses whole, and over a
+    shrink it keeps the table without the flag and replaces it with the
+    flag.
 
     `full`, because the comments restored above may change any verdict: the
     table is re-parsed whole out of `bronze.orders`, in Postgres. It refuses a

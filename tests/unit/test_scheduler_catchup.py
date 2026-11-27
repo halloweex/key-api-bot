@@ -146,6 +146,12 @@ class TestReconcileEndpointDoesNotHoldTheRequestOpen:
         admin_id = sorted(ADMIN_USER_IDS)[0]
 
         class _FakeScheduler:
+            async def claim_job_run(self, job_id):
+                """No leases: every job runs here (`core/job_lease.py`)."""
+                from core import job_lease
+
+                return job_lease.unguarded(job_id)
+
             async def _run_dq_reconciliation(self, window_days=90):
                 recorder.append(window_days)
                 return {"run_id": 1, "discrepancies_count": 0}

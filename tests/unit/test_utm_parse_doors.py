@@ -3,42 +3,51 @@
 Postgres parses `silver.order_utm` itself (`core/pg_utm_parse.py`): the
 derivation's last step, and four doors outside it — `POST
 /api/traffic/refresh`, `/traffic/reclassify`, the `manager_comment` backfill
-behind `/traffic/backfill-utm`, and `scripts/backfill_utm.py`. Until step
-14's S14-15 each door ran DuckDB's parse first and `KS_UTM_PARSE` chose
-whether the router shipped DuckDB's copy (`core/pg_order_utm.py`, deleted)
-or parsed in Postgres; `tests/unit/test_order_utm_shipping.py` walked that
-choice. What is left to pin, and is pinned here:
+behind `/traffic/backfill-utm`, and `scripts/backfill_utm.py`. What is pinned
+here:
 
-- the columns the parse writes are the migration's;
-- every door reaches the table through `reparse_router`, and nothing outside
-  the parse's own module and the derivation's last step calls a parse
-  directly;
-- the two doors that re-parse everything ask for a full parse, the two that
-  add do not;
-- only the CLI forces, behind its flag;
-- the traffic router never takes the store lock, and no traffic read goes
-  round it (moved here from the ship's tests, where it sat since S14-05).
+- nothing outside the parse's own module and the derivation's last step
+  calls a parse directly: the doors go through `reparse_router`;
+- the router's answers;
+- the two routes, as an admin calls them over the test Postgres: the refresh
+  only adds, the reclassify re-parses everything, and over a shrunk
+  `bronze.orders` the reclassify is refused and the table kept;
+- the backfill CLI, as an operator runs it: it re-parses whole, and a shrink
+  replaces the table only behind `--force-ship`.
+
+That the parse writes every column the table has is held in
+`tests/integration/test_pg_utm_parse.py`.
 """
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core import pg_utm_parse
+from tests.helpers.traffic_utm_doors import (
+    IDS,
+    NEW,
+    PAID_VERDICT,
+    STALE_VERDICT,
+    age_the_rules,
+    commented,
+    lose_comments,
+    run_backfill_cli,
+    stored_rows,
+    ten_parsed_orders,
+    utm_failures,
+    verdicts,
+)
+from tests.integration.pg_tab_seed import needs_postgres
 
 REPO = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = ("core", "web", "scripts", "bot", "deploy")
+DSN = os.getenv("KS_PG_DSN")
 
-# The four doors the design names, and whether each re-parses everything.
-DOORS = {
-    ("web/routes/api/traffic.py", "_parse_in_postgres"): None,   # the two routes' helper
-    ("web/routes/api/traffic.py", "_run_backfill_postgres"): False,
-    ("scripts/backfill_utm.py", "_reparse"): True,
-}
-ROUTES = {"refresh_traffic_data": False, "reclassify_traffic": True}
 DIRECT = {"parse_full", "parse_incremental", "parse_incremental_locked"}
 # Where a parse may be called by name: its own module, and the derivation's
 # last step (`BackgroundScheduler._parse_order_utm_in_postgres`).
@@ -74,79 +83,7 @@ def _parents(tree):
     return parents
 
 
-def _migration_columns() -> set:
-    """The columns revision 0018 declares for `silver.order_utm`, lifted out
-    with `ast`, comments stripped, the list delimited by parentheses."""
-    src = (REPO / "migrations" / "versions" / "0018_traffic.py").read_text()
-    statements = [
-        node.value for node in ast.walk(ast.parse(src))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        and "CREATE TABLE silver.order_utm" in node.value]
-    assert len(statements) == 1, "the CREATE TABLE moved or was duplicated"
-    sql = "\n".join(line.split("--", 1)[0] for line in statements[0].splitlines())
-    body, depth, started = [], 0, False
-    for ch in sql[sql.index("silver.order_utm"):]:
-        if ch == "(":
-            depth += 1
-            started = True
-            if depth == 1:
-                continue
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        if started:
-            body.append(ch)
-    columns = set()
-    for part in "".join(body).split(","):
-        words = part.split()
-        if len(words) >= 2 and words[0].isidentifier():
-            columns.add(words[0])
-    return columns
-
-
-def test_the_written_columns_are_the_migrations():
-    """A column the table has and the parser does not carry would be written
-    NULL for ever. `UTM_COLUMNS` moved here from `core/pg_order_utm.py`."""
-    assert _migration_columns() - {"mirrored_at"} == set(pg_utm_parse.UTM_COLUMNS)
-    assert pg_utm_parse.UTM_TABLE == "silver.order_utm"
-
-
 class TestEveryDoorGoesThroughTheRouter:
-    def _router_calls(self):
-        out = {}
-        for rel, tree in _trees():
-            parents = _parents(tree)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and _called(node) == "reparse_router":
-                    fn = _owner(node, parents)
-                    full = next((k.value for k in node.keywords if k.arg == "full"), None)
-                    out.setdefault((rel, fn.name if fn else None), []).append(full)
-        return out
-
-    def test_the_doors_are_the_routers_callers(self):
-        calls = self._router_calls()
-        assert set(calls) == set(DOORS), sorted(calls)
-        for door, full in DOORS.items():
-            for value in calls[door]:
-                if full is None:
-                    assert isinstance(value, ast.Name) and value.id == "full", door
-                else:
-                    said = isinstance(value, ast.Constant) and value.value is True
-                    assert said is full, door
-
-    def test_the_two_routes_say_which_parse(self):
-        """The reclassify is the only way a rule change reaches an order whose
-        `updated_at` has not moved, so it replaces the table whole; the
-        refresh only adds, or every refresh would re-parse 33 K comments."""
-        tree = ast.parse((REPO / "web/routes/api/traffic.py").read_text())
-        for fn in ast.walk(tree):
-            if isinstance(fn, ast.AsyncFunctionDef) and fn.name in ROUTES:
-                (call,) = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
-                           and _called(c) == "_parse_in_postgres"]
-                full = next(k.value for k in call.keywords if k.arg == "full")
-                assert full.value is ROUTES[fn.name], fn.name
-
     def test_nothing_else_calls_a_parse_directly(self):
         found = set()
         for rel, tree in _trees():
@@ -186,75 +123,100 @@ class TestTheRouter:
         add.assert_awaited_once_with()
 
 
-class TestOnlyTheCliForces:
-    """`force=True` defeats the full parse's shrink guard, so where it may
-    come from is pinned by structure."""
+@needs_postgres
+class TestTheTwoRoutes:
+    """`POST /api/traffic/refresh` and `/traffic/reclassify`, an admin's.
 
-    TAKERS = {"reparse_router", "parse_full"}
-
-    def _calls_passing_force(self, path):
-        tree = ast.parse(path.read_text())
-        parents = _parents(tree)
-
-        def _enclosing_params(node):
-            names = set()
-            while node in parents:
-                node = parents[node]
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    a = node.args
-                    names |= {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
-            return names
-
-        found = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _called(node) in self.TAKERS:
-                for kw in node.keywords:
-                    if kw.arg == "force":
-                        forwards = (isinstance(kw.value, ast.Name)
-                                    and kw.value.id == "force"
-                                    and "force" in _enclosing_params(node))
-                        found.append((path, node.lineno, kw.value, forwards))
-        return found
-
-    def test_nothing_in_the_application_originates_a_force(self):
-        offenders = []
-        for root in ("core", "web", "bot"):
-            for path in (REPO / root).rglob("*.py"):
-                offenders += [(str(p.relative_to(REPO)), line)
-                              for p, line, _v, forwards in self._calls_passing_force(path)
-                              if not forwards]
-        assert offenders == [], f"force passed outside the CLI: {offenders}"
-
-    def test_the_backfill_script_forces_only_behind_its_flag(self):
-        path = REPO / "scripts" / "backfill_utm.py"
-        tree = ast.parse(path.read_text())
-        passes = self._calls_passing_force(path)
-        assert len(passes) == 1, "the script should reach Postgres exactly once"
-        value = passes[0][2]
-        assert isinstance(value, ast.Name) and value.id == "force_ship"
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "backfill_utm")
-        names = [a.arg for a in fn.args.args]
-        defaults = dict(zip(names[len(names) - len(fn.args.defaults):], fn.args.defaults))
-        assert isinstance(defaults["force_ship"], ast.Constant)
-        assert defaults["force_ship"].value is False
-        flags = [n for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == "add_argument" and n.args
-                 and isinstance(n.args[0], ast.Constant) and n.args[0].value == "--force-ship"]
-        assert len(flags) == 1
-        action = next(k.value for k in flags[0].keywords if k.arg == "action")
-        assert action.value == "store_true"
+    The reclassify is the only way a rule change reaches an order whose
+    `updated_at` has not moved, so it re-parses everything; the refresh only
+    adds, or every refresh would re-parse 33 K comments. Ten orders parsed,
+    then the first one's verdict left as an earlier rule stored it and the
+    last one's comment emptied in KeyCRM since."""
 
     @pytest.mark.asyncio
-    async def test_the_cli_reparses_whole_in_postgres_and_forwards_its_flag(self):
-        import importlib.util
+    async def test_the_refresh_adds_what_is_new_and_rewrites_nothing(self, monkeypatch):
+        from tests.helpers.app_client import signed_in
 
-        spec = importlib.util.spec_from_file_location(
-            "backfill_utm_doors", REPO / "scripts" / "backfill_utm.py")
-        bf = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(bf)
-        router = AsyncMock(return_value={"rows": 3})
-        with patch("core.pg_utm_parse.reparse_router", new=router):
-            await bf._reparse(force_ship=True)
-        router.assert_awaited_once_with(full=True, force=True)
+        async with ten_parsed_orders(DSN, monkeypatch) as conn:
+            await age_the_rules(conn)
+            await commented(conn, NEW)
+            async with signed_in("admin") as admin:
+                response = await admin.post("/api/traffic/refresh")
+            stored = await verdicts(conn)
+
+        assert response.status_code == 200
+        assert response.json()["utm_orders_parsed"] == 1
+        assert stored == {**{oid: PAID_VERDICT for oid in IDS},
+                          IDS[0]: STALE_VERDICT, NEW: PAID_VERDICT}
+
+    @pytest.mark.asyncio
+    async def test_the_reclassify_rewrites_a_stale_verdict_and_drops_an_emptied_one(
+            self, monkeypatch):
+        from tests.helpers.app_client import signed_in
+
+        async with ten_parsed_orders(DSN, monkeypatch) as conn:
+            await age_the_rules(conn)
+            async with signed_in("admin") as admin:
+                response = await admin.post("/api/traffic/reclassify")
+            stored = await verdicts(conn)
+
+        assert response.status_code == 200
+        assert response.json()["utm_records"] == len(IDS) - 1
+        assert stored == {oid: PAID_VERDICT for oid in IDS[:-1]}
+
+    @pytest.mark.asyncio
+    async def test_a_reclassify_over_a_shrunk_bronze_is_refused_and_the_table_kept(
+            self, monkeypatch):
+        """A `bronze.orders` truncated, half-restored or read from the wrong
+        database would replace the verdicts with less than the truth, and a
+        missing verdict is a gap nobody sees: the order falls through to
+        organic or unattributed, on /traffic and in the Monday report."""
+        from tests.helpers.app_client import signed_in
+
+        async with ten_parsed_orders(DSN, monkeypatch) as conn:
+            before = await stored_rows(conn)
+            await conn.execute("DELETE FROM bronze.orders WHERE id <> $1", IDS[0])
+            async with signed_in("admin") as admin:
+                response = await admin.post("/api/traffic/reclassify")
+            after = await stored_rows(conn)
+
+        assert response.status_code == 409
+        assert after == before
+
+
+@needs_postgres
+class TestTheBackfillCli:
+    """`scripts/backfill_utm.py` ends on a full re-parse, because the comments
+    it restores may change any verdict; and it is the one caller that may
+    mean a shrink, so only it can force one — behind `--force-ship`, a flag
+    an operator types. Run as the operator runs it, against a KeyCRM with no
+    comment to restore."""
+
+    @pytest.mark.asyncio
+    async def test_it_reparses_whole(self, monkeypatch):
+        async with ten_parsed_orders(DSN, monkeypatch) as conn:
+            await age_the_rules(conn)
+            await run_backfill_cli(monkeypatch)
+            stored = await verdicts(conn)
+
+        assert stored == {oid: PAID_VERDICT for oid in IDS[:-1]}
+
+    @pytest.mark.asyncio
+    async def test_without_its_flag_a_shrink_is_refused(self, monkeypatch):
+        async with ten_parsed_orders(DSN, monkeypatch) as conn:
+            before = await stored_rows(conn)
+            await lose_comments(conn)
+            await run_backfill_cli(monkeypatch)
+            after, failures = await stored_rows(conn), await utm_failures(conn)
+
+        assert after == before
+        assert failures == 1, "the re-parse did not run, or was not refused"
+
+    @pytest.mark.asyncio
+    async def test_with_its_flag_a_shrink_replaces_the_table(self, monkeypatch):
+        async with ten_parsed_orders(DSN, monkeypatch) as conn:
+            await lose_comments(conn)
+            await run_backfill_cli(monkeypatch, "--force-ship")
+            stored = await verdicts(conn)
+
+        assert stored == {IDS[0]: PAID_VERDICT}

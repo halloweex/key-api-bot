@@ -1,11 +1,10 @@
 """The `/expenses` statements, the history gate, and the fan-out the port found.
 
 The numbers are `tests/integration/test_expenses_two_engines.py`'s job,
-against a real Postgres; that `_expenses_run` asks Postgres and nothing else
-since step 14's S14-07 is `tests/unit/test_tab_routers_postgres_only.py`'s
-(the flag, every method on an empty DuckDB and the DuckDB branch's
-offloading went with that PR). What is proved here is the statements, the
-history gate — an explicit refusal, reading `bronze.expenses` by its name —
+against a real Postgres; that every `/expenses` route answers 503 naming
+`expenses` when Postgres fails is the sweep's in
+`tests/unit/test_read_fallback_http.py`. What is proved here is the
+statements, the history gate — through the routes, over Postgres, below —
 the shared parse, and one defect that was live on production before this
 port touched anything:
 
@@ -18,14 +17,17 @@ production catalogue: ₴16,433,644.56 reported over 90 days against a true
 from __future__ import annotations
 
 import ast
-from datetime import date, timedelta
+from contextlib import asynccontextmanager
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from core.store import AnalyticsStore
 from core import read_fallback
+from tests.helpers.app_client import signed_in
+from tests.integration.pg_tab_seed import DSN, derive, needs_postgres, seed, tab_in_postgres
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "expenses.py"
@@ -168,61 +170,6 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         r._checked_at = 0.0
 
     @pytest.mark.asyncio
-    async def test_a_body_reading_the_landing_waits_for_history(
-        self, tmp_path, monkeypatch,
-    ):
-        """And waiting is a refusal: no engine could answer it — what
-        `no_engine` made of it under `KS_DUCKDB=off` before step 14's S14-07,
-        a 503 naming `expenses`, never a page of zeros."""
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = AnalyticsStore()
-        read_fallback.reset_counts()
-        try:
-            with patch("core.pg_expenses_read.backfilled",
-                       new=AsyncMock(return_value=False)), \
-                 patch("core.pg_expenses_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                with pytest.raises(read_fallback.ReadUnavailable) as raised:
-                    await store.get_profit_analysis(*W)
-            fetch.assert_not_awaited()
-            assert raised.value.surface == "expenses"
-            assert read_fallback.refusals()["expenses"]["count"] == 1
-        finally:
-            read_fallback.reset_counts()
-
-    @pytest.mark.asyncio
-    async def test_and_answers_once_it_is_across(self, tmp_path, monkeypatch):
-        """`get_profit_analysis` rather than the summary: its statement
-        consumes a row *list*, so an empty stand-in is a legitimate answer.
-        The summary's totals query is `SELECT COALESCE(SUM(...), 0), ...`
-        with no GROUP BY, which always returns exactly one row — mocking it
-        empty tests the mock, not the code."""
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = AnalyticsStore()
-        with patch("core.pg_expenses_read.backfilled",
-                   new=AsyncMock(return_value=True)), \
-             patch("core.pg_expenses_read.fetch",
-                   new=AsyncMock(return_value=[])) as fetch:
-            await store.get_profit_analysis(*W)
-        fetch.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_body_that_does_not_read_it_is_not_gated(
-        self, tmp_path, monkeypatch,
-    ):
-        """`manual_expenses` is replicated whole and the type dictionary is
-        re-shipped every sync; neither has history to be missing."""
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = AnalyticsStore()
-        with patch("core.pg_expenses_read.backfilled",
-                   new=AsyncMock(return_value=False)) as gate, \
-             patch("core.pg_expenses_read.fetch",
-                   new=AsyncMock(return_value=[])) as fetch:
-            await store.get_expense_types()
-        fetch.assert_awaited()
-        gate.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_the_latch_only_ever_closes_forward(self):
         """`backfilled_at` is set and never cleared, so a true answer is worth
         remembering for the life of the process."""
@@ -263,3 +210,121 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         finally:
             r._check_failed = None
             read_fallback.reset_counts()
+
+
+# ─── The history gate, through the routes, over Postgres ───────────────────
+
+KYIV = ZoneInfo("Europe/Kyiv")
+DAY = date(2026, 9, 10)
+WINDOW = {"start_date": "2026-09-08", "end_date": "2026-09-12"}
+# (order_id, grand_total, [(expense_id, expense_type_id, amount)]): two retail
+# orders, one carrying two costs.
+COSTED = [(1, 1000.0, [(11, 1, 100.0), (12, 2, 50.0)]),
+          (2, 2000.0, [(13, 1, 200.0)])]
+TYPES = [(1, "Доставка", "delivery"), (2, "Комісія", "commission")]
+
+
+async def _orders_and_their_costs(conn, pool):
+    """Two orders as KeyCRM lands them, Silver derived, and their costs and
+    the cost types through the shared parse, as the sync lands them."""
+    from core.landing_rows import (
+        EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS, expense_rows, expense_type_rows,
+    )
+
+    await seed(conn, orders=[
+        (oid, 1, 1, total, datetime.combine(DAY, time(12), KYIV), oid, None, None)
+        for oid, total, _ in COSTED])
+    await derive(pool)
+    types = expense_type_rows([{"id": i, "name": n, "alias": a, "is_active": True}
+                               for i, n, a in TYPES])
+    await conn.executemany(
+        f"INSERT INTO bronze.expense_types ({', '.join(EXPENSE_TYPE_COLUMNS)})"
+        " VALUES ($1,$2,$3,$4)", [tuple(r) for r in types])
+    costs = expense_rows([
+        {"id": oid, "expenses": [
+            {"id": eid, "expense_type_id": tid, "amount": amount, "status": "paid"}
+            for eid, tid, amount in lines]}
+        for oid, _, lines in COSTED])
+    await conn.executemany(
+        f"INSERT INTO bronze.expenses ({', '.join(EXPENSE_COLUMNS)}) VALUES "
+        f"({', '.join(f'${i}' for i in range(1, len(EXPENSE_COLUMNS) + 1))})",
+        [tuple(r) for r in costs])
+
+
+# The mirror's own record of `bronze.expenses`: no row at all; a mirror
+# shipping deltas whose history never came across (2026-09-07: 65 of 15 020
+# expenses held, and the page showed almost pure profit); the history across.
+WATERMARKS = {
+    "absent": None,
+    "deltas_only": "INSERT INTO meta.mirror_state (table_name, last_attempted_at,"
+                   " last_ok_at) VALUES ('bronze.expenses', now(), now())",
+    "backfilled": "INSERT INTO meta.mirror_state (table_name, last_attempted_at,"
+                  " last_ok_at, backfilled_at)"
+                  " VALUES ('bronze.expenses', now(), now(), now())",
+}
+_THE_ROW = "FROM meta.mirror_state WHERE table_name = 'bronze.expenses'"
+
+
+@asynccontextmanager
+async def _costs_with(monkeypatch, watermark: str):
+    """The two costed orders, `bronze.expenses`' mirror row as `watermark`
+    says, and the gate as a fresh process finds it: never asked. The row the
+    database held before is put back after."""
+    from core import pg_expenses_read
+
+    monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
+    monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
+    monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
+    async with tab_in_postgres(DSN, monkeypatch, _orders_and_their_costs) as pool:
+        async with pool.acquire() as conn:
+            before = await conn.fetch(f"SELECT * {_THE_ROW}")
+            await conn.execute(f"DELETE {_THE_ROW}")
+            if WATERMARKS[watermark]:
+                await conn.execute(WATERMARKS[watermark])
+        try:
+            yield
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute(f"DELETE {_THE_ROW}")
+                for row in before:
+                    await conn.execute(
+                        f"INSERT INTO meta.mirror_state ({', '.join(row.keys())}) VALUES "
+                        f"({', '.join(f'${i}' for i in range(1, len(row) + 1))})",
+                        *row.values())
+
+
+@needs_postgres
+class TestTheHistoryGateOverPostgres:
+    """The mechanism that replaces "run the backfill first": the two views
+    that read the mirrored costs are refused, a 503 naming `expenses`, until
+    `bronze.expenses` carries `backfilled_at`; what reads only the type
+    dictionary or the typed expenses has no history to miss and answers."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("watermark", ["absent", "deltas_only"])
+    async def test_without_its_history_the_costs_are_refused(self, monkeypatch, watermark):
+        async with _costs_with(monkeypatch, watermark):
+            async with signed_in("editor") as editor:
+                profit = await editor.get("/api/expenses/profit", params=WINDOW)
+                summary = await editor.get("/api/expenses/summary", params=WINDOW)
+                types = await editor.get("/api/expense-types")
+                typed = await editor.get("/api/expenses")
+        for refused in (profit, summary):
+            assert refused.status_code == 503, refused.text
+            assert refused.json()["surface"] == "expenses"
+        assert types.status_code == 200, types.text
+        assert {t["name"] for t in types.json()} == {"Доставка", "Комісія"}
+        assert typed.status_code == 200, typed.text
+
+    @pytest.mark.asyncio
+    async def test_once_it_is_across_the_same_rows_answer(self, monkeypatch):
+        """The control: the same orders and costs, the history across — so the
+        refusals above are the gate's, not a query that cannot run."""
+        async with _costs_with(monkeypatch, "backfilled"):
+            async with signed_in("editor") as editor:
+                profit = await editor.get("/api/expenses/profit", params=WINDOW)
+                summary = await editor.get("/api/expenses/summary", params=WINDOW)
+        assert profit.status_code == 200, profit.text
+        assert profit.json()["metrics"]["totalRevenue"] == 3000.0
+        assert profit.json()["metrics"]["totalExpenses"] == 350.0
+        assert summary.status_code == 200, summary.text

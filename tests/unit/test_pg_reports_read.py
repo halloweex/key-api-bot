@@ -1,9 +1,8 @@
 """The `/reports` statements, and what the router may not touch.
 
 The numbers are `tests/integration/test_reports_two_engines.py`'s job, against
-a real Postgres; that the router asks Postgres and nothing else since step
-14's S14-05 — whatever `KS_READ_REPORTS` says, and a failure refused naming
-`reports` — is `tests/unit/test_read_routers_postgres_only.py`'s. Here:
+a real Postgres; that a failure of its engine is refused naming `reports` is
+the route sweep in `tests/unit/test_read_fallback_http.py` (`TestEveryRoute`)'s. Here:
 
   * every report method sends its statements to Postgres, on a store whose
     DuckDB connection is a trap;

@@ -63,6 +63,7 @@ import type {
   MarginTrendItem,
   MarginBrandCategoryItem,
   MarginAlertItem,
+  StockMarginResponse,
   SmsSegmentsResponse,
   SmsCampaignsResponse,
   TgBotActivityResponse,
@@ -165,6 +166,7 @@ export const queryKeys = {
   marginTrend: (params: string) => ['marginTrend', params] as const,
   marginBrandCategory: (params: string) => ['marginBrandCategory', params] as const,
   marginAlerts: (params: string) => ['marginAlerts', params] as const,
+  stockMargin: () => ['stockMargin'] as const,
   // Promotions calendar: the server's default window, cancelled ones included
   // (the page filters them), and one promotion's versions.
   promotions: () => ['promotions'] as const,
@@ -1018,6 +1020,23 @@ export function useMarginAlerts() {
     queryKey: queryKeys.marginAlerts(queryParams),
     queryFn: () => api.getMarginAlerts(queryParams),
     staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+/**
+ * The margin of everything in stock — admins only. The caller passes
+ * `enabled: false` for anybody else, so a non-admin never sends the request
+ * (the server would refuse it). It takes no header filter: it is the shelf
+ * now, not a period. Refetched every ten minutes so a page left open stays
+ * close to the hourly stock sync.
+ */
+export function useStockMargin(enabled: boolean) {
+  return useQuery<StockMarginResponse>({
+    queryKey: queryKeys.stockMargin(),
+    queryFn: () => api.getStockMargin(),
+    staleTime: CACHE_TTL.STANDARD,
+    refetchInterval: 10 * 60 * 1000,
+    enabled,
   })
 }
 

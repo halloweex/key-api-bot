@@ -238,6 +238,92 @@ CALLS = (
 )
 
 
+# The customer block under a filter of the header (2026-11-27), and the only
+# departure from DuckDB's recorded answers in this file. DuckDB's block — and
+# Postgres's until that day — read a filter for the period's buyers alone and
+# answered every other figure for the whole shop: under a promocode nobody
+# used, the literal still says three orders, an AOV of 850 and a CLV of 1 560.
+# The block now answers every figure for the filtered slice. The literals stay
+# as recorded (rule 9); each value the decision moves is named here with what
+# it is now, worked out by hand from the fixture above:
+#
+# - `NOPE`: no order carries it, so every figure is zero.
+# - `SAVE10`: order 2 alone, 600 on 12.09, from buyer 7, whose first order
+#   (order 10) is a year older — so returning; and the only SAVE10 order buyer
+#   7 ever placed, so no repeat buyer and no CLV.
+# - source 1 and BrandA: order 1's two BrandA lines, 2 × 500 + 200 on 13.09.
+#   Over the whole history buyer 7 bought BrandA on source 1 once more, in
+#   order 10 (220, 10.09.2025): two orders, 1 420, 368 days apart.
+#
+# `aov` is the AOV trend's nonzero days; every other day of the window is 0.
+INSIGHTS_UNDER_A_FILTER_SINCE_2026_11_27 = {
+    call_key("get_customer_insights", {"promocode": "NOPE"}): {
+        "newVsReturning": [0, 0], "aov": {},
+        "metrics": {
+            "totalCustomers": 0, "newCustomers": 0, "returningCustomers": 0,
+            "totalOrders": 0, "repeatRate": 0, "averageOrderValue": 0,
+            "customerLifetimeValue": 0, "avgPurchaseFrequency": 0.0,
+            "avgCustomerLifespanDays": 0.0, "purchaseFrequency": 0,
+            "totalCustomersAllTime": 0, "repeatCustomersAllTime": 0,
+            "trueRepeatRate": 0, "avgOrdersPerCustomer": 0.0,
+        },
+    },
+    call_key("get_customer_insights", {"promocode": "SAVE10"}): {
+        "newVsReturning": [0, 1], "aov": {"12.09": 600.0},
+        "metrics": {
+            "totalCustomers": 1, "newCustomers": 0, "returningCustomers": 1,
+            "totalOrders": 1, "repeatRate": 100.0, "averageOrderValue": 600.0,
+            "customerLifetimeValue": 0, "avgPurchaseFrequency": 0.0,
+            "avgCustomerLifespanDays": 0.0, "purchaseFrequency": 1.0,
+            "totalCustomersAllTime": 1, "repeatCustomersAllTime": 0,
+            "trueRepeatRate": 0.0, "avgOrdersPerCustomer": 1.0,
+        },
+    },
+    call_key("get_customer_insights", {"source_id": 1, "brand": "BrandA"}): {
+        "newVsReturning": [0, 1], "aov": {"13.09": 1200.0},
+        "metrics": {
+            "totalCustomers": 1, "newCustomers": 0, "returningCustomers": 1,
+            "totalOrders": 1, "repeatRate": 100.0, "averageOrderValue": 1200.0,
+            "customerLifetimeValue": 1420.0, "avgPurchaseFrequency": 2.0,
+            "avgCustomerLifespanDays": 368.0, "purchaseFrequency": 1.0,
+            "totalCustomersAllTime": 1, "repeatCustomersAllTime": 1,
+            "trueRepeatRate": 100.0, "avgOrdersPerCustomer": 2.0,
+        },
+    },
+}
+
+
+# A promocode alone selects whole orders (2026-11-27): the cards and the
+# doughnut say their `grand_total`, the trend's measure under the same filter,
+# where they summed the orders' lines. Order 2 carries SAVE10: its total is
+# 600 and its one line 500, so the card said 500 beside a trend of 600.
+PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27 = {
+    call_key("get_summary_stats", {"promocode": "SAVE10"}): {
+        "totalRevenue": 600.0, "avgCheck": 600.0},
+    call_key("get_sales_by_source", {"promocode": "SAVE10"}): {"revenue": [600.0]},
+}
+
+DEPARTURES = (*INSIGHTS_UNDER_A_FILTER_SINCE_2026_11_27,
+              *PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27)
+
+
+def _expected(key: str):
+    """The recorded literal, with the values the two decisions moved."""
+    import copy
+
+    expected = copy.deepcopy(GOLDEN[key])
+    moved = INSIGHTS_UNDER_A_FILTER_SINCE_2026_11_27.get(key)
+    if moved:
+        expected["newVsReturning"]["data"] = moved["newVsReturning"]
+        labels = expected["aovTrend"]["labels"]
+        expected["aovTrend"]["datasets"][0]["data"] = [
+            moved["aov"].get(label, 0) for label in labels]
+        expected["metrics"] = dict(moved["metrics"])
+    if key in PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27:
+        expected.update(PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27[key])
+    return expected
+
+
 class TestPostgresAnswersWhatDuckDBAnswered:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -246,10 +332,67 @@ class TestPostgresAnswersWhatDuckDBAnswered:
     )
     async def test_the_whole_result_is_the_literal(self, in_postgres, name, kwargs):
         assert comparable(await _answer(in_postgres, name, kwargs)) == \
-            GOLDEN[call_key(name, kwargs)]
+            _expected(call_key(name, kwargs))
 
     def test_every_literal_is_a_call_and_every_call_has_one(self):
         assert set(GOLDEN) == {call_key(n, k) for n, k in CALLS}
+
+    def test_every_departure_moves_a_recorded_value(self):
+        """A departure equal to the literal would hide a stale entry."""
+        for key in DEPARTURES:
+            assert _expected(key) != GOLDEN[key], key
+
+
+# Every filter of the header narrows every block of the page, each measured the
+# way the cards measure it (2026-11-27). The customer block answered the whole
+# shop under any filter but a promocode, the brand block under every filter,
+# and under a promocode the cards and the doughnut summed lines beside a trend
+# of order totals.
+FILTERS = [
+    {}, {"source_id": 1}, {"source_id": 2}, {"brand": "BrandA"},
+    {"category_id": 1}, {"promocode": "SAVE10"}, {"promocode": "NOPE"},
+    {"source_id": 1, "brand": "BrandA"}, {"sales_type": "all", "brand": "BrandB"},
+]
+
+
+class TestEveryBlockFollowsTheFilters:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", FILTERS, ids=lambda k: str(k) or "none")
+    async def test_the_customer_block_says_the_cards_orders_and_aov(self, in_postgres, kwargs):
+        insights = await _answer(in_postgres, "get_customer_insights", kwargs)
+        summary = await _answer(in_postgres, "get_summary_stats", kwargs)
+        assert insights["metrics"]["totalOrders"] == summary["totalOrders"]
+        assert insights["metrics"]["averageOrderValue"] == summary["avgCheck"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [k for k in FILTERS if "source_id" not in k],
+                             ids=lambda k: str(k) or "none")
+    async def test_the_doughnut_adds_up_to_the_cards(self, in_postgres, kwargs):
+        """The doughnut splits by source, so it takes no source filter."""
+        doughnut = await _answer(in_postgres, "get_sales_by_source", kwargs)
+        summary = await _answer(in_postgres, "get_summary_stats", kwargs)
+        assert sum(doughnut["orders"]) == summary["totalOrders"]
+        assert round(sum(doughnut["revenue"]), 2) == summary["totalRevenue"]
+
+    @pytest.mark.asyncio
+    async def test_the_brand_block_takes_a_source(self, in_postgres):
+        """Retail lines in the window: order 1 on Instagram (2 × 500 + 2 × 100
+        + 200) and order 2 on Telegram (500)."""
+        def total(answer):
+            return answer["metrics"]["totalRevenue"]
+
+        assert total(await _answer(in_postgres, "get_brand_analytics", {})) == 1900.0
+        assert total(await _answer(in_postgres, "get_brand_analytics", {"source_id": 1})) == 1400.0
+        assert total(await _answer(in_postgres, "get_brand_analytics", {"source_id": 2})) == 500.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [{"brand": "BrandA"}, {"category_id": 1},
+                                        {"source_id": 1, "brand": "BrandA"}],
+                             ids=str)
+    async def test_the_brand_block_takes_a_line_filter_as_the_cards_do(self, in_postgres, kwargs):
+        brands = await _answer(in_postgres, "get_brand_analytics", kwargs)
+        summary = await _answer(in_postgres, "get_summary_stats", kwargs)
+        assert brands["metrics"]["totalRevenue"] == summary["totalRevenue"]
 
 
 class TestTheTwoBranchesOfTheDoughnut:
@@ -416,29 +559,43 @@ class _CaptureMeili:
 async def _index_once(store):
     """Run `sync_to_meilisearch` once, as a first (full) sync.
 
-    Returns the captured documents, the watermark keys it read and wrote, and
-    its stats. The store is never connected and its DuckDB connection is a
-    trap. The watermark primitives are stubbed: the question here is what the
-    index is built from.
+    Returns the captured documents and its stats. The store is never
+    connected and its DuckDB connection is a trap. The watermark is stubbed
+    out — no cursor read, none written — so every run here is a full one:
+    the question is what the index is built from. The cursor itself is
+    `TestTheSearchIndexKeepsOneWatermark`'s.
     """
     from core.sync_service import SyncService
 
-    capture, keys = _CaptureMeili(), {"read": [], "written": []}
+    capture = _CaptureMeili()
 
-    async def get_last(key="orders"):
-        keys["read"].append(key)
-        return None                      # no watermark → full sync
+    async def no_cursor(key="orders"):
+        return None
 
-    async def set_last(key="orders", timestamp=None):
-        keys["written"].append(key)
+    async def keep_no_cursor(key="orders", timestamp=None):
+        return None
 
     svc = SyncService.__new__(SyncService)
     svc.store = store
     with patch("core.sync_service.get_meili_client", return_value=capture), \
-         patch.object(store, "get_last_sync_time", side_effect=get_last), \
-         patch.object(store, "set_last_sync_time", side_effect=set_last):
+         patch.object(store, "get_last_sync_time", side_effect=no_cursor), \
+         patch.object(store, "set_last_sync_time", side_effect=keep_no_cursor):
         stats = await svc.sync_to_meilisearch()
-    return capture.docs, keys, stats
+    return capture.docs, stats
+
+
+async def _sync(store):
+    """Run `sync_to_meilisearch` as the scheduler does, its cursor read from
+    and written to Postgres; only the Meilisearch client is stood in.
+    Returns what it indexed and its stats."""
+    from core.sync_service import SyncService
+
+    capture = _CaptureMeili()
+    svc = SyncService.__new__(SyncService)
+    svc.store = store
+    with patch("core.sync_service.get_meili_client", return_value=capture):
+        stats = await svc.sync_to_meilisearch()
+    return capture.docs, stats
 
 
 SEARCH_INDEX = golden("search_index")
@@ -459,7 +616,7 @@ class TestTheSearchIndexDocumentsAreTheLiteral:
         """Under the suite's `TZ=UTC`: DuckDB's documents, recorded while
         Postgres built the same ones."""
         monkeypatch.setenv("TZ", "UTC")
-        docs, _, stats = await _index_once(original_in_postgres)
+        docs, stats = await _index_once(original_in_postgres)
         for kind in ("buyers", "orders", "products"):
             assert docs[kind], f"no {kind} indexed — the literal would pin nothing"
         assert _as_recorded(docs, stats) == SEARCH_INDEX[
@@ -477,7 +634,7 @@ class TestTheSearchIndexDocumentsAreTheLiteral:
         from core.pg_search_index_read import local_zone
 
         monkeypatch.setenv("TZ", "UTC")
-        docs, _, _ = await _index_once(original_in_postgres)
+        docs, _ = await _index_once(original_in_postgres)
         assert any(d["ordered_at"] for d in docs["orders"].values())
         for i, d in docs["orders"].items():
             if d["ordered_at"]:
@@ -500,7 +657,7 @@ class TestTheSearchIndexUnderANonUtcZone:
     @pytest.mark.asyncio
     async def test_kyiv_offsets_across_dst(self, original_in_postgres, monkeypatch):
         monkeypatch.setenv("TZ", "Europe/Kyiv")
-        docs, _, stats = await _index_once(original_in_postgres)
+        docs, stats = await _index_once(original_in_postgres)
         offsets = {d["ordered_at"][-6:] for d in docs["orders"].values() if d["ordered_at"]}
         assert offsets and offsets <= {"+02:00", "+03:00"}, offsets
         assert _as_recorded(docs, stats) == SEARCH_INDEX[
@@ -508,14 +665,54 @@ class TestTheSearchIndexUnderANonUtcZone:
 
 
 class TestTheSearchIndexKeepsOneWatermark:
-    """Postgres' watermark is `mirrored_at`'s clock, under its own key. The
-    DuckDB index's key, `meilisearch` (`synced_at`'s clock), went with the
-    DuckDB frames in S14-07: it is neither read nor written."""
+    """The index's cursor is chain 3's sync key, `last_sync_meilisearch_pg`
+    in `meta.chain_watermarks` (`pg_orders_write.CHAIN_SYNC_KEYS`), on the
+    clock of the rows' `mirrored_at`. Run for real here, the cursor included,
+    with only the Meilisearch client stood in."""
+
+    CURSOR = "last_sync_meilisearch_pg"
+    _ROW = "FROM meta.chain_watermarks WHERE key = $1"
 
     @pytest.mark.asyncio
-    async def test_the_key_is_postgres_alone(self, original_in_postgres):
-        _, keys, _ = await _index_once(original_in_postgres)
-        assert keys == {"read": ["meilisearch_pg"], "written": ["meilisearch_pg"]}
+    async def test_a_run_after_a_run_indexes_only_what_was_mirrored_since(
+        self, original_in_postgres,
+    ):
+        """A first run indexes everything and stamps the cursor; a second
+        finds nothing mirrored since and indexes nothing; once order 2 is
+        mirrored again, a third indexes that order and its buyer alone. The
+        row the database held under the key is put back after."""
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            before = await conn.fetch(f"SELECT * {self._ROW}", self.CURSOR)
+            await conn.execute(f"DELETE {self._ROW}", self.CURSOR)
+        try:
+            first_docs, first = await _sync(original_in_postgres)
+            async with pool.acquire() as conn:
+                stamped = await conn.fetchval(f"SELECT value {self._ROW}", self.CURSOR)
+            second_docs, second = await _sync(original_in_postgres)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE bronze.orders SET mirrored_at = mirrored_at + interval '1 minute'"
+                    " WHERE id = 2")
+            third_docs, third = await _sync(original_in_postgres)
+        finally:
+            async with pool.acquire() as conn:
+                await conn.execute(f"DELETE {self._ROW}", self.CURSOR)
+                for row in before:
+                    await conn.execute(
+                        "INSERT INTO meta.chain_watermarks (key, value, updated_at)"
+                        " VALUES ($1, $2, $3)", row["key"], row["value"], row["updated_at"])
+
+        assert first == {"buyers": 2, "orders": 7, "products": 4}, first
+        assert set(first_docs["orders"]) == {1, 2, 3, 4, 5, 6, 7}
+        assert stamped is not None, "the first run stamped no cursor under chain 3's key"
+        assert second == {"buyers": 0, "orders": 0, "products": 0}, second
+        assert second_docs == {"buyers": {}, "orders": {}, "products": {}}
+        assert third == {"buyers": 1, "orders": 1, "products": 0}, third
+        assert set(third_docs["orders"]) == {2}
+        assert set(third_docs["buyers"]) == {7}
 
     def test_the_literal_holds_the_two_zones_and_nothing_else(self):
         assert set(SEARCH_INDEX) == {call_key("sync_to_meilisearch", [z])

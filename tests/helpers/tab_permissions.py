@@ -41,10 +41,6 @@ class _FakeStore:
     async def get_traffic_analytics(self, **kwargs):
         return {"summary": {}}
 
-    async def set_user_features(self, user_id, features, changed_by):
-        self.written = (user_id, features, changed_by)
-        return user_id != 404
-
 
 @pytest.fixture(autouse=True)
 def _fresh_permissions():

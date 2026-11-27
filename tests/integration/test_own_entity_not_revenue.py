@@ -233,10 +233,12 @@ class TestTheReadersAroundTheColumn:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type, revenue, expenses", [
-        ("b2b", 4800.0, 100.0), ("internal", 400.0, 0.0), ("all", 6200.0, 100.0)])
+        ("b2b", 4200.0, 100.0), ("internal", 400.0, 0.0), ("all", 5600.0, 100.0)])
     async def test_the_profit(self, own, sales_type, revenue, expenses):
-        """The entity's money and the cost on its sale both leave; Opencart's
-        money stays, as it always has here."""
+        """The entity's money and the cost on its sale both leave, and so does
+        Opencart's 600 (order 9110): since 2026-11-27 the chart reads the
+        orders that count as revenue, as every other figure does. Until then
+        it kept Opencart, and b2b read 4 800, every sales type 6 200."""
         store, _pool = own
         out = await store.get_profit_analysis(DAY, DAY, sales_type=sales_type)
         assert (out["metrics"]["totalRevenue"], out["metrics"]["totalExpenses"]) == (
@@ -304,6 +306,34 @@ class TestTheFindings:
         after = {i.check_name: i for i in check_pg_warehouse(facts)}
         assert after["pg_own_entity_orders"].count == 5
         assert not [o for o in facts.own_entity.orders if o[4]]
+
+    @pytest.mark.asyncio
+    async def test_the_row_values_twin_recomputes_the_rule_the_rebuild_applied(self, own):
+        """The twin recomputes every Silver row from bronze and files each
+        stored row that differs. Recomputing without the entity's rule, it
+        would file every one of the entity's orders for ever. Landed three
+        hours before a rebuild, every row is one that rebuild held, so none is
+        waved through as in flight; and a stored row that does count the
+        entity as revenue is filed, by id."""
+        from core.pg_warehouse_dq import RowValues, check_pg_warehouse, read_facts
+
+        _store, pool = own
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE bronze.orders SET mirrored_at = now() - interval '3 hours'")
+        await derive(pool)
+
+        facts = await read_facts(pool=pool)
+        assert isinstance(facts.silver_row_values, RowValues), facts.silver_row_values
+        assert facts.silver_row_values.compared == len(ORDERS)
+        found = [i.check_name for i in check_pg_warehouse(facts)]
+        assert not [n for n in found if n.startswith("pg_silver_row_values")], found
+
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE silver.orders SET is_active_source = TRUE WHERE id = 9102")
+        facts = await read_facts(pool=pool)
+        issue = {i.check_name: i for i in check_pg_warehouse(facts)}["pg_silver_row_values"]
+        assert issue.sample_ids == (9102,)
+        assert facts.silver_row_values.columns == (("is_active_source", 1),)
 
 
 class TestTheNameRuleInPostgres:

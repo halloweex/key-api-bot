@@ -28,12 +28,11 @@ def _analytics(scale=1.0, unknown_orders=40, totals_orders=300):
 
 
 class FakeStore:
-    """Answers the two calls `build_report` makes, and records them."""
+    """Answers the two calls `build_report` makes."""
 
     THIS_WEEK = date(2026, 8, 31)
 
     def __init__(self, analytics=None, campaigns=None):
-        self.calls = []
         self._analytics = analytics or (lambda cur: _analytics(1.0 if cur else 1.25))
         self._campaigns = campaigns or self._default_campaigns
 
@@ -52,12 +51,10 @@ class FakeStore:
 
     async def get_traffic_analytics(self, start_date, end_date, sales_type=None,
                                     source_id=None):
-        self.calls.append(("analytics", start_date, end_date, sales_type))
         return self._analytics(start_date >= self.THIS_WEEK)
 
     async def get_traffic_utm_campaigns(self, start_date, end_date, sales_type=None,
                                         limit=50, **kwargs):
-        self.calls.append(("campaigns", start_date, end_date, sales_type))
         return {"campaigns": self._campaigns(start_date >= self.THIS_WEEK),
                 "total": 4}
 
