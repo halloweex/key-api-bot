@@ -19,11 +19,7 @@ row since.
 """
 from __future__ import annotations
 
-import ast
-import logging
-import textwrap
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -33,7 +29,6 @@ from bot import canary
 from core.alerting import Kind, spec_for
 from tests.helpers.canary_payload import DASHBOARD, _healthy_payload, _mock_transport
 
-REPO = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
 
 
@@ -260,17 +255,6 @@ class TestWhatOffWouldRefuseIsSeen:
 
 # ─── A probe that read nothing clears nothing ──────────────────────────────
 
-def _job_factory():
-    """`canary_job` itself, compiled out of bot/main.py: it is a closure over
-    `canary_prev_failures`, so it is wrapped in a factory that holds one. The
-    decisions under test are the job's own, not a transcription of them."""
-    source = (REPO / "bot" / "main.py").read_text(encoding="utf-8")
-    segment = textwrap.dedent(ast.get_source_segment(source, _canary_job(), padded=True))
-    factory = ("def _make():\n    canary_prev_failures = set()\n"
-               + textwrap.indent(segment, "    ") + "\n    return canary_job\n")
-    return compile(factory, "bot/main.py:canary_job", "exec")
-
-
 class TestABlindProbeKeepsThePage:
     """The review's reproduction, through the real job: a standing page, a
     probe that times out (a first-time blip the job holds back), then the
@@ -294,11 +278,13 @@ class TestABlindProbeKeepsThePage:
         reset_gate()
 
     async def _run(self, probes):
-        """Each probe is a payload, or None for a timeout. Returns the first
-        line of every message sent and the agent's task buckets."""
+        """Each probe is a payload, or None for a timeout, run through
+        `canary.canary_job` itself. Returns the first line of every message
+        sent and the agent's task buckets."""
         future = datetime.now(timezone.utc) + timedelta(days=60)
         cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
         script = iter(probes)
+        real_run_canary = canary.run_canary
 
         async def run_canary(url):
             payload = next(script)
@@ -310,12 +296,7 @@ class TestABlindProbeKeepsThePage:
 
             async with _mock_transport(handler) as client:
                 with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                    return await canary.run_canary(url, client=client)
-
-        namespace = {"run_canary": run_canary, "format_alert": canary.format_alert,
-                     "DASHBOARD_URL": DASHBOARD, "logger": logging.getLogger("t")}
-        exec(_job_factory(), namespace)
-        job = namespace["_make"]()
+                    return await real_run_canary(url, client=client)
 
         sent, agent = [], []
 
@@ -323,14 +304,17 @@ class TestABlindProbeKeepsThePage:
             sent.append(text.splitlines()[0])
             return 1
 
-        with patch("bot.main.send_admin_message", new=AsyncMock(side_effect=send)), \
+        with patch.object(canary, "run_canary", new=run_canary), \
+             patch.object(canary, "DASHBOARD_URL", DASHBOARD), \
+             patch.object(canary, "canary_prev_failures", set()), \
+             patch("bot.main.send_admin_message", new=AsyncMock(side_effect=send)), \
              patch("core.alert_agent_spool.drop_task",
                    side_effect=lambda *a, **k: agent.append(a[1])), \
              patch("core.alert_archive.write_resolved_now",
                    new=AsyncMock(return_value=True)), \
              patch("core.alert_escalator.escalate_due", new=AsyncMock()):
             for _ in probes:
-                await job(None)
+                await canary.canary_job(None)
         return sent, agent, None
 
     def _payload(self, refused):
@@ -487,18 +471,6 @@ class TestUnjudgedKeys:
 
 
 # ─── The bot writes the watch ──────────────────────────────────────────────
-
-def _canary_job() -> ast.AsyncFunctionDef:
-    tree = ast.parse((REPO / "bot" / "main.py").read_text(encoding="utf-8"))
-    found = [n for n in ast.walk(tree)
-             if isinstance(n, ast.AsyncFunctionDef) and n.name == "canary_job"]
-    assert len(found) == 1, "canary_job moved — this test reads it by name"
-    return found[0]
-
-
-def _parents(root: ast.AST) -> dict:
-    return {child: node for node in ast.walk(root) for child in ast.iter_child_nodes(node)}
-
 
 # `TestTheWatchWriter` stood here until step 14's S14-18: `record_watch`
 # wore the archive's armour (nothing without `KS_PG_DSN`, one warning per
