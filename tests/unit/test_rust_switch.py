@@ -211,7 +211,7 @@ class TestTheService:
         assert '.route("/readyz", get(readyz))' in (RUST_SRC / "http.rs").read_text()
 
     def test_the_image_is_the_one_the_deploy_pushes(self):
-        tags = JOBS["build-rust"]["steps"][-1]["with"]["tags"]
+        tags = _pilot_build()["tags"]
         assert SERVICE["image"] == "halloweex/keycrm-rust-api:latest"
         assert "${{ secrets.DOCKER_USERNAME }}/keycrm-rust-api:latest" in tags
 
@@ -219,6 +219,13 @@ class TestTheService:
         last_stage = DOCKERFILE.rsplit("\nFROM ", 1)[1]
         assert "ENV KS_PILOT_LISTEN=0.0.0.0:8090" in last_stage
         assert SERVICE["expose"] == ["8090"]
+
+
+def _pilot_build() -> dict:
+    """build-rust's step that pushes the pilot's image, found by its tag: the
+    same job pushes the core's worker too (Dockerfile.rust's `worker`)."""
+    return next(step["with"] for step in JOBS["build-rust"]["steps"]
+                if "keycrm-rust-api:latest" in step.get("with", {}).get("tags", ""))
 
 
 class TestTheImageHasNoTestClock:
@@ -235,7 +242,7 @@ class TestTheImageHasNoTestClock:
         assert "test-clock" not in build_api and "--features" not in build_api
 
     def test_the_deploy_builds_that_stage(self):
-        build = JOBS["build-rust"]["steps"][-1]["with"]
+        build = _pilot_build()
         assert build["file"] == "./Dockerfile.rust"
         assert build["context"] == "rust"
         assert "target" not in build

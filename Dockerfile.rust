@@ -7,6 +7,7 @@
 #     docker build -f Dockerfile.rust -t ks-rust-pilot rust
 #     docker build -f Dockerfile.rust --target harness -t ks-rust-pilot-harness rust
 #     docker build -f Dockerfile.rust --target loadgen -t ks-rust-loadgen rust
+#     docker build -f Dockerfile.rust --target worker -t ks-rust-worker rust
 #
 # so nothing outside the workspace can reach the image. The default target is
 # the service. `harness` is the same code with the `test-clock` feature, the
@@ -49,12 +50,26 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked -p ks-loadgen \
     && install -D target/release/ks-loadgen /out/ks-loadgen
 
+FROM source AS build-worker
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release --locked -p ks-worker \
+    && install -D target/release/ks-worker /out/ks-worker
+
 # The harness's build of the service: the trend's clock can be frozen.
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS harness
 COPY --from=build-harness /out/ks-api /usr/local/bin/ks-api
 ENV KS_PILOT_LISTEN=0.0.0.0:8090
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/ks-api"]
+
+# The core's worker (the Rust plan, revision 4, К1): `ch_sync`, hourly, in the
+# shadow until the switch names Rust. Its own target and its own image, so the
+# pilot's never carries it; docker-compose.yml's `rust-worker` runs it.
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS worker
+COPY --from=build-worker /out/ks-worker /usr/local/bin/ks-worker
+ENTRYPOINT ["/usr/local/bin/ks-worker"]
+CMD ["run"]
 
 # The benchmark's client. Its own target, so the service image never carries it.
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS loadgen

@@ -133,7 +133,8 @@ def _rust(tmp_path, *args: str, env: Optional[Dict[str, str]] = None,
     process = subprocess.run(
         [os.environ["KS_RUST_WORKER_BIN"], "ch-sync", "--target", target,
          "--dump", str(dump), *args],
-        capture_output=True, text=True, timeout=600, env={**os.environ, **(env or {})},
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, **_worker_logins(target), **(env or {})},
     )
     elapsed = time.perf_counter() - started
     assert process.stdout.strip(), process.stderr[-4000:]
@@ -147,6 +148,19 @@ def _rust(tmp_path, *args: str, env: Optional[Dict[str, str]] = None,
     findings = [json.loads(line) for line in
                 (dump / "findings.jsonl").read_text(encoding="utf-8").splitlines()]
     return result, sent, findings, elapsed
+
+
+def _worker_logins(target: str) -> Dict[str, str]:
+    """The worker's own logins, where the harness made them
+    (deploy/rust/ks_rust_worker*.sql): Postgres for every run, ClickHouse for
+    the shadow's — the live tables are not that user's to write."""
+    logins = {}
+    if os.getenv("KS_K1_WORKER_PG_DSN"):
+        logins["KS_PG_DSN"] = os.environ["KS_K1_WORKER_PG_DSN"]
+    if target == "shadow" and os.getenv("KS_K1_WORKER_CH_USER"):
+        logins["KS_CH_USER"] = os.environ["KS_K1_WORKER_CH_USER"]
+        logins["KS_CH_PASSWORD"] = os.environ.get("KS_K1_WORKER_CH_PASSWORD", "")
+    return logins
 
 
 def _failed(result: Dict[str, Any]) -> bool:
@@ -238,10 +252,14 @@ async def test_a_first_run_ships_the_same_bytes(stores, tmp_path):
     silver_rows, gold_cells = await _judge_the_shadow()
     assert findings == []
     assert sizes["history.order_versions"] == counts["versions"]
+    # The worker's peak memory, for docker-compose.yml's mem_limit: the only
+    # children this process has started are the worker's runs.
+    import resource
     _report(test="first_run", **counts, answer=python, statements=len(rust_sent),
             bytes_sent=sum(len(b or b"") for _, b in rust_sent),
             silver_readback=silver_rows, gold_cells=gold_cells,
-            python_s=round(python_s, 2), rust_s=round(rust_s, 2))
+            python_s=round(python_s, 2), rust_s=round(rust_s, 2),
+            rust_worker_max_rss_kb=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
 
 
 @pytest.mark.asyncio
@@ -457,3 +475,164 @@ async def test_the_switch_and_the_lease_decide_who_writes_the_live_tables(stores
                 switch_values_refused=7)
     finally:
         await _switch(stores, None)
+
+
+# ─── The nightly judge on real stores (core/ch_rust_shadow.py) ───────────────
+#
+# The same judge the scheduler runs at night, against what the two sides
+# actually shipped: a clean shadow compares clean in every part, a wrong row,
+# cell or version in the shadow alone is named, and a Silver rebuilt after the
+# ships is a wait, not a difference.
+
+async def _rebuilt_before_the_ships(pool) -> None:
+    """Move Postgres' two rebuild stamps an hour back — a night on which
+    Silver was last rebuilt before either side shipped — and forget every
+    night the judge has journalled."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meta.mirror_state SET last_ok_at = last_ok_at - interval '1 hour' "
+            "WHERE table_name IN ('silver.orders', 'gold.daily_revenue')")
+        await conn.execute(
+            "DELETE FROM app.data_quality_issues WHERE run_id IN "
+            "(SELECT run_id FROM app.data_quality_runs WHERE layer = 'rust_shadow')")
+        await conn.execute("DELETE FROM app.data_quality_runs WHERE layer = 'rust_shadow'")
+
+
+def _findings(verdict) -> Dict[Tuple[str, str], Any]:
+    return {(i.check_name, i.table_name): i for i in verdict.issues}
+
+
+EVERY_PART = {"silver", "gold", "live silver", "live gold", "archive", "live archive"}
+
+
+@pytest.mark.asyncio
+async def test_the_night_finds_a_clean_shadow_clean(stores, tmp_path, monkeypatch):
+    from core import ch_rust_shadow as shadow
+
+    await _fresh(stores)
+    await _python()
+    _rust(tmp_path)
+    await _rebuilt_before_the_ships(stores)
+
+    verdict = await shadow.judge()
+    assert verdict.issues == [], [(i.check_name, i.description) for i in verdict.issues]
+    assert verdict.unwatched == []
+    assert set(verdict.compared) == EVERY_PART
+
+    monkeypatch.setenv(shadow.SHADOW_ENV, "ch_sync")
+    first = await shadow.run_nightly(final=False)
+    assert first["findings"] == [] and first["run_id"], first
+    assert await shadow.run_nightly(final=False) == {
+        "skipped": "tonight's comparison is journalled"}
+    async with stores.acquire() as conn:
+        runs = await conn.fetch(
+            "SELECT status, error_message, integrity_issues_count FROM app.data_quality_runs "
+            "WHERE layer = 'rust_shadow'")
+    assert [tuple(r) for r in runs] == [("PASS", None, 0)]
+    _report(test="shadow_judged_clean", compared=sorted(verdict.compared))
+
+
+@pytest.mark.asyncio
+async def test_the_night_names_what_the_shadow_alone_got_wrong(stores, tmp_path):
+    from core import ch_rust_shadow as shadow
+
+    await _fresh(stores)
+    await _python()
+    _rust(tmp_path)
+    await _rebuilt_before_the_ships(stores)
+    async with stores.acquire() as conn:
+        order = await conn.fetchval("SELECT min(id) FROM silver.orders")
+        day = await conn.fetchval("SELECT min(date) FROM gold.daily_revenue")
+        version = await conn.fetchval("SELECT min(id) FROM app.order_versions")
+
+    # A Silver row: named, and Gold and the live copy wait for an equal Silver.
+    await _ch(f"ALTER TABLE silver.orders_rust UPDATE grand_total = grand_total + "
+              f"toDecimal64(1, 2) WHERE id = {order} SETTINGS mutations_sync = 2")
+    verdict = await shadow.judge()
+    found = _findings(verdict)
+    assert set(found) == {("rust_shadow_silver_differs", "silver.orders_rust")}, (
+        found, verdict.compared, verdict.unwatched)
+    assert found["rust_shadow_silver_differs", "silver.orders_rust"].sample_ids == (order,)
+    assert "live silver" not in verdict.compared and "gold" not in verdict.compared
+
+    # A Gold cell, after a fresh ship: named against Postgres and against the live copy.
+    _rust(tmp_path)
+    await _ch(f"ALTER TABLE gold.daily_revenue_rust UPDATE revenue = revenue + "
+              f"toDecimal64(1, 2) WHERE date = '{day}' AND source_id IS NULL "
+              f"SETTINGS mutations_sync = 2")
+    verdict = await shadow.judge()
+    found = _findings(verdict)
+    assert set(found) == {("rust_shadow_gold_differs", "gold.daily_revenue_rust"),
+                          ("rust_shadow_gold_differs", "gold.daily_revenue")}, (
+        found, verdict.compared, verdict.unwatched)
+    sample = day.year * 10000 + day.month * 100 + day.day
+    assert all(i.sample_ids == (sample,) for i in found.values())
+
+    # A version lost from the shadow archive below the cut, after a fresh ship.
+    _rust(tmp_path)
+    await _ch(f"ALTER TABLE history.order_versions_rust DELETE WHERE id = {version} "
+              f"SETTINGS mutations_sync = 2")
+    verdict = await shadow.judge()
+    found = _findings(verdict)
+    assert set(found) == {("rust_shadow_history_differs", "history.order_versions_rust"),
+                          ("rust_shadow_history_differs", "history.order_versions")}, (
+        found, verdict.compared, verdict.unwatched)
+    assert found["rust_shadow_history_differs", "history.order_versions"].sample_ids == (version,)
+    assert verdict.differs and set(verdict.compared) == EVERY_PART
+    _report(test="shadow_judged_wrong", order=order, day=str(day), version=version)
+
+
+@pytest.mark.asyncio
+async def test_the_night_waits_for_a_silver_the_shadow_has_not_shipped(stores, tmp_path,
+                                                                       monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from core import ch_rust_shadow as shadow
+    from core.pg_gold import rebuild_gold
+    from core.pg_silver import rebuild_silver
+
+    await _fresh(stores)
+    await _python()
+    _rust(tmp_path)
+    await _rebuilt_before_the_ships(stores)
+    async with stores.acquire() as conn:
+        await conn.execute(
+            "UPDATE bronze.orders SET grand_total = grand_total + 1 WHERE id % 97 = 0")
+    with patch("core.pg.require_revision", new=AsyncMock()):
+        await rebuild_silver(pool=stores)
+        await rebuild_gold(pool=stores)
+
+    verdict = await shadow.judge()
+    assert not verdict.differs, [(i.check_name, i.description) for i in verdict.issues]
+    assert any(reason.startswith("Silver:") for reason in verdict.unwatched)
+    assert set(verdict.compared) == {"archive", "live archive"}
+
+    monkeypatch.setenv(shadow.SHADOW_ENV, "ch_sync")
+    assert "pending" in await shadow.run_nightly(final=False)
+    last = await shadow.run_nightly(final=True)
+    assert last["findings"] == ["rust_shadow_unwatched"], last
+    _report(test="shadow_waits", unwatched=verdict.unwatched)
+
+
+@pytest.mark.asyncio
+async def test_the_workers_clickhouse_login_cannot_write_the_live_tables(stores, tmp_path):
+    """deploy/rust/ks_rust_worker_clickhouse.sql grants the shadow alone. Run
+    live as that login — the switch saying rust — and every write is refused,
+    counted against the live rows, and the live tables keep what Python
+    shipped: what the morning check would see, with nothing written wrong."""
+    if not os.getenv("KS_K1_WORKER_CH_USER"):
+        pytest.skip("the worker's ClickHouse login is made by rust/harness/k1-ch-sync.sh")
+    await _fresh(stores)
+    python, _, _ = await _python()
+    assert not _failed(python), python
+    live = await _live_bytes()
+    await _switch(stores, "rust")
+    try:
+        worker = {"KS_CH_USER": os.environ["KS_K1_WORKER_CH_USER"],
+                  "KS_CH_PASSWORD": os.environ.get("KS_K1_WORKER_CH_PASSWORD", "")}
+        result, _, _, _ = _rust(tmp_path, target="live", env=worker)
+    finally:
+        await _switch(stores, None)
+    assert "Code: 497" in result.get("error", ""), result
+    assert "Code: 497" in result["history"].get("error", ""), result
+    assert await _live_bytes() == live

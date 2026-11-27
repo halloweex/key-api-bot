@@ -810,6 +810,24 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: the Rust worker's shadow of ch_sync, judged at night (the Rust
+        # plan, К1). Stands down unless KS_WORKER_SHADOW lists ch_sync, so it
+        # is safe to register on a host with no worker. Four attempts, 01:20
+        # to 04:20 Kyiv while orders stand; the first that compares the whole
+        # shadow, or finds a difference, journals layer `rust_shadow`, the
+        # last journals what it has. WARN only: the shadow serves nobody, and
+        # the 09:00 digest is where it is read (core/ch_rust_shadow.py).
+        from core.ch_rust_shadow import ATTEMPT_HOURS as RUST_SHADOW_HOURS
+        self._add_job(
+            job_id="rust_shadow_check",
+            name="Rust shadow: ch_sync judged",
+            description="Compare the Rust worker's ClickHouse shadow with Postgres and with Python's copy",
+            func=self._run_rust_shadow_check,
+            trigger=CronTrigger(hour=RUST_SHADOW_HOURS, minute=20),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Half-written order repair (every 2 h)
         # Orders with revenue and no line items. Detection is a table scan of
         # our own data, so an idle run costs nothing; a working one costs one
@@ -1236,6 +1254,17 @@ class BackgroundScheduler:
             if "skipped" not in result:
                 logger.info("ClickHouse sync: %s", result)
             return result
+
+    async def _run_rust_shadow_check(self) -> Dict[str, Any]:
+        """The Rust worker's shadow of ch_sync against Postgres and Python's copy.
+
+        Never raises, `_run_ch_sync`'s contract: the shadow is optional, and
+        its faults are the run's result, not the scheduler's failure history.
+        """
+        from core.ch_rust_shadow import run_nightly
+
+        with correlation_context():
+            return await run_nightly()
 
     async def _run_ga4_capture(self) -> Dict[str, Any]:
         """The GA4 funnel of each closed period, kept before GA4 drops it.
@@ -3353,6 +3382,11 @@ class BackgroundScheduler:
             # `reconciliation`, which chain 3 stood down, left the list in
             # step 14's S14-12.
             layers = list(WATCHED_LAYERS)
+            # The Rust shadow's nightly verdict, only while there is a shadow:
+            # a layer with no run reads "no successful run" every morning.
+            from core import ch_rust_shadow
+            if ch_rust_shadow.shadow_configured():
+                layers.append(ch_rust_shadow.LAYER)
             # The beat and every layer's runs, from Postgres (chain 9): the
             # beat inherited from the copy of DuckDB's `sync_metadata` while
             # `meta.chain_watermarks` lacks it.

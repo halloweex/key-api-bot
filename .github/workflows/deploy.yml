@@ -222,6 +222,23 @@ jobs:
           cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-rust-api:buildcache-arm64
           cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-rust-api:buildcache-arm64,mode=max
 
+      # The core's worker (К1): Dockerfile.rust's `worker` stage, its own
+      # repository. Pushed, never started by a deploy — docker-compose.yml's
+      # `rust-worker` sits in a profile only a human starts.
+      - name: Build and push the core's worker image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
+        with:
+          context: rust
+          file: ./Dockerfile.rust
+          target: worker
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/keycrm-rust-worker:latest
+            ${{ secrets.DOCKER_USERNAME }}/keycrm-rust-worker:sha-${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-rust-worker:buildcache-arm64
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-rust-worker:buildcache-arm64,mode=max
+
   deploy:
     needs: [changes, build]
     runs-on: ubuntu-latest
@@ -379,4 +396,13 @@ jobs:
             # in silence while it keeps serving the old routes.
             docker exec keycrm-nginx nginx -t
             docker exec keycrm-nginx nginx -s reload
+            # The core's worker: never started here. Once a human has started
+            # it (`--profile rust-worker up -d rust-worker`, on the owner's
+            # yes), each deploy brings it the new image; a worker nobody
+            # started stays not started. A run cut short by the recreate
+            # leaves its staging table behind, and the next one truncates it.
+            if [ -n "$(docker ps -q --filter name='^ks-rust-worker$')" ]; then
+              docker compose --profile rust-worker pull rust-worker
+              docker compose --profile rust-worker up -d --no-deps rust-worker
+            fi
             docker image prune -f

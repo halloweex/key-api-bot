@@ -5,6 +5,7 @@
 #
 #   rust/harness/k1-ch-sync.sh            build, run, tear down
 #   KEEP=1 rust/harness/k1-ch-sync.sh     leave the two stores running
+#   K1_TESTS='tests/…::test_x' rust/harness/k1-ch-sync.sh   only those tests
 #
 # Nothing here reaches production, KeyCRM or the network beyond the images.
 # Docker only: no cargo or Python on the host. The Rust build reuses the
@@ -74,14 +75,29 @@ for database in silver gold history; do
         -q "CREATE DATABASE IF NOT EXISTS $database"
 done
 
-echo "== migrations, then the harness"
+echo "== migrations"
+docker run --rm --init --network "$net" -e TZ=UTC \
+    -e KS_PG_DSN="postgresql://ks_app:$secret@$pg:5432/ks" \
+    -v "$root:/app" -w /app "$PY_IMAGE" sh -c 'alembic upgrade head >/dev/null'
+
+# The worker's own logins, from the files production would run on the owner's
+# yes, so the shadow ships as them here and a grant they lack fails here.
+echo "== the worker's logins"
+docker exec -i "$pg" psql -U postgres -d ks -q -v ON_ERROR_STOP=1 -v password="$secret" \
+    -f - < "$root/deploy/rust/ks_rust_worker.sql"
+hash=$(printf %s "$secret" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)
+sed "s/@PASSWORD_SHA256@/$hash/" "$root/deploy/rust/ks_rust_worker_clickhouse.sql" \
+    | docker exec -i "$ch" clickhouse-client --user ks_app --password "$secret" --multiquery
+
+echo "== the harness"
 docker run --rm --init --network "$net" -e TZ=UTC \
     -e KS_PG_DSN="postgresql://ks_app:$secret@$pg:5432/ks" \
     -e KS_CH_URL="http://$ch:8123" -e KS_CH_USER=ks_app -e KS_CH_PASSWORD="$secret" \
+    -e KS_K1_WORKER_PG_DSN="postgresql://ks_rust_worker:$secret@$pg:5432/ks" \
+    -e KS_K1_WORKER_CH_USER=ks_rust_worker -e KS_K1_WORKER_CH_PASSWORD="$secret" \
     -e KS_RUST_WORKER_BIN=/rust/ks-worker -e KS_K1_REPORT=/out/report.jsonl \
     -v "$root:/app" -v "$out/bin:/rust:ro" -v "$out:/out" -w /app "$PY_IMAGE" \
-    sh -c 'alembic upgrade head >/dev/null && python -m pytest -v -p no:cacheprovider \
-        tests/integration/test_rust_k1_ch_sync.py tests/unit/test_rust_k1_contract.py'
+    sh -c "python -m pytest -v -p no:cacheprovider ${K1_TESTS:-tests/integration/test_rust_k1_ch_sync.py tests/unit/test_rust_k1_contract.py}"
 
 echo "== report: $out/report.jsonl"
 cat "$out/report.jsonl"
