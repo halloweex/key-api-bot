@@ -233,10 +233,12 @@ class TestTheReadersAroundTheColumn:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type, revenue, expenses", [
-        ("b2b", 4800.0, 100.0), ("internal", 400.0, 0.0), ("all", 6200.0, 100.0)])
+        ("b2b", 4200.0, 100.0), ("internal", 400.0, 0.0), ("all", 5600.0, 100.0)])
     async def test_the_profit(self, own, sales_type, revenue, expenses):
-        """The entity's money and the cost on its sale both leave; Opencart's
-        money stays, as it always has here."""
+        """The entity's money and the cost on its sale both leave, and so does
+        Opencart's 600 (order 9110): since 2026-11-27 the chart reads the
+        orders that count as revenue, as every other figure does. Until then
+        it kept Opencart, and b2b read 4 800, every sales type 6 200."""
         store, _pool = own
         out = await store.get_profit_analysis(DAY, DAY, sales_type=sales_type)
         assert (out["metrics"]["totalRevenue"], out["metrics"]["totalExpenses"]) == (

@@ -7,10 +7,14 @@ import math
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Dict, Any, List, Sequence, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, Sequence, Tuple, Union, cast
 
 from core import read_fallback
+from core.duckdb_constants import brand_where
 from core.filters import by_month
+
+if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cycle
+    from core.repositories.revenue import RevenueMixin
 
 logger = logging.getLogger(__name__)
 
@@ -864,6 +868,185 @@ _INSIGHTS_ALLTIME_SQL = """
 """
 
 
+# ─── The block under a filter of the header ─────────────────────────────────
+#
+# Until 2026-11-27 the block answered every filter with the unfiltered numbers:
+# the route took `source_id`, `brand` and `promocode`, the page sent them and
+# the category besides, and the queries read only the promocode, and only for
+# the period's buyers. Under one source the cards above described that source
+# and this block the whole shop, with nothing on the screen saying so; found
+# by reconciling the dashboard against KeyCRM.
+#
+# Under a filter every figure of the block is the filtered slice's, measured
+# the way the cards above measure it (`get_summary_stats`): a source or a
+# promocode selects whole orders and keeps their `grand_total`; a brand or a
+# category selects lines and counts their `line_amount`, an order once however
+# many of its lines match — the brand card's and the marketing report's rule.
+# The lifetime figures (the CLV, the purchase frequency, the lifespan, the
+# all-time repeat) are the same slice over the whole history: under a brand,
+# the brand's repeat buyers and what they spent on it. Without a filter none of
+# this runs and the block reads Gold exactly as before.
+#
+# `{rel}`, `{oid}` and `{amt}` are the slice's relation, order id and amount
+# (`insights_filter_scope`); `{where}` its predicates. `{order_lines}` and
+# `{silver_orders}` inside `{rel}` are table holes, rendered by the runner.
+
+_FILTERED_TOTALS_SQL = """
+    SELECT COUNT(DISTINCT {oid}), COALESCE(SUM({amt}), 0)
+    FROM {rel}
+    WHERE {where}
+"""
+
+_FILTERED_DAILY_SQL = """
+    SELECT x.order_date, COALESCE(SUM({amt}), 0), COUNT(DISTINCT {oid})
+    FROM {rel}
+    WHERE {where}
+    GROUP BY x.order_date
+    ORDER BY x.order_date
+"""
+
+_FILTERED_PEOPLE_SQL = """
+    SELECT COUNT(DISTINCT x.buyer_id),
+           COUNT(DISTINCT CASE WHEN x.is_new_customer THEN x.buyer_id END),
+           COUNT(DISTINCT CASE WHEN NOT x.is_new_customer THEN x.buyer_id END)
+    FROM {rel}
+    WHERE {where} AND x.buyer_id IS NOT NULL
+"""
+
+_FILTERED_CLV_SQL = """
+    WITH customer_stats AS (
+        SELECT x.buyer_id,
+               COUNT(DISTINCT {oid}) AS order_count,
+               SUM({amt})            AS total_spent,
+               MAX(x.order_date) - MIN(x.order_date) AS lifespan_days
+        FROM {rel}
+        WHERE {where} AND x.buyer_id IS NOT NULL
+        GROUP BY x.buyer_id
+        HAVING COUNT(DISTINCT {oid}) > 1
+    )
+    SELECT COUNT(*), AVG(order_count), AVG(lifespan_days), AVG(total_spent)
+    FROM customer_stats
+"""
+
+_FILTERED_ALLTIME_SQL = """
+    WITH customer_orders AS (
+        SELECT x.buyer_id, COUNT(DISTINCT {oid}) AS order_count
+        FROM {rel}
+        WHERE {where} AND x.buyer_id IS NOT NULL
+        GROUP BY x.buyer_id
+    )
+    SELECT COUNT(*),
+           SUM(CASE WHEN order_count >= 2 THEN 1 ELSE 0 END),
+           AVG(order_count)
+    FROM customer_orders
+"""
+
+
+def insights_filter_scope(
+    sales_type: str, *, source_id: Optional[int] = None,
+    category_ids: Optional[Sequence[int]] = None, brand: Optional[str] = None,
+    promocode: Optional[str] = None,
+) -> Tuple[str, str, str, List[str], List[Any]]:
+    """`(relation, order id, amount, predicates, params)` of the slice the
+    header's filters select, over the alias `x`.
+
+    A brand or a category is a fact about a line, so the slice is the order
+    lines and its money the matching lines' value; a source or a promocode
+    alone selects whole orders, so the slice is Silver's orders and their
+    `grand_total`. The predicates are the earning rows' (`NOT is_return AND
+    is_active_source`, Gold's) and the filters', with their parameters in
+    textual order. Pure, so a test can render exactly what the block runs.
+    """
+    line_level = bool(category_ids or brand)
+    relation = "{order_lines} x" if line_level else "{silver_orders} x"
+    order_id = "x.order_id" if line_level else "x.id"
+    amount = "x.line_amount" if line_level else "x.grand_total"
+    where = ["NOT x.is_return", "x.is_active_source"]
+    params: List[Any] = []
+    if sales_type != "all":
+        where.append("x.sales_type = ?")
+        params.append(sales_type)
+    if source_id:
+        where.append("x.source_id = ?")
+        params.append(source_id)
+    if category_ids:
+        where.append(f"x.category_id IN ({','.join('?' * len(category_ids))})")
+        params.extend(category_ids)
+    if brand:
+        where.append(brand_where(brand, params, "x"))
+    if promocode:
+        where.append("UPPER(x.promocode) = UPPER(?)")
+        params.append(promocode)
+    return relation, order_id, amount, where, params
+
+
+def _insights_answer(
+    *, labels: List[str], aov_data: List[float], monthly: bool,
+    total_orders: int, total_revenue: float, people: Sequence[Any],
+    clv: Sequence[Any], alltime: Sequence[Any],
+) -> Dict[str, Any]:
+    """The block's answer from its five readings, with or without a filter.
+
+    `people` is (buyers, new, returning) over the period; `clv` is (repeat
+    buyers, their mean orders, mean lifespan in days, mean spend); `alltime`
+    is (buyers, buyers with two orders or more, mean orders) — each over the
+    same slice as the totals beside them.
+    """
+    overall_aov = total_revenue / total_orders if total_orders > 0 else 0
+    repeat_customer_count = clv[0] or 0
+    avg_purchase_frequency = float(clv[1] or 0)
+    avg_lifespan_days = float(clv[2] or 0)
+    avg_customer_value = float(clv[3] or 0)
+    customer_value = avg_customer_value if repeat_customer_count > 0 else 0
+    unique_buyers = int(people[0] or 0)
+    new_customers = int(people[1] or 0)
+    returning_customers = int(people[2] or 0)
+    total_customers = unique_buyers
+    purchase_frequency = total_orders / unique_buyers if unique_buyers > 0 else 0
+    alltime_total_customers = alltime[0] or 0
+    alltime_repeat_customers = alltime[1] or 0
+    alltime_avg_orders = float(alltime[2] or 0)
+    true_repeat_rate = (alltime_repeat_customers / alltime_total_customers * 100) \
+        if alltime_total_customers > 0 else 0
+
+    return {
+        "newVsReturning": {
+            "labels": ["New Customers", "Returning Customers"],
+            "data": [new_customers, returning_customers],
+            "backgroundColor": ["#2563EB", "#16A34A"]
+        },
+        "aovTrend": {
+            "labels": labels,
+            "datasets": [{
+                "label": "AOV (UAH)",
+                "data": aov_data,
+                "borderColor": "#F59E0B",
+                "backgroundColor": "rgba(245, 158, 11, 0.1)",
+                "fill": True,
+                "tension": 0.3
+            }],
+            # Only for months: a daily answer keeps the body the goldens hold.
+            **({"granularity": "monthly"} if monthly else {}),
+        },
+        "metrics": {
+            "totalCustomers": total_customers,
+            "newCustomers": new_customers,
+            "returningCustomers": returning_customers,
+            "totalOrders": total_orders,
+            "repeatRate": round((returning_customers / total_customers * 100) if total_customers > 0 else 0, 1),
+            "averageOrderValue": round(overall_aov, 2),
+            "customerLifetimeValue": round(customer_value, 2),
+            "avgPurchaseFrequency": round(avg_purchase_frequency, 2),
+            "avgCustomerLifespanDays": round(avg_lifespan_days, 0),
+            "purchaseFrequency": round(purchase_frequency, 2),
+            "totalCustomersAllTime": alltime_total_customers,
+            "repeatCustomersAllTime": alltime_repeat_customers,
+            "trueRepeatRate": round(true_repeat_rate, 1),
+            "avgOrdersPerCustomer": round(alltime_avg_orders, 2)
+        }
+    }
+
+
 def sms_segments_fragments(
     groups: Sequence[SmsAudienceGroup], *, order_lines: str, ltv_basis: str,
     sales_type: str, tiers: Optional[Sequence[str]], grouping: str,
@@ -961,11 +1144,17 @@ class CustomersMixin:
         sales_type: str = "retail",
         promocode: Optional[str] = None,
         granularity: str = "daily",
+        category_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Customer insights: new vs returning, AOV trend, CLV, repeat rate.
 
         `granularity="monthly"` gives the AOV trend one point a calendar month,
         labelled `MM.YYYY`, and says so in `granularity` — the trend's rule.
+
+        A source, brand, category or promocode makes every figure the
+        filtered slice's (`_filtered_customer_insights`, the note above
+        `insights_filter_scope`); without one, the block reads Gold as it
+        always has.
 
         Rides the dashboard's router — this is the dashboard's customer block,
         it reads the same two layers the rest of that tab reads, from
@@ -979,6 +1168,12 @@ class CustomersMixin:
         mixin for this reason when it gained a *third* consumer; this is the
         second, and the note is here so the next one moves it.
         """
+        if source_id or brand or category_id or promocode:
+            return await self._filtered_customer_insights(
+                start_date, end_date, source_id=source_id, brand=brand,
+                category_id=category_id, sales_type=sales_type,
+                promocode=promocode, granularity=granularity)
+
         gold_where = ["date BETWEEN ? AND ?"]
         gold_params: List[Any] = [start_date, end_date]
         if sales_type != "all":
@@ -1012,8 +1207,6 @@ class CustomersMixin:
                 aov_data.append(round(aov_by_day.get(current, 0), 2))
                 current += timedelta(days=1)
 
-        overall_aov = total_revenue / total_orders if total_orders > 0 else 0
-
         # ── CLV, over every order a buyer ever placed ──
         sales_where = "s.sales_type = ?" if sales_type != "all" else "1=1"
         clv_params: List[Any] = [sales_type] if sales_type != "all" else []
@@ -1021,11 +1214,6 @@ class CustomersMixin:
         rows = await self._dashboard_run(
             _INSIGHTS_CLV_SQL.replace("{sales_where}", sales_where), clv_params)
         clv_result = rows[0] if rows else (0, 0, 0, 0)
-        repeat_customer_count = clv_result[0] or 0
-        avg_purchase_frequency = float(clv_result[1] or 0)
-        avg_lifespan_days = float(clv_result[2] or 0)
-        avg_customer_value = float(clv_result[3] or 0)
-        clv = avg_customer_value if repeat_customer_count > 0 else 0
 
         # ── The period's customers, counted over Silver ──
         # Gold sums *daily* distinct counts, so a buyer who came back on
@@ -1034,57 +1222,76 @@ class CustomersMixin:
         rows = await self._dashboard_run(*insights_period_query(
             start_date, end_date, sales_type=sales_type, promocode=promocode))
         pf_result = rows[0] if rows else (0, 0, 0)
-        unique_buyers = int(pf_result[0] or 0)
-        new_customers = int(pf_result[1] or 0)
-        returning_customers = int(pf_result[2] or 0)
-        total_customers = unique_buyers
-        purchase_frequency = total_orders / unique_buyers if unique_buyers > 0 else 0
 
         rows = await self._dashboard_run(
             _INSIGHTS_ALLTIME_SQL.replace("{sales_where}", sales_where), clv_params)
         alltime_result = rows[0] if rows else (0, 0, 0)
-        alltime_total_customers = alltime_result[0] or 0
-        alltime_repeat_customers = alltime_result[1] or 0
-        alltime_avg_orders = float(alltime_result[2] or 0)
-        true_repeat_rate = (alltime_repeat_customers / alltime_total_customers * 100) \
-            if alltime_total_customers > 0 else 0
 
-        return {
-            "newVsReturning": {
-                "labels": ["New Customers", "Returning Customers"],
-                "data": [new_customers, returning_customers],
-                "backgroundColor": ["#2563EB", "#16A34A"]
-            },
-            "aovTrend": {
-                "labels": labels,
-                "datasets": [{
-                    "label": "AOV (UAH)",
-                    "data": aov_data,
-                    "borderColor": "#F59E0B",
-                    "backgroundColor": "rgba(245, 158, 11, 0.1)",
-                    "fill": True,
-                    "tension": 0.3
-                }],
-                # Only for months: a daily answer keeps the body the goldens hold.
-                **({"granularity": "monthly"} if monthly else {}),
-            },
-            "metrics": {
-                "totalCustomers": total_customers,
-                "newCustomers": new_customers,
-                "returningCustomers": returning_customers,
-                "totalOrders": total_orders,
-                "repeatRate": round((returning_customers / total_customers * 100) if total_customers > 0 else 0, 1),
-                "averageOrderValue": round(overall_aov, 2),
-                "customerLifetimeValue": round(clv, 2),
-                "avgPurchaseFrequency": round(avg_purchase_frequency, 2),
-                "avgCustomerLifespanDays": round(avg_lifespan_days, 0),
-                "purchaseFrequency": round(purchase_frequency, 2),
-                "totalCustomersAllTime": alltime_total_customers,
-                "repeatCustomersAllTime": alltime_repeat_customers,
-                "trueRepeatRate": round(true_repeat_rate, 1),
-                "avgOrdersPerCustomer": round(alltime_avg_orders, 2)
-            }
-        }
+        return _insights_answer(
+            labels=labels, aov_data=aov_data, monthly=monthly,
+            total_orders=total_orders, total_revenue=total_revenue,
+            people=pf_result, clv=clv_result, alltime=alltime_result)
+
+    async def _filtered_customer_insights(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        source_id: Optional[int],
+        brand: Optional[str],
+        category_id: Optional[int],
+        sales_type: str,
+        promocode: Optional[str],
+        granularity: str,
+    ) -> Dict[str, Any]:
+        """The block over the slice the header's filters select.
+
+        Every figure from one scope (`insights_filter_scope`): the period's
+        orders, money, AOV by day and people, then the same slice over the
+        whole history for the lifetime figures. The note above the scope says
+        how each one is measured; the answer's shape is the unfiltered one's.
+        """
+        store = cast("RevenueMixin", self)
+        cat_ids = await store._category_ids(category_id) if category_id else None
+        rel, oid, amt, where, params = insights_filter_scope(
+            sales_type, source_id=source_id, category_ids=cat_ids, brand=brand,
+            promocode=promocode)
+
+        def query(sql: str, *, period: bool) -> Tuple[str, List[Any]]:
+            clauses = (["x.order_date BETWEEN ? AND ?"] if period else []) + where
+            text = (sql.replace("{rel}", rel).replace("{oid}", oid)
+                    .replace("{amt}", amt).replace("{where}", " AND ".join(clauses)))
+            return text, ([start_date, end_date] if period else []) + list(params)
+
+        totals = await store._dashboard_run(*query(_FILTERED_TOTALS_SQL, period=True))
+        daily_rows = await store._dashboard_run(*query(_FILTERED_DAILY_SQL, period=True))
+        people = await store._dashboard_run(*query(_FILTERED_PEOPLE_SQL, period=True))
+        clv = await store._dashboard_run(*query(_FILTERED_CLV_SQL, period=False))
+        alltime = await store._dashboard_run(*query(_FILTERED_ALLTIME_SQL, period=False))
+
+        monthly = granularity == "monthly"
+        daily = {row[0]: (float(row[1] or 0), int(row[2] or 0)) for row in daily_rows}
+        labels: List[str] = []
+        aov_data: List[float] = []
+        if monthly:
+            for label, revenue, orders in by_month(start_date, end_date, daily):
+                labels.append(label)
+                aov_data.append(round(revenue / orders, 2) if orders > 0 else 0)
+        else:
+            current = start_date
+            while current <= end_date:
+                revenue, orders = daily.get(current, (0.0, 0))
+                labels.append(current.strftime("%d.%m"))
+                aov_data.append(round(revenue / orders, 2) if orders > 0 else 0)
+                current += timedelta(days=1)
+
+        total = totals[0] if totals else (0, 0)
+        return _insights_answer(
+            labels=labels, aov_data=aov_data, monthly=monthly,
+            total_orders=int(total[0] or 0), total_revenue=float(total[1] or 0),
+            people=people[0] if people else (0, 0, 0),
+            clv=clv[0] if clv else (0, 0, 0, 0),
+            alltime=alltime[0] if alltime else (0, 0, 0))
 
     async def get_cohort_retention(
         self,

@@ -31,7 +31,7 @@ from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
     validate_period, validate_source_id, validate_brand_name, validate_sales_type,
-    validate_promocode, validate_db_int,
+    validate_promocode, validate_db_int, validate_category_id,
     ValidationError,
 )
 
@@ -80,12 +80,18 @@ async def get_customer_insights(
     promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     granularity: str = Query("daily", description="daily, or monthly: the AOV trend one point a month"),
+    category_id: Optional[int] = Query(None, description="Filter by category ID (with its children)"),
     _gate=Depends(require_permission("dashboard")),
 ):
-    """Get customer insights: new vs returning, AOV trend, repeat rate."""
+    """Get customer insights: new vs returning, AOV trend, repeat rate.
+
+    Every filter of the header narrows every figure (2026-11-27): the block
+    read none of them but the promocode, and that only for the period's
+    buyers, so under a source it described the whole shop."""
     try:
         validate_period(period)
         validate_source_id(source_id)
+        validate_category_id(category_id)
         brand = validate_brand_name(brand)
         promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
@@ -97,7 +103,7 @@ async def get_customer_insights(
 
     return await dashboard_service.get_customer_insights(
         start, end, brand=brand, source_id=source_id, sales_type=sales_type,
-        promocode=promocode, granularity=granularity,
+        promocode=promocode, granularity=granularity, category_id=category_id,
     )
 
 

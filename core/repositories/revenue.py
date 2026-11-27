@@ -119,6 +119,18 @@ _SALES_BY_SOURCE_FILTERED_SQL = """
     ORDER BY revenue DESC, l.source_id
 """
 
+# The doughnut under a promocode alone: whole orders and the money they brought
+# in, as the trend and the cards read the same filter.
+_SALES_BY_SOURCE_ORDERS_SQL = """
+    SELECT s.source_id,
+           COUNT(DISTINCT s.id) as orders,
+           COALESCE(SUM(s.grand_total), 0) as revenue
+    FROM {silver_orders} s
+    WHERE {where}
+    GROUP BY s.source_id
+    ORDER BY revenue DESC, s.source_id
+"""
+
 # The doughnut, unfiltered. `{channel_measures}` is the one hole here that is
 # not a name: DuckDB's Gold spells a channel as a column and Postgres' as a
 # dimension, and `core.sql_dialect` renders that from one home.
@@ -557,7 +569,7 @@ class RevenueMixin:
         (`_NO_GOLD_SOURCE_TOTALS`, the owner's decision 5). None of it takes
         the DuckDB store lock (step 14, S14-06).
         """
-        if category_id or brand or promocode:
+        if category_id or brand:
             # The line level keeps distinct order counts correct: it holds the
             # order id beside every line. The category tree is the filter
             # bar's (`_category_ids`), resolved first, as it always was.
@@ -572,6 +584,22 @@ class RevenueMixin:
             returns = await self._pg_silver(ret_sql, ret_params)
             totals: Tuple[Any, Any, Any, Any] = (
                 lines[0][0], lines[0][1], returns[0][0], returns[0][1])
+        elif promocode:
+            # A promocode selects whole orders, so the cards say the money
+            # those orders brought in — `grand_total`, the trend's measure
+            # under the same filter (`get_revenue_trend`). They summed the
+            # orders' lines until 2026-11-27, so under one code the card and
+            # the chart beside it gave two totals; returns as ever unnarrowed.
+            orders_sql, orders_params = self._build_silver_promocode_summary_query(
+                start_date, end_date, sales_type, source_id, promocode)
+            _lines_sql, _lines_params, ret_sql, ret_params = (
+                self._build_silver_filtered_summary_queries(
+                    start_date, end_date, sales_type, source_id,
+                    None, None, None,
+                ))
+            found = await self._pg_silver(orders_sql, orders_params)
+            returns = await self._pg_silver(ret_sql, ret_params)
+            totals = (found[0][0], found[0][1], returns[0][0], returns[0][1])
         elif source_id and source_id not in self._GOLD_SOURCE_IDS:
             totals = _NO_GOLD_SOURCE_TOTALS
         else:
@@ -723,6 +751,35 @@ class RevenueMixin:
             WHERE {" AND ".join(ret_where)}
         """
         return lines_sql, params, returns_sql, ret_params
+
+    @staticmethod
+    def _build_silver_promocode_summary_query(
+        start_date: date,
+        end_date: date,
+        sales_type: str,
+        source_id: Optional[int],
+        promocode: str,
+    ) -> Tuple[str, list]:
+        """`(orders, revenue)` of the orders carrying one promocode, at the
+        order grain: `grand_total`, as `_build_silver_orders_revenue_query`
+        reads it for the trend under the same filter."""
+        params: list = [start_date, end_date]
+        where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+        if sales_type != "all":
+            where.append("s.sales_type = ?")
+            params.append(sales_type)
+        if source_id:
+            where.append("s.source_id = ?")
+            params.append(source_id)
+        where.append("UPPER(s.promocode) = UPPER(?)")
+        params.append(promocode)
+        sql = f"""
+            SELECT COUNT(DISTINCT s.id) AS total_orders,
+                   COALESCE(SUM(s.grand_total), 0) AS total_revenue
+            FROM {{silver_orders}} s
+            WHERE {" AND ".join(where)}
+        """
+        return sql, params
 
     async def _pg_silver(self, sql: str, params: list) -> List[Tuple]:
         """One Silver-grain query of the dashboard's from Postgres; a failure
@@ -1098,12 +1155,18 @@ class RevenueMixin:
 
         if category_id or brand or promocode:
             # The line level, because a category or brand is a fact about a
-            # line and Gold has folded them away.
+            # line and Gold has folded them away. A promocode alone selects
+            # whole orders, so it reads Silver's orders and their
+            # `grand_total` — the trend's and the cards' measure under the
+            # same filter (2026-11-27; it summed the orders' lines until then).
+            line_level = bool(category_id or brand)
+            a = "l" if line_level else "s"
             params = [start_date, end_date]
-            where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
+            where_clauses = [f"{a}.order_date BETWEEN ? AND ?", f"NOT {a}.is_return",
+                             f"{a}.is_active_source"]
 
             if sales_type != "all":
-                where_clauses.append("l.sales_type = ?")
+                where_clauses.append(f"{a}.sales_type = ?")
                 params.append(sales_type)
 
             if category_id:
@@ -1115,12 +1178,13 @@ class RevenueMixin:
                 where_clauses.append(brand_where(brand, params, "l"))
 
             if promocode:
-                where_clauses.append("UPPER(l.promocode) = UPPER(?)")
+                where_clauses.append(f"UPPER({a}.promocode) = UPPER(?)")
                 params.append(promocode)
 
+            body = (_SALES_BY_SOURCE_FILTERED_SQL if line_level
+                    else _SALES_BY_SOURCE_ORDERS_SQL)
             results = await self._dashboard_run(
-                _SALES_BY_SOURCE_FILTERED_SQL.replace(
-                    "{where}", " AND ".join(where_clauses)),
+                body.replace("{where}", " AND ".join(where_clauses)),
                 params,
             )
 
@@ -1442,7 +1506,10 @@ class RevenueMixin:
         start_date: date,
         end_date: date,
         source_id: Optional[int] = None,
-        sales_type: str = "retail"
+        sales_type: str = "retail",
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None,
+        promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Top brands by revenue and by quantity, from the order-lines level.
 
@@ -1450,6 +1517,10 @@ class RevenueMixin:
         per-product cells before, which counted one order once per product it
         contained — 35.2 % high across the base, measured. See the note above
         the bodies.
+
+        The header's filters narrow it as they narrow `get_top_products`, one
+        predicate each: the route passed none until 2026-11-27, so the block
+        showed the whole shop's brands under any filter of the page.
         """
         params: List[Any] = [start_date, end_date]
         where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return",
@@ -1461,6 +1532,15 @@ class RevenueMixin:
         if source_id:
             where.append("l.source_id = ?")
             params.append(source_id)
+        if category_id:
+            cat_ids = await self._category_ids(category_id)
+            where.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
+            params.extend(cat_ids)
+        if brand:
+            where.append(brand_where(brand, params, "l"))
+        if promocode:
+            where.append("UPPER(l.promocode) = UPPER(?)")
+            params.append(promocode)
 
         brand_results = await self._dashboard_run(
             _BRAND_ANALYTICS_SQL.replace("{where}", " AND ".join(where)), params)
@@ -1800,29 +1880,37 @@ class RevenueMixin:
 
         where_sql = " AND ".join(where_clauses)
 
-        # Per-promocode stats
+        # Per-promocode stats, one row a code however it was typed. The filter
+        # matches a code with `UPPER(...) = UPPER(?)`, so `October` and
+        # `OCTOBER` are one code to it; grouped as typed, the table split such
+        # a code into two rows and `totalCodes` counted both (2026-11-27).
         results = await self._marketing_run(f"""
             SELECT
-                s.promocode,
+                UPPER(s.promocode) AS code,
                 COUNT(DISTINCT s.id) as orders,
                 COALESCE(SUM(s.grand_total), 0) as revenue,
                 COUNT(DISTINCT s.buyer_id) as unique_customers
             FROM {{silver_orders}} s
             WHERE {where_sql}
-            GROUP BY s.promocode
-            -- `promocode` closes the sort: codes can tie on revenue, and
+            GROUP BY UPPER(s.promocode)
+            -- `code` closes the sort: codes can tie on revenue, and
             -- the two top-10 lists below are cut from this order.
-            ORDER BY revenue DESC, s.promocode
+            ORDER BY revenue DESC, code
         """, params)
 
-        # Total orders (with and without promo) for share calculation
+        # Total orders (with and without promo) for share calculation, and the
+        # people who used any code — counted once, here, rather than summed
+        # per code: a buyer of two codes is one promo customer, not two.
         total_params = [start_date, end_date]
         total_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
         if sales_type != "all":
             total_where.append("s.sales_type = ?")
             total_params.append(sales_type)
         totals = (await self._marketing_run(f"""
-            SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0)
+            SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0),
+                   COUNT(DISTINCT CASE WHEN s.promocode IS NOT NULL
+                                        AND s.promocode != ''
+                                       THEN s.buyer_id END)
             FROM {{silver_orders}} s
             WHERE {" AND ".join(total_where)}
         """, total_params))[0]
@@ -1837,7 +1925,7 @@ class RevenueMixin:
 
         promo_total_orders = sum(int(row[1]) for row in results)
         promo_total_revenue = sum(float(row[2]) for row in results)
-        promo_total_customers = sum(int(row[3]) for row in results)
+        promo_total_customers = int(totals[2] or 0)
 
         # Top 10 by revenue
         top_revenue = results[:10]

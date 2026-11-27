@@ -238,6 +238,92 @@ CALLS = (
 )
 
 
+# The customer block under a filter of the header (2026-11-27), and the only
+# departure from DuckDB's recorded answers in this file. DuckDB's block — and
+# Postgres's until that day — read a filter for the period's buyers alone and
+# answered every other figure for the whole shop: under a promocode nobody
+# used, the literal still says three orders, an AOV of 850 and a CLV of 1 560.
+# The block now answers every figure for the filtered slice. The literals stay
+# as recorded (rule 9); each value the decision moves is named here with what
+# it is now, worked out by hand from the fixture above:
+#
+# - `NOPE`: no order carries it, so every figure is zero.
+# - `SAVE10`: order 2 alone, 600 on 12.09, from buyer 7, whose first order
+#   (order 10) is a year older — so returning; and the only SAVE10 order buyer
+#   7 ever placed, so no repeat buyer and no CLV.
+# - source 1 and BrandA: order 1's two BrandA lines, 2 × 500 + 200 on 13.09.
+#   Over the whole history buyer 7 bought BrandA on source 1 once more, in
+#   order 10 (220, 10.09.2025): two orders, 1 420, 368 days apart.
+#
+# `aov` is the AOV trend's nonzero days; every other day of the window is 0.
+INSIGHTS_UNDER_A_FILTER_SINCE_2026_11_27 = {
+    call_key("get_customer_insights", {"promocode": "NOPE"}): {
+        "newVsReturning": [0, 0], "aov": {},
+        "metrics": {
+            "totalCustomers": 0, "newCustomers": 0, "returningCustomers": 0,
+            "totalOrders": 0, "repeatRate": 0, "averageOrderValue": 0,
+            "customerLifetimeValue": 0, "avgPurchaseFrequency": 0.0,
+            "avgCustomerLifespanDays": 0.0, "purchaseFrequency": 0,
+            "totalCustomersAllTime": 0, "repeatCustomersAllTime": 0,
+            "trueRepeatRate": 0, "avgOrdersPerCustomer": 0.0,
+        },
+    },
+    call_key("get_customer_insights", {"promocode": "SAVE10"}): {
+        "newVsReturning": [0, 1], "aov": {"12.09": 600.0},
+        "metrics": {
+            "totalCustomers": 1, "newCustomers": 0, "returningCustomers": 1,
+            "totalOrders": 1, "repeatRate": 100.0, "averageOrderValue": 600.0,
+            "customerLifetimeValue": 0, "avgPurchaseFrequency": 0.0,
+            "avgCustomerLifespanDays": 0.0, "purchaseFrequency": 1.0,
+            "totalCustomersAllTime": 1, "repeatCustomersAllTime": 0,
+            "trueRepeatRate": 0.0, "avgOrdersPerCustomer": 1.0,
+        },
+    },
+    call_key("get_customer_insights", {"source_id": 1, "brand": "BrandA"}): {
+        "newVsReturning": [0, 1], "aov": {"13.09": 1200.0},
+        "metrics": {
+            "totalCustomers": 1, "newCustomers": 0, "returningCustomers": 1,
+            "totalOrders": 1, "repeatRate": 100.0, "averageOrderValue": 1200.0,
+            "customerLifetimeValue": 1420.0, "avgPurchaseFrequency": 2.0,
+            "avgCustomerLifespanDays": 368.0, "purchaseFrequency": 1.0,
+            "totalCustomersAllTime": 1, "repeatCustomersAllTime": 1,
+            "trueRepeatRate": 100.0, "avgOrdersPerCustomer": 2.0,
+        },
+    },
+}
+
+
+# A promocode alone selects whole orders (2026-11-27): the cards and the
+# doughnut say their `grand_total`, the trend's measure under the same filter,
+# where they summed the orders' lines. Order 2 carries SAVE10: its total is
+# 600 and its one line 500, so the card said 500 beside a trend of 600.
+PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27 = {
+    call_key("get_summary_stats", {"promocode": "SAVE10"}): {
+        "totalRevenue": 600.0, "avgCheck": 600.0},
+    call_key("get_sales_by_source", {"promocode": "SAVE10"}): {"revenue": [600.0]},
+}
+
+DEPARTURES = (*INSIGHTS_UNDER_A_FILTER_SINCE_2026_11_27,
+              *PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27)
+
+
+def _expected(key: str):
+    """The recorded literal, with the values the two decisions moved."""
+    import copy
+
+    expected = copy.deepcopy(GOLDEN[key])
+    moved = INSIGHTS_UNDER_A_FILTER_SINCE_2026_11_27.get(key)
+    if moved:
+        expected["newVsReturning"]["data"] = moved["newVsReturning"]
+        labels = expected["aovTrend"]["labels"]
+        expected["aovTrend"]["datasets"][0]["data"] = [
+            moved["aov"].get(label, 0) for label in labels]
+        expected["metrics"] = dict(moved["metrics"])
+    if key in PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27:
+        expected.update(PROMOCODE_SELECTS_ORDERS_SINCE_2026_11_27[key])
+    return expected
+
+
 class TestPostgresAnswersWhatDuckDBAnswered:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -246,10 +332,67 @@ class TestPostgresAnswersWhatDuckDBAnswered:
     )
     async def test_the_whole_result_is_the_literal(self, in_postgres, name, kwargs):
         assert comparable(await _answer(in_postgres, name, kwargs)) == \
-            GOLDEN[call_key(name, kwargs)]
+            _expected(call_key(name, kwargs))
 
     def test_every_literal_is_a_call_and_every_call_has_one(self):
         assert set(GOLDEN) == {call_key(n, k) for n, k in CALLS}
+
+    def test_every_departure_moves_a_recorded_value(self):
+        """A departure equal to the literal would hide a stale entry."""
+        for key in DEPARTURES:
+            assert _expected(key) != GOLDEN[key], key
+
+
+# Every filter of the header narrows every block of the page, each measured the
+# way the cards measure it (2026-11-27). The customer block answered the whole
+# shop under any filter but a promocode, the brand block under every filter,
+# and under a promocode the cards and the doughnut summed lines beside a trend
+# of order totals.
+FILTERS = [
+    {}, {"source_id": 1}, {"source_id": 2}, {"brand": "BrandA"},
+    {"category_id": 1}, {"promocode": "SAVE10"}, {"promocode": "NOPE"},
+    {"source_id": 1, "brand": "BrandA"}, {"sales_type": "all", "brand": "BrandB"},
+]
+
+
+class TestEveryBlockFollowsTheFilters:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", FILTERS, ids=lambda k: str(k) or "none")
+    async def test_the_customer_block_says_the_cards_orders_and_aov(self, in_postgres, kwargs):
+        insights = await _answer(in_postgres, "get_customer_insights", kwargs)
+        summary = await _answer(in_postgres, "get_summary_stats", kwargs)
+        assert insights["metrics"]["totalOrders"] == summary["totalOrders"]
+        assert insights["metrics"]["averageOrderValue"] == summary["avgCheck"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [k for k in FILTERS if "source_id" not in k],
+                             ids=lambda k: str(k) or "none")
+    async def test_the_doughnut_adds_up_to_the_cards(self, in_postgres, kwargs):
+        """The doughnut splits by source, so it takes no source filter."""
+        doughnut = await _answer(in_postgres, "get_sales_by_source", kwargs)
+        summary = await _answer(in_postgres, "get_summary_stats", kwargs)
+        assert sum(doughnut["orders"]) == summary["totalOrders"]
+        assert round(sum(doughnut["revenue"]), 2) == summary["totalRevenue"]
+
+    @pytest.mark.asyncio
+    async def test_the_brand_block_takes_a_source(self, in_postgres):
+        """Retail lines in the window: order 1 on Instagram (2 × 500 + 2 × 100
+        + 200) and order 2 on Telegram (500)."""
+        def total(answer):
+            return answer["metrics"]["totalRevenue"]
+
+        assert total(await _answer(in_postgres, "get_brand_analytics", {})) == 1900.0
+        assert total(await _answer(in_postgres, "get_brand_analytics", {"source_id": 1})) == 1400.0
+        assert total(await _answer(in_postgres, "get_brand_analytics", {"source_id": 2})) == 500.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", [{"brand": "BrandA"}, {"category_id": 1},
+                                        {"source_id": 1, "brand": "BrandA"}],
+                             ids=str)
+    async def test_the_brand_block_takes_a_line_filter_as_the_cards_do(self, in_postgres, kwargs):
+        brands = await _answer(in_postgres, "get_brand_analytics", kwargs)
+        summary = await _answer(in_postgres, "get_summary_stats", kwargs)
+        assert brands["metrics"]["totalRevenue"] == summary["totalRevenue"]
 
 
 class TestTheTwoBranchesOfTheDoughnut:
