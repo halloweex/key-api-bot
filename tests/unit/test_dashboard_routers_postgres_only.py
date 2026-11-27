@@ -33,21 +33,22 @@ without a database:
 The numbers are `tests/integration/test_dashboard_two_engines.py`'s, against a
 real Postgres and literals DuckDB answered before its side went; every route
 through the real app, a failing engine answered 503 naming its tab, is
-`tests/unit/test_read_fallback_http.py`'s, and that nothing in `revenue.py` but a router or a refusing helper
-reaches an engine at all is `TestNothingGoesRoundARefusal`'s, below.
+`tests/unit/test_read_fallback_http.py`'s — with each route's default
+parameters. Every reader of `core/repositories/revenue.py` and the customer
+block, in every branch the dashboard asks it, refuses naming its surface
+while Postgres is down: `TestEveryReadRefusesWhilePostgresIsDown`, below. A
+reader that reached an engine round its router would let the engine's own
+error through instead, which the route answers 500 and nobody counts.
 """
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core import read_fallback
-from tests.helpers.router_walk import round_a_refusal
 
-ROOT = Path(__file__).resolve().parents[2]
 D1, D2 = date(2026, 8, 1), date(2026, 8, 3)
 
 
@@ -73,144 +74,219 @@ def store(tmp_path, monkeypatch):
     assert not (tmp_path / "never.duckdb").exists()
 
 
-class TestAFailureIsTheRefusalOffMade:
+@pytest.fixture
+def postgres_down(monkeypatch):
+    """Every Postgres read fails where it asks for the pool — a router's and
+    any other — as with the database gone."""
+    monkeypatch.setattr("core.pg.get_pool",
+                        AsyncMock(side_effect=OSError("postgres down")))
+
+
+def _the_category_tree_answers(monkeypatch):
+    """The filter bar's read answers, so a category filter reaches the read
+    behind it."""
+    monkeypatch.setattr("core.pg_lookups_read.fetch", AsyncMock(return_value=[(1,)]))
+
+
+# The dashboard's readers in every branch the dashboard asks them: the calls
+# of `tests/integration/test_dashboard_two_engines.py` (copied — a test module
+# imports no other), less the summary's three that answer zeros without a
+# read (`NO_READ`, below), and with the filters the brand and customer blocks
+# take since 2026-11-27 and the monthly granularity.
+DASHBOARD_READS = (
+    ("get_sales_by_source", {}),
+    ("get_sales_by_source", {"sales_type": "all"}),
+    ("get_sales_by_source", {"sales_type": "b2b"}),
+    ("get_sales_by_source", {"sales_type": "internal"}),
+    ("get_sales_by_source", {"category_id": 1}),
+    ("get_sales_by_source", {"category_id": 99999}),
+    ("get_sales_by_source", {"brand": "BrandA"}),
+    ("get_sales_by_source", {"brand": "Unknown"}),
+    ("get_sales_by_source", {"category_id": 1, "brand": "BrandA"}),
+    ("get_sales_by_source", {"promocode": "SAVE10"}),
+    ("get_return_orders", {}),
+    ("get_return_orders", {"sales_type": "all"}),
+    ("get_return_orders", {"sales_type": "b2b"}),
+    ("get_return_orders", {"limit": 1}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Care"}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Makeup"}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Nope"}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Care", "brand": "BrandA"}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Care", "source_id": 1}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Care", "promocode": "SAVE10"}),
+    ("get_subcategory_breakdown", {"parent_category_name": "Care", "sales_type": "all"}),
+    ("get_top_products", {}),
+    ("get_top_products", {"category_id": 1}),
+    ("get_top_products", {"brand": "BrandA"}),
+    ("get_top_products", {"limit": 2}),
+    ("get_top_products", {"promocode": "NOPE"}),
+    ("get_top_products", {"promocode": "SAVE10"}),
+    ("get_top_products", {"source_id": 1}),
+    ("get_top_products", {"sales_type": "all"}),
+    ("get_product_performance", {}),
+    ("get_product_performance", {"brand": "BrandA"}),
+    ("get_product_performance", {"source_id": 1}),
+    ("get_product_performance", {"sales_type": "all"}),
+    ("get_product_performance", {"promocode": "SAVE10"}),
+    ("get_brand_analytics", {}),
+    ("get_brand_analytics", {"sales_type": "all"}),
+    ("get_brand_analytics", {"sales_type": "b2b"}),
+    ("get_brand_analytics", {"source_id": 1}),
+    ("get_brand_analytics", {"category_id": 1}),
+    ("get_brand_analytics", {"brand": "BrandA"}),
+    ("get_brand_analytics", {"promocode": "SAVE10"}),
+    ("get_customer_insights", {}),
+    ("get_customer_insights", {"sales_type": "all"}),
+    ("get_customer_insights", {"sales_type": "b2b"}),
+    ("get_customer_insights", {"sales_type": "internal"}),
+    ("get_customer_insights", {"promocode": "NOPE"}),
+    ("get_customer_insights", {"promocode": "SAVE10"}),
+    ("get_customer_insights", {"source_id": 1, "brand": "BrandA"}),
+    ("get_customer_insights", {"category_id": 1}),
+    ("get_customer_insights", {"granularity": "monthly"}),
+    ("get_summary_stats", {}),
+    ("get_summary_stats", {"sales_type": "all"}),
+    ("get_summary_stats", {"sales_type": "b2b"}),
+    ("get_summary_stats", {"sales_type": "internal"}),
+    ("get_summary_stats", {"source_id": 1}),
+    ("get_summary_stats", {"source_id": 2}),
+    ("get_summary_stats", {"source_id": 4}),
+    ("get_summary_stats", {"source_id": 1, "sales_type": "all"}),
+    ("get_summary_stats", {"source_id": 2, "sales_type": "b2b"}),
+    ("get_summary_stats", {"source_id": 3, "brand": "Unknown"}),
+    ("get_summary_stats", {"category_id": 1}),
+    ("get_summary_stats", {"category_id": 4}),
+    ("get_summary_stats", {"category_id": 99999}),
+    ("get_summary_stats", {"brand": "BrandA"}),
+    ("get_summary_stats", {"brand": "Unknown"}),
+    ("get_summary_stats", {"promocode": "NOPE"}),
+    ("get_summary_stats", {"promocode": "SAVE10"}),
+    ("get_summary_stats", {"brand": "BrandA", "source_id": 1}),
+    ("get_summary_stats", {"category_id": 1, "sales_type": "all"}),
+    ("get_summary_stats", {"brand": "BrandA", "sales_type": "b2b"}),
+    ("get_summary_stats", {"promocode": "SAVE10", "source_id": 5, "sales_type": "all"}),
+    ("get_revenue_trend", {}),
+    ("get_revenue_trend", {"sales_type": "all"}),
+    ("get_revenue_trend", {"sales_type": "b2b"}),
+    ("get_revenue_trend", {"sales_type": "internal"}),
+    ("get_revenue_trend", {"source_id": 1}),
+    ("get_revenue_trend", {"source_id": 4, "sales_type": "all"}),
+    ("get_revenue_trend", {"source_id": 3}),
+    ("get_revenue_trend", {"source_id": 5}),
+    ("get_revenue_trend", {"source_id": 5, "sales_type": "all"}),
+    ("get_revenue_trend", {"compare_type": "month_ago"}),
+    ("get_revenue_trend", {"compare_type": "year_ago"}),
+    ("get_revenue_trend", {"include_comparison": False}),
+    ("get_revenue_trend", {"granularity": "monthly"}),
+    ("get_revenue_trend", {"category_id": 1}),
+    ("get_revenue_trend", {"brand": "BrandA"}),
+    ("get_revenue_trend", {"brand": "Unknown"}),
+    ("get_revenue_trend", {"promocode": "NOPE"}),
+    ("get_revenue_trend", {"promocode": "SAVE10"}),
+    ("get_revenue_trend", {"brand": "BrandA", "promocode": "SAVE10"}),
+    ("get_revenue_trend", {"brand": "BrandA", "source_id": 1}),
+    ("get_revenue_trend", {"category_id": 1, "sales_type": "all"}),
+    ("get_revenue_trend", {"brand": "BrandA", "compare_type": "year_ago"}),
+    ("get_revenue_trend", {"brand": "BrandA", "include_comparison": False}),
+    ("get_revenue_trend", {"promocode": "SAVE10", "compare_type": "month_ago"}),
+)
+
+# The summary for a source Gold is not asked about (Opencart, the exhibition)
+# is zeros by the owner's decision 5, read from nowhere.
+NO_READ = ({"source_id": 3}, {"source_id": 5}, {"source_id": 5, "sales_type": "all"})
+
+# The file's readers for the other surfaces it serves: the filter bar, the
+# managers screen, `/reports` and `/marketing`.
+OTHER_READS = (
+    ("get_categories", (), {}, "lookups"),
+    ("get_child_categories", (1,), {}, "lookups"),
+    ("get_brands", (), {}, "lookups"),
+    ("get_promocodes", (), {}, "lookups"),
+    ("get_manager_sales_365d", (), {}, "managers"),
+    ("get_report_summary", (D1, D2), {}, "reports"),
+    ("get_report_summary", (D1, D2), {"brand": "BrandA"}, "reports"),
+    ("get_report_summary", (D1, D2), {"category_id": 1, "source_id": 1}, "reports"),
+    ("get_report_top_products", (D1, D2), {}, "reports"),
+    ("get_report_top_products", (D1, D2), {"category_id": 1}, "reports"),
+    ("get_report_products_by_source", (D1, D2), {}, "reports"),
+    ("get_report_products_by_source", (D1, D2), {"category_id": 1}, "reports"),
+    ("get_promocode_analytics", (D1, D2), {}, "marketing"),
+    ("get_promocode_analytics", (D1, D2), {"sales_type": "all"}, "marketing"),
+    ("get_marketing_report_by_dates", (D1, D2), {}, "marketing"),
+    ("get_marketing_report_by_dates", (D1, D2), {"include_comparison": False}, "marketing"),
+    ("get_marketing_report_by_dates", (D1, D2), {"brand": "BrandA"}, "marketing"),
+    ("get_marketing_report_by_dates", (D1, D2), {"category_id": 1}, "marketing"),
+)
+
+
+def _call_id(name, kwargs) -> str:
+    return f"{name}{tuple(kwargs.items()) if kwargs else ''}"
+
+
+class TestEveryReadRefusesWhilePostgresIsDown:
+    """A failure is the refusal `fall_back` made under `off`: a
+    `ReadUnavailable` naming the surface — which the route answers 503 — and
+    counted under that surface. A reader that reached Postgres round its
+    router would let the pool's `OSError` through instead: the 500 no one
+    counts that the merge review's MD2 found, a call made before a helper's
+    `try` on `/api/summary?source_id=2`."""
+
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("method,kwargs,module,function", [
-        ("get_summary_stats", {}, "pg_gold_read", "fetch_summary"),
-        ("get_summary_stats", {"brand": "BrandA"}, "pg_silver_read", "fetch"),
-        ("get_revenue_trend", {}, "pg_gold_read", "fetch_series"),
-        ("get_revenue_trend", {"promocode": "X"}, "pg_silver_read", "fetch"),
-        ("get_return_orders", {}, "pg_dashboard_read", "fetch"),
-        ("get_customer_insights", {}, "pg_dashboard_read", "fetch"),
-    ], ids=["summary_gold", "summary_silver", "trend_gold", "trend_silver",
-            "returns", "insights"])
-    async def test_the_dashboard_s_methods_refuse_through_them(
-        self, store, monkeypatch, method, kwargs, module, function,
+    @pytest.mark.parametrize("method,kwargs", DASHBOARD_READS,
+                             ids=[_call_id(n, k) for n, k in DASHBOARD_READS])
+    async def test_the_dashboard_refuses_naming_itself(
+        self, store, postgres_down, monkeypatch, method, kwargs,
     ):
-        monkeypatch.setattr(f"core.{module}.{function}",
-                            AsyncMock(side_effect=OSError("down")))
+        _the_category_tree_answers(monkeypatch)
+
         with pytest.raises(read_fallback.ReadUnavailable) as raised:
             await getattr(store, method)(D1, D2, **kwargs)
+
         assert raised.value.surface == "dashboard"
+        assert set(read_fallback.refusals()) == {"dashboard"}
 
+    CATEGORY_READS = (
+        [(n, (D1, D2), k) for n, k in DASHBOARD_READS if "category_id" in k]
+        + [(n, a, k) for n, a, k, _s in OTHER_READS if "category_id" in k])
 
-# `core/repositories/revenue.py`: the four `_*_run` routers it holds (S14-05's
-# three and the dashboard's), and the dashboard's four helpers that refuse for
-# themselves.
-REVENUE = "core/repositories/revenue.py"
-REVENUE_ROUTERS = {"_dashboard_run", "_reports_run", "_marketing_run", "_lookups_run"}
-REFUSING_HELPERS = {"_pg_gold_summary", "_pg_gold_series", "_pg_silver",
-                    "get_manager_sales_365d"}
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,args,kwargs", CATEGORY_READS,
+                             ids=[_call_id(n, k) for n, _a, k in CATEGORY_READS])
+    async def test_a_category_filter_is_refused_by_the_filter_bar_first(
+        self, store, postgres_down, method, args, kwargs,
+    ):
+        """The tree under a category is the filter bar's read, made before the
+        tab's own: down with the rest, it is that refusal the page gets."""
+        with pytest.raises(read_fallback.ReadUnavailable) as raised:
+            await getattr(store, method)(*args, **kwargs)
 
+        assert raised.value.surface == "lookups"
+        assert set(read_fallback.refusals()) == {"lookups"}
 
-class TestNothingGoesRoundARefusal:
-    """The merge of S14-05's main (#327, the pixel-only breakdown) brought
-    `test_nothing_but_the_router_reaches_an_engine`: in the three tab modules
-    whose every reader goes through one router, nothing but that router may
-    reach an engine, because a reader calling Postgres itself answers an
-    engine failure with an uncounted 500 — the refusal rule judges only routers and
-    functions that refuse, and the HTTP sweep only refusals. It left
-    `revenue.py` to this PR. Here the dashboard's file meets the same walk,
-    with the four helpers that refuse for themselves allowed an engine.
-    Mutations: a bare `await pg_dashboard_read.fetch(...)` in
-    `get_sales_by_source`, which no other test sees; and the merge review's
-    MD2, `from core.pg_gold_read import fetch_series` and an `await
-    fetch_series(...)` before `_pg_gold_summary`'s `try` — a 500 on
-    `/api/summary?source_id=2` that the first form of the allowance dropped,
-    and that this and the refusal rule each find now."""
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kwargs", NO_READ, ids=[_call_id("", k) for k in NO_READ])
+    async def test_a_source_gold_is_not_asked_about_reads_nothing(
+        self, store, postgres_down, kwargs,
+    ):
+        out = await store.get_summary_stats(D1, D2, **kwargs)
 
-    def test_the_dashboard_file(self):
-        source = (ROOT / REVENUE).read_text(encoding="utf-8")
-        from tests.helpers.router_walk import _what_reaches_round_the_router
+        assert (out["totalOrders"], out["totalRevenue"], out["totalReturns"]) == (0, 0, 0)
+        assert read_fallback.refusals() == {}
 
-        routers, reaches = _what_reaches_round_the_router(source)
-        assert routers == REVENUE_ROUTERS, routers
-        # Non-vacuity: the walk read the helpers, and found them clean.
-        assert set(reaches) == REFUSING_HELPERS, sorted(reaches)
-        assert round_a_refusal(source, REVENUE) == []
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,args,kwargs,surface", OTHER_READS,
+                             ids=[_call_id(n, k) for n, _a, k, _s in OTHER_READS])
+    async def test_the_file_s_other_readers_refuse_naming_theirs(
+        self, store, postgres_down, monkeypatch, method, args, kwargs, surface,
+    ):
+        if surface != "lookups":
+            _the_category_tree_answers(monkeypatch)
 
-    ROUTER = ("from core import read_fallback\n"
-              "class T:\n"
-              "    async def _t_run(self, sql):\n"
-              "        from core import pg_dashboard_read\n"
-              "        try:\n"
-              "            return await pg_dashboard_read.fetch(sql, [])\n"
-              "        except Exception as exc:\n"
-              "            raise read_fallback.refuse('dashboard', exc)\n\n")
-    HELPER = ("    async def _pg_x(self):\n"
-              "        from core import pg_gold_read\n"
-              "        try:\n"
-              "            return await pg_gold_read.fetch_summary(1)\n"
-              "        except Exception as exc:\n"
-              "            raise read_fallback.refuse('dashboard', exc)\n")
+        with pytest.raises(read_fallback.ReadUnavailable) as raised:
+            await getattr(store, method)(*args, **kwargs)
 
-    # The allowance is what the refusal rule judges, in each spelling it reads: with
-    # the call inside the `try`, nothing is left to report.
-    @pytest.mark.parametrize("helper", [
-        HELPER,
-        HELPER.replace("        try:\n",
-                       "        from core.pg_gold_read import fetch_series\n"
-                       "        try:\n"
-                       "            await fetch_series(1)\n"),
-        HELPER.replace("        try:\n",
-                       "        import core.pg_gold_read\n"
-                       "        try:\n"
-                       "            await core.pg_gold_read.fetch_series(1)\n"),
-        # ClickHouse's modules, which the refusal rule reads since step 14's S14-07:
-        # by the module, and by a name imported from it.
-        HELPER.replace("        try:\n",
-                       "        from core import ch_cohorts\n"
-                       "        try:\n"
-                       "            await ch_cohorts.fetch('q', [], ())\n"),
-        HELPER.replace("        try:\n",
-                       "        from core.ch_cohorts import fetch\n"
-                       "        try:\n"
-                       "            await fetch('q', [], ())\n"),
-    ], ids=["module", "imported_name", "spelled_out", "clickhouse_module",
-            "clickhouse_imported_name"])
-    def test_a_clean_helper_passes(self, helper):
-        assert round_a_refusal(self.ROUTER + helper, REVENUE) == []
-
-    @pytest.mark.parametrize("method", [
-        ("    async def get_x(self):\n"
-         "        from core import pg_dashboard_read\n"
-         "        return await pg_dashboard_read.fetch('q', [])\n"),
-        HELPER.replace("        try:\n",
-                       "        rows = await pg_gold_read.fetch_series(1)\n"
-                       "        try:\n"),
-        # The merge review's MD2: the refusal rule did not read a call by a name
-        # imported from `core.pg_*`, so it held the helper clean and the
-        # allowance dropped what S14-05's walk had found.
-        HELPER.replace("        try:\n",
-                       "        from core.pg_gold_read import fetch_series\n"
-                       "        rows = await fetch_series(1)\n"
-                       "        try:\n"),
-        # No walk reads a call by a name the engine was handed to.
-        HELPER.replace("        try:\n",
-                       "        fetch = pg_gold_read.fetch_series\n"
-                       "        rows = await fetch(1)\n"
-                       "        try:\n"),
-        HELPER.replace("        try:\n",
-                       "        rows = await (lambda: pg_gold_read.fetch_series(1))()\n"
-                       "        try:\n"),
-        HELPER.replace("            raise read_fallback.refuse('dashboard', exc)\n",
-                       "            return None\n"),
-        ("    async def _pg_x(self):\n"
-         "        import os\n"
-         "        from core import pg_gold_read\n"
-         "        try:\n"
-         "            return await pg_gold_read.fetch_summary(os.getenv('KS_READ_GOLD'))\n"
-         "        except Exception as exc:\n"
-         "            raise read_fallback.refuse('dashboard', exc)\n"),
-        # Two functions of one name: the walk keys its reaches by name, so
-        # neither is allowed anything.
-        HELPER + "class U:\n" + HELPER,
-    ], ids=["bare_reader", "helper_bare_second_call",
-            "helper_second_call_by_imported_name", "helper_holds_the_engine_as_a_value",
-            "helper_calls_it_in_a_lambda", "helper_silent_handler",
-            "helper_reads_its_switch", "helper_name_defined_twice"])
-    def test_the_walk_bites(self, method):
-        assert round_a_refusal(self.ROUTER + method, REVENUE) != []
+        assert raised.value.surface == surface
+        assert set(read_fallback.refusals()) == {surface}
 
 
 SUMMARY_KEYS = {"totalOrders", "totalRevenue", "avgCheck", "totalReturns",

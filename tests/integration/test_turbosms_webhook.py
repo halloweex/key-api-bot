@@ -608,19 +608,18 @@ class TestRateLimit:
     inside one minute, so a limit sized for hand-typed requests loses the lot.
     """
 
-    def test_the_limit_is_sized_for_a_real_send(self):
-        per_minute = int(webhooks._DLR_RATE_LIMIT.split("/")[0])
-        assert per_minute >= 600, (
-            "a 5 000-recipient campaign must be absorbable within the gateway's "
-            "4.5-hour retry window"
-        )
-
     def test_a_campaign_sized_burst_is_accepted(self, client, store):
-        for i in range(300):
-            r = client.post(PATH, json=_signed(f"evt-{i}", f"mid-{i}", "DELIVRD"))
-            assert r.status_code == 200, f"rejected at report {i}"
+        """A thousand reports in well under a minute: a limit of 600 a minute,
+        which already lost reports, refuses the last four hundred."""
+        statuses = [
+            client.post(PATH, json=_signed(f"evt-{i}", f"mid-{i}", "DELIVRD")).status_code
+            for i in range(1000)
+        ]
 
-        assert len(store.calls) == 300
+        assert statuses.count(200) == 1000, (
+            f"{statuses.count(429)} reports rate-limited, the first at "
+            f"{statuses.index(429) if 429 in statuses else None}")
+        assert len(store.calls) == 1000
 
 
 class TestExposure:

@@ -486,11 +486,6 @@ class TestSmsSegmentsCsv:
         assert len(rows) == 3
         assert {row["assignment"] for row in rows} == {"target", "holdout"}
 
-    def test_phone_is_e164(self, client, store):
-        rows = self._rows(client.get(CSV_PATH, headers=_admin_headers()))
-        assert rows[0]["phone"].startswith("+380"), \
-            "gateways want E.164, and the + stops Excel reading it as a number"
-
     def test_headers_and_filename(self, client, store):
         r = client.get(
             CSV_PATH, params={"campaign": "aug-promo", "tier": "VIP"}, headers=_admin_headers(),
@@ -500,37 +495,30 @@ class TestSmsSegmentsCsv:
         assert "attachment" in disposition
         assert "sms_aug-promo_vip_" in disposition
 
-    def test_columns(self, client, store):
-        rows = self._rows(client.get(CSV_PATH, headers=_admin_headers()))
-        assert list(rows[0]) == [
-            "buyer_id", "full_name", "phone", "city", "tier", "assignment",
-            "orders", "ltv", "ltv_basis", "avg_order_value",
-            "revenue_ltv", "margin_ltv", "margin_pct", "cost_coverage_pct",
-            "recency_days", "last_order_date", "first_order_date",
-            "last_order_id", "last_order_total", "last_order_item_count",
-            "last_order_items",
-        ]
-
-    def test_last_order_columns_carry_the_personalisation_hook(self, client, store):
-        rows = self._rows(client.get(CSV_PATH, headers=_admin_headers()))
-        row = rows[0]
-
-        assert row["last_order_date"] == "2026-07-16"
-        assert row["last_order_id"] == "90001"
-        assert row["last_order_total"] == "2450.0"
-        assert row["last_order_item_count"] == "5"
-        assert "Abib COLLAGEN GEL MASK" in row["last_order_items"]
-        assert row["last_order_items"].endswith("+2 ещё")
-
-    def test_both_bases_travel_with_the_file(self, client, store):
-        """The export must be re-rankable in a spreadsheet without a second pull."""
+    def test_a_row_carries_every_column_the_store_answered(self, client, store):
+        """Buyer 1 as the store answered them, column by column, in the file's
+        order: the phone in E.164 — what gateways want, and the `+` stops
+        Excel reading it as a number; both lifetime values, so the list can be
+        re-ranked in a spreadsheet without a second pull, beside the basis it
+        was ranked on; and the last order, the hook a message is written
+        around."""
         rows = self._rows(client.get(
             CSV_PATH, params={"ltv_basis": "margin"}, headers=_admin_headers(),
         ))
-        assert rows[0]["ltv_basis"] == "margin"
-        assert rows[0]["revenue_ltv"] == "12000.0"
-        assert rows[0]["margin_ltv"] == "6600.0"
-        assert rows[0]["cost_coverage_pct"] == "96.5"
+
+        assert list(rows[0].items()) == [
+            ("buyer_id", "1"), ("full_name", "Клієнт 1"),
+            ("phone", "+380900000001"), ("city", "Kyiv"), ("tier", "VIP"),
+            ("assignment", "target"), ("orders", "3"), ("ltv", "12000.0"),
+            ("ltv_basis", "margin"), ("avg_order_value", "4000.0"),
+            ("revenue_ltv", "12000.0"), ("margin_ltv", "6600.0"),
+            ("margin_pct", "55.0"), ("cost_coverage_pct", "96.5"),
+            ("recency_days", "20"), ("last_order_date", "2026-07-16"),
+            ("first_order_date", "2025-11-02"), ("last_order_id", "90001"),
+            ("last_order_total", "2450.0"), ("last_order_item_count", "5"),
+            ("last_order_items",
+             "Abib COLLAGEN GEL MASK | LALARECIPE Cica 3in1 | NARD Treatment +2 ещё"),
+        ]
 
     def test_basis_is_in_the_filename(self, client, store):
         r = client.get(

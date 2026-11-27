@@ -248,11 +248,15 @@ class TestAParseFaultOverPostgres:
 # ─── /api/health and the canary ───────────────────────────────────────────────
 
 class TestHealthPublishesIt:
-    def _mirrors(self):
+    @staticmethod
+    def _mirrors(utm_age_seconds: int):
+        """`/api/health`'s mirrors block, every watermark 10 s old but the
+        UTM table's."""
         from web.routes.api import health
 
         async def fake_fetch(pool, tables=("bronze.orders",), now=None):
-            return {t: {"last_ok_at": None, "age_seconds": 10,
+            return {t: {"last_ok_at": None,
+                        "age_seconds": utm_age_seconds if t == UTM else 10,
                         "failures_since_ok": 0, "failing": False} for t in tables}
 
         health._mirror_cache["data"] = None
@@ -263,11 +267,18 @@ class TestHealthPublishesIt:
             finally:
                 health._mirror_cache["data"] = None
 
-    def test_the_table_is_watched_with_its_own_limit(self):
-        data = self._mirrors()
-        assert set(data) == {"bronze.orders", "silver.orders",
-                             "gold.daily_revenue", UTM}
-        assert data[UTM]["max_age_s"] == pg_utm_parse.MAX_AGE_S
+    def test_the_canary_judges_the_table_by_the_block_alone(self):
+        """The canary watches a table web declares a limit for in the block,
+        and no other: a parse that stopped while Silver and Gold stay fresh
+        (DN-19) is a page only if the block says how old is too old. A week
+        is past any limit the canary accepts."""
+        from bot.canary import check_mirror_freshness
+
+        stale, _ = check_mirror_freshness({"mirrors": self._mirrors(7 * 24 * 3600)})
+        fresh, _ = check_mirror_freshness({"mirrors": self._mirrors(10)})
+
+        assert [key for key, _text in stale] == [f"mirror_stale:{UTM}"]
+        assert fresh == []
 
     def test_the_limit_is_inside_the_canarys_ceiling(self):
         from bot import canary

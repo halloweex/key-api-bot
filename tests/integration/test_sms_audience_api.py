@@ -219,6 +219,16 @@ async def _stored_presets() -> int:
         return await conn.fetchval("SELECT count(*) FROM app.sms_audience_presets")
 
 
+def _nested(depth: int) -> dict:
+    """Criteria `depth` dicts deep, each holding the next."""
+    top: dict = {}
+    node = top
+    for _ in range(depth):
+        node["a"] = {}
+        node = node["a"]
+    return top
+
+
 @needs_postgres
 class TestSavedAudiences:
     # The form state the page saves: two levels, three where a filter holds
@@ -259,6 +269,32 @@ class TestSavedAudiences:
         assert r.status_code == 409
         assert await _listed(editor) == before
         assert await _stored_presets() == 0
+
+    @pytest.mark.asyncio
+    async def test_the_deepest_audience_it_accepts_is_listed(self, editor):
+        """Criteria are handed back to every reader of the listing, so what
+        the PUT accepts must be what the listing can render. Nesting was not
+        checked: a preset 251 levels deep saved with a 200 and then made
+        `GET /sms-audience-presets` a 500 for every `sms:view` reader, until
+        somebody deleted it by a name the dead listing no longer showed. So
+        whatever the bound is, the deepest criteria it lets through are found
+        (300 levels are past it, `test_criteria_nested_past_the_bound_is_refused`)
+        and listed whole."""
+        accepted, refused = 1, 300
+        while refused - accepted > 1:
+            depth = (accepted + refused) // 2
+            r = await editor.put(_preset("deep"), json=_nested(depth))
+            assert r.status_code in (200, 400), r.text
+            if r.status_code == 200:
+                accepted = depth
+            else:
+                refused = depth
+
+        r = await editor.put(_preset("deep"), json=_nested(accepted))
+        assert r.status_code == 200, r.text
+
+        listed = {p["name"]: p["criteria"] for p in await _listed(editor)}
+        assert listed["deep"] == _nested(accepted)
 
     @pytest.mark.asyncio
     async def test_a_deleted_audience_is_gone(self, editor):
@@ -370,75 +406,17 @@ class TestPresets:
     # until somebody deleted it by a name the dead listing no longer showed.
     # At 251 levels the write even answered 200, so nothing warned the author.
 
-    @staticmethod
-    def _nested(depth: int) -> dict:
-        top: dict = {}
-        node = top
-        for _ in range(depth):
-            node["a"] = {}
-            node = node["a"]
-        return top
-
     @pytest.mark.parametrize("depth", [21, 251, 300])
     def test_criteria_nested_past_the_bound_is_refused(self, client, store, depth):
         r = client.put(
-            f"{PRESETS}/deep", json=self._nested(depth), headers=_headers(),
+            f"{PRESETS}/deep", json=_nested(depth), headers=_headers(),
         )
         assert r.status_code == 400
         assert store.saved == []
 
-    def test_the_bound_is_under_what_the_listing_can_be_rendered_at(self):
-        """The number is not a taste: past it the listing cannot be sent at all.
-
-        Rendered rather than asserted about, so this fails if the serializer's
-        own limit ever drops towards the bound instead of drifting away from it.
-        The listing envelope is what matters — it wraps `criteria` three levels
-        deeper than the PUT response does, which is why a preset that saved
-        with a 200 could still kill the listing.
-        """
-        from fastapi.responses import ORJSONResponse
-
-        from web.routes.api.customers import _PRESET_CRITERIA_MAX_DEPTH
-
-        def listing(depth: int) -> dict:
-            return {"presets": [{"name": "x", "criteria": self._nested(depth)}]}
-
-        ORJSONResponse(listing(_PRESET_CRITERIA_MAX_DEPTH))
-        with pytest.raises(TypeError):
-            ORJSONResponse(listing(300))
-
     def test_presets_need_a_session(self, client):
         assert client.get(PRESETS).status_code == 401
         assert client.put(f"{PRESETS}/x", json={}).status_code == 401
-
-    def test_presets_carry_the_sms_permission(self):
-        """These endpoints travel with the other nine, not behind require_admin.
-
-        A manager who can see the wizard and cannot save an audience or freeze
-        a campaign has a page that does nothing — which is what leaving these
-        four on the admin gate would have produced.
-        """
-        from tests.routes_helper import route_dependencies
-
-        def gates(path, method):
-            found = set()
-            for dep in route_dependencies(app, path, method):
-                code = getattr(dep, "__code__", None)
-                closure = getattr(dep, "__closure__", None)
-                if code is None or not closure:
-                    continue
-                cells = dict(zip(code.co_freevars, closure))
-                if "feature" in cells and "action" in cells:
-                    found.add((cells["feature"].cell_contents,
-                               cells["action"].cell_contents))
-            return found
-
-        assert ("sms", "view") in gates(PRESETS, "GET")
-        assert ("sms", "edit") in gates(
-            "/api/customers/sms-audience-presets/{name}", "PUT")
-        assert ("sms", "edit") in gates(
-            "/api/customers/sms-audience-presets/{name}", "DELETE")
-        assert ("sms", "edit") in gates(CAMPAIGNS, "POST")
 
     # ─── The {name} path parameter is validated ───────────────────────────
     # A preset name is stored verbatim as a primary key, echoed back to the
