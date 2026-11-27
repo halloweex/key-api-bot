@@ -8,10 +8,15 @@
 --
 -- On the owner's yes, by hand, as the superuser, after the migrations — the
 -- tables must exist to be granted — with the password .env holds as
--- KS_RUST_API_PASSWORD and never typed here:
+-- KS_RUST_API_PASSWORD and never typed here. It travels as an environment
+-- variable named on the command line, so it is in no argv and no output
+-- (the runbook in PR #383 generates it on the host):
 --
---   docker compose exec -T postgres psql -U postgres -d ks -v ON_ERROR_STOP=1 \
---     -v password="$KS_RUST_API_PASSWORD" -f - < deploy/rust/ks_rust_api.sql
+--   docker compose exec -T -e KS_RUST_API_PASSWORD postgres psql -U postgres \
+--     -d ks -v ON_ERROR_STOP=1 -f - < deploy/rust/ks_rust_api.sql
+--
+-- `-v password=...` still wins where it is given: CI passes a throwaway one.
+-- Neither given, the script stops before it changes anything.
 --
 -- Re-running it changes nothing but the password.
 --
@@ -38,6 +43,17 @@
 --   reconnect while an old connection is still closing.
 
 \set ON_ERROR_STOP on
+
+\if :{?password}
+\else
+    \set password ''
+    \getenv password KS_RUST_API_PASSWORD
+\endif
+SELECT :'password' <> '' AS password_given \gset
+\if :password_given
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'no password: export KS_RUST_API_PASSWORD, or pass -v password=...'; END $$;
+\endif
 
 DO $$
 BEGIN
