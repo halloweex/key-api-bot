@@ -470,10 +470,11 @@ class TestOneFindingPerKey:
     hourly copy every hour after. The door folds them."""
 
     def test_a_run_without_a_repeat_is_the_same_list(self):
-        """The default path writes exactly what it wrote before. Mutation:
-        rebuild the list (or reorder it) when nothing repeats."""
+        """The default path writes exactly what it wrote before: the same
+        findings, unchanged, in the same order. Mutation: reorder them, or
+        fold a finding that does not repeat."""
         issues = [_issue("a"), _issue("b"), _twin()]
-        assert dq_journal.one_finding_per_key(issues) is issues
+        assert dq_journal.one_finding_per_key(issues) == issues
 
     def test_a_repeat_is_folded_into_the_first(self):
         """Mutation: keep the first and drop the second — its severity, its

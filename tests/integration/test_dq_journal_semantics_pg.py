@@ -328,19 +328,27 @@ class TestTheDigestBaselineIsWhatYouLastRead:
         _, fresh = await self._both("integrity", today, early + timedelta(hours=6))
         assert fresh["run_id"] == finished != straddling
 
-    def test_the_two_rankings_ask_the_same_question(self):
+    @pytest.mark.asyncio
+    async def test_the_two_rankings_ask_the_same_question(self, pool):
         """The baseline bounds on `run_id`; the latest run ranks the same rows.
         Ranking by one key while bounding with another is right only while
         the two never disagree — verified identical on all 350 production
-        rows, and made structural here."""
-        import inspect
+        rows. Here they do: the run written second started first, and every
+        reader takes it as the newest. Mutation: rank either by `started_at`
+        or `ended_at`."""
+        late = datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc)
+        early = datetime(2026, 9, 14, 4, 0, tzinfo=timezone.utc)
+        first = await _run(late, ended=late + timedelta(seconds=3), layer="integrity")
+        second = await _run(early, ended=early + timedelta(seconds=3), layer="integrity")
+        assert second > first
+        assert (await _latest("integrity"))["run_id"] == second
+        assert (await _latest())["run_id"] == second
 
-        import core.data_quality as dq
-
-        src = inspect.getsource(chain.latest_run)
-        for name in ("LATEST_RUN_SQL", "LATEST_RUN_OF_LAYER_SQL"):
-            assert name in src, f"latest_run no longer reads {name}"
-            assert "ORDER BY run_id DESC" in getattr(dq, name), name
+        today = await _run(late + timedelta(days=1),
+                           ended=late + timedelta(days=1, seconds=3), layer="integrity")
+        stale, fresh = await self._both("integrity", today,
+                                        late + timedelta(hours=1))
+        assert stale["run_id"] == fresh["run_id"] == second
 
 
 class TestTheWorstComesFirst:

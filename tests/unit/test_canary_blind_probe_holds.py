@@ -20,7 +20,7 @@ import pytest
 
 from bot import canary
 from bot.canary import (
-    BLOCK_KEY_PREFIXES, JUDGED_WITHOUT_PAYLOAD, run_canary, unjudged_keys,
+    BLOCK_KEY_PREFIXES, run_canary, unjudged_keys,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,19 +52,24 @@ DELIVERED = ["dq_stale:mirror_landing", "mirror_failing:bronze.orders",
 
 
 class TestTheHeldSet:
-    def test_no_payload_holds_everything_judged_from_one(self):
-        """Mutation: drop the `delivered` loop — none of these is held."""
-        held = unjudged_keys(None, delivered=DELIVERED)
-        for key in DELIVERED:
-            assert (key in held) == (key not in JUDGED_WITHOUT_PAYLOAD), key
+    def test_no_payload_holds_every_delivered_key_but_the_probes_own(self):
+        """No answer: only the request's outcome and the TLS probe are judged.
+        Mutation: drop the `delivered` loop — none of these is held."""
+        held = set(unjudged_keys(None, delivered=DELIVERED))
+        assert held & set(DELIVERED) == set(DELIVERED) - {
+            "health_unreachable", "cert_expiring"}
 
-    @pytest.mark.parametrize("block,prefixes", BLOCK_KEY_PREFIXES)
-    def test_a_missing_block_holds_its_families_only(self, block, prefixes):
+    @pytest.mark.parametrize("block, held", [
+        ("data_quality", {"dq_stale:mirror_landing"}),
+        ("mirrors", {"mirror_failing:bronze.orders"}),
+        ("alerting", {"alerting_transport_failing"}),
+        ("derivation", {"derivation_marks_failing"}),
+        ("write_chains", {"report_ledger_pending"}),
+    ])
+    def test_a_missing_block_holds_its_own_delivered_keys_only(self, block, held):
         payload = _ok()
         payload[block] = None
-        held = unjudged_keys(payload, delivered=DELIVERED)
-        for key in DELIVERED:
-            assert (key in held) == key.startswith(prefixes), (block, key)
+        assert set(unjudged_keys(payload, delivered=DELIVERED)) & set(DELIVERED) == held
 
     def test_a_whole_payload_holds_nothing_new(self):
         assert unjudged_keys(_ok(), delivered=DELIVERED) == unjudged_keys(_ok())

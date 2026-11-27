@@ -16,7 +16,6 @@ so a DuckDB half that raises loses none of them and holds back no page.
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import os
 import textwrap
@@ -222,26 +221,30 @@ class TestChain8Expenses:
         assert facts.expenses.latched_at is None
 
     @pytest.mark.asyncio
-    async def test_an_unreachable_postgres_is_one_warn(self, production):
+    @pytest.mark.parametrize("fails", ["get_pool", "require_revision", "acquire"])
+    async def test_a_postgres_it_cannot_reach_is_one_warn_not_a_raise(
+        self, production, fails,
+    ):
+        """Unreachable, at another revision (web deployed ahead of migrate),
+        or a pool exhausted past `acquire(timeout=)`: the run says once that
+        it is blind. An exception let out would take the integrity scan's
+        persistence with it; the acquire's TimeoutError, let out, handed the
+        scan `None`, read as a job that forgot its pre-read."""
         from core.data_quality import Severity
+        from core.pg import SchemaVersionError
 
-        with patch("core.pg.require_revision",
-                   new=AsyncMock(side_effect=RuntimeError("SchemaVersionError"))):
-            facts = await inv.read_facts(pool=_Pool(_Recorder()))
-        issues = inv.check_chain_invariants(facts)
-        assert [(i.check_name, i.severity) for i in issues] == [
-            (inv.UNWATCHED, Severity.WARN)]
-
-    @pytest.mark.asyncio
-    async def test_a_pool_that_times_out_is_blindness_not_a_raise(self, production):
-        """`pool.acquire(timeout=)` raises TimeoutError. Let out, the scan got
-        `None` and reported a job that forgot its pre-read — a code defect
-        named for an exhausted pool."""
-        with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(raises=TimeoutError()))
-        assert facts.whole is not None and "TimeoutError" in facts.whole.reason
-        assert "without a pre-read" not in (
-            inv.check_chain_invariants(facts)[0].description)
+        pool = _Pool(raises=TimeoutError()) if fails == "acquire" else _Pool(_Recorder())
+        get_pool = (AsyncMock(side_effect=OSError("connection refused"))
+                    if fails == "get_pool" else AsyncMock(return_value=pool))
+        revision = (AsyncMock(side_effect=SchemaVersionError("at 0038, code wants 0039"))
+                    if fails == "require_revision" else AsyncMock())
+        with patch("core.pg.get_pool", new=get_pool), \
+             patch("core.pg.require_revision", new=revision):
+            facts = await inv.read_facts()
+        assert facts.whole is not None
+        assert [(i.check_name, i.severity, i.table_name)
+                for i in inv.check_chain_invariants(facts)] == [
+            ("chain_invariants_unwatched", Severity.WARN, "(write chains)")]
 
 
 class TestTheAllocatorIsReadAsPostgresHandsItOut:
@@ -822,18 +825,23 @@ class TestTheWatermarks:
         self, monkeypatch,
     ):
         """Chain 1 watched, so its two keys are read. An empty tuple from a
-        failed read looked exactly like a chain with no sync keys at all."""
+        failed read looked exactly like a chain with no sync keys at all.
+        The watermark read alone fails: the owner rows, read from the same
+        table first since step 14's S14-11, answer, and so does chain 1's
+        group."""
         _watch_only(monkeypatch, "pg_inventory_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        # The watermark read alone (`key = ANY`): the owner rows, read from
-        # the same table first since step 14's S14-11, answer.
-        conn = _Recorder(fail_on="key = ANY")
+
+        async def unreadable(*_a, **_k):
+            raise RuntimeError("permission denied for table chain_watermarks")
+
+        monkeypatch.setattr(inv, "_read_watermarks", unreadable)
         with patch("core.pg.require_revision", new=AsyncMock()):
-            facts = await inv.read_facts(pool=_Pool(conn))
+            facts = await inv.read_facts(pool=_Pool(_Recorder()))
         assert isinstance(facts.inventory, inv.Inventory)
         issues = inv.check_chain_invariants(facts)
-        assert [i.check_name for i in issues] == [inv.UNWATCHED]
-        assert "meta.chain_watermarks unreadable" in issues[0].description
+        assert [(i.check_name, i.table_name) for i in issues] == [
+            ("chain_invariants_unwatched", "meta.chain_watermarks")]
 
 
 class TestTheWiring:
@@ -863,26 +871,17 @@ class TestTheWiring:
             n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         assert not named & {"check_chain_invariants", "judge", "pg_chain_invariants"}
 
-    def test_every_condition_carries_the_prefix_and_nothing_else_on_the_layer_does(self):
-        """The job resolves these by `only_prefix=PREFIX` when its DuckDB half
-        failed, so a DuckDB-half or twin condition under the same prefix would
-        be announced cleared by a run that never looked at it."""
-        import pathlib
+    def test_the_prefix_names_these_conditions_and_no_other(self):
+        """The job resolves these by `only_prefix=PREFIX` when the scan beside
+        them failed, so any other condition under the same prefix would be
+        announced cleared by a run that never looked at it. The registry is
+        every condition an alert can carry."""
+        from core.alerting import REGISTRY
 
-        for name in inv.CONDITIONS + (inv.UNWATCHED,):
-            assert name.startswith(inv.PREFIX), name
-        root = pathlib.Path(__file__).resolve().parents[2]
-        others = set()
-        for path in ("core/data_quality.py", "core/pg_warehouse_dq.py"):
-            for node in ast.walk(ast.parse((root / path).read_text())):
-                if isinstance(node, ast.keyword) and node.arg == "check_name" \
-                        and isinstance(node.value, ast.Constant):
-                    others.add(node.value.value)
-        from core import pg_warehouse_dq
-
-        others |= set(pg_warehouse_dq.UNWATCHED_NAMES.values())
-        others.add(pg_warehouse_dq.WHOLE_UNWATCHED)
-        assert others and not {n for n in others if n.startswith(inv.PREFIX)}
+        ours = set(inv.CONDITIONS) | {inv.UNWATCHED}
+        assert all(name.startswith(inv.PREFIX) for name in ours)
+        under_the_prefix = {key for key in REGISTRY if key.startswith(inv.PREFIX)}
+        assert under_the_prefix and under_the_prefix <= ours
 
     def test_the_window_follows_the_continuity_check(self):
         from core.data_quality import INVENTORY_CONTINUITY_WINDOW_DAYS
@@ -1020,17 +1019,6 @@ class TestTheLatchStamp:
 
     def test_a_naive_stamp_is_utc_because_that_is_what_the_marker_writes(self):
         assert inv._stamp("2026-09-18T12:00:00") == UTC_NOW
-
-
-def test_read_facts_never_raises_on_an_unreachable_store(monkeypatch):
-    """A blind run must say so; an exception here would take the whole
-    integrity scan's persistence with it."""
-    monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
-    monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-    with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("refused"))):
-        facts = asyncio.run(inv.read_facts())
-    assert facts.whole is not None and "refused" in facts.whole.reason
-    assert [i.check_name for i in inv.check_chain_invariants(facts)] == [inv.UNWATCHED]
 
 
 class TestTheLatchsTwoCopies:

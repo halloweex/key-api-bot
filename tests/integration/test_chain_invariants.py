@@ -306,45 +306,32 @@ async def _seed_sixty_days(pool, today: date) -> date:
 
 class TestOneMutationEach:
     @pytest.mark.asyncio
-    async def test_an_expense_allocator_below_the_table_collides(self, latched):
-        pool, _, _ = latched
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "SELECT setval('app.manual_expenses_id_seq', 1, true)")
-        issues = await _findings(names_only=False)
-        found = [i for i in issues if i.check_name == inv.SEQUENCE_BEHIND]
-        assert [i.table_name for i in found] == ["app.manual_expenses"]
-        assert "already holds id 2" in found[0].description
-
-    @pytest.mark.asyncio
-    async def test_a_movement_allocator_below_the_table_renames_a_movement(self, latched):
-        pool, _, _ = latched
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "SELECT setval('app.stock_movements_id_seq', 5, true)")
-        found = [i for i in await _findings(names_only=False)
-                 if i.check_name == inv.SEQUENCE_BEHIND]
-        assert [i.table_name for i in found] == ["app.stock_movements"]
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("table, sequence", [
-        ("app.manual_expenses", "app.manual_expenses_id_seq"),
-        ("app.stock_movements", "app.stock_movements_id_seq"),
+    @pytest.mark.parametrize("table, value, is_called, collisions", [
+        # `setval(seq, MAX(id), false)`: the next `nextval` returns MAX(id)
+        # itself — the most direct collision there is, and the one that reads
+        # as healthy if `is_called` is ignored or read backwards.
+        ("app.manual_expenses", 2, False, 1),
+        ("app.stock_movements", 12, False, 1),
+        # Below MAX(id): every id from the next one up to MAX is taken.
+        ("app.manual_expenses", 1, False, 2),
+        ("app.stock_movements", 5, True, 7),
     ])
-    async def test_a_sequence_set_to_max_not_called_hands_out_max(
-        self, latched, table, sequence,
+    async def test_an_allocator_at_or_below_max_collides(
+        self, latched, table, value, is_called, collisions,
     ):
-        """`setval(seq, MAX(id), false)`: the next `nextval` returns MAX(id)
-        itself — the most direct collision there is, and the one that reads as
-        healthy if `is_called` is ignored or read backwards."""
+        """The seed holds expenses 1-2 and movements 1-12: the finding names
+        the table, how many ids would collide, and MAX(id)."""
+        from core.data_quality import Severity
+
         pool, _, _ = latched
         async with pool.acquire() as conn:
-            await conn.execute(
-                f"SELECT setval('{sequence}', (SELECT MAX(id) FROM {table}), false)")
-        found = [i for i in await _findings(names_only=False)
-                 if i.check_name == inv.SEQUENCE_BEHIND]
-        assert [i.table_name for i in found] == [table]
-        assert found[0].count == 1
+            await conn.execute("SELECT setval($1, $2, $3)",
+                               f"{table}_id_seq", value, is_called)
+            max_id = await conn.fetchval(f"SELECT MAX(id) FROM {table}")
+        found = [(i.table_name, i.severity, i.count, tuple(i.sample_ids))
+                 for i in await _findings(names_only=False)
+                 if i.check_name == "chain_sequence_behind"]
+        assert found == [(table, Severity.CRITICAL, collisions, (max_id,))]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("table, sequence", [

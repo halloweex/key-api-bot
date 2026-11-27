@@ -150,17 +150,25 @@ class TestThroughRunCanary:
 
     @pytest.mark.asyncio
     async def test_a_cause_names_its_lever_before_what_it_cost(self):
-        """A failing mirror and the refusal it caused: the lever is the
-        mirror's, because that is what fixing looks like."""
-        payload = _healthy_payload()
-        payload["mirrors"]["bronze.orders"].update(failures_since_ok=4, failing=True)
-        payload["read_fallback_mode"] = {"refused": {"dashboard": {
-            "count": 3, "last_at": datetime.now(timezone.utc).isoformat(
-                timespec="seconds")}}}
-        result = await _probe(payload)
-        assert set(result.failure_keys) == {"mirror_failing:bronze.orders",
-                                            "read_refused"}
-        assert canary._what_to_do(result).startswith("Read meta.mirror_state")
+        """A failing mirror and the refusal it caused: the lever is the one
+        the mirror alone would name, because that is what fixing looks like."""
+        def probe(*, mirror_failing: bool, refusing: bool):
+            payload = _healthy_payload()
+            if mirror_failing:
+                payload["mirrors"]["bronze.orders"].update(
+                    failures_since_ok=4, failing=True)
+            payload["read_fallback_mode"] = {"refused": {"dashboard": {
+                "count": 3, "last_at": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds")}} if refusing else {}}
+            return _probe(payload)
+
+        both = await probe(mirror_failing=True, refusing=True)
+        mirror = await probe(mirror_failing=True, refusing=False)
+        refusal = await probe(mirror_failing=False, refusing=True)
+        assert set(both.failure_keys) == {"mirror_failing:bronze.orders",
+                                          "read_refused"}
+        assert canary._what_to_do(both) == canary._what_to_do(mirror)
+        assert canary._what_to_do(mirror) != canary._what_to_do(refusal)
 
     def test_the_lever_is_one_line_of_at_most_150(self):
         lever = dict(canary._ACTIONS)["read_refused"]
@@ -255,18 +263,36 @@ class TestWhatOffWouldRefuseIsSeen:
 
 # ─── A probe that read nothing clears nothing ──────────────────────────────
 
+def _refusing():
+    return {"read_fallback_mode": {"refused": {"traffic": {
+        "count": 2,
+        "last_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}}}}
+
+
+def _buyers_stalled():
+    """Under chain 4 the buyers step is the only writer of buyers; a stall
+    outlives the 05:15 freeze and every recreate (review of chain 4's merge
+    with OD-07). Judged on the `buyer_sync` block alone since step 14's
+    S14-11."""
+    stale = canary.BUYER_SYNC_CHAIN_STALE_S + 600
+    return {"buyer_sync": {"last_ok_age_s": stale, "watermark_age_s": stale,
+                           "last_attempt_age_s": 120, "consecutive_failures": 0}}
+
+
+def _orders_failing():
+    """Under chain 3 the order step is the only writer of orders, and a hung
+    Postgres hangs /api/health too (batch-E review)."""
+    return {"write_chains": {canary.ORDERS_CHAIN: {"sync_step": {
+        "consecutive_failures": canary.ORDERS_SYNC_FAILURES + 2,
+        "last_ok_age_s": 3600, "last_attempt_age_s": 60,
+        "last_error_class": "TimeoutError"}}}}
+
+
 class TestABlindProbeKeepsThePage:
     """The review's reproduction, through the real job: a standing page, a
     probe that times out (a first-time blip the job holds back), then the
     same web process again. The blind probe must not announce it resolved,
-    and the next must not page it as a new incident. Shown on `read_refused`
-    since step 14's S14-16 took `read_fallback_used`, on which it was
-    found."""
-
-    @staticmethod
-    def _refused():
-        return {"traffic": {"count": 2, "last_at": datetime.now(
-            timezone.utc).isoformat(timespec="seconds")}}
+    and the next must not page it as a new incident, agent and all."""
 
     @pytest.fixture(autouse=True)
     def _gate(self, monkeypatch):
@@ -279,8 +305,8 @@ class TestABlindProbeKeepsThePage:
 
     async def _run(self, probes):
         """Each probe is a payload, or None for a timeout, run through
-        `canary.canary_job` itself. Returns the first line of every message
-        sent and the agent's task buckets."""
+        `canary.canary_job` itself. Returns every message sent to the admins
+        and the agent's task buckets."""
         future = datetime.now(timezone.utc) + timedelta(days=60)
         cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
         script = iter(probes)
@@ -301,7 +327,7 @@ class TestABlindProbeKeepsThePage:
         sent, agent = [], []
 
         async def send(text, *a, **k):
-            sent.append(text.splitlines()[0])
+            sent.append(text)
             return 1
 
         with patch.object(canary, "run_canary", new=run_canary), \
@@ -310,78 +336,52 @@ class TestABlindProbeKeepsThePage:
              patch("bot.main.send_admin_message", new=AsyncMock(side_effect=send)), \
              patch("core.alert_agent_spool.drop_task",
                    side_effect=lambda *a, **k: agent.append(a[1])), \
-             patch("core.alert_archive.write_resolved_now",
-                   new=AsyncMock(return_value=True)), \
              patch("core.alert_escalator.escalate_due", new=AsyncMock()):
             for _ in probes:
                 await canary.canary_job(None)
-        return sent, agent, None
+        return sent, agent
 
-    def _payload(self, refused):
+    @staticmethod
+    def _payload(**blocks):
         payload = _healthy_payload()
-        payload["read_fallback_mode"] = {"refused": refused}
+        payload["read_fallback_mode"] = {"refused": {}}
+        payload.update(blocks)
         return payload
 
     @pytest.mark.asyncio
-    async def test_a_deferred_blip_neither_resolves_nor_repages(self):
-        standing = self._payload(self._refused())
-        sent, agent, _ = await self._run([standing, standing, None, standing])
-        assert len(sent) == 1, sent
-        assert "Dashboard warning" in sent[0]
-        assert not any("Resolved" in line for line in sent), sent
-        assert agent == ["canary:read_refused"], agent
-        # No watch row: the read-fallback watch went in S14-16 and the week
-        # of silence's in S14-18; the writer is gone
-        # (`TestTheBotWritesTheWatch`).
+    @pytest.mark.parametrize("blind", ["timeout", "block_missing"])
+    @pytest.mark.parametrize("keys, blocks", [
+        (["read_refused"], _refusing),
+        (["buyer_sync_stalled", "buyer_sync_stalled_chain"], _buyers_stalled),
+        (["orders_sync_failing"], _orders_failing),
+    ], ids=["read_refused", "buyers", "orders"])
+    async def test_a_page_stands_through_a_blind_probe(self, keys, blocks, blind):
+        """Blind is web not answering, or answering without the block the
+        page is judged from. Mutation: drop `*result.unjudged_keys` from the
+        job's resolve (every case), or one of these keys from
+        `unjudged_keys`' named list (its `block_missing` case)."""
+        from core.alerting import delivered_conditions
+
+        page = self._payload(**blocks())
+        unread = None if blind == "timeout" else self._payload(
+            **dict.fromkeys(blocks(), None))
+        sent, agent = await self._run([page, unread, page])
+        assert len(sent) == 1, sent            # the page; no resolution, no second page
+        assert agent == ["canary:" + ",".join(keys)], agent
+        assert {k: delivered_conditions().get(k) for k in keys} == dict.fromkeys(
+            keys, "canary")
 
     @pytest.mark.asyncio
     async def test_a_restarted_web_still_resolves_it(self):
         """The hold is for a probe that saw nothing. One that reads the block
         empty — web restarted — announces the recovery as before."""
-        standing = self._payload(self._refused())
-        sent, _, _ = await self._run([standing, None, self._payload({})])
-        assert len(sent) == 2, sent
-        assert sent[1].startswith("✅ Resolved"), sent
+        from core.alerting import delivered_conditions
 
-    @pytest.mark.asyncio
-    async def test_a_refusal_page_is_held_the_same_way(self):
-        refusing = self._payload(self._refused())
-        sent, agent, _ = await self._run([refusing, None, refusing])
-        assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
-        assert agent == ["canary:read_refused"], agent
-
-    @pytest.mark.asyncio
-    async def test_chain_4s_page_is_held_through_a_blind_probe(self):
-        """Under chain 4 the buyers step is the only writer of buyers; a stall
-        outlives the 05:15 freeze and every recreate, and read blind it was
-        announced resolved and paged again as a new incident (review of chain
-        4's merge with OD-07)."""
-        stalled = self._payload({})
-        stalled["buyer_sync"] = {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
-                                 "watermark_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
-                                 "last_attempt_age_s": 120, "consecutive_failures": 0}
-        # No `write_chains` entry: since step 14's S14-11 the CRITICAL is
-        # judged on the `buyer_sync` block alone.
-        sent, agent, _ = await self._run([stalled, None, stalled])
-        assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
-
-    @pytest.mark.asyncio
-    async def test_chain_3s_page_is_held_through_a_blind_probe(self):
-        """Under chain 3 the order step is the only writer of orders, and a
-        hung Postgres hangs /api/health too: the blind probe announced the
-        CRITICAL resolved, and the next paged it again as a new incident,
-        agent and all — chain 4's defect, fixed for chain 4 only (batch-E
-        review). Mutation: drop `orders_sync_failing` from
-        `unjudged_keys`."""
-        failing = self._payload({})
-        failing["write_chains"] = {canary.ORDERS_CHAIN: {
-            "sync_step": {
-                "consecutive_failures": canary.ORDERS_SYNC_FAILURES + 2,
-                "last_ok_age_s": 3600, "last_attempt_age_s": 60,
-                "last_error_class": "TimeoutError"}}}
-        sent, agent, _ = await self._run([failing, None, failing])
-        assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
-        assert agent == ["canary:orders_sync_failing"], agent
+        standing = self._payload(**_refusing())
+        sent, _ = await self._run([standing, None, self._payload()])
+        assert len(sent) == 2, sent            # the page, then its resolution
+        assert "read_refused" in sent[1]
+        assert "read_refused" not in delivered_conditions()
 
 
 class TestUnjudgedKeys:

@@ -170,14 +170,15 @@ class TestTheWiring:
             {"chain_watermarks", "chain_stamps"} <= {k.arg for k in c.keywords}
             for c in scan)
 
-    def test_the_scan_hands_them_to_the_check(self, monkeypatch):
-        seen = {}
-
-        def spy(now=None, **kwargs):
-            seen.update(kwargs)
-            return []
-
-        monkeypatch.setattr(dq, "_freshness_check", spy)
-        stamps = {"last_sync_orders": "2026-10-29T04:59:00+00:00"}
-        dq.check_internal_integrity(chain_watermarks={}, chain_stamps=stamps)
-        assert seen["chain_stamps"] is stamps
+    def test_the_scan_judges_the_order_step_by_its_last_write(self):
+        """The integrity scan itself, on a quiet night: KeyCRM's newest update
+        nine hours old, the row rewritten a minute ago. Without the stamps the
+        same night pages, as production did. Mutation: drop `chain_stamps=`
+        from the scan's call of the freshness check."""
+        now = datetime.now(UTC)
+        watermarks, stamps = _moved(
+            now, orders=(now - timedelta(hours=9), now - timedelta(minutes=1)))
+        assert _orders(dq.check_internal_integrity(
+            chain_watermarks=watermarks, chain_stamps=stamps)) == []
+        (page,) = _orders(dq.check_internal_integrity(chain_watermarks=watermarks))
+        assert (page.severity, page.count) == (Severity.CRITICAL, 9)
